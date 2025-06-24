@@ -1,0 +1,75 @@
+program: scripts/optimize_strategy.py
+method: bayes
+metric:
+  name: sharpe_ratio
+  goal: maximize
+
+parameters:
+  # Strategy Selection
+  strategy:
+    values: ["mean_reversion", "momentum", "rsi"]
+  
+  # Mean Reversion Strategy Parameters
+  mean_reversion_window:
+    min: 10
+    max: 50
+  mean_reversion_std_dev:
+    min: 1.0
+    max: 3.0
+    
+  # Momentum Strategy Parameters  
+  momentum_fast_period:
+    min: 5
+    max: 20
+  momentum_slow_period:
+    min: 20
+    max: 60
+    
+  # RSI Strategy Parameters
+  rsi_period:
+    min: 10
+    max: 25
+  rsi_oversold:
+    min: 20
+    max: 35
+  rsi_overbought:
+    min: 65
+    max: 80
+    
+  # Risk Management Parameters
+  position_size:
+    min: 0.01
+    max: 0.05
+  stop_loss:
+    min: 0.02
+    max: 0.08
+  take_profit:
+    min: 0.04
+    max: 0.15
+    
+  # Data Parameters
+  lookback_days:
+    values: [252, 504, 756]  # 1, 2, 3 years
+  train_test_split:
+    min: 0.6
+    max: 0.8
+    
+  # Model Parameters (for ML-based strategies)
+  learning_rate:
+    min: 0.0001
+    max: 0.01
+    distribution: log_uniform
+  batch_size:
+    values: [32, 64, 128, 256]
+  dropout_rate:
+    min: 0.1
+    max: 0.5
+    
+early_terminate:
+  type: hyperband
+  min_iter: 10
+  
+command:
+  - python
+  - ${program}
+  - ${args} 
