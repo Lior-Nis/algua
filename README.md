@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="logo.png" alt="Algua Logo" width="200"/>
+</div>
+
 # Algua - Quantitative Trading Platform
 
 A modern quantitative trading platform built with VectorBT Pro, PyTorch, and FastAPI.
