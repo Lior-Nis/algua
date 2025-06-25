@@ -12,13 +12,10 @@ dependencies:
   - numpy=1.24.3
   - scipy=1.11.2
   - scikit-learn=1.3.0
-
   
   # Deep Learning
   - pytorch=2.0.1
   - pytorch-lightning=2.0.8
-  - torchvision=0.15.2
-  - torchaudio=2.0.2
   
   # Optimization & ML
   - optuna=3.3.0
@@ -56,29 +53,8 @@ dependencies:
   # pip packages
   - pip=23.2.1
   - pip:
-    # Trading APIs
-    - alpaca-trade-api==3.1.1
-    - alpaca-py==0.9.0
-    # Monitoring
-    - wandb==0.15.10
-    # TradingView data (optional)
-    # - tvdatafeed==2.1.3
-    # Telegram bot
-    - python-telegram-bot==20.5
-    # Additional utilities
+    # Essential trading packages only
     - yfinance==0.2.20
-    - ccxt==4.0.102
+    - schedule==1.2.0
     # Data validation
     - cerberus==1.3.4
-    # Progress bars
-    - tqdm==4.66.1
-    # Scheduling
-    - schedule==1.2.0
-    # Alternative to VectorBT Pro (open source) 
-    - vectorbt>=0.26.0
-    # TA-Lib (commented out, needs system deps)
-    # - ta-lib==0.4.26
-
-# Note: Install separately via system package manager:
-# - rclone (for cloud storage sync)
-# - gsutil (for Google Cloud Storage) 
