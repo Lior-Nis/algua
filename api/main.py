@@ -4,6 +4,7 @@ Main FastAPI application for Algua trading platform.
 
 from datetime import datetime
 from typing import Dict, List, Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,27 +13,61 @@ import uvicorn
 
 from api.models import TradeRequest, TradeResponse, PortfolioSummary
 from api.dependencies import get_trading_client, get_portfolio_manager
+from api.health import router as health_router
+from configs.settings import get_settings, validate_settings
 from utils.logging import get_logger
+from infrastructure.container import get_container
 
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan events."""
+    # Startup
+    logger.info("Starting Algua Trading Platform")
+    
+    # Validate configuration
+    if not validate_settings():
+        logger.error("Configuration validation failed")
+        raise RuntimeError("Invalid configuration")
+    
+    # Initialize container and services
+    container = get_container()
+    settings = get_settings()
+    
+    logger.info(f"Environment: {getattr(settings, 'environment', 'unknown')}")
+    logger.info(f"Debug mode: {settings.debug}")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down Algua Trading Platform")
+
+
 # Initialize FastAPI app
+settings = get_settings()
 app = FastAPI(
-    title="Algua Trading API",
-    description="REST API for quantitative trading platform",
-    version="1.0.0",
+    title=settings.app_name,
+    description="REST API for quantitative trading platform with DDD architecture",
+    version=settings.app_version,
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # CORS middleware
+allowed_origins = ["*"] if settings.debug else ["http://localhost:3000", "http://localhost:8501"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: Restrict in production
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(health_router)
 
 
 @app.get("/ping")
