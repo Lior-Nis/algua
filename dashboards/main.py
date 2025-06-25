@@ -9,6 +9,17 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
 import requests
+import sys
+import os
+
+# Add project root to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import our new modules
+from configs.settings import get_settings
+from domain.value_objects import Symbol, Price, Quantity, Money
+from portfolio import PortfolioManager
+from risk_management import RiskManager
 
 # Page configuration
 st.set_page_config(
@@ -65,6 +76,19 @@ def load_dummy_data():
     return portfolio_df, positions_df
 
 
+def check_api_health():
+    """Check API health status."""
+    try:
+        response = requests.get("http://localhost:8000/health", timeout=5)
+        if response.status_code == 200:
+            health_data = response.json()
+            return health_data
+        else:
+            return {"status": "unhealthy", "message": f"HTTP {response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        return {"status": "unhealthy", "message": f"Connection failed: {str(e)}"}
+
+
 def render_sidebar():
     """Render sidebar navigation."""
     st.sidebar.title("🚀 Algua Trading")
@@ -74,7 +98,7 @@ def render_sidebar():
     page = st.sidebar.selectbox(
         "Navigate to:",
         ["Portfolio Overview", "Strategy Performance", "Market Data", 
-         "Risk Management", "Live Trading", "Settings"]
+         "Risk Management", "System Health", "Settings"]
     )
     
     st.sidebar.markdown("---")
@@ -87,9 +111,18 @@ def render_sidebar():
     
     st.sidebar.markdown("---")
     
-    # Trading status
+    # System status with real health check
     st.sidebar.subheader("System Status")
-    st.sidebar.success("✅ API Connected")
+    
+    # Check API health
+    health = check_api_health()
+    if health["status"] == "healthy":
+        st.sidebar.success("✅ API Connected")
+    elif health["status"] == "degraded":
+        st.sidebar.warning("⚠️ API Degraded")
+    else:
+        st.sidebar.error("❌ API Disconnected")
+    
     st.sidebar.info("📊 Data Updated: 2min ago")
     st.sidebar.warning("⚠️ Paper Trading Mode")
     
@@ -160,7 +193,7 @@ def render_portfolio_overview(portfolio_df, positions_df):
         color = 'green' if val > 0 else 'red' if val < 0 else 'black'
         return f'color: {color}'
     
-    styled_positions = positions_df.style.applymap(
+    styled_positions = positions_df.style.map(
         color_pnl, subset=['unrealized_pnl']
     )
     
@@ -219,8 +252,93 @@ def render_market_data():
     st.dataframe(market_data, use_container_width=True)
 
 
+def render_system_health():
+    """Render system health monitoring page."""
+    st.markdown('<h1 class="main-header">🔧 System Health</h1>', 
+                unsafe_allow_html=True)
+    
+    # Get health data
+    health_data = check_api_health()
+    
+    if health_data["status"] == "healthy":
+        st.success("✅ System is running normally")
+    elif health_data["status"] == "degraded":
+        st.warning("⚠️ System is experiencing issues")
+    else:
+        st.error("❌ System is unhealthy")
+        st.error(f"Issue: {health_data.get('message', 'Unknown error')}")
+    
+    if "checks" in health_data:
+        st.subheader("Component Health")
+        
+        # Create health overview
+        col1, col2, col3 = st.columns(3)
+        
+        checks = health_data["checks"]
+        
+        with col1:
+            db_status = checks.get("database", {}).get("status", "unknown")
+            if db_status == "healthy":
+                st.success("✅ Database")
+            else:
+                st.error("❌ Database")
+        
+        with col2:
+            api_status = checks.get("alpaca_api", {}).get("status", "unknown")
+            if api_status == "healthy":
+                st.success("✅ Alpaca API")
+            else:
+                st.error("❌ Alpaca API")
+        
+        with col3:
+            sys_status = checks.get("system_resources", {}).get("status", "unknown")
+            if sys_status == "healthy":
+                st.success("✅ System Resources")
+            elif sys_status == "degraded":
+                st.warning("⚠️ System Resources")
+            else:
+                st.error("❌ System Resources")
+        
+        st.subheader("Detailed Health Checks")
+        
+        # Display detailed health information
+        for component, details in checks.items():
+            with st.expander(f"{component.title()} Details"):
+                st.write(f"**Status:** {details['status']}")
+                st.write(f"**Message:** {details['message']}")
+                st.write(f"**Response Time:** {details['response_time_ms']:.2f}ms")
+                st.write(f"**Last Check:** {details['last_check']}")
+    
+    # System metrics
+    st.subheader("System Information")
+    if "uptime_seconds" in health_data:
+        uptime_hours = health_data["uptime_seconds"] / 3600
+        st.metric("System Uptime", f"{uptime_hours:.1f} hours")
+    
+    if "version" in health_data:
+        st.metric("Version", health_data["version"])
+    
+    # Auto-refresh
+    st.subheader("Monitoring")
+    if st.button("🔄 Refresh Health Status"):
+        st.experimental_rerun()
+
+
 def main():
     """Main dashboard application."""
+    # Set environment variables for our configuration
+    os.environ.setdefault('SECRET_KEY', 'dev-secret-key')
+    os.environ.setdefault('ALPACA_API_KEY', 'test-api-key')  
+    os.environ.setdefault('ALPACA_SECRET_KEY', 'test-secret-key')
+    os.environ.setdefault('ENVIRONMENT', 'development')
+    
+    try:
+        # Load our settings to show integration
+        settings = get_settings()
+        st.sidebar.write(f"**Environment:** {getattr(settings, 'environment', 'development')}")
+    except Exception as e:
+        st.sidebar.error(f"Config error: {str(e)}")
+    
     # Load data
     portfolio_df, positions_df = load_dummy_data()
     
@@ -234,6 +352,8 @@ def main():
         render_strategy_performance()
     elif current_page == "Market Data":
         render_market_data()
+    elif current_page == "System Health":
+        render_system_health()
     else:
         st.markdown(f'<h1 class="main-header">🚧 {current_page}</h1>', 
                     unsafe_allow_html=True)
