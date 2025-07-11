@@ -3,11 +3,27 @@ Position sizing calculations.
 """
 
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
+from enum import Enum
+from abc import ABC, abstractmethod
 
-from domain.value_objects import Price, Quantity, Money
+from domain.value_objects import Price, Quantity, Money, Symbol
 from configs.settings import get_settings
+from .interfaces import PositionSizerProtocol
+from .configuration import get_risk_config
+from utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class PositionSizingMethod(Enum):
+    """Position sizing methods."""
+    FIXED_RISK = "fixed_risk"
+    KELLY_CRITERION = "kelly_criterion"
+    VOLATILITY_TARGET = "volatility_target"
+    FIXED_FRACTION = "fixed_fraction"
+    ATR_BASED = "atr_based"
 
 
 @dataclass
@@ -18,6 +34,148 @@ class PositionSizeParams:
     entry_price: Price
     stop_loss_price: Optional[Price] = None
     max_position_size: Optional[Decimal] = None  # As percentage of portfolio
+
+
+class BasePositionSizer(ABC):
+    """Base class for position sizers."""
+    
+    @abstractmethod
+    def calculate_position_size(
+        self,
+        portfolio_value: Money,
+        entry_price: Price,
+        stop_loss_price: Price,
+        risk_per_trade: Decimal
+    ) -> Quantity:
+        """Calculate position size."""
+        pass
+
+
+class FixedRiskPositionSizer(BasePositionSizer):
+    """Fixed risk position sizer."""
+    
+    def __init__(self, config=None):
+        self.config = config or get_risk_config()
+    
+    def calculate_position_size(
+        self,
+        portfolio_value: Money,
+        entry_price: Price,
+        stop_loss_price: Price,
+        risk_per_trade: Decimal
+    ) -> Quantity:
+        """Calculate position size based on fixed risk per trade."""
+        risk_per_share = abs(entry_price.value - stop_loss_price.value)
+        if risk_per_share == 0:
+            raise ValueError("Entry price and stop loss price cannot be the same")
+        
+        total_risk_amount = portfolio_value.amount * risk_per_trade
+        position_size = total_risk_amount / risk_per_share
+        
+        # Apply position size limits
+        max_position_value = portfolio_value.amount * self.config.max_position_size
+        max_position_size = max_position_value / entry_price.value
+        
+        return Quantity(min(position_size, max_position_size))
+
+
+class KellyPositionSizer(BasePositionSizer):
+    """Kelly Criterion position sizer."""
+    
+    def __init__(self, win_rate: Decimal, avg_win: Decimal, avg_loss: Decimal, config=None):
+        self.win_rate = win_rate
+        self.avg_win = avg_win
+        self.avg_loss = avg_loss
+        self.config = config or get_risk_config()
+    
+    def calculate_position_size(
+        self,
+        portfolio_value: Money,
+        entry_price: Price,
+        stop_loss_price: Price,
+        risk_per_trade: Decimal
+    ) -> Quantity:
+        """Calculate position size using Kelly Criterion."""
+        kelly_fraction = self._calculate_kelly_fraction()
+        
+        # Apply Kelly fraction to portfolio
+        kelly_position_value = portfolio_value.amount * kelly_fraction
+        
+        # Apply position size limits
+        max_position_value = portfolio_value.amount * self.config.max_position_size
+        position_value = min(kelly_position_value, max_position_value)
+        
+        return Quantity(position_value / entry_price.value)
+    
+    def _calculate_kelly_fraction(self) -> Decimal:
+        """Calculate Kelly fraction."""
+        b = self.avg_win / self.avg_loss
+        p = self.win_rate
+        q = Decimal('1') - p
+        
+        kelly_fraction = (b * p - q) / b
+        
+        # Cap at 25% for safety
+        kelly_fraction = min(kelly_fraction, Decimal('0.25'))
+        return max(kelly_fraction, Decimal('0'))
+
+
+class VolatilityTargetPositionSizer(BasePositionSizer):
+    """Volatility target position sizer."""
+    
+    def __init__(self, target_volatility: Decimal, asset_volatility: Decimal, config=None):
+        self.target_volatility = target_volatility
+        self.asset_volatility = asset_volatility
+        self.config = config or get_risk_config()
+    
+    def calculate_position_size(
+        self,
+        portfolio_value: Money,
+        entry_price: Price,
+        stop_loss_price: Price,
+        risk_per_trade: Decimal
+    ) -> Quantity:
+        """Calculate position size based on volatility targeting."""
+        if self.asset_volatility <= 0:
+            raise ValueError("Asset volatility must be positive")
+        
+        position_fraction = self.target_volatility / self.asset_volatility
+        
+        # Apply position size limits
+        max_fraction = self.config.max_position_size
+        position_fraction = min(position_fraction, max_fraction)
+        
+        position_value = position_fraction * portfolio_value.amount
+        return Quantity(position_value / entry_price.value)
+
+
+class ATRBasedPositionSizer(BasePositionSizer):
+    """ATR-based position sizer."""
+    
+    def __init__(self, atr_value: Decimal, atr_multiplier: Decimal = None, config=None):
+        self.atr_value = atr_value
+        self.config = config or get_risk_config()
+        self.atr_multiplier = atr_multiplier or self.config.volatility_multiplier
+    
+    def calculate_position_size(
+        self,
+        portfolio_value: Money,
+        entry_price: Price,
+        stop_loss_price: Price,
+        risk_per_trade: Decimal
+    ) -> Quantity:
+        """Calculate position size based on ATR."""
+        # Use ATR to determine stop distance
+        atr_stop_distance = self.atr_value * self.atr_multiplier
+        
+        total_risk_amount = portfolio_value.amount * risk_per_trade
+        position_size = total_risk_amount / atr_stop_distance
+        
+        # Apply position size limits
+        max_position_value = portfolio_value.amount * self.config.max_position_size
+        max_position_size = max_position_value / entry_price.value
+        
+        return Quantity(min(position_size, max_position_size))
 
 
 class PositionSizer:
