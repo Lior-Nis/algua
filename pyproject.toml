@@ -40,3 +40,23 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
+
+[tool.importlinter]
+root_package = "algua"
+
+[[tool.importlinter.contracts]]
+name = "contracts layer is pure (imports no other algua module)"
+type = "forbidden"
+source_modules = ["algua.contracts"]
+forbidden_modules = [
+    "algua.cli",
+    "algua.registry",
+    "algua.config",
+    "algua.calendar",
+]
+
+[[tool.importlinter.contracts]]
+name = "calendar stays independent of cli and registry"
+type = "forbidden"
+source_modules = ["algua.calendar"]
+forbidden_modules = ["algua.cli", "algua.registry"]
