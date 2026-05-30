@@ -64,3 +64,16 @@ def test_to_bar_schema_reshapes_ts_column_frame():
     assert str(out.index.tz) == "UTC"
     assert list(out["symbol"]) == ["AAA", "BBB"]  # sorted by (timestamp, symbol)
     validate_bars(out)
+
+
+def test_to_bar_schema_derives_adj_close_from_close_when_missing():
+    # auto-adjusted sources (yfinance auto_adjust=True) emit no separate adj_close
+    raw = pd.DataFrame({
+        "ts": ["2024-07-01", "2024-07-02"], "symbol": ["AAA", "AAA"],
+        "open": [10.0, 11.0], "high": [10.0, 11.0], "low": [10.0, 11.0],
+        "close": [10.0, 11.0], "volume": [1.0, 1.0],
+    })
+    out = to_bar_schema(raw)
+    assert list(out.columns) == BAR_COLUMNS
+    assert list(out["adj_close"]) == list(out["close"])
+    validate_bars(out)

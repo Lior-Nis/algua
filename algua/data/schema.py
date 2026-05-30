@@ -40,6 +40,11 @@ def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:
     if "timestamp" not in out.columns:
         raise ValueError("frame must have a 'ts' or 'timestamp' column")
     out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
+    if "adj_close" not in out.columns and "close" in out.columns:
+        # Auto-adjusted sources (e.g. yfinance auto_adjust=True) fold the split/dividend
+        # adjustment into `close` and emit no separate adj_close column; the close IS the
+        # adjusted close, so mirror it.
+        out["adj_close"] = out["close"]
     missing = [c for c in BAR_COLUMNS if c not in out.columns]
     if missing:
         raise ValueError(f"frame missing bar columns: {missing}")
