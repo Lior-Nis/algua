@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import functools
 import sqlite3
+from collections.abc import Callable
 
 import typer
 
 from algua.cli.app import app, emit
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Actor, Stage, TransitionError
+from algua.contracts.lifecycle import Actor, Stage
 from algua.registry import store
 from algua.registry.approvals import record_approval
 from algua.registry.db import connect, migrate
@@ -21,7 +23,21 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+def _json_errors(fn: Callable[..., None]) -> Callable[..., None]:
+    """Emit expected domain errors as JSON ({"ok": false, "error": ...}) + exit 1,
+    preserving the agent-parseable stdout contract instead of leaking tracebacks."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, LookupError) as exc:
+            emit({"ok": False, "error": str(exc)})
+            raise typer.Exit(code=1) from exc
+    return wrapper
+
+
 @registry_app.command("add")
+@_json_errors
 def add(name: str) -> None:
     """Register a new strategy at stage 'idea'."""
     rec = store.add_strategy(_conn(), name)
@@ -29,6 +45,7 @@ def add(name: str) -> None:
 
 
 @registry_app.command("list")
+@_json_errors
 def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) -> None:
     """List strategies, optionally filtered by stage."""
     st = Stage(stage) if stage else None
@@ -37,6 +54,7 @@ def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) ->
 
 
 @registry_app.command("show")
+@_json_errors
 def show(name: str) -> None:
     """Show a strategy and its transition history."""
     conn = _conn()
@@ -46,6 +64,7 @@ def show(name: str) -> None:
 
 
 @registry_app.command("transition")
+@_json_errors
 def transition(
     name: str,
     to: str = typer.Option(..., "--to"),
@@ -55,17 +74,14 @@ def transition(
     config_hash: str = typer.Option(None, "--config-hash"),
 ) -> None:
     """Advance a strategy to a new lifecycle stage."""
-    try:
-        rec = store.transition(
-            _conn(), name, Stage(to), Actor(actor), reason, code_hash, config_hash
-        )
-    except TransitionError as exc:
-        emit({"ok": False, "error": str(exc)})
-        raise typer.Exit(code=1) from exc
+    rec = store.transition(
+        _conn(), name, Stage(to), Actor(actor), reason, code_hash, config_hash
+    )
     emit({"ok": True, "name": rec.name, "stage": rec.stage.value})
 
 
 @registry_app.command("approve")
+@_json_errors
 def approve(
     name: str,
     code_hash: str = typer.Option(..., "--code-hash"),

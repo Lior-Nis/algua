@@ -52,3 +52,28 @@ def test_full_path_to_live_with_approval():
         app, ["registry", "transition", "alpha", "--to", "live", "--actor", "human",
               "--code-hash", "c1", "--config-hash", "g1"]))
     assert out["stage"] == "live"
+
+
+def test_unknown_strategy_emits_json_error():
+    result = runner.invoke(app, ["registry", "show", "ghost"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "ghost" in payload["error"]
+
+
+def test_invalid_stage_value_emits_json_error():
+    runner.invoke(app, ["registry", "add", "alpha"])
+    result = runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "bogus", "--actor", "agent"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+
+
+def test_duplicate_add_emits_json_error():
+    runner.invoke(app, ["registry", "add", "alpha"])
+    result = runner.invoke(app, ["registry", "add", "alpha"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
