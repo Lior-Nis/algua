@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from algua.contracts.lifecycle import Actor, Stage, validate_transition
+from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 
 
 def _now() -> str:
@@ -89,7 +89,16 @@ def transition(
 ) -> StrategyRecord:
     rec = get_strategy(conn, name)
     validate_transition(rec.stage, to)
-    # Live-gate enforcement is added in Task 7.
+    if to is Stage.LIVE:
+        # Imported locally to avoid an import cycle (approvals imports store.get_strategy).
+        from algua.registry.approvals import has_valid_approval
+
+        if actor is not Actor.HUMAN:
+            raise TransitionError("transition to live requires a human actor")
+        if code_hash is None or config_hash is None:
+            raise TransitionError("transition to live requires code_hash and config_hash")
+        if not has_valid_approval(conn, rec.id, code_hash, config_hash):
+            raise TransitionError("no matching human approval for this code+config")
     now = _now()
     conn.execute(
         "UPDATE strategies SET stage = ?, updated_at = ? WHERE id = ?",
