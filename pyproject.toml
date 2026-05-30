@@ -1,0 +1,62 @@
+[project]
+name = "algua"
+version = "0.0.1"
+description = "Agent-first algotrading research and lifecycle platform"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "typer>=0.12",
+    "exchange-calendars>=4.5",
+    "pandas>=2.2",
+]
+
+[project.scripts]
+algua = "algua.cli.main:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "import-linter>=2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["algua"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+
+[tool.importlinter]
+root_package = "algua"
+
+[[tool.importlinter.contracts]]
+name = "contracts layer is pure (imports no other algua module)"
+type = "forbidden"
+source_modules = ["algua.contracts"]
+forbidden_modules = [
+    "algua.cli",
+    "algua.registry",
+    "algua.config",
+    "algua.calendar",
+]
+
+[[tool.importlinter.contracts]]
+name = "calendar stays independent of cli and registry"
+type = "forbidden"
+source_modules = ["algua.calendar"]
+forbidden_modules = ["algua.cli", "algua.registry"]
