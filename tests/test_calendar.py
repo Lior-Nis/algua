@@ -1,4 +1,5 @@
 from datetime import date
+
 from algua.calendar.market_calendar import MarketCalendar
 
 

@@ -1,7 +1,8 @@
 import pytest
-from algua.registry.db import connect, migrate
+
+from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry import store
-from algua.contracts.lifecycle import Stage, Actor, TransitionError
+from algua.registry.db import connect, migrate
 
 
 @pytest.fixture()

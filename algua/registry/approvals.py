@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from algua.registry.store import get_strategy
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def record_approval(
@@ -20,7 +20,9 @@ def record_approval(
         (rec.id, code_hash, config_hash, approved_by, _now()),
     )
     conn.commit()
-    return int(cur.lastrowid)
+    rowid = cur.lastrowid
+    assert rowid is not None  # a successful INSERT always sets lastrowid
+    return rowid
 
 
 def has_valid_approval(

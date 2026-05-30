@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from algua.config.settings import Settings, get_settings
 
 

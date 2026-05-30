@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # keep contracts import-light; pandas only needed for typing
     import pandas as pd
 
 
-class Side(str, Enum):
+class Side(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
@@ -46,18 +46,18 @@ class Strategy(Protocol):
     name: str
     execution: ExecutionContract
 
-    def target_weights(self, features: "pd.DataFrame") -> "pd.Series": ...
+    def target_weights(self, features: pd.DataFrame) -> pd.Series: ...
 
 
 @runtime_checkable
 class DataProvider(Protocol):
     def get_bars(
         self, symbols: list[str], start: datetime, end: datetime, timeframe: str
-    ) -> "pd.DataFrame": ...
+    ) -> pd.DataFrame: ...
 
 
 @runtime_checkable
 class Broker(Protocol):
-    def get_positions(self) -> "pd.Series": ...
+    def get_positions(self) -> pd.Series: ...
 
     def submit(self, intent: OrderIntent) -> str: ...

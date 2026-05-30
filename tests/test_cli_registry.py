@@ -1,6 +1,8 @@
 import json
+
 import pytest
 from typer.testing import CliRunner
+
 from algua.cli.main import app
 
 runner = CliRunner()

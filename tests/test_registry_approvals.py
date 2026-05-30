@@ -1,8 +1,9 @@
 import pytest
-from algua.registry.db import connect, migrate
+
+from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry import store
-from algua.registry.approvals import record_approval, has_valid_approval
-from algua.contracts.lifecycle import Stage, Actor, TransitionError
+from algua.registry.approvals import has_valid_approval, record_approval
+from algua.registry.db import connect, migrate
 
 
 @pytest.fixture()

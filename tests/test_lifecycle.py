@@ -1,6 +1,11 @@
 import pytest
+
 from algua.contracts.lifecycle import (
-    Stage, Actor, can_transition, validate_transition, TransitionError,
+    Actor,
+    Stage,
+    TransitionError,
+    can_transition,
+    validate_transition,
 )
 
 

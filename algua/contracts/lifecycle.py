@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class Stage(str, Enum):
+class Stage(StrEnum):
     IDEA = "idea"
     BACKTESTED = "backtested"
     SHORTLISTED = "shortlisted"
@@ -12,7 +12,7 @@ class Stage(str, Enum):
     RETIRED = "retired"
 
 
-class Actor(str, Enum):
+class Actor(StrEnum):
     HUMAN = "human"
     AGENT = "agent"
     SYSTEM = "system"

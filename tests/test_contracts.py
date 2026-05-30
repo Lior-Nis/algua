@@ -1,5 +1,7 @@
-import pytest
 from datetime import datetime
+
+import pytest
+
 from algua.contracts.types import ExecutionContract, OrderIntent, Side, Strategy
 
 
