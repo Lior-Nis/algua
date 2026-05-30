@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from typing import TypeVar
+
 import pandas as pd
 
+# momentum works element-wise on a Series (one symbol) or a wide DataFrame (symbols in
+# columns); the TypeVar preserves the caller's type (Series -> Series, DataFrame -> DataFrame).
+PandasObj = TypeVar("PandasObj", pd.Series, pd.DataFrame)
 
-def momentum(prices: pd.Series, lookback: int) -> pd.Series:
+
+def momentum(prices: PandasObj, lookback: int) -> PandasObj:
     """Trailing simple return over `lookback` periods: price_t / price_{t-lookback} - 1."""
     return prices / prices.shift(lookback) - 1.0
 
