@@ -81,3 +81,14 @@ def test_backtest_run_rejects_both_sources(tmp_path, monkeypatch):
                                  "--demo", "--snapshot", "x"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_backtest_run_unknown_snapshot_is_json_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    # valid-format but absent snapshot id -> JSON error, not a traceback
+    result = runner.invoke(app, ["backtest", "run", "cross_sectional_momentum",
+                                 "--snapshot", "deadbeefdeadbeef"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False

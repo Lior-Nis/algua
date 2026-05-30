@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import typer
 
 from algua.backtest._sample import SyntheticProvider
+from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -27,7 +28,7 @@ def _utc(date_str: str) -> datetime:
 
 
 @backtest_app.command("run")
-@json_errors()
+@json_errors(ValueError, LookupError, BacktestError)
 def run(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
