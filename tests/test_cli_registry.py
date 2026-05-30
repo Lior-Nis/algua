@@ -1,4 +1,5 @@
 import json
+import sqlite3
 
 import pytest
 from typer.testing import CliRunner
@@ -77,3 +78,26 @@ def test_duplicate_add_emits_json_error():
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
+
+
+def test_registry_command_closes_connection(monkeypatch, tmp_path):
+    from algua.cli import registry_cmd
+
+    closed = []
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self) -> None:
+            closed.append(True)
+            super().close()
+
+    def connect_tracking(_db_path):
+        conn = sqlite3.connect(tmp_path / "tracked.db", factory=TrackingConnection)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(registry_cmd, "connect", connect_tracking)
+
+    result = runner.invoke(app, ["registry", "add", "alpha"])
+
+    assert result.exit_code == 0, result.stdout
+    assert closed == [True]

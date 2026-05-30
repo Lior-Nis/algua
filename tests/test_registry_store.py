@@ -34,6 +34,12 @@ def test_legal_transition_updates_stage_and_history(conn):
     assert len(store.list_transitions(conn, "alpha")) == 2
 
 
+def test_transition_accepts_enum_values_as_strings(conn):
+    store.add_strategy(conn, "alpha")
+    rec = store.transition(conn, "alpha", "backtested", "agent")
+    assert rec.stage is Stage.BACKTESTED
+
+
 def test_illegal_transition_raises(conn):
     store.add_strategy(conn, "alpha")
     with pytest.raises(TransitionError):

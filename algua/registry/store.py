@@ -81,8 +81,8 @@ def list_transitions(conn: sqlite3.Connection, name: str) -> list[dict]:
 def transition(
     conn: sqlite3.Connection,
     name: str,
-    to: Stage,
-    actor: Actor,
+    to: Stage | str,
+    actor: Actor | str,
     reason: str | None = None,
     code_hash: str | None = None,
     config_hash: str | None = None,

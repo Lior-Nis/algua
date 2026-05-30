@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import sqlite3
 from collections.abc import Callable
+from contextlib import closing
 
 import typer
 
@@ -40,7 +41,8 @@ def _json_errors(fn: Callable[..., None]) -> Callable[..., None]:
 @_json_errors
 def add(name: str) -> None:
     """Register a new strategy at stage 'idea'."""
-    rec = store.add_strategy(_conn(), name)
+    with closing(_conn()) as conn:
+        rec = store.add_strategy(conn, name)
     emit({"id": rec.id, "name": rec.name, "stage": rec.stage.value})
 
 
@@ -49,7 +51,8 @@ def add(name: str) -> None:
 def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) -> None:
     """List strategies, optionally filtered by stage."""
     st = Stage(stage) if stage else None
-    recs = store.list_strategies(_conn(), st)
+    with closing(_conn()) as conn:
+        recs = store.list_strategies(conn, st)
     emit([{"id": r.id, "name": r.name, "stage": r.stage.value} for r in recs])
 
 
@@ -57,10 +60,11 @@ def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) ->
 @_json_errors
 def show(name: str) -> None:
     """Show a strategy and its transition history."""
-    conn = _conn()
-    rec = store.get_strategy(conn, name)
+    with closing(_conn()) as conn:
+        rec = store.get_strategy(conn, name)
+        transitions = store.list_transitions(conn, name)
     emit({"id": rec.id, "name": rec.name, "stage": rec.stage.value,
-          "transitions": store.list_transitions(conn, name)})
+          "transitions": transitions})
 
 
 @registry_app.command("transition")
@@ -74,9 +78,8 @@ def transition(
     config_hash: str = typer.Option(None, "--config-hash"),
 ) -> None:
     """Advance a strategy to a new lifecycle stage."""
-    rec = store.transition(
-        _conn(), name, Stage(to), Actor(actor), reason, code_hash, config_hash
-    )
+    with closing(_conn()) as conn:
+        rec = store.transition(conn, name, Stage(to), Actor(actor), reason, code_hash, config_hash)
     emit({"ok": True, "name": rec.name, "stage": rec.stage.value})
 
 
@@ -89,5 +92,6 @@ def approve(
     by: str = typer.Option(..., "--by", help="human approver identity"),
 ) -> None:
     """Record a human approval binding code+config hashes (required for going live)."""
-    aid = record_approval(_conn(), name, code_hash, config_hash, by)
+    with closing(_conn()) as conn:
+        aid = record_approval(conn, name, code_hash, config_hash, by)
     emit({"ok": True, "approval_id": aid})
