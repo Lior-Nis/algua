@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import UTC, datetime
 
 import typer
@@ -39,16 +40,18 @@ def run(
     result = run_backtest(strategy, provider, _utc(start), _utc(end))
 
     if register:
-        conn = connect(get_settings().db_path)
-        migrate(conn)
-        existing = {s.name for s in store.list_strategies(conn)}
-        if name not in existing:
-            store.add_strategy(conn, name)
-        sharpe = result.metrics["sharpe"]
-        ret = result.metrics["total_return"]
-        reason = f"backtest sharpe={sharpe:.2f} ret={ret:.2%}"
-        store.transition(conn, name, Stage.BACKTESTED, Actor.AGENT, reason,
-                         code_hash=result.config_hash, config_hash=result.config_hash)
-        conn.close()
+        with closing(connect(get_settings().db_path)) as conn:
+            migrate(conn)
+            existing = {s.name for s in store.list_strategies(conn)}
+            if name not in existing:
+                store.add_strategy(conn, name)
+            reason = (
+                f"backtest sharpe={result.metrics['sharpe']:.2f} "
+                f"ret={result.metrics['total_return']:.2%}"
+            )
+            # NOTE: code_hash == config_hash for now; real source-code hashing is wired in a
+            # later sub-project before the paper->live gate is ever in scope.
+            store.transition(conn, name, Stage.BACKTESTED, Actor.AGENT, reason,
+                             code_hash=result.config_hash, config_hash=result.config_hash)
 
     emit(result.to_dict())

@@ -23,8 +23,11 @@ class SyntheticProvider:
     ) -> pd.DataFrame:
         if timeframe not in _SUPPORTED:
             raise ValueError(f"unsupported timeframe: {timeframe!r}")
+        if not symbols:
+            empty = pd.DataFrame(columns=_BAR_COLUMNS)
+            empty.index = pd.DatetimeIndex([], tz="UTC", name="timestamp")
+            return empty
         sessions = pd.date_range(start=start, end=end, freq="B", tz="UTC")  # business days
-        rng = np.random.default_rng(self.seed)
         frames = []
         for i, sym in enumerate(sorted(symbols)):
             # Deterministic per-symbol drift/vol from a child RNG.
@@ -36,6 +39,5 @@ class SyntheticProvider:
                 "open": price, "high": price * 1.01, "low": price * 0.99,
                 "close": price, "adj_close": price, "volume": 1_000_000.0,
             }))
-        _ = rng  # reserved for future noise; keeps seed wiring explicit
         out = pd.concat(frames).set_index("timestamp").sort_values(["timestamp", "symbol"])
         return out[_BAR_COLUMNS]
