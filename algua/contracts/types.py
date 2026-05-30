@@ -21,9 +21,6 @@ class ExecutionContract:
     decision_lag_bars >= 1 enforces the t -> t+1 rule: features are computed on a
     fully closed bar t and orders may fill no earlier than t + lag. This forbids
     same-bar fills, the single most likely source of look-ahead bias.
-
-    decision_lag_bars=0 is permitted (e.g. for look-ahead comparison benchmarks)
-    but must not be used in production strategies. Default is 1.
     """
 
     rebalance_frequency: str
@@ -32,8 +29,8 @@ class ExecutionContract:
     max_gross_exposure: float = 1.0
 
     def __post_init__(self) -> None:
-        if self.decision_lag_bars < 0:
-            raise ValueError("decision_lag_bars must be >= 0")
+        if self.decision_lag_bars < 1:
+            raise ValueError("decision_lag_bars must be >= 1 (no same-bar fills)")
 
 
 @dataclass(frozen=True)

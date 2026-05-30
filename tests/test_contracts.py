@@ -5,16 +5,9 @@ import pytest
 from algua.contracts.types import ExecutionContract, OrderIntent, Side, Strategy
 
 
-def test_execution_contract_rejects_negative_lag():
+def test_execution_contract_rejects_same_bar_fill():
     with pytest.raises(ValueError):
-        ExecutionContract(rebalance_frequency="1D", decision_lag_bars=-1)
-
-
-def test_execution_contract_allows_zero_lag():
-    # lag=0 is permitted (same-bar fill, useful for look-ahead comparison tests)
-    # but discouraged in production; default is 1.
-    c = ExecutionContract(rebalance_frequency="1D", decision_lag_bars=0)
-    assert c.decision_lag_bars == 0
+        ExecutionContract(rebalance_frequency="1D", decision_lag_bars=0)
 
 
 def test_execution_contract_defaults():
