@@ -26,11 +26,11 @@ DataProvider.get_bars(
 ### Returned DataFrame — exact shape (tidy / long format)
 
 - **One row per `(symbol, bar)`.**
-- **Index:** a name=`timestamp`, **tz-aware** `DatetimeIndex` in **UTC**. Each timestamp is the
-  bar's **close (the moment the bar became known)** — for daily `XNYS` bars, the session close.
-  Monotonic non-decreasing. Rationale: a close-time index makes "features up to time `t`"
-  unambiguous and directly supports the `t→t+1` rule (a decision at `t` may only see bars whose
-  `timestamp <= t`).
+- **Index:** a name=`timestamp`, **tz-aware** `DatetimeIndex` in **UTC**, monotonic non-decreasing.
+  For daily (`1d`) bars the timestamp is the **session date at UTC midnight** (e.g.
+  `2024-07-01 00:00:00+00:00`), matching what real daily sources (yfinance/Alpaca daily) provide.
+  Intraday timeframes carry the bar's time-of-day. The `t→t+1` rule (engine shift) — not the
+  timestamp's time-of-day — is what guarantees no look-ahead.
 - **Columns (exact names, this order):**
 
   | column | dtype | meaning |

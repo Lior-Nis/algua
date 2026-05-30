@@ -29,10 +29,11 @@ class SyntheticProvider:
             empty = pd.DataFrame(columns=_BAR_COLUMNS)
             empty.index = pd.DatetimeIndex([], tz="UTC", name="timestamp")
             return empty
-        # Timestamp daily bars at the XNYS session close (tz-aware UTC), matching the frozen
-        # bar schema and what the real provider emits — not naive midnight business days.
+        # Daily bars are timestamped at the session date (tz-aware UTC midnight), per the bar
+        # schema and what real daily sources provide. Calendar-based so holidays are skipped.
+        session_dates = MarketCalendar("XNYS").sessions_in_range(start.date(), end.date())
         sessions = pd.DatetimeIndex(
-            MarketCalendar("XNYS").session_closes(start.date(), end.date()), name="timestamp"
+            [pd.Timestamp(d, tz="UTC") for d in session_dates], name="timestamp"
         )
         frames = []
         for i, sym in enumerate(sorted(symbols)):

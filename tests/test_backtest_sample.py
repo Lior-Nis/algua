@@ -31,8 +31,8 @@ def test_rejects_unknown_timeframe():
         SyntheticProvider().get_bars(["AAA"], START, END, "7h")
 
 
-def test_timestamps_are_session_closes_not_midnight():
+def test_timestamps_are_utc_session_dates():
     df = SyntheticProvider(seed=1).get_bars(["AAA"], START, END, "1d")
-    # daily bars carry the session-close time (16:00 ET -> 20:00/21:00 UTC), never naive midnight
-    assert (df.index.hour != 0).all()
     assert str(df.index.tz) == "UTC"
+    assert (df.index.hour == 0).all()
+    assert (df.index.normalize() == df.index).all()  # exactly midnight
