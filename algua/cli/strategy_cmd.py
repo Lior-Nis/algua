@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import typer
+
+from algua.cli.app import app, emit
+from algua.cli.errors import json_errors
+from algua.strategies.loader import list_strategies
+
+strategy_app = typer.Typer(help="Author and list strategies", no_args_is_help=True)
+app.add_typer(strategy_app, name="strategy")
+
+_TEMPLATE = '''\
+"""Strategy: {name}. Edit target_weights to express your cross-sectional logic."""
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+
+from algua.contracts.types import ExecutionContract
+from algua.features.indicators import momentum
+from algua.strategies.base import StrategyConfig
+
+CONFIG = StrategyConfig(
+    name="{name}",
+    universe=["AAPL", "MSFT", "NVDA"],
+    execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+    params={{"lookback": 60, "top_k": 2}},
+)
+
+
+def target_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    if len(wide) <= int(params["lookback"]):
+        return pd.Series(dtype="float64")
+    scores = momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
+    winners = scores.sort_values(ascending=False).head(int(params["top_k"])).index
+    if len(winners) == 0:
+        return pd.Series(dtype="float64")
+    return pd.Series(1.0 / len(winners), index=winners)
+'''
+
+
+@strategy_app.command("list")
+@json_errors()
+def list_() -> None:
+    """List available strategies as JSON."""
+    emit(list_strategies())
+
+
+@strategy_app.command("new")
+@json_errors()
+def new(name: str) -> None:
+    """Scaffold a new strategy module under algua/strategies/examples/."""
+    path = Path("algua/strategies/examples") / f"{name}.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise ValueError(f"strategy already exists: {path}")
+    path.write_text(_TEMPLATE.format(name=name))
+    emit({"ok": True, "name": name, "path": str(path)})
