@@ -11,6 +11,7 @@ import pandas as pd
 from algua.data.files import copy_snapshot, count_tabular_rows, sha256_file, write_parquet_snapshot
 from algua.data.manifest import SnapshotManifest
 from algua.data.models import SnapshotMetadata, SnapshotRecord
+from algua.data.schema import to_bar_schema
 
 
 class SnapshotNotFound(LookupError):
@@ -193,6 +194,14 @@ class DataStore:
         if rec is None:
             raise SnapshotNotFound(snapshot_id)
         return rec
+
+    def read_bars(self, snapshot_id: str) -> pd.DataFrame:
+        """Read a bars snapshot back as a bar-schema DataFrame (tz-aware UTC timestamp index)."""
+        rec = self.get_snapshot(snapshot_id)  # raises SnapshotNotFound
+        if rec.dataset != "bars":
+            raise ValueError(f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not 'bars'")
+        frame = pd.read_parquet(self.data_dir / rec.data_path)
+        return to_bar_schema(frame)
 
     def summary(self) -> dict[str, Any]:
         records = self.list_snapshots()
