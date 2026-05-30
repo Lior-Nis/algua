@@ -87,9 +87,11 @@ def transition(
     code_hash: str | None = None,
     config_hash: str | None = None,
 ) -> StrategyRecord:
+    to = Stage(to)
+    actor = Actor(actor)
     rec = get_strategy(conn, name)
     validate_transition(rec.stage, to)
-    if to is Stage.LIVE:
+    if to == Stage.LIVE:
         # Imported locally to avoid an import cycle (approvals imports store.get_strategy).
         from algua.registry.approvals import has_valid_approval
 
