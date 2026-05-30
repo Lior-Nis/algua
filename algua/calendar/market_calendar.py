@@ -31,3 +31,12 @@ class MarketCalendar:
     def sessions_in_range(self, start: date, end: date) -> list[date]:
         idx = self._cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
         return [ts.date() for ts in idx]
+
+    def session_closes(self, start: date, end: date) -> list[pd.Timestamp]:
+        """Session close timestamps (tz-aware UTC) for each session in [start, end].
+
+        Per the bar schema, a daily bar's timestamp is the session close (when the bar became
+        known); this is DST- and half-day-aware (e.g. early closes return 17:00 UTC).
+        """
+        sessions = self._cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
+        return [self._cal.session_close(s) for s in sessions]

@@ -63,3 +63,15 @@ name = "calendar stays independent of cli and registry"
 type = "forbidden"
 source_modules = ["algua.calendar"]
 forbidden_modules = ["algua.cli", "algua.registry"]
+
+[[tool.importlinter.contracts]]
+name = "features layer is pure (no algua imports beyond contracts)"
+type = "forbidden"
+source_modules = ["algua.features"]
+forbidden_modules = ["algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies"]
+
+[[tool.importlinter.contracts]]
+name = "backtest engine stays off cli, registry, and the data lane"
+type = "forbidden"
+source_modules = ["algua.backtest"]
+forbidden_modules = ["algua.cli", "algua.registry", "algua.data"]
