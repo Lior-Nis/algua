@@ -25,3 +25,15 @@ def test_sessions_in_range_count():
     # Jul 1,2,3 trading; Jul 4 holiday; Jul 5,6 weekend; Jul 7 trading
     assert sessions == [date(2025, 7, 1), date(2025, 7, 2),
                         date(2025, 7, 3), date(2025, 7, 7)]
+
+
+def test_next_session_on_trading_day_is_strictly_after():
+    cal = MarketCalendar("XNYS")
+    # 2025-07-07 is a trading day; the next session must be the FOLLOWING day, not itself
+    assert cal.next_session(date(2025, 7, 7)) == date(2025, 7, 8)
+
+
+def test_previous_session_on_trading_day_is_strictly_before():
+    cal = MarketCalendar("XNYS")
+    # 2025-07-08 is a trading day; the previous session must be 2025-07-07, not itself
+    assert cal.previous_session(date(2025, 7, 8)) == date(2025, 7, 7)

@@ -17,14 +17,16 @@ class MarketCalendar:
         return bool(self._cal.is_session(pd.Timestamp(day)))
 
     def next_session(self, day: date) -> date:
-        # next_session() requires a valid session; use date_to_session(direction='next')
-        # which accepts any date (including holidays/weekends) and returns the next session.
-        return self._cal.date_to_session(pd.Timestamp(day), direction="next").date()
+        """The earliest trading session strictly after `day` (works for any day)."""
+        ts = pd.Timestamp(day)
+        anchor = self._cal.date_to_session(ts, direction="previous")
+        return self._cal.next_session(anchor).date()
 
     def previous_session(self, day: date) -> date:
-        # previous_session() requires a valid session; use date_to_session(direction='previous')
-        # which accepts any date and returns the most recent prior session.
-        return self._cal.date_to_session(pd.Timestamp(day), direction="previous").date()
+        """The latest trading session strictly before `day` (works for any day)."""
+        ts = pd.Timestamp(day)
+        anchor = self._cal.date_to_session(ts, direction="next")
+        return self._cal.previous_session(anchor).date()
 
     def sessions_in_range(self, start: date, end: date) -> list[date]:
         idx = self._cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
