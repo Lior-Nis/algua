@@ -4,7 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.contracts.lifecycle import Actor, Stage
 
 
 def _now() -> str:
@@ -87,20 +87,20 @@ def transition(
     code_hash: str | None = None,
     config_hash: str | None = None,
 ) -> StrategyRecord:
-    to = Stage(to)
-    actor = Actor(actor)
-    rec = get_strategy(conn, name)
-    validate_transition(rec.stage, to)
-    if to == Stage.LIVE:
-        # Imported locally to avoid an import cycle (approvals imports store.get_strategy).
-        from algua.registry.approvals import has_valid_approval
+    from algua.registry.transitions import transition_strategy
 
-        if actor is not Actor.HUMAN:
-            raise TransitionError("transition to live requires a human actor")
-        if code_hash is None or config_hash is None:
-            raise TransitionError("transition to live requires code_hash and config_hash")
-        if not has_valid_approval(conn, rec.id, code_hash, config_hash):
-            raise TransitionError("no matching human approval for this code+config")
+    return transition_strategy(conn, name, to, actor, reason, code_hash, config_hash)
+
+
+def apply_transition(
+    conn: sqlite3.Connection,
+    rec: StrategyRecord,
+    to: Stage,
+    actor: Actor,
+    reason: str | None = None,
+    code_hash: str | None = None,
+    config_hash: str | None = None,
+) -> StrategyRecord:
     now = _now()
     conn.execute(
         "UPDATE strategies SET stage = ?, updated_at = ? WHERE id = ?",
@@ -113,4 +113,4 @@ def transition(
         (rec.id, rec.stage.value, to.value, actor.value, reason, code_hash, config_hash, now),
     )
     conn.commit()
-    return get_strategy(conn, name)
+    return get_strategy(conn, rec.name)

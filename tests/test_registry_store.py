@@ -3,6 +3,7 @@ import pytest
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry import store
 from algua.registry.db import connect, migrate
+from algua.registry.transitions import transition_strategy
 
 
 @pytest.fixture()
@@ -44,6 +45,26 @@ def test_illegal_transition_raises(conn):
     store.add_strategy(conn, "alpha")
     with pytest.raises(TransitionError):
         store.transition(conn, "alpha", Stage.LIVE, Actor.AGENT)
+
+
+def test_transition_service_allows_injected_live_approval_verifier(conn):
+    store.add_strategy(conn, "alpha")
+    for stage in (Stage.BACKTESTED, Stage.SHORTLISTED, Stage.PAPER):
+        store.transition(conn, "alpha", stage, Actor.AGENT)
+
+    rec = transition_strategy(
+        conn,
+        "alpha",
+        Stage.LIVE,
+        Actor.HUMAN,
+        code_hash="c1",
+        config_hash="g1",
+        approval_verifier=lambda _conn, _strategy_id, code_hash, config_hash: (
+            code_hash == "c1" and config_hash == "g1"
+        ),
+    )
+
+    assert rec.stage is Stage.LIVE
 
 
 def test_list_filters_by_stage(conn):

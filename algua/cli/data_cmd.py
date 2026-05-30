@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import functools
-from collections.abc import Callable
 from pathlib import Path
 
 import typer
 
 from algua.cli.app import app, emit
+from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.data.store import DataStore
 
@@ -20,20 +19,8 @@ def _store() -> DataStore:
     return DataStore(get_settings().data_dir)
 
 
-def _json_errors(fn: Callable[..., None]) -> Callable[..., None]:
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except (ValueError, LookupError, FileNotFoundError) as exc:
-            emit({"ok": False, "error": str(exc)})
-            raise typer.Exit(code=1) from exc
-
-    return wrapper
-
-
 @data_app.command("ingest")
-@_json_errors
+@json_errors(ValueError, LookupError, FileNotFoundError)
 def ingest(
     dataset: str,
     provider: str = typer.Option(..., "--provider"),
@@ -59,7 +46,7 @@ def ingest(
 
 
 @data_app.command("inspect")
-@_json_errors
+@json_errors(ValueError, LookupError, FileNotFoundError)
 def inspect(
     dataset: str = typer.Option(None, "--dataset", help="filter by dataset"),
     snapshot_id: str = typer.Option(None, "--snapshot-id", help="show one snapshot"),

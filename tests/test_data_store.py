@@ -61,6 +61,26 @@ def test_ingest_same_file_is_idempotent(tmp_path):
     assert len(store.list_snapshots()) == 1
 
 
+def test_ingest_non_csv_records_unknown_row_count(tmp_path):
+    source = tmp_path / "bars.txt"
+    source.write_text("not,csv,contract-specific\n", encoding="utf-8")
+    store = DataStore(tmp_path / "data")
+
+    rec = store.ingest_file(
+        dataset="daily-bars",
+        provider="local",
+        symbols=["AAPL"],
+        start="2026-01-02",
+        end="2026-01-02",
+        as_of="2026-01-03T00:00:00+00:00",
+        source="fixture",
+        file_path=source,
+    )
+
+    assert rec.row_count is None
+    assert store.get_snapshot(rec.snapshot_id).row_count is None
+
+
 def test_get_snapshot_raises_for_unknown_id(tmp_path):
     store = DataStore(tmp_path / "data")
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import functools
 import sqlite3
-from collections.abc import Callable
 from contextlib import closing
 
 import typer
 
 from algua.cli.app import app, emit
+from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.registry import store
@@ -24,21 +23,8 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _json_errors(fn: Callable[..., None]) -> Callable[..., None]:
-    """Emit expected domain errors as JSON ({"ok": false, "error": ...}) + exit 1,
-    preserving the agent-parseable stdout contract instead of leaking tracebacks."""
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except (ValueError, LookupError) as exc:
-            emit({"ok": False, "error": str(exc)})
-            raise typer.Exit(code=1) from exc
-    return wrapper
-
-
 @registry_app.command("add")
-@_json_errors
+@json_errors(ValueError, LookupError)
 def add(name: str) -> None:
     """Register a new strategy at stage 'idea'."""
     with closing(_conn()) as conn:
@@ -47,7 +33,7 @@ def add(name: str) -> None:
 
 
 @registry_app.command("list")
-@_json_errors
+@json_errors(ValueError, LookupError)
 def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) -> None:
     """List strategies, optionally filtered by stage."""
     st = Stage(stage) if stage else None
@@ -57,7 +43,7 @@ def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) ->
 
 
 @registry_app.command("show")
-@_json_errors
+@json_errors(ValueError, LookupError)
 def show(name: str) -> None:
     """Show a strategy and its transition history."""
     with closing(_conn()) as conn:
@@ -68,7 +54,7 @@ def show(name: str) -> None:
 
 
 @registry_app.command("transition")
-@_json_errors
+@json_errors(ValueError, LookupError)
 def transition(
     name: str,
     to: str = typer.Option(..., "--to"),
@@ -84,7 +70,7 @@ def transition(
 
 
 @registry_app.command("approve")
-@_json_errors
+@json_errors(ValueError, LookupError)
 def approve(
     name: str,
     code_hash: str = typer.Option(..., "--code-hash"),
