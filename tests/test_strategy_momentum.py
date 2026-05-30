@@ -1,4 +1,5 @@
 import pandas as pd
+
 from algua.strategies.examples import cross_sectional_momentum as csm
 
 
@@ -7,7 +8,7 @@ def _bars(prices_by_symbol: dict[str, list[float]]) -> pd.DataFrame:
     ts = pd.date_range("2024-01-01", periods=4, freq="D", tz="UTC")
     rows = []
     for sym, path in prices_by_symbol.items():
-        for t, px in zip(ts, path):
+        for t, px in zip(ts, path, strict=False):
             rows.append({"timestamp": t, "symbol": sym, "open": px, "high": px,
                          "low": px, "close": px, "adj_close": px, "volume": 1.0})
     return pd.DataFrame(rows).set_index("timestamp").sort_index()

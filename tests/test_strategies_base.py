@@ -1,6 +1,7 @@
 import pandas as pd
+
 from algua.contracts.types import ExecutionContract, Strategy
-from algua.strategies.base import StrategyConfig, LoadedStrategy
+from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 
 def _tw(view, params):
