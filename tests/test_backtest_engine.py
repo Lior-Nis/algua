@@ -42,40 +42,43 @@ def test_run_is_deterministic() -> None:
     assert a.metrics == b.metrics
 
 
-def test_t_plus_1_blocks_same_bar_fill() -> None:
-    """With the mandatory lag>=1 rule, a strategy that chases a one-time jump can only
-    enter AFTER the jump bar, so it cannot capture the jump's return."""
+def test_t_plus_1_blocks_same_bar_fill():
+    """Guards the t->t+1 rule: a position entered (decided) at bar t must fill at t+1,
+    so it cannot capture a close[t]->close[t+1] jump. The strategy decides to go long
+    while price is still 100 and HOLDS; the price then jumps 100->150 from bar 5 to bar 6.
+    Honest (lag=1) fills at 150 and earns ~0; a broken/removed shift would fill at 100 and
+    capture +50%, failing the assertion."""
 
     class JumpProvider:
         seed = 0
 
         def get_bars(self, symbols, start, end, timeframe):
             ts = pd.date_range("2024-01-01", periods=12, freq="B", tz="UTC")
-            path = [100.0] * 5 + [150.0] * 7  # flat, +50% jump at bar 5, then flat
+            path = [100.0] * 6 + [150.0] * 6  # flat 100 through bar 5, jump to 150 at bar 6
             rows = [{"timestamp": t, "symbol": "AAA", "open": px, "high": px, "low": px,
                      "close": px, "adj_close": px, "volume": 1.0}
                     for t, px in zip(ts, path, strict=True)]
             return pd.DataFrame(rows).set_index("timestamp").sort_index()
 
     cfg = StrategyConfig(
-        name="chaser", universe=["AAA"],
+        name="holder", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
         params={},
     )
 
-    def chaser(view, params):
+    def holder(view, params):
+        # Deterministically go long once we have >=6 bars of history (decision at bar index 5,
+        # price still 100), and HOLD from then on.
         wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-        if len(wide) < 2:
-            return pd.Series(dtype="float64")
-        if wide["AAA"].iloc[-1] > wide["AAA"].iloc[-2]:  # only after seeing the jump
+        if len(wide) >= 6:
             return pd.Series([1.0], index=["AAA"])
         return pd.Series(dtype="float64")
 
-    res = run(LoadedStrategy(config=cfg, fn=chaser), JumpProvider(),
+    res = run(LoadedStrategy(config=cfg, fn=holder), JumpProvider(),
               datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
-    # Chases the jump but enters at t+1 (price already 150) -> earns ~0 from it.
+    # Entered at t+1 (price 150), held flat at 150 -> earns ~0 from the jump it sat through.
     assert res.metrics["total_return"] < 0.01
-    # And it genuinely DID take a position (the test isn't vacuously true).
+    # It genuinely held a position (not vacuous).
     assert res.metrics["n_rebalances"] >= 1
 
 
