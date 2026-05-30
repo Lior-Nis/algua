@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+SCHEMA_VERSION = 2
+
 
 @dataclass(frozen=True)
 class SnapshotMetadata:
@@ -14,6 +16,11 @@ class SnapshotMetadata:
     end: str
     as_of: str
     source: str
+    kind: str = "file"
+    timeframe: str | None = None
+    adjustment: str | None = None
+    universe: str | None = None
+    source_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -24,6 +31,8 @@ class SnapshotRecord:
     content_hash: str
     data_path: Path
     created_at: str
+    storage_format: str = "file"
+    schema_version: int = SCHEMA_VERSION
 
     @property
     def dataset(self) -> str:
@@ -53,8 +62,13 @@ class SnapshotRecord:
     def source(self) -> str:
         return self.metadata.source
 
+    @property
+    def kind(self) -> str:
+        return self.metadata.kind
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "snapshot_id": self.snapshot_id,
             "dataset": self.dataset,
             "provider": self.provider,
@@ -63,9 +77,15 @@ class SnapshotRecord:
             "end": self.end,
             "as_of": self.as_of,
             "source": self.source,
+            "kind": self.kind,
+            "timeframe": self.metadata.timeframe,
+            "adjustment": self.metadata.adjustment,
+            "universe": self.metadata.universe,
+            "source_metadata": self.metadata.source_metadata or {},
             "row_count": self.row_count,
             "content_hash": self.content_hash,
             "data_path": self.data_path.as_posix(),
+            "storage_format": self.storage_format,
             "created_at": self.created_at,
         }
 
@@ -80,6 +100,11 @@ class SnapshotRecord:
             end=str(payload["end"]),
             as_of=str(payload["as_of"]),
             source=str(payload["source"]),
+            kind=str(payload.get("kind", "file")),
+            timeframe=_optional_str(payload.get("timeframe")),
+            adjustment=_optional_str(payload.get("adjustment")),
+            universe=_optional_str(payload.get("universe")),
+            source_metadata=dict(payload.get("source_metadata", {})),
         )
         return cls(
             snapshot_id=str(payload["snapshot_id"]),
@@ -88,4 +113,10 @@ class SnapshotRecord:
             content_hash=str(payload["content_hash"]),
             data_path=Path(str(payload["data_path"])),
             created_at=str(payload["created_at"]),
+            storage_format=str(payload.get("storage_format", "file")),
+            schema_version=int(payload.get("schema_version", 1)),
         )
+
+
+def _optional_str(value: Any) -> str | None:
+    return None if value is None else str(value)

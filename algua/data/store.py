@@ -6,7 +6,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from algua.data.files import copy_snapshot, count_tabular_rows, sha256_file
+import pandas as pd
+
+from algua.data.files import copy_snapshot, count_tabular_rows, sha256_file, write_parquet_snapshot
 from algua.data.manifest import SnapshotManifest
 from algua.data.models import SnapshotMetadata, SnapshotRecord
 
@@ -37,6 +39,11 @@ class DataStore:
         as_of: str,
         source: str,
         file_path: Path,
+        kind: str = "file",
+        timeframe: str | None = None,
+        adjustment: str | None = None,
+        universe: str | None = None,
+        source_metadata: dict[str, Any] | None = None,
     ) -> SnapshotRecord:
         source_path = file_path.expanduser()
         if not source_path.is_file():
@@ -50,6 +57,11 @@ class DataStore:
             end=end,
             as_of=as_of,
             source=source,
+            kind=kind,
+            timeframe=timeframe,
+            adjustment=adjustment,
+            universe=universe,
+            source_metadata=source_metadata,
         )
         content_hash = sha256_file(source_path)
         row_count = count_tabular_rows(source_path)
@@ -71,6 +83,104 @@ class DataStore:
             content_hash=content_hash,
             data_path=relative_path,
             created_at=datetime.now(UTC).isoformat(),
+            storage_format=source_path.suffix.lower().lstrip(".") or "file",
+        )
+        self.manifest.append(rec)
+        return rec
+
+    def ingest_bars(
+        self,
+        *,
+        provider: str,
+        symbols: list[str],
+        start: str,
+        end: str,
+        as_of: str,
+        source: str,
+        frame: pd.DataFrame,
+        timeframe: str = "1d",
+        adjustment: str = "auto",
+        source_metadata: dict[str, Any] | None = None,
+    ) -> SnapshotRecord:
+        metadata = _metadata(
+            dataset="bars",
+            provider=provider,
+            symbols=symbols,
+            start=start,
+            end=end,
+            as_of=as_of,
+            source=source,
+            kind="bars",
+            timeframe=timeframe,
+            adjustment=adjustment,
+            source_metadata=source_metadata,
+        )
+        normalized = _normalize_frame(frame)
+        content_hash = _frame_hash(normalized)
+        snapshot_id = _snapshot_id(metadata, content_hash)
+
+        existing = self.manifest.find(snapshot_id)
+        if existing is not None:
+            return existing
+
+        relative_path = Path("snapshots") / "bars" / snapshot_id / "bars.parquet"
+        write_parquet_snapshot(normalized, self.data_dir, relative_path)
+        rec = SnapshotRecord(
+            snapshot_id=snapshot_id,
+            metadata=metadata,
+            row_count=len(normalized),
+            content_hash=content_hash,
+            data_path=relative_path,
+            created_at=datetime.now(UTC).isoformat(),
+            storage_format="parquet",
+        )
+        self.manifest.append(rec)
+        return rec
+
+    def ingest_universe(
+        self,
+        *,
+        universe: str,
+        symbols: list[str],
+        effective_date: str,
+        as_of: str,
+        source: str,
+        provider: str = "local",
+        source_metadata: dict[str, Any] | None = None,
+    ) -> SnapshotRecord:
+        clean_symbols = _normalize_symbols(symbols)
+        frame = pd.DataFrame(
+            {"effective_date": effective_date, "universe": universe, "symbol": clean_symbols}
+        )
+        metadata = _metadata(
+            dataset="universes",
+            provider=provider,
+            symbols=clean_symbols,
+            start=effective_date,
+            end=effective_date,
+            as_of=as_of,
+            source=source,
+            kind="universe",
+            universe=universe,
+            source_metadata=source_metadata,
+        )
+        content_hash = _frame_hash(frame)
+        snapshot_id = _snapshot_id(metadata, content_hash)
+
+        existing = self.manifest.find(snapshot_id)
+        if existing is not None:
+            return existing
+
+        relative_path = Path("snapshots") / "universes" / snapshot_id / "universe.parquet"
+        write_parquet_snapshot(frame, self.data_dir, relative_path)
+        rec = SnapshotRecord(
+            snapshot_id=snapshot_id,
+            metadata=metadata,
+            row_count=len(frame),
+            content_hash=content_hash,
+            data_path=relative_path,
+            created_at=datetime.now(UTC).isoformat(),
+            storage_format="parquet",
         )
         self.manifest.append(rec)
         return rec
@@ -83,6 +193,41 @@ class DataStore:
         if rec is None:
             raise SnapshotNotFound(snapshot_id)
         return rec
+
+    def summary(self) -> dict[str, Any]:
+        records = self.list_snapshots()
+        datasets: dict[str, dict[str, Any]] = {}
+        for rec in records:
+            item = datasets.setdefault(
+                rec.dataset,
+                {
+                    "dataset": rec.dataset,
+                    "snapshots": 0,
+                    "symbols": set(),
+                    "start": rec.start,
+                    "end": rec.end,
+                    "providers": set(),
+                    "storage_formats": set(),
+                },
+            )
+            item["snapshots"] += 1
+            item["symbols"].update(rec.symbols)
+            item["start"] = min(item["start"], rec.start)
+            item["end"] = max(item["end"], rec.end)
+            item["providers"].add(rec.provider)
+            item["storage_formats"].add(rec.storage_format)
+        return {
+            "snapshots": len(records),
+            "datasets": [
+                {
+                    **item,
+                    "symbols": sorted(item["symbols"]),
+                    "providers": sorted(item["providers"]),
+                    "storage_formats": sorted(item["storage_formats"]),
+                }
+                for item in sorted(datasets.values(), key=lambda d: d["dataset"])
+            ],
+        }
 
 
 def _normalize_symbols(symbols: list[str]) -> list[str]:
@@ -101,6 +246,11 @@ def _metadata(
     end: str,
     as_of: str,
     source: str,
+    kind: str = "file",
+    timeframe: str | None = None,
+    adjustment: str | None = None,
+    universe: str | None = None,
+    source_metadata: dict[str, Any] | None = None,
 ) -> SnapshotMetadata:
     _validate_non_empty("dataset", dataset)
     _validate_non_empty("provider", provider)
@@ -115,6 +265,11 @@ def _metadata(
         end=end,
         as_of=as_of,
         source=source,
+        kind=kind,
+        timeframe=timeframe,
+        adjustment=adjustment,
+        universe=universe,
+        source_metadata=source_metadata or {},
     )
 
 
@@ -146,6 +301,11 @@ def _snapshot_id(metadata: SnapshotMetadata, content_hash: str) -> str:
         "end": metadata.end,
         "as_of": metadata.as_of,
         "source": metadata.source,
+        "kind": metadata.kind,
+        "timeframe": metadata.timeframe,
+        "adjustment": metadata.adjustment,
+        "universe": metadata.universe,
+        "source_metadata": metadata.source_metadata or {},
         "content_hash": content_hash,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -155,3 +315,14 @@ def _snapshot_id(metadata: SnapshotMetadata, content_hash: str) -> str:
 def _path_part(value: str) -> str:
     clean = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in value.lower())
     return clean.strip("-") or "dataset"
+
+
+def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        raise ValueError("bars frame must not be empty")
+    return frame.copy().sort_index(axis=1).reset_index(drop=True)
+
+
+def _frame_hash(frame: pd.DataFrame) -> str:
+    payload = frame.to_json(orient="split", date_format="iso", double_precision=12)
+    return hashlib.sha256(payload.encode()).hexdigest()

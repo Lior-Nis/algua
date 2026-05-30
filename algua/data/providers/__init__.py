@@ -1,0 +1,1 @@
+"""Historical data provider adapters."""

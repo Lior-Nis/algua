@@ -8,12 +8,11 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - **Why the rules exist (detail):** `docs/agent/operating.md`
 - **How this foundation was built (task plan):** `docs/superpowers/plans/2026-05-29-foundation-command-surface.md`
 - **Reviewing/fixing the system?** Read `AGENTS.md` first (review mandate + invariants + deferred scope).
-- **Data contract (frozen):** `docs/contracts/bar-schema.md` — the shape of bars crossing the
-  data↔research seam (`DataProvider.get_bars`).
-- **Current state:** Sub-project 1 (foundation) merged. Sub-project 2 (data layer) in progress.
-  Work is split across two agents in parallel — **Codex: data lane** (`algua/data/*`); **Claude:
-  research lane** (`algua/strategies|features|backtest|tracking/*`), meeting at the bar-schema
-  contract. The 6-sub-project roadmap is in the spec above.
+- **Data contract:** `docs/contracts/bar-schema.md` — the shape of bars crossing the
+  data↔research seam.
+- **Current state:** Sub-project 1 (foundation) merged. Sub-project 2 (data layer) is implemented:
+  provider-backed bars, parquet snapshots, provenance manifest, and universe snapshots. The
+  6-sub-project roadmap is in the spec above.
 
 ## Golden rules
 - Drive the system through `uv run algua ...`. Never reach into modules to bypass the CLI.
@@ -31,6 +30,12 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua registry show <name>` — strategy + transition history.
 - `uv run algua registry transition <name> --to S --actor agent --reason "..."` — advance stage.
 - `uv run algua registry approve <name> --code-hash H --config-hash H --by NAME` — human-only.
+- `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
+- `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
+  historical bars into a parquet snapshot.
+- `uv run algua data ingest-universe NAME --symbols AAPL,MSFT --effective-date D` — record
+  point-in-time universe membership.
+- `uv run algua data inspect [--summary|--dataset NAME|--snapshot-id ID]` — inspect data snapshots.
 
 ## Lifecycle stages
 `idea -> backtested -> shortlisted -> paper -> live -> retired`

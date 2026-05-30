@@ -15,3 +15,13 @@ def test_env_override(monkeypatch, tmp_path):
     s = get_settings()
     assert s.exchange == "XLON"
     assert s.db_path == tmp_path / "x.db"
+
+
+def test_alpaca_env_override(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "key")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "secret")
+    monkeypatch.setenv("ALGUA_ALPACA_DATA_URL", "https://example.test")
+    s = get_settings()
+    assert s.alpaca_api_key == "key"
+    assert s.alpaca_api_secret == "secret"
+    assert s.alpaca_data_url == "https://example.test"

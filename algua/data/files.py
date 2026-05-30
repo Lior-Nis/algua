@@ -5,6 +5,8 @@ import hashlib
 import shutil
 from pathlib import Path
 
+import pandas as pd
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -27,3 +29,9 @@ def copy_snapshot(source_path: Path, data_dir: Path, relative_path: Path) -> Non
     target_path = data_dir / relative_path
     target_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, target_path)
+
+
+def write_parquet_snapshot(frame: pd.DataFrame, data_dir: Path, relative_path: Path) -> None:
+    target_path = data_dir / relative_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(target_path, index=False)

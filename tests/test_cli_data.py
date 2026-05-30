@@ -1,9 +1,11 @@
 import json
 
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.data.contracts import ProviderBars
 
 runner = CliRunner()
 
@@ -56,6 +58,68 @@ def test_data_ingest_and_inspect(tmp_path):
     shown = _json(runner.invoke(app, ["data", "inspect", "--snapshot-id", snapshot_id]))
     assert shown["dataset"] == "daily-bars"
     assert shown["symbols"] == ["AAPL"]
+
+
+def test_data_ingest_bars_with_provider(monkeypatch):
+    from algua.cli import data_cmd
+
+    class FakeProvider:
+        def get_bars(self, _request):
+            return ProviderBars(
+                frame=pd.DataFrame(
+                    {"ts": ["2026-01-02"], "symbol": ["AAPL"], "close": [100.0]}
+                ),
+                source_metadata={"provider": "fake"},
+            )
+
+    monkeypatch.setattr(data_cmd, "_bar_provider", lambda _name: FakeProvider())
+
+    out = _json(
+        runner.invoke(
+            app,
+            [
+                "data",
+                "ingest-bars",
+                "--provider",
+                "fake",
+                "--symbols",
+                "AAPL",
+                "--start",
+                "2026-01-02",
+                "--end",
+                "2026-01-03",
+                "--as-of",
+                "2026-01-04T00:00:00+00:00",
+            ],
+        )
+    )
+
+    assert out["snapshot"]["dataset"] == "bars"
+    assert out["snapshot"]["storage_format"] == "parquet"
+
+
+def test_data_ingest_universe_and_summary():
+    out = _json(
+        runner.invoke(
+            app,
+            [
+                "data",
+                "ingest-universe",
+                "core",
+                "--symbols",
+                "AAPL,MSFT",
+                "--effective-date",
+                "2026-01-02",
+                "--as-of",
+                "2026-01-03T00:00:00+00:00",
+            ],
+        )
+    )
+
+    assert out["snapshot"]["dataset"] == "universes"
+    summary = _json(runner.invoke(app, ["data", "inspect", "--summary"]))
+    assert summary["datasets"][0]["dataset"] == "universes"
+    assert summary["datasets"][0]["symbols"] == ["AAPL", "MSFT"]
 
 
 def test_data_errors_emit_json(tmp_path):
