@@ -92,3 +92,26 @@ def test_empty_universe_data_raises() -> None:
     strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(dtype="float64"))
     with pytest.raises(BacktestError):
         run(strat, SyntheticProvider(), START, END)
+
+
+def test_rejects_weights_exceeding_max_gross_exposure():
+    cfg = StrategyConfig(
+        name="overlev", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
+                                    max_gross_exposure=1.0),
+        params={},
+    )
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series([1.5, 1.5], index=["AAA", "BBB"]))
+    with pytest.raises(BacktestError):
+        run(strat, SyntheticProvider(seed=1), START, END)
+
+
+def test_rejects_unsupported_cadence():
+    cfg = StrategyConfig(
+        name="weekly", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1w", decision_lag_bars=1),
+        params={},
+    )
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(dtype="float64"))
+    with pytest.raises(BacktestError):
+        run(strat, SyntheticProvider(seed=1), START, END)

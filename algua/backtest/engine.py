@@ -14,6 +14,7 @@ from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
 
 _ANN = 252  # trading days/year, for annualization
+_SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
 
 
 class BacktestError(RuntimeError):
@@ -46,6 +47,14 @@ def run(
     seed: int | None = None,
 ) -> BacktestResult:
     timeframe = "1d"
+    # Honor the declared cadence: this slice only rebalances daily. Reject (rather than silently
+    # trade daily for) a strategy that declares e.g. weekly/monthly rebalancing.
+    cadence = strategy.execution.rebalance_frequency.lower()
+    if cadence not in _SUPPORTED_CADENCES:
+        raise BacktestError(
+            f"rebalance_frequency {strategy.execution.rebalance_frequency!r} not supported; "
+            f"this slice rebalances daily only ({sorted(_SUPPORTED_CADENCES)})"
+        )
     try:
         bars = provider.get_bars(strategy.universe, start, end, timeframe)
     except Exception as exc:
@@ -63,6 +72,15 @@ def run(
         w = strategy.target_weights(view)
         if len(w) > 0:
             row = w.reindex(weights.columns).fillna(0.0)
+            # Enforce the contract's gross-exposure bound: a strategy bug returning 2x/10x or
+            # offsetting long/short must fail loudly, not be silently accounted.
+            gross = float(row.abs().sum())
+            max_gross = strategy.execution.max_gross_exposure
+            if gross > max_gross + 1e-9:
+                raise BacktestError(
+                    f"strategy '{strategy.name}' targeted gross exposure {gross:.4f} at {t} "
+                    f"exceeding max_gross_exposure={max_gross}"
+                )
             weights.loc[t] = row.values
 
     # Enforce t -> t+1: decisions at t take effect no earlier than t + lag.

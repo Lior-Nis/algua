@@ -29,3 +29,10 @@ def test_rejects_unknown_timeframe():
     import pytest
     with pytest.raises(ValueError):
         SyntheticProvider().get_bars(["AAA"], START, END, "7h")
+
+
+def test_timestamps_are_session_closes_not_midnight():
+    df = SyntheticProvider(seed=1).get_bars(["AAA"], START, END, "1d")
+    # daily bars carry the session-close time (16:00 ET -> 20:00/21:00 UTC), never naive midnight
+    assert (df.index.hour != 0).all()
+    assert str(df.index.tz) == "UTC"

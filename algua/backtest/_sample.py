@@ -10,6 +10,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+from algua.calendar.market_calendar import MarketCalendar
+
 _BAR_COLUMNS = ["symbol", "open", "high", "low", "close", "adj_close", "volume"]
 _SUPPORTED = {"1d"}
 
@@ -27,7 +29,11 @@ class SyntheticProvider:
             empty = pd.DataFrame(columns=_BAR_COLUMNS)
             empty.index = pd.DatetimeIndex([], tz="UTC", name="timestamp")
             return empty
-        sessions = pd.date_range(start=start, end=end, freq="B", tz="UTC")  # business days
+        # Timestamp daily bars at the XNYS session close (tz-aware UTC), matching the frozen
+        # bar schema and what the real provider emits — not naive midnight business days.
+        sessions = pd.DatetimeIndex(
+            MarketCalendar("XNYS").session_closes(start.date(), end.date()), name="timestamp"
+        )
         frames = []
         for i, sym in enumerate(sorted(symbols)):
             # Deterministic per-symbol drift/vol from a child RNG.

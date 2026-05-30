@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import keyword
 from pathlib import Path
 
 import typer
@@ -54,6 +55,13 @@ def list_() -> None:
 @json_errors()
 def new(name: str) -> None:
     """Scaffold a new strategy module under algua/strategies/examples/."""
+    # `name` becomes both a filesystem path segment and a Python module name, so it must be a
+    # safe identifier — rejects path traversal ("../x"), separators/spaces, and non-importable
+    # or reserved names ("bad-name", "class").
+    if not name.isidentifier() or keyword.iskeyword(name):
+        raise ValueError(
+            f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
+        )
     path = Path("algua/strategies/examples") / f"{name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
