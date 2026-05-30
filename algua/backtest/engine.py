@@ -105,6 +105,7 @@ def run(
         timeframe=timeframe,
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         seed=getattr(provider, "seed", seed),
+        snapshot_id=getattr(provider, "snapshot_id", None),
     )
 
 
