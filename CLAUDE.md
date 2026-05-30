@@ -8,8 +8,12 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - **Why the rules exist (detail):** `docs/agent/operating.md`
 - **How this foundation was built (task plan):** `docs/superpowers/plans/2026-05-29-foundation-command-surface.md`
 - **Reviewing/fixing the system?** Read `AGENTS.md` first (review mandate + invariants + deferred scope).
-- **Current state:** Sub-project 1 (foundation & command surface) is **done and merged**.
-  **Next: sub-project 2 — the point-in-time data layer.** The 6-sub-project roadmap is in the spec above.
+- **Data contract (frozen):** `docs/contracts/bar-schema.md` — the shape of bars crossing the
+  data↔research seam (`DataProvider.get_bars`).
+- **Current state:** Sub-project 1 (foundation) merged. Sub-project 2 (data layer) in progress.
+  Work is split across two agents in parallel — **Codex: data lane** (`algua/data/*`); **Claude:
+  research lane** (`algua/strategies|features|backtest|tracking/*`), meeting at the bar-schema
+  contract. The 6-sub-project roadmap is in the spec above.
 
 ## Golden rules
 - Drive the system through `uv run algua ...`. Never reach into modules to bypass the CLI.

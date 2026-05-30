@@ -35,7 +35,16 @@ Do not weaken a contract, delete a test, or `# type: ignore` your way to green �
 - `docs/superpowers/plans/2026-05-29-foundation-command-surface.md` — the implementation plan that built the current foundation (sub-project 1), task by task.
 - `CLAUDE.md` — the agent operating contract (command surface, golden rules, live-gate summary).
 - `docs/agent/operating.md` — the *why* behind the rules (live-gate rationale, module boundaries, JSON convention).
+- `docs/contracts/bar-schema.md` — **FROZEN** data contract for `DataProvider.get_bars`. The data
+  lane's `get_bars` output MUST conform to this exact shape; it is the integration seam with the
+  research lane. Do not change it (or `contracts/types.py::DataProvider`) without cross-lane agreement.
 - `README.md`, `.env.example` — quickstart and configuration interface.
+
+**Parallel-lane note:** work is currently split across two agents. **Codex owns the data lane**
+(`algua/data/*`, `algua/cli/data_cmd.py`): finish the `DataProvider` adapters (Alpaca, yfinance)
+and the `get_bars` read API conforming to `docs/contracts/bar-schema.md`. **Claude owns the
+research lane** (`algua/strategies|features|backtest|tracking/*`). Neither edits the other's
+modules; both meet only at the bar-schema contract. Work on a branch, not directly on `main`.
 
 **Source modules (what exists today — foundation only):**
 - `algua/contracts/lifecycle.py` — `Stage`/`Actor` enums + `ALLOWED_TRANSITIONS` state machine + `validate_transition`. **Pure** (stdlib only).
