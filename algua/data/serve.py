@@ -21,7 +21,13 @@ class StoreBackedProvider:
     def get_bars(
         self, symbols: list[str], start: datetime, end: datetime, timeframe: str
     ) -> pd.DataFrame:
-        bars = self.store.read_bars(self.snapshot_id)  # bar-schema, validated
+        rec = self.store.get_snapshot(self.snapshot_id)
+        if timeframe != rec.metadata.timeframe:
+            raise ValueError(
+                f"snapshot {self.snapshot_id} is timeframe {rec.metadata.timeframe!r}, "
+                f"not {timeframe!r}"
+            )
+        bars = self.store.read_bars(self.snapshot_id)
         bars = bars[bars["symbol"].isin(set(symbols))]
         start_ts = pd.Timestamp(start)
         end_ts = pd.Timestamp(end)

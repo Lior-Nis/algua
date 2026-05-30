@@ -66,14 +66,26 @@ def test_to_bar_schema_reshapes_ts_column_frame():
     validate_bars(out)
 
 
-def test_to_bar_schema_derives_adj_close_from_close_when_missing():
-    # auto-adjusted sources (yfinance auto_adjust=True) emit no separate adj_close
+def test_to_bar_schema_requires_adj_close():
     raw = pd.DataFrame({
         "ts": ["2024-07-01", "2024-07-02"], "symbol": ["AAA", "AAA"],
         "open": [10.0, 11.0], "high": [10.0, 11.0], "low": [10.0, 11.0],
         "close": [10.0, 11.0], "volume": [1.0, 1.0],
     })
-    out = to_bar_schema(raw)
-    assert list(out.columns) == BAR_COLUMNS
-    assert list(out["adj_close"]) == list(out["close"])
-    validate_bars(out)
+    with pytest.raises(ValueError):
+        to_bar_schema(raw)
+
+
+def test_validate_rejects_nan_volume():
+    df = _good()
+    df.iloc[0, df.columns.get_loc("volume")] = float("nan")
+    with pytest.raises(ValueError):
+        validate_bars(df)
+
+
+def test_validate_rejects_duplicate_keys():
+    df = _good()
+    dup = pd.concat([df.iloc[[0]], df])  # duplicate first (timestamp, symbol)
+    dup = dup.sort_index()
+    with pytest.raises(ValueError):
+        validate_bars(dup)

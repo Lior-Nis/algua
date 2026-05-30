@@ -78,7 +78,7 @@ def ingest_bars(
     start: str = typer.Option(..., "--start", help="inclusive provider start date/datetime"),
     end: str = typer.Option(..., "--end", help="exclusive/ provider end date/datetime"),
     timeframe: str = typer.Option("1d", "--timeframe"),
-    adjustment: str = typer.Option("auto", "--adjustment"),
+    adjustment: str = typer.Option("none", "--adjustment"),
     as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
 ) -> None:
     """Fetch provider bars and persist a reproducible parquet snapshot."""

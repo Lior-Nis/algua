@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
 from algua.contracts.types import DataProvider
 from algua.data.schema import BAR_COLUMNS, validate_bars
@@ -20,6 +21,15 @@ def _ingest(store: DataStore):
         provider="test", symbols=["AAA", "BBB"], start="2024-07-01", end="2024-07-03",
         as_of="2024-07-04", source="unit-test", frame=frame, timeframe="1d", adjustment="none",
     )
+
+
+def test_get_bars_rejects_timeframe_mismatch(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest(store)  # ingested with timeframe="1d"
+    provider = StoreBackedProvider(store, rec.snapshot_id)
+    with pytest.raises(ValueError):
+        provider.get_bars(["AAA"], datetime(2024, 7, 1, tzinfo=UTC),
+                          datetime(2024, 7, 3, tzinfo=UTC), "1h")
 
 
 def test_provider_satisfies_protocol_and_filters(tmp_path):
