@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-algua = "algua.cli.main:app"
+algua = "algua.cli.main:main"
 
 [dependency-groups]
 dev = [

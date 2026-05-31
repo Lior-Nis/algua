@@ -46,6 +46,10 @@ def promote(
 ) -> None:
     """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass."""
     actor_enum = Actor(actor)  # fail fast on a bad actor before running the walk-forward
+    if n_combos is not None and n_combos < 1:
+        raise ValueError("--n-combos must be >= 1 when provided")
+    if not 0.0 <= min_pct_positive <= 1.0:
+        raise ValueError("--min-pct-positive must be in [0, 1]")
     strategy = load_strategy(name)
     provider = _select_provider(demo, snapshot)
     wf = walk_forward(strategy, provider, _utc(start), _utc(end),

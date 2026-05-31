@@ -59,3 +59,17 @@ def test_promote_from_idea_is_json_error():
                                  "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_promote_rejects_bad_n_combos():
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--demo", "--n-combos", "0"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_promote_rejects_out_of_range_pct_positive():
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--demo", "--min-pct-positive", "1.5"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
