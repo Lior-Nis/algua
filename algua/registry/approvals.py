@@ -13,6 +13,9 @@ def _now() -> str:
 def record_approval(
     conn: sqlite3.Connection, name: str, code_hash: str, config_hash: str, approved_by: str
 ) -> int:
+    _require_non_empty("code_hash", code_hash)
+    _require_non_empty("config_hash", config_hash)
+    _require_non_empty("approved_by", approved_by)
     rec = get_strategy(conn, name)
     cur = conn.execute(
         "INSERT INTO approvals(strategy_id, code_hash, config_hash, approved_by, created_at)"
@@ -34,3 +37,8 @@ def has_valid_approval(
         (strategy_id, code_hash, config_hash),
     ).fetchone()
     return row is not None
+
+
+def _require_non_empty(name: str, value: str) -> None:
+    if not value.strip():
+        raise ValueError(f"{name} must not be empty")

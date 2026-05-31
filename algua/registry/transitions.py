@@ -57,6 +57,8 @@ def _validate_live_gate(
         raise TransitionError("transition to live requires a human actor")
     if code_hash is None or config_hash is None:
         raise TransitionError("transition to live requires code_hash and config_hash")
+    if not code_hash.strip() or not config_hash.strip():
+        raise TransitionError("transition to live requires non-empty code_hash and config_hash")
     if not verifier(conn, strategy_id, code_hash, config_hash):
         raise TransitionError("no matching human approval for this code+config")
 

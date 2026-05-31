@@ -43,6 +43,13 @@ def test_live_requires_matching_hash(conn):
                          code_hash="DIFFERENT", config_hash="g1")
 
 
+def test_live_rejects_blank_hashes(conn):
+    _advance_to_paper(conn, "alpha")
+    with pytest.raises(TransitionError):
+        store.transition(conn, "alpha", Stage.LIVE, Actor.HUMAN,
+                         code_hash=" ", config_hash="g1")
+
+
 def test_live_succeeds_with_human_and_matching_approval(conn):
     _advance_to_paper(conn, "alpha")
     record_approval(conn, "alpha", "c1", "g1", "lior")
@@ -57,6 +64,14 @@ def test_has_valid_approval(conn):
     assert has_valid_approval(conn, s.id, "c1", "g1") is False
     record_approval(conn, "alpha", "c1", "g1", "lior")
     assert has_valid_approval(conn, s.id, "c1", "g1") is True
+
+
+def test_record_approval_rejects_blank_hashes(conn):
+    store.add_strategy(conn, "alpha")
+    with pytest.raises(ValueError):
+        record_approval(conn, "alpha", "", "g1", "lior")
+    with pytest.raises(ValueError):
+        record_approval(conn, "alpha", "c1", " ", "lior")
 
 
 def test_string_live_does_not_bypass_gate(conn):
