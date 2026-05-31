@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import itertools
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from algua.backtest.engine import BacktestError
+from algua.backtest.walkforward import walk_forward
+from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
 
 _MAX_COMBOS = 200
@@ -56,3 +60,95 @@ def _parse_grid(params: list[str]) -> dict[str, list[Any]]:
             raise ValueError(f"malformed --param {item!r}: empty key or value list")
         grid[key] = [_coerce(v) for v in values]
     return grid
+
+
+_RANK_KEYS = {"mean_sharpe", "min_sharpe"}
+
+
+@dataclass
+class SweepResult:
+    strategy: str
+    data_source: str
+    snapshot_id: str | None
+    timeframe: str
+    seed: int | None
+    period: dict[str, str]
+    grid: dict[str, list[Any]]
+    n_combos: int
+    rank_by: str
+    ranked: list[dict[str, Any]]
+    best: dict[str, Any] | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "data_source": self.data_source,
+            "snapshot_id": self.snapshot_id,
+            "timeframe": self.timeframe,
+            "seed": self.seed,
+            "period": self.period,
+            "grid": self.grid,
+            "n_combos": self.n_combos,
+            "rank_by": self.rank_by,
+            "ranked": self.ranked,
+            "best": self.best,
+        }
+
+
+def sweep(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    grid: dict[str, list[Any]],
+    windows: int = 4,
+    holdout_frac: float = 0.2,
+    rank_by: str = "mean_sharpe",
+) -> SweepResult:
+    """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
+
+    The holdout is carried per combo but never used for ranking (reserved for promotion gates).
+    """
+    if rank_by not in _RANK_KEYS:
+        raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
+    combos = _combos(grid)
+
+    records: list[dict[str, Any]] = []
+    meta = None
+    for combo in combos:
+        wf = walk_forward(
+            _override(strategy, combo), provider, start, end,
+            windows=windows, holdout_frac=holdout_frac,
+        )
+        if meta is None:
+            meta = wf
+        h = wf.holdout_metrics
+        records.append({
+            "params": combo,
+            "config_hash": wf.config_hash,
+            "n_windows": wf.windows,
+            "stability": wf.stability,
+            "holdout": {
+                "n_bars": h["n_bars"], "sharpe": h["sharpe"],
+                "total_return": h["total_return"], "max_drawdown": h["max_drawdown"],
+            },
+            "score": wf.stability[rank_by],
+        })
+
+    records.sort(key=lambda r: r["score"], reverse=True)
+    best = {"params": records[0]["params"], "score": records[0]["score"]}
+    assert meta is not None  # combos is always non-empty (grid has >=1 key with >=1 value)
+    return SweepResult(
+        strategy=strategy.name,
+        data_source=meta.data_source,
+        snapshot_id=meta.snapshot_id,
+        timeframe=meta.timeframe,
+        seed=meta.seed,
+        period=meta.period,
+        grid=grid,
+        n_combos=len(combos),
+        rank_by=rank_by,
+        ranked=records,
+        best=best,
+    )
