@@ -20,6 +20,7 @@ from algua.data.store import DataStore
 from algua.registry import store
 from algua.registry.db import connect, migrate
 from algua.strategies.loader import load_strategy
+from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
 
 backtest_app = typer.Typer(help="Run backtests", no_args_is_help=True)
 app.add_typer(backtest_app, name="backtest")
@@ -48,6 +49,7 @@ def run(
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
+    track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy = load_strategy(name)
@@ -69,7 +71,12 @@ def run(
             store.transition(conn, name, Stage.BACKTESTED, Actor.AGENT, reason,
                              code_hash=result.config_hash, config_hash=result.config_hash)
 
-    emit(result.to_dict())
+    payload = result.to_dict()
+    if track:
+        payload["mlflow_run_id"] = log_backtest(
+            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+        )
+    emit(payload)
 
 
 @backtest_app.command("walk-forward")
@@ -82,13 +89,19 @@ def walk_forward_cmd(
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
     windows: int = typer.Option(4, "--windows", help="number of equal out-of-sample windows"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
+    track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Walk-forward (out-of-sample) evaluation: per-window metrics, holdout, and stability."""
     strategy = load_strategy(name)
     provider = _select_provider(demo, snapshot)
     result = walk_forward(strategy, provider, _utc(start), _utc(end),
                           windows=windows, holdout_frac=holdout_frac)
-    emit(result.to_dict())
+    payload = result.to_dict()
+    if track:
+        payload["mlflow_run_id"] = log_walk_forward(
+            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+        )
+    emit(payload)
 
 
 @backtest_app.command("sweep")
@@ -104,6 +117,7 @@ def sweep_cmd(
     param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),  # noqa: B008
     rank_by: str = typer.Option("mean_sharpe", "--rank-by", help="mean_sharpe | min_sharpe"),
     top: int = typer.Option(20, "--top", help="max ranked rows to print"),
+    track: bool = typer.Option(False, "--track", help="log this run to MLflow"),  # noqa: B008
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
     if top < 1:
@@ -113,6 +127,11 @@ def sweep_cmd(
     grid = _parse_grid(param or [])
     result = sweep(strategy, provider, _utc(start), _utc(end),
                    grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by)
+    run_id = None
+    if track:
+        run_id = log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri)
     payload = result.to_dict()
     payload["ranked"] = payload["ranked"][:top]
+    if run_id is not None:
+        payload["mlflow_run_id"] = run_id
     emit(payload)

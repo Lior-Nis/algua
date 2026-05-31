@@ -76,3 +76,9 @@ name = "backtest engine stays off cli, registry, and the data lane"
 type = "forbidden"
 source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.cli", "algua.registry", "algua.data"]
+
+[[tool.importlinter.contracts]]
+name = "backtest engine stays off the tracking layer"
+type = "forbidden"
+source_modules = ["algua.backtest"]
+forbidden_modules = ["algua.tracking"]
