@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+import itertools
 from typing import Any
+
+from algua.backtest.engine import BacktestError
+
+_MAX_COMBOS = 200
+
+
+def _combos(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """Cartesian product of the grid into a list of param dicts. Guarded by _MAX_COMBOS."""
+    keys = list(grid.keys())
+    value_lists = [grid[k] for k in keys]
+    total = 1
+    for values in value_lists:
+        total *= len(values)
+    if total > _MAX_COMBOS:
+        raise BacktestError(
+            f"grid too large: {total} combos > {_MAX_COMBOS}; narrow the grid"
+        )
+    return [dict(zip(keys, combo, strict=True)) for combo in itertools.product(*value_lists)]
 
 
 def _coerce(value: str) -> Any:
