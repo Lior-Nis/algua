@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from algua.backtest.result import BacktestResult
+from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
 
 
@@ -57,6 +58,44 @@ def log_backtest(result: BacktestResult, params: dict[str, Any], *, tracking_uri
         })
         mlflow.log_dict(result.to_dict(), "result.json")
         return run.info.run_id
+
+
+def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
+    """Log a sweep as a parent run with a nested child run per ranked combo.
+
+    Returns parent run_id.
+    """
+    import mlflow
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(result.strategy)
+    with mlflow.start_run() as parent:
+        mlflow.log_params({
+            **{f"grid.{k}": ",".join(str(x) for x in vals) for k, vals in result.grid.items()},
+            "n_combos": result.n_combos, "rank_by": result.rank_by,
+            "windows": result.windows, "holdout_frac": result.holdout_frac,
+            "snapshot_id": result.snapshot_id, "seed": result.seed,
+            "period_start": result.period["start"], "period_end": result.period["end"],
+            "timeframe": result.timeframe,
+        })
+        if result.best is not None:
+            mlflow.log_metric("best_score", float(result.best["score"]))
+        mlflow.set_tags({"kind": "sweep", "strategy": result.strategy})
+        mlflow.log_dict(result.to_dict(), "sweep.json")
+
+        for entry in result.ranked:
+            with mlflow.start_run(nested=True):
+                mlflow.log_params({
+                    **{f"param.{k}": v for k, v in entry["params"].items()},
+                    "config_hash": entry["config_hash"],
+                })
+                mlflow.log_metrics({
+                    "score": float(entry["score"]),
+                    **_numeric_metrics(_flatten(entry["stability"])),
+                    **_numeric_metrics(_flatten(entry["holdout"], "holdout.")),
+                })
+                mlflow.set_tags({"kind": "sweep_combo", "strategy": result.strategy})
+        return parent.info.run_id
 
 
 def log_walk_forward(
