@@ -12,6 +12,7 @@ dependencies = [
     "yfinance>=1.4.1",
     "pyarrow>=24.0.0",
     "vectorbt>=0.26",
+    "mlflow-skinny>=3.12.0",
 ]
 
 [project.scripts]

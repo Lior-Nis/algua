@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     alpaca_api_key: str | None = None
     alpaca_api_secret: str | None = None
     alpaca_data_url: str = "https://data.alpaca.markets/v2"
+    mlflow_tracking_uri: str = "mlruns"
 
 
 def get_settings() -> Settings:
