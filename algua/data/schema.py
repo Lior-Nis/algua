@@ -4,6 +4,7 @@ import pandas as pd
 
 BAR_COLUMNS = ["symbol", "open", "high", "low", "close", "adj_close", "volume"]
 _NON_NULL = ["open", "high", "low", "close", "adj_close", "volume"]
+_FLOAT_COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
 
 
 def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
@@ -23,6 +24,11 @@ def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("bars index must be monotonic non-decreasing")
     if list(df.columns) != BAR_COLUMNS:
         raise ValueError(f"bars columns must be {BAR_COLUMNS}, got {list(df.columns)}")
+    if not all(isinstance(symbol, str) for symbol in df["symbol"]):
+        raise ValueError("bars symbol values must be strings")
+    bad_dtypes = [col for col in _FLOAT_COLUMNS if str(df[col].dtype) != "float64"]
+    if bad_dtypes:
+        raise ValueError(f"bars numeric columns must be float64: {bad_dtypes}")
     if df[_NON_NULL].isna().any().any():
         raise ValueError("bars values (OHLC/adj_close/volume) must not contain NaN")
     keys = df.reset_index()[["timestamp", "symbol"]]
@@ -46,5 +52,8 @@ def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"frame missing bar columns: {missing}")
     out = out[["timestamp", *BAR_COLUMNS]]
+    out["symbol"] = out["symbol"].astype(str)
+    for col in _FLOAT_COLUMNS:
+        out[col] = pd.to_numeric(out[col], errors="raise").astype("float64")
     out = out.sort_values(["timestamp", "symbol"]).set_index("timestamp")
     return validate_bars(out)

@@ -76,8 +76,9 @@ consumers must not assume as-of reads exist.
 
 ## Conformance
 - `algua/data/schema.py::validate_bars(df)` is the canonical encoding of this schema; it raises
-  on the first violation (index name/tz/monotonicity, exact column list, non-null OHLC+volume,
-  uniqueness and sort of `(timestamp, symbol)`). `to_bar_schema` reshapes a stored frame into it.
+  on the first violation (index name/tz/monotonicity, exact column list, symbol/numeric dtypes,
+  non-null OHLC+volume, uniqueness and sort of `(timestamp, symbol)`). `to_bar_schema` reshapes
+  a stored frame into it.
 - Data layer: `DataStore.read_bars` / `StoreBackedProvider.get_bars` output must satisfy
   `validate_bars` (it is called on the read path).
 - Research/backtest layer: the synthetic fixture `DataProvider` emits this same shape, so

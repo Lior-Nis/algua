@@ -1,8 +1,9 @@
 import json
 
+import pytest
 from typer.testing import CliRunner
 
-from algua.cli.main import app
+from algua.cli.main import app, main
 
 runner = CliRunner()
 
@@ -21,3 +22,35 @@ def test_doctor_passes_in_clean_env(monkeypatch, tmp_path):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert {c["check"] for c in payload["checks"]} >= {"python", "registry_db", "calendar"}
+
+
+def test_main_usage_errors_emit_json(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["registry", "add"])
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "Missing argument" in payload["error"]
+
+
+def test_main_unknown_options_emit_json(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["version", "--wat"])
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "No such option" in payload["error"]
+
+
+def test_main_decorated_errors_exit_nonzero(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["registry", "show", "ghost"])
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "ghost" in payload["error"]

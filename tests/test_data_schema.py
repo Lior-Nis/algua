@@ -21,6 +21,13 @@ def test_validate_accepts_conformant_frame():
     assert validate_bars(df) is df
 
 
+def test_validate_rejects_non_float_numeric_dtype():
+    df = _good()
+    df["volume"] = df["volume"].astype("int64")
+    with pytest.raises(ValueError, match="float64"):
+        validate_bars(df)
+
+
 def test_validate_rejects_missing_column():
     with pytest.raises(ValueError):
         validate_bars(_good().drop(columns=["adj_close"]))
@@ -63,7 +70,17 @@ def test_to_bar_schema_reshapes_ts_column_frame():
     assert out.index.name == "timestamp"
     assert str(out.index.tz) == "UTC"
     assert list(out["symbol"]) == ["AAA", "BBB"]  # sorted by (timestamp, symbol)
+    assert all(str(out[col].dtype) == "float64" for col in BAR_COLUMNS if col != "symbol")
     validate_bars(out)
+
+
+def test_to_bar_schema_rejects_non_numeric_values():
+    raw = pd.DataFrame(
+        {"adj_close": [1.0], "close": ["bad"], "high": [1.0], "low": [1.0],
+         "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01"], "volume": [10.0]}
+    )
+    with pytest.raises(ValueError):
+        to_bar_schema(raw)
 
 
 def test_to_bar_schema_requires_adj_close():

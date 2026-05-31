@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from algua.backtest.engine import BacktestError, _build_portfolio, _config_hash
+from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
 
@@ -86,6 +87,8 @@ class WalkForwardResult:
     window_metrics: list[dict[str, Any]]
     holdout_metrics: dict[str, Any]
     stability: dict[str, float]
+    code_hash: str | None = None
+    dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +98,8 @@ class WalkForwardResult:
             "snapshot_id": self.snapshot_id,
             "timeframe": self.timeframe,
             "seed": self.seed,
+            "code_hash": self.code_hash,
+            "dependency_hash": self.dependency_hash,
             "period": self.period,
             "windows": self.windows,
             "holdout_frac": self.holdout_frac,
@@ -142,6 +147,7 @@ def walk_forward(
         "min_sharpe": float(np.min(sharpes)),
         "pct_positive_windows": float(positive / len(window_metrics)),
     }
+    stamps = runtime_stamps()
 
     return WalkForwardResult(
         strategy=strategy.name,
@@ -150,6 +156,8 @@ def walk_forward(
         snapshot_id=getattr(provider, "snapshot_id", None),
         timeframe="1d",
         seed=getattr(provider, "seed", None),
+        code_hash=stamps["code_hash"],
+        dependency_hash=stamps["dependency_hash"],
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         windows=windows,
         holdout_frac=holdout_frac,

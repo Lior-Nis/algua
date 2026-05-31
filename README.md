@@ -28,7 +28,7 @@ uv run algua data ingest-bars \
   --start 2026-01-02 \
   --end 2026-01-31 \
   --timeframe 1d \
-  --adjustment auto
+  --adjustment none
 
 # Record universe membership as of a date.
 uv run algua data ingest-universe core \

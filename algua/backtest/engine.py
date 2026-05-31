@@ -10,6 +10,7 @@ import vectorbt as vbt
 
 from algua.backtest.metrics import avg_gross_exposure, weights_turnover
 from algua.backtest.result import BacktestResult
+from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
 
@@ -99,6 +100,7 @@ def run(
 ) -> BacktestResult:
     pf, weights_eff = _build_portfolio(strategy, provider, start, end)
     metrics = _metrics(pf, weights_eff)
+    stamps = runtime_stamps()
     return BacktestResult(
         strategy=strategy.name,
         metrics=metrics,
@@ -108,6 +110,8 @@ def run(
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         seed=getattr(provider, "seed", seed),
         snapshot_id=getattr(provider, "snapshot_id", None),
+        code_hash=stamps["code_hash"],
+        dependency_hash=stamps["dependency_hash"],
     )
 
 

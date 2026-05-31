@@ -21,17 +21,16 @@ except ModuleNotFoundError:  # older Typer that defers to the real Click
 __all__ = ["app", "main"]
 
 
-def main() -> None:
+def main(args: list[str] | None = None) -> None:
     """Console-script entry point.
 
     Runs the Typer app with ``standalone_mode=False`` so Click argument-parse errors (bad option
     types, unknown options, missing arguments) are rendered as JSON ``{ok: false}`` instead of Rich
-    usage text — honoring the platform-wide "every command emits JSON" contract. Command-body
-    errors are already JSON-rendered by the ``json_errors`` decorator.
+    usage text. Command-body errors are already JSON-rendered by the ``json_errors`` decorator.
     """
     command = get_command(app)
     try:
-        command(standalone_mode=False)
+        result = command.main(args=args, prog_name="algua", standalone_mode=False)
     except _click_exc.UsageError as exc:
         emit({"ok": False, "error": exc.format_message()})
         sys.exit(1)
@@ -40,4 +39,6 @@ def main() -> None:
     except _click_exc.Abort:
         emit({"ok": False, "error": "aborted"})
         sys.exit(1)
+    if isinstance(result, int) and result != 0:
+        sys.exit(result)
     sys.exit(0)

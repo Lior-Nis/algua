@@ -13,7 +13,7 @@ class BarRequest:
     start: str
     end: str
     timeframe: str = "1d"
-    adjustment: str = "auto"
+    adjustment: str = "none"
 
 
 @dataclass(frozen=True)

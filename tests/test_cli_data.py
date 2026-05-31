@@ -67,7 +67,16 @@ def test_data_ingest_bars_with_provider(monkeypatch):
         def get_bars(self, _request):
             return ProviderBars(
                 frame=pd.DataFrame(
-                    {"ts": ["2026-01-02"], "symbol": ["AAPL"], "close": [100.0]}
+                    {
+                        "ts": ["2026-01-02"],
+                        "symbol": ["AAPL"],
+                        "open": [99.0],
+                        "high": [101.0],
+                        "low": [98.0],
+                        "close": [100.0],
+                        "adj_close": [99.5],
+                        "volume": [1000.0],
+                    }
                 ),
                 source_metadata={"provider": "fake"},
             )

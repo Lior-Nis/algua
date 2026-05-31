@@ -11,12 +11,17 @@ class YFinanceBarProvider(BarProvider):
     def get_bars(self, request: BarRequest) -> ProviderBars:
         import yfinance as yf
 
+        if request.adjustment not in {"none", "raw"}:
+            raise ValueError(
+                "yfinance bars require adjustment='none' so raw close and adj_close are both "
+                "available for the frozen bar schema"
+            )
         raw = yf.download(
             tickers=list(request.symbols),
             start=request.start,
             end=request.end,
             interval=request.timeframe,
-            auto_adjust=request.adjustment == "auto",
+            auto_adjust=False,
             group_by="ticker",
             progress=False,
             threads=False,
@@ -27,7 +32,7 @@ class YFinanceBarProvider(BarProvider):
             source_metadata={
                 "library": "yfinance",
                 "timeframe": request.timeframe,
-                "adjustment": request.adjustment,
+                "adjustment": "none",
             },
         )
 

@@ -9,7 +9,7 @@
 **Tech Stack:** Python 3.12, pandas 2.3.3, the existing `algua/data` store (parquet snapshots + manifest), Typer CLI, pytest.
 
 **Key existing APIs (already on `main`):**
-- `algua/data/store.py::DataStore(data_dir)` — `ingest_bars(*, provider, symbols, start, end, as_of, source, frame, timeframe="1d", adjustment="auto", source_metadata=None) -> SnapshotRecord`; `get_snapshot(id) -> SnapshotRecord` (raises `SnapshotNotFound`); `list_snapshots(dataset=None)`.
+- `algua/data/store.py::DataStore(data_dir)` — `ingest_bars(*, provider, symbols, start, end, as_of, source, frame, timeframe="1d", adjustment="none", source_metadata=None) -> SnapshotRecord`; `get_snapshot(id) -> SnapshotRecord` (raises `SnapshotNotFound`); `list_snapshots(dataset=None)`.
 - `SnapshotRecord`: `.snapshot_id`, `.data_path` (Path, relative to `data_dir`), `.dataset` (property), `.symbols`. Parquet is written with `index=False`; a bars frame has columns `ts, symbol, open, high, low, close, adj_close, volume` (stored alphabetically sorted).
 - `algua/contracts/types.py::DataProvider` protocol: `get_bars(symbols, start, end, timeframe) -> pd.DataFrame`.
 - `algua/backtest/engine.py::run(strategy, provider, start, end, *, seed=None)`; `BacktestResult` has `seed` and `snapshot_id` fields (both default `None`).

@@ -132,3 +132,10 @@ def test_run_stamps_snapshot_id_when_provider_exposes_it():
         1.0 / len(v["symbol"].unique()), index=sorted(v["symbol"].unique())))
     res = run(strat, StampedProvider(), START, END)
     assert res.snapshot_id == "snap-123"
+
+
+def test_run_stamps_code_and_dependency_identity():
+    res = run(_equal_weight_strategy(), SyntheticProvider(seed=3), START, END)
+    payload = res.to_dict()
+    assert isinstance(payload["code_hash"], str) and len(payload["code_hash"]) >= 7
+    assert isinstance(payload["dependency_hash"], str) and len(payload["dependency_hash"]) == 64
