@@ -45,6 +45,7 @@ def promote(
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
 ) -> None:
     """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before running the walk-forward
     strategy = load_strategy(name)
     provider = _select_provider(demo, snapshot)
     wf = walk_forward(strategy, provider, _utc(start), _utc(end),
@@ -59,7 +60,7 @@ def promote(
     if decision.passed:
         with closing(connect(get_settings().db_path)) as conn:
             migrate(conn)
-            store.transition(conn, name, Stage.SHORTLISTED, Actor(actor), _gate_reason(decision),
+            store.transition(conn, name, Stage.SHORTLISTED, actor_enum, _gate_reason(decision),
                              code_hash=wf.config_hash, config_hash=wf.config_hash)
         promoted = True
 
