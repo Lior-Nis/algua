@@ -38,17 +38,13 @@ def _config_hash(strategy: LoadedStrategy) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def run(
-    strategy: LoadedStrategy,
-    provider: DataProvider,
-    start: datetime,
-    end: datetime,
-    *,
-    seed: int | None = None,
-) -> BacktestResult:
+def _build_portfolio(
+    strategy: LoadedStrategy, provider: DataProvider, start: datetime, end: datetime
+) -> tuple[vbt.Portfolio, pd.DataFrame]:
+    """Fetch bars, run the per-bar decision loop (enforcing gross exposure), apply the
+    t->t+1 shift, and simulate. Returns (portfolio, effective-weights). Shared by run()
+    and walk_forward()."""
     timeframe = "1d"
-    # Honor the declared cadence: this slice only rebalances daily. Reject (rather than silently
-    # trade daily for) a strategy that declares e.g. weekly/monthly rebalancing.
     cadence = strategy.execution.rebalance_frequency.lower()
     if cadence not in _SUPPORTED_CADENCES:
         raise BacktestError(
@@ -65,15 +61,12 @@ def run(
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     adj = adj.sort_index()
 
-    # Per-bar decision loop: strategy only ever sees rows <= t (parity guarantee).
     weights = pd.DataFrame(0.0, index=adj.index, columns=adj.columns)
     for t in adj.index:
-        view = bars.loc[:t]  # label slice on tz-aware DatetimeIndex -> rows with timestamp <= t
+        view = bars.loc[:t]
         w = strategy.target_weights(view)
         if len(w) > 0:
             row = w.reindex(weights.columns).fillna(0.0)
-            # Enforce the contract's gross-exposure bound: a strategy bug returning 2x/10x or
-            # offsetting long/short must fail loudly, not be silently accounted.
             gross = float(row.abs().sum())
             max_gross = strategy.execution.max_gross_exposure
             if gross > max_gross + 1e-9:
@@ -83,10 +76,8 @@ def run(
                 )
             weights.loc[t] = row.values
 
-    # Enforce t -> t+1: decisions at t take effect no earlier than t + lag.
     lag = strategy.execution.decision_lag_bars
     weights_eff = weights.shift(lag).fillna(0.0)
-
     pf = vbt.Portfolio.from_orders(
         close=adj,
         size=weights_eff,
@@ -95,14 +86,25 @@ def run(
         group_by=True,
         freq="1D",
     )
+    return pf, weights_eff
 
+
+def run(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    seed: int | None = None,
+) -> BacktestResult:
+    pf, weights_eff = _build_portfolio(strategy, provider, start, end)
     metrics = _metrics(pf, weights_eff)
     return BacktestResult(
         strategy=strategy.name,
         metrics=metrics,
         config_hash=_config_hash(strategy),
         data_source=type(provider).__name__,
-        timeframe=timeframe,
+        timeframe="1d",
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         seed=getattr(provider, "seed", seed),
         snapshot_id=getattr(provider, "snapshot_id", None),
