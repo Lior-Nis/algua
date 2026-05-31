@@ -100,7 +100,7 @@ class DataStore:
         source: str,
         frame: pd.DataFrame,
         timeframe: str = "1d",
-        adjustment: str = "auto",
+        adjustment: str = "none",
         source_metadata: dict[str, Any] | None = None,
     ) -> SnapshotRecord:
         metadata = _metadata(
@@ -116,7 +116,7 @@ class DataStore:
             adjustment=adjustment,
             source_metadata=source_metadata,
         )
-        normalized = _normalize_frame(frame)
+        normalized = _normalize_bar_frame(frame)
         content_hash = _frame_hash(normalized)
         snapshot_id = _snapshot_id(metadata, content_hash)
 
@@ -326,10 +326,10 @@ def _path_part(value: str) -> str:
     return clean.strip("-") or "dataset"
 
 
-def _normalize_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _normalize_bar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         raise ValueError("bars frame must not be empty")
-    return frame.copy().sort_index(axis=1).reset_index(drop=True)
+    return to_bar_schema(frame).reset_index()
 
 
 def _frame_hash(frame: pd.DataFrame) -> str:

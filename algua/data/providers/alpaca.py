@@ -23,6 +23,26 @@ class AlpacaBarProvider(BarProvider):
         self.base_url = base_url.rstrip("/")
 
     def get_bars(self, request: BarRequest) -> ProviderBars:
+        raw_payload = self._fetch_bars(request, adjustment="raw")
+        adjusted_payload = self._fetch_bars(request, adjustment="all")
+        raw_frame = _normalize_alpaca(raw_payload)
+        adjusted_frame = _normalize_alpaca(adjusted_payload)[["ts", "symbol", "close"]].rename(
+            columns={"close": "adj_close"}
+        )
+        frame = raw_frame.merge(adjusted_frame, on=["ts", "symbol"], how="inner")
+        if frame.empty:
+            raise ValueError("provider returned no overlapping raw/adjusted bars")
+        return ProviderBars(
+            frame=frame,
+            source_metadata={
+                "api": "alpaca",
+                "base_url": self.base_url,
+                "timeframe": request.timeframe,
+                "adjustment": "raw+all",
+            },
+        )
+
+    def _fetch_bars(self, request: BarRequest, *, adjustment: str) -> dict[str, Any]:
         response = requests.get(
             f"{self.base_url}/stocks/bars",
             headers={
@@ -34,21 +54,15 @@ class AlpacaBarProvider(BarProvider):
                 "timeframe": request.timeframe,
                 "start": request.start,
                 "end": request.end,
-                "adjustment": request.adjustment,
+                "adjustment": adjustment,
             },
             timeout=30,
         )
         response.raise_for_status()
         payload = response.json()
-        return ProviderBars(
-            frame=_normalize_alpaca(payload),
-            source_metadata={
-                "api": "alpaca",
-                "base_url": self.base_url,
-                "timeframe": request.timeframe,
-                "adjustment": request.adjustment,
-            },
-        )
+        if not isinstance(payload, dict):
+            raise ValueError("provider returned a non-object response")
+        return payload
 
 
 def _normalize_alpaca(payload: dict[str, Any]) -> pd.DataFrame:

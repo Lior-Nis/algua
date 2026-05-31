@@ -88,7 +88,12 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
         {
             "ts": ["2026-01-02", "2026-01-03"],
             "symbol": ["AAPL", "AAPL"],
+            "open": [99.0, 100.0],
+            "high": [101.0, 102.0],
+            "low": [98.0, 99.0],
             "close": [100.0, 101.0],
+            "adj_close": [99.5, 100.5],
+            "volume": [1000.0, 1100.0],
         }
     )
 
@@ -101,7 +106,7 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
         source="fixture",
         frame=frame,
         timeframe="1d",
-        adjustment="raw",
+        adjustment="none",
         source_metadata={"fixture": "true"},
     )
 
@@ -110,10 +115,28 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
     assert rec.storage_format == "parquet"
     assert rec.row_count == 2
     assert rec.metadata.timeframe == "1d"
-    assert rec.metadata.adjustment == "raw"
+    assert rec.metadata.adjustment == "none"
     assert rec.metadata.source_metadata == {"fixture": "true"}
     saved = pd.read_parquet(tmp_path / "data" / rec.data_path)
     assert list(saved["close"]) == [100.0, 101.0]
+
+
+def test_ingest_bars_rejects_frames_outside_bar_schema(tmp_path):
+    store = DataStore(tmp_path / "data")
+    frame = pd.DataFrame({"ts": ["2026-01-02"], "symbol": ["AAPL"], "close": [100.0]})
+
+    with pytest.raises(ValueError, match="missing bar columns"):
+        store.ingest_bars(
+            provider="fixture",
+            symbols=["AAPL"],
+            start="2026-01-02",
+            end="2026-01-02",
+            as_of="2026-01-03T00:00:00+00:00",
+            source="fixture",
+            frame=frame,
+        )
+
+    assert store.list_snapshots() == []
 
 
 def test_ingest_universe_writes_point_in_time_membership(tmp_path):
