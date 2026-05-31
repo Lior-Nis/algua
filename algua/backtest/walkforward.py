@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from algua.backtest.engine import BacktestError, _build_portfolio, _config_hash
+from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
 
 _ANN = 252  # trading days/year
@@ -104,7 +105,7 @@ def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, A
 
 def walk_forward(
     strategy: LoadedStrategy,
-    provider: Any,
+    provider: DataProvider,
     start: datetime,
     end: datetime,
     *,
