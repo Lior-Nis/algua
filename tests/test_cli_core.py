@@ -28,7 +28,7 @@ def test_main_usage_errors_emit_json(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["registry", "add"])
 
-    assert exc.value.code == 2
+    assert exc.value.code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "Missing argument" in payload["error"]
@@ -38,7 +38,7 @@ def test_main_unknown_options_emit_json(capsys):
     with pytest.raises(SystemExit) as exc:
         main(["version", "--wat"])
 
-    assert exc.value.code == 2
+    assert exc.value.code == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "No such option" in payload["error"]
