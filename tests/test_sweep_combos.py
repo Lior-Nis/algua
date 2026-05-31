@@ -1,4 +1,5 @@
 import pytest
+
 from algua.backtest.engine import BacktestError
 from algua.backtest.sweep import _combos
 
