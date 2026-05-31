@@ -117,7 +117,7 @@ def sweep_cmd(
     param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),  # noqa: B008
     rank_by: str = typer.Option("mean_sharpe", "--rank-by", help="mean_sharpe | min_sharpe"),
     top: int = typer.Option(20, "--top", help="max ranked rows to print"),
-    track: bool = typer.Option(False, "--track", help="log this run to MLflow"),  # noqa: B008
+    track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
     if top < 1:
