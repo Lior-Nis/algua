@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
-from algua.backtest.engine import BacktestError
+from algua.backtest.engine import BacktestError, _build_portfolio, _config_hash
+from algua.strategies.base import LoadedStrategy
 
 _ANN = 252  # trading days/year
 _MIN_WINDOW_BARS = 5
@@ -56,3 +61,84 @@ def metrics_from_returns(returns: pd.Series) -> dict[str, float]:
         "total_return": total_return, "ann_return": ann_return, "ann_volatility": ann_vol,
         "sharpe": sharpe, "max_drawdown": max_drawdown,
     }
+
+
+@dataclass
+class WalkForwardResult:
+    strategy: str
+    config_hash: str
+    data_source: str
+    snapshot_id: str | None
+    period: dict[str, str]
+    windows: int
+    holdout_frac: float
+    window_metrics: list[dict[str, Any]]
+    holdout_metrics: dict[str, Any]
+    stability: dict[str, float]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "strategy": self.strategy,
+            "config_hash": self.config_hash,
+            "data_source": self.data_source,
+            "snapshot_id": self.snapshot_id,
+            "period": self.period,
+            "windows": self.windows,
+            "holdout_frac": self.holdout_frac,
+            "window_metrics": self.window_metrics,
+            "holdout_metrics": self.holdout_metrics,
+            "stability": self.stability,
+        }
+
+
+def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, Any]:
+    seg = returns.iloc[start_i:end_i]
+    rec: dict[str, Any] = {
+        "start": str(seg.index[0].date()) if len(seg) else None,
+        "end": str(seg.index[-1].date()) if len(seg) else None,
+        "n_bars": int(len(seg)),
+    }
+    rec.update(metrics_from_returns(seg))
+    return rec
+
+
+def walk_forward(
+    strategy: LoadedStrategy,
+    provider: Any,
+    start: datetime,
+    end: datetime,
+    *,
+    windows: int = 4,
+    holdout_frac: float = 0.2,
+) -> WalkForwardResult:
+    """Run the strategy once, then segment its return series into K windows + a final holdout."""
+    pf, _weights = _build_portfolio(strategy, provider, start, end)
+    returns = pf.returns()
+    bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
+
+    window_metrics = [
+        {"index": i, **_segment_record(returns, s, e)} for i, (s, e) in enumerate(bounds)
+    ]
+    holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
+
+    sharpes = [w["sharpe"] for w in window_metrics]
+    positive = sum(1 for w in window_metrics if w["total_return"] > 0)
+    stability = {
+        "mean_sharpe": float(np.mean(sharpes)),
+        "std_sharpe": float(np.std(sharpes)),
+        "min_sharpe": float(np.min(sharpes)),
+        "pct_positive_windows": float(positive / len(window_metrics)),
+    }
+
+    return WalkForwardResult(
+        strategy=strategy.name,
+        config_hash=_config_hash(strategy),
+        data_source=type(provider).__name__,
+        snapshot_id=getattr(provider, "snapshot_id", None),
+        period={"start": start.date().isoformat(), "end": end.date().isoformat()},
+        windows=windows,
+        holdout_frac=holdout_frac,
+        window_metrics=window_metrics,
+        holdout_metrics=holdout_metrics,
+        stability=stability,
+    )
