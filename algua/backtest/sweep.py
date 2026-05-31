@@ -82,6 +82,8 @@ class SweepResult:
     rank_by: str
     ranked: list[dict[str, Any]]
     best: dict[str, Any] | None
+    code_hash: str | None = None
+    dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,6 +92,8 @@ class SweepResult:
             "snapshot_id": self.snapshot_id,
             "timeframe": self.timeframe,
             "seed": self.seed,
+            "code_hash": self.code_hash,
+            "dependency_hash": self.dependency_hash,
             "period": self.period,
             "windows": self.windows,
             "holdout_frac": self.holdout_frac,
@@ -151,6 +155,8 @@ def sweep(
         snapshot_id=meta.snapshot_id,
         timeframe=meta.timeframe,
         seed=meta.seed,
+        code_hash=meta.code_hash,
+        dependency_hash=meta.dependency_hash,
         period=meta.period,
         windows=windows,
         holdout_frac=holdout_frac,

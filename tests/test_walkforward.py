@@ -32,6 +32,7 @@ def test_walk_forward_shape_and_stamps():
     assert stability_keys == set(d["stability"])
     assert 0.0 <= d["stability"]["pct_positive_windows"] <= 1.0
     assert d["config_hash"] and d["data_source"] == "SyntheticProvider"
+    assert d["code_hash"] and d["dependency_hash"]
 
 
 def test_walk_forward_is_deterministic():

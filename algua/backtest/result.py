@@ -14,6 +14,8 @@ class BacktestResult:
     period: dict[str, str]
     seed: int | None = None
     snapshot_id: str | None = None
+    code_hash: str | None = None
+    dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,4 +27,6 @@ class BacktestResult:
             "period": self.period,
             "seed": self.seed,
             "snapshot_id": self.snapshot_id,
+            "code_hash": self.code_hash,
+            "dependency_hash": self.dependency_hash,
         }

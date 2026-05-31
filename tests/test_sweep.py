@@ -48,6 +48,7 @@ def test_sweep_ranks_and_counts():
     assert "holdout" in top and "stability" in top
     assert top["score"] == top["stability"]["mean_sharpe"]
     assert set(top["params"]) == {"lookback", "top_k"}
+    assert d["code_hash"] and d["dependency_hash"]
 
 
 def test_sweep_is_deterministic():

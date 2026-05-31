@@ -36,6 +36,8 @@ def _stamp_params(result: Any) -> dict[str, Any]:
         "period_start": result.period["start"],
         "period_end": result.period["end"],
         "timeframe": result.timeframe,
+        "code_hash": result.code_hash,
+        "dependency_hash": result.dependency_hash,
     }
 
 
@@ -76,7 +78,8 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
             "windows": result.windows, "holdout_frac": result.holdout_frac,
             "snapshot_id": result.snapshot_id, "seed": result.seed,
             "period_start": result.period["start"], "period_end": result.period["end"],
-            "timeframe": result.timeframe,
+            "timeframe": result.timeframe, "code_hash": result.code_hash,
+            "dependency_hash": result.dependency_hash,
         })
         if result.best is not None:
             mlflow.log_metric("best_score", float(result.best["score"]))
@@ -92,7 +95,8 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                     "snapshot_id": result.snapshot_id, "seed": result.seed,
                     "period_start": result.period["start"], "period_end": result.period["end"],
                     "timeframe": result.timeframe, "windows": result.windows,
-                    "holdout_frac": result.holdout_frac,
+                    "holdout_frac": result.holdout_frac, "code_hash": result.code_hash,
+                    "dependency_hash": result.dependency_hash,
                 })
                 mlflow.log_metrics({
                     "score": float(entry["score"]),
