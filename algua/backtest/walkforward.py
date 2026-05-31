@@ -3,7 +3,39 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from algua.backtest.engine import BacktestError
+
 _ANN = 252  # trading days/year
+_MIN_WINDOW_BARS = 5
+
+
+def _segment_bounds(
+    n: int, windows: int, holdout_frac: float
+) -> tuple[list[tuple[int, int]], tuple[int, int]]:
+    """Partition n bars (by index) into K equal windows + a final holdout, as half-open ranges.
+
+    Holdout = the last int(n*holdout_frac) bars. The remaining bars split into `windows` equal
+    pieces; any integer-division remainder goes to the LAST window.
+    """
+    if windows < 2:
+        raise ValueError("windows must be >= 2")
+    if not (0.0 < holdout_frac < 1.0):
+        raise ValueError("holdout_frac must be in (0, 1)")
+    holdout_n = int(n * holdout_frac)
+    train_n = n - holdout_n
+    base = train_n // windows
+    if base < _MIN_WINDOW_BARS:
+        raise BacktestError(
+            f"not enough bars: {train_n} train bars / {windows} windows is "
+            f"< {_MIN_WINDOW_BARS} bars/window; widen the period or lower --windows"
+        )
+    bounds: list[tuple[int, int]] = []
+    s = 0
+    for i in range(windows):
+        e = train_n if i == windows - 1 else s + base
+        bounds.append((s, e))
+        s = e
+    return bounds, (train_n, n)
 
 
 def metrics_from_returns(returns: pd.Series) -> dict[str, float]:
