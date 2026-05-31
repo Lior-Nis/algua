@@ -42,3 +42,19 @@ def test_log_sweep_parent_and_children(tmp_path):
         assert child.data.tags["mlflow.parentRunId"] == parent_id
         assert "score" in child.data.metrics
         assert "param.lookback" in child.data.params
+
+
+def test_sweep_child_runs_carry_shared_stamps(tmp_path):
+    from mlflow.tracking import MlflowClient
+
+    uri = str(tmp_path / "mlruns")
+    log_sweep(_sweep(), tracking_uri=uri)
+    client = MlflowClient(tracking_uri=uri)
+    exp = client.get_experiment_by_name("ew")
+    children = [r for r in client.search_runs([exp.experiment_id])
+                if r.data.tags.get("kind") == "sweep_combo"]
+    assert children
+    for c in children:
+        assert c.data.params["timeframe"] == "1d"
+        assert c.data.params["windows"] == "4"
+        assert "snapshot_id" in c.data.params

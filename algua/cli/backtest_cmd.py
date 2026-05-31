@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime
 
@@ -40,6 +41,15 @@ def _select_provider(demo: bool, snapshot: str | None) -> DataProvider:
     raise ValueError("pass one of --demo (synthetic) or --snapshot <id> (real data)")
 
 
+def _track(call: Callable[[], str]) -> str:
+    """Run a tracker call; convert any failure into a BacktestError so MLflow problems stay in
+    the JSON command contract instead of leaking a traceback."""
+    try:
+        return call()
+    except Exception as exc:  # noqa: BLE001 - tracking is a best-effort side effect
+        raise BacktestError(f"mlflow tracking failed: {exc}") from exc
+
+
 @backtest_app.command("run")
 @json_errors(ValueError, LookupError, BacktestError)
 def run(
@@ -73,8 +83,10 @@ def run(
 
     payload = result.to_dict()
     if track:
-        payload["mlflow_run_id"] = log_backtest(
-            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+        payload["mlflow_run_id"] = _track(
+            lambda: log_backtest(
+                result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+            )
         )
     emit(payload)
 
@@ -98,8 +110,10 @@ def walk_forward_cmd(
                           windows=windows, holdout_frac=holdout_frac)
     payload = result.to_dict()
     if track:
-        payload["mlflow_run_id"] = log_walk_forward(
-            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+        payload["mlflow_run_id"] = _track(
+            lambda: log_walk_forward(
+                result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+            )
         )
     emit(payload)
 
@@ -129,7 +143,7 @@ def sweep_cmd(
                    grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by)
     run_id = None
     if track:
-        run_id = log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri)
+        run_id = _track(lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
     payload = result.to_dict()
     payload["ranked"] = payload["ranked"][:top]
     if run_id is not None:

@@ -47,3 +47,16 @@ def test_sweep_track_logs_parent_and_children(tmp_path):
     runs = _runs(tmp_path)
     assert sum(1 for r in runs if r.data.tags.get("kind") == "sweep") == 1
     assert sum(1 for r in runs if r.data.tags.get("kind") == "sweep_combo") == 2
+
+
+def test_track_failure_renders_json_error(tmp_path, monkeypatch):
+    import algua.cli.backtest_cmd as bt
+
+    def boom(*a, **k):
+        raise RuntimeError("mlflow down")
+
+    monkeypatch.setattr(bt, "log_backtest", boom)
+    result = runner.invoke(app, ["backtest", "run", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31", "--track"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False

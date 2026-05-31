@@ -88,6 +88,11 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                 mlflow.log_params({
                     **{f"param.{k}": v for k, v in entry["params"].items()},
                     "config_hash": entry["config_hash"],
+                    # Shared sweep context so a child run is reproducible without the parent.
+                    "snapshot_id": result.snapshot_id, "seed": result.seed,
+                    "period_start": result.period["start"], "period_end": result.period["end"],
+                    "timeframe": result.timeframe, "windows": result.windows,
+                    "holdout_frac": result.holdout_frac,
                 })
                 mlflow.log_metrics({
                     "score": float(entry["score"]),
