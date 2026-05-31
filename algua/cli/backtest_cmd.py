@@ -106,6 +106,8 @@ def sweep_cmd(
     top: int = typer.Option(20, "--top", help="max ranked rows to print"),
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
+    if top < 1:
+        raise ValueError("--top must be >= 1")
     strategy = load_strategy(name)
     provider = _select_provider(demo, snapshot)
     grid = _parse_grid(param or [])

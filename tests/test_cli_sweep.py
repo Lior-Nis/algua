@@ -45,3 +45,10 @@ def test_sweep_requires_data_source():
                                  "--param", "lookback=20,40"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_sweep_top_zero_is_json_error():
+    result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
+                                 "--param", "lookback=20,40", "--top", "0"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False

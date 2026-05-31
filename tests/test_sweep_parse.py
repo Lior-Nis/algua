@@ -23,3 +23,8 @@ def test_empty_key_or_values_raises():
         _parse_grid(["=1,2"])
     with pytest.raises(ValueError):
         _parse_grid(["k="])
+
+
+def test_duplicate_key_raises():
+    with pytest.raises(ValueError):
+        _parse_grid(["lookback=20,40", "lookback=60"])

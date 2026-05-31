@@ -61,3 +61,11 @@ def test_sweep_rejects_bad_rank_by():
     with pytest.raises(ValueError):
         sweep(_momentum(), SyntheticProvider(seed=3), START, END,
               grid={"lookback": [20, 40]}, rank_by="holdout_sharpe")
+
+
+def test_sweep_records_windows_and_holdout_frac():
+    res = sweep(_momentum(), SyntheticProvider(seed=3), START, END,
+                grid={"lookback": [20, 40]}, windows=3, holdout_frac=0.25)
+    d = res.to_dict()
+    assert d["windows"] == 3
+    assert d["holdout_frac"] == 0.25

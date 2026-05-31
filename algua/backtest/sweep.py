@@ -58,6 +58,8 @@ def _parse_grid(params: list[str]) -> dict[str, list[Any]]:
         values = [v.strip() for v in raw.split(",") if v.strip() != ""]
         if not key or not values:
             raise ValueError(f"malformed --param {item!r}: empty key or value list")
+        if key in grid:
+            raise ValueError(f"duplicate --param key {key!r}: specify each key only once")
         grid[key] = [_coerce(v) for v in values]
     return grid
 
@@ -73,6 +75,8 @@ class SweepResult:
     timeframe: str
     seed: int | None
     period: dict[str, str]
+    windows: int
+    holdout_frac: float
     grid: dict[str, list[Any]]
     n_combos: int
     rank_by: str
@@ -87,6 +91,8 @@ class SweepResult:
             "timeframe": self.timeframe,
             "seed": self.seed,
             "period": self.period,
+            "windows": self.windows,
+            "holdout_frac": self.holdout_frac,
             "grid": self.grid,
             "n_combos": self.n_combos,
             "rank_by": self.rank_by,
@@ -146,6 +152,8 @@ def sweep(
         timeframe=meta.timeframe,
         seed=meta.seed,
         period=meta.period,
+        windows=windows,
+        holdout_frac=holdout_frac,
         grid=grid,
         n_combos=len(combos),
         rank_by=rank_by,
