@@ -25,3 +25,10 @@ def test_alpaca_env_override(monkeypatch):
     assert s.alpaca_api_key == "key"
     assert s.alpaca_api_secret == "secret"
     assert s.alpaca_data_url == "https://example.test"
+
+
+def test_mlflow_tracking_uri_default_and_override(monkeypatch):
+    from algua.config.settings import get_settings
+    assert get_settings().mlflow_tracking_uri == "mlruns"
+    monkeypatch.setenv("ALGUA_MLFLOW_TRACKING_URI", "/tmp/x/mlruns")
+    assert get_settings().mlflow_tracking_uri == "/tmp/x/mlruns"
