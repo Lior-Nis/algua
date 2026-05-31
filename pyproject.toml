@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-algua = "algua.cli.main:app"
+algua = "algua.cli.main:main"
 
 [dependency-groups]
 dev = [
@@ -82,3 +82,9 @@ name = "backtest engine stays off the tracking layer"
 type = "forbidden"
 source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.tracking"]
+
+[[tool.importlinter.contracts]]
+name = "backtest engine stays off the research layer"
+type = "forbidden"
+source_modules = ["algua.backtest"]
+forbidden_modules = ["algua.research"]
