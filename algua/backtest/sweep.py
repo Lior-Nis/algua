@@ -4,8 +4,17 @@ import itertools
 from typing import Any
 
 from algua.backtest.engine import BacktestError
+from algua.strategies.base import LoadedStrategy
 
 _MAX_COMBOS = 200
+
+
+def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy:
+    """Return a LoadedStrategy whose params are the base params with `combo` merged over them.
+    Does not mutate the base strategy/config."""
+    new_params = {**strategy.config.params, **combo}
+    new_config = strategy.config.model_copy(update={"params": new_params})
+    return LoadedStrategy(config=new_config, fn=strategy.fn)
 
 
 def _combos(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
