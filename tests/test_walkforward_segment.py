@@ -39,3 +39,9 @@ def test_invalid_holdout_frac():
 def test_too_few_bars_raises_backtest_error():
     with pytest.raises(BacktestError):
         _segment_bounds(20, windows=4, holdout_frac=0.2)  # train=16, base=4 < _MIN_WINDOW_BARS(5)
+
+
+def test_zero_bar_holdout_rejected():
+    # holdout_frac so small it rounds to 0 holdout bars must be rejected
+    with pytest.raises(BacktestError):
+        _segment_bounds(100, windows=4, holdout_frac=0.005)  # int(100*0.005)=0

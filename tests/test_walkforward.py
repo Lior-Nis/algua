@@ -46,3 +46,10 @@ def test_windows_and_holdout_cover_all_bars():
     total = sum(w["n_bars"] for w in res.window_metrics) + res.holdout_metrics["n_bars"]
     assert total > 0
     assert res.holdout_metrics["n_bars"] > 0
+
+
+def test_walk_forward_carries_timeframe_and_seed():
+    res = walk_forward(_equal_weight(), SyntheticProvider(seed=3), START, END)
+    d = res.to_dict()
+    assert d["timeframe"] == "1d"
+    assert d["seed"] == 3

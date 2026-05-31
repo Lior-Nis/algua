@@ -26,3 +26,9 @@ def test_positive_series_has_positive_sharpe():
     m = metrics_from_returns(pd.Series([0.01, 0.02, 0.015, 0.005]))
     assert m["sharpe"] > 0
     assert m["ann_volatility"] > 0
+
+
+def test_first_bar_loss_counts_as_drawdown():
+    # starting capital is the initial peak: a 50% loss on the first bar is a -0.5 drawdown
+    m = metrics_from_returns(pd.Series([-0.5, 0.0]))
+    assert abs(m["max_drawdown"] - (-0.5)) < 1e-9
