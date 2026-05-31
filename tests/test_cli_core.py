@@ -42,3 +42,15 @@ def test_main_unknown_options_emit_json(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert "No such option" in payload["error"]
+
+
+def test_main_decorated_errors_exit_nonzero(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["registry", "show", "ghost"])
+
+    assert exc.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "ghost" in payload["error"]

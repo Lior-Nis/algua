@@ -15,7 +15,9 @@ from algua.cli.app import app, emit
 
 def main(args: list[str] | None = None) -> None:
     try:
-        app(args=args, standalone_mode=False)
+        result = app(args=args, standalone_mode=False)
+        if isinstance(result, int) and result != 0:
+            raise SystemExit(result)
     except click.ClickException as exc:
         _emit_click_error(exc)
     except click.exceptions.Exit as exc:
