@@ -6,11 +6,15 @@ from datetime import UTC, datetime
 import typer
 
 from algua.backtest._sample import SyntheticProvider
+from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.types import DataProvider
+from algua.data.serve import StoreBackedProvider
+from algua.data.store import DataStore
 from algua.registry import store
 from algua.registry.db import connect, migrate
 from algua.strategies.loader import load_strategy
@@ -24,19 +28,26 @@ def _utc(date_str: str) -> datetime:
 
 
 @backtest_app.command("run")
-@json_errors()
+@json_errors(ValueError, LookupError, BacktestError)
 def run(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
+    snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy = load_strategy(name)
-    if not demo:
-        raise ValueError("only --demo (synthetic provider) is supported until data integration")
-    provider = SyntheticProvider(seed=0)
+    if demo and snapshot:
+        raise ValueError("pass only one of --demo or --snapshot")
+    provider: DataProvider
+    if demo:
+        provider = SyntheticProvider(seed=0)
+    elif snapshot:
+        provider = StoreBackedProvider(DataStore(get_settings().data_dir), snapshot)
+    else:
+        raise ValueError("pass one of --demo (synthetic) or --snapshot <id> (real data)")
     result = run_backtest(strategy, provider, _utc(start), _utc(end))
 
     if register:

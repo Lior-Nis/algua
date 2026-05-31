@@ -38,11 +38,3 @@ def test_previous_session_on_trading_day_is_strictly_before():
     cal = MarketCalendar("XNYS")
     # 2025-07-08 is a trading day; the previous session must be 2025-07-07, not itself
     assert cal.previous_session(date(2025, 7, 8)) == date(2025, 7, 7)
-
-
-def test_session_closes_are_utc_close_times():
-    cal = MarketCalendar("XNYS")
-    closes = cal.session_closes(date(2024, 7, 1), date(2024, 7, 3))
-    assert len(closes) == 3  # Jul 1, 2, 3 are all sessions
-    assert all(str(c.tz) == "UTC" for c in closes)
-    assert closes[0].hour == 20  # regular summer close 16:00 ET == 20:00 UTC

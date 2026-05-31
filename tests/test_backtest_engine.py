@@ -115,3 +115,20 @@ def test_rejects_unsupported_cadence():
     strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(dtype="float64"))
     with pytest.raises(BacktestError):
         run(strat, SyntheticProvider(seed=1), START, END)
+
+
+def test_run_stamps_snapshot_id_when_provider_exposes_it():
+    class StampedProvider:
+        snapshot_id = "snap-123"
+
+        def get_bars(self, symbols, start, end, timeframe):
+            return SyntheticProvider(seed=1).get_bars(symbols, start, end, timeframe)
+
+    cfg = StrategyConfig(
+        name="ew", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1), params={},
+    )
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(
+        1.0 / len(v["symbol"].unique()), index=sorted(v["symbol"].unique())))
+    res = run(strat, StampedProvider(), START, END)
+    assert res.snapshot_id == "snap-123"

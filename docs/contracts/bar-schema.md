@@ -1,16 +1,22 @@
-# Data Contract — `get_bars` Bar Schema (FROZEN)
+# Data Contract — `get_bars` Bar Schema
 
-**Status:** Frozen integration contract. **Date:** 2026-05-30.
+**Status:** Authoritative. **Date:** 2026-05-30 (last updated when the data layer was integrated).
 
 ## Why this exists
-This is the **boundary between two parallel work lanes**:
-- **Data lane (Codex):** implements `DataProvider` adapters (Alpaca, yfinance) + the `get_bars`
-  read API over the point-in-time snapshot store.
-- **Research lane (Claude):** builds `features/`, `strategies/`, and the `backtest/` engine,
-  consuming bars through this exact shape (via a fixture provider until the real one lands).
+This pins the **shape of the data crossing the seam between the data layer and the
+research/backtest layer**:
+- **Data layer** (`algua/data/*`): `DataProvider` adapters (Alpaca, yfinance) + the snapshot
+  store + the `get_bars` read path (`StoreBackedProvider`).
+- **Research/backtest layer** (`algua/features|strategies|backtest/*`): consumes bars through
+  this exact shape; the engine depends only on the `DataProvider` protocol.
 
-Because the two lanes are built independently, the **shape of the data that crosses this seam
-must be pinned**. Both lanes build to this document; integration is then mechanical.
+Pinning the shape keeps the seam mechanical: the backtest engine works unchanged whether it is
+fed the synthetic fixture provider or a real store-backed snapshot. This contract is enforced in
+code by `algua/data/schema.py::validate_bars`.
+
+> Historical note: this document originated when the data layer and research layer were built in
+> parallel by two agents; it now lives in a single-owner repo, but the seam — and the value of
+> pinning it — is unchanged.
 
 ## The contract
 
@@ -26,11 +32,11 @@ DataProvider.get_bars(
 ### Returned DataFrame — exact shape (tidy / long format)
 
 - **One row per `(symbol, bar)`.**
-- **Index:** a name=`timestamp`, **tz-aware** `DatetimeIndex` in **UTC**. Each timestamp is the
-  bar's **close (the moment the bar became known)** — for daily `XNYS` bars, the session close.
-  Monotonic non-decreasing. Rationale: a close-time index makes "features up to time `t`"
-  unambiguous and directly supports the `t→t+1` rule (a decision at `t` may only see bars whose
-  `timestamp <= t`).
+- **Index:** a name=`timestamp`, **tz-aware** `DatetimeIndex` in **UTC**, monotonic non-decreasing.
+  For daily (`1d`) bars the timestamp is the **session date at UTC midnight** (e.g.
+  `2024-07-01 00:00:00+00:00`), matching what real daily sources (yfinance/Alpaca daily) provide.
+  Intraday timeframes carry the bar's time-of-day. The `t→t+1` rule (engine shift) — not the
+  timestamp's time-of-day — is what guarantees no look-ahead.
 - **Columns (exact names, this order):**
 
   | column | dtype | meaning |
@@ -65,19 +71,21 @@ gaps in return series. Raw OHLC is preserved so corporate-action handling stays 
 The snapshot store already records `as_of` provenance. The `get_bars` signature above has **no
 `as_of` parameter yet** — for now it returns the latest snapshot's bars. If/when we need
 as-of-date reads (for leak-free walk-forward across data revisions), we add `as_of` to the
-signature **by agreement of both lanes** (see Change control). Until then, the research lane must
-not assume as-of reads exist.
+signature (see Change control) and update `validate_bars` + consumers together. Until then,
+consumers must not assume as-of reads exist.
 
 ## Conformance
-- A shared canonical fixture/validator (`validate_bars(df)`) will encode this schema so both
-  lanes test against the identical definition rather than two drifting interpretations. It is a
-  small follow-up; until it exists, this document is authoritative.
-- Data lane: `get_bars` output must satisfy this shape exactly.
-- Research lane: the fixture `DataProvider` used in backtest tests must emit this shape, so
-  swapping in the real provider is a no-op at the seam.
+- `algua/data/schema.py::validate_bars(df)` is the canonical encoding of this schema; it raises
+  on the first violation (index name/tz/monotonicity, exact column list, non-null OHLC+volume,
+  uniqueness and sort of `(timestamp, symbol)`). `to_bar_schema` reshapes a stored frame into it.
+- Data layer: `DataStore.read_bars` / `StoreBackedProvider.get_bars` output must satisfy
+  `validate_bars` (it is called on the read path).
+- Research/backtest layer: the synthetic fixture `DataProvider` emits this same shape, so
+  swapping in a real store-backed snapshot is a no-op at the seam.
 
 ## Change control
-This schema and `algua/contracts/types.py::DataProvider` are **shared, frozen interfaces**.
-Changing either requires agreement from **both** lanes: update this doc, and coordinate before
-editing `contracts/types.py`. Neither lane edits the other's modules (`algua/data/*` vs
-`algua/strategies|features|backtest|tracking/*`); they meet only at this contract.
+This schema and `algua/contracts/types.py::DataProvider` are the **authoritative interface**
+between the data layer and the research/backtest layer. Changing either requires updating this
+doc **and** `validate_bars` together, plus the consumers, in the same change — keep the three in
+sync. The backtest engine must continue to depend only on the `DataProvider` protocol (it never
+imports `algua.data`; import-linter enforces this).
