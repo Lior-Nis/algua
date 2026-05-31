@@ -8,6 +8,7 @@ import typer
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
+from algua.backtest.sweep import _parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -88,3 +89,30 @@ def walk_forward_cmd(
     result = walk_forward(strategy, provider, _utc(start), _utc(end),
                           windows=windows, holdout_frac=holdout_frac)
     emit(result.to_dict())
+
+
+@backtest_app.command("sweep")
+@json_errors(ValueError, LookupError, BacktestError)
+def sweep_cmd(
+    name: str,
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str = typer.Option("2023-12-31", "--end"),
+    demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
+    snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    windows: int = typer.Option(4, "--windows", help="walk-forward windows per combo"),
+    holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
+    param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),  # noqa: B008
+    rank_by: str = typer.Option("mean_sharpe", "--rank-by", help="mean_sharpe | min_sharpe"),
+    top: int = typer.Option(20, "--top", help="max ranked rows to print"),
+) -> None:
+    """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
+    if top < 1:
+        raise ValueError("--top must be >= 1")
+    strategy = load_strategy(name)
+    provider = _select_provider(demo, snapshot)
+    grid = _parse_grid(param or [])
+    result = sweep(strategy, provider, _utc(start), _utc(end),
+                   grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by)
+    payload = result.to_dict()
+    payload["ranked"] = payload["ranked"][:top]
+    emit(payload)
