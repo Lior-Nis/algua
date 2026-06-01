@@ -168,7 +168,10 @@ Six sub-projects; each gets its own spec → plan → implementation cycle. Buil
    reconciliation, risk limits + kill-switch, paper loop + warm-up gate, status/health
    commands, audit log. *→ Agent promotes to paper and operates it.*
 6. **Live hardening + cloud lift** (human-gated) — verified-approval live gate, full
-   reconciliation, restart playbook, alerting, secrets, Docker/VM.
+   reconciliation, restart playbook, alerting, secrets, Docker/VM. The verified approval is a
+   **TOTP (authenticator-app) code** on `registry approve` (single-use, bound to code/config
+   hash); the autonomous agent must never hold the TOTP seed, and the live transition runs vetted
+   code in a trusted context the agent isn't in.
    *→ Human-gated path to real money.*
 
 ## 10. Open Questions / To Revisit Later
