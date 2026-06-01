@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 
+from typer._click import exceptions as _click_exc  # Typer vendors its own Click fork
 from typer.main import get_command
 
 from algua.cli import (  # noqa: F401 - imports register subcommands
@@ -12,11 +13,6 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     strategy_cmd,
 )
 from algua.cli.app import app, emit
-
-try:  # Typer vendors its own Click fork; get_command() raises from that fork.
-    from typer._click import exceptions as _click_exc
-except ModuleNotFoundError:  # older Typer that defers to the real Click
-    from click import exceptions as _click_exc  # type: ignore[no-redef]
 
 __all__ = ["app", "main"]
 

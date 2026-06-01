@@ -45,15 +45,14 @@ a timer is trivial and separate).
     run-research-loop.sh            # the launcher — the only executable code in this slice
 CODEOWNERS                          # human-only approval on integrity-critical files
 AGENTS.md                           # += a short pointer routing the research-operator run to the skills
-.claude/skills/<name>  -> ../../.codex/skills/<name>   # symlinks (Claude Code + opencode portability)
-.agents/skills/<name>  -> ../../.codex/skills/<name>   # symlinks (.agents convention)
+.claude/skills/<name>  -> ../../.codex/skills/<name>   # symlinks so Claude Code (co-dev) reads the same skills
 ```
 
 **Skills** are the operating knowledge (markdown). The primary agent reads `operating-algua` +
 `run-the-research-loop`; it delegates to the `author` and `interpret` subagents, which read
 `author-a-strategy` and `interpret-results` respectively. Skills are authored canonically in
-`.codex/skills/` and symlinked into `.claude/skills/` and `.agents/skills/` so the same context
-serves Codex (operator), Claude Code (co-dev), and opencode.
+`.codex/skills/` and symlinked into `.claude/skills/` so the same context serves Codex (the
+operator) and Claude Code (co-dev).
 
 **Subagents** are the two roles: `author` (writes a strategy module; intended write scope =
 `algua/strategies/examples/`) and `interpret` (read-only; judges results). The primary agent owns
@@ -128,8 +127,7 @@ This slice is skills (markdown) + config + one bash script — little unit-testa
   without an LLM.
 - **Skill frontmatter check** — a test asserts every `.codex/skills/*/SKILL.md` has valid YAML
   frontmatter with `name` + `description`.
-- **Symlink check** — a test asserts each skill is reachable via `.claude/skills/` and
-  `.agents/skills/`.
+- **Symlink check** — a test asserts each skill is reachable via `.claude/skills/`.
 - **Existing quality gates** (`pytest · ruff · mypy · lint-imports`) stay green (this slice adds
   almost no Python, so they're largely unaffected).
 - **Real-run smoke (manual, documented, not CI):** run the launcher for real (`--hypotheses 1`,
@@ -141,8 +139,9 @@ This slice is skills (markdown) + config + one bash script — little unit-testa
 
 ## 6. Consequences
 
-- The operating layer is **portable** (skills shared across Codex / Claude Code / opencode) and
-  **swappable** (a different harness reuses the same skills + a different launcher).
+- The operating layer is **portable** (skills shared across Codex and Claude Code today) and
+  **swappable** (a different harness reuses the same skills + a different launcher; add its skill
+  path only when we actually adopt it).
 - Far less code to maintain than the abandoned enforcement harness; the agent's autonomy is the
   point, not something to wrap in rails.
 - Safety rests on layers that don't depend on the agent's goodwill: CLI enforcement, worktree

@@ -62,8 +62,9 @@ def test_every_skill_has_name_and_description_frontmatter():
         assert fm.get("description"), f"{name}: frontmatter description is required"
 
 
-def test_skills_reachable_via_portable_symlink_paths():
-    for base in (".claude/skills", ".agents/skills"):
-        for name in SKILL_NAMES:
-            p = REPO / base / name / "SKILL.md"
-            assert p.exists(), f"{p} not reachable — portability symlink missing"
+def test_skills_reachable_via_claude_skills_symlinks():
+    # Canonical skills live in .codex/skills/ (Codex). Claude Code reads .claude/skills/,
+    # so the same skills serve the co-dev harness too via symlink.
+    for name in SKILL_NAMES:
+        p = REPO / ".claude/skills" / name / "SKILL.md"
+        assert p.exists(), f"{p} not reachable — .claude/skills symlink missing"
