@@ -1,0 +1,14 @@
+# Integrity-critical files for algua.
+#
+# An autonomous research agent may edit these inside its isolated worktree, but a human
+# must approve any merge to main. This is the durable guard behind the autonomous loop:
+# the agent can't quietly weaken the live wall, the lifecycle, the anti-look-ahead engine,
+# or the promotion gate and have it reach main.
+#
+# NOTE: this only binds once "Require review from Code Owners" is enabled in the GitHub
+# branch-protection settings for the default branch (a one-time repo setting).
+
+/algua/registry/store.py        @Lior-Nis   # the paper->live wall + approvals
+/algua/contracts/lifecycle.py   @Lior-Nis   # lifecycle stages + allowed transitions
+/algua/backtest/engine.py       @Lior-Nis   # anti-look-ahead t->t+1 enforcement
+/algua/research/gates.py        @Lior-Nis   # promotion-gate criteria

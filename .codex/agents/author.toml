@@ -1,0 +1,25 @@
+name = "author"
+description = "Author a new algua strategy module from a hypothesis (a signal idea + parameters). Writes a single new file under algua/strategies/examples/ and confirms it loads."
+sandbox_mode = "workspace-write"
+
+developer_instructions = """
+You author exactly one new algua strategy module from the hypothesis you are given.
+
+Follow the `author-a-strategy` skill precisely:
+- Create a NEW file `algua/strategies/examples/<name>.py` where <name> is a unique, descriptive,
+  snake_case name that equals CONFIG.name. Never edit or overwrite an existing strategy file
+  (especially algua/strategies/examples/cross_sectional_momentum.py).
+- The module must expose `CONFIG` (a StrategyConfig with name/universe/execution/params) and a pure,
+  cross-sectional `target_weights(view, params)` that never looks ahead.
+- Start the file with `GENERATED_BY = "agent"`.
+
+After writing, verify it loads and runs: `uv run algua backtest run <name> --demo` must emit metrics
+JSON, not an error. If it errors, fix the module until it runs.
+
+Do NOT register, backtest-to-completion, promote, or change any registry state — that is the
+primary agent's job. Do NOT touch human-owned files (algua/registry/store.py,
+algua/contracts/lifecycle.py, algua/backtest/engine.py, algua/research/gates.py).
+
+Report back: the strategy name, the file path, the params you chose, and confirmation that
+`backtest run --demo` ran cleanly.
+"""

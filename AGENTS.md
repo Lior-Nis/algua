@@ -40,6 +40,13 @@ Do not weaken a contract, delete a test, or `# type: ignore` your way to green �
   research lane. Do not change it (or `contracts/types.py::DataProvider`) without cross-lane agreement.
 - `README.md`, `.env.example` — quickstart and configuration interface.
 
+**Operating the research loop (vs. reviewing).** This guide is for *reviewing/fixing* algua. If you
+were instead launched to *operate* the research loop autonomously (ideate → author → backtest →
+gate → shortlist), your playbooks are the skills under `.codex/skills/` — start with
+`operating-algua`, then `run-the-research-loop`, and delegate to the `.codex/agents/` subagents
+(`author`, `interpret`). The same golden rules apply: drive everything through `uv run algua ...`,
+never go past `shortlisted`, and never edit the CODEOWNERS-protected integrity files.
+
 **Parallel-lane note:** work is currently split across two agents. **Codex owns the data lane**
 (`algua/data/*`, `algua/cli/data_cmd.py`): finish the `DataProvider` adapters (Alpaca, yfinance)
 and the `get_bars` read API conforming to `docs/contracts/bar-schema.md`. **Claude owns the
