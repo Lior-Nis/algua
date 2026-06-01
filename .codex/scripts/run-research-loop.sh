@@ -78,7 +78,9 @@ echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}"
 
 echo "Running research loop (timeout ${TIMEOUT}, ${N_HYPOTHESES} hypotheses)..."
-"${CODEX_CMD[@]}" || echo "codex exec exited non-zero (timeout or error) — review the branch anyway."
+# stdin from /dev/null: the goal is passed as an argument, and an unattended/cron run has no
+# stdin — without this, codex blocks reading stdin and the run hangs.
+"${CODEX_CMD[@]}" </dev/null || echo "codex exec exited non-zero (timeout or error) — review the branch anyway."
 
 echo
 echo "Done. Review the run:"
