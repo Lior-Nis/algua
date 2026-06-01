@@ -21,6 +21,7 @@ set -euo pipefail
 
 N_HYPOTHESES="${N_HYPOTHESES:-3}"
 TIMEOUT="${TIMEOUT:-30m}"
+SYNC_TIMEOUT="${SYNC_TIMEOUT:-5m}"
 THESIS="${THESIS:-ride institutional/whale momentum}"
 DRY_RUN=0
 
@@ -70,12 +71,22 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "would create worktree: ${WORKTREE}"
   echo "would create branch:   ${BRANCH}"
   echo "hypotheses: ${N_HYPOTHESES}   timeout: ${TIMEOUT}"
+  echo "would pre-warm env:    timeout ${SYNC_TIMEOUT} uv sync (in ${WORKTREE})"
   echo "would run: ${CODEX_CMD[*]}"
   exit 0
 fi
 
 echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}"
+
+# A fresh worktree has no .venv, and algua installs editable -> the worktree path (so the agent's
+# authored strategies are importable). Build the env once here, up front, instead of letting the
+# first `uv run` cold-sync mid-agent-run. uv's global cache makes this fast after the first ever sync.
+echo "Pre-warming the worktree environment (uv sync, timeout ${SYNC_TIMEOUT})..."
+# Bounded like the codex run itself: an unattended launcher must not hang here (network stall,
+# lock contention). If the env can't be built, fail fast rather than run on a broken venv.
+( cd "${WORKTREE}" && timeout "${SYNC_TIMEOUT}" uv sync ) \
+  || { echo "pre-warm (uv sync) failed or timed out after ${SYNC_TIMEOUT}; aborting." >&2; exit 1; }
 
 echo "Running research loop (timeout ${TIMEOUT}, ${N_HYPOTHESES} hypotheses)..."
 # stdin from /dev/null: the goal is passed as an argument, and an unattended/cron run has no
