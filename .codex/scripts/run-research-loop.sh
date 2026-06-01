@@ -70,12 +70,19 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "would create worktree: ${WORKTREE}"
   echo "would create branch:   ${BRANCH}"
   echo "hypotheses: ${N_HYPOTHESES}   timeout: ${TIMEOUT}"
+  echo "would pre-warm env:    uv sync (in ${WORKTREE})"
   echo "would run: ${CODEX_CMD[*]}"
   exit 0
 fi
 
 echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}"
+
+# A fresh worktree has no .venv, and algua installs editable -> the worktree path (so the agent's
+# authored strategies are importable). Build the env once here, up front, instead of letting the
+# first `uv run` cold-sync mid-agent-run. uv's global cache makes this fast after the first ever sync.
+echo "Pre-warming the worktree environment (uv sync)..."
+( cd "${WORKTREE}" && uv sync )
 
 echo "Running research loop (timeout ${TIMEOUT}, ${N_HYPOTHESES} hypotheses)..."
 # stdin from /dev/null: the goal is passed as an argument, and an unattended/cron run has no
