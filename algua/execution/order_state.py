@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import sqlite3
+from datetime import UTC, datetime
+
+import pandas as pd
+
+from algua.live.paper_loop import PaperRunResult
+
+
+def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
+    """Persist a run's orders and fills. Fills link to their order by broker_order_id."""
+    now = datetime.now(UTC).isoformat()
+    fills_by_order: dict[str, list] = {}
+    for f in result.fills:
+        fills_by_order.setdefault(f.broker_order_id, []).append(f)
+
+    # Orders were submitted in list order, so they map to broker ids sim-1, sim-2, ...
+    for seq, intent in enumerate(result.orders, start=1):
+        broker_order_id = f"sim-{seq}"
+        matched = fills_by_order.get(broker_order_id, [])
+        status = "filled" if matched else "noop"
+        cols = (
+            "(strategy, symbol, side, target_weight,"
+            " decision_ts, submitted_ts, status, broker_order_id)"
+        )
+        cur = conn.execute(
+            f"INSERT INTO paper_orders{cols} VALUES (?,?,?,?,?,?,?,?)",
+            (result.strategy, intent.symbol, intent.side.value, intent.target_weight,
+             intent.decision_ts.isoformat(), now, status, broker_order_id),
+        )
+        order_row_id = cur.lastrowid
+        for f in matched:
+            conn.execute(
+                "INSERT INTO paper_fills(order_id, symbol, qty, price, fill_ts) VALUES (?,?,?,?,?)",
+                (order_row_id, f.symbol, f.qty, f.price, f.fill_ts.isoformat()),
+            )
+    conn.commit()
+
+
+def derive_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float]:
+    rows = conn.execute(
+        "SELECT f.symbol AS symbol, SUM(f.qty) AS qty FROM paper_fills f "
+        "JOIN paper_orders o ON o.id = f.order_id WHERE o.strategy = ? GROUP BY f.symbol",
+        (strategy,),
+    ).fetchall()
+    return {r["symbol"]: float(r["qty"]) for r in rows if float(r["qty"]) != 0.0}
+
+
+def reconcile(derived: dict[str, float], broker_positions: pd.Series) -> bool:
+    broker = {s: float(q) for s, q in broker_positions.items() if float(q) != 0.0}
+    return {s: q for s, q in derived.items() if q != 0.0} == broker
