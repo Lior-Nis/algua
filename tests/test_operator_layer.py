@@ -44,7 +44,7 @@ def test_launcher_dry_run_emits_bounded_sandboxed_codex_command():
     assert "--dangerously-bypass-approvals-and-sandbox" in out  # yolo, but contained in a worktree
     assert "timeout 10m" in out                                  # OS-level hard bound
     assert "research-run/" in out                                # isolated branch
-    assert "timeout 5m uv sync" in out                            # worktree env pre-warm, hard-bounded
+    assert "timeout 5m uv sync" in out                           # bounded worktree env pre-warm
     assert "2 strategy hypotheses" in out                        # goal-level bound
 
 
