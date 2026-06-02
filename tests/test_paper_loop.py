@@ -113,3 +113,14 @@ def test_warmup_gate_delays_first_order():
     result = run_paper(strat, SimBroker(cash=10_000.0), _FakeProvider(bars), DATES[0], DATES[-1])
     assert all(o.decision_ts >= DATES[1] for o in result.orders)
     assert len(result.orders) >= 1
+
+
+def test_final_bar_drawdown_breach_raises():
+    # Price craters only on the LAST bar; in-loop checks (at earlier closes) never see it,
+    # so the post-loop final-equity drawdown check must catch it.
+    strat = _strategy({"AAA": 1.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0, 50.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_paper(strat, SimBroker(cash=10_000.0), _FakeProvider(bars), DATES[0], DATES[-1],
+                  max_drawdown=0.1)
+    assert ei.value.kind == "drawdown"

@@ -95,7 +95,7 @@ def show(name: str) -> None:
 
 
 @paper_app.command("kill")
-@json_errors(ValueError)
+@json_errors(ValueError, LookupError)
 def kill(
     name: str,
     reason: str = typer.Option(..., "--reason", help="why the strategy is being halted"),
@@ -104,6 +104,7 @@ def kill(
     """Manually trip the kill-switch for a strategy (halts paper runs until reset)."""
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
+        store.get_strategy(conn, name)  # reject unknown/mistyped names before tripping a switch
         kill_switch.trip(conn, name, reason=reason, actor=actor)
         audit_append(conn, actor=actor, action="kill_switch_trip", reason=reason, strategy=name)
     emit({"strategy": name, "kill_switch": "tripped", "reason": reason})
@@ -115,8 +116,11 @@ def resume(name: str) -> None:
     """Reset (clear) a strategy's kill-switch so paper runs may resume. Human action."""
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        was_tripped = kill_switch.reset(conn, name)
+        was_tripped = kill_switch.is_tripped(conn, name)
         if was_tripped:
+            # Audit BEFORE clearing: if the reset write fails, the switch stays tripped
+            # (fail-safe — still halted) rather than cleared with no audit trail.
             audit_append(conn, actor="human", action="kill_switch_reset",
                          reason="manual resume", strategy=name)
+            kill_switch.reset(conn, name)
     emit({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"})

@@ -73,6 +73,12 @@ def run_paper(
     for i in range(len(ts) - 1):  # only bars with a successor can fill
         t, t_next = ts[i], ts[i + 1]
         bars_seen += 1
+        # Equity/drawdown are tracked every bar (including warm-up) so the breaker sees losses.
+        equity = broker.equity(closes.loc[t])
+        peak = max(peak, equity)
+        check_drawdown(equity, peak, max_drawdown)
+        if bars_seen < warmup:
+            continue  # warm-up: observe only — no signal evaluation, validation, or orders
         view = bars.loc[:t]
         weights = strategy.target_weights(view)
         if len(weights) and bool((weights < 0).any()):
@@ -83,17 +89,17 @@ def run_paper(
                 f"for {negative} at {t}",
             )
         check_gross_exposure(weights, max_gross)
-        equity = broker.equity(closes.loc[t])
-        peak = max(peak, equity)
-        check_drawdown(equity, peak, max_drawdown)
-        if bars_seen >= warmup:
-            for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
-                broker.submit(intent)
-                orders.append(intent)
-            fills.extend(broker.fill_pending(opens.loc[t_next], fill_ts=t_next))
+        for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
+            broker.submit(intent)
+            orders.append(intent)
+        fills.extend(broker.fill_pending(opens.loc[t_next], fill_ts=t_next))
 
     final_positions = {s: float(q) for s, q in broker.get_positions().items()}
     final_equity = broker.equity(closes.loc[ts[-1]]) if ts else broker.cash
+    # The final bar's close is filled-at but never re-checked in-loop; check it before returning
+    # so a drawdown on the last bar still trips the breaker rather than persisting as a clean run.
+    peak = max(peak, final_equity)
+    check_drawdown(final_equity, peak, max_drawdown)
     derived: dict[str, float] = {}
     for f in fills:
         derived[f.symbol] = derived.get(f.symbol, 0.0) + f.qty

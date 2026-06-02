@@ -76,3 +76,9 @@ def test_breach_trips_killswitch_and_persists_nothing(monkeypatch):
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
     assert show["n_orders"] == 0
+
+
+def test_kill_rejects_unknown_strategy():
+    result = runner.invoke(app, ["paper", "kill", "no_such_strategy", "--reason", "x"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
