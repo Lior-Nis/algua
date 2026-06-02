@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -32,6 +32,33 @@ CREATE TABLE IF NOT EXISTS approvals (
     approved_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     revoked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS paper_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    target_weight REAL NOT NULL,
+    decision_ts TEXT NOT NULL,
+    submitted_ts TEXT NOT NULL,
+    status TEXT NOT NULL,
+    broker_order_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES paper_orders(id),
+    symbol TEXT NOT NULL,
+    qty REAL NOT NULL,
+    price REAL NOT NULL,
+    fill_ts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT,
+    strategy TEXT
 );
 """
 
