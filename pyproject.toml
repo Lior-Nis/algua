@@ -100,3 +100,15 @@ name = "backtest engine stays off the execution and live lanes"
 type = "forbidden"
 source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.execution", "algua.live"]
+
+[[tool.importlinter.contracts]]
+name = "risk layer stays off the cli layer"
+type = "forbidden"
+source_modules = ["algua.risk"]
+forbidden_modules = ["algua.cli"]
+
+[[tool.importlinter.contracts]]
+name = "backtest engine stays off the risk lane"
+type = "forbidden"
+source_modules = ["algua.backtest"]
+forbidden_modules = ["algua.risk"]
