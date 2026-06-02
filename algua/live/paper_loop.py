@@ -8,6 +8,7 @@ import pandas as pd
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.sim_broker import Fill, SimBroker
+from algua.risk.limits import RiskBreach, check_drawdown, check_gross_exposure
 from algua.strategies.base import LoadedStrategy
 
 _EPS = 1e-6
@@ -53,6 +54,7 @@ def run_paper(
     start: datetime,
     end: datetime,
     timeframe: str = "1d",
+    max_drawdown: float = 1.0,
 ) -> PaperRunResult:
     """Replay the strategy bar-by-bar: decide weights on closed bar t (data <= t), submit
     orders, fill at t+1 open. Pure over the injected broker + provider."""
@@ -61,20 +63,32 @@ def run_paper(
     opens = _reset.pivot(index="timestamp", columns="symbol", values="open").sort_index()
     closes = _reset.pivot(index="timestamp", columns="symbol", values="adj_close").sort_index()
     ts = list(opens.index)
+    warmup = strategy.execution.warmup_bars
+    max_gross = strategy.execution.max_gross_exposure
+    peak = broker.equity(closes.loc[ts[0]]) if ts else broker.cash
+    bars_seen = 0
 
     orders: list[OrderIntent] = []
     fills: list[Fill] = []
     for i in range(len(ts) - 1):  # only bars with a successor can fill
         t, t_next = ts[i], ts[i + 1]
+        bars_seen += 1
+        # Equity/drawdown are tracked every bar (including warm-up) so the breaker sees losses.
+        equity = broker.equity(closes.loc[t])
+        peak = max(peak, equity)
+        check_drawdown(equity, peak, max_drawdown)
+        if bars_seen < warmup:
+            continue  # warm-up: observe only — no signal evaluation, validation, or orders
         view = bars.loc[:t]
         weights = strategy.target_weights(view)
         if len(weights) and bool((weights < 0).any()):
             negative = sorted(weights[weights < 0].index)
-            raise ValueError(
+            raise RiskBreach(
+                "long_only",
                 f"long-only: strategy '{strategy.name}' returned negative target weight(s) "
-                f"for {negative} at {t}"
+                f"for {negative} at {t}",
             )
-        equity = broker.equity(closes.loc[t])
+        check_gross_exposure(weights, max_gross)
         for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
             broker.submit(intent)
             orders.append(intent)
@@ -82,6 +96,10 @@ def run_paper(
 
     final_positions = {s: float(q) for s, q in broker.get_positions().items()}
     final_equity = broker.equity(closes.loc[ts[-1]]) if ts else broker.cash
+    # The final bar's close is filled-at but never re-checked in-loop; check it before returning
+    # so a drawdown on the last bar still trips the breaker rather than persisting as a clean run.
+    peak = max(peak, final_equity)
+    check_drawdown(final_equity, peak, max_drawdown)
     derived: dict[str, float] = {}
     for f in fills:
         derived[f.symbol] = derived.get(f.symbol, 0.0) + f.qty

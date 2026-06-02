@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -59,6 +59,13 @@ CREATE TABLE IF NOT EXISTS audit_log (
     action TEXT NOT NULL,
     reason TEXT,
     strategy TEXT
+);
+CREATE TABLE IF NOT EXISTS kill_switches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy TEXT NOT NULL UNIQUE,
+    reason TEXT,
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 """
 
