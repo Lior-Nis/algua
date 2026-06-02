@@ -9,7 +9,20 @@ from algua.live.paper_loop import PaperRunResult
 
 
 def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
-    """Persist a run's orders and fills. Fills link to their order by broker_order_id."""
+    """Persist a run's orders and fills. Fills link to their order by broker_order_id.
+
+    A paper run is a full from-scratch replay, so it REPLACES this strategy's paper book
+    (orders + fills) rather than appending — otherwise re-running a replay would double the
+    persisted positions. Cross-run history lives in audit_log, not here. (Incremental /
+    session semantics arrive with the real wall-clock paper adapter.)
+    """
+    conn.execute(
+        "DELETE FROM paper_fills WHERE order_id IN "
+        "(SELECT id FROM paper_orders WHERE strategy = ?)",
+        (result.strategy,),
+    )
+    conn.execute("DELETE FROM paper_orders WHERE strategy = ?", (result.strategy,))
+
     now = datetime.now(UTC).isoformat()
     fills_by_order: dict[str, list] = {}
     for f in result.fills:

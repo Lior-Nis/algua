@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
 from algua.contracts.types import ExecutionContract
 from algua.execution.sim_broker import SimBroker
@@ -65,3 +66,12 @@ def test_fills_never_share_timestamp_with_their_decision_bar():
                        DATES[0], DATES[-1])
     for f in result.fills:
         assert f.fill_ts > f.decision_ts
+
+
+def test_run_paper_rejects_negative_weights_long_only():
+    bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
+    cfg = StrategyConfig(name="shorty", universe=["AAA"],
+                         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1))
+    short = LoadedStrategy(config=cfg, fn=lambda view, params: pd.Series({"AAA": -1.0}))
+    with pytest.raises(ValueError, match="long-only"):
+        run_paper(short, SimBroker(cash=10_000.0), _FakeProvider(bars), DATES[0], DATES[-1])

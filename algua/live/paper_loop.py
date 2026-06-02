@@ -68,6 +68,12 @@ def run_paper(
         t, t_next = ts[i], ts[i + 1]
         view = bars.loc[:t]
         weights = strategy.target_weights(view)
+        if len(weights) and bool((weights < 0).any()):
+            negative = sorted(weights[weights < 0].index)
+            raise ValueError(
+                f"long-only: strategy '{strategy.name}' returned negative target weight(s) "
+                f"for {negative} at {t}"
+            )
         equity = broker.equity(closes.loc[t])
         for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
             broker.submit(intent)

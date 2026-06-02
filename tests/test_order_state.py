@@ -37,3 +37,19 @@ def test_reconcile_true_on_match_false_on_mismatch():
     assert reconcile({"AAA": 50.0}, pd.Series({"AAA": 50.0})) is True
     assert reconcile({"AAA": 50.0}, pd.Series({"AAA": 49.0})) is False
     assert reconcile({}, pd.Series(dtype="float64")) is True
+
+
+def test_persist_run_replaces_prior_paper_state_not_accumulates(tmp_path):
+    conn = _conn(tmp_path)
+    result = PaperRunResult(
+        strategy="s",
+        orders=[OrderIntent("AAA", Side.BUY, 1.0, T0)],
+        fills=[Fill("AAA", 50.0, 100.0, T0, T1, "sim-1")],
+        final_positions={"AAA": 50.0}, final_cash=5000.0,
+        final_equity=10000.0, reconcile_ok=True,
+    )
+    persist_run(conn, result)
+    persist_run(conn, result)  # re-running the same replay must REPLACE, not double
+    assert conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 1
+    assert derive_positions(conn, "s") == {"AAA": 50.0}
