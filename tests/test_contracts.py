@@ -32,3 +32,14 @@ def test_strategy_protocol_runtime_check():
             return features
 
     assert isinstance(Dummy(), Strategy)
+
+
+def test_execution_contract_warmup_bars_default_and_validation():
+    import pytest
+
+    from algua.contracts.types import ExecutionContract
+
+    assert ExecutionContract(rebalance_frequency="1d").warmup_bars == 0
+    assert ExecutionContract(rebalance_frequency="1d", warmup_bars=30).warmup_bars == 30
+    with pytest.raises(ValueError, match="warmup_bars"):
+        ExecutionContract(rebalance_frequency="1d", warmup_bars=-1)

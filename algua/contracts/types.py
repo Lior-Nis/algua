@@ -27,10 +27,13 @@ class ExecutionContract:
     decision_lag_bars: int = 1
     allow_fractional: bool = True
     max_gross_exposure: float = 1.0
+    warmup_bars: int = 0
 
     def __post_init__(self) -> None:
         if self.decision_lag_bars < 1:
             raise ValueError("decision_lag_bars must be >= 1 (no same-bar fills)")
+        if self.warmup_bars < 0:
+            raise ValueError("warmup_bars must be >= 0")
 
 
 @dataclass(frozen=True)
