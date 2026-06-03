@@ -156,23 +156,31 @@ def test_trade_live_submits_and_persists(monkeypatch):
 class _FlattenBroker:
     def __init__(self, fail=False):
         self.fail = fail
-        self.flattened = False
+        self.cancelled = False
+        self.closed_symbols = None
 
-    def close_all_positions(self):
+    def cancel_open_orders(self):
+        self.cancelled = True
+
+    def close_positions(self, symbols):
         if self.fail:
             raise BrokerError("alpaca failed to close some positions: [...]")
-        self.flattened = True
+        self.closed_symbols = list(symbols)
 
 
 def test_paper_flatten_closes_and_trips(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
-    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FlattenBroker)
+    broker = _FlattenBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
     result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
-    assert payload["flattened"] is True and payload["kill_switch"] == "tripped"
+    assert payload["liquidation_submitted"] is True and payload["kill_switch"] == "tripped"
+    # scoped to the strategy's universe (a symbol list), not an account-wide close
+    assert broker.cancelled is True
+    assert isinstance(broker.closed_symbols, list) and broker.closed_symbols
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
 

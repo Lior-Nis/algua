@@ -176,15 +176,21 @@ def trade_live(
             kill_switch.trip(conn, name, reason=exc.detail, actor="system")
             audit_append(conn, actor="system", action="kill_switch_trip",
                          reason=f"{exc.kind}: {exc.detail}", strategy=name)
-            flattened = True
+            liquidation_submitted = True
+            flatten_error = None
             try:
-                broker.close_all_positions()
+                broker.cancel_open_orders()
+                broker.close_positions(strategy.universe)
             except BrokerError as fexc:
-                flattened = False
+                liquidation_submitted = False
+                flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
-            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped",
-                  "flattened": flattened, "error": exc.detail})
+            payload = {"ok": False, "kind": exc.kind, "kill_switch": "tripped",
+                       "liquidation_submitted": liquidation_submitted, "error": exc.detail}
+            if flatten_error is not None:
+                payload["flatten_error"] = flatten_error
+            emit(payload)
             raise typer.Exit(1) from exc
         now = datetime.now(UTC).isoformat()
         decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
@@ -215,8 +221,8 @@ def flatten(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
-    """Emergency: close ALL live positions for a strategy and trip its kill-switch (halt)."""
-    load_strategy(name)
+    """Emergency: close this strategy's live positions (its universe) and trip its kill-switch."""
+    strategy = load_strategy(name)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         rec = store.get_strategy(conn, name)
@@ -227,9 +233,11 @@ def flatten(
         kill_switch.trip(conn, name, reason="flatten", actor=actor)
         audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
         try:
-            broker.close_all_positions()
+            broker.cancel_open_orders()
+            broker.close_positions(strategy.universe)
         except BrokerError as exc:
             emit({"ok": False, "strategy": name, "kill_switch": "tripped",
-                  "flattened": False, "error": str(exc)})
+                  "liquidation_submitted": False, "error": str(exc)})
             raise typer.Exit(1) from exc
-    emit({"strategy": name, "kill_switch": "tripped", "flattened": True})
+    # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
+    emit({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True})
