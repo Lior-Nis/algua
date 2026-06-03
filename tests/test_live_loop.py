@@ -87,3 +87,12 @@ def test_run_tick_gross_breach_raises():
         run_tick(_strategy({"AAA": 1.0, "BBB": 1.0}), broker, _FakeProvider(bars),
                  DATES[0], DATES[-1])
     assert ei.value.kind == "gross_exposure"
+
+
+def test_run_tick_drops_partial_current_session_bar():
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # sessions Jan 2,3,4 2023
+    # now = Jan 4 -> that session is "today" (possibly partial); decide on Jan 3 instead.
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      now=datetime(2023, 1, 4, 12, 0, tzinfo=UTC))
+    assert result.decision_ts == DATES[1]

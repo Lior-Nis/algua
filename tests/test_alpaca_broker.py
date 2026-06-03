@@ -139,7 +139,7 @@ class _FakeRequestsWithDelete(_FakeRequests):
 
 
 def test_cancel_open_orders_ok(monkeypatch):
-    fake = _FakeRequestsWithDelete(_FakeResp(207, []))
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"id": "a", "status": 200}]))
     monkeypatch.setattr(ab, "requests", fake)
     _broker().cancel_open_orders()
     assert fake.deleted == ["https://paper-api.alpaca.markets/v2/orders"]
@@ -147,5 +147,13 @@ def test_cancel_open_orders_ok(monkeypatch):
 
 def test_cancel_open_orders_non_2xx_raises(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequestsWithDelete(_FakeResp(500, text="boom")))
+    with pytest.raises(BrokerError):
+        _broker().cancel_open_orders()
+
+
+def test_cancel_open_orders_partial_failure_raises(monkeypatch):
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"id": "a", "status": 200},
+                                                   {"id": "b", "status": 500}]))
+    monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError):
         _broker().cancel_open_orders()

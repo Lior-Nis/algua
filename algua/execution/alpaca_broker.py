@@ -94,11 +94,14 @@ class AlpacaPaperBroker:
         )
 
     def cancel_open_orders(self) -> None:
-        """Cancel all open orders (DELETE /v2/orders). Alpaca returns 207 multi-status with
-        per-order results; we only require an overall-success status."""
-        resp = self._delete("/v2/orders")
-        if resp.status_code not in (200, 207):
-            raise BrokerError(f"alpaca {resp.status_code} on /v2/orders: {resp.text}")
+        """Cancel all open orders (DELETE /v2/orders). Alpaca returns 207 multi-status with a
+        per-order result list; raise if ANY individual cancel failed, otherwise a stale order
+        could survive and the next submit would over-order."""
+        results = self._read(self._delete("/v2/orders"), "/v2/orders", ok=(200, 207))
+        if isinstance(results, list):
+            failed = [r for r in results if int(r.get("status", 500)) not in (200, 204)]
+            if failed:
+                raise BrokerError(f"alpaca failed to cancel some orders: {failed}")
 
     def _market_value(self, symbol: str) -> float:
         path = f"/v2/positions/{symbol}"
