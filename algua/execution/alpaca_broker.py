@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any
 
 import pandas as pd
 import requests
+from requests import RequestException
 
 from algua.contracts.types import OrderIntent
 
@@ -13,7 +16,9 @@ _DEFAULT_BASE_URL = "https://paper-api.alpaca.markets"
 
 
 class BrokerError(RuntimeError):
-    """A non-2xx response (or other failure) from the Alpaca trading API."""
+    """Any failure talking to the Alpaca trading API — network error, non-2xx status,
+    or a malformed/unexpected response. Callers (the CLI, the future loop) catch this so a
+    broker hiccup never escapes as a raw traceback."""
 
 
 @dataclass(frozen=True)
@@ -37,34 +42,56 @@ class AlpacaPaperBroker:
     def _headers(self) -> dict[str, str]:
         return {"APCA-API-KEY-ID": self.api_key, "APCA-API-SECRET-KEY": self.api_secret}
 
+    def _get(self, path: str) -> requests.Response:
+        try:
+            return requests.get(f"{self.base_url}{path}", headers=self._headers(), timeout=_TIMEOUT)
+        except RequestException as exc:
+            raise BrokerError(f"alpaca GET {path} failed: {exc}") from exc
+
+    def _post(self, path: str, body: dict[str, Any]) -> requests.Response:
+        try:
+            return requests.post(f"{self.base_url}{path}", headers=self._headers(),
+                                 json=body, timeout=_TIMEOUT)
+        except RequestException as exc:
+            raise BrokerError(f"alpaca POST {path} failed: {exc}") from exc
+
+    @staticmethod
+    def _read(resp: requests.Response, path: str, ok: tuple[int, ...] = (200,)) -> Any:
+        if resp.status_code not in ok:
+            raise BrokerError(f"alpaca {resp.status_code} on {path}: {resp.text}")
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise BrokerError(f"alpaca malformed JSON on {path}: {exc}") from exc
+
+    @staticmethod
+    def _num(data: dict[str, Any], key: str, path: str) -> float:
+        try:
+            return float(data[key])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise BrokerError(f"alpaca {path}: bad or missing field {key!r}") from exc
+
     def account(self) -> AccountState:
-        resp = requests.get(
-            f"{self.base_url}/v2/account", headers=self._headers(), timeout=_TIMEOUT
-        )
-        if resp.status_code != 200:
-            raise BrokerError(f"alpaca {resp.status_code}: {resp.text}")
-        data = resp.json()
+        data = self._read(self._get("/v2/account"), "/v2/account")
         return AccountState(
-            equity=float(data["equity"]),
-            cash=float(data["cash"]),
-            buying_power=float(data["buying_power"]),
+            equity=self._num(data, "equity", "/v2/account"),
+            cash=self._num(data, "cash", "/v2/account"),
+            buying_power=self._num(data, "buying_power", "/v2/account"),
         )
 
     def get_positions(self) -> pd.Series:
-        resp = requests.get(f"{self.base_url}/v2/positions", headers=self._headers(),
-                            timeout=_TIMEOUT)
-        if resp.status_code != 200:
-            raise BrokerError(f"alpaca {resp.status_code}: {resp.text}")
-        return pd.Series({row["symbol"]: float(row["qty"]) for row in resp.json()}, dtype="float64")
+        data = self._read(self._get("/v2/positions"), "/v2/positions")
+        return pd.Series(
+            {row["symbol"]: self._num(row, "qty", "/v2/positions") for row in data},
+            dtype="float64",
+        )
 
     def _market_value(self, symbol: str) -> float:
-        resp = requests.get(f"{self.base_url}/v2/positions/{symbol}", headers=self._headers(),
-                            timeout=_TIMEOUT)
+        path = f"/v2/positions/{symbol}"
+        resp = self._get(path)
         if resp.status_code == 404:
-            return 0.0  # no open position
-        if resp.status_code != 200:
-            raise BrokerError(f"alpaca {resp.status_code}: {resp.text}")
-        return float(resp.json()["market_value"])
+            return 0.0  # Alpaca returns 404 when there is no open position
+        return self._num(self._read(resp, path), "market_value", path)
 
     def submit(self, intent: OrderIntent) -> str:
         equity = self.account().equity
@@ -72,13 +99,13 @@ class AlpacaPaperBroker:
         if abs(delta) < _MIN_NOTIONAL:
             return "noop"
         side = "buy" if delta > 0 else "sell"
-        resp = requests.post(
-            f"{self.base_url}/v2/orders",
-            headers=self._headers(),
-            json={"symbol": intent.symbol, "notional": str(round(abs(delta), 2)),
-                  "side": side, "type": "market", "time_in_force": "day"},
-            timeout=_TIMEOUT,
+        notional = format(Decimal(str(abs(delta))).quantize(Decimal("0.01")), "f")
+        data = self._read(
+            self._post("/v2/orders", {"symbol": intent.symbol, "notional": notional,
+                                      "side": side, "type": "market", "time_in_force": "day"}),
+            "/v2/orders", ok=(200, 201),
         )
-        if resp.status_code not in (200, 201):
-            raise BrokerError(f"alpaca {resp.status_code}: {resp.text}")
-        return str(resp.json()["id"])
+        order_id = data.get("id") if isinstance(data, dict) else None
+        if not order_id:
+            raise BrokerError(f"alpaca /v2/orders: response missing 'id': {data}")
+        return str(order_id)

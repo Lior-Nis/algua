@@ -70,7 +70,7 @@ def test_submit_buy_delta_posts_notional(monkeypatch):
     monkeypatch.setattr(ab, "requests", fake)
     oid = _broker().submit(OrderIntent("AAA", Side.BUY, 0.5, T0))
     assert oid == "order-1"
-    assert fake.posted[0] == {"symbol": "AAA", "notional": "50000.0", "side": "buy",
+    assert fake.posted[0] == {"symbol": "AAA", "notional": "50000.00", "side": "buy",
                               "type": "market", "time_in_force": "day"}
 
 
@@ -82,7 +82,7 @@ def test_submit_sell_delta(monkeypatch):
     )
     monkeypatch.setattr(ab, "requests", fake)
     _broker().submit(OrderIntent("AAA", Side.SELL, 0.5, T0))
-    assert fake.posted[0]["side"] == "sell" and fake.posted[0]["notional"] == "10000.0"
+    assert fake.posted[0]["side"] == "sell" and fake.posted[0]["notional"] == "10000.00"
 
 
 def test_submit_noop_below_threshold(monkeypatch):
@@ -100,4 +100,28 @@ def test_non_2xx_raises_broker_error(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests(
         {"/v2/account": _FakeResp(403, text="forbidden")}))
     with pytest.raises(BrokerError):
+        _broker().account()
+
+
+class _RaisingRequests:
+    def get(self, url, headers=None, timeout=None):
+        raise ab.RequestException("connection reset")
+
+
+class _BadJSONResp:
+    status_code = 200
+
+    def json(self):
+        raise ValueError("not json")
+
+
+def test_network_error_wrapped_in_broker_error(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _RaisingRequests())
+    with pytest.raises(BrokerError, match="failed"):
+        _broker().account()
+
+
+def test_malformed_json_wrapped_in_broker_error(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _FakeRequests({"/v2/account": _BadJSONResp()}))
+    with pytest.raises(BrokerError, match="malformed JSON"):
         _broker().account()
