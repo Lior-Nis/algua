@@ -176,7 +176,15 @@ def trade_live(
             kill_switch.trip(conn, name, reason=exc.detail, actor="system")
             audit_append(conn, actor="system", action="kill_switch_trip",
                          reason=f"{exc.kind}: {exc.detail}", strategy=name)
-            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped", "error": exc.detail})
+            flattened = True
+            try:
+                broker.close_all_positions()
+            except BrokerError as fexc:
+                flattened = False
+                audit_append(conn, actor="system", action="flatten_failed",
+                             reason=str(fexc), strategy=name)
+            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped",
+                  "flattened": flattened, "error": exc.detail})
             raise typer.Exit(1) from exc
         now = datetime.now(UTC).isoformat()
         decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
@@ -199,3 +207,29 @@ def trade_live(
         "positions_before": result.positions_before,
         "submitted": result.submitted,
     })
+
+
+@paper_app.command("flatten")
+@json_errors(ValueError, LookupError, BrokerError)
+def flatten(
+    name: str,
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+) -> None:
+    """Emergency: close ALL live positions for a strategy and trip its kill-switch (halt)."""
+    load_strategy(name)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = store.get_strategy(conn, name)
+        if rec.stage is not Stage.PAPER:
+            raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
+        broker = _alpaca_broker_from_settings()
+        # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
+        kill_switch.trip(conn, name, reason="flatten", actor=actor)
+        audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
+        try:
+            broker.close_all_positions()
+        except BrokerError as exc:
+            emit({"ok": False, "strategy": name, "kill_switch": "tripped",
+                  "flattened": False, "error": str(exc)})
+            raise typer.Exit(1) from exc
+    emit({"strategy": name, "kill_switch": "tripped", "flattened": True})

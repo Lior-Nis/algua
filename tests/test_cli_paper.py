@@ -5,7 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
-from algua.execution.alpaca_broker import AccountState
+from algua.execution.alpaca_broker import AccountState, BrokerError
 from algua.live.live_loop import TickResult
 from algua.risk.limits import RiskBreach
 
@@ -151,3 +151,50 @@ def test_trade_live_submits_and_persists(monkeypatch):
     assert payload["submitted"][0]["order_id"] == "o-1"
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["n_orders"] == 1
+
+
+class _FlattenBroker:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.flattened = False
+
+    def close_all_positions(self):
+        if self.fail:
+            raise BrokerError("alpaca failed to close some positions: [...]")
+        self.flattened = True
+
+
+def test_paper_flatten_closes_and_trips(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FlattenBroker)
+    result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["flattened"] is True and payload["kill_switch"] == "tripped"
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["kill_switch"]["tripped"] is True
+
+
+def test_paper_flatten_rejects_non_paper_stage(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    runner.invoke(app, ["registry", "add", "cross_sectional_momentum"])  # idea
+    result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_paper_flatten_close_failure_stays_tripped(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FlattenBroker(fail=True))
+    result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False and payload["kill_switch"] == "tripped"
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["kill_switch"]["tripped"] is True
