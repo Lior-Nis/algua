@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -66,6 +66,11 @@ CREATE TABLE IF NOT EXISTS kill_switches (
     reason TEXT,
     actor TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strategy_peaks (
+    strategy TEXT PRIMARY KEY,
+    peak_equity REAL NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 

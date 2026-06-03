@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import UTC, datetime
 
 import pandas as pd
 
 from algua.live.paper_loop import PaperRunResult
+
+# Alpaca client_order_id allows up to 128 chars; keep ours under that and strip anything outside
+# [A-Za-z0-9_-] so a symbol or strategy name with odd characters can't produce an invalid id.
+_COID_SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def client_order_id(strategy: str, decision_ts: datetime, symbol: str) -> str:
+    """Deterministic Alpaca client_order_id for one (strategy, decision_ts, symbol). Identical
+    inputs always produce the same id, so a retried submit (after a transient failure) or a re-run
+    of the same tick reuses the id and Alpaca de-duplicates rather than double-filling (#18, #24).
+    The decision timestamp is normalised to UTC so the id does not depend on the caller's tzinfo."""
+    ts = decision_ts.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    raw = f"{strategy}-{ts}-{symbol}"
+    return _COID_SANITIZE.sub("_", raw)[:128]
 
 
 def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
@@ -67,3 +82,43 @@ def derive_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float
 def reconcile(derived: dict[str, float], broker_positions: pd.Series) -> bool:
     broker = {s: float(q) for s, q in broker_positions.items() if float(q) != 0.0}
     return {s: q for s, q in derived.items() if q != 0.0} == broker
+
+
+def record_submitted_order(
+    conn: sqlite3.Connection, strategy: str, symbol: str, side: str,
+    target_weight: float, decision_ts: str | None, broker_order_id: str,
+) -> None:
+    """Persist ONE accepted live order IMMEDIATELY after the broker accepts it, so a mid-tick death
+    can never leave Alpaca holding an order the DB never recorded (#18). Each row commits on its own
+    rather than being batched after the whole loop."""
+    conn.execute(
+        "INSERT INTO paper_orders"
+        "(strategy, symbol, side, target_weight, decision_ts, submitted_ts,"
+        " status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
+        (strategy, symbol, side, target_weight, decision_ts,
+         datetime.now(UTC).isoformat(), "submitted", broker_order_id),
+    )
+    conn.commit()
+
+
+def get_peak_equity(conn: sqlite3.Connection, strategy: str) -> float | None:
+    row = conn.execute(
+        "SELECT peak_equity FROM strategy_peaks WHERE strategy = ?", (strategy,)
+    ).fetchone()
+    return float(row["peak_equity"]) if row is not None else None
+
+
+def update_peak_equity(conn: sqlite3.Connection, strategy: str, equity: float) -> float:
+    """Persist the running peak equity for a strategy (the drawdown denominator across ticks) and
+    return the new peak. The peak only ever ratchets up; a tick's equity below it is a drawdown the
+    breaker can act on (#27)."""
+    prior = get_peak_equity(conn, strategy)
+    peak = equity if prior is None else max(prior, equity)
+    conn.execute(
+        "INSERT INTO strategy_peaks(strategy, peak_equity, updated_at) VALUES (?,?,?) "
+        "ON CONFLICT(strategy) DO UPDATE SET peak_equity=excluded.peak_equity, "
+        "updated_at=excluded.updated_at",
+        (strategy, peak, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+    return peak

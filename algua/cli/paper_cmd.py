@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import closing
-from datetime import UTC, datetime
 
 import typer
 
@@ -13,9 +12,16 @@ from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
-from algua.execution.order_state import derive_positions, persist_run
+from algua.execution.order_state import (
+    client_order_id,
+    derive_positions,
+    get_peak_equity,
+    persist_run,
+    record_submitted_order,
+    update_peak_equity,
+)
 from algua.execution.sim_broker import SimBroker
-from algua.live.live_loop import run_tick
+from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry import store
 from algua.registry.db import connect, migrate
@@ -47,12 +53,14 @@ def run(
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="paper-run an ingested bars snapshot"),  # noqa: B008
     cash: float = typer.Option(100_000.0, "--cash", help="starting paper cash"),
-    max_drawdown: float = typer.Option(1.0, "--max-drawdown",
-                                       help="trip the kill-switch if equity falls this fraction below peak (1.0 = off)"),  # noqa: E501
+    max_drawdown: float = typer.Option(None, "--max-drawdown",
+                                       help="trip the kill-switch if equity falls this fraction below peak (omit to disable)"),  # noqa: E501,B008
 ) -> None:
     """Replay a paper-stage strategy through the sim broker and persist orders/fills."""
     if cash <= 0:
         raise ValueError("--cash must be > 0")
+    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
+        raise ValueError("--max-drawdown must be in (0, 1]")
     strategy = load_strategy(name)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
@@ -149,29 +157,58 @@ def account() -> None:
     emit({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power})
 
 
-@paper_app.command("trade-live")
+@paper_app.command("trade-tick")
 @json_errors(ValueError, LookupError, BrokerError)
-def trade_live(
+def trade_tick(
     name: str,
     snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
+    max_drawdown: float = typer.Option(None, "--max-drawdown",
+                                       help="halt + flatten if equity falls this fraction below the persisted peak (omit to disable)"),  # noqa: E501,B008
 ) -> None:
-    """Run ONE wall-clock tick: submit Alpaca market-order deltas toward the strategy's target."""
+    """Run ONE wall-clock tick against the PAPER venue: submit Alpaca market-order deltas toward
+    the strategy's target. Each accepted order persists immediately; a drawdown/exposure/reconcile
+    breach trips the kill-switch and flattens. Never trades live (the broker refuses a live URL)."""
+    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
+        raise ValueError("--max-drawdown must be in (0, 1]")
     strategy = load_strategy(name)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         rec = store.get_strategy(conn, name)
         if rec.stage is not Stage.PAPER:
-            raise ValueError(f"{name} is at stage '{rec.stage.value}'; trade-live requires 'paper'")
+            raise ValueError(f"{name} is at stage '{rec.stage.value}'; trade-tick requires 'paper'")
         if kill_switch.is_tripped(conn, name):
             raise ValueError(
                 f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'"
             )
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
+
+        def _persist(record: SubmittedOrder) -> None:
+            # Persist each accepted order immediately so a mid-loop death can't lose it (#18).
+            record_submitted_order(conn, name, record.symbol, record.side, record.target_weight,
+                                   record.decision_ts.isoformat(), record.order_id)
+
+        hooks = TickHooks(
+            client_order_id_for=client_order_id,
+            on_submitted=_persist,
+            # Re-read the switch from the DB right before submit so an externally-tripped switch
+            # aborts before any order goes out (#21).
+            should_halt=lambda: kill_switch.is_tripped(conn, name),
+            peak_equity=get_peak_equity(conn, name),
+            derived_positions=derive_positions(conn, name),
+        )
         try:
-            result = run_tick(strategy, broker, provider, _utc(start), _utc(end))
+            result = run_tick(strategy, broker, provider, _utc(start), _utc(end),
+                              hooks=hooks, max_drawdown=max_drawdown)
+        except TickHalted as exc:
+            # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
+            audit_append(conn, actor="system", action="trade_tick_halted",
+                         reason=str(exc), strategy=name)
+            emit({"ok": False, "strategy": name, "kill_switch": "tripped", "halted": True,
+                  "error": str(exc)})
+            raise typer.Exit(1) from exc
         except RiskBreach as exc:
             kill_switch.trip(conn, name, reason=exc.detail, actor="system")
             audit_append(conn, actor="system", action="kill_switch_trip",
@@ -192,18 +229,9 @@ def trade_live(
                 payload["flatten_error"] = flatten_error
             emit(payload)
             raise typer.Exit(1) from exc
-        now = datetime.now(UTC).isoformat()
-        decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
-        for o in result.submitted:
-            conn.execute(
-                "INSERT INTO paper_orders"
-                "(strategy, symbol, side, target_weight, decision_ts, submitted_ts,"
-                " status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
-                (name, o["symbol"], o["side"], o["target_weight"],
-                 decision_ts_str, now, "submitted", o["order_id"]),
-            )
-        conn.commit()
-        audit_append(conn, actor="agent", action="trade_live",
+        if result.peak_equity is not None:
+            update_peak_equity(conn, name, result.peak_equity)
+        audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)
 
     emit({
@@ -212,6 +240,8 @@ def trade_live(
         "target_weights": result.target_weights,
         "positions_before": result.positions_before,
         "submitted": result.submitted,
+        "reconcile_ok": result.reconcile_ok,
+        "realized_gross": result.realized_gross,
     })
 
 
