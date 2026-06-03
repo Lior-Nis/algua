@@ -24,6 +24,16 @@ def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
         )
 
 
+def check_long_only(weights: pd.Series, strategy_name: str) -> None:
+    if len(weights) and bool((weights < 0).any()):
+        negative = sorted(weights[weights < 0].index)
+        raise RiskBreach(
+            "long_only",
+            f"long-only: strategy '{strategy_name}' returned negative target weight(s) "
+            f"for {negative}",
+        )
+
+
 def check_drawdown(equity: float, peak: float, max_drawdown: float) -> None:
     if max_drawdown >= 1.0 or peak <= 0:
         return  # disabled, or no peak yet

@@ -31,3 +31,13 @@ def test_drawdown_over_limit_raises():
     with pytest.raises(RiskBreach) as ei:
         check_drawdown(equity=80.0, peak=100.0, max_drawdown=0.1)  # 20% > 10%
     assert ei.value.kind == "drawdown"
+
+
+def test_check_long_only_passes_and_raises():
+    from algua.risk.limits import check_long_only
+
+    check_long_only(pd.Series({"AAA": 0.6, "BBB": 0.4}), "s")  # ok
+    check_long_only(pd.Series(dtype="float64"), "s")           # empty ok
+    with pytest.raises(RiskBreach) as ei:
+        check_long_only(pd.Series({"AAA": -0.5}), "s")
+    assert ei.value.kind == "long_only"
