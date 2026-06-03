@@ -4,6 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.execution.alpaca_broker import AccountState
 from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
@@ -82,3 +83,24 @@ def test_kill_rejects_unknown_strategy():
     result = runner.invoke(app, ["paper", "kill", "no_such_strategy", "--reason", "x"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_paper_account_missing_creds_errors(monkeypatch):
+    monkeypatch.delenv("ALGUA_ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALGUA_ALPACA_API_SECRET", raising=False)
+    result = runner.invoke(app, ["paper", "account"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_paper_account_emits_balances(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=100000.0, cash=50000.0, buying_power=150000.0),
+    )
+    result = runner.invoke(app, ["paper", "account"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["equity"] == 100000.0 and payload["cash"] == 50000.0
