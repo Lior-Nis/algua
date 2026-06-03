@@ -10,6 +10,12 @@ from algua.risk.limits import check_gross_exposure, check_long_only
 from algua.strategies.base import LoadedStrategy
 
 
+def _positions(broker: AlpacaPaperBroker) -> dict[str, float]:
+    """Current broker positions as {symbol: qty} — used only on early-return paths (no decision),
+    where no sizing snapshot is taken."""
+    return {s: float(q) for s, q in broker.get_positions().items()}
+
+
 @dataclass
 class TickResult:
     decision_ts: datetime | None
@@ -32,7 +38,6 @@ def run_tick(
     testability)."""
     now = now or datetime.now(UTC)
     bars = provider.get_bars(strategy.universe, start, end, timeframe).sort_index()
-    positions_before = {s: float(q) for s, q in broker.get_positions().items()}
     if not bars.empty:
         # Only decide on fully-closed sessions: drop any bar dated on/after today so a partial
         # current-session bar can't drive the decision. (B2b's scheduler can use the exchange
@@ -40,24 +45,31 @@ def run_tick(
         cutoff = now.date()
         bars = bars[[ts.date() < cutoff for ts in bars.index]]
     if bars.empty:
-        return TickResult(None, {}, positions_before, [])
+        return TickResult(None, {}, _positions(broker), [])
 
     t = bars.index.max()
     if bars.index.nunique() < strategy.execution.warmup_bars:
-        return TickResult(t, {}, positions_before, [])  # warm-up not met
+        return TickResult(t, {}, _positions(broker), [])  # warm-up not met
 
     weights = strategy.target_weights(bars.loc[:t])
     check_long_only(weights, strategy.name)
     check_gross_exposure(weights, strategy.execution.max_gross_exposure)
 
     broker.cancel_open_orders()
+    # Snapshot equity + positions ONCE (1 account GET + 1 positions GET); reuse it as the fixed
+    # sizing denominator for every symbol so it can't drift mid-tick as earlier orders fill (#20).
+    # The snapshot is scoped to the strategy universe and folds in any held names so a dropped
+    # position can still be exited; symbols outside both are rejected by submit_sized (#29).
+    snap = broker.snapshot(strategy.universe)
+    positions_before = {s: q for s, q in snap.qtys.items() if q != 0.0}
+    symbols = sorted(set(weights.index) | set(snap.qtys))
     submitted: list[dict[str, Any]] = []
-    symbols = sorted(set(weights.index) | set(broker.get_positions().index))
     for sym in symbols:
         target = float(weights.get(sym, 0.0))
         side = Side.BUY if target > 0 else Side.SELL
-        order_id = broker.submit(OrderIntent(symbol=sym, side=side, target_weight=target,
-                                             decision_ts=t))
+        order_id = broker.submit_sized(
+            OrderIntent(symbol=sym, side=side, target_weight=target, decision_ts=t), snap
+        )
         if order_id != "noop":
             submitted.append({"symbol": sym, "side": side.value,
                               "target_weight": target, "order_id": order_id})

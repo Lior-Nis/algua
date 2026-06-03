@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from algua.contracts.types import ExecutionContract
+from algua.execution.alpaca_broker import BrokerError, TickSnapshot
 from algua.live.live_loop import run_tick
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
@@ -29,10 +30,12 @@ class _FakeProvider:
 
 
 class _FakeBroker:
-    def __init__(self, positions=None):
+    def __init__(self, positions=None, equity=100_000.0):
         self._positions = pd.Series(positions or {}, dtype="float64")
+        self._equity = equity
         self.submitted = []
         self.cancels = 0
+        self.snapshots = 0
 
     def get_positions(self):
         return self._positions
@@ -40,7 +43,16 @@ class _FakeBroker:
     def cancel_open_orders(self):
         self.cancels += 1
 
-    def submit(self, intent):
+    def snapshot(self, universe):
+        self.snapshots += 1
+        syms = set(universe) | set(self._positions.index)
+        qtys = {s: float(self._positions.get(s, 0.0)) for s in syms}
+        # market value priced at $1/share for simplicity (qty == market value)
+        return TickSnapshot(equity=self._equity, market_values=dict(qtys), qtys=qtys)
+
+    def submit_sized(self, intent, snap):
+        if intent.symbol not in snap.qtys:
+            raise BrokerError(f"{intent.symbol} not in universe")
         self.submitted.append(intent)
         return f"order-{len(self.submitted)}"
 
@@ -59,6 +71,7 @@ def test_run_tick_submits_target_and_cancels_first():
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
     assert broker.cancels == 1
+    assert broker.snapshots == 1  # #20: ONE snapshot per tick, not per symbol
     assert len(result.submitted) == 1 and result.submitted[0]["symbol"] == "AAA"
     assert result.submitted[0]["order_id"] == "order-1"
     assert result.decision_ts == DATES[-1]
