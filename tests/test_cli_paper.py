@@ -86,8 +86,10 @@ def test_kill_rejects_unknown_strategy():
 
 
 def test_paper_account_missing_creds_errors(monkeypatch):
-    monkeypatch.delenv("ALGUA_ALPACA_API_KEY", raising=False)
-    monkeypatch.delenv("ALGUA_ALPACA_API_SECRET", raising=False)
+    # Empty env vars override any local .env (env > .env in pydantic-settings) so this stays
+    # hermetic even on a developer machine that has real Alpaca keys in .env.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "")
     result = runner.invoke(app, ["paper", "account"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
