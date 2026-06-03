@@ -2,6 +2,14 @@ from algua.audit.log import append, read
 from algua.registry.db import connect, migrate
 
 
+def _setup(tmp_path, n: int = 5) -> object:
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    for i in range(n):
+        append(conn, actor="agent", action=f"action_{i}", strategy="s" if i % 2 == 0 else "t")
+    return conn
+
+
 def test_append_and_read_roundtrip(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
@@ -11,3 +19,52 @@ def test_append_and_read_roundtrip(tmp_path):
     assert rows[0]["actor"] == "agent"
     assert rows[0]["action"] == "paper_run"
     assert rows[0]["strategy"] == "s"
+
+
+def test_read_default_most_recent_first(tmp_path):
+    """Default ordering is most-recent-first (DESC by id)."""
+    conn = _setup(tmp_path, n=3)
+    rows = read(conn)
+    ids = [r["id"] for r in rows]
+    assert ids == sorted(ids, reverse=True), "Default order should be most-recent-first"
+
+
+def test_read_limit(tmp_path):
+    """limit= caps the number of returned rows."""
+    conn = _setup(tmp_path, n=5)
+    rows = read(conn, limit=3)
+    assert len(rows) == 3
+
+
+def test_read_limit_offset(tmp_path):
+    """limit + offset together page through the result set."""
+    conn = _setup(tmp_path, n=5)
+    all_rows = read(conn)  # all 5, most-recent-first
+    page1 = read(conn, limit=2, offset=0)
+    page2 = read(conn, limit=2, offset=2)
+    assert page1[0]["id"] == all_rows[0]["id"]
+    assert page2[0]["id"] == all_rows[2]["id"]
+    assert len(page1) == 2
+    assert len(page2) == 2
+
+
+def test_read_strategy_filter_with_limit(tmp_path):
+    """strategy= filter is compatible with limit/offset."""
+    conn = _setup(tmp_path, n=6)  # 3 rows for 's', 3 for 't'
+    rows = read(conn, strategy="s", limit=2)
+    assert len(rows) == 2
+    assert all(r["strategy"] == "s" for r in rows)
+
+
+def test_read_limit_larger_than_table(tmp_path):
+    """limit larger than total rows returns all rows without error."""
+    conn = _setup(tmp_path, n=3)
+    rows = read(conn, limit=100)
+    assert len(rows) == 3
+
+
+def test_read_no_limit_returns_all(tmp_path):
+    """Passing limit=None (default) returns every row."""
+    conn = _setup(tmp_path, n=4)
+    rows = read(conn)
+    assert len(rows) == 4

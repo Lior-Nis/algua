@@ -15,9 +15,30 @@ def append(
     conn.commit()
 
 
-def read(conn: sqlite3.Connection, *, strategy: str | None = None) -> list[sqlite3.Row]:
-    if strategy is None:
-        return conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
-    return conn.execute(
-        "SELECT * FROM audit_log WHERE strategy = ? ORDER BY id", (strategy,)
-    ).fetchall()
+def read(
+    conn: sqlite3.Connection,
+    *,
+    strategy: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[sqlite3.Row]:
+    """Return audit rows, most-recent-first.
+
+    Args:
+        conn: open SQLite connection.
+        strategy: when given, filter to rows for that strategy only.
+        limit: maximum rows to return.  ``None`` (default) returns all rows.
+        offset: number of rows to skip before returning results; used for
+            pagination together with *limit*.
+    """
+    where = "WHERE strategy = ?" if strategy is not None else ""
+    params: list[object] = [strategy] if strategy is not None else []
+    query = f"SELECT * FROM audit_log {where} ORDER BY id DESC"
+    if limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        params += [limit, offset]
+    elif offset:
+        # offset without limit requires SQLite's -1 sentinel for unlimited
+        query += " LIMIT -1 OFFSET ?"
+        params.append(offset)
+    return conn.execute(query, params).fetchall()
