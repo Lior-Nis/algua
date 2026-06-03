@@ -8,7 +8,7 @@ import pandas as pd
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.sim_broker import Fill, SimBroker
-from algua.risk.limits import RiskBreach, check_drawdown, check_gross_exposure
+from algua.risk.limits import check_drawdown, check_gross_exposure, check_long_only
 from algua.strategies.base import LoadedStrategy
 
 _EPS = 1e-6
@@ -81,13 +81,7 @@ def run_paper(
             continue  # warm-up: observe only — no signal evaluation, validation, or orders
         view = bars.loc[:t]
         weights = strategy.target_weights(view)
-        if len(weights) and bool((weights < 0).any()):
-            negative = sorted(weights[weights < 0].index)
-            raise RiskBreach(
-                "long_only",
-                f"long-only: strategy '{strategy.name}' returned negative target weight(s) "
-                f"for {negative} at {t}",
-            )
+        check_long_only(weights, strategy.name)
         check_gross_exposure(weights, max_gross)
         for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
             broker.submit(intent)

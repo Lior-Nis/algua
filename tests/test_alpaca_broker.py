@@ -125,3 +125,35 @@ def test_malformed_json_wrapped_in_broker_error(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests({"/v2/account": _BadJSONResp()}))
     with pytest.raises(BrokerError, match="malformed JSON"):
         _broker().account()
+
+
+class _FakeRequestsWithDelete(_FakeRequests):
+    def __init__(self, delete_resp):
+        super().__init__({})
+        self._delete_resp = delete_resp
+        self.deleted = []
+
+    def delete(self, url, headers=None, timeout=None):
+        self.deleted.append(url)
+        return self._delete_resp
+
+
+def test_cancel_open_orders_ok(monkeypatch):
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"id": "a", "status": 200}]))
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().cancel_open_orders()
+    assert fake.deleted == ["https://paper-api.alpaca.markets/v2/orders"]
+
+
+def test_cancel_open_orders_non_2xx_raises(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _FakeRequestsWithDelete(_FakeResp(500, text="boom")))
+    with pytest.raises(BrokerError):
+        _broker().cancel_open_orders()
+
+
+def test_cancel_open_orders_partial_failure_raises(monkeypatch):
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"id": "a", "status": 200},
+                                                   {"id": "b", "status": 500}]))
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError):
+        _broker().cancel_open_orders()

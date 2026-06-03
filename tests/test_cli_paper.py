@@ -1,10 +1,12 @@
 import json
+from datetime import UTC, datetime
 
 import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.execution.alpaca_broker import AccountState
+from algua.live.live_loop import TickResult
 from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
@@ -86,8 +88,10 @@ def test_kill_rejects_unknown_strategy():
 
 
 def test_paper_account_missing_creds_errors(monkeypatch):
-    monkeypatch.delenv("ALGUA_ALPACA_API_KEY", raising=False)
-    monkeypatch.delenv("ALGUA_ALPACA_API_SECRET", raising=False)
+    # Empty env vars override any local .env (env > .env in pydantic-settings) so this stays
+    # hermetic even on a developer machine that has real Alpaca keys in .env.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "")
     result = runner.invoke(app, ["paper", "account"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
@@ -104,3 +108,46 @@ def test_paper_account_emits_balances(monkeypatch):
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["equity"] == 100000.0 and payload["cash"] == 50000.0
+
+
+def test_trade_live_rejects_non_paper_stage(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    runner.invoke(app, ["registry", "add", "cross_sectional_momentum"])  # stage = idea
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_trade_live_refused_when_killed(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    runner.invoke(app, ["paper", "kill", "cross_sectional_momentum", "--reason", "x"])
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_trade_live_submits_and_persists(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    ts = datetime(2023, 6, 1, tzinfo=UTC)
+    fake_result = TickResult(
+        decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
+        submitted=[{"symbol": "AAA", "side": "buy", "target_weight": 1.0, "order_id": "o-1"}],
+    )
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: object())
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda strategy, broker, provider, start, end: fake_result)
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["submitted"][0]["order_id"] == "o-1"
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["n_orders"] == 1

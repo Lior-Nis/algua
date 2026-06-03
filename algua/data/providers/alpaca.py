@@ -8,6 +8,14 @@ import requests
 from algua.data.contracts import BarProvider, BarRequest, ProviderBars
 
 
+def _alpaca_timeframe(timeframe: str) -> str:
+    """Map algua's canonical timeframe to Alpaca's bars-API format (e.g. '1d' -> '1Day').
+
+    Alpaca rejects '1d' with HTTP 400 'invalid timeframe'; its daily timeframe is '1Day'.
+    Unknown values pass through (Alpaca will reject anything it doesn't recognise)."""
+    return {"1d": "1Day", "1day": "1Day"}.get(timeframe.lower(), timeframe)
+
+
 class AlpacaBarProvider(BarProvider):
     name = "alpaca"
 
@@ -51,7 +59,7 @@ class AlpacaBarProvider(BarProvider):
             },
             params={
                 "symbols": ",".join(request.symbols),
-                "timeframe": request.timeframe,
+                "timeframe": _alpaca_timeframe(request.timeframe),
                 "start": request.start,
                 "end": request.end,
                 "adjustment": adjustment,

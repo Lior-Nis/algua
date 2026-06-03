@@ -137,3 +137,11 @@ def test_alpaca_provider_merges_raw_close_with_adjusted_close(monkeypatch):
         }
     ]
     assert bars.source_metadata["adjustment"] == "raw+all"
+
+
+def test_alpaca_timeframe_maps_1d_to_alpaca_format():
+    from algua.data.providers.alpaca import _alpaca_timeframe
+
+    assert _alpaca_timeframe("1d") == "1Day"
+    assert _alpaca_timeframe("1Day") == "1Day"
+    assert _alpaca_timeframe("1Min") == "1Min"  # unknown-to-us passes through
