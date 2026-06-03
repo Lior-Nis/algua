@@ -32,3 +32,9 @@ def test_mlflow_tracking_uri_default_and_override(monkeypatch):
     assert get_settings().mlflow_tracking_uri == "mlruns"
     monkeypatch.setenv("ALGUA_MLFLOW_TRACKING_URI", "/tmp/x/mlruns")
     assert get_settings().mlflow_tracking_uri == "/tmp/x/mlruns"
+
+
+def test_alpaca_paper_url_default():
+    from algua.config.settings import get_settings
+
+    assert get_settings().alpaca_paper_url == "https://paper-api.alpaca.markets"
