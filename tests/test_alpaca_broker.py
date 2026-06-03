@@ -157,3 +157,54 @@ def test_cancel_open_orders_partial_failure_raises(monkeypatch):
     monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError):
         _broker().cancel_open_orders()
+
+
+def test_cancel_open_orders_non_dict_item_raises(monkeypatch):
+    # a malformed (non-dict) 207 item must not pass silently
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"id": "a", "status": 200}, "oops"]))
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError):
+        _broker().cancel_open_orders()
+
+
+class _FakeDeleteRouter(_FakeRequests):
+    """DELETE returns a per-symbol status keyed off the URL's trailing path segment."""
+
+    def __init__(self, status_by_symbol):
+        super().__init__({})
+        self.status_by_symbol = status_by_symbol
+        self.deleted = []
+
+    def delete(self, url, headers=None, timeout=None):
+        self.deleted.append(url)
+        symbol = url.rsplit("/", 1)[-1]
+        status = self.status_by_symbol.get(symbol, 200)
+        return _FakeResp(status, {"id": "o", "symbol": symbol}, text="err")
+
+
+def test_close_positions_ok_is_scoped_per_symbol(monkeypatch):
+    fake = _FakeDeleteRouter({"AAA": 200, "BBB": 200})
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().close_positions(["AAA", "BBB"])
+    assert fake.deleted == ["https://paper-api.alpaca.markets/v2/positions/AAA",
+                            "https://paper-api.alpaca.markets/v2/positions/BBB"]
+
+
+def test_close_positions_empty_is_noop(monkeypatch):
+    fake = _FakeDeleteRouter({})
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().close_positions([])  # no symbols -> no DELETE calls, no error
+    assert fake.deleted == []
+
+
+def test_close_positions_skips_404_no_position(monkeypatch):
+    fake = _FakeDeleteRouter({"AAA": 404})  # no open position -> skip, no raise
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().close_positions(["AAA"])
+
+
+def test_close_positions_failure_raises(monkeypatch):
+    fake = _FakeDeleteRouter({"AAA": 200, "BBB": 500})
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError):
+        _broker().close_positions(["AAA", "BBB"])

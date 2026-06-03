@@ -176,7 +176,21 @@ def trade_live(
             kill_switch.trip(conn, name, reason=exc.detail, actor="system")
             audit_append(conn, actor="system", action="kill_switch_trip",
                          reason=f"{exc.kind}: {exc.detail}", strategy=name)
-            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped", "error": exc.detail})
+            liquidation_submitted = True
+            flatten_error = None
+            try:
+                broker.cancel_open_orders()
+                broker.close_positions(strategy.universe)
+            except BrokerError as fexc:
+                liquidation_submitted = False
+                flatten_error = str(fexc)
+                audit_append(conn, actor="system", action="flatten_failed",
+                             reason=str(fexc), strategy=name)
+            payload = {"ok": False, "kind": exc.kind, "kill_switch": "tripped",
+                       "liquidation_submitted": liquidation_submitted, "error": exc.detail}
+            if flatten_error is not None:
+                payload["flatten_error"] = flatten_error
+            emit(payload)
             raise typer.Exit(1) from exc
         now = datetime.now(UTC).isoformat()
         decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
@@ -199,3 +213,31 @@ def trade_live(
         "positions_before": result.positions_before,
         "submitted": result.submitted,
     })
+
+
+@paper_app.command("flatten")
+@json_errors(ValueError, LookupError, BrokerError)
+def flatten(
+    name: str,
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+) -> None:
+    """Emergency: close this strategy's live positions (its universe) and trip its kill-switch."""
+    strategy = load_strategy(name)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = store.get_strategy(conn, name)
+        if rec.stage is not Stage.PAPER:
+            raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
+        broker = _alpaca_broker_from_settings()
+        # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
+        kill_switch.trip(conn, name, reason="flatten", actor=actor)
+        audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
+        try:
+            broker.cancel_open_orders()
+            broker.close_positions(strategy.universe)
+        except BrokerError as exc:
+            emit({"ok": False, "strategy": name, "kill_switch": "tripped",
+                  "liquidation_submitted": False, "error": str(exc)})
+            raise typer.Exit(1) from exc
+    # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
+    emit({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True})

@@ -15,6 +15,15 @@ _MIN_NOTIONAL = 1.0
 _DEFAULT_BASE_URL = "https://paper-api.alpaca.markets"
 
 
+def _multistatus_failures(results: list[Any]) -> list[Any]:
+    """Per-item failures in an Alpaca 207 multi-status list. A non-dict item or a non-2xx
+    `status` counts as a failure (a malformed item must not pass silently)."""
+    return [
+        r for r in results
+        if not isinstance(r, dict) or int(r.get("status", 500)) not in (200, 204)
+    ]
+
+
 class BrokerError(RuntimeError):
     """Any failure talking to the Alpaca trading API — network error, non-2xx status,
     or a malformed/unexpected response. Callers (the CLI, the future loop) catch this so a
@@ -98,10 +107,21 @@ class AlpacaPaperBroker:
         per-order result list; raise if ANY individual cancel failed, otherwise a stale order
         could survive and the next submit would over-order."""
         results = self._read(self._delete("/v2/orders"), "/v2/orders", ok=(200, 207))
-        if isinstance(results, list):
-            failed = [r for r in results if int(r.get("status", 500)) not in (200, 204)]
-            if failed:
-                raise BrokerError(f"alpaca failed to cancel some orders: {failed}")
+        if isinstance(results, list) and _multistatus_failures(results):
+            raise BrokerError(f"alpaca failed to cancel some orders: {results}")
+
+    def close_positions(self, symbols: list[str]) -> None:
+        """Liquidate the given symbols' positions — one DELETE /v2/positions/{symbol} each, so a
+        flatten is SCOPED to a single strategy's universe rather than nuking the whole account
+        (DELETE /v2/positions is reserved for a future global halt). 404 (no open position) is a
+        no-op; any other non-2xx raises BrokerError. Submits liquidating market orders (async
+        fills). Idempotent: re-running on a flat book is a series of 404 no-ops."""
+        for symbol in symbols:
+            path = f"/v2/positions/{symbol}"
+            resp = self._delete(path)
+            if resp.status_code == 404:
+                continue  # no open position for this symbol -> nothing to close
+            self._read(resp, path, ok=(200,))
 
     def _market_value(self, symbol: str) -> float:
         path = f"/v2/positions/{symbol}"
