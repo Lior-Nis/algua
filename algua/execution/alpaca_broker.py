@@ -103,6 +103,18 @@ class AlpacaPaperBroker:
             if failed:
                 raise BrokerError(f"alpaca failed to cancel some orders: {failed}")
 
+    def close_all_positions(self) -> None:
+        """Liquidate ALL positions and cancel open orders (DELETE /v2/positions?cancel_orders=true).
+        Alpaca returns 207 multi-status with a per-position result list; raise if ANY close failed.
+        Idempotent: no open positions -> empty list -> no-op."""
+        results = self._read(
+            self._delete("/v2/positions?cancel_orders=true"), "/v2/positions", ok=(200, 207)
+        )
+        if isinstance(results, list):
+            failed = [r for r in results if int(r.get("status", 500)) not in (200, 204)]
+            if failed:
+                raise BrokerError(f"alpaca failed to close some positions: {failed}")
+
     def _market_value(self, symbol: str) -> float:
         path = f"/v2/positions/{symbol}"
         resp = self._get(path)
