@@ -11,6 +11,7 @@ from algua.cli.backtest_cmd import _select_provider, _utc
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
+from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import derive_positions, persist_run
 from algua.execution.sim_broker import SimBroker
 from algua.live.paper_loop import run_paper
@@ -22,6 +23,17 @@ from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
 app.add_typer(paper_app, name="paper")
+
+
+def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
+    s = get_settings()
+    if not s.alpaca_api_key or not s.alpaca_api_secret:
+        raise ValueError(
+            "Alpaca paper credentials not configured; set ALGUA_ALPACA_API_KEY "
+            "and ALGUA_ALPACA_API_SECRET"
+        )
+    return AlpacaPaperBroker(api_key=s.alpaca_api_key, api_secret=s.alpaca_api_secret,
+                             base_url=s.alpaca_paper_url)
 
 
 @paper_app.command("run")
@@ -124,3 +136,12 @@ def resume(name: str) -> None:
                          reason="manual resume", strategy=name)
             kill_switch.reset(conn, name)
     emit({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"})
+
+
+@paper_app.command("account")
+@json_errors(ValueError, BrokerError)
+def account() -> None:
+    """Show the Alpaca paper account (equity/cash/buying-power) — a connectivity smoke."""
+    broker = _alpaca_broker_from_settings()
+    acct = broker.account()
+    emit({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power})
