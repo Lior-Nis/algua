@@ -55,6 +55,13 @@ class AlpacaPaperBroker:
         except RequestException as exc:
             raise BrokerError(f"alpaca POST {path} failed: {exc}") from exc
 
+    def _delete(self, path: str) -> requests.Response:
+        try:
+            return requests.delete(f"{self.base_url}{path}", headers=self._headers(),
+                                   timeout=_TIMEOUT)
+        except RequestException as exc:
+            raise BrokerError(f"alpaca DELETE {path} failed: {exc}") from exc
+
     @staticmethod
     def _read(resp: requests.Response, path: str, ok: tuple[int, ...] = (200,)) -> Any:
         if resp.status_code not in ok:
@@ -85,6 +92,13 @@ class AlpacaPaperBroker:
             {row["symbol"]: self._num(row, "qty", "/v2/positions") for row in data},
             dtype="float64",
         )
+
+    def cancel_open_orders(self) -> None:
+        """Cancel all open orders (DELETE /v2/orders). Alpaca returns 207 multi-status with
+        per-order results; we only require an overall-success status."""
+        resp = self._delete("/v2/orders")
+        if resp.status_code not in (200, 207):
+            raise BrokerError(f"alpaca {resp.status_code} on /v2/orders: {resp.text}")
 
     def _market_value(self, symbol: str) -> float:
         path = f"/v2/positions/{symbol}"
