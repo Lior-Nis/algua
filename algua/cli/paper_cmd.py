@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from datetime import UTC, datetime
 
 import typer
 
@@ -14,6 +15,7 @@ from algua.contracts.lifecycle import Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import derive_positions, persist_run
 from algua.execution.sim_broker import SimBroker
+from algua.live.live_loop import run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry import store
 from algua.registry.db import connect, migrate
@@ -145,3 +147,55 @@ def account() -> None:
     broker = _alpaca_broker_from_settings()
     acct = broker.account()
     emit({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power})
+
+
+@paper_app.command("trade-live")
+@json_errors(ValueError, LookupError, BrokerError)
+def trade_live(
+    name: str,
+    snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str = typer.Option("2023-12-31", "--end"),
+) -> None:
+    """Run ONE wall-clock tick: submit Alpaca market-order deltas toward the strategy's target."""
+    strategy = load_strategy(name)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = store.get_strategy(conn, name)
+        if rec.stage is not Stage.PAPER:
+            raise ValueError(f"{name} is at stage '{rec.stage.value}'; trade-live requires 'paper'")
+        if kill_switch.is_tripped(conn, name):
+            raise ValueError(
+                f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'"
+            )
+        broker = _alpaca_broker_from_settings()
+        provider = _select_provider(False, snapshot)
+        try:
+            result = run_tick(strategy, broker, provider, _utc(start), _utc(end))
+        except RiskBreach as exc:
+            kill_switch.trip(conn, name, reason=exc.detail, actor="system")
+            audit_append(conn, actor="system", action="kill_switch_trip",
+                         reason=f"{exc.kind}: {exc.detail}", strategy=name)
+            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped", "error": exc.detail})
+            raise typer.Exit(1) from exc
+        now = datetime.now(UTC).isoformat()
+        decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
+        for o in result.submitted:
+            conn.execute(
+                "INSERT INTO paper_orders"
+                "(strategy, symbol, side, target_weight, decision_ts, submitted_ts,"
+                " status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
+                (name, o["symbol"], o["side"], o["target_weight"],
+                 decision_ts_str, now, "submitted", o["order_id"]),
+            )
+        conn.commit()
+        audit_append(conn, actor="agent", action="trade_live",
+                     reason=f"{len(result.submitted)} orders submitted", strategy=name)
+
+    emit({
+        "strategy": name,
+        "decision_ts": result.decision_ts.isoformat() if result.decision_ts else None,
+        "target_weights": result.target_weights,
+        "positions_before": result.positions_before,
+        "submitted": result.submitted,
+    })
