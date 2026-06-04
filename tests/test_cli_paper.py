@@ -140,7 +140,8 @@ def test_trade_live_submits_and_persists(monkeypatch):
         decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
         submitted=[{"symbol": "AAA", "side": "buy", "target_weight": 1.0, "order_id": "o-1"}],
     )
-    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: object())
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _AccountBroker(equity=100.0))
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
                         lambda strategy, broker, provider, start, end: fake_result)
@@ -206,3 +207,80 @@ def test_paper_flatten_close_failure_stays_tripped(monkeypatch):
     assert payload["ok"] is False and payload["kill_switch"] == "tripped"
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
+
+
+class _AccountBroker(_FlattenBroker):
+    """_FlattenBroker (cancel_open_orders + close_positions) plus an account() stub."""
+    def __init__(self, equity, fail=False):
+        super().__init__(fail=fail)
+        self._equity = equity
+
+    def account(self):
+        return AccountState(equity=self._equity, cash=self._equity, buying_power=self._equity)
+
+
+def _seed_peak(name, value):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry import store
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        store.set_equity_peak(conn, name, value)
+
+
+def test_trade_live_drawdown_trips_and_flattens(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_peak("cross_sectional_momentum", 100.0)
+    broker = _AccountBroker(equity=80.0)  # 20% drawdown
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda *a, **k: pytest.fail("run_tick should not run on breach"))
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "x", "--max-drawdown", "0.10"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "drawdown" and payload["kill_switch"] == "tripped"
+    assert payload["liquidation_submitted"] is True
+    assert broker.closed_symbols  # flattened to the strategy universe
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["kill_switch"]["tripped"] is True
+
+
+def test_trade_live_new_high_persists_peak(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_peak("cross_sectional_momentum", 100.0)
+    broker = _AccountBroker(equity=130.0)  # new high
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda *a, **k: TickResult(None, {}, {}, []))
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "x", "--max-drawdown", "0.10"])
+    assert result.exit_code == 0, result.stdout
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry import store
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert store.get_equity_peak(conn, "cross_sectional_momentum") == 130.0
+
+
+def test_trade_live_drawdown_disabled_default(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_peak("cross_sectional_momentum", 100.0)
+    broker = _AccountBroker(equity=10.0)  # huge drawdown, but breaker disabled (default 1.0)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda *a, **k: TickResult(None, {}, {}, []))
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "x"])  # no --max-drawdown -> 1.0
+    assert result.exit_code == 0, result.stdout
