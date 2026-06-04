@@ -13,8 +13,14 @@ def momentum[PandasObj: (pd.Series, pd.DataFrame)](prices: PandasObj, lookback: 
 
 
 def zscore(values: pd.Series) -> pd.Series:
-    """Cross-sectional/sample z-score. Std uses population (ddof=0) to stay defined for n>=1."""
+    """Cross-sectional/sample z-score. Std uses population (ddof=0) to stay defined for n>=1.
+
+    A zero-variance (degenerate/flat) cross-section has an *undefined* z-score, so this
+    returns all-NaN rather than all-zero. Zero would read as a legitimate "no signal" tie
+    and survive a downstream `.dropna()`; NaN makes the degeneracy explicit and lets
+    rankers/filters drop the cross-section instead of treating it as a flat tie.
+    """
     std = values.std(ddof=0)
     if std == 0:
-        return values * 0.0
+        return values * float("nan")
     return (values - values.mean()) / std
