@@ -1,3 +1,5 @@
+import pytest
+
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 
 
@@ -35,3 +37,26 @@ def test_replace_block_replaces_between_markers():
 def test_replace_block_inserts_when_markers_absent():
     out = replace_block("body only\n", "RESULTS", "fresh")
     assert "<!-- ALGUA:RESULTS -->\nfresh\n<!-- /ALGUA:RESULTS -->" in out
+
+
+def test_replace_block_raises_on_orphan_open_marker():
+    # A start marker with no close would otherwise get a second block appended, and the
+    # next sync would swallow the prose between the orphan and the appended close marker.
+    text = "intro\n<!-- ALGUA:RESULTS -->\nstuff\nno close marker\n"
+    with pytest.raises(ValueError):
+        replace_block(text, "RESULTS", "new")
+
+
+def test_replace_block_raises_on_orphan_close_marker():
+    with pytest.raises(ValueError):
+        replace_block("intro\n<!-- /ALGUA:RESULTS -->\nrest\n", "RESULTS", "new")
+
+
+def test_replace_block_raises_on_duplicate_markers():
+    text = (
+        "<!-- ALGUA:RESULTS -->\na\n<!-- /ALGUA:RESULTS -->\n"
+        "prose\n"
+        "<!-- ALGUA:RESULTS -->\nb\n<!-- /ALGUA:RESULTS -->\n"
+    )
+    with pytest.raises(ValueError):
+        replace_block(text, "RESULTS", "new")

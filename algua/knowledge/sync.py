@@ -1,22 +1,52 @@
 from __future__ import annotations
 
-from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 from algua.config.settings import Settings
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 from algua.knowledge.metrics import latest_run_metrics
-from algua.registry import store
-from algua.registry.db import connect, migrate
+
+
+def _safe_path(base: Path, *parts: str) -> Path:
+    """Join `parts` under `base`, refusing any name that escapes the vault root.
+
+    Doc names flow in from CLI arguments and registry rows, so a `../escape` must never
+    resolve a write outside `knowledge_dir`.
+    """
+    candidate = base.joinpath(*parts)
+    base_resolved = base.resolve()
+    resolved = candidate.resolve()
+    if resolved != base_resolved and base_resolved not in resolved.parents:
+        raise ValueError(f"unsafe knowledge-base path: {'/'.join(parts)!r}")
+    return candidate
 
 
 def strategy_doc_path(settings: Settings, name: str) -> Path:
-    return settings.knowledge_dir / f"{name}.md"
+    return _safe_path(settings.knowledge_dir, f"{name}.md")
 
 
 def family_doc_path(settings: Settings, name: str) -> Path:
-    return settings.knowledge_dir / "families" / f"{name}.md"
+    return _safe_path(settings.knowledge_dir, "families", f"{name}.md")
+
+
+def _unwikilink(value: object) -> str | None:
+    """`"[[momentum]]"` -> `"momentum"`; passthrough for a bare slug; None otherwise."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if stripped.startswith("[[") and stripped.endswith("]]"):
+        stripped = stripped[2:-2]
+    return stripped or None
+
+
+def strategy_family(settings: Settings, name: str) -> str | None:
+    """The family slug a strategy doc declares, or None if the doc/field is absent."""
+    path = strategy_doc_path(settings, name)
+    if not path.exists():
+        return None
+    fm, _ = parse_doc(path.read_text())
+    return _unwikilink(fm.get("family"))
 
 
 def render_results_block(metrics: dict[str, Any] | None) -> str:
@@ -35,17 +65,18 @@ def render_results_block(metrics: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def sync_strategy_doc(settings: Settings, conn, name: str) -> bool:
-    """Rewrite the synced parts of one strategy doc. Returns False if the doc is absent."""
+def sync_strategy_doc(settings: Settings, name: str, *, stage: str | None) -> bool:
+    """Rewrite the synced parts of one strategy doc. Returns False if the doc is absent.
+
+    `stage` is the registry lifecycle stage (None if the strategy isn't registered yet);
+    the caller reads it at the CLI seam so this layer never touches the registry.
+    """
     path = strategy_doc_path(settings, name)
     if not path.exists():
         return False
     fm, body = parse_doc(path.read_text())
-    try:
-        rec = store.get_strategy(conn, name)
-        fm["stage"] = rec.stage.value
-    except store.StrategyNotFound:
-        pass  # doc scaffolded before registry add — leave authored stage untouched
+    if stage is not None:
+        fm["stage"] = stage
     metrics = latest_run_metrics(name, tracking_uri=settings.mlflow_tracking_uri)
     if metrics:
         fm["mlflow_run"] = metrics["run_id"][:8]
@@ -64,7 +95,7 @@ def sync_family_doc(settings: Settings, name: str) -> bool:
         if doc.name.startswith("_"):
             continue
         fm, _ = parse_doc(doc.read_text())
-        if fm.get("family") == f"[[{name}]]":
+        if _unwikilink(fm.get("family")) == name:
             stage = str(fm.get("stage", "?"))
             counts[stage] = counts.get(stage, 0) + 1
     total = sum(counts.values())
@@ -104,12 +135,15 @@ def generate_indexes(settings: Settings) -> None:
     (vault / "_families.md").write_text("# Thesis families\n\n" + "\n".join(fam_lines) + "\n")
 
 
-def sync_all(settings: Settings, conn) -> dict[str, list[str]]:
-    """Sync every registry strategy that has a doc, every family doc, then the indexes."""
+def sync_all(settings: Settings, stages: dict[str, str]) -> dict[str, list[str]]:
+    """Sync each registered strategy's doc (stage from `stages`), every family doc, then indexes.
+
+    Strategy docs are synced before family docs so member rosters count freshly-synced stages.
+    """
     synced: list[str] = []
-    for rec in store.list_strategies(conn):
-        if sync_strategy_doc(settings, conn, rec.name):
-            synced.append(rec.name)
+    for name, stage in stages.items():
+        if sync_strategy_doc(settings, name, stage=stage):
+            synced.append(name)
     families: list[str] = []
     fam_dir = settings.knowledge_dir / "families"
     if fam_dir.exists():
@@ -122,20 +156,20 @@ def sync_all(settings: Settings, conn) -> dict[str, list[str]]:
     return {"strategies": synced, "families": families}
 
 
-def kb_check(settings: Settings) -> tuple[bool, str]:
-    """Flag registry strategies with no doc or a stale synced stage. For `doctor`."""
-    with closing(connect(settings.db_path)) as conn:
-        migrate(conn)
-        records = store.list_strategies(conn)
+def kb_check(settings: Settings, stages: dict[str, str]) -> tuple[bool, str]:
+    """Flag registered strategies with no doc or a stale synced stage. For `doctor`.
+
+    `stages` is the registry name->stage mapping, read by the caller at the CLI seam.
+    """
     issues: list[str] = []
-    for rec in records:
-        path = strategy_doc_path(settings, rec.name)
+    for name, stage in stages.items():
+        path = strategy_doc_path(settings, name)
         if not path.exists():
-            issues.append(f"{rec.name}: no doc")
+            issues.append(f"{name}: no doc")
             continue
         fm, _ = parse_doc(path.read_text())
-        if fm.get("stage") != rec.stage.value:
-            issues.append(f"{rec.name}: doc stage {fm.get('stage')} != registry {rec.stage.value}")
+        if fm.get("stage") != stage:
+            issues.append(f"{name}: doc stage {fm.get('stage')} != registry {stage}")
     if issues:
         return False, "; ".join(issues)
-    return True, f"{len(records)} strategies in sync"
+    return True, f"{len(stages)} strategies in sync"

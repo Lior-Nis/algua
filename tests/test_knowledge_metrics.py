@@ -17,6 +17,13 @@ def test_latest_run_metrics_none_when_no_experiment(tmp_path):
     assert latest_run_metrics("ghost", tracking_uri=uri) is None
 
 
+def test_latest_run_metrics_none_when_store_missing(tmp_path, monkeypatch):
+    # A relative tracking uri with no store on disk (fresh checkout) must degrade to None,
+    # not raise — otherwise `strategy doc` would crash before any tracked run exists.
+    monkeypatch.chdir(tmp_path)
+    assert latest_run_metrics("alpha", tracking_uri="mlruns") is None
+
+
 def test_latest_run_metrics_reads_latest(tmp_path):
     uri = str(tmp_path / "mlruns")
     _log_run(uri, "alpha", kind="backtest",

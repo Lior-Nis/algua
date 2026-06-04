@@ -49,9 +49,15 @@ def doctor() -> None:
         checks.append({"check": "calendar", "ok": False, "detail": str(exc)})
 
     try:
-        from algua.knowledge.sync import kb_check
+        from contextlib import closing
 
-        kb_ok, kb_detail = kb_check(settings)
+        from algua.knowledge.sync import kb_check
+        from algua.registry import store
+
+        with closing(connect(settings.db_path)) as kb_conn:
+            migrate(kb_conn)
+            stages = {rec.name: rec.stage.value for rec in store.list_strategies(kb_conn)}
+        kb_ok, kb_detail = kb_check(settings, stages)
         checks.append({"check": "knowledge_base", "ok": kb_ok, "detail": kb_detail})
     except Exception as exc:  # noqa: BLE001
         checks.append({"check": "knowledge_base", "ok": False, "detail": str(exc)})

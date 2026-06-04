@@ -10,8 +10,15 @@ import typer
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.knowledge.sync import generate_indexes, sync_all, sync_strategy_doc
+from algua.knowledge.sync import (
+    generate_indexes,
+    strategy_family,
+    sync_all,
+    sync_family_doc,
+    sync_strategy_doc,
+)
 from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
+from algua.registry import store
 from algua.registry.db import connect, migrate
 from algua.strategies.loader import list_strategies
 
@@ -110,13 +117,19 @@ def doc(
 ) -> None:
     """Regenerate the synced blocks of strategy/family docs + rebuild the indexes."""
     settings = get_settings()
+    # Read lifecycle stage at the CLI seam; the knowledge layer stays registry-free.
     with closing(connect(settings.db_path)) as conn:
         migrate(conn)
-        if all_ or name is None:
-            summary = sync_all(settings, conn)
-        else:
-            if not sync_strategy_doc(settings, conn, name):
-                raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
-            generate_indexes(settings)
-            summary = {"strategies": [name], "families": []}
+        stages = {rec.name: rec.stage.value for rec in store.list_strategies(conn)}
+    if all_ or name is None:
+        summary = sync_all(settings, stages)
+    else:
+        if not sync_strategy_doc(settings, name, stage=stages.get(name)):
+            raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
+        # Keep the family roster consistent with this strategy's freshly-synced stage.
+        family = strategy_family(settings, name)
+        if family:
+            sync_family_doc(settings, family)
+        generate_indexes(settings)
+        summary = {"strategies": [name], "families": [family] if family else []}
     emit({"ok": True, **summary})

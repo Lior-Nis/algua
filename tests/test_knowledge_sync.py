@@ -1,5 +1,6 @@
-from contextlib import closing
 from pathlib import Path
+
+import pytest
 
 from algua.config.settings import Settings
 from algua.knowledge.frontmatter import parse_doc
@@ -7,12 +8,13 @@ from algua.knowledge.sync import (
     generate_indexes,
     kb_check,
     render_results_block,
+    strategy_doc_path,
+    strategy_family,
     sync_all,
+    sync_family_doc,
     sync_strategy_doc,
 )
 from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
-from algua.registry import store
-from algua.registry.db import connect, migrate
 
 
 def _settings(tmp_path) -> Settings:
@@ -46,23 +48,42 @@ def test_sync_strategy_doc_updates_stage_and_preserves_prose(tmp_path):
     s = _settings(tmp_path)
     _write(s.knowledge_dir / "alpha.md",
            scaffold_strategy_doc("alpha", created="2026-06-03"))
-    with closing(connect(s.db_path)) as conn:
-        migrate(conn)
-        store.add_strategy(conn, "alpha")
-        store.transition(conn, "alpha", "backtested", "agent", "test")
-        assert sync_strategy_doc(s, conn, "alpha") is True
+    assert sync_strategy_doc(s, "alpha", stage="backtested") is True
     fm, body = parse_doc((s.knowledge_dir / "alpha.md").read_text())
-    assert fm["stage"] == "backtested"          # synced from registry
+    assert fm["stage"] == "backtested"          # synced stage (passed in from the seam)
     assert "## Hypothesis" in body              # prose preserved
     assert "No tracked runs yet" in body        # synced RESULTS block present
+
+
+def test_sync_strategy_doc_leaves_stage_when_unregistered(tmp_path):
+    s = _settings(tmp_path)
+    _write(s.knowledge_dir / "alpha.md",
+           scaffold_strategy_doc("alpha", created="2026-06-03"))
+    assert sync_strategy_doc(s, "alpha", stage=None) is True
+    fm, _ = parse_doc((s.knowledge_dir / "alpha.md").read_text())
+    assert fm["stage"] == "idea"                # scaffold default, untouched
 
 
 def test_sync_strategy_doc_false_when_doc_missing(tmp_path):
     s = _settings(tmp_path)
     s.knowledge_dir.mkdir(parents=True)
-    with closing(connect(s.db_path)) as conn:
-        migrate(conn)
-        assert sync_strategy_doc(s, conn, "ghost") is False
+    assert sync_strategy_doc(s, "ghost", stage=None) is False
+
+
+def test_doc_paths_reject_traversal(tmp_path):
+    s = _settings(tmp_path)
+    with pytest.raises(ValueError):
+        strategy_doc_path(s, "../escape")
+    with pytest.raises(ValueError):
+        sync_strategy_doc(s, "../escape", stage="idea")
+
+
+def test_strategy_family_unwraps_wikilink(tmp_path):
+    s = _settings(tmp_path)
+    _write(s.knowledge_dir / "alpha.md",
+           scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
+    assert strategy_family(s, "alpha") == "momentum"
+    assert strategy_family(s, "ghost") is None
 
 
 def test_generate_indexes_lists_strategies_and_families(tmp_path):
@@ -78,15 +99,33 @@ def test_generate_indexes_lists_strategies_and_families(tmp_path):
     assert "[[momentum]]" in families
 
 
+def test_sync_family_doc_counts_members_by_stage(tmp_path):
+    s = _settings(tmp_path)
+    _write(s.knowledge_dir / "alpha.md",
+           scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
+    _write(s.knowledge_dir / "families" / "momentum.md",
+           scaffold_family_doc("momentum", created="2026-06-03"))
+    sync_strategy_doc(s, "alpha", stage="backtested")
+    assert sync_family_doc(s, "momentum") is True
+    members = (s.knowledge_dir / "families" / "momentum.md").read_text()
+    assert "backtested 1" in members
+
+
 def test_kb_check_flags_missing_doc(tmp_path):
     s = _settings(tmp_path)
     s.knowledge_dir.mkdir(parents=True)
-    with closing(connect(s.db_path)) as conn:
-        migrate(conn)
-        store.add_strategy(conn, "alpha")
-    ok, detail = kb_check(s)
+    ok, detail = kb_check(s, {"alpha": "idea"})
     assert ok is False
     assert "alpha" in detail
+
+
+def test_kb_check_passes_when_in_sync(tmp_path):
+    s = _settings(tmp_path)
+    _write(s.knowledge_dir / "alpha.md",
+           scaffold_strategy_doc("alpha", created="2026-06-03"))
+    sync_strategy_doc(s, "alpha", stage="idea")
+    ok, _ = kb_check(s, {"alpha": "idea"})
+    assert ok is True
 
 
 def test_sync_all_returns_summary(tmp_path):
@@ -95,10 +134,7 @@ def test_sync_all_returns_summary(tmp_path):
            scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
     _write(s.knowledge_dir / "families" / "momentum.md",
            scaffold_family_doc("momentum", created="2026-06-03"))
-    with closing(connect(s.db_path)) as conn:
-        migrate(conn)
-        store.add_strategy(conn, "alpha")
-        summary = sync_all(s, conn)
+    summary = sync_all(s, {"alpha": "idea"})
     assert "alpha" in summary["strategies"]
     assert "momentum" in summary["families"]
     members = (s.knowledge_dir / "families" / "momentum.md").read_text()
