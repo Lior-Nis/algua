@@ -1,3 +1,5 @@
+import math
+
 from algua.backtest.sweep import SweepResult
 from algua.tracking.mlflow_tracker import log_sweep
 
@@ -58,3 +60,54 @@ def test_sweep_child_runs_carry_shared_stamps(tmp_path):
         assert c.data.params["timeframe"] == "1d"
         assert c.data.params["windows"] == "4"
         assert "snapshot_id" in c.data.params
+
+
+def test_sweep_n_combos_is_param_not_metric(tmp_path):
+    """n_combos is a sweep config count — must be logged as a param, never as a metric."""
+    from mlflow.tracking import MlflowClient
+
+    uri = str(tmp_path / "mlruns")
+    log_sweep(_sweep(), tracking_uri=uri)
+    client = MlflowClient(tracking_uri=uri)
+    exp = client.get_experiment_by_name("ew")
+    parents = [r for r in client.search_runs([exp.experiment_id])
+               if r.data.tags.get("kind") == "sweep"]
+    assert len(parents) == 1
+    assert parents[0].data.params["n_combos"] == "2"
+    assert "n_combos" not in parents[0].data.metrics
+
+
+def test_sweep_drops_nonfinite_child_metrics(tmp_path):
+    """NaN/inf in combo stability/holdout must not reach MLflow child runs."""
+    from mlflow.tracking import MlflowClient
+
+    bad_combo = {
+        "params": {"lookback": 20, "top_k": 1}, "config_hash": "hbad",
+        "n_windows": 4,
+        "stability": {
+            "mean_sharpe": float("nan"), "std_sharpe": float("inf"),
+            "min_sharpe": -0.3, "pct_positive_windows": 0.5,
+        },
+        "holdout": {
+            "n_bars": 100, "sharpe": float("nan"),
+            "total_return": 0.02, "max_drawdown": -0.04,
+        },
+        "score": 0.5,
+    }
+    sweep = SweepResult(
+        strategy="ew_bad", data_source="SyntheticProvider", snapshot_id=None,
+        timeframe="1d", seed=0,
+        period={"start": "2022-01-01", "end": "2023-12-31"}, windows=4, holdout_frac=0.2,
+        grid={"lookback": [20], "top_k": [1]}, n_combos=1, rank_by="mean_sharpe",
+        ranked=[bad_combo], best={"params": {"lookback": 20, "top_k": 1}, "score": 0.5},
+    )
+    uri = str(tmp_path / "mlruns")
+    log_sweep(sweep, tracking_uri=uri)
+
+    client = MlflowClient(tracking_uri=uri)
+    exp = client.get_experiment_by_name("ew_bad")
+    children = [r for r in client.search_runs([exp.experiment_id])
+                if r.data.tags.get("kind") == "sweep_combo"]
+    assert len(children) == 1
+    for v in children[0].data.metrics.values():
+        assert math.isfinite(v), f"Non-finite metric found: {v}"
