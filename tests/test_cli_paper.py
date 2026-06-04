@@ -284,3 +284,19 @@ def test_trade_live_drawdown_disabled_default(monkeypatch):
     result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
                                  "--snapshot", "x"])  # no --max-drawdown -> 1.0
     assert result.exit_code == 0, result.stdout
+
+
+def test_resume_clears_equity_peak(monkeypatch):
+    _to_paper()
+    _seed_peak("cross_sectional_momentum", 100.0)
+    runner.invoke(app, ["paper", "kill", "cross_sectional_momentum", "--reason", "x"])
+    result = runner.invoke(app, ["paper", "resume", "cross_sectional_momentum"])
+    assert result.exit_code == 0, result.stdout
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry import store
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert store.get_equity_peak(conn, "cross_sectional_momentum") is None

@@ -137,6 +137,7 @@ def resume(name: str) -> None:
             audit_append(conn, actor="human", action="kill_switch_reset",
                          reason="manual resume", strategy=name)
             kill_switch.reset(conn, name)
+            store.clear_equity_peak(conn, name)  # re-base the high-water mark on resume
     emit({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"})
 
 
