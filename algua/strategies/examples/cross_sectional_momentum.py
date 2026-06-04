@@ -6,7 +6,6 @@ from typing import Any
 import pandas as pd
 
 from algua.contracts.types import ExecutionContract
-from algua.features.indicators import momentum
 from algua.strategies.base import StrategyConfig
 
 CONFIG = StrategyConfig(
@@ -17,14 +16,15 @@ CONFIG = StrategyConfig(
 )
 
 
-def target_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+def compute_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
     lookback = int(params["lookback"])
     top_k = int(params["top_k"])
     # Wide adj_close (index=timestamp, columns=symbol) from the point-in-time view.
     wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     if len(wide) <= lookback:
         return pd.Series(dtype="float64")
-    scores = momentum(wide, lookback=lookback).iloc[-1].dropna()
+    # Last-row momentum only — avoid materializing the full momentum matrix per bar.
+    scores = (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
     winners = scores.sort_values(ascending=False).head(top_k).index
     if len(winners) == 0:
         return pd.Series(dtype="float64")

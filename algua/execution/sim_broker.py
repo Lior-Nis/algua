@@ -7,23 +7,30 @@ from datetime import datetime
 import pandas as pd
 
 from algua.contracts.types import OrderIntent
+from algua.execution.sizing import size_order
 
 
 @dataclass(frozen=True)
 class Fill:
     symbol: str
-    qty: float  # signed shares: +buy, -sell
+    qty: float  # signed shares: +buy, -sell (0.0 for a rejected order)
     price: float
     decision_ts: datetime
     fill_ts: datetime
     broker_order_id: str
+    status: str = "filled"  # "filled" | "partial" | "rejected"
 
 
 class SimBroker:
-    """In-process paper broker: fills submitted orders at the next bar's open, full fill,
-    no slippage. Sells are applied before buys so freed cash funds buys; cash never goes
-    negative. Implements the contracts Broker surface (submit, get_positions) plus the
-    sim-only equity()/fill_pending() the replay loop drives."""
+    """In-process paper broker: fills submitted orders at the next bar's open, no slippage. Sells
+    are applied before buys so freed cash funds buys; cash never goes negative. Implements the
+    contracts Broker surface (submit, get_positions) plus the sim-only equity()/fill_pending() the
+    replay loop drives.
+
+    Every pending order yields exactly one Fill (#26): a full fill, a partial fill (buy clamped to
+    cash on hand), or a zero-qty "rejected" record (unaffordable, untradeable price, or already on
+    target). This models partial-fill / rejection paths instead of silently dropping orders.
+    """
 
     def __init__(self, cash: float) -> None:
         self.cash = float(cash)
@@ -47,27 +54,44 @@ class SimBroker:
         return self.cash + held
 
     def fill_pending(self, opens: pd.Series, fill_ts: datetime) -> list[Fill]:
+        """Fill every pending order against `opens`, returning one Fill per order. The equity
+        snapshot is taken once here and used as the sizing denominator for all orders so sizing
+        does not drift as earlier orders fill."""
         eq = self.equity(opens)
-        planned: list[tuple[str, OrderIntent, float, float]] = []  # id, intent, qty, price
+        # id, intent, intended signed qty, price (price is NaN when the symbol is untradeable)
+        planned: list[tuple[str, OrderIntent, float, float]] = []
+        rejected: list[Fill] = []
         for order_id, intent in self._pending:
             price = float(opens.get(intent.symbol, float("nan")))
             if not price > 0:
+                rejected.append(Fill(intent.symbol, 0.0, 0.0, intent.decision_ts, fill_ts,
+                                     order_id, status="rejected"))
                 continue
-            target_shares = math.floor(intent.target_weight * eq / price)
-            qty = target_shares - self.positions.get(intent.symbol, 0.0)
-            if qty != 0.0:
-                planned.append((order_id, intent, qty, price))
-        planned.sort(key=lambda p: p[2])  # sells (negative qty) first
+            current = self.positions.get(intent.symbol, 0.0)
+            sized = size_order(symbol=intent.symbol, target_weight=intent.target_weight,
+                               equity=eq, current_market_value=current * price,
+                               price=price, current_shares=current)
+            if sized.is_noop:
+                rejected.append(Fill(intent.symbol, 0.0, price, intent.decision_ts, fill_ts,
+                                     order_id, status="rejected"))
+                continue
+            planned.append((order_id, intent, sized.delta_shares, price))
+        planned.sort(key=lambda p: p[2])  # sells (negative qty) first so they free cash for buys
         fills: list[Fill] = []
         for order_id, intent, qty, price in planned:
-            if qty > 0:  # buy: clamp to cash on hand
-                qty = min(qty, float(math.floor(self.cash / price)))
+            status = "filled"
+            if qty > 0:  # buy: clamp to cash on hand -> partial (or rejected if nothing affordable)
+                affordable = float(math.floor(self.cash / price))
+                if affordable < qty:
+                    qty = affordable
+                    status = "partial"
                 if qty <= 0:
+                    fills.append(Fill(intent.symbol, 0.0, price, intent.decision_ts, fill_ts,
+                                      order_id, status="rejected"))
                     continue
             self.cash -= qty * price
             self.positions[intent.symbol] = self.positions.get(intent.symbol, 0.0) + qty
-            fills.append(
-                Fill(intent.symbol, float(qty), price, intent.decision_ts, fill_ts, order_id)
-            )
+            fills.append(Fill(intent.symbol, float(qty), price, intent.decision_ts, fill_ts,
+                              order_id, status=status))
         self._pending.clear()
-        return fills
+        return fills + rejected

@@ -40,11 +40,18 @@ class SyntheticProvider:
             # Deterministic per-symbol drift/vol from a child RNG.
             sub = np.random.default_rng(self.seed + i + 1)
             rets = sub.normal(loc=0.0005, scale=0.02, size=len(sessions))
-            price = 100.0 * np.exp(np.cumsum(rets))
+            close = 100.0 * np.exp(np.cumsum(rets))
+            # Open differs from close so high/low-dependent logic can be exercised.
+            open_ = close * np.exp(sub.normal(loc=0.0, scale=0.005, size=len(sessions)))
+            # Jitter widens the bar so high > max(open,close) and low < min(open,close);
+            # the OHLC invariant low <= open,close <= high always holds by construction.
+            jitter = sub.uniform(0.001, 0.008, size=len(sessions))
+            high = np.maximum(open_, close) * (1.0 + jitter)
+            low = np.minimum(open_, close) * (1.0 - jitter)
             frames.append(pd.DataFrame({
                 "timestamp": sessions, "symbol": sym,
-                "open": price, "high": price * 1.01, "low": price * 0.99,
-                "close": price, "adj_close": price, "volume": 1_000_000.0,
+                "open": open_, "high": high, "low": low,
+                "close": close, "adj_close": close, "volume": 1_000_000.0,
             }))
         out = pd.concat(frames).set_index("timestamp").sort_values(["timestamp", "symbol"])
         return out[_BAR_COLUMNS]

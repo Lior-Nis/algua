@@ -107,6 +107,40 @@ def test_data_ingest_bars_with_provider(monkeypatch):
     assert out["snapshot"]["storage_format"] == "parquet"
 
 
+def test_data_ingest_bars_provider_failure_emits_json(monkeypatch):
+    from algua.cli import data_cmd
+    from algua.data.providers.errors import ProviderError
+
+    class FailingProvider:
+        def get_bars(self, _request):
+            raise ProviderError("yfinance download failed: read timed out")
+
+    monkeypatch.setattr(data_cmd, "_bar_provider", lambda _name: FailingProvider())
+
+    result = runner.invoke(
+        app,
+        [
+            "data",
+            "ingest-bars",
+            "--provider",
+            "yfinance",
+            "--symbols",
+            "AAPL",
+            "--start",
+            "2026-01-02",
+            "--end",
+            "2026-01-03",
+            "--as-of",
+            "2026-01-04T00:00:00+00:00",
+        ],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "download failed" in payload["error"]
+
+
 def test_data_ingest_universe_and_summary():
     out = _json(
         runner.invoke(
