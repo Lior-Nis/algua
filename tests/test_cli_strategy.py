@@ -28,3 +28,24 @@ def test_strategy_new_rejects_unsafe_names(tmp_path, monkeypatch):
         result = runner.invoke(app, ["strategy", "new", bad])
         assert result.exit_code == 1, (bad, result.stdout)
         assert json.loads(result.stdout)["ok"] is False
+
+
+def test_strategy_new_scaffolds_doc_and_family(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    result = runner.invoke(
+        app, ["strategy", "new", "alpha", "--family", "momentum", "--derived-from", "seed"]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert (tmp_path / "vault" / "alpha.md").exists()
+    assert (tmp_path / "vault" / "families" / "momentum.md").exists()
+    assert payload["doc"].endswith("alpha.md")
+
+
+def test_strategy_new_rejects_unsafe_family(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    result = runner.invoke(app, ["strategy", "new", "alpha", "--family", "../evil"])
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["ok"] is False

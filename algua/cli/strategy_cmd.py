@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import keyword
+import re
 from pathlib import Path
 
 import typer
 
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.config.settings import get_settings
+from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
 from algua.strategies.loader import list_strategies
 
 strategy_app = typer.Typer(help="Author and list strategies", no_args_is_help=True)
 app.add_typer(strategy_app, name="strategy")
+
+_FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 _TEMPLATE = '''\
 """Strategy: {name}. Edit target_weights to express your cross-sectional logic."""
@@ -53,18 +58,42 @@ def list_() -> None:
 
 @strategy_app.command("new")
 @json_errors()
-def new(name: str) -> None:
-    """Scaffold a new strategy module under algua/strategies/examples/."""
-    # `name` becomes both a filesystem path segment and a Python module name, so it must be a
-    # safe identifier — rejects path traversal ("../x"), separators/spaces, and non-importable
-    # or reserved names ("bad-name", "class").
+def new(
+    name: str,
+    family: str = typer.Option(None, "--family", help="thesis family this belongs to"),  # noqa: B008
+    derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),  # noqa: B008
+) -> None:
+    """Scaffold a new strategy module + its knowledge-base doc (and family hub if needed)."""
     if not name.isidentifier() or keyword.iskeyword(name):
         raise ValueError(
             f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
+        )
+    if family is not None and not _FAMILY_RE.match(family):
+        raise ValueError(
+            f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)"
         )
     path = Path("algua/strategies/examples") / f"{name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ValueError(f"strategy already exists: {path}")
     path.write_text(_TEMPLATE.format(name=name))
-    emit({"ok": True, "name": name, "path": str(path)})
+
+    vault = get_settings().knowledge_dir
+    vault.mkdir(parents=True, exist_ok=True)
+    doc_path = vault / f"{name}.md"
+    if not doc_path.exists():
+        doc_path.write_text(
+            scaffold_strategy_doc(name, family=family, derived_from=derived_from)
+        )
+    family_doc: str | None = None
+    if family:
+        (vault / "families").mkdir(parents=True, exist_ok=True)
+        fam_path = vault / "families" / f"{family}.md"
+        if not fam_path.exists():
+            fam_path.write_text(scaffold_family_doc(family))
+        family_doc = str(fam_path)
+
+    emit({
+        "ok": True, "name": name, "path": str(path),
+        "doc": str(doc_path), "family_doc": family_doc,
+    })
