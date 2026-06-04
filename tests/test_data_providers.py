@@ -166,8 +166,10 @@ def test_get_provider_builds_alpaca_from_settings():
 
 
 def test_get_provider_alpaca_requires_credentials():
+    # Explicit None overrides any ambient ALGUA_ALPACA_* env so the test is hermetic.
+    settings = Settings(alpaca_api_key=None, alpaca_api_secret=None)
     with pytest.raises(ValueError, match="ALGUA_ALPACA_API_KEY"):
-        get_provider("alpaca", Settings())
+        get_provider("alpaca", settings)
 
 
 def test_get_provider_rejects_unknown_name():
