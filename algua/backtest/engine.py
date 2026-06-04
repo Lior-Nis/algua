@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime
 
 import numpy as np
@@ -13,6 +11,7 @@ from algua.backtest.result import BacktestResult
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
+from algua.strategies.base import config_hash as _config_hash
 
 _ANN = 252  # trading days/year, for annualization
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
@@ -20,23 +19,6 @@ _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
 
 class BacktestError(RuntimeError):
     pass
-
-
-def _config_hash(strategy: LoadedStrategy) -> str:
-    payload = json.dumps(
-        {
-            "name": strategy.name,
-            "universe": strategy.universe,
-            "params": strategy.params,
-            "execution": {
-                "rebalance_frequency": strategy.execution.rebalance_frequency,
-                "decision_lag_bars": strategy.execution.decision_lag_bars,
-                "max_gross_exposure": strategy.execution.max_gross_exposure,
-            },
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _build_portfolio(

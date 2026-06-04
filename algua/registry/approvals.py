@@ -1,42 +1,39 @@
 from __future__ import annotations
 
-import sqlite3
-from datetime import UTC, datetime
+import hashlib
+import inspect
 
-from algua.registry.store import get_strategy
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
+from algua.registry.repository import StrategyRepository
+from algua.strategies.base import config_hash
+from algua.strategies.loader import load_strategy
 
 
-def record_approval(
-    conn: sqlite3.Connection, name: str, code_hash: str, config_hash: str, approved_by: str
-) -> int:
-    _require_non_empty("code_hash", code_hash)
-    _require_non_empty("config_hash", config_hash)
+def compute_artifact_hashes(name: str) -> tuple[str, str]:
+    """Recompute ``(code_hash, config_hash)`` from the strategy's *actual* source + resolved
+    config. This is the single function both the ``approve`` and the ``transition --to live``
+    paths call, so the live gate pins the real artifact: a constant or caller-supplied hash can
+    no longer satisfy it, because both sides derive the hash from the loaded module itself.
+    """
+    loaded = load_strategy(name)
+    module = inspect.getmodule(loaded.fn)
+    source = inspect.getsource(module) if module is not None else ""
+    code_hash = hashlib.sha256(source.encode()).hexdigest()[:16]
+    return code_hash, config_hash(loaded)
+
+
+def record_approval(repo: StrategyRepository, name: str, approved_by: str) -> int:
+    """Record a human approval. The approved hashes are computed from the live strategy source
+    and config, never supplied by the caller, so the approval binds to the code it approves."""
     _require_non_empty("approved_by", approved_by)
-    rec = get_strategy(conn, name)
-    cur = conn.execute(
-        "INSERT INTO approvals(strategy_id, code_hash, config_hash, approved_by, created_at)"
-        " VALUES (?,?,?,?,?)",
-        (rec.id, code_hash, config_hash, approved_by, _now()),
-    )
-    conn.commit()
-    rowid = cur.lastrowid
-    assert rowid is not None  # a successful INSERT always sets lastrowid
-    return rowid
+    rec = repo.get(name)
+    code_hash, config_hash_ = compute_artifact_hashes(name)
+    return repo.record_approval(rec.id, code_hash, config_hash_, approved_by)
 
 
 def has_valid_approval(
-    conn: sqlite3.Connection, strategy_id: int, code_hash: str, config_hash: str
+    repo: StrategyRepository, strategy_id: int, code_hash: str, config_hash: str
 ) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM approvals WHERE strategy_id=? AND code_hash=? AND config_hash=?"
-        " AND revoked_at IS NULL LIMIT 1",
-        (strategy_id, code_hash, config_hash),
-    ).fetchone()
-    return row is not None
+    return repo.has_valid_approval(strategy_id, code_hash, config_hash)
 
 
 def _require_non_empty(name: str, value: str) -> None:

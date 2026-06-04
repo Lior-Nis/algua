@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -46,3 +48,23 @@ class LoadedStrategy:
 
     def target_weights(self, features: pd.DataFrame) -> pd.Series:
         return self.fn(features, self.config.params)
+
+
+def config_hash(strategy: LoadedStrategy) -> str:
+    """Stable digest of a strategy's resolved configuration (name + universe + params +
+    execution contract). The single source of truth for the config side of the artifact identity,
+    shared by the backtest engine and the registry's live-approval gate."""
+    payload = json.dumps(
+        {
+            "name": strategy.name,
+            "universe": strategy.universe,
+            "params": strategy.params,
+            "execution": {
+                "rebalance_frequency": strategy.execution.rebalance_frequency,
+                "decision_lag_bars": strategy.execution.decision_lag_bars,
+                "max_gross_exposure": strategy.execution.max_gross_exposure,
+            },
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
