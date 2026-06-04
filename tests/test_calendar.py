@@ -38,3 +38,11 @@ def test_previous_session_on_trading_day_is_strictly_before():
     cal = MarketCalendar("XNYS")
     # 2025-07-08 is a trading day; the previous session must be 2025-07-07, not itself
     assert cal.previous_session(date(2025, 7, 8)) == date(2025, 7, 7)
+
+
+def test_same_code_shares_cached_underlying_calendar():
+    """Two MarketCalendar instances with the same code must reuse one xcals object."""
+    cal_a = MarketCalendar("XNYS")
+    cal_b = MarketCalendar("XNYS")
+    # Identity check: the heavy xcals calendar must not be reconstructed per instance.
+    assert cal_a._cal is cal_b._cal

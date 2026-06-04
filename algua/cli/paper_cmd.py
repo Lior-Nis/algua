@@ -23,8 +23,8 @@ from algua.execution.order_state import (
 from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
-from algua.registry import store
 from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
 from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_strategy
@@ -64,7 +64,7 @@ def run(
     strategy = load_strategy(name)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        rec = store.get_strategy(conn, name)
+        rec = SqliteStrategyRepository(conn).get(name)
         if rec.stage is not Stage.PAPER:
             raise ValueError(f"{name} is at stage '{rec.stage.value}'; paper run requires 'paper'")
         if kill_switch.is_tripped(conn, name):
@@ -126,7 +126,8 @@ def kill(
     """Manually trip the kill-switch for a strategy (halts paper runs until reset)."""
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        store.get_strategy(conn, name)  # reject unknown/mistyped names before tripping a switch
+        # reject unknown/mistyped names before tripping a switch
+        SqliteStrategyRepository(conn).get(name)
         kill_switch.trip(conn, name, reason=reason, actor=actor)
         audit_append(conn, actor=actor, action="kill_switch_trip", reason=reason, strategy=name)
     emit({"strategy": name, "kill_switch": "tripped", "reason": reason})
@@ -175,7 +176,7 @@ def trade_tick(
     strategy = load_strategy(name)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        rec = store.get_strategy(conn, name)
+        rec = SqliteStrategyRepository(conn).get(name)
         if rec.stage is not Stage.PAPER:
             raise ValueError(f"{name} is at stage '{rec.stage.value}'; trade-tick requires 'paper'")
         if kill_switch.is_tripped(conn, name):
@@ -255,7 +256,7 @@ def flatten(
     strategy = load_strategy(name)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        rec = store.get_strategy(conn, name)
+        rec = SqliteStrategyRepository(conn).get(name)
         if rec.stage is not Stage.PAPER:
             raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
         broker = _alpaca_broker_from_settings()

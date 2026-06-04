@@ -43,15 +43,16 @@ def test_transition_illegal_exits_nonzero():
 
 
 def test_full_path_to_live_with_approval():
-    runner.invoke(app, ["registry", "add", "alpha"])
+    # The live gate pins the recomputed hash of the loaded module, so this exercises a real,
+    # loadable strategy and supplies no caller-controlled hashes.
+    strategy = "cross_sectional_momentum"
+    runner.invoke(app, ["registry", "add", strategy])
     for stage in ("backtested", "shortlisted", "paper"):
-        runner.invoke(app, ["registry", "transition", "alpha",
+        runner.invoke(app, ["registry", "transition", strategy,
                             "--to", stage, "--actor", "agent"])
-    runner.invoke(app, ["registry", "approve", "alpha",
-                        "--code-hash", "c1", "--config-hash", "g1", "--by", "lior"])
+    runner.invoke(app, ["registry", "approve", strategy, "--by", "lior"])
     out = _json(runner.invoke(
-        app, ["registry", "transition", "alpha", "--to", "live", "--actor", "human",
-              "--code-hash", "c1", "--config-hash", "g1"]))
+        app, ["registry", "transition", strategy, "--to", "live", "--actor", "human"]))
     assert out["stage"] == "live"
 
 

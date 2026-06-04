@@ -18,13 +18,22 @@ class Actor(StrEnum):
     SYSTEM = "system"
 
 
+# Forward/back edges between live stages. The retire edge is *derived* below so adding a
+# stage cannot silently forget it: every non-retired stage gains `-> RETIRED` automatically,
+# and RETIRED is terminal.
+_LIVE_TRANSITIONS: dict[Stage, set[Stage]] = {
+    Stage.IDEA: {Stage.BACKTESTED},
+    Stage.BACKTESTED: {Stage.SHORTLISTED, Stage.IDEA},
+    Stage.SHORTLISTED: {Stage.PAPER, Stage.BACKTESTED},
+    Stage.PAPER: {Stage.LIVE, Stage.SHORTLISTED},
+    Stage.LIVE: {Stage.PAPER},
+}
+
 ALLOWED_TRANSITIONS: dict[Stage, set[Stage]] = {
-    Stage.IDEA: {Stage.BACKTESTED, Stage.RETIRED},
-    Stage.BACKTESTED: {Stage.SHORTLISTED, Stage.IDEA, Stage.RETIRED},
-    Stage.SHORTLISTED: {Stage.PAPER, Stage.BACKTESTED, Stage.RETIRED},
-    Stage.PAPER: {Stage.LIVE, Stage.SHORTLISTED, Stage.RETIRED},
-    Stage.LIVE: {Stage.PAPER, Stage.RETIRED},
-    Stage.RETIRED: set(),
+    stage: (_LIVE_TRANSITIONS.get(stage, set()) | {Stage.RETIRED})
+    if stage is not Stage.RETIRED
+    else set()
+    for stage in Stage
 }
 
 

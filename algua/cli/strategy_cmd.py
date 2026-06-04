@@ -13,7 +13,7 @@ strategy_app = typer.Typer(help="Author and list strategies", no_args_is_help=Tr
 app.add_typer(strategy_app, name="strategy")
 
 _TEMPLATE = '''\
-"""Strategy: {name}. Edit target_weights to express your cross-sectional logic."""
+"""Strategy: {name}. Edit compute_weights to express your cross-sectional logic."""
 from __future__ import annotations
 
 from typing import Any
@@ -21,7 +21,6 @@ from typing import Any
 import pandas as pd
 
 from algua.contracts.types import ExecutionContract
-from algua.features.indicators import momentum
 from algua.strategies.base import StrategyConfig
 
 CONFIG = StrategyConfig(
@@ -32,11 +31,12 @@ CONFIG = StrategyConfig(
 )
 
 
-def target_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+def compute_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    lookback = int(params["lookback"])
     wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-    if len(wide) <= int(params["lookback"]):
+    if len(wide) <= lookback:
         return pd.Series(dtype="float64")
-    scores = momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
+    scores = (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
     winners = scores.sort_values(ascending=False).head(int(params["top_k"])).index
     if len(winners) == 0:
         return pd.Series(dtype="float64")
