@@ -3,6 +3,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+# Identifies the current schema generation. This is a marker stamped into the
+# DB's user_version, NOT a migration cursor: there is no per-version migration
+# logic. `migrate()` is an idempotent bootstrap (CREATE TABLE IF NOT EXISTS),
+# so it can add new tables to an existing DB but CANNOT ALTER a populated one.
+# Any column/constraint change to an existing table needs a real migration
+# (write it explicitly when the need arrives) — not just a bump of this number.
 SCHEMA_VERSION = 3
 
 _SCHEMA = """
@@ -33,6 +39,16 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at TEXT NOT NULL,
     revoked_at TEXT
 );
+-- paper_orders / paper_fills / audit_log / kill_switches are DELIBERATELY
+-- denormalized: they reference a strategy by its free-text NAME and carry no
+-- foreign key into strategies(id). These are operational/audit snapshots, not
+-- relational children of the registry. audit_log in particular is an immutable
+-- trail that MUST survive a strategy's removal, and there is intentionally no
+-- strategy-deletion path in the codebase. Keying by name (rather than id +
+-- ON DELETE CASCADE) keeps these records readable and self-contained even after
+-- the parent strategy is gone. The normalized core (stage_transitions,
+-- approvals) keeps its integer FK to strategies(id) precisely because it is
+-- relational state that should not outlive its strategy.
 CREATE TABLE IF NOT EXISTS paper_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy TEXT NOT NULL,
@@ -80,8 +96,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    version = conn.execute("PRAGMA user_version;").fetchone()[0]
-    if version < SCHEMA_VERSION:
-        conn.executescript(_SCHEMA)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
-        conn.commit()
+    """Bootstrap the schema; idempotent. NOT a versioned in-place migrator.
+
+    This runs the full current `_SCHEMA` unconditionally. Every statement is
+    `CREATE TABLE IF NOT EXISTS`, so re-running is a no-op and a DB missing only
+    some tables is brought fully up to date — regardless of the recorded
+    user_version. It does NOT (and cannot) ALTER existing tables: changing a
+    column or constraint on a populated table requires a dedicated migration,
+    not a bump of SCHEMA_VERSION. We do not gate on user_version (doing so would
+    falsely imply migration history and could skip needed table creation on a
+    pre-stamped DB); we only stamp it afterward as a schema-generation marker.
+    """
+    conn.executescript(_SCHEMA)
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
+    conn.commit()
