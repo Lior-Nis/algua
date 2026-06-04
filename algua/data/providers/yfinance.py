@@ -24,34 +24,33 @@ class YFinanceBarProvider(BarProvider):
                 "yfinance bars require adjustment='none' so raw close and adj_close are both "
                 "available for the frozen bar schema"
             )
-        raw = yf.download(
-            tickers=list(request.symbols),
-            start=request.start,
-            end=request.end,
-            interval=request.timeframe,
-            auto_adjust=False,
-            group_by="ticker",
-            progress=False,
-            threads=False,
-        )
-        frame, missing = _normalize_yfinance(raw, request.symbols)
+        try:
+            raw = yf.download(
+                tickers=list(request.symbols),
+                start=request.start,
+                end=request.end,
+                interval=request.timeframe,
+                auto_adjust=False,
+                group_by="ticker",
+                progress=False,
+                threads=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - any library/network fault must stay in the JSON contract
+            raise ProviderError(f"yfinance download failed: {exc}") from exc
+        frame = _normalize_yfinance(raw, request.symbols)
         source_metadata = {
             "library": "yfinance",
             "timeframe": request.timeframe,
             "adjustment": "none",
         }
-        if missing:
-            source_metadata["missing_symbols"] = ",".join(missing)
         return ProviderBars(frame=frame, source_metadata=source_metadata)
 
 
-def _normalize_yfinance(
-    raw: pd.DataFrame, symbols: tuple[str, ...]
-) -> tuple[pd.DataFrame, tuple[str, ...]]:
+def _normalize_yfinance(raw: pd.DataFrame, symbols: tuple[str, ...]) -> pd.DataFrame:
     """Normalize a yfinance frame to the bar schema.
 
-    Returns the normalized frame plus the requested-but-absent symbols so callers can
-    surface them instead of dropping them silently.
+    Raises ``ProviderError`` if any requested symbol is absent from the response so a
+    partial frame can never be persisted under a manifest claiming full coverage.
     """
     if raw.empty:
         raise ProviderError("provider returned no bars")
@@ -101,9 +100,14 @@ def _normalize_yfinance(
             + f" (got: {', '.join(out.columns)})"
         )
 
-    missing_symbols = tuple(sorted(set(symbols) - set(present)))
+    missing_symbols = sorted(set(symbols) - set(present))
+    if missing_symbols:
+        raise ProviderError(
+            "yfinance returned no bars for requested symbols: " + ", ".join(missing_symbols)
+        )
+
     out = out[list(REQUIRED_COLUMNS)].sort_values(["symbol", "ts"]).reset_index(drop=True)
-    return out, missing_symbols
+    return out
 
 
 def _column_name(value: object) -> str:

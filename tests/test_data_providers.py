@@ -21,9 +21,8 @@ def test_yfinance_normalizer_handles_single_symbol_frame():
         index=pd.Index([pd.Timestamp("2026-01-02")], name="Date"),
     )
 
-    frame, missing = _normalize_yfinance(raw, ("AAPL",))
+    frame = _normalize_yfinance(raw, ("AAPL",))
 
-    assert missing == ()
     assert frame.to_dict("records") == [
         {
             "ts": pd.Timestamp("2026-01-02"),
@@ -173,7 +172,9 @@ def test_yfinance_normalizer_raises_naming_missing_columns():
     assert "volume" in message
 
 
-def test_yfinance_normalizer_surfaces_missing_symbols_without_dropping_silently():
+def test_yfinance_normalizer_raises_on_requested_but_missing_symbols():
+    # A request for AAPL/MSFT/GOOG that returns only AAPL must fail rather than
+    # produce a frame whose coverage is narrower than the manifest will claim.
     raw = pd.DataFrame(
         {
             ("AAPL", "Open"): [100.0],
@@ -187,13 +188,15 @@ def test_yfinance_normalizer_surfaces_missing_symbols_without_dropping_silently(
     )
     raw.columns = pd.MultiIndex.from_tuples(raw.columns)
 
-    frame, missing = _normalize_yfinance(raw, ("AAPL", "MSFT", "GOOG"))
+    with pytest.raises(ProviderError) as exc:
+        _normalize_yfinance(raw, ("AAPL", "MSFT", "GOOG"))
 
-    assert set(frame["symbol"]) == {"AAPL"}
-    assert missing == ("GOOG", "MSFT")
+    message = str(exc.value)
+    assert "GOOG" in message
+    assert "MSFT" in message
 
 
-def test_yfinance_provider_reports_missing_symbols_in_metadata(monkeypatch):
+def test_yfinance_provider_raises_on_partial_coverage(monkeypatch):
     raw = pd.DataFrame(
         {
             ("AAPL", "Open"): [100.0],
@@ -215,9 +218,24 @@ def test_yfinance_provider_reports_missing_symbols_in_metadata(monkeypatch):
     monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
 
     provider = YFinanceBarProvider()
-    bars = provider.get_bars(BarRequest(("AAPL", "MSFT"), "2026-01-02", "2026-01-03"))
+    with pytest.raises(ProviderError, match="MSFT"):
+        provider.get_bars(BarRequest(("AAPL", "MSFT"), "2026-01-02", "2026-01-03"))
 
-    assert bars.source_metadata["missing_symbols"] == "MSFT"
+
+def test_yfinance_download_failure_wrapped_as_provider_error(monkeypatch):
+    import sys
+    import types
+
+    def boom(*_a, **_k):
+        raise RuntimeError("yfinance: HTTPSConnectionPool read timed out")
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.download = boom  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    provider = YFinanceBarProvider()
+    with pytest.raises(ProviderError, match="yfinance download failed"):
+        provider.get_bars(BarRequest(("AAPL",), "2026-01-02", "2026-01-03"))
 
 
 # --- #59: provider transport errors must stay inside the JSON contract ---
@@ -315,6 +333,68 @@ def test_alpaca_retries_on_429_then_succeeds(monkeypatch):
 
     assert calls["n"] >= 3  # retried the 429 at least once, plus the second fetch
     assert set(bars.frame["symbol"]) == {"AAPL"}
+
+
+def test_alpaca_raises_when_raw_and_adjusted_key_sets_differ(monkeypatch):
+    # The adjusted view is missing the MSFT bar; the inner merge would silently
+    # drop it, producing a partial snapshot that still looks valid.
+    responses = {
+        "raw": {
+            "bars": {
+                "AAPL": [
+                    {"t": "2026-01-02T14:30:00Z", "o": 1, "h": 1, "l": 1, "c": 100.5, "v": 1}
+                ],
+                "MSFT": [
+                    {"t": "2026-01-02T14:30:00Z", "o": 1, "h": 1, "l": 1, "c": 200.5, "v": 1}
+                ],
+            }
+        },
+        "all": {
+            "bars": {
+                "AAPL": [
+                    {"t": "2026-01-02T14:30:00Z", "o": 1, "h": 1, "l": 1, "c": 100.0, "v": 1}
+                ],
+            }
+        },
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(*_a, **kwargs):
+        return FakeResponse(responses[kwargs["params"]["adjustment"]])
+
+    monkeypatch.setattr("algua.data.providers.alpaca.requests.get", fake_get)
+    provider = AlpacaBarProvider(api_key="key", api_secret="secret")
+
+    with pytest.raises(ProviderError, match="MSFT"):
+        provider.get_bars(BarRequest(("AAPL", "MSFT"), "2026-01-02", "2026-01-03"))
+
+
+def test_alpaca_malformed_json_body_wrapped_as_provider_error(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    monkeypatch.setattr(
+        "algua.data.providers.alpaca.requests.get", lambda *a, **k: FakeResponse()
+    )
+    provider = AlpacaBarProvider(api_key="key", api_secret="secret")
+
+    with pytest.raises(ProviderError, match="malformed JSON"):
+        provider.get_bars(BarRequest(("AAPL",), "2026-01-02", "2026-01-03"))
 
 
 def test_alpaca_gives_up_after_retries_on_persistent_5xx(monkeypatch):

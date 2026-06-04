@@ -43,6 +43,18 @@ class AlpacaBarProvider(BarProvider):
         adjusted_frame = _normalize_alpaca(adjusted_payload)[["ts", "symbol", "close"]].rename(
             columns={"close": "adj_close"}
         )
+
+        raw_keys = set(map(tuple, raw_frame[["ts", "symbol"]].itertuples(index=False)))
+        adjusted_keys = set(map(tuple, adjusted_frame[["ts", "symbol"]].itertuples(index=False)))
+        if raw_keys != adjusted_keys:
+            unmatched = sorted(
+                f"{symbol}@{ts}" for ts, symbol in raw_keys.symmetric_difference(adjusted_keys)
+            )
+            raise ProviderError(
+                "raw and adjusted bar key sets differ; refusing partial snapshot. "
+                "unmatched (ts, symbol): " + ", ".join(unmatched)
+            )
+
         frame = raw_frame.merge(adjusted_frame, on=["ts", "symbol"], how="inner")
         if frame.empty:
             raise ProviderError("provider returned no overlapping raw/adjusted bars")
@@ -99,7 +111,12 @@ class AlpacaBarProvider(BarProvider):
             except requests.HTTPError as exc:
                 raise ProviderError(f"alpaca returned HTTP {status}: {exc}") from exc
 
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ProviderError(
+                    f"alpaca returned a malformed JSON body (HTTP {status}): {exc}"
+                ) from exc
             if not isinstance(payload, dict):
                 raise ProviderError("provider returned a non-object response")
             return payload
