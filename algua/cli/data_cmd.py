@@ -123,11 +123,11 @@ def inspect(
     summary: bool = typer.Option(False, "--summary", help="summarize available datasets"),
 ) -> None:
     """Inspect recorded point-in-time data snapshots."""
-    store = _store()
+    ds = _store()
     if summary:
-        emit(store.summary())
+        emit(ds.summary())
         return
     if snapshot_id is not None:
-        emit(store.get_snapshot(snapshot_id).to_dict())
+        emit(ds.get_snapshot(snapshot_id).to_dict())
         return
-    emit([rec.to_dict() for rec in store.list_snapshots(dataset)])
+    emit([rec.to_dict() for rec in ds.list_snapshots(dataset)])

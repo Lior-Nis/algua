@@ -62,7 +62,7 @@ def new(name: str) -> None:
         raise ValueError(
             f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
         )
-    path = Path("algua/strategies/examples") / f"{name}.py"
+    path = Path(__file__).parent.parent / "strategies" / "examples" / f"{name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ValueError(f"strategy already exists: {path}")

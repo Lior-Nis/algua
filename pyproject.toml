@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
-    "typer>=0.12",
+    "typer>=0.12,<0.28",  # _click private fork; bump only after verifying test_cli_main smoke tests pass
     "exchange-calendars>=4.5",
     "pandas>=2.2,<3",
     "yfinance>=1.4.1",
@@ -36,6 +36,7 @@ packages = ["algua"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+exclude = [".claude/worktrees"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
