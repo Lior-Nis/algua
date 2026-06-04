@@ -70,6 +70,15 @@ def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
     conn.commit()
 
 
+def count_orders(conn: sqlite3.Connection, strategy: str) -> int:
+    """Number of persisted paper orders for a strategy (the `paper show` order count)."""
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM paper_orders WHERE strategy = ?", (strategy,)
+        ).fetchone()[0]
+    )
+
+
 def derive_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float]:
     rows = conn.execute(
         "SELECT f.symbol AS symbol, SUM(f.qty) AS qty FROM paper_fills f "

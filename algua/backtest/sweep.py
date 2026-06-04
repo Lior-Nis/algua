@@ -45,7 +45,7 @@ def _coerce(value: str) -> Any:
     return value
 
 
-def _parse_grid(params: list[str]) -> dict[str, list[Any]]:
+def parse_grid(params: list[str]) -> dict[str, list[Any]]:
     """Parse repeatable `KEY=v1,v2,...` flags into a grid dict. Values coerced int->float->str."""
     if not params:
         raise ValueError("provide at least one --param KEY=v1,v2,...")

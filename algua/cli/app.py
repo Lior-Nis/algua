@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from typing import Any
 
 import typer
@@ -9,7 +10,6 @@ import typer
 from algua import __version__
 from algua.calendar.market_calendar import MarketCalendar
 from algua.config.settings import get_settings
-from algua.registry.db import connect, migrate
 
 app = typer.Typer(
     help="Algua — agent-first algotrading platform", no_args_is_help=True
@@ -17,37 +17,54 @@ app = typer.Typer(
 
 
 def emit(data: Any) -> None:
-    """Print a value as indented JSON — the shared machine + human surface."""
+    """Print a value as indented JSON — the shared machine + human surface.
+
+    CLI JSON-envelope convention: success payloads that are objects carry ``"ok": true`` (see
+    ``cli._common.ok``); failures carry ``{"ok": false, "error": ...}`` (see ``cli.errors`` and
+    ``cli.main``). Commands that return a collection (``registry list``, ``data inspect``) emit a
+    bare JSON array instead — the one documented exception.
+    """
     typer.echo(json.dumps(data, indent=2, default=str))
 
 
 @app.command()
 def version() -> None:
     """Print the package version as JSON."""
-    emit({"name": "algua", "version": __version__})
+    emit({"ok": True, "name": "algua", "version": __version__})
+
+
+def _check(name: str, fn: Callable[[], str]) -> dict[str, Any]:
+    """Run one readiness probe: ``fn`` returns a detail string on success or raises on failure.
+    Either way it becomes a uniform ``{check, ok, detail}`` row (no per-check try/except)."""
+    try:
+        return {"check": name, "ok": True, "detail": fn()}
+    except Exception as exc:  # noqa: BLE001 - any failure is reported as a check result
+        return {"check": name, "ok": False, "detail": str(exc)}
+
+
+def _registry_db_detail() -> str:
+    from algua.cli._common import registry_conn
+
+    with registry_conn():
+        pass
+    return str(get_settings().db_path)
+
+
+def _calendar_detail() -> str:
+    settings = get_settings()
+    MarketCalendar(settings.exchange)
+    return settings.exchange
 
 
 @app.command()
 def doctor() -> None:
     """Check environment readiness. Exits non-zero if any check fails."""
-    settings = get_settings()
     checks: list[dict[str, Any]] = [
         {"check": "python", "ok": sys.version_info >= (3, 12),
          "detail": sys.version.split()[0]},
+        _check("registry_db", _registry_db_detail),
+        _check("calendar", _calendar_detail),
     ]
-    try:
-        conn = connect(settings.db_path)
-        migrate(conn)
-        conn.close()
-        checks.append({"check": "registry_db", "ok": True, "detail": str(settings.db_path)})
-    except Exception as exc:  # noqa: BLE001 - report any failure as a check result
-        checks.append({"check": "registry_db", "ok": False, "detail": str(exc)})
-    try:
-        MarketCalendar(settings.exchange)
-        checks.append({"check": "calendar", "ok": True, "detail": settings.exchange})
-    except Exception as exc:  # noqa: BLE001
-        checks.append({"check": "calendar", "ok": False, "detail": str(exc)})
-
     all_ok = all(c["ok"] for c in checks)
     emit({"ok": all_ok, "checks": checks})
     raise typer.Exit(code=0 if all_ok else 1)
