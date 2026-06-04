@@ -112,3 +112,15 @@ name = "backtest engine stays off the risk lane"
 type = "forbidden"
 source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.risk"]
+
+[[tool.importlinter.contracts]]
+name = "knowledge layer stays off cli, backtest, live, execution"
+type = "forbidden"
+source_modules = ["algua.knowledge"]
+forbidden_modules = ["algua.cli", "algua.backtest", "algua.live", "algua.execution"]
+
+[[tool.importlinter.contracts]]
+name = "pure + execution lanes stay off the knowledge layer"
+type = "forbidden"
+source_modules = ["algua.backtest", "algua.live", "algua.features", "algua.contracts"]
+forbidden_modules = ["algua.knowledge"]
