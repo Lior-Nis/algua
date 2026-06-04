@@ -5,6 +5,7 @@ import pytest
 from algua.config.settings import Settings
 from algua.knowledge.frontmatter import parse_doc
 from algua.knowledge.sync import (
+    family_doc_path,
     generate_indexes,
     kb_check,
     render_results_block,
@@ -76,6 +77,9 @@ def test_doc_paths_reject_traversal(tmp_path):
         strategy_doc_path(s, "../escape")
     with pytest.raises(ValueError):
         sync_strategy_doc(s, "../escape", stage="idea")
+    # family paths are contained to families/ itself, not just the vault root
+    with pytest.raises(ValueError):
+        family_doc_path(s, "../escape")
 
 
 def test_strategy_family_unwraps_wikilink(tmp_path):

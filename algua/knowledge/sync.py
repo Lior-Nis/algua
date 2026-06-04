@@ -27,7 +27,8 @@ def strategy_doc_path(settings: Settings, name: str) -> Path:
 
 
 def family_doc_path(settings: Settings, name: str) -> Path:
-    return _safe_path(settings.knowledge_dir, "families", f"{name}.md")
+    # Contain to families/ itself, so a stray name can't even land elsewhere in the vault.
+    return _safe_path(settings.knowledge_dir / "families", f"{name}.md")
 
 
 def _unwikilink(value: object) -> str | None:
