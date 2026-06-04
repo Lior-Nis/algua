@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -69,29 +70,14 @@ class WalkForwardResult:
     dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "strategy": self.strategy,
-            "config_hash": self.config_hash,
-            "data_source": self.data_source,
-            "snapshot_id": self.snapshot_id,
-            "timeframe": self.timeframe,
-            "seed": self.seed,
-            "code_hash": self.code_hash,
-            "dependency_hash": self.dependency_hash,
-            "period": self.period,
-            "windows": self.windows,
-            "holdout_frac": self.holdout_frac,
-            "window_metrics": self.window_metrics,
-            "holdout_metrics": self.holdout_metrics,
-            "stability": self.stability,
-        }
+        return dataclasses.asdict(self)
 
 
 def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, Any]:
     seg = returns.iloc[start_i:end_i]
     rec: dict[str, Any] = {
-        "start": str(seg.index[0].date()) if len(seg) else None,
-        "end": str(seg.index[-1].date()) if len(seg) else None,
+        "start": str(seg.index[0].date()),
+        "end": str(seg.index[-1].date()),
         "n_bars": int(len(seg)),
     }
     rec.update(metrics_from_returns(seg))
