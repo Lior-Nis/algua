@@ -1,11 +1,35 @@
 from __future__ import annotations
 
-from typing import Any
+import math
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import Any, Protocol
 
 from algua.backtest.result import BacktestResult
 from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
 
+# ---------------------------------------------------------------------------
+# Protocol (#45)
+# ---------------------------------------------------------------------------
+
+class ExperimentTracker(Protocol):
+    """Structural protocol for experiment loggers."""
+
+    def log_backtest(
+        self, result: BacktestResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str: ...
+
+    def log_sweep(self, result: SweepResult, *, tracking_uri: str) -> str: ...
+
+    def log_walk_forward(
+        self, result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str: ...
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _flatten(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     """Flatten a nested dict into `prefix.key` entries."""
@@ -19,13 +43,14 @@ def _flatten(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     return out
 
 
+def _is_finite_number(v: Any) -> bool:
+    """Return True iff *v* is a real, finite number (int/float, not bool, not NaN/inf)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _numeric_metrics(d: dict[str, Any]) -> dict[str, float]:
-    """Keep only real numeric values (drops None/str/bool), as floats — safe for log_metrics."""
-    return {
-        k: float(v)
-        for k, v in d.items()
-        if isinstance(v, (int, float)) and not isinstance(v, bool)
-    }
+    """Keep only real, finite numeric values — NaN/inf are dropped; safe for log_metrics."""
+    return {k: float(v) for k, v in d.items() if _is_finite_number(v)}
 
 
 def _stamp_params(result: Any) -> dict[str, Any]:
@@ -41,13 +66,26 @@ def _stamp_params(result: Any) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _run(experiment: str, tracking_uri: str) -> Generator[Any, None, None]:
+    """Import mlflow, set tracking URI + experiment once, yield a started run."""
+    import mlflow
+
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(experiment)
+    with mlflow.start_run() as run:
+        yield run
+
+
+# ---------------------------------------------------------------------------
+# Public loggers
+# ---------------------------------------------------------------------------
+
 def log_backtest(result: BacktestResult, params: dict[str, Any], *, tracking_uri: str) -> str:
     """Log a single backtest as an MLflow run (experiment = strategy name). Returns run_id."""
     import mlflow
 
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment(result.strategy)
-    with mlflow.start_run() as run:
+    with _run(result.strategy, tracking_uri) as run:
         mlflow.log_params({
             **{f"param.{k}": v for k, v in params.items()},
             **_stamp_params(result),
@@ -66,12 +104,11 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
     """Log a sweep as a parent run with a nested child run per ranked combo.
 
     Returns parent run_id.
+    n_combos is logged as a param (it is a config-level count, not a result metric).
     """
     import mlflow
 
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment(result.strategy)
-    with mlflow.start_run() as parent:
+    with _run(result.strategy, tracking_uri) as parent:
         mlflow.log_params({
             **{f"grid.{k}": ",".join(str(x) for x in vals) for k, vals in result.grid.items()},
             "n_combos": result.n_combos, "rank_by": result.rank_by,
@@ -82,7 +119,9 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
             "dependency_hash": result.dependency_hash,
         })
         if result.best is not None:
-            mlflow.log_metric("best_score", float(result.best["score"]))
+            _best_score = result.best["score"]
+            if _is_finite_number(_best_score):
+                mlflow.log_metric("best_score", float(_best_score))
         mlflow.set_tags({"kind": "sweep", "strategy": result.strategy})
         mlflow.log_dict(result.to_dict(), "sweep.json")
 
@@ -98,8 +137,12 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                     "holdout_frac": result.holdout_frac, "code_hash": result.code_hash,
                     "dependency_hash": result.dependency_hash,
                 })
+                _entry_score = entry["score"]
+                _score_metric: dict[str, float] = (
+                    {"score": float(_entry_score)} if _is_finite_number(_entry_score) else {}
+                )
                 mlflow.log_metrics({
-                    "score": float(entry["score"]),
+                    **_score_metric,
                     **_numeric_metrics(_flatten(entry["stability"])),
                     **_numeric_metrics(_flatten(entry["holdout"], "holdout.")),
                 })
@@ -113,9 +156,7 @@ def log_walk_forward(
     """Log a walk-forward evaluation as one MLflow run. Returns run_id."""
     import mlflow
 
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment(result.strategy)
-    with mlflow.start_run() as run:
+    with _run(result.strategy, tracking_uri) as run:
         mlflow.log_params({
             **{f"param.{k}": v for k, v in params.items()},
             "windows": result.windows, "holdout_frac": result.holdout_frac,
