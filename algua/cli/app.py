@@ -48,6 +48,14 @@ def doctor() -> None:
     except Exception as exc:  # noqa: BLE001
         checks.append({"check": "calendar", "ok": False, "detail": str(exc)})
 
+    try:
+        from algua.knowledge.sync import kb_check
+
+        kb_ok, kb_detail = kb_check(settings)
+        checks.append({"check": "knowledge_base", "ok": kb_ok, "detail": kb_detail})
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"check": "knowledge_base", "ok": False, "detail": str(exc)})
+
     all_ok = all(c["ok"] for c in checks)
     emit({"ok": all_ok, "checks": checks})
     raise typer.Exit(code=0 if all_ok else 1)
