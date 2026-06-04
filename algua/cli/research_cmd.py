@@ -10,7 +10,8 @@ from algua.cli._common import ok, registry_conn, resolve_eval_inputs
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.contracts.lifecycle import Actor, Stage
-from algua.registry import store
+from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import transition_strategy
 from algua.research.gates import GateCriteria, GateDecision, evaluate_gate
 
 research_app = typer.Typer(help="Research workflow: gates and promotion", no_args_is_help=True)
@@ -58,8 +59,8 @@ def promote(
     promoted = False
     if decision.passed:
         with registry_conn() as conn:
-            store.transition(conn, name, Stage.SHORTLISTED, actor_enum, _gate_reason(decision),
-                             code_hash=wf.config_hash, config_hash=wf.config_hash)
+            transition_strategy(SqliteStrategyRepository(conn), name, Stage.SHORTLISTED,
+                                actor_enum, _gate_reason(decision))
         promoted = True
 
     payload: dict[str, Any] = {

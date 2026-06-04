@@ -31,12 +31,13 @@ def test_now_iso_is_utc_isoformat():
 
 
 def test_registry_conn_migrates_and_closes():
-    from algua.registry import store
+    from algua.registry.store import SqliteStrategyRepository
 
     with registry_conn() as conn:
         # migrated: a registry write succeeds against a fresh DB
-        store.add_strategy(conn, "demo_strat")
-        recs = store.list_strategies(conn)
+        repo = SqliteStrategyRepository(conn)
+        repo.add("demo_strat")
+        recs = repo.list_strategies()
         assert any(r.name == "demo_strat" for r in recs)
     # closed on exit: using the connection now raises
     with pytest.raises(sqlite3.ProgrammingError):

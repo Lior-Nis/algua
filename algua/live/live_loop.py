@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -57,7 +57,10 @@ class TickHooks:
     on_submitted: Callable[[SubmittedOrder], None] | None = None
     should_halt: Callable[[], bool] | None = None
     peak_equity: float | None = None
-    derived_positions: dict[str, float] = field(default_factory=dict)
+    # None == hook not supplied (pure decide+submit path, no reconcile). A supplied dict — even an
+    # EMPTY one — means "the DB says we hold this"; an empty DB against a held broker book is the
+    # drift case we must catch, so reconcile is unconditional once the hook is present (#18).
+    derived_positions: dict[str, float] | None = None
 
 
 class TickHalted(RuntimeError):
@@ -110,16 +113,25 @@ def run_tick(
     current_weights = {s: mv / snap.equity for s, mv in snap.market_values.items() if mv != 0.0}
 
     # Reconcile DB-derived positions against the broker's pre-submit state (#18): a drift means a
-    # prior tick's orders never persisted (or vice versa) — halt before compounding it.
-    reconcile_ok = (
-        {s: q for s, q in hooks.derived_positions.items() if q != 0.0} == positions_before
-    )
-    if hooks.derived_positions and not reconcile_ok:
-        raise RiskBreach(
-            "reconcile",
-            f"DB-derived positions {hooks.derived_positions} disagree with broker "
-            f"{positions_before} before tick — refusing to trade on inconsistent state",
-        )
+    # prior tick's orders never persisted (or vice versa) — halt before compounding it. Reconcile
+    # whenever the hook is supplied (derived_positions is not None), INCLUDING when it is empty: an
+    # empty DB against a held broker book is exactly the drift we must catch.
+    reconcile_ok = True
+    if hooks.derived_positions is not None:
+        derived = {s: q for s, q in hooks.derived_positions.items() if q != 0.0}
+        reconcile_ok = derived == positions_before
+        if not reconcile_ok:
+            raise RiskBreach(
+                "reconcile",
+                f"DB-derived positions {hooks.derived_positions} disagree with broker "
+                f"{positions_before} before tick — refusing to trade on inconsistent state",
+            )
+
+    # Validate REALIZED gross exposure from the snapshot BEFORE cancelling/submitting (#27): if the
+    # broker book is already over the limit, trip/flatten before any NEW order goes out rather than
+    # after. The target-weight gross check in decide() can't catch a book that drifted across ticks.
+    realized_gross = sum(abs(w) for w in current_weights.values())
+    check_gross_exposure_realized(realized_gross, strategy.execution.max_gross_exposure)
 
     weights, intents = decide(strategy, bars.loc[:t], current_weights, t)
 
@@ -127,6 +139,12 @@ def run_tick(
         raise TickHalted("kill-switch tripped before submit phase")
 
     broker.cancel_open_orders()
+
+    # Re-check the kill-switch AFTER cancel and immediately before the submit loop (#21): if the
+    # switch tripped while cancellation was in flight, abort before sending any order.
+    if hooks.should_halt is not None and hooks.should_halt():
+        raise TickHalted("kill-switch tripped before submit phase")
+
     submitted: list[dict[str, Any]] = []
     for intent in intents:
         coid = (
@@ -145,11 +163,6 @@ def run_tick(
         submitted.append({"symbol": record.symbol, "side": record.side,
                           "target_weight": record.target_weight, "order_id": record.order_id,
                           "client_order_id": record.client_order_id})
-
-    # Validate REALIZED gross exposure from the snapshot the orders were sized against (#27): the
-    # target-weight gross check in decide() can't catch a book that drifted between ticks.
-    realized_gross = sum(abs(w) for w in current_weights.values())
-    check_gross_exposure_realized(realized_gross, strategy.execution.max_gross_exposure)
 
     return TickResult(
         decision_ts=t,
