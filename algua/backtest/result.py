@@ -1,7 +1,29 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
+
+from algua.contracts.types import DataProvider
+
+# config_hash is canonical in strategies.base (shared by the backtest engine and the registry's
+# live-approval gate). Re-exported here because it is also part of backtest provenance (#38).
+from algua.strategies.base import config_hash as config_hash
+
+
+def provenance(provider: DataProvider, seed: int | None) -> dict[str, Any]:
+    """Provenance fields shared by every backtest-family result (#43).
+
+    A provider that pins its own `seed`/`snapshot_id` wins (real snapshots and the
+    synthetic provider both do this); otherwise the caller's explicit `seed` is recorded.
+    Used identically by run() and walk_forward() so their seed/source/snapshot provenance
+    can never drift.
+    """
+    return {
+        "data_source": type(provider).__name__,
+        "seed": getattr(provider, "seed", seed),
+        "snapshot_id": getattr(provider, "snapshot_id", None),
+    }
 
 
 @dataclass
@@ -18,15 +40,4 @@ class BacktestResult:
     dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "strategy": self.strategy,
-            "metrics": self.metrics,
-            "config_hash": self.config_hash,
-            "data_source": self.data_source,
-            "timeframe": self.timeframe,
-            "period": self.period,
-            "seed": self.seed,
-            "snapshot_id": self.snapshot_id,
-            "code_hash": self.code_hash,
-            "dependency_hash": self.dependency_hash,
-        }
+        return dataclasses.asdict(self)

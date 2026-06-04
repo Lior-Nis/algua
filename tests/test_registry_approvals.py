@@ -105,17 +105,17 @@ def test_record_approval_rejects_blank_approver(repo):
 
 
 def test_code_hash_covers_imported_algua_helper(repo, monkeypatch):
-    # #97: the strategy imports a first-party helper (algua.features.indicators.momentum).
+    # #97: the strategy imports a first-party helper (algua.strategies.base — StrategyConfig).
     # If that helper's source changes after approval, the recomputed code_hash MUST change,
     # so the stale approval can no longer promote altered behavior to live.
-    import algua.features.indicators as indicators
+    import algua.strategies.base as helper
 
     baseline, _ = compute_artifact_hashes(STRATEGY)
 
     real_getsource = inspect.getsource
 
     def fake_getsource(obj):
-        if obj is indicators:
+        if obj is helper:
             return real_getsource(obj) + "\n# behavior-changing edit to a first-party helper\n"
         return real_getsource(obj)
 

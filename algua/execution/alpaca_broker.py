@@ -9,9 +9,9 @@ import requests
 from requests import RequestException
 
 from algua.contracts.types import OrderIntent
+from algua.execution.sizing import size_order
 
 _TIMEOUT = 30
-_MIN_NOTIONAL = 1.0
 _DEFAULT_BASE_URL = "https://paper-api.alpaca.markets"
 
 
@@ -37,11 +37,25 @@ class AccountState:
     buying_power: float
 
 
+@dataclass(frozen=True)
+class TickSnapshot:
+    """Equity + per-symbol market value AND qty captured ONCE at tick start (1 account GET + 1
+    positions GET). The equity is the fixed sizing denominator for every symbol in the tick, so it
+    can't drift as earlier orders in the same tick fill (#20). `market_values`/`qtys` are keyed on
+    the universe the snapshot was scoped to (0.0 when flat)."""
+
+    equity: float
+    market_values: dict[str, float]  # symbol -> current position market value (0.0 => flat)
+    qtys: dict[str, float]  # symbol -> current position shares (0.0 => flat)
+
+
 class AlpacaPaperBroker:
-    """requests-based wrapper of the Alpaca paper-trading REST. Implements the Broker protocol
-    (get_positions, submit) + account(). Sizes target_weight -> notional market orders internally,
-    consistent with SimBroker. Async by nature: submit() returns an order id; fills land later and
-    show up in get_positions()."""
+    """requests-based wrapper of the Alpaca paper-trading REST. Implements the contracts Broker
+    protocol (get_positions, submit) and sizes via the shared `size_order` rule so it sizes target
+    weights identically to SimBroker. The tick loop drives it through snapshot()/submit_sized() to
+    keep round-trips to 1 account GET + 1 positions GET + N POSTs with a fixed sizing denominator
+    (#20). Async by nature: submit returns an order id; fills land later and show up in
+    get_positions()."""
 
     def __init__(self, api_key: str, api_secret: str, base_url: str = _DEFAULT_BASE_URL) -> None:
         self.api_key = api_key
@@ -95,10 +109,13 @@ class AlpacaPaperBroker:
             buying_power=self._num(data, "buying_power", "/v2/account"),
         )
 
+    def _positions_raw(self) -> list[Any]:
+        return self._read(self._get("/v2/positions"), "/v2/positions")
+
     def get_positions(self) -> pd.Series:
-        data = self._read(self._get("/v2/positions"), "/v2/positions")
+        rows = self._positions_raw()
         return pd.Series(
-            {row["symbol"]: self._num(row, "qty", "/v2/positions") for row in data},
+            {row["symbol"]: self._num(row, "qty", "/v2/positions") for row in rows},
             dtype="float64",
         )
 
@@ -123,20 +140,40 @@ class AlpacaPaperBroker:
                 continue  # no open position for this symbol -> nothing to close
             self._read(resp, path, ok=(200,))
 
-    def _market_value(self, symbol: str) -> float:
-        path = f"/v2/positions/{symbol}"
-        resp = self._get(path)
-        if resp.status_code == 404:
-            return 0.0  # Alpaca returns 404 when there is no open position
-        return self._num(self._read(resp, path), "market_value", path)
-
-    def submit(self, intent: OrderIntent) -> str:
+    def snapshot(self, universe: list[str]) -> TickSnapshot:
+        """Capture equity + per-symbol market value and qty ONCE (1 account GET + 1 positions GET).
+        The snapshot keys are the union of `universe` and every currently-held symbol: universe
+        names absent from the book are flat (0.0), and held names outside the universe are included
+        so a dropped position can still be exited. Sizing a symbol that is neither in the universe
+        nor held is rejected by submit_sized, so a typo can't be misread as flat (#29)."""
         equity = self.account().equity
-        delta = intent.target_weight * equity - self._market_value(intent.symbol)
-        if abs(delta) < _MIN_NOTIONAL:
+        rows = self._positions_raw()
+        open_values = {r["symbol"]: self._num(r, "market_value", "/v2/positions") for r in rows}
+        open_qtys = {r["symbol"]: self._num(r, "qty", "/v2/positions") for r in rows}
+        symbols = set(universe) | set(open_qtys)
+        return TickSnapshot(
+            equity=equity,
+            market_values={sym: open_values.get(sym, 0.0) for sym in symbols},
+            qtys={sym: open_qtys.get(sym, 0.0) for sym in symbols},
+        )
+
+    def submit_sized(self, intent: OrderIntent, snap: TickSnapshot) -> str:
+        """Size ONE intent against the tick snapshot (shared `size_order`) and POST it. The symbol
+        MUST be in the snapshot's universe — an unknown symbol raises rather than silently sizing a
+        full target-weight buy against a phantom flat position (#29). Returns the order id, or
+        "noop" if the delta is below the minimum notional."""
+        if intent.symbol not in snap.market_values:
+            raise BrokerError(
+                f"alpaca submit: {intent.symbol!r} is not in the strategy universe "
+                f"{sorted(snap.market_values)} — refusing to size an unknown symbol"
+            )
+        sized = size_order(symbol=intent.symbol, target_weight=intent.target_weight,
+                           equity=snap.equity,
+                           current_market_value=snap.market_values[intent.symbol])
+        if sized.is_noop:
             return "noop"
-        side = "buy" if delta > 0 else "sell"
-        notional = format(Decimal(str(abs(delta))).quantize(Decimal("0.01")), "f")
+        side = "buy" if sized.delta_notional > 0 else "sell"
+        notional = format(Decimal(str(abs(sized.delta_notional))).quantize(Decimal("0.01")), "f")
         data = self._read(
             self._post("/v2/orders", {"symbol": intent.symbol, "notional": notional,
                                       "side": side, "type": "market", "time_in_force": "day"}),
@@ -146,3 +183,9 @@ class AlpacaPaperBroker:
         if not order_id:
             raise BrokerError(f"alpaca /v2/orders: response missing 'id': {data}")
         return str(order_id)
+
+    def submit(self, intent: OrderIntent) -> str:
+        """Broker-protocol single-symbol submit: snapshot scoped to this one symbol, then size +
+        POST. The tick loop instead snapshots the whole universe ONCE and calls submit_sized per
+        symbol, so this self-snapshotting path is reserved for single-order callers."""
+        return self.submit_sized(intent, self.snapshot([intent.symbol]))
