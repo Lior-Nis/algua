@@ -13,7 +13,8 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.registry import store
+from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import transition_strategy
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
 
 backtest_app = typer.Typer(help="Run backtests", no_args_is_help=True)
@@ -46,17 +47,15 @@ def run(
 
     if register:
         with registry_conn() as conn:
-            existing = {s.name for s in store.list_strategies(conn)}
+            repo = SqliteStrategyRepository(conn)
+            existing = {s.name for s in repo.list_strategies()}
             if name not in existing:
-                store.add_strategy(conn, name)
+                repo.add(name)
             reason = (
                 f"backtest sharpe={result.metrics['sharpe']:.2f} "
                 f"ret={result.metrics['total_return']:.2%}"
             )
-            # NOTE: code_hash == config_hash for now; real source-code hashing is wired in a
-            # later sub-project before the paper->live gate is ever in scope.
-            store.transition(conn, name, Stage.BACKTESTED, Actor.AGENT, reason,
-                             code_hash=result.config_hash, config_hash=result.config_hash)
+            transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason)
 
     payload = result.to_dict()
     if track:

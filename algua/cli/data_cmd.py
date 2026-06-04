@@ -9,9 +9,8 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.data.contracts import BarProvider, BarRequest
-from algua.data.providers.alpaca import AlpacaBarProvider
-from algua.data.providers.yfinance import YFinanceBarProvider
-from algua.data.store import DataStore
+from algua.data.providers import get_provider
+from algua.data.store import DataStore, normalize_symbols
 
 data_app = typer.Typer(help="Point-in-time data snapshots", no_args_is_help=True)
 app.add_typer(data_app, name="data")
@@ -24,20 +23,7 @@ def _store() -> DataStore:
 
 
 def _bar_provider(name: str) -> BarProvider:
-    settings = get_settings()
-    if name == "yfinance":
-        return YFinanceBarProvider()
-    if name == "alpaca":
-        if settings.alpaca_api_key is None or settings.alpaca_api_secret is None:
-            raise ValueError(
-                "alpaca provider requires ALGUA_ALPACA_API_KEY and ALGUA_ALPACA_API_SECRET"
-            )
-        return AlpacaBarProvider(
-            api_key=settings.alpaca_api_key,
-            api_secret=settings.alpaca_api_secret,
-            base_url=settings.alpaca_data_url,
-        )
-    raise ValueError(f"unsupported bar provider: {name}")
+    return get_provider(name, get_settings())
 
 
 @data_app.command("ingest")
@@ -72,15 +58,22 @@ def ingest_bars(
     provider: str = typer.Option("yfinance", "--provider"),
     symbols: str = typer.Option(..., "--symbols", help="comma-separated symbols"),
     start: str = typer.Option(..., "--start", help="inclusive provider start date/datetime"),
-    end: str = typer.Option(..., "--end", help="exclusive/ provider end date/datetime"),
+    end: str = typer.Option(
+        ...,
+        "--end",
+        help=(
+            "end date/datetime. Canonical convention is half-open [start, end). NOTE: vendors "
+            "differ — yfinance treats end exclusive (matches the convention); Alpaca treats end "
+            "inclusive, so an Alpaca snapshot may include the end bar."
+        ),
+    ),
     timeframe: str = typer.Option("1d", "--timeframe"),
     adjustment: str = typer.Option("none", "--adjustment"),
     as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
 ) -> None:
     """Fetch provider bars and persist a reproducible parquet snapshot."""
-    clean_symbols = symbols.split(",")
     request = BarRequest(
-        symbols=tuple(s.strip().upper() for s in clean_symbols if s.strip()),
+        symbols=tuple(normalize_symbols(symbols.split(","))),
         start=start,
         end=end,
         timeframe=timeframe,

@@ -102,6 +102,17 @@ def test_count_orders_scoped_to_strategy(tmp_path):
     assert count_orders(conn, "other") == 1
 
 
+def test_record_submitted_order_idempotent_on_duplicate(tmp_path):
+    # #18: a crash/retry or duplicate Alpaca client_order_id path can return the SAME broker order
+    # again. Re-recording it must NOT create a duplicate paper_orders row.
+    conn = _conn(tmp_path)
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")  # retry
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_orders WHERE strategy='s' AND broker_order_id='alp-1'"
+    ).fetchone()[0] == 1
+
+
 def test_peak_equity_ratchets_up(tmp_path):
     conn = _conn(tmp_path)
     assert get_peak_equity(conn, "s") is None
@@ -109,6 +120,36 @@ def test_peak_equity_ratchets_up(tmp_path):
     assert update_peak_equity(conn, "s", 120.0) == 120.0  # new high
     assert update_peak_equity(conn, "s", 90.0) == 120.0   # below peak -> peak unchanged
     assert get_peak_equity(conn, "s") == 120.0
+
+
+def test_persist_run_partial_fill_reaches_partial_status(tmp_path):
+    """SimBroker buy clamped to available cash produces Fill.status='partial'; that must be
+    persisted as paper_orders.status='partial', not collapsed to 'filled'."""
+    from algua.execution.sim_broker import SimBroker
+
+    conn = _conn(tmp_path)
+    # equity=$1150 (1 BBB@$1000 + $150 cash).  target_weight=0.5 for AAA@$100 → wants 5 shares,
+    # but only $150 cash on hand → affordable=1.  SimBroker clamps qty to 1 → partial fill.
+    broker = SimBroker(cash=150.0)
+    broker.positions["BBB"] = 1.0
+    intent = OrderIntent("AAA", Side.BUY, 0.5, T0)
+    broker_order_id = broker.submit(intent)
+    fills = broker.fill_pending(pd.Series({"AAA": 100.0, "BBB": 1000.0}), fill_ts=T1)
+    assert len(fills) == 1 and fills[0].status == "partial", "SimBroker must emit partial"
+
+    result = PaperRunResult(
+        strategy="s",
+        orders=[OrderRecord(intent, broker_order_id)],
+        fills=fills,
+        final_positions=dict(broker.get_positions()),
+        final_cash=broker.cash,
+        final_equity=broker.equity(pd.Series({"AAA": 100.0})),
+        reconcile_ok=True,
+    )
+    persist_run(conn, result)
+
+    row = conn.execute("SELECT status FROM paper_orders WHERE strategy='s'").fetchone()
+    assert row["status"] == "partial"
 
 
 def test_persist_run_replaces_prior_paper_state_not_accumulates(tmp_path):

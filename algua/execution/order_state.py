@@ -51,7 +51,15 @@ def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
         # A rejected fill (zero-qty) carries no shares; the order's status reflects whether any
         # shares actually executed, and only executing fills are persisted as fills.
         executed = [f for f in fills_by_order.get(broker_order_id, []) if f.qty != 0.0]
-        status = "filled" if executed else "rejected"
+        # Derive status from the fills' own status rather than hardcoding "filled": a buy clamped
+        # to available cash produces Fill.status="partial", which must be preserved here so callers
+        # can distinguish fully-filled orders from cash-constrained ones.
+        if any(f.status == "partial" for f in executed):
+            status = "partial"
+        elif executed:
+            status = "filled"
+        else:
+            status = "rejected"
         cols = (
             "(strategy, symbol, side, target_weight,"
             " decision_ts, submitted_ts, status, broker_order_id)"
@@ -99,9 +107,13 @@ def record_submitted_order(
 ) -> None:
     """Persist ONE accepted live order IMMEDIATELY after the broker accepts it, so a mid-tick death
     can never leave Alpaca holding an order the DB never recorded (#18). Each row commits on its own
-    rather than being batched after the whole loop."""
+    rather than being batched after the whole loop.
+
+    Idempotent on (strategy, broker_order_id): a crash/retry or a duplicate Alpaca client_order_id
+    path that re-returns the SAME broker order leaves the existing row untouched instead of writing
+    a duplicate (the unique index enforces this; INSERT OR IGNORE makes it a no-op)."""
     conn.execute(
-        "INSERT INTO paper_orders"
+        "INSERT OR IGNORE INTO paper_orders"
         "(strategy, symbol, side, target_weight, decision_ts, submitted_ts,"
         " status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
         (strategy, symbol, side, target_weight, decision_ts,

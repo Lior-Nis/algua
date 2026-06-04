@@ -25,7 +25,7 @@ from algua.execution.order_state import (
 from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
-from algua.registry import store
+from algua.registry.store import SqliteStrategyRepository
 from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy
@@ -55,7 +55,7 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     switch (kill/flatten) do their own, narrower gating instead.
     """
     strategy = load_strategy(name)
-    rec = store.get_strategy(conn, name)
+    rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage is not Stage.PAPER:
         raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
     if kill_switch.is_tripped(conn, name):
@@ -139,7 +139,8 @@ def kill(
 ) -> None:
     """Manually trip the kill-switch for a strategy (halts paper runs until reset)."""
     with registry_conn() as conn:
-        store.get_strategy(conn, name)  # reject unknown/mistyped names before tripping a switch
+        # reject unknown/mistyped names before tripping a switch
+        SqliteStrategyRepository(conn).get(name)
         kill_switch.trip(conn, name, reason=reason, actor=actor)
         audit_append(conn, actor=actor, action="kill_switch_trip", reason=reason, strategy=name)
     emit(ok({"strategy": name, "kill_switch": "tripped", "reason": reason}))
@@ -256,7 +257,7 @@ def flatten(
     """Emergency: close this strategy's live positions (its universe) and trip its kill-switch."""
     strategy = load_strategy(name)
     with registry_conn() as conn:
-        rec = store.get_strategy(conn, name)
+        rec = SqliteStrategyRepository(conn).get(name)
         if rec.stage is not Stage.PAPER:
             raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
         broker = _alpaca_broker_from_settings()

@@ -1,39 +1,36 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
-from algua.registry import store
+from algua.registry.repository import StrategyRecord, StrategyRepository
 
-ApprovalVerifier = Callable[[sqlite3.Connection, int, str, str], bool]
+ApprovalVerifier = Callable[[StrategyRepository, int, str, str], bool]
 
 
 def transition_strategy(
-    conn: sqlite3.Connection,
+    repo: StrategyRepository,
     name: str,
     to: Stage | str,
     actor: Actor | str,
     reason: str | None = None,
-    code_hash: str | None = None,
-    config_hash: str | None = None,
     approval_verifier: ApprovalVerifier | None = None,
-) -> store.StrategyRecord:
+) -> StrategyRecord:
     target = Stage(to)
     transition_actor = Actor(actor)
-    rec = store.get_strategy(conn, name)
+    rec = repo.get(name)
     validate_transition(rec.stage, target)
+    code_hash: str | None = None
+    config_hash: str | None = None
     if target == Stage.LIVE:
-        _validate_live_gate(
-            conn=conn,
+        code_hash, config_hash = _validate_live_gate(
+            repo=repo,
+            name=name,
             strategy_id=rec.id,
             actor=transition_actor,
-            code_hash=code_hash,
-            config_hash=config_hash,
             approval_verifier=approval_verifier,
         )
-    return store.apply_transition(
-        conn=conn,
+    return repo.apply_transition(
         rec=rec,
         to=target,
         actor=transition_actor,
@@ -45,22 +42,30 @@ def transition_strategy(
 
 def _validate_live_gate(
     *,
-    conn: sqlite3.Connection,
+    repo: StrategyRepository,
+    name: str,
     strategy_id: int,
     actor: Actor,
-    code_hash: str | None,
-    config_hash: str | None,
     approval_verifier: ApprovalVerifier | None,
-) -> None:
-    verifier = approval_verifier or _default_approval_verifier()
+) -> tuple[str, str]:
+    """Enforce the human-only live wall against the *recomputed* artifact identity.
+
+    Returns the hashes actually pinned (recomputed from source), so they land in the transition
+    history rather than any caller-supplied value.
+    """
     if actor is not Actor.HUMAN:
         raise TransitionError("transition to live requires a human actor")
-    if code_hash is None or config_hash is None:
-        raise TransitionError("transition to live requires code_hash and config_hash")
-    if not code_hash.strip() or not config_hash.strip():
-        raise TransitionError("transition to live requires non-empty code_hash and config_hash")
-    if not verifier(conn, strategy_id, code_hash, config_hash):
+    code_hash, config_hash = _compute_hashes(name)
+    verifier = approval_verifier or _default_approval_verifier()
+    if not verifier(repo, strategy_id, code_hash, config_hash):
         raise TransitionError("no matching human approval for this code+config")
+    return code_hash, config_hash
+
+
+def _compute_hashes(name: str) -> tuple[str, str]:
+    from algua.registry.approvals import compute_artifact_hashes
+
+    return compute_artifact_hashes(name)
 
 
 def _default_approval_verifier() -> ApprovalVerifier:

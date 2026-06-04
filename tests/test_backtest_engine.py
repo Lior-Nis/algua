@@ -139,3 +139,60 @@ def test_run_stamps_code_and_dependency_identity():
     payload = res.to_dict()
     assert isinstance(payload["code_hash"], str) and len(payload["code_hash"]) >= 7
     assert isinstance(payload["dependency_hash"], str) and len(payload["dependency_hash"]) == 64
+
+
+def test_explicit_seed_recorded_when_provider_has_none():
+    # #43: provider w/o a seed attr -> the run's explicit seed is the provenance seed.
+    class NoSeedProvider:
+        def get_bars(self, symbols, start, end, timeframe):
+            return SyntheticProvider(seed=1).get_bars(symbols, start, end, timeframe)
+
+    res = run(_equal_weight_strategy(), NoSeedProvider(), START, END, seed=99)
+    assert res.seed == 99
+
+
+def test_provider_seed_wins_over_explicit_seed():
+    res = run(_equal_weight_strategy(), SyntheticProvider(seed=3), START, END, seed=99)
+    assert res.seed == 3
+
+
+def test_warmup_bars_zeroes_weights_in_warmup_window():
+    """#41: warmup_bars must suppress positions for the first `warmup_bars` bars.
+
+    A strategy that always wants 100% AAA, with warmup_bars=5 and lag=1, cannot hold
+    anything until after the warmup window, so its first rebalance is delayed.
+    """
+    cfg_warm = StrategyConfig(
+        name="warm", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
+                                    warmup_bars=5),
+        params={},
+    )
+    cfg_none = StrategyConfig(
+        name="nowarm", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
+                                    warmup_bars=0),
+        params={},
+    )
+    fn = lambda v, p: pd.Series([1.0], index=["AAA"])  # noqa: E731
+    warm = run(LoadedStrategy(config=cfg_warm, fn=fn), SyntheticProvider(seed=2), START, END)
+    none = run(LoadedStrategy(config=cfg_none, fn=fn), SyntheticProvider(seed=2), START, END)
+    # Warmup suppresses early holding -> lower average gross exposure than the no-warmup run.
+    assert warm.metrics["avg_gross_exposure"] < none.metrics["avg_gross_exposure"]
+
+
+def test_simulate_label_aligns_misordered_weights():
+    """Direct check of label-aligned assignment in the simulation step (#42)."""
+    from algua.backtest import simulate
+
+    cfg = StrategyConfig(
+        name="rev", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={},
+    )
+    # Strategy always wants 100% BBB but returns it as the only label.
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series([1.0], index=["BBB"]))
+    _pf, weights_eff = simulate(strat, SyntheticProvider(seed=4), START, END)
+    # Every non-zero weight must sit in the BBB column; AAA must remain flat zero.
+    assert (weights_eff["AAA"] == 0.0).all()
+    assert weights_eff["BBB"].abs().sum() > 0
