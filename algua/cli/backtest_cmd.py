@@ -18,8 +18,9 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import DataProvider
 from algua.data.serve import StoreBackedProvider
 from algua.data.store import DataStore
-from algua.registry import store
 from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import transition_strategy
 from algua.strategies.loader import load_strategy
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
 
@@ -69,17 +70,15 @@ def run(
     if register:
         with closing(connect(get_settings().db_path)) as conn:
             migrate(conn)
-            existing = {s.name for s in store.list_strategies(conn)}
+            repo = SqliteStrategyRepository(conn)
+            existing = {s.name for s in repo.list_strategies()}
             if name not in existing:
-                store.add_strategy(conn, name)
+                repo.add(name)
             reason = (
                 f"backtest sharpe={result.metrics['sharpe']:.2f} "
                 f"ret={result.metrics['total_return']:.2%}"
             )
-            # NOTE: code_hash == config_hash for now; real source-code hashing is wired in a
-            # later sub-project before the paper->live gate is ever in scope.
-            store.transition(conn, name, Stage.BACKTESTED, Actor.AGENT, reason,
-                             code_hash=result.config_hash, config_hash=result.config_hash)
+            transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason)
 
     payload = result.to_dict()
     if track:

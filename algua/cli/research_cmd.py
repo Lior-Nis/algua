@@ -12,8 +12,9 @@ from algua.cli.backtest_cmd import _select_provider, _utc
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.registry import store
 from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import transition_strategy
 from algua.research.gates import GateCriteria, GateDecision, evaluate_gate
 from algua.strategies.loader import load_strategy
 
@@ -64,8 +65,8 @@ def promote(
     if decision.passed:
         with closing(connect(get_settings().db_path)) as conn:
             migrate(conn)
-            store.transition(conn, name, Stage.SHORTLISTED, actor_enum, _gate_reason(decision),
-                             code_hash=wf.config_hash, config_hash=wf.config_hash)
+            transition_strategy(SqliteStrategyRepository(conn), name, Stage.SHORTLISTED,
+                                actor_enum, _gate_reason(decision))
         promoted = True
 
     payload: dict[str, Any] = {

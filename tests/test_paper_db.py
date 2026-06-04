@@ -1,5 +1,5 @@
-from algua.registry import store
 from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
 
 
 def _tables(conn):
@@ -18,37 +18,13 @@ def test_migrate_is_idempotent(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     migrate(conn)  # second run must not raise
-    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version;").fetchone()[0] == 3
 
 
 def test_migrate_creates_kill_switches_table(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     assert "kill_switches" in _tables(conn)
-
-
-def test_migrate_creates_live_equity_peak_table(tmp_path):
-    conn = connect(tmp_path / "r.db")
-    migrate(conn)
-    assert "live_equity_peak" in _tables(conn)
-
-
-def test_equity_peak_roundtrip_and_upsert(tmp_path):
-    conn = connect(tmp_path / "r.db")
-    migrate(conn)
-    assert store.get_equity_peak(conn, "s") is None      # no row yet
-    store.set_equity_peak(conn, "s", 100.0)
-    assert store.get_equity_peak(conn, "s") == 100.0
-    store.set_equity_peak(conn, "s", 125.5)              # UPSERT overwrites
-    assert store.get_equity_peak(conn, "s") == 125.5
-
-
-def test_clear_equity_peak(tmp_path):
-    conn = connect(tmp_path / "r.db")
-    migrate(conn)
-    store.set_equity_peak(conn, "s", 100.0)
-    store.clear_equity_peak(conn, "s")
-    assert store.get_equity_peak(conn, "s") is None
 
 
 def _fk_targets(conn, table):
@@ -79,7 +55,7 @@ def test_operational_rows_survive_strategy_deletion(tmp_path):
     """
     conn = connect(tmp_path / "r.db")
     migrate(conn)
-    store.add_strategy(conn, "alpha")
+    SqliteStrategyRepository(conn).add("alpha")
     conn.execute(
         "INSERT INTO audit_log(ts, actor, action, reason, strategy) VALUES (?,?,?,?,?)",
         ("2026-06-04T00:00:00+00:00", "agent", "noted", None, "alpha"),

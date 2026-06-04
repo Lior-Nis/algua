@@ -9,7 +9,7 @@ from pathlib import Path
 # so it can add new tables to an existing DB but CANNOT ALTER a populated one.
 # Any column/constraint change to an existing table needs a real migration
 # (write it explicitly when the need arrives) — not just a bump of this number.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -82,11 +82,6 @@ CREATE TABLE IF NOT EXISTS kill_switches (
     reason TEXT,
     actor TEXT NOT NULL,
     created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS live_equity_peak (
-    strategy    TEXT PRIMARY KEY,
-    peak_equity REAL NOT NULL,
-    updated_ts  TEXT NOT NULL
 );
 """
 

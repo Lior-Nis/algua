@@ -48,8 +48,14 @@ def test_build_intents_emits_on_weight_change():
 
 def test_build_intents_noop_when_already_at_target():
     intents = build_intents(pd.Series(dtype="float64"), pd.Series(dtype="float64"),
-                            pd.Series(dtype="float64"), equity=0.0, decision_ts=DATES[0])
+                            pd.Series(dtype="float64"), equity=10_000.0, decision_ts=DATES[0])
     assert intents == []
+
+
+def test_build_intents_asserts_positive_equity():
+    with pytest.raises(AssertionError, match="positive equity"):
+        build_intents(pd.Series({"AAA": 1.0}), pd.Series(dtype="float64"),
+                      pd.Series({"AAA": 100.0}), equity=0.0, decision_ts=DATES[0])
 
 
 def test_run_paper_buys_and_reconciles():
@@ -111,7 +117,7 @@ def test_warmup_gate_delays_first_order():
     bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
     strat = _strategy({"AAA": 1.0}, warmup_bars=2)
     result = run_paper(strat, SimBroker(cash=10_000.0), _FakeProvider(bars), DATES[0], DATES[-1])
-    assert all(o.decision_ts >= DATES[1] for o in result.orders)
+    assert all(o.intent.decision_ts >= DATES[1] for o in result.orders)
     assert len(result.orders) >= 1
 
 

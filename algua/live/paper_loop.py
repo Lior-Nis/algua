@@ -14,10 +14,19 @@ from algua.strategies.base import LoadedStrategy
 _EPS = 1e-6
 
 
+@dataclass(frozen=True)
+class OrderRecord:
+    """A submitted order paired with the broker order id submit() returned. Persistence reads the
+    id from here rather than reconstructing it from list position (#30)."""
+
+    intent: OrderIntent
+    broker_order_id: str
+
+
 @dataclass
 class PaperRunResult:
     strategy: str
-    orders: list[OrderIntent]
+    orders: list[OrderRecord]
     fills: list[Fill]
     final_positions: dict[str, float]
     final_cash: float
@@ -33,12 +42,16 @@ def build_intents(
     decision_ts: datetime,
 ) -> list[OrderIntent]:
     """Emit one OrderIntent per symbol whose target weight differs from its current weight."""
+    # Equity is the sizing denominator; a non-positive value would silently treat every position as
+    # weight 0 and buy against nothing. The drawdown breaker should have halted the run long before
+    # equity reaches zero, so reaching here with equity <= 0 is a logic error, not a market state.
+    assert equity > 0, f"build_intents requires positive equity, got {equity!r}"
     intents: list[OrderIntent] = []
     symbols = sorted(set(weights.index) | set(positions.index))
     for sym in symbols:
         target = float(weights.get(sym, 0.0))
         shares = float(positions.get(sym, 0.0))
-        current = (shares * float(closes.get(sym, 0.0)) / equity) if equity > 0 else 0.0
+        current = shares * float(closes.get(sym, 0.0)) / equity
         if abs(target - current) > _EPS:
             side = Side.BUY if target > current else Side.SELL
             intents.append(
@@ -68,7 +81,7 @@ def run_paper(
     peak = broker.equity(closes.loc[ts[0]]) if ts else broker.cash
     bars_seen = 0
 
-    orders: list[OrderIntent] = []
+    orders: list[OrderRecord] = []
     fills: list[Fill] = []
     for i in range(len(ts) - 1):  # only bars with a successor can fill
         t, t_next = ts[i], ts[i + 1]
@@ -84,8 +97,8 @@ def run_paper(
         check_long_only(weights, strategy.name)
         check_gross_exposure(weights, max_gross)
         for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
-            broker.submit(intent)
-            orders.append(intent)
+            order_id = broker.submit(intent)
+            orders.append(OrderRecord(intent=intent, broker_order_id=order_id))
         fills.extend(broker.fill_pending(opens.loc[t_next], fill_ts=t_next))
 
     final_positions = {s: float(q) for s, q in broker.get_positions().items()}

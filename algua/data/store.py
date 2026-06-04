@@ -8,9 +8,16 @@ from typing import Any
 
 import pandas as pd
 
-from algua.data.files import copy_snapshot, count_tabular_rows, sha256_file, write_parquet_snapshot
+from algua.data.files import (
+    copy_snapshot,
+    count_tabular_rows,
+    frame_to_parquet_bytes,
+    sha256_bytes,
+    sha256_file,
+    write_bytes_snapshot,
+)
 from algua.data.manifest import SnapshotManifest
-from algua.data.models import SnapshotMetadata, SnapshotRecord
+from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
 from algua.data.schema import to_bar_schema
 
 
@@ -40,11 +47,11 @@ class DataStore:
         as_of: str,
         source: str,
         file_path: Path,
-        kind: str = "file",
+        kind: str = Kind.FILE.value,
         timeframe: str | None = None,
         adjustment: str | None = None,
         universe: str | None = None,
-        source_metadata: dict[str, Any] | None = None,
+        source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
         source_path = file_path.expanduser()
         if not source_path.is_file():
@@ -101,31 +108,32 @@ class DataStore:
         frame: pd.DataFrame,
         timeframe: str = "1d",
         adjustment: str = "none",
-        source_metadata: dict[str, Any] | None = None,
+        source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
         metadata = _metadata(
-            dataset="bars",
+            dataset=Dataset.BARS.value,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=source,
-            kind="bars",
+            kind=Kind.BARS.value,
             timeframe=timeframe,
             adjustment=adjustment,
             source_metadata=source_metadata,
         )
         normalized = _normalize_bar_frame(frame)
-        content_hash = _frame_hash(normalized)
+        payload = frame_to_parquet_bytes(normalized)
+        content_hash = sha256_bytes(payload)
         snapshot_id = _snapshot_id(metadata, content_hash)
 
         existing = self.manifest.find(snapshot_id)
         if existing is not None:
             return existing
 
-        relative_path = Path("snapshots") / "bars" / snapshot_id / "bars.parquet"
-        write_parquet_snapshot(normalized, self.data_dir, relative_path)
+        relative_path = Path("snapshots") / Dataset.BARS.value / snapshot_id / "bars.parquet"
+        write_bytes_snapshot(payload, self.data_dir, relative_path)
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,
             metadata=metadata,
@@ -147,33 +155,36 @@ class DataStore:
         as_of: str,
         source: str,
         provider: str = "local",
-        source_metadata: dict[str, Any] | None = None,
+        source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
-        clean_symbols = _normalize_symbols(symbols)
+        clean_symbols = normalize_symbols(symbols)
         frame = pd.DataFrame(
             {"effective_date": effective_date, "universe": universe, "symbol": clean_symbols}
         )
         metadata = _metadata(
-            dataset="universes",
+            dataset=Dataset.UNIVERSES.value,
             provider=provider,
             symbols=clean_symbols,
             start=effective_date,
             end=effective_date,
             as_of=as_of,
             source=source,
-            kind="universe",
+            kind=Kind.UNIVERSE.value,
             universe=universe,
             source_metadata=source_metadata,
         )
-        content_hash = _frame_hash(frame)
+        payload = frame_to_parquet_bytes(frame)
+        content_hash = sha256_bytes(payload)
         snapshot_id = _snapshot_id(metadata, content_hash)
 
         existing = self.manifest.find(snapshot_id)
         if existing is not None:
             return existing
 
-        relative_path = Path("snapshots") / "universes" / snapshot_id / "universe.parquet"
-        write_parquet_snapshot(frame, self.data_dir, relative_path)
+        relative_path = (
+            Path("snapshots") / Dataset.UNIVERSES.value / snapshot_id / "universe.parquet"
+        )
+        write_bytes_snapshot(payload, self.data_dir, relative_path)
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,
             metadata=metadata,
@@ -198,8 +209,10 @@ class DataStore:
     def read_bars(self, snapshot_id: str) -> pd.DataFrame:
         """Read a bars snapshot back as a bar-schema DataFrame (tz-aware UTC timestamp index)."""
         rec = self.get_snapshot(snapshot_id)  # raises SnapshotNotFound
-        if rec.dataset != "bars":
-            raise ValueError(f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not 'bars'")
+        if rec.dataset != Dataset.BARS.value:
+            raise ValueError(
+                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not {Dataset.BARS.value!r}"
+            )
         frame = pd.read_parquet(self.data_dir / rec.data_path)
         return to_bar_schema(frame)
 
@@ -239,7 +252,11 @@ class DataStore:
         }
 
 
-def _normalize_symbols(symbols: list[str]) -> list[str]:
+def normalize_symbols(symbols: list[str]) -> list[str]:
+    """Canonicalize a symbol list: strip, upper-case, de-duplicate, sort.
+
+    The single source of truth for symbol normalization across the data layer and CLI.
+    """
     clean = sorted({s.strip().upper() for s in symbols if s.strip()})
     if not clean:
         raise ValueError("symbols must not be empty")
@@ -255,11 +272,11 @@ def _metadata(
     end: str,
     as_of: str,
     source: str,
-    kind: str = "file",
+    kind: str = Kind.FILE.value,
     timeframe: str | None = None,
     adjustment: str | None = None,
     universe: str | None = None,
-    source_metadata: dict[str, Any] | None = None,
+    source_metadata: dict[str, str] | None = None,
 ) -> SnapshotMetadata:
     _validate_non_empty("dataset", dataset)
     _validate_non_empty("provider", provider)
@@ -269,7 +286,7 @@ def _metadata(
     return SnapshotMetadata(
         dataset=dataset,
         provider=provider,
-        symbols=tuple(_normalize_symbols(symbols)),
+        symbols=tuple(normalize_symbols(symbols)),
         start=start,
         end=end,
         as_of=as_of,
@@ -330,8 +347,3 @@ def _normalize_bar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         raise ValueError("bars frame must not be empty")
     return to_bar_schema(frame).reset_index()
-
-
-def _frame_hash(frame: pd.DataFrame) -> str:
-    payload = frame.to_json(orient="split", date_format="iso", double_precision=12)
-    return hashlib.sha256(payload.encode()).hexdigest()

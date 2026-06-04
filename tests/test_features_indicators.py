@@ -21,3 +21,16 @@ def test_zscore_centers_and_scales():
     z = zscore(s)
     assert abs(z.mean()) < 1e-9
     assert z.iloc[-1] > 0 and z.iloc[0] < 0
+
+
+def test_zscore_zero_variance_is_nan():
+    """A degenerate (flat) cross-section is undefined, not a flat zero tie."""
+    s = pd.Series([5.0, 5.0, 5.0])
+    z = zscore(s)
+    assert z.isna().all()
+
+
+def test_zscore_zero_variance_drops_out():
+    """NaN lets downstream `.dropna()` discard a degenerate cross-section."""
+    s = pd.Series([5.0, 5.0, 5.0])
+    assert zscore(s).dropna().empty

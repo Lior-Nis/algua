@@ -8,10 +8,16 @@ from algua.data.store import DataStore
 
 
 class StoreBackedProvider:
-    """Serves a single ingested bars snapshot through the DataProvider protocol.
+    """Serves a single ingested bars snapshot through the serving `DataProvider` protocol
+    (`algua.contracts.types`) — distinct from the ingestion `BarProvider` seam.
 
     Point-in-time and reproducible: a backtest against this provider is pinned to exactly one
     snapshot, whose id is exposed for stamping into the result.
+
+    The `[start, end)` window is half-open — bars timestamped exactly at `end` are excluded. This
+    is the look-ahead-safe reading of "bars up to time T": asking for data as of T must not hand
+    back the bar that prints at T. This is the canonical serving-seam convention (see
+    `docs/contracts/bar-schema.md`).
     """
 
     def __init__(self, store: DataStore, snapshot_id: str) -> None:
@@ -35,4 +41,4 @@ class StoreBackedProvider:
             start_ts = start_ts.tz_localize("UTC")
         if end_ts.tzinfo is None:
             end_ts = end_ts.tz_localize("UTC")
-        return bars[(bars.index >= start_ts) & (bars.index <= end_ts)]
+        return bars[(bars.index >= start_ts) & (bars.index < end_ts)]
