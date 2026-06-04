@@ -106,8 +106,24 @@ def _normalize_yfinance(raw: pd.DataFrame, symbols: tuple[str, ...]) -> pd.DataF
             "yfinance returned no bars for requested symbols: " + ", ".join(missing_symbols)
         )
 
+    # Normalize to tz-aware UTC so output satisfies the schema's tz-aware requirement (#108).
+    out["ts"] = _to_utc(out["ts"])
     out = out[list(REQUIRED_COLUMNS)].sort_values(["symbol", "ts"]).reset_index(drop=True)
     return out
+
+
+def _to_utc(ts: pd.Series) -> pd.Series:
+    """Normalize yfinance timestamps to tz-aware UTC for the bar schema.
+
+    yfinance daily bars carry a naive `Date` index — we treat those naive timestamps as UTC
+    session dates and localize them explicitly. Intraday bars carry a tz-aware (exchange-local)
+    index, which we convert to the same instant in UTC. Normalizing here keeps the schema's
+    tz-aware requirement intact instead of silently localizing at the validation boundary.
+    """
+    parsed = pd.to_datetime(ts, errors="raise")
+    if parsed.dt.tz is None:
+        return parsed.dt.tz_localize("UTC")
+    return parsed.dt.tz_convert("UTC")
 
 
 def _column_name(value: object) -> str:

@@ -10,7 +10,7 @@ from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.data.contracts import BarProvider, BarRequest
 from algua.data.providers import get_provider
-from algua.data.store import DataStore
+from algua.data.store import DataStore, normalize_symbols
 
 data_app = typer.Typer(help="Point-in-time data snapshots", no_args_is_help=True)
 app.add_typer(data_app, name="data")
@@ -76,9 +76,8 @@ def ingest_bars(
     as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
 ) -> None:
     """Fetch provider bars and persist a reproducible parquet snapshot."""
-    clean_symbols = symbols.split(",")
     request = BarRequest(
-        symbols=tuple(s.strip().upper() for s in clean_symbols if s.strip()),
+        symbols=tuple(normalize_symbols(symbols.split(","))),
         start=start,
         end=end,
         timeframe=timeframe,

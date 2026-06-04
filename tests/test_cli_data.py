@@ -68,7 +68,7 @@ def test_data_ingest_bars_with_provider(monkeypatch):
             return ProviderBars(
                 frame=pd.DataFrame(
                     {
-                        "ts": ["2026-01-02"],
+                        "ts": ["2026-01-02T00:00:00+00:00"],
                         "symbol": ["AAPL"],
                         "open": [99.0],
                         "high": [101.0],

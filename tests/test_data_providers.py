@@ -8,6 +8,7 @@ from algua.data.providers import get_provider, register_provider
 from algua.data.providers.alpaca import AlpacaBarProvider, _normalize_alpaca
 from algua.data.providers.errors import ProviderError
 from algua.data.providers.yfinance import YFinanceBarProvider, _normalize_yfinance
+from algua.data.schema import to_bar_schema
 
 
 def test_yfinance_normalizer_handles_single_symbol_frame():
@@ -27,7 +28,9 @@ def test_yfinance_normalizer_handles_single_symbol_frame():
 
     assert frame.to_dict("records") == [
         {
-            "ts": pd.Timestamp("2026-01-02"),
+            # yfinance daily Date index is naive; the normalizer treats it as a UTC session date
+            # so the frame already satisfies the tz-aware UTC bar schema.
+            "ts": pd.Timestamp("2026-01-02", tz="UTC"),
             "symbol": "AAPL",
             "open": 100.0,
             "high": 101.0,
@@ -37,6 +40,51 @@ def test_yfinance_normalizer_handles_single_symbol_frame():
             "volume": 1000,
         }
     ]
+
+
+def test_yfinance_daily_output_satisfies_bar_schema():
+    # End-to-end guard: the naive daily Date index must be normalized to tz-aware UTC by the
+    # provider so to_bar_schema (which rejects naive timestamps) accepts the output unchanged.
+    raw = pd.DataFrame(
+        {
+            "Open": [100.0],
+            "High": [101.0],
+            "Low": [99.0],
+            "Close": [100.5],
+            "Adj Close": [100.25],
+            "Volume": [1000],
+        },
+        index=pd.Index([pd.Timestamp("2026-01-02")], name="Date"),
+    )
+
+    frame = _normalize_yfinance(raw, ("AAPL",))
+    out = to_bar_schema(frame)
+
+    assert str(out.index.tz) == "UTC"
+    assert out.index[0] == pd.Timestamp("2026-01-02", tz="UTC")
+
+
+def test_yfinance_intraday_output_is_converted_to_utc():
+    # Intraday yfinance returns a tz-aware (exchange-local) index; the normalizer must convert the
+    # same instant to UTC, not shift it.
+    raw = pd.DataFrame(
+        {
+            "Open": [100.0],
+            "High": [101.0],
+            "Low": [99.0],
+            "Close": [100.5],
+            "Adj Close": [100.25],
+            "Volume": [1000],
+        },
+        index=pd.DatetimeIndex(
+            [pd.Timestamp("2026-01-02T09:30:00", tz="America/New_York")], name="Datetime"
+        ),
+    )
+
+    frame = _normalize_yfinance(raw, ("AAPL",))
+    out = to_bar_schema(frame)
+
+    assert out.index[0] == pd.Timestamp("2026-01-02T14:30:00", tz="UTC")
 
 
 def test_yfinance_provider_rejects_auto_adjustment():
