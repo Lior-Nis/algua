@@ -18,7 +18,7 @@ def test_momentum_picks_top_k_winners_equal_weight():
     # WIN doubles, FLAT flat, LOSE halves over the window -> top_k=1 -> all weight on WIN
     view = _bars({"WIN": [10, 12, 16, 20], "FLAT": [10, 10, 10, 10], "LOSE": [10, 9, 8, 7]})
     params = {"lookback": 3, "top_k": 1}
-    w = csm.target_weights(view, params)
+    w = csm.compute_weights(view, params)
     assert w.idxmax() == "WIN"
     assert abs(w.sum() - 1.0) < 1e-9
     assert (w.drop("WIN") == 0).all()
@@ -27,3 +27,10 @@ def test_momentum_picks_top_k_winners_equal_weight():
 def test_has_config():
     assert csm.CONFIG.name == "cross_sectional_momentum"
     assert csm.CONFIG.execution.decision_lag_bars >= 1
+
+
+def test_authored_module_exposes_compute_weights_not_protocol_name():
+    # The authored layer is `compute_weights(view, params)`; the protocol-level
+    # `target_weights(features)` lives only on the LoadedStrategy adapter.
+    assert hasattr(csm, "compute_weights")
+    assert not hasattr(csm, "target_weights")
