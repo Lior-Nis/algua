@@ -3,13 +3,21 @@ from __future__ import annotations
 import pandas as pd
 
 from algua.data.contracts import BarProvider, BarRequest, ProviderBars
+from algua.data.providers.errors import ProviderError
+
+REQUIRED_COLUMNS = ("ts", "symbol", "open", "high", "low", "close", "adj_close", "volume")
 
 
 class YFinanceBarProvider(BarProvider):
     name = "yfinance"
 
     def get_bars(self, request: BarRequest) -> ProviderBars:
-        import yfinance as yf
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ProviderError(
+                "yfinance is not installed; install it to fetch bars from this provider"
+            ) from exc
 
         if request.adjustment not in {"none", "raw"}:
             raise ValueError(
@@ -26,36 +34,49 @@ class YFinanceBarProvider(BarProvider):
             progress=False,
             threads=False,
         )
-        frame = _normalize_yfinance(raw, request.symbols)
-        return ProviderBars(
-            frame=frame,
-            source_metadata={
-                "library": "yfinance",
-                "timeframe": request.timeframe,
-                "adjustment": "none",
-            },
-        )
+        frame, missing = _normalize_yfinance(raw, request.symbols)
+        source_metadata = {
+            "library": "yfinance",
+            "timeframe": request.timeframe,
+            "adjustment": "none",
+        }
+        if missing:
+            source_metadata["missing_symbols"] = ",".join(missing)
+        return ProviderBars(frame=frame, source_metadata=source_metadata)
 
 
-def _normalize_yfinance(raw: pd.DataFrame, symbols: tuple[str, ...]) -> pd.DataFrame:
+def _normalize_yfinance(
+    raw: pd.DataFrame, symbols: tuple[str, ...]
+) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    """Normalize a yfinance frame to the bar schema.
+
+    Returns the normalized frame plus the requested-but-absent symbols so callers can
+    surface them instead of dropping them silently.
+    """
     if raw.empty:
-        raise ValueError("provider returned no bars")
+        raise ProviderError("provider returned no bars")
 
     frames = []
+    present = []
     if isinstance(raw.columns, pd.MultiIndex):
+        available = set(raw.columns.get_level_values(0))
         for symbol in symbols:
-            if symbol not in raw.columns.get_level_values(0):
+            if symbol not in available:
                 continue
             part = raw[symbol].copy()
             part["symbol"] = symbol
             frames.append(part.reset_index())
+            present.append(symbol)
     else:
         part = raw.copy()
         part["symbol"] = symbols[0]
         frames.append(part.reset_index())
+        present.append(symbols[0])
 
     if not frames:
-        raise ValueError("provider returned no bars for requested symbols")
+        raise ProviderError(
+            f"provider returned no bars for any requested symbol: {', '.join(symbols)}"
+        )
 
     out = pd.concat(frames, ignore_index=True)
     out.columns = [_column_name(c) for c in out.columns]
@@ -71,12 +92,18 @@ def _normalize_yfinance(raw: pd.DataFrame, symbols: tuple[str, ...]) -> pd.DataF
         "symbol": "symbol",
     }
     out = out.rename(columns={c: rename.get(c, c) for c in out.columns})
-    cols = [
-        c
-        for c in ("ts", "symbol", "open", "high", "low", "close", "adj_close", "volume")
-        if c in out
-    ]
-    return out[cols].sort_values(["symbol", "ts"]).reset_index(drop=True)
+
+    missing_cols = [c for c in REQUIRED_COLUMNS if c not in out.columns]
+    if missing_cols:
+        raise ProviderError(
+            "yfinance returned bars missing required columns: "
+            + ", ".join(missing_cols)
+            + f" (got: {', '.join(out.columns)})"
+        )
+
+    missing_symbols = tuple(sorted(set(symbols) - set(present)))
+    out = out[list(REQUIRED_COLUMNS)].sort_values(["symbol", "ts"]).reset_index(drop=True)
+    return out, missing_symbols
 
 
 def _column_name(value: object) -> str:
