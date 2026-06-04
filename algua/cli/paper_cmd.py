@@ -200,7 +200,11 @@ def trade_live(
                 payload["flatten_error"] = flatten_error
             emit(payload)
             raise typer.Exit(1) from exc
-        store.set_equity_peak(conn, name, new_peak)
+        # Advance the high-water mark only on a clean tick, and only when equity made a new high.
+        # Intentionally not in a finally: a trip or a failed tick must NOT advance the peak (a
+        # stale-higher peak just makes the breaker more sensitive next tick — the safe direction).
+        if new_peak > (peak or 0.0):
+            store.set_equity_peak(conn, name, new_peak)
         now = datetime.now(UTC).isoformat()
         decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
         for o in result.submitted:
