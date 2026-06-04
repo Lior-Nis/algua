@@ -7,12 +7,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from algua.backtest.engine import BacktestError, _build_portfolio, _config_hash
+from algua.backtest.engine import BacktestError, build_portfolio
+from algua.backtest.metrics import metrics_from_returns
+from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
 from algua.strategies.base import LoadedStrategy
 
-_ANN = 252  # trading days/year
 _MIN_WINDOW_BARS = 5
 
 
@@ -48,29 +49,6 @@ def _segment_bounds(
         bounds.append((s, e))
         s = e
     return bounds, (train_n, n)
-
-
-def metrics_from_returns(returns: pd.Series) -> dict[str, float]:
-    """Return-based metrics for one segment. Safe on empty / zero-vol input (-> zeros)."""
-    r = returns.dropna()
-    if len(r) == 0:
-        return {
-            "total_return": 0.0, "ann_return": 0.0, "ann_volatility": 0.0,
-            "sharpe": 0.0, "max_drawdown": 0.0,
-        }
-    total_return = float((1.0 + r).prod() - 1.0)
-    ann_return = float(r.mean() * _ANN)
-    ann_vol = float(r.std() * np.sqrt(_ANN))
-    sharpe = float(ann_return / ann_vol) if ann_vol > 0 else 0.0
-    equity = (1.0 + r).cumprod()
-    # Floor the running peak at starting capital (1.0) so a loss on the first bar counts as
-    # drawdown (otherwise the peak would start at the already-depressed first equity value).
-    peak = equity.cummax().clip(lower=1.0)
-    max_drawdown = float((equity / peak - 1.0).min())
-    return {
-        "total_return": total_return, "ann_return": ann_return, "ann_volatility": ann_vol,
-        "sharpe": sharpe, "max_drawdown": max_drawdown,
-    }
 
 
 @dataclass
@@ -128,9 +106,10 @@ def walk_forward(
     *,
     windows: int = 4,
     holdout_frac: float = 0.2,
+    seed: int | None = None,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout."""
-    pf, _weights = _build_portfolio(strategy, provider, start, end)
+    pf, _weights = build_portfolio(strategy, provider, start, end)
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 
@@ -148,14 +127,12 @@ def walk_forward(
         "pct_positive_windows": float(positive / len(window_metrics)),
     }
     stamps = runtime_stamps()
+    prov = provenance(provider, seed)
 
     return WalkForwardResult(
         strategy=strategy.name,
-        config_hash=_config_hash(strategy),
-        data_source=type(provider).__name__,
-        snapshot_id=getattr(provider, "snapshot_id", None),
+        config_hash=config_hash(strategy),
         timeframe="1d",
-        seed=getattr(provider, "seed", None),
         code_hash=stamps["code_hash"],
         dependency_hash=stamps["dependency_hash"],
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
@@ -164,4 +141,5 @@ def walk_forward(
         window_metrics=window_metrics,
         holdout_metrics=holdout_metrics,
         stability=stability,
+        **prov,
     )

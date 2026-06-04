@@ -47,3 +47,15 @@ def test_low_pct_positive_and_negative_window_fail():
 def test_to_dict_serializable():
     import json
     json.dumps(evaluate_gate(_wf(), GateCriteria()).to_dict())
+
+
+def test_gate_checks_are_table_driven():
+    # #40: gate checks come from a declarative spec, not hand-built literals per call site.
+    from algua.research.gates import GATE_SPECS
+
+    names_from_table = {spec.name for spec in GATE_SPECS}
+    names_from_eval = {c["name"] for c in evaluate_gate(_wf(), GateCriteria()).checks}
+    assert names_from_table == names_from_eval
+    # Each spec points at a real GateCriteria threshold attribute.
+    for spec in GATE_SPECS:
+        assert hasattr(GateCriteria(), spec.threshold_attr)
