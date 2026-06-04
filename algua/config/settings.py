@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     db_path: Path = Path("data/algua.db")
     data_dir: Path = Path("data")
+    knowledge_dir: Path = Path("docs/strategies")
     exchange: str = "XNYS"
     timezone: str = "America/New_York"
     alpaca_api_key: str | None = None
