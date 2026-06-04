@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
 
+from algua.cli._common import now_iso
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -20,10 +20,6 @@ FROM_FILE_OPTION = typer.Option(..., "--from-file", help="local data file to sna
 
 def _store() -> DataStore:
     return DataStore(get_settings().data_dir)
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def _bar_provider(name: str) -> BarProvider:
@@ -89,7 +85,7 @@ def ingest_bars(
         symbols=list(request.symbols),
         start=start,
         end=end,
-        as_of=as_of or _now(),
+        as_of=as_of or now_iso(),
         source=provider,
         frame=result.frame,
         timeframe=timeframe,
@@ -113,7 +109,7 @@ def ingest_universe(
         universe=universe,
         symbols=symbols.split(","),
         effective_date=effective_date,
-        as_of=as_of or _now(),
+        as_of=as_of or now_iso(),
         source=source,
     )
     emit({"ok": True, "snapshot": rec.to_dict()})

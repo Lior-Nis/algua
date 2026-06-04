@@ -33,10 +33,12 @@ def test_paper_run_executes_and_reconciles():
                                  "--start", "2022-01-01", "--end", "2023-12-31"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["ok"] is True  # success envelope discriminator (mirrors {"ok": false} failures)
     assert payload["strategy"] == "cross_sectional_momentum"
     assert payload["reconcile_ok"] is True
     assert payload["orders"] >= 1
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["ok"] is True
     assert show["n_orders"] >= 1
 
 
@@ -165,6 +167,7 @@ def test_trade_tick_submits_and_persists(monkeypatch):
                                  "--snapshot", "snap1"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["ok"] is True  # success envelope discriminator
     assert payload["submitted"][0]["order_id"] == "o-1"
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["n_orders"] == 1

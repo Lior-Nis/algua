@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from contextlib import closing
+import sqlite3
 
 import typer
 
 from algua.audit.log import append as audit_append
 from algua.backtest.engine import BacktestError
+from algua.cli._common import ok, registry_conn, utc
+from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
-from algua.cli.backtest_cmd import _select_provider, _utc
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
     client_order_id,
+    count_orders,
     derive_positions,
     get_peak_equity,
     persist_run,
@@ -23,10 +25,10 @@ from algua.execution.order_state import (
 from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
-from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
+from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
@@ -44,6 +46,31 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
+def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> LoadedStrategy:
+    """Load a strategy and clear the two gates every trading command shares: it must be at the
+    PAPER stage and its kill-switch must not be tripped. ``command`` only colours the error text.
+
+    Centralises the stage + kill-switch preamble that ``run`` and ``trade-tick`` both need (an SRP
+    fix: the command bodies no longer hand-roll these checks). Commands that intentionally TRIP the
+    switch (kill/flatten) do their own, narrower gating instead.
+    """
+    strategy = load_strategy(name)
+    rec = SqliteStrategyRepository(conn).get(name)
+    if rec.stage is not Stage.PAPER:
+        raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
+    if kill_switch.is_tripped(conn, name):
+        raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
+    return strategy
+
+
+def _trip(conn: sqlite3.Connection, name: str, exc: RiskBreach) -> None:
+    """Trip the kill-switch for a risk breach and write the matching audit row (the shared half of
+    both commands' breach handling; the divergent emit/flatten stays in each caller)."""
+    kill_switch.trip(conn, name, reason=exc.detail, actor="system")
+    audit_append(conn, actor="system", action="kill_switch_trip",
+                 reason=f"{exc.kind}: {exc.detail}", strategy=name)
+
+
 @paper_app.command("run")
 @json_errors(ValueError, LookupError, BacktestError)
 def run(
@@ -51,34 +78,24 @@ def run(
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
-    snapshot: str = typer.Option(None, "--snapshot", help="paper-run an ingested bars snapshot"),  # noqa: B008
+    snapshot: str = typer.Option(None, "--snapshot", help="paper-run an ingested bars snapshot"),
     cash: float = typer.Option(100_000.0, "--cash", help="starting paper cash"),
     max_drawdown: float = typer.Option(None, "--max-drawdown",
-                                       help="trip the kill-switch if equity falls this fraction below peak (omit to disable)"),  # noqa: E501,B008
+                                       help="trip the kill-switch if equity falls this fraction below peak (omit to disable)"),  # noqa: E501
 ) -> None:
     """Replay a paper-stage strategy through the sim broker and persist orders/fills."""
     if cash <= 0:
         raise ValueError("--cash must be > 0")
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
-    strategy = load_strategy(name)
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
-        rec = SqliteStrategyRepository(conn).get(name)
-        if rec.stage is not Stage.PAPER:
-            raise ValueError(f"{name} is at stage '{rec.stage.value}'; paper run requires 'paper'")
-        if kill_switch.is_tripped(conn, name):
-            raise ValueError(
-                f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'"
-            )
+    with registry_conn() as conn:
+        strategy = _load_gated_strategy(conn, name, "paper run")
         provider = _select_provider(demo, snapshot)
         try:
             result = run_paper(strategy, SimBroker(cash=cash), provider,
-                               _utc(start), _utc(end), max_drawdown=max_drawdown)
+                               utc(start), utc(end), max_drawdown=max_drawdown)
         except RiskBreach as exc:
-            kill_switch.trip(conn, name, reason=exc.detail, actor="system")
-            audit_append(conn, actor="system", action="kill_switch_trip",
-                         reason=f"{exc.kind}: {exc.detail}", strategy=name)
+            _trip(conn, name, exc)
             emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped", "error": exc.detail})
             raise typer.Exit(1) from exc
         persist_run(conn, result)
@@ -88,7 +105,7 @@ def run(
             strategy=name,
         )
 
-    emit({
+    emit(ok({
         "strategy": result.strategy,
         "orders": len(result.orders),
         "fills": len(result.fills),
@@ -96,24 +113,21 @@ def run(
         "final_cash": result.final_cash,
         "final_equity": result.final_equity,
         "reconcile_ok": result.reconcile_ok,
-    })
+    }))
 
 
 @paper_app.command("show")
 @json_errors(ValueError, LookupError)
 def show(name: str) -> None:
     """Show persisted paper state (orders count + derived positions) for a strategy."""
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
-        n_orders = conn.execute(
-            "SELECT COUNT(*) FROM paper_orders WHERE strategy = ?", (name,)
-        ).fetchone()[0]
+    with registry_conn() as conn:
+        n_orders = count_orders(conn, name)
         positions = derive_positions(conn, name)
         ks = kill_switch.get(conn, name)
-    emit({
+    emit(ok({
         "strategy": name, "n_orders": n_orders, "positions": positions,
         "kill_switch": {"tripped": ks is not None, "reason": ks["reason"] if ks else None},
-    })
+    }))
 
 
 @paper_app.command("kill")
@@ -124,21 +138,19 @@ def kill(
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """Manually trip the kill-switch for a strategy (halts paper runs until reset)."""
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
+    with registry_conn() as conn:
         # reject unknown/mistyped names before tripping a switch
         SqliteStrategyRepository(conn).get(name)
         kill_switch.trip(conn, name, reason=reason, actor=actor)
         audit_append(conn, actor=actor, action="kill_switch_trip", reason=reason, strategy=name)
-    emit({"strategy": name, "kill_switch": "tripped", "reason": reason})
+    emit(ok({"strategy": name, "kill_switch": "tripped", "reason": reason}))
 
 
 @paper_app.command("resume")
 @json_errors(ValueError)
 def resume(name: str) -> None:
     """Reset (clear) a strategy's kill-switch so paper runs may resume. Human action."""
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
+    with registry_conn() as conn:
         was_tripped = kill_switch.is_tripped(conn, name)
         if was_tripped:
             # Audit BEFORE clearing: if the reset write fails, the switch stays tripped
@@ -146,7 +158,7 @@ def resume(name: str) -> None:
             audit_append(conn, actor="human", action="kill_switch_reset",
                          reason="manual resume", strategy=name)
             kill_switch.reset(conn, name)
-    emit({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"})
+    emit(ok({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"}))
 
 
 @paper_app.command("account")
@@ -155,7 +167,7 @@ def account() -> None:
     """Show the Alpaca paper account (equity/cash/buying-power) — a connectivity smoke."""
     broker = _alpaca_broker_from_settings()
     acct = broker.account()
-    emit({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power})
+    emit(ok({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power}))
 
 
 @paper_app.command("trade-tick")
@@ -166,23 +178,15 @@ def trade_tick(
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
     max_drawdown: float = typer.Option(None, "--max-drawdown",
-                                       help="halt + flatten if equity falls this fraction below the persisted peak (omit to disable)"),  # noqa: E501,B008
+                                       help="halt + flatten if equity falls this fraction below the persisted peak (omit to disable)"),  # noqa: E501
 ) -> None:
     """Run ONE wall-clock tick against the PAPER venue: submit Alpaca market-order deltas toward
     the strategy's target. Each accepted order persists immediately; a drawdown/exposure/reconcile
     breach trips the kill-switch and flattens. Never trades live (the broker refuses a live URL)."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
-    strategy = load_strategy(name)
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
-        rec = SqliteStrategyRepository(conn).get(name)
-        if rec.stage is not Stage.PAPER:
-            raise ValueError(f"{name} is at stage '{rec.stage.value}'; trade-tick requires 'paper'")
-        if kill_switch.is_tripped(conn, name):
-            raise ValueError(
-                f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'"
-            )
+    with registry_conn() as conn:
+        strategy = _load_gated_strategy(conn, name, "trade-tick")
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
 
@@ -201,7 +205,7 @@ def trade_tick(
             derived_positions=derive_positions(conn, name),
         )
         try:
-            result = run_tick(strategy, broker, provider, _utc(start), _utc(end),
+            result = run_tick(strategy, broker, provider, utc(start), utc(end),
                               hooks=hooks, max_drawdown=max_drawdown)
         except TickHalted as exc:
             # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
@@ -211,9 +215,7 @@ def trade_tick(
                   "error": str(exc)})
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
-            kill_switch.trip(conn, name, reason=exc.detail, actor="system")
-            audit_append(conn, actor="system", action="kill_switch_trip",
-                         reason=f"{exc.kind}: {exc.detail}", strategy=name)
+            _trip(conn, name, exc)
             liquidation_submitted = True
             flatten_error = None
             try:
@@ -235,7 +237,7 @@ def trade_tick(
         audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)
 
-    emit({
+    emit(ok({
         "strategy": name,
         "decision_ts": result.decision_ts.isoformat() if result.decision_ts else None,
         "target_weights": result.target_weights,
@@ -243,7 +245,7 @@ def trade_tick(
         "submitted": result.submitted,
         "reconcile_ok": result.reconcile_ok,
         "realized_gross": result.realized_gross,
-    })
+    }))
 
 
 @paper_app.command("flatten")
@@ -254,8 +256,7 @@ def flatten(
 ) -> None:
     """Emergency: close this strategy's live positions (its universe) and trip its kill-switch."""
     strategy = load_strategy(name)
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
+    with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
         if rec.stage is not Stage.PAPER:
             raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
@@ -271,4 +272,4 @@ def flatten(
                   "liquidation_submitted": False, "error": str(exc)})
             raise typer.Exit(1) from exc
     # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
-    emit({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True})
+    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))

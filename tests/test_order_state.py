@@ -5,6 +5,7 @@ import pandas as pd
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.order_state import (
     client_order_id,
+    count_orders,
     derive_positions,
     get_peak_equity,
     persist_run,
@@ -89,6 +90,16 @@ def test_record_submitted_order_persists_immediately(tmp_path):
     ).fetchone()
     assert (row["strategy"], row["symbol"], row["status"], row["broker_order_id"]) == (
         "s", "AAA", "submitted", "alp-1")
+
+
+def test_count_orders_scoped_to_strategy(tmp_path):
+    conn = _conn(tmp_path)
+    assert count_orders(conn, "s") == 0
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")
+    record_submitted_order(conn, "s", "BBB", "buy", 1.0, T0.isoformat(), "alp-2")
+    record_submitted_order(conn, "other", "CCC", "buy", 1.0, T0.isoformat(), "alp-3")
+    assert count_orders(conn, "s") == 2
+    assert count_orders(conn, "other") == 1
 
 
 def test_record_submitted_order_idempotent_on_duplicate(tmp_path):

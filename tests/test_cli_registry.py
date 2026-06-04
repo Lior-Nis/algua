@@ -20,8 +20,11 @@ def _json(result):
 
 
 def test_add_and_list():
-    _json(runner.invoke(app, ["registry", "add", "alpha"]))
+    added = _json(runner.invoke(app, ["registry", "add", "alpha"]))
+    assert added["ok"] is True  # success envelope discriminator
     listed = _json(runner.invoke(app, ["registry", "list"]))
+    # `registry list` is the documented exception: a bare JSON array (collection), not an envelope.
+    assert isinstance(listed, list)
     assert [s["name"] for s in listed] == ["alpha"]
     assert listed[0]["stage"] == "idea"
 
@@ -82,7 +85,9 @@ def test_duplicate_add_emits_json_error():
 
 
 def test_registry_command_closes_connection(monkeypatch, tmp_path):
-    from algua.cli import registry_cmd
+    # The connect+migrate+close lifecycle now lives in cli._common.registry_conn (the single
+    # shared idiom), so the connection factory is patched there.
+    from algua.cli import _common
 
     closed = []
 
@@ -96,7 +101,7 @@ def test_registry_command_closes_connection(monkeypatch, tmp_path):
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(registry_cmd, "connect", connect_tracking)
+    monkeypatch.setattr(_common, "connect", connect_tracking)
 
     result = runner.invoke(app, ["registry", "add", "alpha"])
 
