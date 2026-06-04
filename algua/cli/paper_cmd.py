@@ -20,7 +20,7 @@ from algua.live.paper_loop import run_paper
 from algua.registry import store
 from algua.registry.db import connect, migrate
 from algua.risk import kill_switch
-from algua.risk.limits import RiskBreach
+from algua.risk.limits import RiskBreach, check_drawdown
 from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
@@ -137,6 +137,7 @@ def resume(name: str) -> None:
             audit_append(conn, actor="human", action="kill_switch_reset",
                          reason="manual resume", strategy=name)
             kill_switch.reset(conn, name)
+            store.clear_equity_peak(conn, name)  # re-base the high-water mark on resume
     emit({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"})
 
 
@@ -156,6 +157,9 @@ def trade_live(
     snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
+    max_drawdown: float = typer.Option(
+        1.0, "--max-drawdown", help="trip+flatten if drawdown from peak equity exceeds this "
+        "(0..1; 1.0 disables)"),
 ) -> None:
     """Run ONE wall-clock tick: submit Alpaca market-order deltas toward the strategy's target."""
     strategy = load_strategy(name)
@@ -170,7 +174,11 @@ def trade_live(
             )
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
+        equity = broker.account().equity
+        peak = store.get_equity_peak(conn, name)
+        new_peak = max(peak, equity) if peak is not None else equity
         try:
+            check_drawdown(equity, new_peak, max_drawdown)  # pre-flight circuit breaker
             result = run_tick(strategy, broker, provider, _utc(start), _utc(end))
         except RiskBreach as exc:
             kill_switch.trip(conn, name, reason=exc.detail, actor="system")
@@ -192,6 +200,11 @@ def trade_live(
                 payload["flatten_error"] = flatten_error
             emit(payload)
             raise typer.Exit(1) from exc
+        # Advance the high-water mark only on a clean tick, and only when equity made a new high.
+        # Intentionally not in a finally: a trip or a failed tick must NOT advance the peak (a
+        # stale-higher peak just makes the breaker more sensitive next tick — the safe direction).
+        if new_peak > (peak or 0.0):
+            store.set_equity_peak(conn, name, new_peak)
         now = datetime.now(UTC).isoformat()
         decision_ts_str = result.decision_ts.isoformat() if result.decision_ts else None
         for o in result.submitted:

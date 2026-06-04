@@ -114,3 +114,27 @@ def apply_transition(
     )
     conn.commit()
     return get_strategy(conn, rec.name)
+
+
+def get_equity_peak(conn: sqlite3.Connection, strategy: str) -> float | None:
+    """Persisted lifetime high-water-mark equity for a live strategy, or None if untracked."""
+    row = conn.execute(
+        "SELECT peak_equity FROM live_equity_peak WHERE strategy = ?", (strategy,)
+    ).fetchone()
+    return float(row["peak_equity"]) if row is not None else None
+
+
+def set_equity_peak(conn: sqlite3.Connection, strategy: str, peak: float) -> None:
+    conn.execute(
+        "INSERT INTO live_equity_peak(strategy, peak_equity, updated_ts) VALUES (?,?,?) "
+        "ON CONFLICT(strategy) DO UPDATE SET peak_equity=excluded.peak_equity, "
+        "updated_ts=excluded.updated_ts",
+        (strategy, peak, _now()),
+    )
+    conn.commit()
+
+
+def clear_equity_peak(conn: sqlite3.Connection, strategy: str) -> None:
+    """Drop the stored peak so the next tick re-bases the high-water mark (used on resume)."""
+    conn.execute("DELETE FROM live_equity_peak WHERE strategy = ?", (strategy,))
+    conn.commit()
