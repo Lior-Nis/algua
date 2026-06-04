@@ -62,7 +62,8 @@ def test_validate_rejects_unsorted():
 def test_to_bar_schema_reshapes_ts_column_frame():
     raw = pd.DataFrame(
         {"adj_close": [1.0, 2.0], "close": [1.0, 2.0], "high": [1.0, 2.0], "low": [1.0, 2.0],
-         "open": [1.0, 2.0], "symbol": ["BBB", "AAA"], "ts": ["2024-07-01", "2024-07-01"],
+         "open": [1.0, 2.0], "symbol": ["BBB", "AAA"],
+         "ts": ["2024-07-01T00:00:00+00:00", "2024-07-01T00:00:00+00:00"],
          "volume": [20.0, 10.0]}
     )
     out = to_bar_schema(raw)
@@ -77,7 +78,7 @@ def test_to_bar_schema_reshapes_ts_column_frame():
 def test_to_bar_schema_rejects_non_numeric_values():
     raw = pd.DataFrame(
         {"adj_close": [1.0], "close": ["bad"], "high": [1.0], "low": [1.0],
-         "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01"], "volume": [10.0]}
+         "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01T00:00:00+00:00"], "volume": [10.0]}
     )
     with pytest.raises(ValueError):
         to_bar_schema(raw)
@@ -85,12 +86,38 @@ def test_to_bar_schema_rejects_non_numeric_values():
 
 def test_to_bar_schema_requires_adj_close():
     raw = pd.DataFrame({
-        "ts": ["2024-07-01", "2024-07-02"], "symbol": ["AAA", "AAA"],
+        "ts": ["2024-07-01T00:00:00+00:00", "2024-07-02T00:00:00+00:00"], "symbol": ["AAA", "AAA"],
         "open": [10.0, 11.0], "high": [10.0, 11.0], "low": [10.0, 11.0],
         "close": [10.0, 11.0], "volume": [1.0, 1.0],
     })
     with pytest.raises(ValueError):
         to_bar_schema(raw)
+
+
+def test_to_bar_schema_rejects_naive_timestamps():
+    raw = pd.DataFrame(
+        {"adj_close": [1.0], "close": [1.0], "high": [1.0], "low": [1.0],
+         "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01"], "volume": [10.0]}
+    )
+    with pytest.raises(ValueError, match="tz-aware"):
+        to_bar_schema(raw)
+
+
+def test_to_bar_schema_preserves_non_utc_offset_as_utc_instant():
+    # A tz-aware non-UTC timestamp is accepted and converted to UTC (same instant), not shifted.
+    raw = pd.DataFrame(
+        {"adj_close": [1.0], "close": [1.0], "high": [1.0], "low": [1.0],
+         "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01T05:00:00+05:00"], "volume": [10.0]}
+    )
+    out = to_bar_schema(raw)
+    assert out.index[0] == pd.Timestamp("2024-07-01T00:00:00", tz="UTC")
+
+
+def test_bar_column_lists_are_consistent():
+    from algua.data.schema import FLOAT_COLUMNS, NON_NULL_COLUMNS
+
+    assert NON_NULL_COLUMNS == FLOAT_COLUMNS
+    assert BAR_COLUMNS == ["symbol", *FLOAT_COLUMNS]
 
 
 def test_validate_rejects_nan_volume():
