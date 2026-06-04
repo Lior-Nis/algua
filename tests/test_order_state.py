@@ -91,6 +91,17 @@ def test_record_submitted_order_persists_immediately(tmp_path):
         "s", "AAA", "submitted", "alp-1")
 
 
+def test_record_submitted_order_idempotent_on_duplicate(tmp_path):
+    # #18: a crash/retry or duplicate Alpaca client_order_id path can return the SAME broker order
+    # again. Re-recording it must NOT create a duplicate paper_orders row.
+    conn = _conn(tmp_path)
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")  # retry
+    assert conn.execute(
+        "SELECT COUNT(*) FROM paper_orders WHERE strategy='s' AND broker_order_id='alp-1'"
+    ).fetchone()[0] == 1
+
+
 def test_peak_equity_ratchets_up(tmp_path):
     conn = _conn(tmp_path)
     assert get_peak_equity(conn, "s") is None

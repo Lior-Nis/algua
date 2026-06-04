@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     status TEXT NOT NULL,
     broker_order_id TEXT NOT NULL
 );
+-- One broker order maps to at most one paper_orders row per strategy, so a crash/retry or a
+-- duplicate Alpaca client_order_id path that re-returns the same order is an idempotent no-op
+-- rather than a duplicate row (#18).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_paper_orders_strategy_broker
+    ON paper_orders(strategy, broker_order_id);
 CREATE TABLE IF NOT EXISTS paper_fills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL REFERENCES paper_orders(id),

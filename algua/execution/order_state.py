@@ -90,9 +90,13 @@ def record_submitted_order(
 ) -> None:
     """Persist ONE accepted live order IMMEDIATELY after the broker accepts it, so a mid-tick death
     can never leave Alpaca holding an order the DB never recorded (#18). Each row commits on its own
-    rather than being batched after the whole loop."""
+    rather than being batched after the whole loop.
+
+    Idempotent on (strategy, broker_order_id): a crash/retry or a duplicate Alpaca client_order_id
+    path that re-returns the SAME broker order leaves the existing row untouched instead of writing
+    a duplicate (the unique index enforces this; INSERT OR IGNORE makes it a no-op)."""
     conn.execute(
-        "INSERT INTO paper_orders"
+        "INSERT OR IGNORE INTO paper_orders"
         "(strategy, symbol, side, target_weight, decision_ts, submitted_ts,"
         " status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
         (strategy, symbol, side, target_weight, decision_ts,
