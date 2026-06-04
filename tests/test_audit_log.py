@@ -68,3 +68,51 @@ def test_read_no_limit_returns_all(tmp_path):
     conn = _setup(tmp_path, n=4)
     rows = read(conn)
     assert len(rows) == 4
+
+
+# --- validation tests ---
+
+def test_read_limit_zero_raises(tmp_path):
+    """limit=0 is rejected; it would return no rows and is meaningless."""
+    import pytest
+    conn = _setup(tmp_path, n=2)
+    with pytest.raises(ValueError, match="limit"):
+        read(conn, limit=0)
+
+
+def test_read_limit_negative_raises(tmp_path):
+    """Negative limit must be rejected; SQLite treats it as unlimited."""
+    import pytest
+    conn = _setup(tmp_path, n=2)
+    with pytest.raises(ValueError, match="limit"):
+        read(conn, limit=-1)
+
+
+def test_read_offset_negative_raises(tmp_path):
+    """Negative offset must be rejected."""
+    import pytest
+    conn = _setup(tmp_path, n=2)
+    with pytest.raises(ValueError, match="offset"):
+        read(conn, limit=10, offset=-1)
+
+
+def test_read_offset_negative_no_limit_raises(tmp_path):
+    """Negative offset is rejected even when no limit is supplied."""
+    import pytest
+    conn = _setup(tmp_path, n=2)
+    with pytest.raises(ValueError, match="offset"):
+        read(conn, offset=-5)
+
+
+def test_read_valid_limit_and_offset_works(tmp_path):
+    """Boundary-valid values (limit=1, offset=0) must not raise."""
+    conn = _setup(tmp_path, n=3)
+    rows = read(conn, limit=1, offset=0)
+    assert len(rows) == 1
+
+
+def test_read_valid_offset_without_limit_works(tmp_path):
+    """offset=0 with no limit is valid (default call pattern)."""
+    conn = _setup(tmp_path, n=3)
+    rows = read(conn, offset=0)
+    assert len(rows) == 3

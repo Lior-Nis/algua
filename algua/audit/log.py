@@ -31,6 +31,10 @@ def read(
         offset: number of rows to skip before returning results; used for
             pagination together with *limit*.
     """
+    if limit is not None and limit < 1:
+        raise ValueError(f"limit must be >= 1, got {limit!r}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset!r}")
     where = "WHERE strategy = ?" if strategy is not None else ""
     params: list[object] = [strategy] if strategy is not None else []
     query = f"SELECT * FROM audit_log {where} ORDER BY id DESC"
