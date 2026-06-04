@@ -44,6 +44,44 @@ def test_low_pct_positive_and_negative_window_fail():
     assert failed == {"pct_positive_windows", "min_window_sharpe"}
 
 
+def test_infinite_metric_fails_gate_not_passes():
+    # float('inf') trivially satisfies >=/>; it must instead fail the check.
+    d = evaluate_gate(_wf(holdout_sharpe=float("inf")), GateCriteria())
+    assert d.passed is False
+    failed = [c for c in d.checks if c["name"] == "holdout_sharpe"]
+    assert failed and failed[0]["passed"] is False
+
+
+def test_nan_metric_fails_gate_and_is_not_recorded_as_value():
+    # NaN must not be recorded as a passing value in the decision payload.
+    import math
+
+    d = evaluate_gate(_wf(holdout_sharpe=float("nan")), GateCriteria())
+    assert d.passed is False
+    check = next(c for c in d.checks if c["name"] == "holdout_sharpe")
+    assert check["passed"] is False
+    # The recorded value is never a raw NaN (it is nulled out instead).
+    assert check["value"] is None or not math.isnan(check["value"])
+
+
+def test_nan_gate_decision_is_json_serializable():
+    import json
+
+    json.dumps(evaluate_gate(_wf(holdout_sharpe=float("nan")), GateCriteria()).to_dict())
+
+
 def test_to_dict_serializable():
     import json
     json.dumps(evaluate_gate(_wf(), GateCriteria()).to_dict())
+
+
+def test_gate_checks_are_table_driven():
+    # #40: gate checks come from a declarative spec, not hand-built literals per call site.
+    from algua.research.gates import GATE_SPECS
+
+    names_from_table = {spec.name for spec in GATE_SPECS}
+    names_from_eval = {c["name"] for c in evaluate_gate(_wf(), GateCriteria()).checks}
+    assert names_from_table == names_from_eval
+    # Each spec points at a real GateCriteria threshold attribute.
+    for spec in GATE_SPECS:
+        assert hasattr(GateCriteria(), spec.threshold_attr)

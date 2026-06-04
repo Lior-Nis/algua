@@ -28,11 +28,23 @@ def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
     for f in result.fills:
         fills_by_order.setdefault(f.broker_order_id, []).append(f)
 
-    # Orders were submitted in list order, so they map to broker ids sim-1, sim-2, ...
-    for seq, intent in enumerate(result.orders, start=1):
-        broker_order_id = f"sim-{seq}"
-        matched = fills_by_order.get(broker_order_id, [])
-        status = "filled" if matched else "noop"
+    for record in result.orders:
+        intent = record.intent
+        # Read the broker id submit() returned rather than reconstructing sim-{seq} positionally,
+        # so a skipped/"noop" submit can't shift the mapping (#30).
+        broker_order_id = record.broker_order_id
+        # A rejected fill (zero-qty) carries no shares; the order's status reflects whether any
+        # shares actually executed, and only executing fills are persisted as fills.
+        executed = [f for f in fills_by_order.get(broker_order_id, []) if f.qty != 0.0]
+        # Derive status from the fills' own status rather than hardcoding "filled": a buy clamped
+        # to available cash produces Fill.status="partial", which must be preserved here so callers
+        # can distinguish fully-filled orders from cash-constrained ones.
+        if any(f.status == "partial" for f in executed):
+            status = "partial"
+        elif executed:
+            status = "filled"
+        else:
+            status = "rejected"
         cols = (
             "(strategy, symbol, side, target_weight,"
             " decision_ts, submitted_ts, status, broker_order_id)"
@@ -43,7 +55,7 @@ def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
              intent.decision_ts.isoformat(), now, status, broker_order_id),
         )
         order_row_id = cur.lastrowid
-        for f in matched:
+        for f in executed:
             conn.execute(
                 "INSERT INTO paper_fills(order_id, symbol, qty, price, fill_ts) VALUES (?,?,?,?,?)",
                 (order_row_id, f.symbol, f.qty, f.price, f.fill_ts.isoformat()),

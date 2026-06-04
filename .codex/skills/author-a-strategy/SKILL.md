@@ -1,13 +1,17 @@
 ---
 name: author-a-strategy
-description: How to author a new algua strategy module — the CONFIG + target_weights contract, the bar schema the function receives, available features, where the file goes, and the GENERATED_BY/additions-only discipline. Use when writing a strategy.
+description: How to author a new algua strategy module — the CONFIG + compute_weights contract, the bar schema the function receives, available features, where the file goes, and the GENERATED_BY/additions-only discipline. Use when writing a strategy.
 ---
 
 # Authoring an algua strategy
 
 A strategy is a **single Python module** at `algua/strategies/examples/<name>.py` that exposes two
-names: `CONFIG` and `target_weights`. The loader imports it by name (`load_strategy("<name>")`),
+names: `CONFIG` and `compute_weights`. The loader imports it by name (`load_strategy("<name>")`),
 so the filename stem **is** the strategy name and must match `CONFIG.name`.
+
+`compute_weights(view, params)` is the **authored signal**. The loader wraps it in a
+`LoadedStrategy` adapter that exposes the protocol-level `Strategy.target_weights(features)`
+(1-arg) by injecting `params` — so authored modules never define `target_weights` themselves.
 
 ## The contract
 
@@ -32,7 +36,7 @@ CONFIG = StrategyConfig(
 )
 
 
-def target_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+def compute_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
     """Pure, cross-sectional, per-bar. Given the point-in-time view of bars UP TO the
     current bar, return target weights indexed by symbol. The engine applies the
     t→t+1 decision lag centrally — do NOT shift or peek ahead yourself."""
@@ -40,7 +44,7 @@ def target_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
 ```
 
 Rules that matter:
-- `target_weights` is **pure** (no I/O, no network, no global state) and **cross-sectional**: it
+- `compute_weights` is **pure** (no I/O, no network, no global state) and **cross-sectional**: it
   returns a `pd.Series` of weights indexed by symbol for the current bar. Return an empty
   `pd.Series(dtype="float64")` when you can't form a view (e.g. not enough history yet).
 - **Never look ahead.** The `view` contains bars only up to the current timestamp, and the engine
@@ -67,8 +71,8 @@ imports nothing beyond contracts).
 ## Reuse vs. new logic
 
 - **Parameter variant** of an existing idea: import its function and define a new `CONFIG` —
-  `from algua.strategies.examples.cross_sectional_momentum import target_weights`.
-- **New signal**: write a new `target_weights`. Look at
+  `from algua.strategies.examples.cross_sectional_momentum import compute_weights`.
+- **New signal**: write a new `compute_weights`. Look at
   `algua/strategies/examples/cross_sectional_momentum.py` as the reference implementation.
 
 ## Discipline

@@ -9,7 +9,10 @@ from pydantic import BaseModel
 
 from algua.contracts.types import ExecutionContract
 
-TargetWeightsFn = Callable[[pd.DataFrame, dict[str, Any]], pd.Series]
+# The AUTHORED signal: a pure module-level `compute_weights(view, params)`. The protocol-level
+# `Strategy.target_weights(features)` (1-arg) is exposed only by the LoadedStrategy adapter below,
+# which closes over `params`. Two layers, two names — no silent signature drift.
+ComputeWeightsFn = Callable[[pd.DataFrame, dict[str, Any]], pd.Series]
 
 
 class StrategyConfig(BaseModel):
@@ -22,11 +25,12 @@ class StrategyConfig(BaseModel):
 
 @dataclass
 class LoadedStrategy:
-    """Binds a StrategyConfig + a pure target_weights function into an object that
-    satisfies the Strategy protocol (.name, .execution, .target_weights)."""
+    """Binds a StrategyConfig + a pure authored compute_weights(view, params) function into an
+    object that satisfies the Strategy protocol (.name, .execution, .target_weights). The adapter
+    is the ONLY place the protocol-level 1-arg `target_weights` exists — it injects params."""
 
     config: StrategyConfig
-    fn: TargetWeightsFn
+    fn: ComputeWeightsFn
 
     @property
     def name(self) -> str:
