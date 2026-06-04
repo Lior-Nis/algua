@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import sys
+from types import ModuleType
 
 from algua.registry.repository import StrategyRepository
 from algua.strategies.base import config_hash
 from algua.strategies.loader import load_strategy
+
+_FIRST_PARTY_ROOT = "algua"
 
 
 def compute_artifact_hashes(name: str) -> tuple[str, str]:
@@ -13,12 +17,70 @@ def compute_artifact_hashes(name: str) -> tuple[str, str]:
     config. This is the single function both the ``approve`` and the ``transition --to live``
     paths call, so the live gate pins the real artifact: a constant or caller-supplied hash can
     no longer satisfy it, because both sides derive the hash from the loaded module itself.
+
+    ``code_hash`` covers the strategy's first-party *dependency closure*, not just its own
+    module source: starting from the loaded strategy module we walk the imported ``algua.*``
+    modules transitively (first-party only — stdlib/third-party are excluded) and hash their
+    sorted source. So a behavior-changing edit to an imported ``algua`` helper the strategy
+    relies on invalidates a prior approval, instead of silently slipping past the live gate.
     """
     loaded = load_strategy(name)
-    module = inspect.getmodule(loaded.fn)
-    source = inspect.getsource(module) if module is not None else ""
-    code_hash = hashlib.sha256(source.encode()).hexdigest()[:16]
+    root = inspect.getmodule(loaded.fn)
+    closure = _first_party_closure(root)
+    payload = "\n".join(
+        f"# module: {mod_name}\n{source}" for mod_name, source in sorted(closure.items())
+    )
+    code_hash = hashlib.sha256(payload.encode()).hexdigest()[:16]
     return code_hash, config_hash(loaded)
+
+
+def _is_first_party(module_name: str | None) -> bool:
+    return module_name == _FIRST_PARTY_ROOT or (
+        module_name is not None and module_name.startswith(_FIRST_PARTY_ROOT + ".")
+    )
+
+
+def _first_party_closure(root: ModuleType | None) -> dict[str, str]:
+    """Map ``module_name -> source`` for every first-party ``algua.*`` module transitively
+    reachable from ``root`` via its imported names. Bounded to ``algua.*`` so we never recurse
+    into stdlib/third-party trees; deterministic because callers sort by module name."""
+    if root is None:
+        return {}
+    sources: dict[str, str] = {}
+    seen: set[str] = set()
+    queue: list[ModuleType] = [root]
+    while queue:
+        module = queue.pop()
+        mod_name = getattr(module, "__name__", None)
+        if mod_name is None or mod_name in seen or not _is_first_party(mod_name):
+            continue
+        seen.add(mod_name)
+        try:
+            sources[mod_name] = inspect.getsource(module)
+        except (OSError, TypeError):
+            sources[mod_name] = ""
+        for dep in _imported_first_party_modules(module):
+            if dep.__name__ not in seen:
+                queue.append(dep)
+    return sources
+
+
+def _imported_first_party_modules(module: ModuleType) -> list[ModuleType]:
+    """First-party module objects referenced by ``module``'s globals: directly imported
+    ``algua.*`` modules, plus the defining modules of imported names (so
+    ``from algua.x import helper`` pulls in ``algua.x``)."""
+    deps: list[ModuleType] = []
+    for value in vars(module).values():
+        if isinstance(value, ModuleType):
+            if _is_first_party(getattr(value, "__name__", None)):
+                deps.append(value)
+            continue
+        owner = getattr(value, "__module__", None)
+        if isinstance(owner, str) and _is_first_party(owner):
+            resolved = sys.modules.get(owner)
+            if resolved is not None:
+                deps.append(resolved)
+    return deps
 
 
 def record_approval(repo: StrategyRepository, name: str, approved_by: str) -> int:

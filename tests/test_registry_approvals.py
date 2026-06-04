@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
@@ -100,3 +102,44 @@ def test_record_approval_rejects_blank_approver(repo):
     repo.add(STRATEGY)
     with pytest.raises(ValueError):
         record_approval(repo, STRATEGY, " ")
+
+
+def test_code_hash_covers_imported_algua_helper(repo, monkeypatch):
+    # #97: the strategy imports a first-party helper (algua.features.indicators.momentum).
+    # If that helper's source changes after approval, the recomputed code_hash MUST change,
+    # so the stale approval can no longer promote altered behavior to live.
+    import algua.features.indicators as indicators
+
+    baseline, _ = compute_artifact_hashes(STRATEGY)
+
+    real_getsource = inspect.getsource
+
+    def fake_getsource(obj):
+        if obj is indicators:
+            return real_getsource(obj) + "\n# behavior-changing edit to a first-party helper\n"
+        return real_getsource(obj)
+
+    monkeypatch.setattr(inspect, "getsource", fake_getsource)
+    mutated, _ = compute_artifact_hashes(STRATEGY)
+
+    assert mutated != baseline
+
+
+def test_code_hash_ignores_thirdparty_and_stdlib_changes(repo, monkeypatch):
+    # The closure is bounded to algua.* modules: mutating a third-party module's source
+    # must NOT change the code_hash (otherwise the hash is non-deterministic across envs).
+    import pandas as pd
+
+    baseline, _ = compute_artifact_hashes(STRATEGY)
+
+    real_getsource = inspect.getsource
+
+    def fake_getsource(obj):
+        if obj is pd:
+            return "totally different pandas source"
+        return real_getsource(obj)
+
+    monkeypatch.setattr(inspect, "getsource", fake_getsource)
+    unchanged, _ = compute_artifact_hashes(STRATEGY)
+
+    assert unchanged == baseline
