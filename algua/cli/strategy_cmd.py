@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import keyword
 import re
+from contextlib import closing
 from pathlib import Path
 
 import typer
@@ -9,7 +10,9 @@ import typer
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
+from algua.knowledge.sync import generate_indexes, sync_all, sync_strategy_doc
 from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
+from algua.registry.db import connect, migrate
 from algua.strategies.loader import list_strategies
 
 strategy_app = typer.Typer(help="Author and list strategies", no_args_is_help=True)
@@ -97,3 +100,23 @@ def new(
         "ok": True, "name": name, "path": str(path),
         "doc": str(doc_path), "family_doc": family_doc,
     })
+
+
+@strategy_app.command("doc")
+@json_errors()
+def doc(
+    name: str = typer.Argument(None, help="strategy to sync; omit (or --all) for all"),  # noqa: B008
+    all_: bool = typer.Option(False, "--all", help="sync every strategy + family doc"),
+) -> None:
+    """Regenerate the synced blocks of strategy/family docs + rebuild the indexes."""
+    settings = get_settings()
+    with closing(connect(settings.db_path)) as conn:
+        migrate(conn)
+        if all_ or name is None:
+            summary = sync_all(settings, conn)
+        else:
+            if not sync_strategy_doc(settings, conn, name):
+                raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
+            generate_indexes(settings)
+            summary = {"strategies": [name], "families": []}
+    emit({"ok": True, **summary})

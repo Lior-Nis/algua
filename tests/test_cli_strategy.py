@@ -49,3 +49,31 @@ def test_strategy_new_rejects_unsafe_family(tmp_path, monkeypatch):
     result = runner.invoke(app, ["strategy", "new", "alpha", "--family", "../evil"])
     assert result.exit_code == 1, result.stdout
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_strategy_doc_syncs_and_builds_index(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    assert runner.invoke(app, ["strategy", "new", "alpha"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "add", "alpha"]).exit_code == 0
+    assert runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "backtested",
+              "--actor", "agent", "--reason", "x"]
+    ).exit_code == 0
+
+    result = runner.invoke(app, ["strategy", "doc", "--all"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["ok"] is True
+    assert "[[alpha]]" in (tmp_path / "vault" / "_index.md").read_text()
+    assert "stage: backtested" in (tmp_path / "vault" / "alpha.md").read_text()
+
+
+def test_strategy_doc_missing_doc_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    result = runner.invoke(app, ["strategy", "doc", "ghost"])
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["ok"] is False
