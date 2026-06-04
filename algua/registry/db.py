@@ -5,11 +5,11 @@ from pathlib import Path
 
 # Identifies the current schema generation. This is a marker stamped into the
 # DB's user_version, NOT a migration cursor: there is no per-version migration
-# logic. `migrate()` is an idempotent bootstrap (CREATE TABLE IF NOT EXISTS),
-# so it can add new tables to an existing DB but CANNOT ALTER a populated one.
+# logic. `migrate()` is an idempotent bootstrap (CREATE TABLE/INDEX IF NOT EXISTS),
+# so it can add new tables/indexes to an existing DB but CANNOT ALTER a populated one.
 # Any column/constraint change to an existing table needs a real migration
 # (write it explicitly when the need arrives) — not just a bump of this number.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -60,6 +60,11 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     status TEXT NOT NULL,
     broker_order_id TEXT NOT NULL
 );
+-- One broker order maps to at most one paper_orders row per strategy, so a crash/retry or a
+-- duplicate Alpaca client_order_id path that re-returns the same order is an idempotent no-op
+-- rather than a duplicate row (#18).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_paper_orders_strategy_broker
+    ON paper_orders(strategy, broker_order_id);
 CREATE TABLE IF NOT EXISTS paper_fills (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id INTEGER NOT NULL REFERENCES paper_orders(id),
@@ -82,6 +87,11 @@ CREATE TABLE IF NOT EXISTS kill_switches (
     reason TEXT,
     actor TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strategy_peaks (
+    strategy TEXT PRIMARY KEY,
+    peak_equity REAL NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 

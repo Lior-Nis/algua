@@ -5,7 +5,7 @@ import pytest
 
 from algua.contracts.types import ExecutionContract
 from algua.execution.alpaca_broker import BrokerError, TickSnapshot
-from algua.live.live_loop import run_tick
+from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
@@ -34,6 +34,7 @@ class _FakeBroker:
         self._positions = pd.Series(positions or {}, dtype="float64")
         self._equity = equity
         self.submitted = []
+        self.client_order_ids = []
         self.cancels = 0
         self.snapshots = 0
 
@@ -50,10 +51,11 @@ class _FakeBroker:
         # market value priced at $1/share for simplicity (qty == market value)
         return TickSnapshot(equity=self._equity, market_values=dict(qtys), qtys=qtys)
 
-    def submit_sized(self, intent, snap):
+    def submit_sized(self, intent, snap, client_order_id=None):
         if intent.symbol not in snap.qtys:
             raise BrokerError(f"{intent.symbol} not in universe")
         self.submitted.append(intent)
+        self.client_order_ids.append(client_order_id)
         return f"order-{len(self.submitted)}"
 
 
@@ -109,3 +111,115 @@ def test_run_tick_drops_partial_current_session_bar():
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
                       now=datetime(2023, 1, 4, 12, 0, tzinfo=UTC))
     assert result.decision_ts == DATES[1]
+
+
+def test_run_tick_persists_each_order_immediately_with_client_order_id():
+    # #18: on_submitted fires per accepted order (before the next submit), carrying a deterministic
+    # client_order_id passed through to the broker.
+    broker = _FakeBroker(positions={"BBB": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [50.0, 50.0, 50.0]})
+    persisted = []
+    hooks = TickHooks(
+        client_order_id_for=lambda strat, ts, sym: f"{strat}-{sym}",
+        on_submitted=persisted.append,
+    )
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      hooks=hooks)
+    assert {r.symbol for r in persisted} == {o["symbol"] for o in result.submitted}
+    assert all(isinstance(r, SubmittedOrder) for r in persisted)
+    assert all(c is not None for c in broker.client_order_ids)  # coid threaded to the broker
+
+
+def test_run_tick_halts_before_submit_when_switch_trips():
+    # #21: should_halt() true => abort before any cancel/submit.
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(should_halt=lambda: True)
+    with pytest.raises(TickHalted):
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=hooks)
+    assert broker.cancels == 0 and broker.submitted == []  # nothing sent
+
+
+def test_run_tick_drawdown_breach_halts_before_trading():
+    # #27: equity below the persisted peak by more than max_drawdown trips before any order.
+    broker = _FakeBroker(equity=80_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(peak_equity=100_000.0)
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=hooks, max_drawdown=0.1)  # 20% drop > 10%
+    assert ei.value.kind == "drawdown"
+    assert broker.cancels == 0 and broker.submitted == []
+
+
+def test_run_tick_reconcile_mismatch_raises():
+    # #18: DB-derived positions disagreeing with the broker's pre-submit book halts the tick.
+    broker = _FakeBroker(positions={"AAA": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(derived_positions={"AAA": 999.0})  # DB thinks we hold far more
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=hooks)
+    assert ei.value.kind == "reconcile"
+
+
+def test_run_tick_reconcile_empty_db_vs_held_broker_raises():
+    # #18 drift: the DB lost its record (empty derived) while the broker still holds positions.
+    # Supplying the hook (even empty) must reconcile and halt, not skip on empty.
+    broker = _FakeBroker(positions={"AAA": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(derived_positions={})  # DB says flat, broker holds 10 -> drift
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=hooks)
+    assert ei.value.kind == "reconcile"
+    assert broker.cancels == 0 and broker.submitted == []  # halted before any order
+
+
+def test_run_tick_no_reconcile_hook_does_not_compare():
+    # No derived_positions hook supplied: the loop must not attempt reconcile (back-compat for the
+    # pure decide+submit path) and trades normally.
+    broker = _FakeBroker(positions={"AAA": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    assert result.reconcile_ok is True
+    assert broker.cancels == 1
+
+
+def test_run_tick_halts_after_cancel_before_submit_when_switch_trips():
+    # #21: the kill-switch trips after cancel is already in flight. The second should_halt() check
+    # (after cancel, before the submit loop) must abort before any order is sent.
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    calls = {"n": 0}
+
+    def _halt():
+        calls["n"] += 1
+        return calls["n"] >= 2  # first check (pre-cancel) passes; second (post-cancel) trips
+
+    hooks = TickHooks(should_halt=_halt)
+    with pytest.raises(TickHalted):
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=hooks)
+    assert broker.cancels == 1  # cancel ran
+    assert broker.submitted == []  # but nothing was submitted
+
+
+def test_run_tick_realized_gross_breach_trips_before_submit():
+    # #27: the broker book is already over the realized gross limit BEFORE this tick. The realized
+    # check must trip/flatten before any new order is sent, not after.
+    broker = _FakeBroker(positions={"AAA": 100_000.0, "BBB": 100_000.0}, equity=100_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    assert ei.value.kind == "gross_exposure_realized"
+    assert broker.cancels == 0 and broker.submitted == []  # tripped before cancel + submit
+
+
+def test_run_tick_ratchets_peak_equity():
+    broker = _FakeBroker(equity=120_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      hooks=TickHooks(peak_equity=100_000.0))
+    assert result.peak_equity == 120_000.0  # new high

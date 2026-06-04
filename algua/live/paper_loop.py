@@ -8,10 +8,13 @@ import pandas as pd
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.sim_broker import Fill, SimBroker
-from algua.risk.limits import check_drawdown, check_gross_exposure, check_long_only
+from algua.risk.limits import (
+    WEIGHT_TOL,
+    check_drawdown,
+    check_gross_exposure,
+    check_long_only,
+)
 from algua.strategies.base import LoadedStrategy
-
-_EPS = 1e-6
 
 
 @dataclass(frozen=True)
@@ -36,28 +39,40 @@ class PaperRunResult:
 
 def build_intents(
     weights: pd.Series,
-    positions: pd.Series,
-    closes: pd.Series,
-    equity: float,
+    current_weights: dict[str, float],
     decision_ts: datetime,
 ) -> list[OrderIntent]:
-    """Emit one OrderIntent per symbol whose target weight differs from its current weight."""
-    # Equity is the sizing denominator; a non-positive value would silently treat every position as
-    # weight 0 and buy against nothing. The drawdown breaker should have halted the run long before
-    # equity reaches zero, so reaching here with equity <= 0 is a logic error, not a market state.
-    assert equity > 0, f"build_intents requires positive equity, got {equity!r}"
+    """Emit one OrderIntent per symbol whose target weight differs from its current weight by more
+    than WEIGHT_TOL. `current_weights` is each held symbol's market-value weight (shares*price over
+    equity for the sim, market_value/equity for Alpaca); the caller computes it from what it has."""
     intents: list[OrderIntent] = []
-    symbols = sorted(set(weights.index) | set(positions.index))
+    symbols = sorted(set(weights.index) | set(current_weights))
     for sym in symbols:
         target = float(weights.get(sym, 0.0))
-        shares = float(positions.get(sym, 0.0))
-        current = shares * float(closes.get(sym, 0.0)) / equity
-        if abs(target - current) > _EPS:
+        current = float(current_weights.get(sym, 0.0))
+        if abs(target - current) > WEIGHT_TOL:
             side = Side.BUY if target > current else Side.SELL
             intents.append(
                 OrderIntent(symbol=sym, side=side, target_weight=target, decision_ts=decision_ts)
             )
     return intents
+
+
+def decide(
+    strategy: LoadedStrategy,
+    view: pd.DataFrame,
+    current_weights: dict[str, float],
+    decision_ts: datetime,
+) -> tuple[pd.Series, list[OrderIntent]]:
+    """Shared decision core both loops call: evaluate target weights on the closed-bar `view`, run
+    the target-weight risk checks (long-only + gross), then build the per-symbol intents against the
+    caller's current market-value weights. Broker mechanics (sim fill_pending vs Alpaca submit) stay
+    in each loop; only this weights->risk->intents step is shared (#25)."""
+    weights = strategy.target_weights(view)
+    check_long_only(weights, strategy.name)
+    check_gross_exposure(weights, strategy.execution.max_gross_exposure)
+    intents = build_intents(weights, current_weights, decision_ts)
+    return weights, intents
 
 
 def run_paper(
@@ -67,7 +82,7 @@ def run_paper(
     start: datetime,
     end: datetime,
     timeframe: str = "1d",
-    max_drawdown: float = 1.0,
+    max_drawdown: float | None = None,
 ) -> PaperRunResult:
     """Replay the strategy bar-by-bar: decide weights on closed bar t (data <= t), submit
     orders, fill at t+1 open. Pure over the injected broker + provider."""
@@ -77,7 +92,6 @@ def run_paper(
     closes = _reset.pivot(index="timestamp", columns="symbol", values="adj_close").sort_index()
     ts = list(opens.index)
     warmup = strategy.execution.warmup_bars
-    max_gross = strategy.execution.max_gross_exposure
     peak = broker.equity(closes.loc[ts[0]]) if ts else broker.cash
     bars_seen = 0
 
@@ -92,11 +106,18 @@ def run_paper(
         check_drawdown(equity, peak, max_drawdown)
         if bars_seen < warmup:
             continue  # warm-up: observe only — no signal evaluation, validation, or orders
-        view = bars.loc[:t]
-        weights = strategy.target_weights(view)
-        check_long_only(weights, strategy.name)
-        check_gross_exposure(weights, max_gross)
-        for intent in build_intents(weights, broker.get_positions(), closes.loc[t], equity, t):
+        # Equity is the sizing denominator; a non-positive value would silently treat every position
+        # as weight 0 and buy against nothing. The drawdown breaker should have halted long before
+        # equity reaches zero, so equity <= 0 here is a logic error, not a market state.
+        assert equity > 0, f"run_paper requires positive equity, got {equity!r}"
+        positions = broker.get_positions()
+        bar_closes = closes.loc[t]
+        current_weights = {
+            s: float(positions.get(s, 0.0)) * float(bar_closes.get(s, 0.0)) / equity
+            for s in positions.index
+        }
+        _weights, intents = decide(strategy, bars.loc[:t], current_weights, t)
+        for intent in intents:
             order_id = broker.submit(intent)
             orders.append(OrderRecord(intent=intent, broker_order_id=order_id))
         fills.extend(broker.fill_pending(opens.loc[t_next], fill_ts=t_next))
