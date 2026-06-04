@@ -36,7 +36,15 @@ def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
         # A rejected fill (zero-qty) carries no shares; the order's status reflects whether any
         # shares actually executed, and only executing fills are persisted as fills.
         executed = [f for f in fills_by_order.get(broker_order_id, []) if f.qty != 0.0]
-        status = "filled" if executed else "rejected"
+        # Derive status from the fills' own status rather than hardcoding "filled": a buy clamped
+        # to available cash produces Fill.status="partial", which must be preserved here so callers
+        # can distinguish fully-filled orders from cash-constrained ones.
+        if any(f.status == "partial" for f in executed):
+            status = "partial"
+        elif executed:
+            status = "filled"
+        else:
+            status = "rejected"
         cols = (
             "(strategy, symbol, side, target_weight,"
             " decision_ts, submitted_ts, status, broker_order_id)"
