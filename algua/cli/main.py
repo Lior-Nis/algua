@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import sys
 
-from typer._click import exceptions as _click_exc  # Typer vendors its own Click fork
+# Typer vendors a private Click fork (typer._click); its exception classes do NOT inherit from
+# public click.exceptions, so we must import them from the private module.  We pin Typer tightly
+# (see pyproject.toml) so this coupling is version-stable.  The smoke tests in
+# tests/test_cli_main.py (test_bad_option_type_renders_json, test_unknown_option_renders_json)
+# act as the contract-break detector if the Typer version is ever bumped.
+from typer._click import exceptions as _click_exc
 from typer.main import get_command
 
 from algua.cli import (  # noqa: F401 - imports register subcommands
