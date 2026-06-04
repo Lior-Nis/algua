@@ -2,7 +2,9 @@ import pandas as pd
 import pytest
 import requests
 
+from algua.config.settings import Settings
 from algua.data.contracts import BarRequest
+from algua.data.providers import get_provider, register_provider
 from algua.data.providers.alpaca import AlpacaBarProvider, _normalize_alpaca
 from algua.data.providers.errors import ProviderError
 from algua.data.providers.yfinance import YFinanceBarProvider, _normalize_yfinance
@@ -147,6 +149,44 @@ def test_alpaca_timeframe_maps_1d_to_alpaca_format():
     assert _alpaca_timeframe("1d") == "1Day"
     assert _alpaca_timeframe("1Day") == "1Day"
     assert _alpaca_timeframe("1Min") == "1Min"  # unknown-to-us passes through
+
+
+def test_get_provider_builds_yfinance():
+    provider = get_provider("yfinance", Settings())
+    assert isinstance(provider, YFinanceBarProvider)
+
+
+def test_get_provider_builds_alpaca_from_settings():
+    settings = Settings(alpaca_api_key="key", alpaca_api_secret="secret")
+    provider = get_provider("alpaca", settings)
+    assert isinstance(provider, AlpacaBarProvider)
+    assert provider.api_key == "key"
+    assert provider.api_secret == "secret"
+    assert provider.base_url == settings.alpaca_data_url.rstrip("/")
+
+
+def test_get_provider_alpaca_requires_credentials():
+    # Explicit None overrides any ambient ALGUA_ALPACA_* env so the test is hermetic.
+    settings = Settings(alpaca_api_key=None, alpaca_api_secret=None)
+    with pytest.raises(ValueError, match="ALGUA_ALPACA_API_KEY"):
+        get_provider("alpaca", settings)
+
+
+def test_get_provider_rejects_unknown_name():
+    with pytest.raises(ValueError, match="unsupported bar provider: nope"):
+        get_provider("nope", Settings())
+
+
+def test_register_provider_is_open_for_extension():
+    """A new provider plugs in via the registry without touching the CLI or get_provider."""
+    sentinel = object()
+    register_provider("dummy", lambda _settings: sentinel)
+    try:
+        assert get_provider("dummy", Settings()) is sentinel
+    finally:
+        from algua.data.providers import _REGISTRY
+
+        del _REGISTRY["dummy"]
 
 
 # --- #58: yfinance normalizer must not silently drop columns/symbols ---
