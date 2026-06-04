@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass
@@ -60,15 +61,4 @@ class BacktestResult:
     dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "strategy": self.strategy,
-            "metrics": self.metrics,
-            "config_hash": self.config_hash,
-            "data_source": self.data_source,
-            "timeframe": self.timeframe,
-            "period": self.period,
-            "seed": self.seed,
-            "snapshot_id": self.snapshot_id,
-            "code_hash": self.code_hash,
-            "dependency_hash": self.dependency_hash,
-        }
+        return dataclasses.asdict(self)
