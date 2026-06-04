@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -80,13 +81,20 @@ def _parse_grid(params: list[str]) -> dict[str, list[Any]]:
 def _rank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort records descending by score; ties broken by ascending std_sharpe (more stable wins).
 
-    Deterministic: equal score + equal std_sharpe preserves the original order (stable sort).
+    Non-finite score or std_sharpe (NaN, ±inf) always sorts last so a degenerate combo
+    never beats a finite one.  The sort is stable: equal score + equal std_sharpe
+    preserves the original order.
     """
-    return sorted(
-        records,
-        key=lambda r: (r["score"], -r["stability"]["std_sharpe"]),
-        reverse=True,
-    )
+    def _key(r: dict[str, Any]) -> tuple[float, float]:
+        score = r["score"]
+        std = r["stability"]["std_sharpe"]
+        # Map non-finite to sentinels that sink to the bottom under reverse=True.
+        # score: -inf → always last;  std_sharpe: +inf → -(-inf) = -inf → also last.
+        finite_score = score if math.isfinite(score) else -math.inf
+        finite_std = std if math.isfinite(std) else math.inf
+        return (finite_score, -finite_std)
+
+    return sorted(records, key=_key, reverse=True)
 
 
 _RANK_KEYS = {"mean_sharpe", "min_sharpe"}
