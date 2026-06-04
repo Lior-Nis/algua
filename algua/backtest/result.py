@@ -1,37 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from algua.contracts.types import DataProvider
-from algua.strategies.base import LoadedStrategy
 
-
-def config_hash(strategy: LoadedStrategy) -> str:
-    """Stable short hash of the config that defines a backtest's identity.
-
-    Lives beside the result/provenance code because it is provenance, not simulation.
-    Used by both run() and walk_forward() (#38).
-
-    The hash serializes the *full* ExecutionContract via asdict, so every
-    behavior-affecting field (warmup_bars, allow_fractional, max_gross_exposure,
-    decision_lag_bars, rebalance_frequency) is part of the backtest's identity — and any
-    field added later is included automatically. Two configs that produce different trades
-    can therefore never collide on config_hash.
-    """
-    payload = json.dumps(
-        {
-            "name": strategy.name,
-            "universe": strategy.universe,
-            "params": strategy.params,
-            "execution": asdict(strategy.execution),
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+# config_hash is canonical in strategies.base (shared by the backtest engine and the registry's
+# live-approval gate). Re-exported here because it is also part of backtest provenance (#38).
+from algua.strategies.base import config_hash as config_hash
 
 
 def provenance(provider: DataProvider, seed: int | None) -> dict[str, Any]:
