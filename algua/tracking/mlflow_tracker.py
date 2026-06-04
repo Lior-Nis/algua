@@ -43,13 +43,14 @@ def _flatten(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     return out
 
 
+def _is_finite_number(v: Any) -> bool:
+    """Return True iff *v* is a real, finite number (int/float, not bool, not NaN/inf)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _numeric_metrics(d: dict[str, Any]) -> dict[str, float]:
     """Keep only real, finite numeric values — NaN/inf are dropped; safe for log_metrics."""
-    return {
-        k: float(v)
-        for k, v in d.items()
-        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-    }
+    return {k: float(v) for k, v in d.items() if _is_finite_number(v)}
 
 
 def _stamp_params(result: Any) -> dict[str, Any]:
@@ -118,7 +119,9 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
             "dependency_hash": result.dependency_hash,
         })
         if result.best is not None:
-            mlflow.log_metric("best_score", float(result.best["score"]))
+            _best_score = result.best["score"]
+            if _is_finite_number(_best_score):
+                mlflow.log_metric("best_score", float(_best_score))
         mlflow.set_tags({"kind": "sweep", "strategy": result.strategy})
         mlflow.log_dict(result.to_dict(), "sweep.json")
 
@@ -134,8 +137,12 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                     "holdout_frac": result.holdout_frac, "code_hash": result.code_hash,
                     "dependency_hash": result.dependency_hash,
                 })
+                _entry_score = entry["score"]
+                _score_metric: dict[str, float] = (
+                    {"score": float(_entry_score)} if _is_finite_number(_entry_score) else {}
+                )
                 mlflow.log_metrics({
-                    "score": float(entry["score"]),
+                    **_score_metric,
                     **_numeric_metrics(_flatten(entry["stability"])),
                     **_numeric_metrics(_flatten(entry["holdout"], "holdout.")),
                 })
