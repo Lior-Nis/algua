@@ -61,6 +61,15 @@ class DataProvider(Protocol):
 
 @runtime_checkable
 class Broker(Protocol):
+    """The substitutable surface both brokers (sim + Alpaca paper) implement.
+
+    `submit` sizes ONE OrderIntent against an equity snapshot the broker holds and returns a
+    broker order id; a delta below the broker's minimum-notional threshold returns the string
+    "noop" and submits nothing. Beyond this surface each broker exposes its own driving methods
+    (the sim's equity()/fill_pending() replay hooks; Alpaca's account()/cancel_open_orders() HTTP
+    calls), so the loops that need those are typed against the concrete class, not this protocol.
+    """
+
     def get_positions(self) -> pd.Series: ...
 
     def submit(self, intent: OrderIntent) -> str: ...

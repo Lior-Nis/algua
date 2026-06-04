@@ -42,6 +42,11 @@ def _broker():
     return AlpacaPaperBroker(api_key="k", api_secret="s")
 
 
+def test_alpaca_broker_conforms_to_broker_protocol():
+    from algua.contracts.types import Broker
+    assert isinstance(_broker(), Broker)
+
+
 def test_account_parses_floats(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "50000",
@@ -64,7 +69,7 @@ def test_get_positions_parses_and_empty(monkeypatch):
 def test_submit_buy_delta_posts_notional(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
-         "/v2/positions/AAA": _FakeResp(404, text="no position")},
+         "/v2/positions": _FakeResp(200, [])},  # flat
         post_resp=_FakeResp(201, {"id": "order-1"}),
     )
     monkeypatch.setattr(ab, "requests", fake)
@@ -77,7 +82,8 @@ def test_submit_buy_delta_posts_notional(monkeypatch):
 def test_submit_sell_delta(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
-         "/v2/positions/AAA": _FakeResp(200, {"market_value": "60000"})},
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "600",
+                                           "market_value": "60000"}])},
         post_resp=_FakeResp(201, {"id": "order-2"}),
     )
     monkeypatch.setattr(ab, "requests", fake)
@@ -88,11 +94,56 @@ def test_submit_sell_delta(monkeypatch):
 def test_submit_noop_below_threshold(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
-         "/v2/positions/AAA": _FakeResp(200, {"market_value": "50000"})},
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "500",
+                                           "market_value": "50000"}])},
         post_resp=_FakeResp(201, {"id": "unused"}),
     )
     monkeypatch.setattr(ab, "requests", fake)
     assert _broker().submit(OrderIntent("AAA", Side.BUY, 0.5, T0)) == "noop"
+    assert fake.posted == []
+
+
+def test_snapshot_is_one_account_and_one_positions_get(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "10",
+                                           "market_value": "1000"}])})
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = _broker().snapshot(["AAA", "BBB"])
+    assert snap.equity == 100000.0
+    assert snap.market_values == {"AAA": 1000.0, "BBB": 0.0}  # BBB in universe but flat
+    assert snap.qtys == {"AAA": 10.0, "BBB": 0.0}
+
+
+def test_snapshot_includes_held_symbol_outside_universe(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [{"symbol": "ZZZ", "qty": "5",
+                                           "market_value": "500"}])})
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = _broker().snapshot(["AAA"])  # ZZZ held but not in universe -> still folded in
+    assert snap.qtys == {"AAA": 0.0, "ZZZ": 5.0}
+
+
+def test_submit_sized_uses_fixed_equity_denominator(monkeypatch):
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "order-x"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0, "BBB": 0.0},
+                           qtys={"AAA": 0.0, "BBB": 0.0})
+    _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap)
+    _broker().submit_sized(OrderIntent("BBB", Side.BUY, 0.3, T0), snap)
+    # both sized off the SAME snapshot equity (100k), not a re-read that drifted as AAA filled
+    assert fake.posted[0]["notional"] == "50000.00"
+    assert fake.posted[1]["notional"] == "30000.00"
+
+
+def test_submit_sized_rejects_symbol_outside_universe(monkeypatch):
+    # #29: a typo'd symbol absent from the snapshot universe must raise, not size a phantom buy
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "x"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    with pytest.raises(BrokerError, match="not in the strategy universe"):
+        _broker().submit_sized(OrderIntent("TYPOO", Side.BUY, 0.5, T0), snap)
     assert fake.posted == []
 
 
