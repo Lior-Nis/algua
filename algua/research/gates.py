@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -71,6 +72,12 @@ def evaluate_gate(
     for spec in GATE_SPECS:
         value = float(sources[spec.source][spec.metric_key])
         threshold = float(getattr(criteria, spec.threshold_attr))
+        # A non-finite metric (inf trivially clears >=/>, NaN is never a real result) is a
+        # gate failure, never a pass — and is never recorded as a NaN/inf in the payload.
+        if not math.isfinite(value):
+            checks.append({"name": spec.name, "value": None, "threshold": threshold,
+                           "op": spec.op, "passed": False})
+            continue
         passed = _OPS[spec.op](value, threshold)
         checks.append({"name": spec.name, "value": value, "threshold": threshold,
                        "op": spec.op, "passed": bool(passed)})

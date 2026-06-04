@@ -28,7 +28,11 @@ def _ann_return(r: pd.Series) -> float:
 
 
 def _ann_volatility(r: pd.Series) -> float:
-    return float(r.std() * np.sqrt(ANN))
+    # pd.Series.std() defaults to ddof=1, which is NaN for a one-sample series. Coerce a
+    # non-finite std to 0.0 so the "safe on ... zero-vol input" contract holds and no
+    # non-finite vol leaks into Sharpe or JSON. Multi-bar values are unchanged (ddof=1 kept).
+    vol = r.std() * np.sqrt(ANN)
+    return float(vol) if np.isfinite(vol) else 0.0
 
 
 def _max_drawdown(r: pd.Series) -> float:

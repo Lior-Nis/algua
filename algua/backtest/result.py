@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from algua.contracts.types import DataProvider
@@ -14,17 +14,19 @@ def config_hash(strategy: LoadedStrategy) -> str:
 
     Lives beside the result/provenance code because it is provenance, not simulation.
     Used by both run() and walk_forward() (#38).
+
+    The hash serializes the *full* ExecutionContract via asdict, so every
+    behavior-affecting field (warmup_bars, allow_fractional, max_gross_exposure,
+    decision_lag_bars, rebalance_frequency) is part of the backtest's identity — and any
+    field added later is included automatically. Two configs that produce different trades
+    can therefore never collide on config_hash.
     """
     payload = json.dumps(
         {
             "name": strategy.name,
             "universe": strategy.universe,
             "params": strategy.params,
-            "execution": {
-                "rebalance_frequency": strategy.execution.rebalance_frequency,
-                "decision_lag_bars": strategy.execution.decision_lag_bars,
-                "max_gross_exposure": strategy.execution.max_gross_exposure,
-            },
+            "execution": asdict(strategy.execution),
         },
         sort_keys=True,
     )
