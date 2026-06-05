@@ -21,7 +21,9 @@ def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy
     Does not mutate the base strategy/config."""
     new_params = {**strategy.config.params, **combo}
     new_config = strategy.config.model_copy(update={"params": new_params})
-    return LoadedStrategy(config=new_config, fn=strategy.fn)
+    # Preserve the optional fast-path hook — otherwise every sweep combo silently drops the
+    # vectorized path and re-incurs the per-bar cost (the parity guard still protects each combo).
+    return LoadedStrategy(config=new_config, fn=strategy.fn, panel_fn=strategy.panel_fn)
 
 
 def _combos(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
