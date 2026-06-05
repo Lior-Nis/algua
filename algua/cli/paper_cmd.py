@@ -154,14 +154,16 @@ def resume(name: str) -> None:
     with registry_conn() as conn:
         was_tripped = kill_switch.is_tripped(conn, name)
         if was_tripped:
-            # Audit BEFORE clearing: if the reset write fails, the switch stays tripped
-            # (fail-safe — still halted) rather than cleared with no audit trail.
+            # Audit BEFORE mutating: if a write fails the switch stays tripped (fail-safe — still
+            # halted) rather than cleared with no audit trail.
             audit_append(conn, actor="human", action="kill_switch_reset",
-                         reason="manual resume", strategy=name)
-            kill_switch.reset(conn, name)
-            # Re-base the drawdown high-water mark to the (post-flatten) current equity, so the
-            # next tick doesn't instantly re-trip the breaker against the stale pre-loss peak (#27).
+                         reason="manual resume (re-bases drawdown peak)", strategy=name)
+            # Re-base the drawdown high-water mark to current equity FIRST, then clear the
+            # kill-switch LAST so the actual un-halt is the final write: any earlier failure leaves
+            # the strategy safely halted and resume is retryable. Without the rebase, a drawdown
+            # trip -> flatten-to-cash re-trips every tick against the stale pre-loss peak (#27).
             clear_peak_equity(conn, name)
+            kill_switch.reset(conn, name)
     emit(ok({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"}))
 
 
