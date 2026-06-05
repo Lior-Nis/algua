@@ -9,7 +9,7 @@ from pathlib import Path
 # so it can add new tables/indexes to an existing DB but CANNOT ALTER a populated one.
 # Any column/constraint change to an existing table needs a real migration
 # (write it explicitly when the need arrives) — not just a bump of this number.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS tick_snapshots (
     reconcile_ok INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_tick_snapshots_strategy_ts ON tick_snapshots(strategy, tick_ts);
+CREATE TABLE IF NOT EXISTS global_halt (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    reason     TEXT,
+    actor      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 

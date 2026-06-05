@@ -350,3 +350,30 @@ def test_close_positions_failure_raises(monkeypatch):
     monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError):
         _broker().close_positions(["AAA", "BBB"])
+
+
+def test_close_all_positions_ok(monkeypatch):
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"symbol": "AAA", "status": 200}]))
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().close_all_positions()
+    assert fake.deleted == ["https://paper-api.alpaca.markets/v2/positions?cancel_orders=true"]
+
+
+def test_close_all_positions_empty_is_noop(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _FakeRequestsWithDelete(_FakeResp(207, [])))
+    _broker().close_all_positions()  # no positions -> no error
+
+
+def test_close_all_positions_partial_failure_raises(monkeypatch):
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"symbol": "AAA", "status": 200},
+                                                   {"symbol": "BBB", "status": 500}]))
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError):
+        _broker().close_all_positions()
+
+
+def test_close_all_positions_non_list_body_raises(monkeypatch):
+    # a panic flatten must not treat an unexpected (non-list) body as success
+    monkeypatch.setattr(ab, "requests", _FakeRequestsWithDelete(_FakeResp(207, {"oops": 1})))
+    with pytest.raises(BrokerError):
+        _broker().close_all_positions()

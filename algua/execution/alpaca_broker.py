@@ -199,6 +199,21 @@ class AlpacaPaperBroker:
                 continue  # no open position for this symbol -> nothing to close
             self._read(resp, path, ok=(200,))
 
+    def close_all_positions(self) -> None:
+        """Liquidate the ENTIRE account: DELETE /v2/positions?cancel_orders=true — Alpaca cancels
+        all open orders then market-closes every position, returning a 207 multi-status; raise if
+        any per-position close failed. Account-wide — used ONLY by the global halt (per-strategy
+        flatten uses close_positions(universe)). Empty account -> empty list -> no-op."""
+        results = self._read(
+            self._delete("/v2/positions?cancel_orders=true"), "/v2/positions", ok=(200, 207)
+        )
+        if not isinstance(results, list):
+            # A panic flatten must not call an unexpected (non-list) body a success and let the
+            # operator believe the account is flat.
+            raise BrokerError(f"alpaca /v2/positions: expected a list, got {results!r}")
+        if _multistatus_failures(results):
+            raise BrokerError(f"alpaca failed to close some positions: {results}")
+
     def snapshot(self, universe: list[str]) -> TickSnapshot:
         """Capture equity + per-symbol market value and qty ONCE (1 account GET + 1 positions GET).
         The snapshot keys are the union of `universe` and every currently-held symbol: universe
