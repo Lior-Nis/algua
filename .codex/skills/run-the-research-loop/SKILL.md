@@ -19,8 +19,8 @@ research explores. Ground your hypotheses in this thesis unless told otherwise.
 
 For each hypothesis:
 
-1. **Ideate.** First read the knowledge base: `docs/strategies/_index.md` and
-   `_families.md`. Prefer a thesis family marked `exploring`/`promising` with an open axis
+1. **Ideate.** First read the knowledge base: `kb/strategies/_index.md` and
+   `kb/strategies/_families.md`. Prefer a thesis family marked `exploring`/`promising` with an open axis
    in its `## Open questions`; read that family doc and the relevant strategy docs to avoid
    re-running a refuted idea. Form one concrete, testable hypothesis on the most promising
    open axis. Pick a unique strategy name; skip names already in `uv run algua registry list`.

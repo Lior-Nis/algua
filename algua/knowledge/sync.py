@@ -22,13 +22,18 @@ def _safe_path(base: Path, *parts: str) -> Path:
     return candidate
 
 
+def strategies_dir(settings: Settings) -> Path:
+    """The strategy domain of the vault: `<knowledge_dir>/strategies/`."""
+    return settings.knowledge_dir / "strategies"
+
+
 def strategy_doc_path(settings: Settings, name: str) -> Path:
-    return _safe_path(settings.knowledge_dir, f"{name}.md")
+    return _safe_path(strategies_dir(settings), f"{name}.md")
 
 
 def family_doc_path(settings: Settings, name: str) -> Path:
     # Contain to families/ itself, so a stray name can't even land elsewhere in the vault.
-    return _safe_path(settings.knowledge_dir / "families", f"{name}.md")
+    return _safe_path(strategies_dir(settings) / "families", f"{name}.md")
 
 
 def _unwikilink(value: object) -> str | None:
@@ -92,7 +97,7 @@ def sync_family_doc(settings: Settings, name: str) -> bool:
     if not path.exists():
         return False
     counts: dict[str, int] = {}
-    for doc in settings.knowledge_dir.glob("*.md"):
+    for doc in strategies_dir(settings).glob("*.md"):
         if doc.name.startswith("_"):
             continue
         fm, _ = parse_doc(doc.read_text())
@@ -110,11 +115,11 @@ def sync_family_doc(settings: Settings, name: str) -> bool:
 
 
 def generate_indexes(settings: Settings) -> None:
-    """(Re)generate _index.md (strategies) and _families.md from vault frontmatter."""
-    vault = settings.knowledge_dir
-    vault.mkdir(parents=True, exist_ok=True)
+    """(Re)generate strategies/_index.md and strategies/_families.md from frontmatter."""
+    base = strategies_dir(settings)
+    base.mkdir(parents=True, exist_ok=True)
     strat_lines: list[str] = []
-    for doc in sorted(vault.glob("*.md")):
+    for doc in sorted(base.glob("*.md")):
         if doc.name.startswith("_"):
             continue
         fm, _ = parse_doc(doc.read_text())
@@ -125,15 +130,15 @@ def generate_indexes(settings: Settings) -> None:
             f"- [[{name}]] — {fm.get('family', '—')} · "
             f"{fm.get('stage', '?')} · {fm.get('hypothesis_status', '?')}"
         )
-    (vault / "_index.md").write_text("# Strategies\n\n" + "\n".join(strat_lines) + "\n")
+    (base / "_index.md").write_text("# Strategies\n\n" + "\n".join(strat_lines) + "\n")
 
-    fam_dir = vault / "families"
+    fam_dir = base / "families"
     fam_lines: list[str] = []
     if fam_dir.exists():
         for doc in sorted(fam_dir.glob("*.md")):
             fm, _ = parse_doc(doc.read_text())
             fam_lines.append(f"- [[{fm.get('name', doc.stem)}]] — {fm.get('status', '?')}")
-    (vault / "_families.md").write_text("# Thesis families\n\n" + "\n".join(fam_lines) + "\n")
+    (base / "_families.md").write_text("# Thesis families\n\n" + "\n".join(fam_lines) + "\n")
 
 
 def sync_all(settings: Settings, stages: dict[str, str]) -> dict[str, list[str]]:
@@ -146,7 +151,7 @@ def sync_all(settings: Settings, stages: dict[str, str]) -> dict[str, list[str]]
         if sync_strategy_doc(settings, name, stage=stage):
             synced.append(name)
     families: list[str] = []
-    fam_dir = settings.knowledge_dir / "families"
+    fam_dir = strategies_dir(settings) / "families"
     if fam_dir.exists():
         for doc in sorted(fam_dir.glob("*.md")):
             fm, _ = parse_doc(doc.read_text())

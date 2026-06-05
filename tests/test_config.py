@@ -46,7 +46,7 @@ def test_alpaca_paper_url_default():
 def test_knowledge_dir_default_and_override(monkeypatch):
     from algua.config.settings import Settings
 
-    assert Settings().knowledge_dir == Path("docs/strategies")
+    assert Settings().knowledge_dir == Path("kb")
     monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", "/tmp/vault")
     assert Settings().knowledge_dir == Path("/tmp/vault")
 
