@@ -9,9 +9,12 @@ from algua.execution.order_state import (
     count_orders,
     derive_positions,
     get_peak_equity,
+    latest_tick_snapshot,
     persist_run,
+    recent_orders,
     reconcile,
     record_submitted_order,
+    record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import Fill
@@ -175,3 +178,27 @@ def test_persist_run_replaces_prior_paper_state_not_accumulates(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 1
     assert derive_positions(conn, "s") == {"AAA": 50.0}
+
+
+def test_tick_snapshot_roundtrip_latest_wins(tmp_path):
+    conn = _conn(tmp_path)
+    assert latest_tick_snapshot(conn, "s") is None
+    record_tick_snapshot(conn, "s", tick_ts="2023-06-01T00:00:00+00:00",
+                         decision_ts="2023-05-31T00:00:00+00:00", equity=100.0, peak_equity=100.0,
+                         positions={"AAA": 10.0}, n_submitted=1, reconcile_ok=True)
+    record_tick_snapshot(conn, "s", tick_ts="2023-06-02T00:00:00+00:00",
+                         decision_ts="2023-06-01T00:00:00+00:00", equity=120.0, peak_equity=120.0,
+                         positions={"AAA": 12.0}, n_submitted=0, reconcile_ok=False)
+    latest = latest_tick_snapshot(conn, "s")
+    assert latest["equity"] == 120.0 and latest["positions"] == {"AAA": 12.0}
+    assert latest["reconcile_ok"] is False and latest["n_submitted"] == 0
+
+
+def test_recent_orders_newest_first_and_limit(tmp_path):
+    conn = _conn(tmp_path)
+    for i in range(3):
+        record_submitted_order(conn, "s", f"SYM{i}", "buy", 1.0, "2023-06-01T00:00:00+00:00",
+                               f"o-{i}")
+    rows = recent_orders(conn, "s", limit=2)
+    assert [r["broker_order_id"] for r in rows] == ["o-2", "o-1"]  # newest first, limited
+    assert rows[0]["symbol"] == "SYM2" and rows[0]["side"] == "buy"
