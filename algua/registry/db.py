@@ -113,6 +113,10 @@ CREATE TABLE IF NOT EXISTS strategy_peaks (
 -- promotion gate sums n_combos across all rows for a strategy (cumulative trials searched in
 -- the family — the conservative, honest count). FK into strategies(id) because this is
 -- relational state that should not outlive its strategy.
+-- INTENTIONAL: there is no grid deduplication. Re-running an identical sweep inserts another row
+-- and permanently raises the cumulative count — and therefore the promotion bar. This is the
+-- conservative choice: exploratory re-runs are real search effort and should count; silently
+-- deduplicating them would quietly weaken the multiple-testing defense.
 CREATE TABLE IF NOT EXISTS search_trials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),

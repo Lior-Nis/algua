@@ -20,6 +20,8 @@ app.add_typer(research_app, name="research")
 
 def _gate_reason(decision: GateDecision) -> str:
     parts = [f"{c['name']}={c['value']:.4g}{c['op']}{c['threshold']:.4g}" for c in decision.checks]
+    # The `n_combos is not None` guard is defensive: `promote` refuses unless _resolve_breadth
+    # succeeds, so n_combos is always set when this function is reached on a passing decision.
     breadth = (
         f"; breadth={decision.n_combos}({decision.breadth_provenance})"
         f"; min_holdout_sharpe={decision.base_min_holdout_sharpe:.4g}"

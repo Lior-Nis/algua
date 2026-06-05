@@ -39,6 +39,11 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
 
     Invariants: 0 at N=1 (``ln(1) == 0`` — no penalty for a single pre-registered hypothesis),
     monotonically non-decreasing in N, and uses the holdout sample size T (not a constant).
+
+    NOTE: N is the RAW combo count with no deduplication. Correlated combos (e.g. neighboring
+    parameter values that produce near-duplicate strategies) make the effective number of
+    independent trials smaller, so ``sqrt(2*ln N)`` is an upper bound — the haircut errs on the
+    strict side, which is intentional.
     """
     n = max(int(n_combos), 1)
     if n_bars <= 0:
