@@ -40,6 +40,11 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
     Invariants: 0 at N=1 (``ln(1) == 0`` — no penalty for a single pre-registered hypothesis),
     monotonically non-decreasing in N, and uses the holdout sample size T (not a constant).
 
+    DEGENERATE HOLDOUT (T <= 0) FAILS CLOSED: a zero-length holdout carries no out-of-sample
+    evidence, so the multiple-testing penalty is UNDEFINED, not zero. Returning ``inf`` lifts the
+    effective holdout-Sharpe bar out of reach so the gate cannot pass on an empty holdout — the
+    opposite of waiving the penalty (which returning 0.0 would silently do).
+
     NOTE: N is the RAW combo count with no deduplication. Correlated combos (e.g. neighboring
     parameter values that produce near-duplicate strategies) make the effective number of
     independent trials smaller, so ``sqrt(2*ln N)`` is an upper bound — the haircut errs on the
@@ -47,7 +52,7 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
     """
     n = max(int(n_combos), 1)
     if n_bars <= 0:
-        return 0.0
+        return math.inf
     return math.sqrt(2.0 * math.log(n)) * math.sqrt(ANN) / math.sqrt(n_bars)
 
 
@@ -61,13 +66,18 @@ class GateDecision:
     effective_min_holdout_sharpe: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
+        # payload stays JSON-clean, mirroring how non-finite check values are nulled.
+        eff = self.effective_min_holdout_sharpe
         return {
             "passed": self.passed,
             "checks": self.checks,
             "n_combos": self.n_combos,
             "breadth_provenance": self.breadth_provenance,
             "base_min_holdout_sharpe": self.base_min_holdout_sharpe,
-            "effective_min_holdout_sharpe": self.effective_min_holdout_sharpe,
+            "effective_min_holdout_sharpe": (
+                eff if eff is None or math.isfinite(eff) else None
+            ),
         }
 
 
@@ -138,6 +148,13 @@ def evaluate_gate(
         threshold = float(getattr(criteria, spec.threshold_attr))
         if spec.name == _HOLDOUT_SHARPE_SPEC:
             threshold = effective_holdout_sharpe
+        # A non-finite EFFECTIVE THRESHOLD means a degenerate (zero-length) holdout drove the
+        # haircut to inf: there is no out-of-sample evidence, so the check FAILS CLOSED — never a
+        # pass — and the inf threshold is nulled out of the payload to keep it JSON-clean.
+        if not math.isfinite(threshold):
+            checks.append({"name": spec.name, "value": None, "threshold": None,
+                           "op": spec.op, "passed": False})
+            continue
         # A non-finite metric (inf trivially clears >=/>, NaN is never a real result) is a
         # gate failure, never a pass — and is never recorded as a NaN/inf in the payload.
         if not math.isfinite(value):

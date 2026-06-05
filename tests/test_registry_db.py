@@ -107,7 +107,9 @@ def test_migrate_creates_search_trials_table(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "search_trials" in tables
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_trials)")}
-    assert {"id", "strategy_id", "n_combos", "grid_json", "created_at"} <= cols
+    # Keyed by strategy NAME (not the registry FK id) so pre-registration sweeps still count.
+    assert {"id", "strategy_name", "n_combos", "grid_json", "created_at"} <= cols
+    assert "strategy_id" not in cols
 
 
 def test_migrate_adds_search_trials_to_legacy_db(tmp_path):
@@ -134,16 +136,54 @@ def test_migrate_adds_search_trials_to_legacy_db(tmp_path):
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "search_trials" in tables
-    # The legacy strategy row survived and the new table is usable.
-    sid = conn.execute("SELECT id FROM strategies WHERE name='s'").fetchone()["id"]
+    # The legacy strategy row survived and the new (name-keyed) table is usable.
     conn.execute(
-        "INSERT INTO search_trials(strategy_id, n_combos, grid_json, created_at)"
+        "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
         " VALUES (?,?,?,?)",
-        (sid, 4, "{}", "2026-01-02T00:00:00+00:00"),
+        ("s", 4, "{}", "2026-01-02T00:00:00+00:00"),
     )
     conn.commit()
 
     migrate(conn)  # idempotent re-run must not drop the row or raise
+    assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
+
+
+def test_migrate_rekeys_legacy_id_keyed_search_trials_to_name(tmp_path):
+    """A dev DB with the OLD id-keyed search_trials is forward-migrated to the name-keyed table,
+    carrying each row's breadth across by resolving strategy_id -> strategies.name."""
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE search_trials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+            n_combos INTEGER NOT NULL,
+            grid_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO search_trials(strategy_id, n_combos, grid_json, created_at)
+            VALUES (1, 7, '{}', '2026-01-02T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_trials)")}
+    assert "strategy_name" in cols
+    assert "strategy_id" not in cols
+    rows = conn.execute(
+        "SELECT strategy_name, n_combos FROM search_trials"
+    ).fetchall()
+    assert [(r["strategy_name"], r["n_combos"]) for r in rows] == [("s", 7)]
+
+    migrate(conn)  # idempotent re-run must not duplicate or drop the row
     assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
 
 

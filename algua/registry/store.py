@@ -138,22 +138,22 @@ class SqliteStrategyRepository:
         ).fetchone()
         return row is not None
 
-    def record_search_trial(self, strategy_id: int, n_combos: int, grid_json: str) -> int:
+    def record_search_trial(self, strategy_name: str, n_combos: int, grid_json: str) -> int:
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO search_trials(strategy_id, n_combos, grid_json, created_at)"
+                "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
                 " VALUES (?,?,?,?)",
-                (strategy_id, n_combos, grid_json, _now()),
+                (strategy_name, n_combos, grid_json, _now()),
             )
         rowid = cur.lastrowid
         assert rowid is not None  # a successful INSERT always sets lastrowid
         return rowid
 
-    def total_search_combos(self, strategy_id: int) -> int:
+    def total_search_combos(self, strategy_name: str) -> int:
         # COALESCE so an empty result (no trials) reads as 0 rather than NULL.
         row = self._conn.execute(
-            "SELECT COALESCE(SUM(n_combos), 0) AS total FROM search_trials WHERE strategy_id=?",
-            (strategy_id,),
+            "SELECT COALESCE(SUM(n_combos), 0) AS total FROM search_trials WHERE strategy_name=?",
+            (strategy_name,),
         ).fetchone()
         return int(row["total"])
 

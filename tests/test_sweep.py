@@ -45,7 +45,9 @@ def test_sweep_ranks_and_counts():
     assert scores == sorted(scores, reverse=True)
     assert d["ranked"][0]["score"] == d["best"]["score"]
     top = d["ranked"][0]
-    assert "holdout" in top and "stability" in top
+    # The holdout is WITHHELD from sweep records (reserved for `research promote`); only the
+    # window/stability ranking signal is exposed.
+    assert "holdout" not in top and "stability" in top
     assert top["score"] == top["stability"]["mean_sharpe"]
     assert set(top["params"]) == {"lookback", "top_k"}
     assert d["code_hash"] and d["dependency_hash"]

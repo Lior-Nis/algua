@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -108,23 +108,28 @@ CREATE TABLE IF NOT EXISTS strategy_peaks (
 );
 -- search_trials records the MEASURED search breadth of each parameter sweep so the promotion
 -- gate's multiple-testing defense can scale on the real count of combinations tried, not a
--- self-reported flag. One row per `backtest sweep` of a registered strategy: n_combos is the
--- actual size of that sweep's grid; grid_json is the JSON grid for the audit trail. The
--- promotion gate sums n_combos across all rows for a strategy (cumulative trials searched in
--- the family — the conservative, honest count). FK into strategies(id) because this is
--- relational state that should not outlive its strategy.
+-- self-reported flag. One row per `backtest sweep`: n_combos is the actual size of that sweep's
+-- grid; grid_json is the JSON grid for the audit trail. The promotion gate sums n_combos across
+-- all rows for a strategy (cumulative trials searched in the family — the conservative, honest
+-- count).
+-- KEYED BY strategy NAME (free text), NOT a strategies(id) FK, ON PURPOSE: a sweep can run
+-- BEFORE a strategy is registered (exploration precedes registration). Keying by id would force
+-- pre-registration sweeps to record nothing, letting an agent search broadly first and then
+-- promote a freshly-registered strategy under a smaller DECLARED breadth — defeating the gate.
+-- Keying by name lets those measured trials persist and be summed at promotion. (Same
+-- denormalized-by-name rationale as paper_orders/audit_log above.)
 -- INTENTIONAL: there is no grid deduplication. Re-running an identical sweep inserts another row
 -- and permanently raises the cumulative count — and therefore the promotion bar. This is the
 -- conservative choice: exploratory re-runs are real search effort and should count; silently
 -- deduplicating them would quietly weaken the multiple-testing defense.
 CREATE TABLE IF NOT EXISTS search_trials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+    strategy_name TEXT NOT NULL,
     n_combos INTEGER NOT NULL,
     grid_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_id);
+CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_name);
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
@@ -172,11 +177,46 @@ def migrate(conn: sqlite3.Connection) -> None:
     falsely imply migration history and could skip needed table creation on a pre-stamped DB);
     we only stamp it afterward as a schema-generation marker.
     """
+    _rekey_search_trials_to_name(conn)
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
     _add_missing_columns(conn, "stage_transitions", {"dependency_hash": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
+
+
+def _rekey_search_trials_to_name(conn: sqlite3.Connection) -> None:
+    """Forward-migrate a dev DB whose ``search_trials`` is keyed by the old ``strategy_id`` FK to
+    the name-keyed table, carrying each row's breadth across by resolving the id to a strategy
+    name. Runs BEFORE the ``CREATE TABLE IF NOT EXISTS`` bootstrap (which would otherwise leave an
+    old-shaped table untouched). Idempotent: a no-op once the table is already name-keyed (or
+    absent — the bootstrap then creates it fresh)."""
+    table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_trials'"
+    ).fetchone()
+    if table_exists is None:
+        return
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_trials)")}
+    if "strategy_name" in cols or "strategy_id" not in cols:
+        return  # already migrated (or some other shape) — leave it alone
+    # Rebuild the table name-keyed, joining through strategies to recover each row's name. Rows
+    # whose strategy_id no longer resolves are dropped (the strategy is gone; its breadth is moot).
+    conn.executescript(
+        """
+        ALTER TABLE search_trials RENAME TO _search_trials_old;
+        CREATE TABLE search_trials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_name TEXT NOT NULL,
+            n_combos INTEGER NOT NULL,
+            grid_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)
+            SELECT s.name, o.n_combos, o.grid_json, o.created_at
+            FROM _search_trials_old o JOIN strategies s ON s.id = o.strategy_id;
+        DROP TABLE _search_trials_old;
+        """
+    )
 
 
 def _add_missing_columns(

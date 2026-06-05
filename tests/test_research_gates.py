@@ -61,6 +61,24 @@ def test_haircut_uses_holdout_sample_size():
     assert sharpe_haircut(50, 400) < sharpe_haircut(50, 100)
 
 
+def test_haircut_fails_closed_on_degenerate_holdout():
+    # A zero-length (or negative) holdout has NO out-of-sample evidence: the haircut must NOT
+    # collapse to 0 (which would waive the multiple-testing penalty entirely). It fails closed by
+    # returning +inf, so the effective holdout-Sharpe bar becomes unreachable.
+    assert sharpe_haircut(9, 0) == math.inf
+    assert sharpe_haircut(1, 0) == math.inf
+    assert sharpe_haircut(9, -5) == math.inf
+
+
+def test_degenerate_holdout_makes_gate_fail_not_pass():
+    # n_bars=0 -> the holdout_sharpe check must FAIL (never pass), even with an otherwise stellar
+    # holdout Sharpe, because a zero-length holdout is no evidence at all.
+    d = evaluate_gate(_wf(holdout_sharpe=99.0, n_bars=0), GateCriteria(), n_combos=9)
+    assert d.passed is False
+    check = next(c for c in d.checks if c["name"] == "holdout_sharpe")
+    assert check["passed"] is False
+
+
 def test_n1_effective_equals_base():
     d = evaluate_gate(_wf(), GateCriteria(min_holdout_sharpe=0.5), n_combos=1)
     assert d.base_min_holdout_sharpe == 0.5

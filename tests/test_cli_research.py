@@ -403,6 +403,26 @@ def test_promote_universe_burn_keyed_on_window_not_universe(tmp_path, monkeypatc
     assert "holdout" in json.loads(second.stdout)["error"].lower()
 
 
+def test_walk_forward_does_not_burn_holdout_then_promote_succeeds(tmp_path):
+    """`backtest walk-forward` must NOT consume the holdout: it records no holdout_evaluations row,
+    and a later `promote` on the SAME window still succeeds (walk-forward didn't burn it)."""
+    assert _backtest_to_backtested().exit_code == 0
+    wf = runner.invoke(app, ["backtest", "walk-forward", "cross_sectional_momentum", "--demo",
+                             "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert wf.exit_code == 0, wf.stdout
+    assert "holdout_metrics" not in json.loads(wf.stdout)
+    assert len(_holdout_rows(tmp_path)) == 0  # walk-forward burned nothing
+
+    promote = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  *_PASS, "--n-combos", "9"])
+    assert promote.exit_code == 0, promote.stdout  # not refused — holdout was still fresh
+    payload = json.loads(promote.stdout)
+    assert payload["promoted"] is True
+    assert payload["holdout"]["n_bars"] > 0  # promote DOES reveal the holdout
+    assert len(_holdout_rows(tmp_path)) == 1  # and promote burns it
+
+
 def test_promote_with_universe_refuses_with_no_breadth_before_walkforward(tmp_path, monkeypatch):
     """Breadth refusal still fires before walk_forward even with --universe present."""
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))

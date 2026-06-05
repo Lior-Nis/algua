@@ -169,8 +169,9 @@ def _resolve_breadth(
     (--n-combos). If neither exists, REFUSE — never silently default breadth to 1, which would
     waive the multiple-testing penalty for an unmeasured search.
     """
-    rec = repo.get(name)  # raises StrategyNotFound -> JSON error (promotion needs registration)
-    measured = repo.total_search_combos(rec.id)
+    repo.get(name)  # raises StrategyNotFound -> JSON error (promotion needs registration)
+    # Breadth is summed by NAME (not the registry id) so pre-registration sweeps count too.
+    measured = repo.total_search_combos(name)
     if measured > 0:
         return measured, "measured"
     if declared is not None:

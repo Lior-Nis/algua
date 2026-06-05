@@ -100,13 +100,14 @@ class StrategyRepository(Protocol):
         row with a NULL ``dependency_hash`` never matches a concrete hash — both fail closed."""
         ...
 
-    def record_search_trial(self, strategy_id: int, n_combos: int, grid_json: str) -> int:
-        """Persist one measured search-breadth row (the size + grid of one sweep); return its
-        row id. The promotion gate's multiple-testing defense reads these back."""
+    def record_search_trial(self, strategy_name: str, n_combos: int, grid_json: str) -> int:
+        """Persist one measured search-breadth row (the size + grid of one sweep); return its row
+        id. Keyed by strategy NAME so a sweep run BEFORE the strategy is registered still counts
+        toward promotion breadth. The promotion gate's multiple-testing defense reads these back."""
         ...
 
-    def total_search_combos(self, strategy_id: int) -> int:
-        """Sum of ``n_combos`` across every recorded ``search_trials`` row for the strategy —
+    def total_search_combos(self, strategy_name: str) -> int:
+        """Sum of ``n_combos`` across every recorded ``search_trials`` row for the strategy NAME —
         the cumulative count of parameter combinations searched in this family (0 if none)."""
         ...
 

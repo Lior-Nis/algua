@@ -144,7 +144,11 @@ def sweep(
 ) -> SweepResult:
     """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
 
-    The holdout is carried per combo but never used for ranking (reserved for promotion gates).
+    The holdout is COMPUTED by each combo's walk_forward but is DELIBERATELY NOT recorded here:
+    it is never used for ranking (ranking is on window/stability), and exposing a per-combo holdout
+    would let a caller SELECT the best combo on the untouched holdout across the whole grid — the
+    exact multiple-testing leak the promotion breadth gate fights. The holdout is revealed (and
+    burned) in exactly one place: `research promote`.
     """
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
@@ -161,16 +165,12 @@ def sweep(
         )
         if meta is None:
             meta = wf
-        h = wf.holdout_metrics
+        # Note: wf.holdout_metrics is intentionally NOT copied into the record (see docstring).
         records.append({
             "params": combo,
             "config_hash": wf.config_hash,
             "n_windows": wf.windows,
             "stability": wf.stability,
-            "holdout": {
-                "n_bars": h["n_bars"], "sharpe": h["sharpe"],
-                "total_return": h["total_return"], "max_drawdown": h["max_drawdown"],
-            },
             "score": wf.stability[rank_by],
         })
 

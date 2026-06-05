@@ -14,7 +14,7 @@ def _tmp(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
 
 
-def test_walk_forward_demo_emits_result():
+def test_walk_forward_demo_emits_windows_and_stability_but_no_holdout():
     result = runner.invoke(app, ["backtest", "walk-forward", "cross_sectional_momentum",
                                  "--demo", "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--windows", "4", "--holdout-frac", "0.2"])
@@ -22,7 +22,9 @@ def test_walk_forward_demo_emits_result():
     d = json.loads(result.stdout)
     assert len(d["window_metrics"]) == 4
     assert "mean_sharpe" in d["stability"]
-    assert d["holdout_metrics"]["n_bars"] > 0
+    # The OOS holdout is WITHHELD here: it is revealed (and burned) only by `research promote`.
+    # Emitting it from walk-forward would defeat the single-use guarantee.
+    assert "holdout_metrics" not in d
 
 
 def test_walk_forward_requires_a_data_source():

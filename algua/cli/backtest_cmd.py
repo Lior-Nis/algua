@@ -19,7 +19,6 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
@@ -97,7 +96,13 @@ def walk_forward_cmd(
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
-    """Walk-forward (out-of-sample) evaluation: per-window metrics, holdout, and stability."""
+    """Walk-forward (out-of-sample) evaluation: per-window metrics + stability.
+
+    The final OOS holdout segment is COMPUTED by walk_forward (research promote depends on it) but
+    is WITHHELD from this command's output. The holdout is revealed — and burned — in exactly one
+    place: `research promote`. Emitting it here would defeat that single-use guarantee, letting a
+    caller peek at (and select on) the holdout without consuming it.
+    """
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     result = walk_forward(strategy, provider, start_dt, end_dt,
@@ -105,6 +110,7 @@ def walk_forward_cmd(
                           universe_by_date=universe_by_date,
                           universe_name=universe, universe_snapshots=universe_prov)
     payload = result.to_dict()
+    payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
         payload["mlflow_run_id"] = _track(
             lambda: log_walk_forward(
@@ -150,25 +156,23 @@ def sweep_cmd(
     payload["ranked"] = payload["ranked"][:top]
     # Surface the MEASURED breadth this sweep contributed (this sweep's n_combos) and the
     # cumulative family total now on record, so the operator sees what promotion will read back.
-    # `recorded_breadth` is None when the strategy is unregistered (nothing recorded — fine).
+    # Recorded by strategy NAME, so even a sweep of an UNREGISTERED strategy counts.
     payload["recorded_breadth"] = recorded
     if run_id is not None:
         payload["mlflow_run_id"] = run_id
     emit(ok(payload))
 
 
-def _record_search_breadth(name: str, result: SweepResult) -> dict[str, int] | None:
-    """Record this sweep's measured breadth into the registry IF the strategy is registered.
+def _record_search_breadth(name: str, result: SweepResult) -> dict[str, int]:
+    """Record this sweep's measured breadth into the registry, keyed by strategy NAME.
 
-    A sweep of an UNREGISTERED strategy records nothing and returns None — that is fine;
-    promotion requires registration anyway. Returns the recorded count plus the new cumulative
-    family total for the emitted JSON.
+    Recorded UNCONDITIONALLY — even for a not-yet-registered strategy. Exploration precedes
+    registration: keying by name (not the registry id) means a pre-registration sweep still
+    counts toward the promotion breadth, so an agent can't sweep broadly first and then promote a
+    freshly-registered strategy under a smaller declared --n-combos. Returns the recorded count
+    plus the new cumulative family total for the emitted JSON.
     """
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        try:
-            rec = repo.get(name)
-        except StrategyNotFound:
-            return None
-        repo.record_search_trial(rec.id, result.n_combos, json.dumps(result.grid, sort_keys=True))
-        return {"n_combos": result.n_combos, "cumulative": repo.total_search_combos(rec.id)}
+        repo.record_search_trial(name, result.n_combos, json.dumps(result.grid, sort_keys=True))
+        return {"n_combos": result.n_combos, "cumulative": repo.total_search_combos(name)}
