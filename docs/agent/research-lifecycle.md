@@ -89,6 +89,24 @@ uv run algua registry transition cross_sectional_momentum --to live --actor agen
 # -> {"ok": false, "error": ...}, exit 1
 ```
 
-Going live requires a human actor plus a matching approval recorded via `registry approve`
-(`--code-hash`, `--config-hash`, `--by`). This is the one boundary the system enforces and an
-agent must never try to route around.
+Going live is a two-step signed ceremony — a human must perform both steps:
+
+**Step 1** — get the go-live challenge:
+
+```bash
+uv run algua registry transition cross_sectional_momentum --to live --actor human
+# -> {"ok": true, "action": "go_live_challenge", "challenge": "...", ...}
+```
+
+**Step 2** — sign the challenge and re-run:
+
+```bash
+echo '<challenge value>' > challenge.txt
+ssh-keygen -Y sign -n algua-go-live -f ~/.ssh/id_ed25519 challenge.txt
+uv run algua registry transition cross_sectional_momentum --to live \
+  --actor human --signature challenge.txt.sig
+# -> {"ok": true, "stage": "live"}
+```
+
+The challenge is single-use and expires in 10 minutes. This is the one boundary the system
+enforces and an agent must never try to route around.

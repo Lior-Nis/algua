@@ -95,3 +95,9 @@ def test_migrate_creates_global_halt_table(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     assert "global_halt" in _tables(conn)
+
+
+def test_migrate_creates_live_challenges_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    assert "live_challenges" in _tables(conn)

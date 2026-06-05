@@ -29,7 +29,8 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua registry list [--stage S]` — list strategies.
 - `uv run algua registry show <name>` — strategy + transition history.
 - `uv run algua registry transition <name> --to S --actor agent --reason "..."` — advance stage.
-- `uv run algua registry approve <name> --code-hash H --config-hash H --by NAME` — human-only.
+- `uv run algua registry transition <name> --to live --actor human` — step 1 of go-live: prints a
+  challenge. Sign it, then re-run with `--signature <file>.sig` to complete the transition.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
