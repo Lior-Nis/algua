@@ -272,3 +272,56 @@ def test_trade_tick_persists_snapshot(monkeypatch):
         snap = latest_tick_snapshot(conn, "cross_sectional_momentum")
     assert snap is not None and snap["equity"] == 99000.0
     assert snap["positions"] == {"AAA": 5.0} and snap["n_submitted"] == 1
+
+
+def _seed_snapshot(name, *, equity, peak, reconcile_ok=True, positions=None):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import record_tick_snapshot, update_peak_equity
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        update_peak_equity(conn, name, peak)
+        record_tick_snapshot(conn, name, tick_ts="2023-06-01T00:00:00+00:00",
+                             decision_ts="2023-05-31T00:00:00+00:00", equity=equity,
+                             peak_equity=peak, positions=positions or {}, n_submitted=0,
+                             reconcile_ok=reconcile_ok)
+
+
+def test_show_consolidated_view():
+    _to_paper()
+    _seed_snapshot("cross_sectional_momentum", equity=90.0, peak=100.0, positions={"AAA": 3.0})
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["stage"] == "paper"
+    assert payload["drawdown"]["peak_equity"] == 100.0
+    assert payload["drawdown"]["last_equity"] == 90.0
+    assert abs(payload["drawdown"]["drawdown"] - 0.10) < 1e-9
+    assert payload["last_tick"]["positions"] == {"AAA": 3.0}
+    assert payload["health"] == "ok"
+    assert "recent_orders" in payload
+
+
+def test_show_health_halted():
+    _to_paper()
+    runner.invoke(app, ["paper", "kill", "cross_sectional_momentum", "--reason", "x"])
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["health"] == "halted"
+
+
+def test_show_health_drift():
+    _to_paper()
+    _seed_snapshot("cross_sectional_momentum", equity=90.0, peak=100.0, reconcile_ok=False)
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["health"] == "drift"
+
+
+def test_show_health_idle_no_ticks():
+    _to_paper()
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["health"] == "idle" and payload["last_tick"] is None
+
+
+def test_show_unknown_strategy_errors():
+    result = runner.invoke(app, ["paper", "show", "no_such_strategy"])
+    assert result.exit_code == 1 and json.loads(result.stdout)["ok"] is False
