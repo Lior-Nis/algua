@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import subprocess
+import tempfile
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 _NAMESPACE = "algua-go-live"
 _TTL = timedelta(minutes=10)
@@ -60,3 +63,54 @@ def consume_challenge(conn: sqlite3.Connection, nonce: str, *,
     )
     conn.commit()
     return cur.rowcount > 0
+
+
+class SignatureError(RuntimeError):
+    """ssh-keygen is unavailable or failed in an unexpected way (not a plain bad signature)."""
+
+
+def verify_signature(allowed_signers_path: Path, payload: str, signature: bytes) -> str | None:
+    """Verify an SSH signature over `payload` against the enrolled keys in `allowed_signers_path`.
+    Returns the matched principal on success, or None if the signature is invalid / the signer is
+    not enrolled. Raises SignatureError only when ssh-keygen itself can't run."""
+    with tempfile.NamedTemporaryFile("wb", suffix=".sig", delete=True) as sigf:
+        sigf.write(signature)
+        sigf.flush()
+        data = payload.encode()
+        try:
+            found = subprocess.run(
+                ["ssh-keygen", "-Y", "find-principals", "-f", str(allowed_signers_path),
+                 "-s", sigf.name],
+                input=data, capture_output=True,
+            )
+        except FileNotFoundError as exc:  # ssh-keygen not installed
+            raise SignatureError("ssh-keygen not found on PATH") from exc
+        if found.returncode != 0:
+            return None  # signer not enrolled (or malformed signature)
+        out = found.stdout.decode().splitlines()
+        principal = out[0].strip() if out and out[0].strip() else ""
+        if not principal:
+            return None
+        verified = subprocess.run(
+            ["ssh-keygen", "-Y", "verify", "-f", str(allowed_signers_path), "-I", principal,
+             "-n", _NAMESPACE, "-s", sigf.name],
+            input=data, capture_output=True,
+        )
+        return principal if verified.returncode == 0 else None
+
+
+def verify_and_consume(conn: sqlite3.Connection, strategy: str, strategy_id: int, code_hash: str,
+                       config_hash: str, signature: bytes, allowed_signers_path: Path, *,
+                       now: datetime | None = None) -> str | None:
+    """Find the pending challenge for this artifact, verify the signature over its exact payload,
+    and atomically consume it. Returns the approver principal on success, else None."""
+    now = now or _now()
+    row = find_pending_challenge(conn, strategy_id, code_hash, config_hash, now=now)
+    if row is None:
+        return None
+    payload = build_challenge(strategy, strategy_id, code_hash, config_hash, row["nonce"],
+                              row["expires_at"])
+    principal = verify_signature(allowed_signers_path, payload, signature)
+    if principal is None:
+        return None
+    return principal if consume_challenge(conn, row["nonce"], now=now) else None

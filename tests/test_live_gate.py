@@ -1,3 +1,4 @@
+import subprocess
 from datetime import UTC, datetime, timedelta
 
 from algua.registry import live_gate
@@ -38,3 +39,49 @@ def test_find_pending_rejects_expired_and_wrong_hash(tmp_path):
     later = now + timedelta(hours=1)
     assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", now=later) is None  # expired
     assert live_gate.find_pending_challenge(conn, 1, "DIFFERENT", "cfg", now=now) is None
+
+
+def _make_key(tmp_path, name="id"):
+    key = tmp_path / name
+    subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "test", "-f", str(key)],
+                   check=True, capture_output=True)
+    return key, (tmp_path / f"{name}.pub").read_text().strip()
+
+
+def _allowed_signers(tmp_path, principal, pub):
+    keytype, keyblob = pub.split()[0], pub.split()[1]
+    path = tmp_path / "allowed_signers"
+    path.write_text(f'{principal} namespaces="algua-go-live" {keytype} {keyblob}\n')
+    return path
+
+
+def _sign(key, payload, tmp_path):
+    data = tmp_path / "payload.txt"
+    data.write_text(payload)
+    subprocess.run(["ssh-keygen", "-Y", "sign", "-n", "algua-go-live", "-f", str(key), str(data)],
+                   check=True, capture_output=True)
+    return (tmp_path / "payload.txt.sig").read_bytes()
+
+
+def test_verify_signature_happy_path(tmp_path):
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers(tmp_path, "lior", pub)
+    payload = "algua-go-live\nstrategy=s\nnonce=abc"
+    sig = _sign(key, payload, tmp_path)
+    assert live_gate.verify_signature(signers, payload, sig) == "lior"
+
+
+def test_verify_signature_rejects_unenrolled_key(tmp_path):
+    key, _pub = _make_key(tmp_path, "mine")
+    _other_key, other_pub = _make_key(tmp_path, "other")
+    signers = _allowed_signers(tmp_path, "lior", other_pub)  # enroll a DIFFERENT key
+    payload = "algua-go-live\nx=1"
+    sig = _sign(key, payload, tmp_path)
+    assert live_gate.verify_signature(signers, payload, sig) is None
+
+
+def test_verify_signature_rejects_tampered_payload(tmp_path):
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers(tmp_path, "lior", pub)
+    sig = _sign(key, "original-payload", tmp_path)
+    assert live_gate.verify_signature(signers, "DIFFERENT-payload", sig) is None
