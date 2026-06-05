@@ -56,6 +56,17 @@ DataProvider.get_bars(
 - **Empty result:** an empty DataFrame **with these columns and a tz-aware empty index** (not
   `None`, not a bare `DataFrame()`), so consumers can rely on the schema unconditionally.
 
+### Window boundary — half-open `[start, end)`
+The serving `get_bars` window is **half-open**: `start` inclusive, `end` **exclusive**. A bar
+timestamped exactly at `end` is **not** returned. This is the look-ahead-safe reading of "bars up
+to time T" — asking for data as of T must never hand back the bar that prints at T. The store-read
+path (`StoreBackedProvider.get_bars`) enforces this.
+
+Ingestion (`BarRequest` / vendor adapters) shares this canonical convention but vendors differ at
+the wire: **yfinance** treats `end` exclusive (matches); **Alpaca** treats `end` inclusive, so a
+raw Alpaca pull may include the `end` bar. Adapters do not re-clip at ingestion — the boundary that
+guards against look-ahead is the serving read path above.
+
 ### `timeframe` vocabulary
 - `"1d"` — daily session bars. **Required first; the research lane targets `"1d"` initially.**
 - `"1h"`, `"15m"`, `"1m"` — intraday, UTC-aligned bar boundaries (reserved; build later).

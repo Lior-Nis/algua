@@ -42,6 +42,24 @@ def _broker():
     return AlpacaPaperBroker(api_key="k", api_secret="s")
 
 
+def test_rejects_non_paper_base_url():
+    # #28: the platform invariant is paper-only, never live — constructing against the live host
+    # (or any non-paper host) must be impossible, not a warning.
+    with pytest.raises(BrokerError, match="non-paper"):
+        AlpacaPaperBroker(api_key="k", api_secret="s", base_url="https://api.alpaca.markets")
+
+
+def test_accepts_paper_base_url():
+    b = AlpacaPaperBroker(api_key="k", api_secret="s",
+                          base_url="https://paper-api.alpaca.markets/")
+    assert b.base_url == "https://paper-api.alpaca.markets"
+
+
+def test_alpaca_broker_conforms_to_broker_protocol():
+    from algua.contracts.types import Broker
+    assert isinstance(_broker(), Broker)
+
+
 def test_account_parses_floats(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "50000",
@@ -64,7 +82,7 @@ def test_get_positions_parses_and_empty(monkeypatch):
 def test_submit_buy_delta_posts_notional(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
-         "/v2/positions/AAA": _FakeResp(404, text="no position")},
+         "/v2/positions": _FakeResp(200, [])},  # flat
         post_resp=_FakeResp(201, {"id": "order-1"}),
     )
     monkeypatch.setattr(ab, "requests", fake)
@@ -77,7 +95,8 @@ def test_submit_buy_delta_posts_notional(monkeypatch):
 def test_submit_sell_delta(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
-         "/v2/positions/AAA": _FakeResp(200, {"market_value": "60000"})},
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "600",
+                                           "market_value": "60000"}])},
         post_resp=_FakeResp(201, {"id": "order-2"}),
     )
     monkeypatch.setattr(ab, "requests", fake)
@@ -88,11 +107,56 @@ def test_submit_sell_delta(monkeypatch):
 def test_submit_noop_below_threshold(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
-         "/v2/positions/AAA": _FakeResp(200, {"market_value": "50000"})},
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "500",
+                                           "market_value": "50000"}])},
         post_resp=_FakeResp(201, {"id": "unused"}),
     )
     monkeypatch.setattr(ab, "requests", fake)
     assert _broker().submit(OrderIntent("AAA", Side.BUY, 0.5, T0)) == "noop"
+    assert fake.posted == []
+
+
+def test_snapshot_is_one_account_and_one_positions_get(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "10",
+                                           "market_value": "1000"}])})
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = _broker().snapshot(["AAA", "BBB"])
+    assert snap.equity == 100000.0
+    assert snap.market_values == {"AAA": 1000.0, "BBB": 0.0}  # BBB in universe but flat
+    assert snap.qtys == {"AAA": 10.0, "BBB": 0.0}
+
+
+def test_snapshot_includes_held_symbol_outside_universe(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [{"symbol": "ZZZ", "qty": "5",
+                                           "market_value": "500"}])})
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = _broker().snapshot(["AAA"])  # ZZZ held but not in universe -> still folded in
+    assert snap.qtys == {"AAA": 0.0, "ZZZ": 5.0}
+
+
+def test_submit_sized_uses_fixed_equity_denominator(monkeypatch):
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "order-x"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0, "BBB": 0.0},
+                           qtys={"AAA": 0.0, "BBB": 0.0})
+    _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap)
+    _broker().submit_sized(OrderIntent("BBB", Side.BUY, 0.3, T0), snap)
+    # both sized off the SAME snapshot equity (100k), not a re-read that drifted as AAA filled
+    assert fake.posted[0]["notional"] == "50000.00"
+    assert fake.posted[1]["notional"] == "30000.00"
+
+
+def test_submit_sized_rejects_symbol_outside_universe(monkeypatch):
+    # #29: a typo'd symbol absent from the snapshot universe must raise, not size a phantom buy
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "x"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    with pytest.raises(BrokerError, match="not in the strategy universe"):
+        _broker().submit_sized(OrderIntent("TYPOO", Side.BUY, 0.5, T0), snap)
     assert fake.posted == []
 
 
@@ -165,6 +229,84 @@ def test_cancel_open_orders_non_dict_item_raises(monkeypatch):
     monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError):
         _broker().cancel_open_orders()
+
+
+def test_cancel_open_orders_207_non_list_body_raises(monkeypatch):
+    # #22: a 207 whose body is not a per-order list must raise, not be read as "all cancelled".
+    fake = _FakeRequestsWithDelete(_FakeResp(207, {"message": "service degraded"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError, match="non-list body"):
+        _broker().cancel_open_orders()
+
+
+def test_cancel_open_orders_non_int_status_is_failure(monkeypatch):
+    # #22: a present-but-non-int status must count as a failure, not raise an uncaught ValueError.
+    fake = _FakeRequestsWithDelete(_FakeResp(207, [{"id": "a", "status": "bad"}]))
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError, match="failed to cancel"):
+        _broker().cancel_open_orders()
+
+
+class _FlakyRequests(_FakeRequests):
+    """First N GET calls return a retryable status, then a 200. Records attempt count."""
+
+    def __init__(self, fail_times, final_payload):
+        super().__init__({})
+        self.fail_times = fail_times
+        self.final_payload = final_payload
+        self.attempts = 0
+
+    def get(self, url, headers=None, timeout=None):
+        self.attempts += 1
+        if self.attempts <= self.fail_times:
+            return _FakeResp(503, text="unavailable")
+        return _FakeResp(200, self.final_payload)
+
+
+def test_retries_transient_status_then_succeeds(monkeypatch):
+    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    fake = _FlakyRequests(fail_times=2,
+                          final_payload={"equity": "1", "cash": "1", "buying_power": "1"})
+    monkeypatch.setattr(ab, "requests", fake)
+    acct = _broker().account()
+    assert acct.equity == 1.0 and fake.attempts == 3  # 2 failures + 1 success
+
+
+def test_retries_exhausted_raises(monkeypatch):
+    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    fake = _FlakyRequests(fail_times=99, final_payload={})  # always 503
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError, match="503"):
+        _broker().account()
+
+
+class _RetryableThenRaise(_FakeRequests):
+    def __init__(self):
+        super().__init__({})
+        self.attempts = 0
+
+    def get(self, url, headers=None, timeout=None):
+        self.attempts += 1
+        raise ab.RequestException("timeout")
+
+
+def test_retries_transport_error_then_raises(monkeypatch):
+    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    fake = _RetryableThenRaise()
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError, match="after 3 attempts"):
+        _broker().account()
+    assert fake.attempts == 3
+
+
+def test_submit_sized_passes_client_order_id(monkeypatch):
+    # #18/#24: the deterministic client_order_id is sent so a retried submit is idempotent.
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "order-x"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                           client_order_id="cfg-2023-06-01-AAA")
+    assert fake.posted[0]["client_order_id"] == "cfg-2023-06-01-AAA"
 
 
 class _FakeDeleteRouter(_FakeRequests):

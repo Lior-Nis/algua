@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from datetime import date
+from functools import cache
 
 import exchange_calendars as xcals
 import pandas as pd
+
+
+# xcals.get_calendar is heavy (parses ~20 years of session data on first call per code).
+# Cache by exchange code so repeated MarketCalendar("XNYS") constructions reuse one object.
+@cache
+def _get_calendar(code: str) -> xcals.ExchangeCalendar:
+    return xcals.get_calendar(code)
 
 
 class MarketCalendar:
@@ -11,7 +19,7 @@ class MarketCalendar:
 
     def __init__(self, code: str = "XNYS") -> None:
         self.code = code
-        self._cal = xcals.get_calendar(code)
+        self._cal = _get_calendar(code)
 
     def is_session(self, day: date) -> bool:
         return bool(self._cal.is_session(pd.Timestamp(day)))

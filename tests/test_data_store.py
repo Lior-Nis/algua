@@ -3,7 +3,26 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from algua.data.files import count_tabular_rows
 from algua.data.store import DataStore, SnapshotNotFound
+
+
+def test_count_tabular_rows_streams_csv(tmp_path):
+    source = tmp_path / "rows.csv"
+    source.write_text("a,b\n1,2\n3,4\n5,6\n", encoding="utf-8")
+    assert count_tabular_rows(source) == 3
+
+
+def test_count_tabular_rows_counts_parquet(tmp_path):
+    source = tmp_path / "rows.parquet"
+    pd.DataFrame({"a": [1, 2, 3, 4]}).to_parquet(source, index=False)
+    assert count_tabular_rows(source) == 4
+
+
+def test_count_tabular_rows_unknown_format_is_none(tmp_path):
+    source = tmp_path / "rows.txt"
+    source.write_text("nope\n", encoding="utf-8")
+    assert count_tabular_rows(source) is None
 
 
 def test_ingest_file_copies_payload_and_records_manifest(tmp_path):
@@ -86,7 +105,7 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
     store = DataStore(tmp_path / "data")
     frame = pd.DataFrame(
         {
-            "ts": ["2026-01-02", "2026-01-03"],
+            "ts": ["2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"],
             "symbol": ["AAPL", "AAPL"],
             "open": [99.0, 100.0],
             "high": [101.0, 102.0],
@@ -123,7 +142,9 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
 
 def test_ingest_bars_rejects_frames_outside_bar_schema(tmp_path):
     store = DataStore(tmp_path / "data")
-    frame = pd.DataFrame({"ts": ["2026-01-02"], "symbol": ["AAPL"], "close": [100.0]})
+    frame = pd.DataFrame(
+        {"ts": ["2026-01-02T00:00:00+00:00"], "symbol": ["AAPL"], "close": [100.0]}
+    )
 
     with pytest.raises(ValueError, match="missing bar columns"):
         store.ingest_bars(
@@ -219,3 +240,86 @@ def test_ingest_requires_existing_file(tmp_path):
             source="fixture",
             file_path=Path("missing.csv"),
         )
+
+
+def _bars_frame(ts: list[str]) -> pd.DataFrame:
+    n = len(ts)
+    return pd.DataFrame(
+        {
+            "ts": ts,
+            "symbol": ["AAPL"] * n,
+            "open": [99.0 + i for i in range(n)],
+            "high": [101.0 + i for i in range(n)],
+            "low": [98.0 + i for i in range(n)],
+            "close": [100.0 + i for i in range(n)],
+            "adj_close": [99.5 + i for i in range(n)],
+            "volume": [1000.0 + i for i in range(n)],
+        }
+    )
+
+
+def test_ingest_bars_is_idempotent_on_identical_content(tmp_path):
+    # Regression for #55: a byte-identical dataset must produce a stable snapshot_id / content_hash
+    # so re-ingestion dedups instead of writing a second snapshot.
+    ts = ["2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"]
+    store = DataStore(tmp_path / "data")
+    kwargs = dict(
+        provider="fixture", symbols=["AAPL"], start="2026-01-02", end="2026-01-03",
+        as_of="2026-01-04T00:00:00+00:00", source="fixture", timeframe="1d", adjustment="none",
+    )
+    first = store.ingest_bars(frame=_bars_frame(ts), **kwargs)
+    second = store.ingest_bars(frame=_bars_frame(ts), **kwargs)
+
+    assert second == first
+    assert len(store.list_snapshots()) == 1
+
+
+def test_content_hash_is_canonical_parquet_bytes(tmp_path):
+    # #55: hash is the sha256 of the canonical on-disk parquet bytes, so what's hashed is exactly
+    # what's stored and dedup is reproducible across runs.
+    from algua.data.files import sha256_file
+
+    ts = ["2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"]
+    store = DataStore(tmp_path / "data")
+    rec = store.ingest_bars(
+        provider="fixture", symbols=["AAPL"], start="2026-01-02", end="2026-01-03",
+        as_of="2026-01-04T00:00:00+00:00", source="fixture", frame=_bars_frame(ts),
+    )
+    assert rec.content_hash == sha256_file(tmp_path / "data" / rec.data_path)
+
+
+def test_from_dict_requires_schema_version():
+    # #61: no silent v1 fallback — a record without schema_version is rejected.
+    from algua.data.models import SnapshotRecord
+
+    payload = {
+        "snapshot_id": "abc", "dataset": "bars", "provider": "p", "symbols": ["AAPL"],
+        "start": "2026-01-02", "end": "2026-01-02", "as_of": "2026-01-03T00:00:00+00:00",
+        "source": "s", "kind": "bars", "row_count": 1, "content_hash": "h",
+        "data_path": "snapshots/bars/abc/bars.parquet", "storage_format": "parquet",
+        "created_at": "2026-01-03T00:00:00+00:00",
+    }
+    with pytest.raises(KeyError):
+        SnapshotRecord.from_dict(payload)
+
+
+def test_normalize_symbols_is_shared_public_helper():
+    # #63: one normalization helper (strip/upper/sort/dedup) reused across layers.
+    from algua.data.store import normalize_symbols
+
+    assert normalize_symbols([" aapl ", "MSFT", "aapl"]) == ["AAPL", "MSFT"]
+    with pytest.raises(ValueError):
+        normalize_symbols([" ", ""])
+
+
+def test_dataset_kind_constants_match_records(tmp_path):
+    # #62: dataset/kind routing keys are centralized constants the store actually uses.
+    from algua.data.models import Dataset, Kind
+
+    store = DataStore(tmp_path / "data")
+    rec = store.ingest_universe(
+        universe="core", symbols=["AAPL"], effective_date="2026-01-02",
+        as_of="2026-01-03T00:00:00+00:00", source="manual",
+    )
+    assert rec.dataset == Dataset.UNIVERSES.value
+    assert rec.kind == Kind.UNIVERSE.value

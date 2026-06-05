@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 2
+
+
+class Dataset(StrEnum):
+    """Dataset routing key — the manifest `dataset` field and snapshot path component."""
+
+    BARS = "bars"
+    UNIVERSES = "universes"
+
+
+class Kind(StrEnum):
+    """Snapshot `kind` — the provenance of a snapshot's payload."""
+
+    BARS = "bars"
+    UNIVERSE = "universe"
+    FILE = "file"
 
 
 @dataclass(frozen=True)
@@ -20,7 +36,7 @@ class SnapshotMetadata:
     timeframe: str | None = None
     adjustment: str | None = None
     universe: str | None = None
-    source_metadata: dict[str, Any] | None = None
+    source_metadata: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +120,7 @@ class SnapshotRecord:
             timeframe=_optional_str(payload.get("timeframe")),
             adjustment=_optional_str(payload.get("adjustment")),
             universe=_optional_str(payload.get("universe")),
-            source_metadata=dict(payload.get("source_metadata", {})),
+            source_metadata={str(k): str(v) for k, v in payload.get("source_metadata", {}).items()},
         )
         return cls(
             snapshot_id=str(payload["snapshot_id"]),
@@ -114,7 +130,7 @@ class SnapshotRecord:
             data_path=Path(str(payload["data_path"])),
             created_at=str(payload["created_at"]),
             storage_format=str(payload.get("storage_format", "file")),
-            schema_version=int(payload.get("schema_version", 1)),
+            schema_version=int(payload["schema_version"]),
         )
 
 

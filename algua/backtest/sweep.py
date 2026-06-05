@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import itertools
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -45,7 +47,19 @@ def _coerce(value: str) -> Any:
     return value
 
 
-def _parse_grid(params: list[str]) -> dict[str, list[Any]]:
+def _coerce_values(values: list[Any]) -> list[Any]:
+    """Widen a homogeneous-numeric value list to float if any element is float.
+
+    Prevents silent type mixing when a grid mixes e.g. "10,10.5" → [int(10), float(10.5)].
+    Any list that already contains a non-numeric value is returned unchanged.
+    """
+    has_float = any(type(v) is float for v in values)
+    if has_float and all(isinstance(v, (int, float)) for v in values):
+        return [float(v) for v in values]
+    return list(values)
+
+
+def parse_grid(params: list[str]) -> dict[str, list[Any]]:
     """Parse repeatable `KEY=v1,v2,...` flags into a grid dict. Values coerced int->float->str."""
     if not params:
         raise ValueError("provide at least one --param KEY=v1,v2,...")
@@ -60,8 +74,27 @@ def _parse_grid(params: list[str]) -> dict[str, list[Any]]:
             raise ValueError(f"malformed --param {item!r}: empty key or value list")
         if key in grid:
             raise ValueError(f"duplicate --param key {key!r}: specify each key only once")
-        grid[key] = [_coerce(v) for v in values]
+        grid[key] = _coerce_values([_coerce(v) for v in values])
     return grid
+
+
+def _rank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort records descending by score; ties broken by ascending std_sharpe (more stable wins).
+
+    Non-finite score or std_sharpe (NaN, ±inf) always sorts last so a degenerate combo
+    never beats a finite one.  The sort is stable: equal score + equal std_sharpe
+    preserves the original order.
+    """
+    def _key(r: dict[str, Any]) -> tuple[float, float]:
+        score = r["score"]
+        std = r["stability"]["std_sharpe"]
+        # Map non-finite to sentinels that sink to the bottom under reverse=True.
+        # score: -inf → always last;  std_sharpe: +inf → -(-inf) = -inf → also last.
+        finite_score = score if math.isfinite(score) else -math.inf
+        finite_std = std if math.isfinite(std) else math.inf
+        return (finite_score, -finite_std)
+
+    return sorted(records, key=_key, reverse=True)
 
 
 _RANK_KEYS = {"mean_sharpe", "min_sharpe"}
@@ -86,23 +119,7 @@ class SweepResult:
     dependency_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "strategy": self.strategy,
-            "data_source": self.data_source,
-            "snapshot_id": self.snapshot_id,
-            "timeframe": self.timeframe,
-            "seed": self.seed,
-            "code_hash": self.code_hash,
-            "dependency_hash": self.dependency_hash,
-            "period": self.period,
-            "windows": self.windows,
-            "holdout_frac": self.holdout_frac,
-            "grid": self.grid,
-            "n_combos": self.n_combos,
-            "rank_by": self.rank_by,
-            "ranked": self.ranked,
-            "best": self.best,
-        }
+        return dataclasses.asdict(self)
 
 
 def sweep(
@@ -146,8 +163,8 @@ def sweep(
             "score": wf.stability[rank_by],
         })
 
-    records.sort(key=lambda r: r["score"], reverse=True)
-    best = {"params": records[0]["params"], "score": records[0]["score"]}
+    ranked = _rank_records(records)
+    best = {"params": ranked[0]["params"], "score": ranked[0]["score"]}
     assert meta is not None  # combos is always non-empty (grid has >=1 key with >=1 value)
     return SweepResult(
         strategy=strategy.name,
@@ -163,6 +180,6 @@ def sweep(
         grid=grid,
         n_combos=len(combos),
         rank_by=rank_by,
-        ranked=records,
+        ranked=ranked,
         best=best,
     )

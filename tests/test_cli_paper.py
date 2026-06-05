@@ -6,7 +6,7 @@ from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.execution.alpaca_broker import AccountState, BrokerError
-from algua.live.live_loop import TickResult
+from algua.live.live_loop import SubmittedOrder, TickResult
 from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
@@ -33,10 +33,12 @@ def test_paper_run_executes_and_reconciles():
                                  "--start", "2022-01-01", "--end", "2023-12-31"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["ok"] is True  # success envelope discriminator (mirrors {"ok": false} failures)
     assert payload["strategy"] == "cross_sectional_momentum"
     assert payload["reconcile_ok"] is True
     assert payload["orders"] >= 1
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["ok"] is True
     assert show["n_orders"] >= 1
 
 
@@ -110,44 +112,62 @@ def test_paper_account_emits_balances(monkeypatch):
     assert payload["equity"] == 100000.0 and payload["cash"] == 50000.0
 
 
-def test_trade_live_rejects_non_paper_stage(monkeypatch):
+def test_trade_tick_rejects_non_paper_stage(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     runner.invoke(app, ["registry", "add", "cross_sectional_momentum"])  # stage = idea
-    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
                                  "--snapshot", "snap1"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
 
 
-def test_trade_live_refused_when_killed(monkeypatch):
+def test_trade_tick_refused_when_killed(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
     runner.invoke(app, ["paper", "kill", "cross_sectional_momentum", "--reason", "x"])
-    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
                                  "--snapshot", "snap1"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
 
 
-def test_trade_live_submits_and_persists(monkeypatch):
+def test_trade_tick_old_name_removed(monkeypatch):
+    # #28: the old `trade-live` name is gone (no alias) — invoking it must error.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code != 0
+
+
+def test_trade_tick_submits_and_persists(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
     ts = datetime(2023, 6, 1, tzinfo=UTC)
     fake_result = TickResult(
         decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
-        submitted=[{"symbol": "AAA", "side": "buy", "target_weight": 1.0, "order_id": "o-1"}],
+        submitted=[{"symbol": "AAA", "side": "buy", "target_weight": 1.0, "order_id": "o-1",
+                    "client_order_id": "c-1"}],
+        peak_equity=100_000.0,
     )
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        # exercise the immediate-persist hook the CLI wires up (#18)
+        hooks.on_submitted(SubmittedOrder(symbol="AAA", side="buy", target_weight=1.0,
+                                          order_id="o-1", client_order_id="c-1", decision_ts=ts))
+        return fake_result
+
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: object())
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
-    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
-                        lambda strategy, broker, provider, start, end: fake_result)
-    result = runner.invoke(app, ["paper", "trade-live", "cross_sectional_momentum",
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
                                  "--snapshot", "snap1"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["ok"] is True  # success envelope discriminator
     assert payload["submitted"][0]["order_id"] == "o-1"
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["n_orders"] == 1

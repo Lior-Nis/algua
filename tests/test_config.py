@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from algua.config.settings import Settings, get_settings
 
 
@@ -46,3 +49,30 @@ def test_knowledge_dir_default_and_override(monkeypatch):
     assert Settings().knowledge_dir == Path("docs/strategies")
     monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", "/tmp/vault")
     assert Settings().knowledge_dir == Path("/tmp/vault")
+
+
+def test_alpaca_paper_url_rejects_live_endpoint(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_PAPER_URL", "https://api.alpaca.markets")
+    with pytest.raises(ValidationError):
+        get_settings()
+
+
+def test_alpaca_paper_url_rejects_non_paper_host(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_PAPER_URL", "https://example.test")
+    with pytest.raises(ValidationError):
+        get_settings()
+
+
+def test_alpaca_paper_url_accepts_paper_host(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_PAPER_URL", "https://paper-api.alpaca.markets/v2")
+    assert get_settings().alpaca_paper_url == "https://paper-api.alpaca.markets/v2"
+
+
+def test_db_path_rejects_empty():
+    with pytest.raises(ValidationError):
+        Settings(db_path=Path(""))
+
+
+def test_data_dir_rejects_empty():
+    with pytest.raises(ValidationError):
+        Settings(data_dir=Path(""))

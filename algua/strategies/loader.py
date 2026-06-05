@@ -12,14 +12,14 @@ class StrategyNotFound(LookupError):
 
 
 def load_strategy(name: str) -> LoadedStrategy:
-    """Load a bundled strategy module by name; it must expose CONFIG + target_weights."""
+    """Load a bundled strategy module by name; it must expose CONFIG + compute_weights."""
     try:
         module = importlib.import_module(f"algua.strategies.examples.{name}")
     except ModuleNotFoundError as exc:
         raise StrategyNotFound(name) from exc
-    if not hasattr(module, "CONFIG") or not hasattr(module, "target_weights"):
-        raise StrategyNotFound(f"{name} is missing CONFIG or target_weights")
-    return LoadedStrategy(config=module.CONFIG, fn=module.target_weights)
+    if not hasattr(module, "CONFIG") or not hasattr(module, "compute_weights"):
+        raise StrategyNotFound(f"{name} is missing CONFIG or compute_weights")
+    return LoadedStrategy(config=module.CONFIG, fn=module.compute_weights)
 
 
 def list_strategies() -> list[str]:

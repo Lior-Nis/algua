@@ -24,7 +24,7 @@ def test_gross_exposure_over_limit_raises():
 
 def test_drawdown_within_limit_passes():
     check_drawdown(equity=95.0, peak=100.0, max_drawdown=0.1)  # 5% < 10%
-    check_drawdown(equity=50.0, peak=100.0, max_drawdown=1.0)  # disabled
+    check_drawdown(equity=50.0, peak=100.0, max_drawdown=None)  # disabled (explicit sentinel)
 
 
 def test_drawdown_over_limit_raises():

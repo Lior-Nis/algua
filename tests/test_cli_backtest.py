@@ -18,6 +18,7 @@ def test_backtest_run_demo_emits_metrics():
                                  "--demo", "--start", "2023-01-01", "--end", "2023-12-31"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["ok"] is True  # success envelope discriminator
     assert payload["strategy"] == "cross_sectional_momentum"
     assert "sharpe" in payload["metrics"]
 

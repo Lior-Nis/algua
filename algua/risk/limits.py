@@ -2,6 +2,16 @@ from __future__ import annotations
 
 import pandas as pd
 
+# Single tolerance for "is this weight materially different from another / from a limit".
+# One named constant rather than a scatter of bare 1e-9 / 1e-6 literals so both brokers and
+# every risk check agree on what counts as a difference (#31). 1e-9 is comfortably tighter than
+# any tradeable weight delta yet wide enough to absorb float rounding.
+WEIGHT_TOL = 1e-9
+
+# Explicit "drawdown breaker off" sentinel. Passing None disables the check, rather than
+# overloading a magic max_drawdown >= 1.0 to mean "off" (#32).
+DRAWDOWN_DISABLED: None = None
+
 
 class RiskBreach(ValueError):
     """A hard risk-limit breach. Subclasses ValueError so existing CLI error handling
@@ -17,7 +27,7 @@ def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
     if len(weights) == 0:
         return
     gross = float(weights.abs().sum())
-    if gross > max_gross + 1e-9:
+    if gross > max_gross + WEIGHT_TOL:
         raise RiskBreach(
             "gross_exposure",
             f"gross exposure {gross:.4f} exceeds max_gross_exposure {max_gross:.4f}",
@@ -34,9 +44,9 @@ def check_long_only(weights: pd.Series, strategy_name: str) -> None:
         )
 
 
-def check_drawdown(equity: float, peak: float, max_drawdown: float) -> None:
-    if max_drawdown >= 1.0 or peak <= 0:
-        return  # disabled, or no peak yet
+def check_drawdown(equity: float, peak: float, max_drawdown: float | None) -> None:
+    if max_drawdown is None or peak <= 0:
+        return  # disabled (explicit None sentinel), or no peak yet
     if equity < peak * (1.0 - max_drawdown):
         dd = 1.0 - (equity / peak)
         raise RiskBreach(

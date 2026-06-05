@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import keyword
 import re
-from contextlib import closing
 from pathlib import Path
 
 import typer
 
+from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -18,8 +18,7 @@ from algua.knowledge.sync import (
     sync_strategy_doc,
 )
 from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
-from algua.registry import store
-from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
 from algua.strategies.loader import list_strategies
 
 strategy_app = typer.Typer(help="Author and list strategies", no_args_is_help=True)
@@ -28,7 +27,7 @@ app.add_typer(strategy_app, name="strategy")
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 _TEMPLATE = '''\
-"""Strategy: {name}. Edit target_weights to express your cross-sectional logic."""
+"""Strategy: {name}. Edit compute_weights to express your cross-sectional logic."""
 from __future__ import annotations
 
 from typing import Any
@@ -36,7 +35,6 @@ from typing import Any
 import pandas as pd
 
 from algua.contracts.types import ExecutionContract
-from algua.features.indicators import momentum
 from algua.strategies.base import StrategyConfig
 
 CONFIG = StrategyConfig(
@@ -47,11 +45,12 @@ CONFIG = StrategyConfig(
 )
 
 
-def target_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+def compute_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    lookback = int(params["lookback"])
     wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-    if len(wide) <= int(params["lookback"]):
+    if len(wide) <= lookback:
         return pd.Series(dtype="float64")
-    scores = momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
+    scores = (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
     winners = scores.sort_values(ascending=False).head(int(params["top_k"])).index
     if len(winners) == 0:
         return pd.Series(dtype="float64")
@@ -70,8 +69,8 @@ def list_() -> None:
 @json_errors()
 def new(
     name: str,
-    family: str = typer.Option(None, "--family", help="thesis family this belongs to"),  # noqa: B008
-    derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),  # noqa: B008
+    family: str = typer.Option(None, "--family", help="thesis family this belongs to"),
+    derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),
 ) -> None:
     """Scaffold a new strategy module + its knowledge-base doc (and family hub if needed)."""
     if not name.isidentifier() or keyword.iskeyword(name):
@@ -82,7 +81,7 @@ def new(
         raise ValueError(
             f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)"
         )
-    path = Path("algua/strategies/examples") / f"{name}.py"
+    path = Path(__file__).parent.parent / "strategies" / "examples" / f"{name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ValueError(f"strategy already exists: {path}")
@@ -103,24 +102,25 @@ def new(
             fam_path.write_text(scaffold_family_doc(family))
         family_doc = str(fam_path)
 
-    emit({
-        "ok": True, "name": name, "path": str(path),
+    emit(ok({
+        "name": name, "path": str(path),
         "doc": str(doc_path), "family_doc": family_doc,
-    })
+    }))
 
 
 @strategy_app.command("doc")
 @json_errors()
 def doc(
-    name: str = typer.Argument(None, help="strategy to sync; omit (or --all) for all"),  # noqa: B008
+    name: str = typer.Argument(None, help="strategy to sync; omit (or --all) for all"),
     all_: bool = typer.Option(False, "--all", help="sync every strategy + family doc"),
 ) -> None:
     """Regenerate the synced blocks of strategy/family docs + rebuild the indexes."""
     settings = get_settings()
     # Read lifecycle stage at the CLI seam; the knowledge layer stays registry-free.
-    with closing(connect(settings.db_path)) as conn:
-        migrate(conn)
-        stages = {rec.name: rec.stage.value for rec in store.list_strategies(conn)}
+    with registry_conn() as conn:
+        stages = {
+            rec.name: rec.stage.value for rec in SqliteStrategyRepository(conn).list_strategies()
+        }
     if all_ or name is None:
         summary = sync_all(settings, stages)
     else:
@@ -132,4 +132,4 @@ def doc(
             sync_family_doc(settings, family)
         generate_indexes(settings)
         summary = {"strategies": [name], "families": [family] if family else []}
-    emit({"ok": True, **summary})
+    emit(ok(summary))

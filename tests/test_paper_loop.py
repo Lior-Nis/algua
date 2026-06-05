@@ -39,16 +39,13 @@ def _all_in(symbol: str) -> LoadedStrategy:
 
 def test_build_intents_emits_on_weight_change():
     weights = pd.Series({"AAA": 1.0})
-    positions = pd.Series(dtype="float64")
-    closes = pd.Series({"AAA": 100.0})
-    intents = build_intents(weights, positions, closes, equity=10_000.0,
-                            decision_ts=DATES[0])
+    intents = build_intents(weights, current_weights={}, decision_ts=DATES[0])
     assert len(intents) == 1 and intents[0].symbol == "AAA"
 
 
 def test_build_intents_noop_when_already_at_target():
-    intents = build_intents(pd.Series(dtype="float64"), pd.Series(dtype="float64"),
-                            pd.Series(dtype="float64"), equity=0.0, decision_ts=DATES[0])
+    intents = build_intents(pd.Series({"AAA": 1.0}), current_weights={"AAA": 1.0},
+                            decision_ts=DATES[0])
     assert intents == []
 
 
@@ -111,7 +108,7 @@ def test_warmup_gate_delays_first_order():
     bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
     strat = _strategy({"AAA": 1.0}, warmup_bars=2)
     result = run_paper(strat, SimBroker(cash=10_000.0), _FakeProvider(bars), DATES[0], DATES[-1])
-    assert all(o.decision_ts >= DATES[1] for o in result.orders)
+    assert all(o.intent.decision_ts >= DATES[1] for o in result.orders)
     assert len(result.orders) >= 1
 
 

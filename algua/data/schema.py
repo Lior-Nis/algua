@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-BAR_COLUMNS = ["symbol", "open", "high", "low", "close", "adj_close", "volume"]
-_NON_NULL = ["open", "high", "low", "close", "adj_close", "volume"]
-_FLOAT_COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
+# Single source of truth for the numeric (float64, non-null) bar columns. `BAR_COLUMNS` (the full
+# stored/serving column order) prepends the string `symbol` column. `NON_NULL_COLUMNS` and
+# `FLOAT_COLUMNS` are the same set under two names the validator reads, derived — not duplicated.
+FLOAT_COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
+NON_NULL_COLUMNS = FLOAT_COLUMNS
+BAR_COLUMNS = ["symbol", *FLOAT_COLUMNS]
 
 
 def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
@@ -26,10 +29,10 @@ def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"bars columns must be {BAR_COLUMNS}, got {list(df.columns)}")
     if not all(isinstance(symbol, str) for symbol in df["symbol"]):
         raise ValueError("bars symbol values must be strings")
-    bad_dtypes = [col for col in _FLOAT_COLUMNS if str(df[col].dtype) != "float64"]
+    bad_dtypes = [col for col in FLOAT_COLUMNS if str(df[col].dtype) != "float64"]
     if bad_dtypes:
         raise ValueError(f"bars numeric columns must be float64: {bad_dtypes}")
-    if df[_NON_NULL].isna().any().any():
+    if df[NON_NULL_COLUMNS].isna().any().any():
         raise ValueError("bars values (OHLC/adj_close/volume) must not contain NaN")
     keys = df.reset_index()[["timestamp", "symbol"]]
     if keys.duplicated().any():
@@ -47,13 +50,21 @@ def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:
         out = out.rename(columns={"ts": "timestamp"})
     if "timestamp" not in out.columns:
         raise ValueError("frame must have a 'ts' or 'timestamp' column")
-    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
+    # Providers deliver UTC. Parse without coercing tz so naive timestamps surface as NaT-free but
+    # tz-naive, which we reject — never silently localize (that would shift intraday bars).
+    parsed = pd.to_datetime(out["timestamp"], errors="raise")
+    if parsed.dt.tz is None:
+        raise ValueError(
+            "bars 'ts'/'timestamp' must be tz-aware (providers deliver UTC); "
+            "naive timestamps are rejected, not localized"
+        )
+    out["timestamp"] = parsed.dt.tz_convert("UTC")
     missing = [c for c in BAR_COLUMNS if c not in out.columns]
     if missing:
         raise ValueError(f"frame missing bar columns: {missing}")
     out = out[["timestamp", *BAR_COLUMNS]]
     out["symbol"] = out["symbol"].astype(str)
-    for col in _FLOAT_COLUMNS:
+    for col in FLOAT_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="raise").astype("float64")
     out = out.sort_values(["timestamp", "symbol"]).set_index("timestamp")
     return validate_bars(out)
