@@ -24,8 +24,15 @@ def _backtest_to_backtested():
                                "--start", "2022-01-01", "--end", "2023-12-31", "--register"])
 
 
+def _sweep():
+    return runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
+                               "--start", "2022-01-01", "--end", "2023-12-31",
+                               "--param", "lookback=20,40", "--param", "top_k=1,3"])
+
+
 def test_promote_passes_and_shortlists():
     assert _backtest_to_backtested().exit_code == 0
+    # No sweep recorded yet, so declare breadth explicitly via --n-combos.
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
@@ -36,14 +43,69 @@ def test_promote_passes_and_shortlists():
     assert payload["passed"] is True
     assert payload["promoted"] is True
     assert payload["n_combos"] == 9
+    assert payload["breadth_provenance"] == "declared"
+    # A declared breadth still raises the bar: effective > base.
+    assert payload["effective_min_holdout_sharpe"] > payload["base_min_holdout_sharpe"]
     assert _stage() == "shortlisted"
+
+
+def test_promote_uses_measured_breadth_from_sweep():
+    assert _backtest_to_backtested().exit_code == 0
+    assert _sweep().exit_code == 0  # records a 4-combo search_trial
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["breadth_provenance"] == "measured"
+    assert payload["n_combos"] == 4
+
+
+def test_measured_breadth_wins_over_declaration():
+    assert _backtest_to_backtested().exit_code == 0
+    assert _sweep().exit_code == 0  # 4 combos measured
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+                                 "--n-combos", "999"])  # declaration ignored
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["breadth_provenance"] == "measured"
+    assert payload["n_combos"] == 4
+
+
+def test_two_sweeps_accumulate_breadth():
+    assert _backtest_to_backtested().exit_code == 0
+    assert _sweep().exit_code == 0
+    assert _sweep().exit_code == 0  # second sweep accumulates
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
+    payload = json.loads(result.stdout)
+    assert payload["n_combos"] == 8  # 4 + 4
+
+
+def test_promote_refuses_with_no_breadth():
+    assert _backtest_to_backtested().exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "search breadth" in payload["error"]
+    assert _stage() == "backtested"  # not transitioned
 
 
 def test_promote_fails_does_not_transition():
     assert _backtest_to_backtested().exit_code == 0
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--min-holdout-sharpe", "999"])
+                                 "--min-holdout-sharpe", "999", "--n-combos", "1"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["passed"] is False
@@ -73,3 +135,307 @@ def test_promote_rejects_out_of_range_pct_positive():
                                  "--demo", "--min-pct-positive", "1.5"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+# --- Holdout-reuse (single-use holdout) -------------------------------------
+
+_PASS = ["--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+         "--min-pct-positive", "0", "--min-window-sharpe", "-100"]
+
+
+def _holdout_rows(tmp_path):
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "r.db")
+    try:
+        return conn.execute(
+            "SELECT period_start, period_end, holdout_frac, reused, data_source, snapshot_id"
+            " FROM holdout_evaluations ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_first_promote_records_holdout_evaluation(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 0, result.stdout
+    rows = _holdout_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0][3] == 0  # reused == 0
+    assert _stage() == "shortlisted"
+
+
+def test_second_promote_same_window_refused(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                *_PASS, "--n-combos", "9"])
+    assert first.exit_code == 0, first.stdout
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert second.exit_code == 1, second.stdout
+    payload = json.loads(second.stdout)
+    assert payload["ok"] is False
+    assert "holdout" in payload["error"].lower()
+    # No second row written; stage unchanged from the first (passing) promote.
+    assert len(_holdout_rows(tmp_path)) == 1
+
+
+def test_failing_first_promote_still_burns_holdout(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    # Impossible Sharpe bar -> gate fails, but the holdout was looked at and is now burned.
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                "--min-holdout-sharpe", "999", "--n-combos", "1"])
+    assert first.exit_code == 0, first.stdout
+    assert json.loads(first.stdout)["passed"] is False
+    assert len(_holdout_rows(tmp_path)) == 1
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "1"])
+    assert second.exit_code == 1, second.stdout
+    assert json.loads(second.stdout)["ok"] is False
+    assert len(_holdout_rows(tmp_path)) == 1
+
+
+def test_allow_holdout_reuse_overrides(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    # First promote FAILS the gate (impossible Sharpe) so the strategy stays `backtested`, but the
+    # holdout is burned. The override then re-evaluates the same window and promotes on the merits.
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                "--min-holdout-sharpe", "999", "--n-combos", "9"])
+    assert first.exit_code == 0, first.stdout
+    assert json.loads(first.stdout)["passed"] is False
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9", "--allow-holdout-reuse"])
+    assert second.exit_code == 0, second.stdout
+    payload = json.loads(second.stdout)
+    assert payload["holdout_reuse"] == "override"
+    rows = _holdout_rows(tmp_path)
+    assert len(rows) == 2
+    assert rows[1][3] == 1  # second row reused == 1
+    # The override is recorded in the transition reason.
+    show = runner.invoke(app, ["registry", "show", "cross_sectional_momentum"])
+    history = json.loads(show.stdout)["transitions"]
+    assert any("override" in (t.get("reason") or "") for t in history)
+
+
+def test_non_overlapping_window_allowed(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    # Both gates fail (impossible Sharpe) so the strategy stays `backtested` and neither call
+    # attempts a same-stage transition -- this isolates the holdout pre-check from the lifecycle.
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2022-12-31",
+                                "--min-holdout-sharpe", "999", "--n-combos", "1"])
+    assert first.exit_code == 0, first.stdout
+    # Disjoint period -> allowed without override (no refusal), records a second row.
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2023-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "999", "--n-combos", "1"])
+    assert second.exit_code == 0, second.stdout
+    assert len(_holdout_rows(tmp_path)) == 2
+
+
+def test_config_change_alone_does_not_bypass(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                *_PASS, "--n-combos", "9"])
+    assert first.exit_code == 0, first.stdout
+    # Same window + holdout_frac, tweaked gate params (config_hash unchanged here, but the rule
+    # matches on the WINDOW regardless of config): still refused.
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "0.1", "--min-holdout-return", "-100",
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+                                 "--n-combos", "9"])
+    assert second.exit_code == 1, second.stdout
+    assert json.loads(second.stdout)["ok"] is False
+
+
+# --- Point-in-time universe wiring through the promotion gate -----------------
+
+
+def _ingest_snapshot(tmp_path):
+    """Ingest synthetic momentum-universe bars; return the snapshot id."""
+    from datetime import UTC, datetime
+
+    from algua.backtest._sample import SyntheticProvider
+    from algua.data.store import DataStore
+
+    symbols = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
+    start, end = datetime(2022, 1, 1, tzinfo=UTC), datetime(2023, 12, 31, tzinfo=UTC)
+    bars = SyntheticProvider(seed=0).get_bars(symbols, start, end, "1d")
+    frame = bars.reset_index().rename(columns={"timestamp": "ts"})
+    rec = DataStore(tmp_path).ingest_bars(
+        provider="synthetic", symbols=symbols, start="2022-01-01", end="2023-12-31",
+        as_of="2024-01-01", source="test", frame=frame, timeframe="1d", adjustment="none",
+    )
+    return rec.snapshot_id
+
+
+def _ingest_pit_universe(tmp_path):
+    """Ingest a time-varying universe `pit_core`: AAPL/MSFT from 2022, NVDA added 2023.
+
+    Returns the two snapshot ids in effective-date order.
+    """
+    from algua.data.store import DataStore
+
+    store = DataStore(tmp_path)
+    first = store.ingest_universe(
+        universe="pit_core", symbols=["AAPL", "MSFT"], effective_date="2022-01-01",
+        as_of="2022-01-02T00:00:00+00:00", source="test",
+    )
+    second = store.ingest_universe(
+        universe="pit_core", symbols=["AAPL", "MSFT", "NVDA"], effective_date="2023-01-01",
+        as_of="2023-01-02T00:00:00+00:00", source="test",
+    )
+    return first.snapshot_id, second.snapshot_id
+
+
+def _register_backtested_on_snapshot(snap):
+    return runner.invoke(app, ["backtest", "run", "cross_sectional_momentum",
+                               "--snapshot", snap, "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"])
+
+
+def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    first_u, second_u = _ingest_pit_universe(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "pit_core",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["promoted"] is True
+    assert payload["universe_name"] == "pit_core"
+    eff = [s["effective_date"] for s in payload["universe_snapshots"]]
+    assert eff == ["2022-01-01", "2023-01-01"]
+    assert {s["snapshot_id"] for s in payload["universe_snapshots"]} == {first_u, second_u}
+    # The bars snapshot_id is a SEPARATE provenance dimension — still the bars snapshot.
+    assert payload["snapshot_id"] == snap
+    assert _stage() == "shortlisted"
+
+
+def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):
+    """A PIT-restricted universe (excluding symbols static mode would include) yields a
+    different holdout metric than the static run — proving the map threads into the engine."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    _ingest_pit_universe(tmp_path)  # AAPL/MSFT then +NVDA — excludes AMZN/GOOGL always
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+
+    static = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap,
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "999", "--n-combos", "9"])
+    assert static.exit_code == 0, static.stdout
+    static_holdout = json.loads(static.stdout)["holdout"]
+
+    pit = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                              "--snapshot", snap, "--universe", "pit_core",
+                              "--start", "2022-01-01", "--end", "2023-12-31",
+                              "--min-holdout-sharpe", "999", "--n-combos", "9",
+                              "--allow-holdout-reuse"])
+    assert pit.exit_code == 0, pit.stdout
+    pit_payload = json.loads(pit.stdout)
+    assert pit_payload["universe_name"] == "pit_core"
+    # PIT membership excludes AMZN/GOOGL the static run includes -> different holdout metrics.
+    assert pit_payload["holdout"]["total_return"] != static_holdout["total_return"]
+
+
+def test_promote_without_universe_has_null_universe_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    assert _backtest_to_backtested().exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["universe_name"] is None
+    assert payload["universe_snapshots"] is None
+
+
+def test_promote_unknown_universe_is_json_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "does_not_exist",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_promote_universe_burn_keyed_on_window_not_universe(tmp_path, monkeypatch):
+    """The holdout burn is keyed on the data window, NOT the universe: a second promote on the
+    same window+snapshot under a DIFFERENT universe is still refused (conservative)."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    _ingest_pit_universe(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                "--snapshot", snap,
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                *_PASS, "--n-combos", "9"])
+    assert first.exit_code == 0, first.stdout
+    # Same window/snapshot, now WITH a universe -> still refused (universe not in burn identity).
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "pit_core",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert second.exit_code == 1, second.stdout
+    assert "holdout" in json.loads(second.stdout)["error"].lower()
+
+
+def test_walk_forward_does_not_burn_holdout_then_promote_succeeds(tmp_path):
+    """`backtest walk-forward` must NOT consume the holdout: it records no holdout_evaluations row,
+    and a later `promote` on the SAME window still succeeds (walk-forward didn't burn it)."""
+    assert _backtest_to_backtested().exit_code == 0
+    wf = runner.invoke(app, ["backtest", "walk-forward", "cross_sectional_momentum", "--demo",
+                             "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert wf.exit_code == 0, wf.stdout
+    assert "holdout_metrics" not in json.loads(wf.stdout)
+    assert len(_holdout_rows(tmp_path)) == 0  # walk-forward burned nothing
+
+    promote = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  *_PASS, "--n-combos", "9"])
+    assert promote.exit_code == 0, promote.stdout  # not refused — holdout was still fresh
+    payload = json.loads(promote.stdout)
+    assert payload["promoted"] is True
+    assert payload["holdout"]["n_bars"] > 0  # promote DOES reveal the holdout
+    assert len(_holdout_rows(tmp_path)) == 1  # and promote burns it
+
+
+def test_promote_with_universe_refuses_with_no_breadth_before_walkforward(tmp_path, monkeypatch):
+    """Breadth refusal still fires before walk_forward even with --universe present."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    _ingest_pit_universe(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "pit_core",
+                                 "--start", "2022-01-01", "--end", "2023-12-31", *_PASS])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "search breadth" in payload["error"]
+    # No holdout row written: refusal happened before walk_forward burned anything.
+    assert len(_holdout_rows(tmp_path)) == 0

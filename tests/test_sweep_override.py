@@ -26,3 +26,17 @@ def test_override_does_not_mutate_base():
     base = _base()
     _override(base, {"lookback": 20, "top_k": 1})
     assert base.config.params == {"lookback": 60, "top_k": 3}  # unchanged
+
+
+def test_override_preserves_panel_fn():
+    """The fast-path acceleration hook must survive a sweep combo rebuild — otherwise sweeps
+    silently drop the fast path and re-incur the per-bar cost on every combo."""
+    cfg = StrategyConfig(
+        name="m", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={"lookback": 60, "top_k": 3},
+    )
+    panel = lambda b, p: pd.DataFrame()  # noqa: E731
+    base = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel)
+    out = _override(base, {"lookback": 20})
+    assert out.panel_fn is panel

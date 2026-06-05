@@ -141,10 +141,11 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                 _score_metric: dict[str, float] = (
                     {"score": float(_entry_score)} if _is_finite_number(_entry_score) else {}
                 )
+                # No holdout metrics: the sweep withholds the OOS holdout (reserved for
+                # `research promote`), so there is nothing per-combo to log here.
                 mlflow.log_metrics({
                     **_score_metric,
                     **_numeric_metrics(_flatten(entry["stability"])),
-                    **_numeric_metrics(_flatten(entry["holdout"], "holdout.")),
                 })
                 mlflow.set_tags({"kind": "sweep_combo", "strategy": result.strategy})
         return parent.info.run_id
@@ -153,7 +154,11 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
 def log_walk_forward(
     result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
 ) -> str:
-    """Log a walk-forward evaluation as one MLflow run. Returns run_id."""
+    """Log a walk-forward evaluation as one MLflow run. Returns run_id.
+
+    The OOS holdout is WITHHELD here, exactly as the `backtest walk-forward` command withholds it:
+    it is revealed (and burned) only by `research promote`, so neither the logged metrics nor the
+    result.json artifact carry the holdout segment."""
     import mlflow
 
     with _run(result.strategy, tracking_uri) as run:
@@ -162,14 +167,16 @@ def log_walk_forward(
             "windows": result.windows, "holdout_frac": result.holdout_frac,
             **_stamp_params(result),
         })
-        mlflow.log_metrics({
-            **_numeric_metrics(result.stability),
-            **_numeric_metrics(_flatten(result.holdout_metrics, "holdout.")),
-        })
+        mlflow.log_metrics(_numeric_metrics(result.stability))
         mlflow.set_tags({
             "kind": "walk_forward", "strategy": result.strategy,
             "config_hash": result.config_hash, "snapshot_id": str(result.snapshot_id),
             "timeframe": result.timeframe,
         })
-        mlflow.log_dict(result.to_dict(), "result.json")
+        # Strip the holdout from the persisted artifact too (it lives only in `research promote`).
+        # No default: a KeyError here means the field was renamed and the strip silently no-oped,
+        # which would re-leak the holdout into result.json — fail loud so the rename is caught.
+        wf_dict = result.to_dict()
+        wf_dict.pop("holdout_metrics")
+        mlflow.log_dict(wf_dict, "result.json")
         return run.info.run_id

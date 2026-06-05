@@ -32,8 +32,9 @@ def test_log_walk_forward_records_metrics(tmp_path):
     assert len(runs) == 1
     m = runs[0].data.metrics
     assert abs(m["mean_sharpe"] - 1.1) < 1e-9
-    assert abs(m["holdout.sharpe"] - 0.8) < 1e-9
-    assert "holdout.start" not in m
+    # The OOS holdout is WITHHELD from walk-forward tracking (reserved for `research promote`):
+    # no holdout.* metric is logged.
+    assert not any(k.startswith("holdout.") for k in m)
     assert runs[0].data.tags["kind"] == "walk_forward"
     assert runs[0].data.params["windows"] == "4"
 

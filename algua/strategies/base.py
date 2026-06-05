@@ -16,6 +16,14 @@ from algua.contracts.types import ExecutionContract
 # which closes over `params`. Two layers, two names — no silent signature drift.
 ComputeWeightsFn = Callable[[pd.DataFrame, dict[str, Any]], pd.Series]
 
+# OPTIONAL vectorized acceleration hook: a pure module-level `compute_weights_panel(bars, params)`
+# that returns the FULL decision-time weights matrix (index=timestamp, columns=symbol; PRE-lag) in
+# one shot, instead of being called once per bar. It is NOT a second signal definition: the engine
+# uses it only behind a fail-closed parity guard against the canonical per-bar `compute_weights`,
+# and raises on any disagreement. `bars` is the long-format bar-schema frame (same as the per-bar
+# view, but spanning the whole period). `None` for strategies that don't define it.
+ComputeWeightsPanelFn = Callable[[pd.DataFrame, dict[str, Any]], pd.DataFrame]
+
 
 class StrategyConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
@@ -33,6 +41,9 @@ class LoadedStrategy:
 
     config: StrategyConfig
     fn: ComputeWeightsFn
+    # OPTIONAL vectorized fast-path hook (loader-detected, see ComputeWeightsPanelFn). `None` when
+    # the strategy module does not define `compute_weights_panel`. `fn` stays canonical regardless.
+    panel_fn: ComputeWeightsPanelFn | None = None
 
     @property
     def name(self) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -83,9 +84,14 @@ def run_paper(
     end: datetime,
     timeframe: str = "1d",
     max_drawdown: float | None = None,
+    on_decision: Callable[[datetime, pd.Series], None] | None = None,
 ) -> PaperRunResult:
     """Replay the strategy bar-by-bar: decide weights on closed bar t (data <= t), submit
-    orders, fill at t+1 open. Pure over the injected broker + provider."""
+    orders, fill at t+1 open. Pure over the injected broker + provider.
+
+    `on_decision`, if given, is called with (decision_ts, decided_weights) for every bar the
+    loop actually decides on (post warm-up). It is a read-only observation seam — it cannot
+    alter any decision — used to assert backtest<->paper decision parity."""
     bars = provider.get_bars(strategy.universe, start, end, timeframe).sort_index()
     _reset = bars.reset_index()
     opens = _reset.pivot(index="timestamp", columns="symbol", values="open").sort_index()
@@ -104,7 +110,10 @@ def run_paper(
         equity = broker.equity(closes.loc[t])
         peak = max(peak, equity)
         check_drawdown(equity, peak, max_drawdown)
-        if bars_seen < warmup:
+        # warmup_bars = N holds the first N bars flat: bars_seen runs 1..len(ts)-1, so the
+        # first DECIDED bar is bars_seen == N+1 (session index N) — identical to the backtest
+        # loop's `if i < warmup: continue` (#1: reconcile the historical off-by-one).
+        if bars_seen <= warmup:
             continue  # warm-up: observe only — no signal evaluation, validation, or orders
         # Equity is the sizing denominator; a non-positive value would silently treat every position
         # as weight 0 and buy against nothing. The drawdown breaker should have halted long before
@@ -116,7 +125,9 @@ def run_paper(
             s: float(positions.get(s, 0.0)) * float(bar_closes.get(s, 0.0)) / equity
             for s in positions.index
         }
-        _weights, intents = decide(strategy, bars.loc[:t], current_weights, t)
+        weights, intents = decide(strategy, bars.loc[:t], current_weights, t)
+        if on_decision is not None:
+            on_decision(t, weights)
         for intent in intents:
             order_id = broker.submit(intent)
             orders.append(OrderRecord(intent=intent, broker_order_id=order_id))

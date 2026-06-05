@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,18 @@ class SnapshotRecord:
             storage_format=str(payload.get("storage_format", "file")),
             schema_version=int(payload["schema_version"]),
         )
+
+
+@dataclass(frozen=True)
+class UniverseSnapshot:
+    """One point-in-time universe-membership snapshot: the set of `symbols` that constituted a
+    named universe as of `effective_date`. A time-varying universe is a timeline of these (one
+    per effective date) sharing the same universe NAME. Data-layer-only value object — it never
+    crosses into the backtest engine (the engine receives a plain date->symbols mapping)."""
+
+    snapshot_id: str
+    effective_date: date
+    symbols: frozenset[str]
 
 
 def _optional_str(value: Any) -> str | None:

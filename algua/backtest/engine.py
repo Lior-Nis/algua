@@ -1,26 +1,56 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Collection, Mapping
+from datetime import date, datetime
 
+import numpy as np
 import pandas as pd
 import vectorbt as vbt
 
-from algua.backtest._constants import GROSS_EXPOSURE_TOL
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
+from algua.risk.limits import WEIGHT_TOL, RiskBreach, check_gross_exposure, check_long_only
 from algua.strategies.base import LoadedStrategy
 
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
+
+# Fail-closed runtime parity guard: number of post-warmup bars at which the fast path is
+# re-verified against the canonical per-bar definition on every run that uses a panel_fn.
+# Bounded + deterministic (evenly spread across the evaluated span) so the guard costs O(_PARITY_
+# SAMPLE) per-bar evaluations rather than O(n_bars) — preserving the speedup while still catching a
+# panel fn that disagrees with its per-bar twin. Full per-bar parity is asserted in CI (test suite).
+_PARITY_SAMPLE = 16
 
 
 class BacktestError(RuntimeError):
     pass
 
 
+def _members_as_of(
+    universe_by_date: Mapping[date, Collection[str]], t: pd.Timestamp
+) -> frozenset[str]:
+    """As-of-t membership: the snapshot with the greatest effective_date <= t.date().
+
+    The map is keyed by effective_date and may be sparse (the CLI wiring passes one entry per
+    universe snapshot, not per session); the as-of rule holds either way. Empty before the
+    earliest effective date. Uses only dates <= t, so membership at t can never see a later
+    snapshot — no look-ahead.
+    """
+    target = t.date()
+    eligible = [d for d in universe_by_date if d <= target]
+    if not eligible:
+        return frozenset()
+    return frozenset(universe_by_date[max(eligible)])
+
+
 def _decision_weights(
-    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+    strategy: LoadedStrategy,
+    bars: pd.DataFrame,
+    adj: pd.DataFrame,
+    *,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
 ) -> pd.DataFrame:
     """Run the per-bar decision loop and return raw target weights (pre-lag).
 
@@ -31,10 +61,20 @@ def _decision_weights(
     re-copying a growing `.loc[:t]` prefix each step.
 
     The first `warmup_bars` bars are held flat: a strategy may need that much history
-    before its signal is meaningful, so the first window excludes the warmup span.
+    before its signal is meaningful, so the first window excludes the warmup span. This matches
+    the paper loop's warm-up exactly (warmup_bars = N => the same N initial bars are flat).
+
+    Each evaluated bar runs the SAME long-only + gross-exposure risk checks as the paper/live
+    decision core, so a decision that passes the backtest is one paper/live will also accept.
+
+    Point-in-time universe (`universe_by_date`): when provided, the strategy only ever sees the
+    symbols that were as-of-t members (the snapshot with the greatest effective_date <= t),
+    eliminating survivorship bias. `None` reproduces the original static behavior exactly (the
+    full fetched panel is visible every bar). Empty as-of membership => that bar is flat. A weight
+    returned for a non-member is a strategy bug and raises `BacktestError`. As-of membership at t
+    uses only snapshots dated <= t, so the masking introduces no look-ahead.
     """
     columns = adj.columns
-    max_gross = strategy.execution.max_gross_exposure
     warmup = strategy.execution.warmup_bars
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
@@ -47,30 +87,208 @@ def _decision_weights(
         if i < warmup:
             continue
         view = bars_sorted.iloc[:stop]
+        if universe_by_date is not None:
+            members = _members_as_of(universe_by_date, t)
+            if not members:
+                continue  # before the earliest effective date -> flat
+            view = view[view["symbol"].isin(members)]
+            if view.empty:
+                continue  # members exist but no bar data for any of them yet -> flat
         w = strategy.target_weights(view)
         if len(w) == 0:
             continue
+        if universe_by_date is not None:
+            non_members = [s for s in w.index[w != 0.0] if s not in members]
+            if non_members:
+                raise BacktestError(
+                    f"strategy {strategy.name!r} returned weight for non-member symbol(s) "
+                    f"{sorted(non_members)} at {t} (as-of members: {sorted(members)})"
+                )
+        # The shared checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error
+        # contract while preserving the breach (and its `.kind`) as the cause.
+        try:
+            check_long_only(w, strategy.name)
+            check_gross_exposure(w, strategy.execution.max_gross_exposure)
+        except RiskBreach as breach:
+            raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
-        gross = float(row.abs().sum())
-        if gross > max_gross + GROSS_EXPOSURE_TOL:
-            raise BacktestError(
-                f"strategy '{strategy.name}' targeted gross exposure {gross:.4f} at {t} "
-                f"exceeding max_gross_exposure={max_gross}"
-            )
         # Label-aligned assignment: place each symbol's weight in its own column rather than
         # trusting positional order (#42).
         weights.loc[t, row.index] = row.to_numpy()
     return weights
 
 
+def _canonical_row(
+    strategy: LoadedStrategy, bars_sorted: pd.DataFrame, stop: int, columns: pd.Index
+) -> pd.Series:
+    """The canonical per-bar weights at one bar: `target_weights` over the expanding history slice
+    ending at (and including) that bar, reindexed onto `columns` and zero-filled. This is the SAME
+    computation the loop performs per bar — reused by the fast-path parity guard so the guard
+    compares the fast path against the loop's own definition, not a re-derivation."""
+    view = bars_sorted.iloc[:stop]
+    w = strategy.target_weights(view)
+    if len(w) == 0:
+        return pd.Series(0.0, index=columns)
+    return w.reindex(columns).fillna(0.0)
+
+
+def _decision_weights_fast(
+    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+) -> pd.DataFrame:
+    """Vectorized fast-path: call the strategy's `panel_fn` ONCE for the whole period, then make
+    the result indistinguishable from the per-bar loop's output (same shape, warmup, risk checks)
+    — but ONLY after a fail-closed parity guard confirms it agrees with the canonical per-bar
+    definition on a bounded deterministic sample of bars. Static universe only (PIT forces the
+    loop; see `_decision_weights_fast_or_loop`). Pre-lag, like the loop.
+
+    The guard is the crux of the "one signal definition" invariant: the panel fn is never trusted
+    on its own. On any disagreement (or any per-row risk breach) this RAISES `BacktestError`; it
+    never silently falls back to either answer.
+
+    Risk enforcement (long-only + gross) remains per-row by design — it reuses the same
+    `risk.limits` checks as the loop rather than re-deriving a vectorized form, deliberately
+    preserving the single source of truth even though it means one Python pass over the rows.
+    """
+    assert strategy.panel_fn is not None  # caller guarantees this
+    columns = adj.columns
+    warmup = strategy.execution.warmup_bars
+
+    raw = strategy.panel_fn(bars, strategy.params)
+    if not isinstance(raw, pd.DataFrame):
+        raise BacktestError(
+            f"strategy {strategy.name!r} compute_weights_panel returned "
+            f"{type(raw).__name__}, expected a DataFrame"
+        )
+    # Reindex onto the simulation grid; missing cells (symbols/sessions the panel omitted) are flat.
+    weights = raw.reindex(index=adj.index, columns=columns).fillna(0.0)
+    # Same flat warmup period as the loop: the first `warmup` bars are held flat.
+    if warmup:
+        weights.iloc[:warmup] = 0.0
+
+    bars_sorted = bars.sort_index()
+    end_pos = bars_sorted.index.searchsorted(adj.index, side="right")
+
+    # Run the SAME risk checks the loop runs, per evaluated row (source of truth: risk/limits).
+    for i, (t, row) in enumerate(zip(adj.index, weights.itertuples(index=False), strict=True)):
+        if i < warmup:
+            continue
+        w = pd.Series(row, index=columns)
+        nz = w[w != 0.0]
+        if len(nz) == 0:
+            continue
+        try:
+            check_long_only(nz, strategy.name)
+            check_gross_exposure(nz, strategy.execution.max_gross_exposure)
+        except RiskBreach as breach:
+            raise BacktestError(f"{breach.detail} at {t}") from breach
+
+    _assert_parity(strategy, bars_sorted, end_pos, weights, warmup)
+    return weights
+
+
+def _parity_sample_positions(warmup: int, n: int) -> list[int]:
+    """Deterministic, bounded sample of evaluated-bar positions (>= warmup, < n) spread across the
+    period — first, last, and an evenly-spaced interior. Empty when there are no evaluated bars."""
+    if n <= warmup:
+        return []
+    lo, hi = warmup, n - 1
+    if hi == lo:
+        return [lo]
+    k = min(_PARITY_SAMPLE, hi - lo + 1)
+    if k == 1:
+        return [lo]
+    step = (hi - lo) / (k - 1)
+    return sorted({lo + round(j * step) for j in range(k)})
+
+
+def _assert_parity(
+    strategy: LoadedStrategy,
+    bars_sorted: pd.DataFrame,
+    end_pos: np.ndarray,
+    weights: pd.DataFrame,
+    warmup: int,
+) -> None:
+    """Fail-closed parity guard. On a bounded deterministic sample of evaluated bars, recompute the
+    canonical per-bar weights and compare to the fast-path row at the same bar with tolerance
+    `WEIGHT_TOL` (rtol=0). Any mismatch RAISES `BacktestError` naming the disagreement — the fast
+    path is never trusted without this check, and never silently falls back."""
+    columns = weights.columns
+    n = len(weights.index)
+    for i in _parity_sample_positions(warmup, n):
+        t = weights.index[i]
+        stop = int(end_pos[i])
+        canonical = _canonical_row(strategy, bars_sorted, stop, columns)
+        fast = pd.Series(weights.iloc[i].to_numpy(), index=columns)
+        diff = (canonical - fast).abs()
+        if bool((diff > WEIGHT_TOL).any()):
+            offenders = sorted(diff[diff > WEIGHT_TOL].index)
+            raise BacktestError(
+                f"fast-path parity check FAILED for strategy {strategy.name!r} at {t}: "
+                f"compute_weights_panel disagrees with the per-bar compute_weights on "
+                f"symbol(s) {offenders} "
+                f"(per-bar={canonical[offenders].to_dict()}, "
+                f"panel={fast[offenders].to_dict()}, tol={WEIGHT_TOL})"
+            )
+
+
+def _decision_weights_fast_or_loop(
+    strategy: LoadedStrategy,
+    bars: pd.DataFrame,
+    adj: pd.DataFrame,
+    *,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+) -> pd.DataFrame:
+    """Selector for the decision step. Returns the same pre-lag weights matrix the loop returns.
+
+    - No `panel_fn` -> the canonical per-bar loop (`_decision_weights`), unchanged.
+    - PIT mode (`universe_by_date is not None`) -> FORCE the loop. The per-bar as-of masking cannot
+      be reproduced by a generic whole-period panel fn (membership at t depends on t), and we do not
+      attempt a vectorized PIT mask here (deferred). The fast path is for the static-universe case.
+    - Otherwise -> the vectorized fast path, gated by the fail-closed parity guard.
+    """
+    if strategy.panel_fn is None or universe_by_date is not None:
+        return _decision_weights(strategy, bars, adj, universe_by_date=universe_by_date)
+    return _decision_weights_fast(strategy, bars, adj)
+
+
+def _fetch_symbols(
+    strategy: LoadedStrategy, universe_by_date: Mapping[date, Collection[str]] | None
+) -> list[str]:
+    """Symbols to fetch bars for.
+
+    Static mode: the strategy's declared universe. PIT mode: the UNION of every symbol ever
+    effective across the membership timeline — so price data exists for any ever-member, including
+    membership active at `start` that derives from a snapshot dated before it. (The wiring layer
+    already restricts the timeline to snapshots effective <= end_date.)
+    """
+    if universe_by_date is None:
+        return strategy.universe
+    union: set[str] = set()
+    for members in universe_by_date.values():
+        union.update(members)
+    return sorted(union)
+
+
 def simulate(
-    strategy: LoadedStrategy, provider: DataProvider, start: datetime, end: datetime
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
 ) -> tuple[vbt.Portfolio, pd.DataFrame]:
-    """Fetch bars, run the per-bar decision loop (enforcing gross exposure), apply the
-    t->t+1 shift, and simulate. Returns (portfolio, effective-weights).
+    """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
+    the strategy exposes a parity-guarded `panel_fn` — see `_decision_weights_fast_or_loop`),
+    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift and
+    simulate. Returns (portfolio, effective-weights). The shift lives ONLY here — the panel fn (like
+    the loop) returns DECISION-time weights, never executable ones.
 
     This is the public simulation step: bars -> (portfolio, effective weights). Metrics are
-    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward()."""
+    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+
+    Point-in-time universe (`universe_by_date`): when provided, bars are fetched for the UNION of
+    all ever-effective members and the per-bar decision is masked to as-of-t membership (see
+    `_decision_weights`). `None` is the original static behavior — fetch the declared universe."""
     cadence = strategy.execution.rebalance_frequency.lower()
     if cadence not in _SUPPORTED_CADENCES:
         raise BacktestError(
@@ -78,7 +296,7 @@ def simulate(
             f"this slice rebalances daily only ({sorted(_SUPPORTED_CADENCES)})"
         )
     try:
-        bars = provider.get_bars(strategy.universe, start, end, "1d")
+        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
@@ -87,7 +305,9 @@ def simulate(
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     adj = adj.sort_index()
 
-    weights = _decision_weights(strategy, bars, adj)
+    weights = _decision_weights_fast_or_loop(
+        strategy, bars, adj, universe_by_date=universe_by_date
+    )
 
     lag = strategy.execution.decision_lag_bars
     weights_eff = weights.shift(lag).fillna(0.0)
@@ -114,8 +334,11 @@ def run(
     end: datetime,
     *,
     seed: int | None = None,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
 ) -> BacktestResult:
-    pf, weights_eff = simulate(strategy, provider, start, end)
+    pf, weights_eff = simulate(strategy, provider, start, end, universe_by_date=universe_by_date)
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
@@ -127,5 +350,7 @@ def run(
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         code_hash=stamps["code_hash"],
         dependency_hash=stamps["dependency_hash"],
+        universe_name=universe_name,
+        universe_snapshots=universe_snapshots,
         **prov,
     )

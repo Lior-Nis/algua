@@ -196,3 +196,164 @@ def test_simulate_label_aligns_misordered_weights():
     # Every non-zero weight must sit in the BBB column; AAA must remain flat zero.
     assert (weights_eff["AAA"] == 0.0).all()
     assert weights_eff["BBB"].abs().sum() > 0
+
+
+# --- #7: point-in-time universe membership (survivorship-bias fix) --------------------------
+
+
+def _pit_provider():
+    """Synthetic provider over a fixed AAA+BBB panel; records the symbols arg it was asked for."""
+
+    class PITProvider:
+        seed = 0
+
+        def __init__(self):
+            self.requested_symbols = None
+
+        def get_bars(self, symbols, start, end, timeframe):
+            self.requested_symbols = list(symbols)
+            return SyntheticProvider(seed=0).get_bars(["AAA", "BBB"], start, end, timeframe)
+
+    return PITProvider()
+
+
+def test_decision_weights_masks_symbol_before_effective_date():
+    """A symbol added mid-period is ABSENT from the strategy view before its effective date and
+    PRESENT on/after it. A spy strategy records the symbols it sees per bar."""
+    from datetime import date
+
+    from algua.backtest.engine import _decision_weights
+
+    provider = SyntheticProvider(seed=0)
+    bars = provider.get_bars(["AAA", "BBB"], START, END, "1d")
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    adj = adj.sort_index()
+
+    sessions = list(adj.index)
+    cutover = sessions[len(sessions) // 2].date()
+    # Before cutover only AAA is a member; on/after cutover AAA+BBB.
+    universe_by_date = {}
+    for ts in adj.index:
+        d = ts.date()
+        universe_by_date[d] = {"AAA"} if d < cutover else {"AAA", "BBB"}
+
+    seen: dict = {}
+
+    def spy(view, params):
+        d = view.index[-1].date()
+        seen[d] = set(view["symbol"].unique())
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(1.0 / len(syms), index=syms)
+
+    cfg = StrategyConfig(
+        name="spy", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    _decision_weights(LoadedStrategy(config=cfg, fn=spy), bars, adj,
+                      universe_by_date=universe_by_date)
+
+    before = [d for d in seen if d < cutover]
+    after = [d for d in seen if d >= cutover]
+    assert before and after
+    assert all("BBB" not in seen[d] for d in before), "BBB leaked before its effective date"
+    assert all("BBB" in seen[d] for d in after), "BBB missing on/after its effective date"
+    assert isinstance(cutover, date)
+
+
+def test_decision_weights_flat_before_earliest_membership():
+    """Bars whose date precedes the earliest effective date have empty membership -> flat,
+    and the strategy is never even called for them."""
+    from algua.backtest.engine import _decision_weights
+
+    provider = SyntheticProvider(seed=0)
+    bars = provider.get_bars(["AAA"], START, END, "1d")
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    adj = adj.sort_index()
+
+    sessions = list(adj.index)
+    start_membership = sessions[len(sessions) // 2].date()
+    universe_by_date = {ts.date(): {"AAA"} for ts in adj.index if ts.date() >= start_membership}
+
+    cfg = StrategyConfig(
+        name="x", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    fn = lambda v, p: pd.Series([1.0], index=["AAA"])  # noqa: E731
+    weights = _decision_weights(LoadedStrategy(config=cfg, fn=fn), bars, adj,
+                                universe_by_date=universe_by_date)
+
+    pre = weights[weights.index.map(lambda ts: ts.date() < start_membership)]
+    post = weights[weights.index.map(lambda ts: ts.date() >= start_membership)]
+    assert (pre["AAA"] == 0.0).all()
+    assert post["AAA"].abs().sum() > 0
+
+
+def test_decision_weights_rejects_non_member_weight():
+    """A weight returned for a symbol that is NOT an as-of member is a strategy bug -> BacktestError
+    naming the offending symbol."""
+    from algua.backtest.engine import _decision_weights
+
+    provider = SyntheticProvider(seed=0)
+    bars = provider.get_bars(["AAA", "BBB"], START, END, "1d")
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    adj = adj.sort_index()
+    # BBB is never a member, but the strategy insists on holding it.
+    universe_by_date = {ts.date(): {"AAA"} for ts in adj.index}
+
+    cfg = StrategyConfig(
+        name="cheat", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    fn = lambda v, p: pd.Series([1.0], index=["BBB"])  # noqa: E731
+    with pytest.raises(BacktestError, match="BBB"):
+        _decision_weights(LoadedStrategy(config=cfg, fn=fn), bars, adj,
+                          universe_by_date=universe_by_date)
+
+
+def test_decision_weights_none_is_unchanged_static_behavior():
+    """No PIT map (None) => identical behavior to before: the full panel is visible every bar."""
+    from algua.backtest.engine import _decision_weights
+
+    provider = SyntheticProvider(seed=0)
+    bars = provider.get_bars(["AAA", "BBB"], START, END, "1d")
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    adj = adj.sort_index()
+
+    cfg = StrategyConfig(
+        name="ew", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    fn = lambda v, p: pd.Series(  # noqa: E731
+        1.0 / len(v["symbol"].unique()), index=sorted(v["symbol"].unique()))
+    strat = LoadedStrategy(config=cfg, fn=fn)
+    static = _decision_weights(strat, bars, adj)
+    pit_none = _decision_weights(strat, bars, adj, universe_by_date=None)
+    assert static.equals(pit_none)
+
+
+def test_simulate_fetches_union_of_pit_members_not_strategy_universe():
+    """#7 union-fetch: in PIT mode `simulate` fetches the UNION of all ever-effective members
+    (spy provider records the symbols arg), NOT the static strategy.universe."""
+    from algua.backtest.engine import simulate
+
+    provider = _pit_provider()
+    # PIT timeline: CCC effective early, DDD added later. strategy.universe is a DIFFERENT,
+    # decoy list that must NOT drive the fetch.
+    early = START.date()
+    universe_by_date = {early: {"CCC"}, START.replace(month=2).date(): {"CCC", "DDD"}}
+
+    cfg = StrategyConfig(
+        name="ew", universe=["ZZZ_DECOY"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    # Strategy only ever holds symbols it actually sees; the provider serves AAA/BBB regardless,
+    # so the masked view may be empty and the run stays flat — we only assert the FETCH arg here.
+    fn = lambda v, p: pd.Series(dtype="float64")  # noqa: E731
+    simulate(LoadedStrategy(config=cfg, fn=fn), provider, START, END,
+             universe_by_date=universe_by_date)
+    assert provider.requested_symbols == ["CCC", "DDD"]  # union, sorted; not ZZZ_DECOY

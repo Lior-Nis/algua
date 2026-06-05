@@ -75,6 +75,35 @@ imports nothing beyond contracts).
 - **New signal**: write a new `compute_weights`. Look at
   `algua/strategies/examples/cross_sectional_momentum.py` as the reference implementation.
 
+## Optional: `compute_weights_panel` (advanced acceleration hook)
+
+`compute_weights` is the **canonical signal** — paper, live, and the backtest all run it per bar.
+For the common "stateless" case (weights at `t` are a pure function of the trailing window ending
+at `t`), the per-bar Python loop is slow. A module **MAY** additionally define a module-level:
+
+```python
+def compute_weights_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    """Decision-time (PRE-lag) weights for the WHOLE period at once, indexed timestamp × symbol."""
+```
+
+The loader detects it and binds it as `LoadedStrategy.panel_fn`; the backtest engine then computes
+the whole weights matrix in one vectorized shot instead of looping. Rules:
+
+- It is **NOT a second signal.** It MUST produce results **identical** to running `compute_weights`
+  on the expanding view at each bar. The engine enforces this with a **fail-closed parity guard**:
+  on every run it re-checks the panel output against the per-bar `compute_weights` on a bounded
+  deterministic sample of bars, and **raises** on any disagreement (it never silently falls back).
+- Same purity rules as `compute_weights`: pure, pandas-only, no I/O, no look-ahead. Return PRE-lag
+  decision weights (the engine applies the `t→t+1` shift centrally — do not shift yourself).
+- Rows without enough history must be flat, exactly as the per-bar function returns empty there.
+- It is **optional and advanced** — only add it when the per-bar loop is a measured bottleneck. Most
+  strategies should ship `compute_weights` alone. If you add a panel fn, you **must** add a parity
+  test (`pd.testing.assert_frame_equal(..., check_exact=False, atol=WEIGHT_TOL, rtol=0)`) proving
+  the two paths agree, mirroring `tests/test_fast_path.py`.
+- **PIT (point-in-time universe) runs always use the per-bar loop**, even when a panel fn exists —
+  the as-of masking can't be reproduced by a whole-period panel fn. The fast path is static-universe
+  only. See `algua/strategies/examples/cross_sectional_momentum.py` for a worked example.
+
 ## Discipline
 
 - **Additions only.** Create a NEW file under `algua/strategies/examples/`. Do **not** edit or

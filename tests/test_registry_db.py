@@ -23,6 +23,218 @@ def test_wal_mode_enabled(tmp_path):
     assert mode.lower() == "wal"
 
 
+def test_migrate_adds_dependency_hash_column_to_legacy_approvals(tmp_path):
+    """A pre-existing, populated approvals table without dependency_hash gets the column added
+    in place (ALTER), with existing rows defaulting to NULL — fail-closed for the live gate."""
+    conn = connect(tmp_path / "r.db")
+    # Build a legacy approvals table lacking dependency_hash, with one row already in it.
+    conn.executescript(
+        """
+        CREATE TABLE strategies (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            approved_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT
+        );
+        INSERT INTO strategies(id, name) VALUES (1, 's');
+        INSERT INTO approvals(strategy_id, code_hash, config_hash, approved_by, created_at)
+            VALUES (1, 'c', 'cfg', 'legacy', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(approvals)")}
+    assert "dependency_hash" in cols
+    legacy = conn.execute("SELECT dependency_hash FROM approvals WHERE id=1").fetchone()
+    assert legacy["dependency_hash"] is None  # existing row fails closed
+
+    migrate(conn)  # re-running the ALTER path must stay idempotent
+    cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(approvals)")}
+    assert "dependency_hash" in cols_again
+
+
+def test_migrate_adds_dependency_hash_column_to_legacy_stage_transitions(tmp_path):
+    """A pre-existing, populated stage_transitions table without dependency_hash gets the column
+    added in place (ALTER), with existing rows defaulting to NULL — same idempotent mechanism as
+    the approvals migration."""
+    conn = connect(tmp_path / "r.db")
+    # Build a legacy stage_transitions table lacking dependency_hash, with one row already in it.
+    conn.executescript(
+        """
+        CREATE TABLE strategies (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE stage_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            from_stage TEXT,
+            to_stage TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT,
+            code_hash TEXT,
+            config_hash TEXT,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(id, name) VALUES (1, 's');
+        INSERT INTO stage_transitions(strategy_id, to_stage, actor, created_at)
+            VALUES (1, 'idea', 'system', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_transitions)")}
+    assert "dependency_hash" in cols
+    legacy = conn.execute(
+        "SELECT dependency_hash FROM stage_transitions WHERE id=1"
+    ).fetchone()
+    assert legacy["dependency_hash"] is None  # existing row fails closed
+
+    migrate(conn)  # re-running the ALTER path must stay idempotent
+    cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(stage_transitions)")}
+    assert "dependency_hash" in cols_again
+
+
+def test_migrate_creates_search_trials_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "search_trials" in tables
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_trials)")}
+    # Keyed by strategy NAME (not the registry FK id) so pre-registration sweeps still count.
+    assert {"id", "strategy_name", "n_combos", "grid_json", "created_at"} <= cols
+    assert "strategy_id" not in cols
+
+
+def test_migrate_adds_search_trials_to_legacy_db(tmp_path):
+    """A legacy populated DB that predates search_trials gains the whole table via the
+    CREATE TABLE IF NOT EXISTS bootstrap; re-running stays idempotent."""
+    conn = connect(tmp_path / "r.db")
+    # A legacy DB with the older core tables populated but no search_trials at all.
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    assert "search_trials" not in {
+        r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "search_trials" in tables
+    # The legacy strategy row survived and the new (name-keyed) table is usable.
+    conn.execute(
+        "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
+        " VALUES (?,?,?,?)",
+        ("s", 4, "{}", "2026-01-02T00:00:00+00:00"),
+    )
+    conn.commit()
+
+    migrate(conn)  # idempotent re-run must not drop the row or raise
+    assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
+
+
+def test_migrate_rekeys_legacy_id_keyed_search_trials_to_name(tmp_path):
+    """A dev DB with the OLD id-keyed search_trials is forward-migrated to the name-keyed table,
+    carrying each row's breadth across by resolving strategy_id -> strategies.name."""
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE search_trials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+            n_combos INTEGER NOT NULL,
+            grid_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO search_trials(strategy_id, n_combos, grid_json, created_at)
+            VALUES (1, 7, '{}', '2026-01-02T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_trials)")}
+    assert "strategy_name" in cols
+    assert "strategy_id" not in cols
+    rows = conn.execute(
+        "SELECT strategy_name, n_combos FROM search_trials"
+    ).fetchall()
+    assert [(r["strategy_name"], r["n_combos"]) for r in rows] == [("s", 7)]
+
+    migrate(conn)  # idempotent re-run must not duplicate or drop the row
+    assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
+
+
+def test_migrate_creates_holdout_evaluations_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "holdout_evaluations" in tables
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(holdout_evaluations)")}
+    assert {"id", "strategy_id", "data_source", "snapshot_id", "period_start", "period_end",
+            "holdout_frac", "config_hash", "reused", "created_at"} <= cols
+
+
+def test_migrate_adds_holdout_evaluations_to_legacy_db(tmp_path):
+    """A legacy populated DB that predates holdout_evaluations gains the whole table via the
+    CREATE TABLE IF NOT EXISTS bootstrap; re-running stays idempotent."""
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    assert "holdout_evaluations" not in {
+        r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "holdout_evaluations" in tables
+    sid = conn.execute("SELECT id FROM strategies WHERE name='s'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO holdout_evaluations(strategy_id, data_source, snapshot_id, period_start,"
+        " period_end, holdout_frac, config_hash, reused, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (sid, "SyntheticProvider", None, "2022-01-01", "2023-12-31", 0.2, "cfg", 0,
+         "2026-01-02T00:00:00+00:00"),
+    )
+    conn.commit()
+
+    migrate(conn)  # idempotent re-run must not drop the row or raise
+    assert conn.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 1
+
+
 def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     """migrate() is an idempotent bootstrap, not a version-gated migrator.
 

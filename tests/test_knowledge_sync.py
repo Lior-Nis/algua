@@ -45,12 +45,17 @@ def test_render_results_block_handles_no_metrics():
 
 
 def test_render_results_block_renders_metrics():
+    # Pins the holdout seal at the knowledge surface: even if a caller somehow passes a
+    # metrics dict containing a holdout key, render_results_block renders whatever it receives.
+    # The real seal is at latest_run_metrics (the read boundary); here we verify that a
+    # normal metric IS rendered and that an already-filtered dict produces correct output.
     out = render_results_block(
         {"run_id": "abcd1234ef", "kind": "walk_forward",
-         "snapshot_id": "ds_2", "seed": "7", "metrics": {"holdout.sharpe": 0.28}}
+         "snapshot_id": "ds_2", "seed": "7", "metrics": {"sharpe": 0.35}}
     )
     assert "walk_forward" in out
-    assert "holdout.sharpe" in out
+    assert "sharpe" in out
+    assert "holdout.sharpe" not in out
     assert "ds_2" in out
 
 

@@ -95,7 +95,12 @@ def run_tick(
         return TickResult(None, {}, _positions(broker), [])
 
     t = bars.index.max()
-    if bars.index.nunique() < strategy.execution.warmup_bars:
+    # warmup_bars = N holds the first N closed sessions flat: refuse to decide until strictly MORE
+    # than N distinct closed sessions are available, so the FIRST decision happens on session index
+    # N (the bar that sees N+1 sessions of history) — identical to the backtest loop's
+    # `if i < warmup: continue` and the paper loop's `if bars_seen <= warmup: continue`
+    # (#1: reconcile the historical off-by-one, which decided one bar early at nunique() == N).
+    if bars.index.nunique() <= strategy.execution.warmup_bars:
         return TickResult(t, {}, _positions(broker), [])  # warm-up not met
 
     # Snapshot equity + positions ONCE (1 account GET + 1 positions GET); reuse it as the fixed

@@ -3,8 +3,9 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import math
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from algua.backtest.engine import BacktestError
@@ -20,7 +21,9 @@ def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy
     Does not mutate the base strategy/config."""
     new_params = {**strategy.config.params, **combo}
     new_config = strategy.config.model_copy(update={"params": new_params})
-    return LoadedStrategy(config=new_config, fn=strategy.fn)
+    # Preserve the optional fast-path hook — otherwise every sweep combo silently drops the
+    # vectorized path and re-incurs the per-bar cost (the parity guard still protects each combo).
+    return LoadedStrategy(config=new_config, fn=strategy.fn, panel_fn=strategy.panel_fn)
 
 
 def _combos(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
@@ -117,6 +120,9 @@ class SweepResult:
     best: dict[str, Any] | None
     code_hash: str | None = None
     dependency_hash: str | None = None
+    # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
+    universe_name: str | None = None
+    universe_snapshots: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -132,10 +138,17 @@ def sweep(
     windows: int = 4,
     holdout_frac: float = 0.2,
     rank_by: str = "mean_sharpe",
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
 ) -> SweepResult:
     """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
 
-    The holdout is carried per combo but never used for ranking (reserved for promotion gates).
+    The holdout is COMPUTED by each combo's walk_forward but is DELIBERATELY NOT recorded here:
+    it is never used for ranking (ranking is on window/stability), and exposing a per-combo holdout
+    would let a caller SELECT the best combo on the untouched holdout across the whole grid — the
+    exact multiple-testing leak the promotion breadth gate fights. The holdout is revealed (and
+    burned) in exactly one place: `research promote`.
     """
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
@@ -147,19 +160,17 @@ def sweep(
         wf = walk_forward(
             _override(strategy, combo), provider, start, end,
             windows=windows, holdout_frac=holdout_frac,
+            universe_by_date=universe_by_date,
+            universe_name=universe_name, universe_snapshots=universe_snapshots,
         )
         if meta is None:
             meta = wf
-        h = wf.holdout_metrics
+        # Note: wf.holdout_metrics is intentionally NOT copied into the record (see docstring).
         records.append({
             "params": combo,
             "config_hash": wf.config_hash,
             "n_windows": wf.windows,
             "stability": wf.stability,
-            "holdout": {
-                "n_bars": h["n_bars"], "sharpe": h["sharpe"],
-                "total_return": h["total_return"], "max_drawdown": h["max_drawdown"],
-            },
             "score": wf.stability[rank_by],
         })
 
@@ -182,4 +193,6 @@ def sweep(
         rank_by=rank_by,
         ranked=ranked,
         best=best,
+        universe_name=meta.universe_name,
+        universe_snapshots=meta.universe_snapshots,
     )

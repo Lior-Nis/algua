@@ -81,6 +81,7 @@ class SqliteStrategyRepository:
         reason: str | None = None,
         code_hash: str | None = None,
         config_hash: str | None = None,
+        dependency_hash: str | None = None,
     ) -> StrategyRecord:
         from_stage = rec.stage
         now = _now()
@@ -92,30 +93,119 @@ class SqliteStrategyRepository:
             self._conn.execute(
                 "INSERT INTO stage_transitions"
                 "(strategy_id, from_stage, to_stage, actor, reason, code_hash, config_hash,"
-                " created_at) VALUES (?,?,?,?,?,?,?,?)",
+                " dependency_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (rec.id, from_stage.value, to.value, actor.value, reason,
-                 code_hash, config_hash, now),
+                 code_hash, config_hash, dependency_hash, now),
             )
         return self.get(rec.name)
 
     def record_approval(
-        self, strategy_id: int, code_hash: str, config_hash: str, approved_by: str
+        self,
+        strategy_id: int,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+        approved_by: str,
     ) -> int:
         with self._conn:
             cur = self._conn.execute(
                 "INSERT INTO approvals"
-                "(strategy_id, code_hash, config_hash, approved_by, created_at)"
-                " VALUES (?,?,?,?,?)",
-                (strategy_id, code_hash, config_hash, approved_by, _now()),
+                "(strategy_id, code_hash, config_hash, dependency_hash, approved_by, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (strategy_id, code_hash, config_hash, dependency_hash, approved_by, _now()),
             )
         rowid = cur.lastrowid
         assert rowid is not None  # a successful INSERT always sets lastrowid
         return rowid
 
-    def has_valid_approval(self, strategy_id: int, code_hash: str, config_hash: str) -> bool:
+    def has_valid_approval(
+        self,
+        strategy_id: int,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+    ) -> bool:
+        # A NULL dependency_hash (no lockfile) can never pin a real artifact, so refuse it
+        # outright rather than letting `= NULL` quietly never-match through the SQL.
+        if dependency_hash is None:
+            return False
+        # `dependency_hash=?` against a pre-existing NULL column value yields no match, so legacy
+        # approval rows written before this column existed fail closed — no `OR ... IS NULL`.
         row = self._conn.execute(
             "SELECT 1 FROM approvals WHERE strategy_id=? AND code_hash=? AND config_hash=?"
-            " AND revoked_at IS NULL LIMIT 1",
-            (strategy_id, code_hash, config_hash),
+            " AND dependency_hash=? AND revoked_at IS NULL LIMIT 1",
+            (strategy_id, code_hash, config_hash, dependency_hash),
+        ).fetchone()
+        return row is not None
+
+    def record_search_trial(self, strategy_name: str, n_combos: int, grid_json: str) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
+                " VALUES (?,?,?,?)",
+                (strategy_name, n_combos, grid_json, _now()),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None  # a successful INSERT always sets lastrowid
+        return rowid
+
+    def total_search_combos(self, strategy_name: str) -> int:
+        # COALESCE so an empty result (no trials) reads as 0 rather than NULL.
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(n_combos), 0) AS total FROM search_trials WHERE strategy_name=?",
+            (strategy_name,),
+        ).fetchone()
+        return int(row["total"])
+
+    def record_holdout_evaluation(
+        self,
+        strategy_id: int,
+        *,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+        config_hash: str,
+        reused: bool,
+    ) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO holdout_evaluations"
+                "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
+                " config_hash, reused, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,
+                 config_hash, int(reused), _now()),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None  # a successful INSERT always sets lastrowid
+        return rowid
+
+    def overlapping_holdout_evaluations(
+        self,
+        strategy_id: int,
+        *,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+    ) -> bool:
+        # Data identity: when BOTH the probe and a stored row carry a snapshot_id, identity is the
+        # snapshot_id; otherwise fall back to data_source equality. Period overlap is the standard
+        # interval test (start1 <= end2 AND start2 <= end1). Match is on the window, never config.
+        if snapshot_id is not None:
+            data_match = "snapshot_id = ?"
+            data_param: str = snapshot_id
+        else:
+            # Probe has no snapshot -> identity is the data_source (compare only rows that also
+            # lack a snapshot, so a snapshot-backed row is a distinct identity, not a match).
+            data_match = "snapshot_id IS NULL AND data_source = ?"
+            data_param = data_source
+        row = self._conn.execute(
+            f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ? AND holdout_frac = ?"
+            f" AND {data_match}"
+            f" AND period_start <= ? AND ? <= period_end LIMIT 1",
+            (strategy_id, holdout_frac, data_param, period_end, period_start),
         ).fetchone()
         return row is not None

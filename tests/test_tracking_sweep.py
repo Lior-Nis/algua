@@ -10,7 +10,6 @@ def _combo(lookback, score):
         "n_windows": 4,
         "stability": {"mean_sharpe": score, "std_sharpe": 0.2, "min_sharpe": score - 0.3,
                       "pct_positive_windows": 0.75},
-        "holdout": {"n_bars": 100, "sharpe": 0.5, "total_return": 0.04, "max_drawdown": -0.06},
         "score": score,
     }
 
@@ -124,7 +123,6 @@ def test_sweep_nonfinite_entry_score_not_logged(tmp_path):
         "n_windows": 4,
         "stability": {"mean_sharpe": 0.8, "std_sharpe": 0.1, "min_sharpe": 0.5,
                       "pct_positive_windows": 0.75},
-        "holdout": {"n_bars": 100, "sharpe": 0.5, "total_return": 0.04, "max_drawdown": -0.06},
         "score": float("nan"),
     }
     sweep = SweepResult(
@@ -164,7 +162,7 @@ def test_sweep_finite_entry_score_still_logged(tmp_path):
 
 
 def test_sweep_drops_nonfinite_child_metrics(tmp_path):
-    """NaN/inf in combo stability/holdout must not reach MLflow child runs."""
+    """NaN/inf in combo stability metrics must not reach MLflow child runs."""
     from mlflow.tracking import MlflowClient
 
     bad_combo = {
@@ -173,10 +171,6 @@ def test_sweep_drops_nonfinite_child_metrics(tmp_path):
         "stability": {
             "mean_sharpe": float("nan"), "std_sharpe": float("inf"),
             "min_sharpe": -0.3, "pct_positive_windows": 0.5,
-        },
-        "holdout": {
-            "n_bars": 100, "sharpe": float("nan"),
-            "total_return": 0.02, "max_drawdown": -0.04,
         },
         "score": 0.5,
     }

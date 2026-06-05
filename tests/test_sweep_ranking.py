@@ -15,7 +15,6 @@ def _rec(score: float, std_sharpe: float, params: dict) -> dict:
                       "pct_positive_windows": 1.0},
         "config_hash": "abc",
         "n_windows": 4,
-        "holdout": {"n_bars": 10, "sharpe": 0.5, "total_return": 0.1, "max_drawdown": -0.05},
     }
 
 
