@@ -25,9 +25,10 @@ def _members_as_of(
 ) -> frozenset[str]:
     """As-of-t membership: the snapshot with the greatest effective_date <= t.date().
 
-    The map is keyed by effective_date (one entry per session here, pre-expanded by the wiring
-    layer, but the rule holds for any sparse map). Empty before the earliest effective date.
-    Uses only dates <= t, so membership at t can never see a later snapshot — no look-ahead.
+    The map is keyed by effective_date and may be sparse (the CLI wiring passes one entry per
+    universe snapshot, not per session); the as-of rule holds either way. Empty before the
+    earliest effective date. Uses only dates <= t, so membership at t can never see a later
+    snapshot — no look-ahead.
     """
     target = t.date()
     eligible = [d for d in universe_by_date if d <= target]
