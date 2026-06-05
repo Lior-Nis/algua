@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 
 import typer
 
@@ -19,8 +20,11 @@ from algua.execution.order_state import (
     count_orders,
     derive_positions,
     get_peak_equity,
+    latest_tick_snapshot,
     persist_run,
+    recent_orders,
     record_submitted_order,
+    record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import SimBroker
@@ -129,14 +133,40 @@ def run(
 @paper_app.command("show")
 @json_errors(ValueError, LookupError)
 def show(name: str) -> None:
-    """Show persisted paper state (orders count + derived positions) for a strategy."""
+    """Consolidated per-strategy operability view — stage, kill-switch, drawdown, last tick,
+    recent orders, and a health rollup. A pure read of persisted state (no broker call)."""
     with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
         n_orders = count_orders(conn, name)
         positions = derive_positions(conn, name)
         ks = kill_switch.get(conn, name)
+        peak = get_peak_equity(conn, name)
+        last = latest_tick_snapshot(conn, name)
+        orders = recent_orders(conn, name, 10)
+    tripped = ks is not None
+    last_equity = last["equity"] if last else None
+    drawdown = (
+        1.0 - last_equity / peak
+        if last_equity is not None and peak is not None and peak > 0 else None
+    )
+    if tripped:
+        health = "halted"
+    elif last is not None and not last["reconcile_ok"]:
+        health = "drift"
+    elif last is None:
+        health = "idle"
+    else:
+        health = "ok"
     emit(ok({
-        "strategy": name, "n_orders": n_orders, "positions": positions,
-        "kill_switch": {"tripped": ks is not None, "reason": ks["reason"] if ks else None},
+        "strategy": name,
+        "stage": rec.stage.value,
+        "kill_switch": {"tripped": tripped, "reason": ks["reason"] if ks else None},
+        "drawdown": {"peak_equity": peak, "last_equity": last_equity, "drawdown": drawdown},
+        "last_tick": last,
+        "positions": positions,
+        "n_orders": n_orders,
+        "recent_orders": orders,
+        "health": health,
     }))
 
 
@@ -248,6 +278,13 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
+            record_tick_snapshot(
+                conn, name, tick_ts=datetime.now(UTC).isoformat(),
+                decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
+                equity=result.equity, peak_equity=result.peak_equity,
+                positions=result.positions_before, n_submitted=len(result.submitted),
+                reconcile_ok=result.reconcile_ok,
+            )
         audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)
 

@@ -33,6 +33,7 @@ class TickResult:
     target_weights: dict[str, float]
     positions_before: dict[str, float]
     submitted: list[dict[str, Any]]
+    equity: float = 0.0
     peak_equity: float | None = None
     reconcile_ok: bool = True
     realized_gross: float = 0.0
@@ -169,6 +170,7 @@ def run_tick(
         target_weights={s: float(w) for s, w in weights.items()},
         positions_before=positions_before,
         submitted=submitted,
+        equity=snap.equity,
         peak_equity=peak,
         reconcile_ok=reconcile_ok,
         realized_gross=realized_gross,

@@ -223,3 +223,10 @@ def test_run_tick_ratchets_peak_equity():
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
                       hooks=TickHooks(peak_equity=100_000.0))
     assert result.peak_equity == 120_000.0  # new high
+
+
+def test_run_tick_result_carries_equity():
+    broker = _FakeBroker(equity=123_456.0)  # snapshot() returns TickSnapshot(equity=self._equity)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    assert result.equity == 123_456.0  # the tick's snapshot equity is surfaced on the result

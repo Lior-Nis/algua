@@ -9,7 +9,7 @@ from pathlib import Path
 # so it can add new tables/indexes to an existing DB but CANNOT ALTER a populated one.
 # Any column/constraint change to an existing table needs a real migration
 # (write it explicitly when the need arrives) — not just a bump of this number.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -93,6 +93,21 @@ CREATE TABLE IF NOT EXISTS strategy_peaks (
     peak_equity REAL NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- Append-only per-tick operability record (equity + positions per completed tick); the equity
+-- time-series `paper show` and the future dashboard read. Permanent history — no pruning path yet
+-- (`trade-tick` is wall-clock-per-invocation, so growth is modest); add retention when it matters.
+CREATE TABLE IF NOT EXISTS tick_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy     TEXT NOT NULL,
+    tick_ts      TEXT NOT NULL,
+    decision_ts  TEXT,
+    equity       REAL NOT NULL,
+    peak_equity  REAL,
+    positions    TEXT NOT NULL,
+    n_submitted  INTEGER NOT NULL,
+    reconcile_ok INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_tick_snapshots_strategy_ts ON tick_snapshots(strategy, tick_ts);
 """
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -148,3 +149,43 @@ def clear_peak_equity(conn: sqlite3.Connection, strategy: str) -> None:
     drawdown denominator to current equity — intentional (the operator is re-baselining)."""
     conn.execute("DELETE FROM strategy_peaks WHERE strategy = ?", (strategy,))
     conn.commit()
+
+
+def record_tick_snapshot(
+    conn: sqlite3.Connection, strategy: str, *, tick_ts: str, decision_ts: str | None,
+    equity: float, peak_equity: float | None, positions: dict[str, float], n_submitted: int,
+    reconcile_ok: bool,
+) -> None:
+    """Append one completed-tick snapshot (equity + positions) for a strategy — the per-tick
+    operability/equity-curve record read by `paper show`."""
+    conn.execute(
+        "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, peak_equity, "
+        "positions, n_submitted, reconcile_ok) VALUES (?,?,?,?,?,?,?,?)",
+        (strategy, tick_ts, decision_ts, equity, peak_equity, json.dumps(positions),
+         n_submitted, 1 if reconcile_ok else 0),
+    )
+    conn.commit()
+
+
+def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None:
+    """The most recent tick snapshot for a strategy (positions parsed back to a dict), or None."""
+    row = conn.execute(
+        "SELECT tick_ts, decision_ts, equity, peak_equity, positions, n_submitted, reconcile_ok "
+        "FROM tick_snapshots WHERE strategy = ? ORDER BY id DESC LIMIT 1", (strategy,)
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "tick_ts": row["tick_ts"], "decision_ts": row["decision_ts"], "equity": row["equity"],
+        "peak_equity": row["peak_equity"], "positions": json.loads(row["positions"]),
+        "n_submitted": row["n_submitted"], "reconcile_ok": bool(row["reconcile_ok"]),
+    }
+
+
+def recent_orders(conn: sqlite3.Connection, strategy: str, limit: int = 10) -> list[dict]:
+    """The most recent paper_orders rows for a strategy, newest first."""
+    rows = conn.execute(
+        "SELECT symbol, side, status, broker_order_id, submitted_ts FROM paper_orders "
+        "WHERE strategy = ? ORDER BY id DESC LIMIT ?", (strategy, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
