@@ -64,6 +64,15 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     return strategy
 
 
+def _breach_payload(error: str, **extra: object) -> dict:
+    """A failure envelope for a tripped kill-switch: ``{"ok": false, "kill_switch": "tripped"...}``.
+
+    The shared skeleton of every paper-command halt/breach emit; callers pass the human-readable
+    ``error`` plus whatever variant keys (``kind``, ``strategy``, ``halted``, ...) that path adds.
+    """
+    return {"ok": False, "kill_switch": "tripped", "error": error, **extra}
+
+
 def _trip(conn: sqlite3.Connection, name: str, exc: RiskBreach) -> None:
     """Trip the kill-switch for a risk breach and write the matching audit row (the shared half of
     both commands' breach handling; the divergent emit/flatten stays in each caller)."""
@@ -97,7 +106,7 @@ def run(
                                utc(start), utc(end), max_drawdown=max_drawdown)
         except RiskBreach as exc:
             _trip(conn, name, exc)
-            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped", "error": exc.detail})
+            emit(_breach_payload(exc.detail, kind=exc.kind))
             raise typer.Exit(1) from exc
         persist_run(conn, result)
         audit_append(
@@ -217,8 +226,7 @@ def trade_tick(
             # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
             audit_append(conn, actor="system", action="trade_tick_halted",
                          reason=str(exc), strategy=name)
-            emit({"ok": False, "strategy": name, "kill_switch": "tripped", "halted": True,
-                  "error": str(exc)})
+            emit(_breach_payload(str(exc), strategy=name, halted=True))
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
             _trip(conn, name, exc)
@@ -232,8 +240,8 @@ def trade_tick(
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
-            payload = {"ok": False, "kind": exc.kind, "kill_switch": "tripped",
-                       "liquidation_submitted": liquidation_submitted, "error": exc.detail}
+            payload = _breach_payload(exc.detail, kind=exc.kind,
+                                      liquidation_submitted=liquidation_submitted)
             if flatten_error is not None:
                 payload["flatten_error"] = flatten_error
             emit(payload)
@@ -274,8 +282,7 @@ def flatten(
             broker.cancel_open_orders()
             broker.close_positions(strategy.universe)
         except BrokerError as exc:
-            emit({"ok": False, "strategy": name, "kill_switch": "tripped",
-                  "liquidation_submitted": False, "error": str(exc)})
+            emit(_breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
     # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
     emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))

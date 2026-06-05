@@ -4,8 +4,6 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 
-import pandas as pd
-
 from algua.live.paper_loop import PaperRunResult
 
 # Alpaca client_order_id allows up to 128 chars; keep ours under that and strip anything outside
@@ -94,11 +92,6 @@ def derive_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float
         (strategy,),
     ).fetchall()
     return {r["symbol"]: float(r["qty"]) for r in rows if float(r["qty"]) != 0.0}
-
-
-def reconcile(derived: dict[str, float], broker_positions: pd.Series) -> bool:
-    broker = {s: float(q) for s, q in broker_positions.items() if float(q) != 0.0}
-    return {s: q for s, q in derived.items() if q != 0.0} == broker
 
 
 def record_submitted_order(
