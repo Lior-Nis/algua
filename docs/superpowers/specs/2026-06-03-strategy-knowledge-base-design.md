@@ -56,16 +56,22 @@ authors a strategy; nothing queries a lineage table because the agent reads the 
 
 ### 4.1 Vault layout
 
+> **Updated 2026-06-05 (PR #111):** the vault root moved from `docs/strategies/` to a
+> top-level `kb/` so the knowledge base can hold domains beyond strategies (research, news,
+> pivots) in one Obsidian graph. Strategy docs now live under `kb/strategies/`. The structure
+> below is otherwise unchanged. `knowledge_dir` (default `kb`) is the vault root.
+
 ```
-docs/strategies/            # the Obsidian vault
-├── _index.md               # generated: one line per strategy
-├── _families.md            # generated: families + status + best result
-├── families/
-│   ├── dark-pool-leadlag.md
-│   └── 13f-momentum.md
-├── dark-pool-leadlag-v1.md
-├── dark-pool-leadlag-v2.md
-└── ...
+kb/                         # the Obsidian vault (mount this)
+└── strategies/             # the strategy domain
+    ├── _index.md           # generated: one line per strategy
+    ├── _families.md        # generated: families + status + best result
+    ├── families/
+    │   ├── dark-pool-leadlag.md
+    │   └── 13f-momentum.md
+    ├── dark-pool-leadlag-v1.md
+    ├── dark-pool-leadlag-v2.md
+    └── ...
 ```
 
 `[[wikilinks]]` resolve across folders — the layout is for human tidiness; the graph is
