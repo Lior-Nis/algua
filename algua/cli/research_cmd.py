@@ -17,6 +17,8 @@ from algua.research.gates import GateCriteria, GateDecision, evaluate_gate
 research_app = typer.Typer(help="Research workflow: gates and promotion", no_args_is_help=True)
 app.add_typer(research_app, name="research")
 
+_HOLDOUT_REUSE_OVERRIDE = "override"
+
 
 def _gate_reason(decision: GateDecision) -> str:
     parts = [f"{c['name']}={c['value']:.4g}{c['op']}{c['threshold']:.4g}" for c in decision.checks]
@@ -108,7 +110,7 @@ def promote(
                           windows=windows, holdout_frac=holdout_frac)
         # 5. Record the holdout evaluation NOW — looking at it consumes it regardless of pass/fail.
         repo.record_holdout_evaluation(
-            rec.id, data_source=wf.data_source, snapshot_id=wf.snapshot_id,
+            rec.id, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             config_hash=wf.config_hash, reused=reused,
         )
@@ -118,7 +120,7 @@ def promote(
         if decision.passed:
             reason = _gate_reason(decision)
             if reused:
-                reason += "; holdout_reuse=override"
+                reason += "; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE
             transition_strategy(repo, name, Stage.SHORTLISTED, actor_enum, reason)
             promoted = True
 
@@ -132,7 +134,7 @@ def promote(
         "stability": wf.stability,
     }
     if reused:
-        payload["holdout_reuse"] = "override"
+        payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
     emit(ok(payload))
 
 
