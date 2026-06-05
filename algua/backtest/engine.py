@@ -34,7 +34,7 @@ def _decision_weights(
     before its signal is meaningful, so the first window excludes the warmup span. This matches
     the paper loop's warm-up exactly (warmup_bars = N => the same N initial bars are flat).
 
-    Each evaluated bar runs the SAME long-only + gross-exposure risk checks as the live/paper
+    Each evaluated bar runs the SAME long-only + gross-exposure risk checks as the paper/live
     decision core, so a decision that passes the backtest is one paper/live will also accept.
     """
     columns = adj.columns
@@ -53,11 +53,8 @@ def _decision_weights(
         w = strategy.target_weights(view)
         if len(w) == 0:
             continue
-        # Identical risk checks to the live/paper decision core (algua.live.paper_loop.decide):
-        # ONE source of truth + tolerance for long-only and gross exposure (algua.risk.limits),
-        # so a decision that passes the backtest is one paper/live will also accept. The shared
-        # checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error contract
-        # while preserving the breach (and its `.kind`) as the cause.
+        # The shared checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error
+        # contract while preserving the breach (and its `.kind`) as the cause.
         try:
             check_long_only(w, strategy.name)
             check_gross_exposure(w, strategy.execution.max_gross_exposure)

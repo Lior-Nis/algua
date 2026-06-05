@@ -76,21 +76,6 @@ def decide(
     return weights, intents
 
 
-def decided_weights_by_bar(
-    sink: dict[datetime, pd.Series],
-) -> Callable[[datetime, pd.Series], None]:
-    """Build an `on_decision` callback that records each bar's decided target weights into `sink`.
-
-    A minimal, side-effect-free observation seam: the paper loop already computes the decided
-    weights, so recording them does not change any production decision. Used by the
-    backtest<->paper parity test to read out the live path's per-bar decision."""
-
-    def record(decision_ts: datetime, weights: pd.Series) -> None:
-        sink[decision_ts] = weights
-
-    return record
-
-
 def run_paper(
     strategy: LoadedStrategy,
     broker: SimBroker,

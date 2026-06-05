@@ -6,6 +6,7 @@ the paper/live loop, so a result discovered in research transfers to live. These
 that the two paths make the IDENTICAL decision bar-for-bar, share a single risk-check source
 of truth, and agree on what "warmup_bars = N" means.
 """
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -15,12 +16,27 @@ from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import BacktestError, _decision_weights, run, simulate
 from algua.contracts.types import ExecutionContract
 from algua.execution.sim_broker import SimBroker
-from algua.live.paper_loop import decided_weights_by_bar, run_paper
+from algua.live.paper_loop import run_paper
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 4, 1, tzinfo=UTC)
+
+
+def decided_weights_by_bar(
+    sink: dict[datetime, pd.Series],
+) -> Callable[[datetime, pd.Series], None]:
+    """Build an `on_decision` callback that records each bar's decided target weights into `sink`.
+
+    A minimal, side-effect-free observation seam: run_paper already computes the decided weights,
+    so recording them does not change any production decision. Test-only — reads out the live
+    path's per-bar decision to assert backtest<->paper parity."""
+
+    def record(decision_ts: datetime, weights: pd.Series) -> None:
+        sink[decision_ts] = weights
+
+    return record
 
 
 def _momentum_strategy(warmup_bars: int = 3) -> LoadedStrategy:
