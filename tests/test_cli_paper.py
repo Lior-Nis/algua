@@ -325,3 +325,70 @@ def test_show_health_idle_no_ticks():
 def test_show_unknown_strategy_errors():
     result = runner.invoke(app, ["paper", "show", "no_such_strategy"])
     assert result.exit_code == 1 and json.loads(result.stdout)["ok"] is False
+
+
+class _HaltBroker:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.closed_all = False
+
+    def close_all_positions(self):
+        if self.fail:
+            raise BrokerError("alpaca failed to close some positions: [...]")
+        self.closed_all = True
+
+
+def test_halt_all_engages_and_flattens(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    broker = _HaltBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "halt-all", "--reason", "panic"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["global_halt"] == "set" and payload["liquidation_submitted"] is True
+    assert broker.closed_all is True
+
+
+def test_halt_all_close_failure_stays_engaged(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _HaltBroker(fail=True))
+    result = runner.invoke(app, ["paper", "halt-all", "--reason", "panic"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False and payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is False
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is True  # still engaged (fail-safe)
+
+
+def test_resume_all_clears_and_wipes_peaks_but_keeps_strategy_switch(monkeypatch):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import get_peak_equity, update_peak_equity
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt, kill_switch
+
+    _to_paper()
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        global_halt.engage(conn, reason="x", actor="human")
+        update_peak_equity(conn, "cross_sectional_momentum", 100.0)
+        kill_switch.trip(conn, "cross_sectional_momentum", reason="indiv", actor="human")
+    result = runner.invoke(app, ["paper", "resume-all"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["global_halt"] == "reset"
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is False
+        assert get_peak_equity(conn, "cross_sectional_momentum") is None  # peaks wiped
+        assert kill_switch.is_tripped(conn, "cross_sectional_momentum") is True  # untouched

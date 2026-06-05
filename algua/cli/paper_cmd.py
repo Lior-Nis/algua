@@ -15,6 +15,7 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
+    clear_all_peaks,
     clear_peak_equity,
     client_order_id,
     count_orders,
@@ -31,7 +32,7 @@ from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.store import SqliteStrategyRepository
-from algua.risk import kill_switch
+from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
@@ -323,3 +324,44 @@ def flatten(
             raise typer.Exit(1) from exc
     # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
     emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))
+
+
+@paper_app.command("halt-all")
+@json_errors(ValueError, LookupError, BrokerError)
+def halt_all(
+    reason: str = typer.Option(..., "--reason", help="why the whole account is being halted"),
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+) -> None:
+    """ACCOUNT-WIDE emergency: engage the global halt and flatten the ENTIRE Alpaca account."""
+    with registry_conn() as conn:
+        broker = _alpaca_broker_from_settings()
+        # Engage first (fail-safe): all trading is stopped even if the close call then fails.
+        global_halt.engage(conn, reason=reason, actor=actor)
+        audit_append(conn, actor=actor, action="halt_all", reason=reason, strategy=None)
+        try:
+            broker.close_all_positions()
+        except BrokerError as exc:
+            audit_append(conn, actor="system", action="flatten_failed", reason=str(exc),
+                         strategy=None)
+            emit({"ok": False, "global_halt": "set", "liquidation_submitted": False,
+                  "error": str(exc)})
+            raise typer.Exit(1) from exc
+    emit(ok({"global_halt": "set", "liquidation_submitted": True}))
+
+
+@paper_app.command("resume-all")
+@json_errors(ValueError)
+def resume_all(
+    actor: str = typer.Option("human", "--actor", help="human | agent"),
+) -> None:
+    """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
+    to cash). Per-strategy kill-switches are left untouched."""
+    with registry_conn() as conn:
+        was_set = global_halt.is_engaged(conn)
+        if was_set:
+            audit_append(conn, actor=actor, action="resume_all",
+                         reason="clear global halt; re-base all drawdown peaks", strategy=None)
+            # Re-base peaks first, clear the halt LAST so the un-halt is the final write (#109).
+            clear_all_peaks(conn)
+            global_halt.clear(conn)
+    emit(ok({"global_halt": "reset" if was_set else "not_set"}))
