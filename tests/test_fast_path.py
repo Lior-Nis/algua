@@ -30,10 +30,6 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 6, 1, tzinfo=UTC)
 
 
-def _panel(bars: pd.DataFrame, adj: pd.DataFrame) -> tuple:
-    return bars, adj
-
-
 def _bars_adj(symbols: list[str], seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     bars = SyntheticProvider(seed=seed).get_bars(symbols, START, END, "1d")
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
@@ -43,7 +39,7 @@ def _bars_adj(symbols: list[str], seed: int = 0) -> tuple[pd.DataFrame, pd.DataF
 # --- 1. loader detection -------------------------------------------------------------------
 
 
-def test_loader_panel_fn_none_when_absent() -> None:
+def test_example_strategy_exposes_panel_fn() -> None:
     strat = load_strategy("cross_sectional_momentum")
     # cross_sectional_momentum DOES define a panel fn (added in this change); use a strategy
     # module without one for the None case.
@@ -119,7 +115,9 @@ def test_cross_sectional_momentum_full_parity() -> None:
     syms = strat.universe
     bars, adj = _bars_adj(syms, seed=7)
     loop = _decision_weights(strat, bars, adj)
-    panel = strat.panel_fn(bars, strat.params)  # type: ignore[misc]
+    panel_fn = strat.panel_fn
+    assert panel_fn is not None
+    panel = panel_fn(bars, strat.params)
     # Reindex panel like the fast path will, then compare to the loop output.
     aligned = panel.reindex(index=adj.index, columns=adj.columns).fillna(0.0)
     warmup = strat.execution.warmup_bars

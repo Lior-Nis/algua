@@ -144,6 +144,10 @@ def _decision_weights_fast(
     The guard is the crux of the "one signal definition" invariant: the panel fn is never trusted
     on its own. On any disagreement (or any per-row risk breach) this RAISES `BacktestError`; it
     never silently falls back to either answer.
+
+    Risk enforcement (long-only + gross) remains per-row by design — it reuses the same
+    `risk.limits` checks as the loop rather than re-deriving a vectorized form, deliberately
+    preserving the single source of truth even though it means one Python pass over the rows.
     """
     assert strategy.panel_fn is not None  # caller guarantees this
     columns = adj.columns
