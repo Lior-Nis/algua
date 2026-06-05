@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.registry.approvals import compute_artifact_hashes, has_valid_approval
 from algua.registry.repository import StrategyRecord, StrategyRepository
 
 ApprovalVerifier = Callable[[StrategyRepository, int, str, str], bool]
@@ -55,20 +56,8 @@ def _validate_live_gate(
     """
     if actor is not Actor.HUMAN:
         raise TransitionError("transition to live requires a human actor")
-    code_hash, config_hash = _compute_hashes(name)
-    verifier = approval_verifier or _default_approval_verifier()
+    code_hash, config_hash = compute_artifact_hashes(name)
+    verifier = approval_verifier or has_valid_approval
     if not verifier(repo, strategy_id, code_hash, config_hash):
         raise TransitionError("no matching human approval for this code+config")
     return code_hash, config_hash
-
-
-def _compute_hashes(name: str) -> tuple[str, str]:
-    from algua.registry.approvals import compute_artifact_hashes
-
-    return compute_artifact_hashes(name)
-
-
-def _default_approval_verifier() -> ApprovalVerifier:
-    from algua.registry.approvals import has_valid_approval
-
-    return has_valid_approval

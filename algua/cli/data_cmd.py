@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from algua.cli._common import now_iso
+from algua.cli._common import now_iso, ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -49,7 +49,7 @@ def ingest(
         source=source,
         file_path=from_file,
     )
-    emit({"ok": True, "snapshot": rec.to_dict()})
+    emit(ok({"snapshot": rec.to_dict()}))
 
 
 @data_app.command("ingest-bars")
@@ -92,7 +92,7 @@ def ingest_bars(
         adjustment=adjustment,
         source_metadata=result.source_metadata,
     )
-    emit({"ok": True, "snapshot": rec.to_dict()})
+    emit(ok({"snapshot": rec.to_dict()}))
 
 
 @data_app.command("ingest-universe")
@@ -112,7 +112,7 @@ def ingest_universe(
         as_of=as_of or now_iso(),
         source=source,
     )
-    emit({"ok": True, "snapshot": rec.to_dict()})
+    emit(ok({"snapshot": rec.to_dict()}))
 
 
 @data_app.command("inspect")
