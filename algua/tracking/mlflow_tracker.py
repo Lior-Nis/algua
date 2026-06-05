@@ -3,11 +3,29 @@ from __future__ import annotations
 import math
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Protocol
 
 from algua.backtest.result import BacktestResult
 from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
+
+# ---------------------------------------------------------------------------
+# Protocol (#45)
+# ---------------------------------------------------------------------------
+
+class ExperimentTracker(Protocol):
+    """Structural protocol for experiment loggers."""
+
+    def log_backtest(
+        self, result: BacktestResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str: ...
+
+    def log_sweep(self, result: SweepResult, *, tracking_uri: str) -> str: ...
+
+    def log_walk_forward(
+        self, result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str: ...
+
 
 # ---------------------------------------------------------------------------
 # Helpers

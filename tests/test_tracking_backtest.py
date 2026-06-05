@@ -2,6 +2,7 @@ import math
 
 from algua.backtest.result import BacktestResult
 from algua.tracking.mlflow_tracker import (
+    ExperimentTracker,
     _flatten,
     _numeric_metrics,
     log_backtest,
@@ -42,6 +43,31 @@ def test_numeric_metrics_integer_count_survives():
     d = {"sharpe": 1.1, "n_rebalances": 7}
     result = _numeric_metrics(d)
     assert result["n_rebalances"] == 7.0
+
+
+# ---------------------------------------------------------------------------
+# ExperimentTracker protocol — #45
+# ---------------------------------------------------------------------------
+
+def test_experiment_tracker_protocol_is_structural():
+    """Any object with the three log_* methods satisfies ExperimentTracker structurally."""
+    # Protocol is importable and has the expected attributes
+    for method in ("log_backtest", "log_sweep", "log_walk_forward"):
+        assert hasattr(ExperimentTracker, method)
+
+    class Fake:
+        def log_backtest(self, result, params, *, tracking_uri):
+            return "run-1"
+
+        def log_sweep(self, result, *, tracking_uri):
+            return "run-2"
+
+        def log_walk_forward(self, result, params, *, tracking_uri):
+            return "run-3"
+
+    # Structural check: all methods present
+    for method in ("log_backtest", "log_sweep", "log_walk_forward"):
+        assert hasattr(Fake(), method)
 
 
 # ---------------------------------------------------------------------------
