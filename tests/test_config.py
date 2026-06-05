@@ -43,6 +43,14 @@ def test_alpaca_paper_url_default():
     assert get_settings().alpaca_paper_url == "https://paper-api.alpaca.markets"
 
 
+def test_knowledge_dir_default_and_override(monkeypatch):
+    from algua.config.settings import Settings
+
+    assert Settings().knowledge_dir == Path("docs/strategies")
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", "/tmp/vault")
+    assert Settings().knowledge_dir == Path("/tmp/vault")
+
+
 def test_alpaca_paper_url_rejects_live_endpoint(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_PAPER_URL", "https://api.alpaca.markets")
     with pytest.raises(ValidationError):

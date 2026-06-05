@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 import keyword
+import re
 from pathlib import Path
 
 import typer
 
+from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.config.settings import get_settings
+from algua.knowledge.sync import (
+    generate_indexes,
+    strategy_family,
+    sync_all,
+    sync_family_doc,
+    sync_strategy_doc,
+)
+from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
+from algua.registry.store import SqliteStrategyRepository
 from algua.strategies.loader import list_strategies
 
 strategy_app = typer.Typer(help="Author and list strategies", no_args_is_help=True)
 app.add_typer(strategy_app, name="strategy")
+
+_FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 _TEMPLATE = '''\
 """Strategy: {name}. Edit compute_weights to express your cross-sectional logic."""
@@ -53,18 +67,69 @@ def list_() -> None:
 
 @strategy_app.command("new")
 @json_errors()
-def new(name: str) -> None:
-    """Scaffold a new strategy module under algua/strategies/examples/."""
-    # `name` becomes both a filesystem path segment and a Python module name, so it must be a
-    # safe identifier — rejects path traversal ("../x"), separators/spaces, and non-importable
-    # or reserved names ("bad-name", "class").
+def new(
+    name: str,
+    family: str = typer.Option(None, "--family", help="thesis family this belongs to"),
+    derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),
+) -> None:
+    """Scaffold a new strategy module + its knowledge-base doc (and family hub if needed)."""
     if not name.isidentifier() or keyword.iskeyword(name):
         raise ValueError(
             f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
+        )
+    if family is not None and not _FAMILY_RE.match(family):
+        raise ValueError(
+            f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)"
         )
     path = Path(__file__).parent.parent / "strategies" / "examples" / f"{name}.py"
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         raise ValueError(f"strategy already exists: {path}")
     path.write_text(_TEMPLATE.format(name=name))
-    emit({"ok": True, "name": name, "path": str(path)})
+
+    vault = get_settings().knowledge_dir
+    vault.mkdir(parents=True, exist_ok=True)
+    doc_path = vault / f"{name}.md"
+    if not doc_path.exists():
+        doc_path.write_text(
+            scaffold_strategy_doc(name, family=family, derived_from=derived_from)
+        )
+    family_doc: str | None = None
+    if family:
+        (vault / "families").mkdir(parents=True, exist_ok=True)
+        fam_path = vault / "families" / f"{family}.md"
+        if not fam_path.exists():
+            fam_path.write_text(scaffold_family_doc(family))
+        family_doc = str(fam_path)
+
+    emit(ok({
+        "name": name, "path": str(path),
+        "doc": str(doc_path), "family_doc": family_doc,
+    }))
+
+
+@strategy_app.command("doc")
+@json_errors()
+def doc(
+    name: str = typer.Argument(None, help="strategy to sync; omit (or --all) for all"),
+    all_: bool = typer.Option(False, "--all", help="sync every strategy + family doc"),
+) -> None:
+    """Regenerate the synced blocks of strategy/family docs + rebuild the indexes."""
+    settings = get_settings()
+    # Read lifecycle stage at the CLI seam; the knowledge layer stays registry-free.
+    with registry_conn() as conn:
+        stages = {
+            rec.name: rec.stage.value for rec in SqliteStrategyRepository(conn).list_strategies()
+        }
+    if all_ or name is None:
+        summary = sync_all(settings, stages)
+    else:
+        if not sync_strategy_doc(settings, name, stage=stages.get(name)):
+            raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
+        # Keep the family roster consistent with this strategy's freshly-synced stage.
+        family = strategy_family(settings, name)
+        if family:
+            sync_family_doc(settings, family)
+        generate_indexes(settings)
+        summary = {"strategies": [name], "families": [family] if family else []}
+    emit(ok(summary))

@@ -56,6 +56,24 @@ def _calendar_detail() -> str:
     return settings.exchange
 
 
+def _knowledge_base_detail() -> str:
+    """Knowledge-base drift probe: registry stage is read at the seam and passed in, so the
+    knowledge layer stays registry-free. Drift (a missing doc or a stale synced stage) raises,
+    so ``_check`` renders it as a failed check with the drift detail."""
+    from algua.cli._common import registry_conn
+    from algua.knowledge.sync import kb_check
+    from algua.registry.store import SqliteStrategyRepository
+
+    with registry_conn() as conn:
+        stages = {
+            rec.name: rec.stage.value for rec in SqliteStrategyRepository(conn).list_strategies()
+        }
+    healthy, detail = kb_check(get_settings(), stages)
+    if not healthy:
+        raise RuntimeError(detail)
+    return detail
+
+
 @app.command()
 def doctor() -> None:
     """Check environment readiness. Exits non-zero if any check fails."""
@@ -64,6 +82,7 @@ def doctor() -> None:
          "detail": sys.version.split()[0]},
         _check("registry_db", _registry_db_detail),
         _check("calendar", _calendar_detail),
+        _check("knowledge_base", _knowledge_base_detail),
     ]
     all_ok = all(c["ok"] for c in checks)
     emit({"ok": all_ok, "checks": checks})

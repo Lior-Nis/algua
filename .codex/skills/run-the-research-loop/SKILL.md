@@ -19,11 +19,16 @@ research explores. Ground your hypotheses in this thesis unless told otherwise.
 
 For each hypothesis:
 
-1. **Ideate.** Form one concrete, testable hypothesis (e.g. "longer-lookback cross-sectional
-   momentum with a tighter top-k concentrates into stronger trends"). Pick a unique strategy name;
-   skip names already in `uv run algua registry list`.
-2. **Author.** Delegate to the `author` subagent (it follows `author-a-strategy`) to write
-   `algua/strategies/examples/<name>.py`. Confirm it loads: `uv run algua backtest run <name> --demo`.
+1. **Ideate.** First read the knowledge base: `docs/strategies/_index.md` and
+   `_families.md`. Prefer a thesis family marked `exploring`/`promising` with an open axis
+   in its `## Open questions`; read that family doc and the relevant strategy docs to avoid
+   re-running a refuted idea. Form one concrete, testable hypothesis on the most promising
+   open axis. Pick a unique strategy name; skip names already in `uv run algua registry list`.
+2. **Author.** Scaffold with `uv run algua strategy new <name> --family <slug> --derived-from
+   <parent>` (creates the module *and* the KB doc + family hub). Delegate to the `author`
+   subagent (it follows `author-a-strategy`) to write `algua/strategies/examples/<name>.py`,
+   then fill in the doc's `## Hypothesis` and `## Derivation` prose. Confirm it loads:
+   `uv run algua backtest run <name> --demo`.
 3. **Backtest + register.** `uv run algua backtest run <name> --demo --register` (advances `idea →
    backtested`).
 4. **Out-of-sample evidence.** `uv run algua backtest walk-forward <name> --demo` (holdout + K
@@ -35,7 +40,10 @@ For each hypothesis:
 6. **Gate.** Run `uv run algua research promote <name> --demo` (record the combos you searched with
    `--n-combos K`). The gate advances `backtested → shortlisted` **only on pass**; on a fail it
    reports why and leaves the stage unchanged. Trust the gate — do not lower thresholds to force a pass.
-7. **Record.** Append the hypothesis, params, key metrics, the gate decision, and your
+7. **Record.** Sync the synced fact blocks: `uv run algua strategy doc <name>`. Then write
+   the doc's `## Verdict & next` (what was learned + the next idea as a `[[dangling-link]]`),
+   set `hypothesis_status`, and update the family doc's `## State of exploration` and
+   `status`. Finally append the hypothesis, params, key metrics, the gate decision, and your
    shortlist/discard rationale to `run-report.md`.
 
 ## Stopping

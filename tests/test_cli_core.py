@@ -44,6 +44,26 @@ def test_main_unknown_options_emit_json(capsys):
     assert "No such option" in payload["error"]
 
 
+def test_doctor_reports_knowledge_base_check(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    result = runner.invoke(app, ["doctor"])
+    payload = json.loads(result.stdout)
+    assert "knowledge_base" in {c["check"] for c in payload["checks"]}
+
+
+def test_doctor_flags_missing_strategy_doc(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    runner.invoke(app, ["registry", "add", "alpha"])  # registry row, no doc
+    result = runner.invoke(app, ["doctor"])
+    payload = json.loads(result.stdout)
+    kb = next(c for c in payload["checks"] if c["check"] == "knowledge_base")
+    assert kb["ok"] is False
+    assert "alpha" in kb["detail"]
+    assert result.exit_code == 1
+
+
 def test_main_decorated_errors_exit_nonzero(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
 

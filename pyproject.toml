@@ -118,3 +118,20 @@ name = "backtest engine stays off the risk lane"
 type = "forbidden"
 source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.risk"]
+
+[[tool.importlinter.contracts]]
+# The knowledge layer is a pure projection: it reads config + the filesystem vault + MLflow,
+# and receives registry state (stage) passed in from the CLI seam — it never imports the
+# registry itself, matching how backtest/research/live stay registry-free.
+name = "knowledge layer stays off cli, registry, backtest, live, execution"
+type = "forbidden"
+source_modules = ["algua.knowledge"]
+forbidden_modules = [
+    "algua.cli", "algua.registry", "algua.backtest", "algua.live", "algua.execution"
+]
+
+[[tool.importlinter.contracts]]
+name = "pure + execution lanes stay off the knowledge layer"
+type = "forbidden"
+source_modules = ["algua.backtest", "algua.live", "algua.features", "algua.contracts"]
+forbidden_modules = ["algua.knowledge"]
