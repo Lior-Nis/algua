@@ -5,11 +5,11 @@ from datetime import datetime
 import pandas as pd
 import vectorbt as vbt
 
-from algua.backtest._constants import GROSS_EXPOSURE_TOL
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
+from algua.risk.limits import RiskBreach, check_gross_exposure, check_long_only
 from algua.strategies.base import LoadedStrategy
 
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
@@ -31,10 +31,13 @@ def _decision_weights(
     re-copying a growing `.loc[:t]` prefix each step.
 
     The first `warmup_bars` bars are held flat: a strategy may need that much history
-    before its signal is meaningful, so the first window excludes the warmup span.
+    before its signal is meaningful, so the first window excludes the warmup span. This matches
+    the paper loop's warm-up exactly (warmup_bars = N => the same N initial bars are flat).
+
+    Each evaluated bar runs the SAME long-only + gross-exposure risk checks as the live/paper
+    decision core, so a decision that passes the backtest is one paper/live will also accept.
     """
     columns = adj.columns
-    max_gross = strategy.execution.max_gross_exposure
     warmup = strategy.execution.warmup_bars
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
@@ -50,13 +53,17 @@ def _decision_weights(
         w = strategy.target_weights(view)
         if len(w) == 0:
             continue
+        # Identical risk checks to the live/paper decision core (algua.live.paper_loop.decide):
+        # ONE source of truth + tolerance for long-only and gross exposure (algua.risk.limits),
+        # so a decision that passes the backtest is one paper/live will also accept. The shared
+        # checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error contract
+        # while preserving the breach (and its `.kind`) as the cause.
+        try:
+            check_long_only(w, strategy.name)
+            check_gross_exposure(w, strategy.execution.max_gross_exposure)
+        except RiskBreach as breach:
+            raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
-        gross = float(row.abs().sum())
-        if gross > max_gross + GROSS_EXPOSURE_TOL:
-            raise BacktestError(
-                f"strategy '{strategy.name}' targeted gross exposure {gross:.4f} at {t} "
-                f"exceeding max_gross_exposure={max_gross}"
-            )
         # Label-aligned assignment: place each symbol's weight in its own column rather than
         # trusting positional order (#42).
         weights.loc[t, row.index] = row.to_numpy()
@@ -66,8 +73,8 @@ def _decision_weights(
 def simulate(
     strategy: LoadedStrategy, provider: DataProvider, start: datetime, end: datetime
 ) -> tuple[vbt.Portfolio, pd.DataFrame]:
-    """Fetch bars, run the per-bar decision loop (enforcing gross exposure), apply the
-    t->t+1 shift, and simulate. Returns (portfolio, effective-weights).
+    """Fetch bars, run the per-bar decision loop (enforcing the shared long-only + gross-exposure
+    risk checks), apply the t->t+1 shift, and simulate. Returns (portfolio, effective-weights).
 
     This is the public simulation step: bars -> (portfolio, effective weights). Metrics are
     computed separately (see algua.backtest.metrics). Shared by run() and walk_forward()."""
