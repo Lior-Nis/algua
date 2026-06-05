@@ -32,10 +32,21 @@ def latest_run_metrics(strategy: str, *, tracking_uri: str) -> dict[str, Any] | 
     if not runs:
         return None
     run = runs[0]
+    # The OOS holdout is revealed in exactly ONE place: `research promote` (which burns it).
+    # The knowledge doc is an operator-facing surface and must withhold holdout metrics,
+    # even for runs logged before the writers were sealed (defense-in-depth).
+    # Drop any key that is "holdout_metrics" or starts with "holdout." (the flattened shape
+    # produced by the tracker's _flatten helper, e.g. "holdout.sharpe").
+    raw_metrics = run.data.metrics
+    filtered_metrics = {
+        k: v
+        for k, v in raw_metrics.items()
+        if k != "holdout_metrics" and not k.lower().startswith("holdout.")
+    }
     return {
         "run_id": run.info.run_id,
         "kind": run.data.tags.get("kind", "unknown"),
         "snapshot_id": run.data.params.get("snapshot_id"),
         "seed": run.data.params.get("seed"),
-        "metrics": dict(run.data.metrics),
+        "metrics": filtered_metrics,
     }
