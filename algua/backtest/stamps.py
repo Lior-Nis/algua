@@ -5,13 +5,15 @@ import os
 import subprocess
 from pathlib import Path
 
+from algua.provenance import lockfile
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 
 def runtime_stamps() -> dict[str, str | None]:
     return {
         "code_hash": _code_hash(),
-        "dependency_hash": _file_hash(_ROOT / "uv.lock"),
+        "dependency_hash": lockfile.dependency_hash(),
     }
 
 
@@ -61,13 +63,3 @@ def _git_bytes(args: list[str]) -> bytes | None:
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
     return result.stdout
-
-
-def _file_hash(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

@@ -78,8 +78,10 @@ def transition(
                 raise TransitionError("transition to live requires a human actor")
             rec = repo.get(name)
             validate_transition(rec.stage, Stage.LIVE)  # reject non-paper before issuing
-            code_hash, config_hash = compute_artifact_hashes(name)
-            issued = live_gate.issue_challenge(conn, rec.id, name, code_hash, config_hash)
+            identity = compute_artifact_hashes(name)
+            issued = live_gate.issue_challenge(
+                conn, rec.id, name, identity.code_hash, identity.config_hash,
+                identity.dependency_hash)
             emit(ok({
                 "action": "go_live_challenge", "strategy": name, **issued,
                 "instructions": ("sign the 'challenge' value with your enrolled key: "
@@ -93,9 +95,9 @@ def transition(
         if target is Stage.LIVE:
             sig_bytes = Path(signature).read_bytes()
 
-            def _verify(_repo: object, sid: int, ch: str, cfg: str) -> bool:
+            def _verify(_repo: object, sid: int, ch: str, cfg: str, dep: str | None) -> bool:
                 principal = live_gate.verify_and_consume(
-                    conn, name, sid, ch, cfg, sig_bytes, ALLOWED_SIGNERS_PATH)
+                    conn, name, sid, ch, cfg, dep, sig_bytes, ALLOWED_SIGNERS_PATH)
                 if principal is None:
                     return False
                 approver["id"] = principal

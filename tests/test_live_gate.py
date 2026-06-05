@@ -15,30 +15,33 @@ def _conn(tmp_path):
 
 
 def test_build_challenge_is_deterministic():
-    a = live_gate.build_challenge("s", 1, "ch", "cfg", "nonce123", "2026-06-05T00:10:00+00:00")
-    b = live_gate.build_challenge("s", 1, "ch", "cfg", "nonce123", "2026-06-05T00:10:00+00:00")
-    assert a == b and "nonce=nonce123" in a and a.startswith("algua-go-live")
+    exp = "2026-06-05T00:10:00+00:00"
+    a = live_gate.build_challenge("s", 1, "ch", "cfg", "dep", "nonce123", exp)
+    b = live_gate.build_challenge("s", 1, "ch", "cfg", "dep", "nonce123", exp)
+    assert a == b and "nonce=nonce123" in a and "dependency_hash=dep" in a
+    assert a.startswith("algua-go-live")
 
 
 def test_issue_then_find_then_consume(tmp_path):
     conn = _conn(tmp_path)
     now = datetime(2026, 6, 5, tzinfo=UTC)
-    issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", now=now)
+    issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
     assert "nonce" in issued and "challenge" in issued and "expires_at" in issued
-    row = live_gate.find_pending_challenge(conn, 1, "ch", "cfg", now=now)
+    row = live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "dep", now=now)
     assert row is not None and row["nonce"] == issued["nonce"]
     assert live_gate.consume_challenge(conn, issued["nonce"], now=now) is True
     assert live_gate.consume_challenge(conn, issued["nonce"], now=now) is False  # single-use
-    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", now=now) is None  # consumed
+    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "dep", now=now) is None  # used
 
 
 def test_find_pending_rejects_expired_and_wrong_hash(tmp_path):
     conn = _conn(tmp_path)
     now = datetime(2026, 6, 5, tzinfo=UTC)
-    live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", now=now)
+    live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
     later = now + timedelta(hours=1)
-    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", now=later) is None  # expired
-    assert live_gate.find_pending_challenge(conn, 1, "DIFFERENT", "cfg", now=now) is None
+    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "dep", now=later) is None  # exp
+    assert live_gate.find_pending_challenge(conn, 1, "DIFFERENT", "cfg", "dep", now=now) is None
+    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "OTHER", now=now) is None  # dep
 
 
 def _make_key(tmp_path, name="id"):

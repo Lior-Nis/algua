@@ -83,3 +83,62 @@ def test_list_filters_by_stage(repo):
     _transition(repo, "beta", Stage.BACKTESTED, Actor.AGENT)
     ideas = repo.list_strategies(Stage.IDEA)
     assert [r.name for r in ideas] == ["alpha"]
+
+
+# --- holdout_evaluations -----------------------------------------------------
+
+def test_record_and_query_overlapping_holdout(repo):
+    rec = repo.add("alpha")
+    repo.record_holdout_evaluation(
+        rec.id, data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2022-01-01", period_end="2023-12-31", holdout_frac=0.2,
+        config_hash="cfg", reused=False,
+    )
+    # Overlapping period, same data_source + holdout_frac -> collision.
+    assert repo.overlapping_holdout_evaluations(
+        rec.id, data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2023-06-01", period_end="2024-06-01", holdout_frac=0.2,
+    )
+
+
+def test_holdout_non_overlap_and_frac_and_data_distinguish(repo):
+    rec = repo.add("alpha")
+    repo.record_holdout_evaluation(
+        rec.id, data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
+        config_hash="cfg", reused=False,
+    )
+    # Disjoint period -> no collision.
+    assert not repo.overlapping_holdout_evaluations(
+        rec.id, data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2023-01-01", period_end="2023-12-31", holdout_frac=0.2,
+    )
+    # Different holdout_frac -> no collision.
+    assert not repo.overlapping_holdout_evaluations(
+        rec.id, data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.3,
+    )
+    # Different data_source -> no collision.
+    assert not repo.overlapping_holdout_evaluations(
+        rec.id, data_source="StoreBackedProvider", snapshot_id=None,
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
+    )
+
+
+def test_holdout_snapshot_identity_takes_precedence(repo):
+    rec = repo.add("alpha")
+    repo.record_holdout_evaluation(
+        rec.id, data_source="StoreBackedProvider", snapshot_id="snapA",
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
+        config_hash="cfg", reused=False,
+    )
+    # Same window, different snapshot id -> distinct data identity, no collision.
+    assert not repo.overlapping_holdout_evaluations(
+        rec.id, data_source="StoreBackedProvider", snapshot_id="snapB",
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
+    )
+    # Same snapshot id, overlapping window -> collision.
+    assert repo.overlapping_holdout_evaluations(
+        rec.id, data_source="StoreBackedProvider", snapshot_id="snapA",
+        period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2,
+    )

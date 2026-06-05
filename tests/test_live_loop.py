@@ -95,6 +95,49 @@ def test_run_tick_warmup_not_met_submits_nothing():
     assert result.submitted == [] and broker.submitted == []
 
 
+def _bars_n(symbol, n_sessions):
+    """Daily bars for one symbol over `n_sessions` distinct closed sessions, flat at $100."""
+    dates = [datetime(2023, 2, d, tzinfo=UTC) for d in range(1, n_sessions + 1)]
+    rows = [{"timestamp": ts, "symbol": symbol, "open": 100.0, "high": 100.0,
+             "low": 100.0, "close": 100.0, "adj_close": 100.0, "volume": 1000} for ts in dates]
+    return pd.DataFrame(rows).set_index("timestamp").sort_index(), dates
+
+
+def test_run_tick_warmup_boundary_matches_backtest_paper_semantic():
+    """PIN live's warm-up boundary to the reconciled backtest/paper semantic (#1).
+
+    "warmup_bars = N" holds the first N sessions flat and FIRST DECIDES on session index N
+    (the bar that sees N+1 sessions of history) — the SAME boundary as the backtest loop
+    (`if i < warmup: continue`, first decision at i == N) and the paper loop
+    (`if bars_seen <= warmup: continue`, first decision at session index N). See
+    test_decision_parity.test_warmup_means_the_same_number_of_flat_bars_in_both_paths.
+
+    Regression guard against the historical off-by-one: live formerly decided once `nunique()
+    reached N` (deciding on session index N-1, one bar early). It must now block while
+    `nunique() <= N` and first decide at `nunique() == N+1`.
+    """
+    N = 5
+
+    # Exactly N closed sessions: still warm-up — the tick must NOT decide (no snapshot, no orders).
+    bars_n, dates_n = _bars_n("AAA", N)
+    broker = _FakeBroker()
+    after = datetime(2023, 2, N + 1, tzinfo=UTC)  # all N sessions are fully closed
+    result = run_tick(_strategy({"AAA": 1.0}, warmup_bars=N), broker, _FakeProvider(bars_n),
+                      dates_n[0], dates_n[-1], now=after)
+    assert result.target_weights == {} and result.submitted == []
+    assert broker.snapshots == 0  # warm-up path takes no sizing snapshot / makes no decision
+
+    # N+1 closed sessions: warm-up satisfied — the tick decides on session index N (the latest
+    # closed session, the same bar the backtest/paper first evaluate).
+    bars_n1, dates_n1 = _bars_n("AAA", N + 1)
+    broker = _FakeBroker()
+    after = datetime(2023, 2, N + 2, tzinfo=UTC)
+    result = run_tick(_strategy({"AAA": 1.0}, warmup_bars=N), broker, _FakeProvider(bars_n1),
+                      dates_n1[0], dates_n1[-1], now=after)
+    assert result.decision_ts == dates_n1[N]  # session index N (0-based)
+    assert len(result.submitted) == 1 and result.submitted[0]["symbol"] == "AAA"
+
+
 def test_run_tick_gross_breach_raises():
     broker = _FakeBroker()
     bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0]})

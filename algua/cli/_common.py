@@ -8,9 +8,9 @@ private-import smell): the public names here are the sanctioned shared surface.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from algua.backtest._sample import SyntheticProvider
 from algua.config.settings import get_settings
@@ -77,3 +77,40 @@ def resolve_eval_inputs(
     strategy = load_strategy(name)
     provider = select_provider(demo, snapshot)
     return strategy, provider, utc(start), utc(end)
+
+
+def resolve_universe_inputs(
+    universe_name: str | None, start_dt: datetime, end_dt: datetime
+) -> tuple[Mapping[date, Collection[str]] | None, list[dict[str, str]] | None]:
+    """Resolve the opt-in point-in-time universe for a backtest-family command.
+
+    `universe_name is None` (no `--universe`) => static mode: returns ``(None, None)`` and the
+    engine fetches/shows the strategy's declared universe unchanged.
+
+    Otherwise reads the named universe's membership timeline from the `DataStore`, restricts it to
+    snapshots effective on or before `end_dt` (so the union fetched for bars never includes a
+    member that only becomes effective after the backtest window — and the as-of resolution at any
+    `t <= end_dt` is unaffected), and returns:
+      * a sparse ``{effective_date: symbols}`` map the engine resolves as-of-t (greatest
+        effective_date <= t; empty before the earliest), and
+      * the provenance list ``[{"snapshot_id", "effective_date"}, ...]`` for the result JSON.
+    Raises ``ValueError`` if the universe has no membership effective by `end_dt`.
+    """
+    if universe_name is None:
+        return None, None
+    timeline = DataStore(get_settings().data_dir).read_universe(universe_name)
+    end_date = end_dt.date()
+    in_window = [snap for snap in timeline if snap.effective_date <= end_date]
+    if not in_window:
+        raise ValueError(
+            f"universe {universe_name!r} has no membership effective on or before "
+            f"{end_date.isoformat()}; ingest a snapshot with --effective-date <= end"
+        )
+    universe_by_date: dict[date, Collection[str]] = {
+        snap.effective_date: snap.symbols for snap in in_window
+    }
+    provenance = [
+        {"snapshot_id": snap.snapshot_id, "effective_date": snap.effective_date.isoformat()}
+        for snap in in_window
+    ]
+    return universe_by_date, provenance

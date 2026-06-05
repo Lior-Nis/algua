@@ -1,3 +1,4 @@
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -323,3 +324,73 @@ def test_dataset_kind_constants_match_records(tmp_path):
     )
     assert rec.dataset == Dataset.UNIVERSES.value
     assert rec.kind == Kind.UNIVERSE.value
+
+
+def test_read_universe_builds_sorted_effective_dated_timeline(tmp_path):
+    # #7: a time-varying universe = multiple snapshots sharing the NAME, one per effective_date.
+    # read_universe returns them as an effective-date-sorted timeline of UniverseSnapshots.
+    from algua.data.models import UniverseSnapshot
+
+    store = DataStore(tmp_path / "data")
+    store.ingest_universe(
+        universe="core", symbols=["AAPL", "MSFT"], effective_date="2026-03-01",
+        as_of="2026-03-02T00:00:00+00:00", source="manual",
+    )
+    store.ingest_universe(
+        universe="core", symbols=["AAPL"], effective_date="2026-01-01",
+        as_of="2026-01-02T00:00:00+00:00", source="manual",
+    )
+    # A different universe name must not bleed into `core`.
+    store.ingest_universe(
+        universe="other", symbols=["TSLA"], effective_date="2026-01-01",
+        as_of="2026-01-02T00:00:00+00:00", source="manual",
+    )
+
+    timeline = store.read_universe("core")
+
+    assert all(isinstance(s, UniverseSnapshot) for s in timeline)
+    assert [s.effective_date for s in timeline] == [date(2026, 1, 1), date(2026, 3, 1)]
+    assert timeline[0].symbols == frozenset({"AAPL"})
+    assert timeline[1].symbols == frozenset({"AAPL", "MSFT"})
+
+
+def test_read_universe_empty_for_unknown_name(tmp_path):
+    store = DataStore(tmp_path / "data")
+    store.ingest_universe(
+        universe="core", symbols=["AAPL"], effective_date="2026-01-01",
+        as_of="2026-01-02T00:00:00+00:00", source="manual",
+    )
+    assert store.read_universe("nonexistent") == []
+
+
+def test_read_universe_rejects_ambiguous_duplicate_effective_date(tmp_path):
+    # Two snapshots for the SAME name + SAME effective_date but DIFFERENT membership =>
+    # the as-of-date answer is ambiguous; refuse rather than silently pick one.
+    store = DataStore(tmp_path / "data")
+    store.ingest_universe(
+        universe="core", symbols=["AAPL"], effective_date="2026-01-01",
+        as_of="2026-01-02T00:00:00+00:00", source="manual",
+    )
+    store.ingest_universe(
+        universe="core", symbols=["MSFT"], effective_date="2026-01-01",
+        as_of="2026-01-03T00:00:00+00:00", source="manual",
+    )
+    with pytest.raises(ValueError, match="ambiguous"):
+        store.read_universe("core")
+
+
+def test_read_universe_allows_identical_duplicate_effective_date(tmp_path):
+    # Same effective_date with IDENTICAL membership is not ambiguous (idempotent re-ingest of
+    # the exact same parquet dedups to one snapshot anyway; even if two records exist they agree).
+    store = DataStore(tmp_path / "data")
+    store.ingest_universe(
+        universe="core", symbols=["AAPL", "MSFT"], effective_date="2026-01-01",
+        as_of="2026-01-02T00:00:00+00:00", source="manual",
+    )
+    store.ingest_universe(
+        universe="core", symbols=["MSFT", "AAPL"], effective_date="2026-01-01",
+        as_of="2026-01-09T00:00:00+00:00", source="manual",
+    )
+    timeline = store.read_universe("core")
+    assert [s.effective_date for s in timeline] == [date(2026, 1, 1)]
+    assert timeline[0].symbols == frozenset({"AAPL", "MSFT"})
