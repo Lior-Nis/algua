@@ -151,6 +151,13 @@ def clear_peak_equity(conn: sqlite3.Connection, strategy: str) -> None:
     conn.commit()
 
 
+def clear_all_peaks(conn: sqlite3.Connection) -> None:
+    """Wipe every strategy's persisted peak — used by the global resume-all after the whole account
+    is flattened, so each strategy re-bases its drawdown high-water mark on its next tick (#27)."""
+    conn.execute("DELETE FROM strategy_peaks")
+    conn.commit()
+
+
 def record_tick_snapshot(
     conn: sqlite3.Connection, strategy: str, *, tick_ts: str, decision_ts: str | None,
     equity: float, peak_equity: float | None, positions: dict[str, float], n_submitted: int,

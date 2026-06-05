@@ -4,6 +4,7 @@ import pandas as pd
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.order_state import (
+    clear_all_peaks,
     clear_peak_equity,
     client_order_id,
     count_orders,
@@ -195,3 +196,11 @@ def test_recent_orders_newest_first_and_limit(tmp_path):
     rows = recent_orders(conn, "s", limit=2)
     assert [r["broker_order_id"] for r in rows] == ["o-2", "o-1"]  # newest first, limited
     assert rows[0]["symbol"] == "SYM2" and rows[0]["side"] == "buy"
+
+
+def test_clear_all_peaks_wipes_every_strategy(tmp_path):
+    conn = _conn(tmp_path)
+    update_peak_equity(conn, "a", 100.0)
+    update_peak_equity(conn, "b", 200.0)
+    clear_all_peaks(conn)
+    assert get_peak_equity(conn, "a") is None and get_peak_equity(conn, "b") is None
