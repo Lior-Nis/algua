@@ -93,6 +93,9 @@ CREATE TABLE IF NOT EXISTS strategy_peaks (
     peak_equity REAL NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- Append-only per-tick operability record (equity + positions per completed tick); the equity
+-- time-series `paper show` and the future dashboard read. Permanent history — no pruning path yet
+-- (`trade-tick` is wall-clock-per-invocation, so growth is modest); add retention when it matters.
 CREATE TABLE IF NOT EXISTS tick_snapshots (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy     TEXT NOT NULL,
