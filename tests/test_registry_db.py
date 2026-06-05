@@ -23,6 +23,42 @@ def test_wal_mode_enabled(tmp_path):
     assert mode.lower() == "wal"
 
 
+def test_migrate_adds_dependency_hash_column_to_legacy_approvals(tmp_path):
+    """A pre-existing, populated approvals table without dependency_hash gets the column added
+    in place (ALTER), with existing rows defaulting to NULL — fail-closed for the live gate."""
+    conn = connect(tmp_path / "r.db")
+    # Build a legacy approvals table lacking dependency_hash, with one row already in it.
+    conn.executescript(
+        """
+        CREATE TABLE strategies (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            approved_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT
+        );
+        INSERT INTO strategies(id, name) VALUES (1, 's');
+        INSERT INTO approvals(strategy_id, code_hash, config_hash, approved_by, created_at)
+            VALUES (1, 'c', 'cfg', 'legacy', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(approvals)")}
+    assert "dependency_hash" in cols
+    legacy = conn.execute("SELECT dependency_hash FROM approvals WHERE id=1").fetchone()
+    assert legacy["dependency_hash"] is None  # existing row fails closed
+
+    migrate(conn)  # re-running the ALTER path must stay idempotent
+    cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(approvals)")}
+    assert "dependency_hash" in cols_again
+
+
 def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     """migrate() is an idempotent bootstrap, not a version-gated migrator.
 

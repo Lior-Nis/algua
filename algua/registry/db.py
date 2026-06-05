@@ -9,7 +9,7 @@ from pathlib import Path
 # so it can add new tables/indexes to an existing DB but CANNOT ALTER a populated one.
 # Any column/constraint change to an existing table needs a real migration
 # (write it explicitly when the need arrives) — not just a bump of this number.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS approvals (
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),
     code_hash TEXT NOT NULL,
     config_hash TEXT NOT NULL,
+    -- dependency_hash is nullable on purpose: rows written before this column existed carry
+    -- NULL and MUST never satisfy the live gate (fail-closed), and `has_valid_approval` refuses
+    -- a NULL probe outright. New approvals always write a concrete hash.
+    dependency_hash TEXT,
     approved_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     revoked_at TEXT
@@ -106,17 +110,30 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Bootstrap the schema; idempotent. NOT a versioned in-place migrator.
+    """Bootstrap the schema, then apply in-place column migrations; idempotent.
 
-    This runs the full current `_SCHEMA` unconditionally. Every statement is
-    `CREATE TABLE IF NOT EXISTS`, so re-running is a no-op and a DB missing only
-    some tables is brought fully up to date — regardless of the recorded
-    user_version. It does NOT (and cannot) ALTER existing tables: changing a
-    column or constraint on a populated table requires a dedicated migration,
-    not a bump of SCHEMA_VERSION. We do not gate on user_version (doing so would
-    falsely imply migration history and could skip needed table creation on a
-    pre-stamped DB); we only stamp it afterward as a schema-generation marker.
+    The `CREATE TABLE IF NOT EXISTS` bootstrap brings a DB missing whole tables up to date but
+    CANNOT add a column to an already-populated table. Adding a column to an existing table needs
+    a dedicated `ALTER TABLE` — `_add_missing_columns` does exactly that, guarded by an
+    introspection check so re-running is a no-op. We do not gate on user_version (doing so would
+    falsely imply migration history and could skip needed table creation on a pre-stamped DB);
+    we only stamp it afterward as a schema-generation marker.
     """
     conn.executescript(_SCHEMA)
+    _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
+
+
+def _add_missing_columns(
+    conn: sqlite3.Connection, table: str, columns: dict[str, str]
+) -> None:
+    """Add any of ``columns`` (name -> column type) missing from ``table`` via ``ALTER TABLE``.
+
+    Idempotent: existing columns are skipped. New columns are added without a default, so on a
+    populated table the existing rows get NULL — which the live gate treats as fail-closed
+    (a NULL ``dependency_hash`` can never match a recomputed concrete hash)."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, col_type in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
