@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -106,6 +106,21 @@ CREATE TABLE IF NOT EXISTS strategy_peaks (
     peak_equity REAL NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- search_trials records the MEASURED search breadth of each parameter sweep so the promotion
+-- gate's multiple-testing defense can scale on the real count of combinations tried, not a
+-- self-reported flag. One row per `backtest sweep` of a registered strategy: n_combos is the
+-- actual size of that sweep's grid; grid_json is the JSON grid for the audit trail. The
+-- promotion gate sums n_combos across all rows for a strategy (cumulative trials searched in
+-- the family — the conservative, honest count). FK into strategies(id) because this is
+-- relational state that should not outlive its strategy.
+CREATE TABLE IF NOT EXISTS search_trials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+    n_combos INTEGER NOT NULL,
+    grid_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_id);
 """
 
 

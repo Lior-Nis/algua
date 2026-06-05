@@ -99,3 +99,13 @@ class StrategyRepository(Protocol):
         dependency set. A ``None`` ``dependency_hash`` (no lockfile) never matches, and a stored
         row with a NULL ``dependency_hash`` never matches a concrete hash — both fail closed."""
         ...
+
+    def record_search_trial(self, strategy_id: int, n_combos: int, grid_json: str) -> int:
+        """Persist one measured search-breadth row (the size + grid of one sweep); return its
+        row id. The promotion gate's multiple-testing defense reads these back."""
+        ...
+
+    def total_search_combos(self, strategy_id: int) -> int:
+        """Sum of ``n_combos`` across every recorded ``search_trials`` row for the strategy —
+        the cumulative count of parameter combinations searched in this family (0 if none)."""
+        ...

@@ -27,6 +27,30 @@ def test_sweep_demo_emits_ranked():
     assert d["rank_by"] == "mean_sharpe"
 
 
+def test_sweep_of_unregistered_strategy_records_nothing():
+    result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--param", "lookback=20,40"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["recorded_breadth"] is None
+
+
+def test_sweep_of_registered_strategy_records_breadth():
+    assert runner.invoke(app, ["registry", "add", "cross_sectional_momentum"]).exit_code == 0
+    result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--param", "lookback=20,40", "--param", "top_k=1,3"])
+    assert result.exit_code == 0, result.stdout
+    recorded = json.loads(result.stdout)["recorded_breadth"]
+    assert recorded == {"n_combos": 4, "cumulative": 4}
+
+    # A second sweep accumulates the cumulative family total.
+    result2 = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  "--param", "lookback=20,40"])
+    assert json.loads(result2.stdout)["recorded_breadth"] == {"n_combos": 2, "cumulative": 6}
+
+
 def test_sweep_requires_param():
     result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo"])
     assert result.exit_code == 1

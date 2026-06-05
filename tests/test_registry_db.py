@@ -100,6 +100,53 @@ def test_migrate_adds_dependency_hash_column_to_legacy_stage_transitions(tmp_pat
     assert "dependency_hash" in cols_again
 
 
+def test_migrate_creates_search_trials_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "search_trials" in tables
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_trials)")}
+    assert {"id", "strategy_id", "n_combos", "grid_json", "created_at"} <= cols
+
+
+def test_migrate_adds_search_trials_to_legacy_db(tmp_path):
+    """A legacy populated DB that predates search_trials gains the whole table via the
+    CREATE TABLE IF NOT EXISTS bootstrap; re-running stays idempotent."""
+    conn = connect(tmp_path / "r.db")
+    # A legacy DB with the older core tables populated but no search_trials at all.
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    assert "search_trials" not in {
+        r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "search_trials" in tables
+    # The legacy strategy row survived and the new table is usable.
+    sid = conn.execute("SELECT id FROM strategies WHERE name='s'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO search_trials(strategy_id, n_combos, grid_json, created_at)"
+        " VALUES (?,?,?,?)",
+        (sid, 4, "{}", "2026-01-02T00:00:00+00:00"),
+    )
+    conn.commit()
+
+    migrate(conn)  # idempotent re-run must not drop the row or raise
+    assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
+
+
 def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     """migrate() is an idempotent bootstrap, not a version-gated migrator.
 

@@ -20,8 +20,14 @@ app.add_typer(research_app, name="research")
 
 def _gate_reason(decision: GateDecision) -> str:
     parts = [f"{c['name']}={c['value']:.4g}{c['op']}{c['threshold']:.4g}" for c in decision.checks]
-    extra = f"; n_combos={decision.n_combos}" if decision.n_combos is not None else ""
-    return "gate pass: " + ", ".join(parts) + extra
+    breadth = (
+        f"; breadth={decision.n_combos}({decision.breadth_provenance})"
+        f"; min_holdout_sharpe={decision.base_min_holdout_sharpe:.4g}"
+        f"->{decision.effective_min_holdout_sharpe:.4g}"
+        if decision.n_combos is not None
+        else ""
+    )
+    return "gate pass: " + ", ".join(parts) + breadth
 
 
 @research_app.command("promote")
@@ -38,10 +44,20 @@ def promote(
     min_holdout_return: float = typer.Option(0.0, "--min-holdout-return"),
     min_pct_positive: float = typer.Option(0.6, "--min-pct-positive"),
     min_window_sharpe: float = typer.Option(0.0, "--min-window-sharpe"),
-    n_combos: int = typer.Option(None, "--n-combos", help="combos searched (recorded as evidence)"),
+    n_combos: int = typer.Option(
+        None, "--n-combos",
+        help="OPERATOR DECLARATION of search breadth, used ONLY when no measured sweep trials "
+             "exist; the measured sum from `backtest sweep` is preferred and always wins",
+    ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
 ) -> None:
-    """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass."""
+    """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass.
+
+    The holdout-Sharpe bar is DEFLATED by the strategy's search breadth (the multiple-testing
+    defense). Breadth is MEASURED as the sum of recorded `search_trials` (from `backtest sweep`)
+    when any exist; otherwise it must be DECLARED via --n-combos, else promotion is refused. A
+    declared number is recorded with provenance="declared" so it is auditably less trustworthy.
+    """
     actor_enum = Actor(actor)  # fail fast on a bad actor before running the walk-forward
     if n_combos is not None and n_combos < 1:
         raise ValueError("--n-combos must be >= 1 when provided")
@@ -54,14 +70,15 @@ def promote(
         min_holdout_sharpe=min_holdout_sharpe, min_holdout_return=min_holdout_return,
         min_pct_positive_windows=min_pct_positive, min_window_sharpe=min_window_sharpe,
     )
-    decision = evaluate_gate(wf, criteria, n_combos=n_combos)
 
-    promoted = False
-    if decision.passed:
-        with registry_conn() as conn:
-            transition_strategy(SqliteStrategyRepository(conn), name, Stage.SHORTLISTED,
-                                actor_enum, _gate_reason(decision))
-        promoted = True
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        breadth, provenance = _resolve_breadth(repo, name, n_combos)
+        decision = evaluate_gate(wf, criteria, n_combos=breadth, breadth_provenance=provenance)
+        promoted = False
+        if decision.passed:
+            transition_strategy(repo, name, Stage.SHORTLISTED, actor_enum, _gate_reason(decision))
+            promoted = True
 
     payload: dict[str, Any] = {
         **decision.to_dict(),
@@ -73,3 +90,25 @@ def promote(
         "stability": wf.stability,
     }
     emit(ok(payload))
+
+
+def _resolve_breadth(
+    repo: SqliteStrategyRepository, name: str, declared: int | None
+) -> tuple[int, str]:
+    """Resolve the search breadth N and its provenance for the gate.
+
+    The MEASURED sum of recorded `search_trials` is the default, trusted path and always wins
+    over a declaration. If nothing is recorded, fall back to the operator DECLARATION
+    (--n-combos). If neither exists, REFUSE — never silently default breadth to 1, which would
+    waive the multiple-testing penalty for an unmeasured search.
+    """
+    rec = repo.get(name)  # raises StrategyNotFound -> JSON error (promotion needs registration)
+    measured = repo.total_search_combos(rec.id)
+    if measured > 0:
+        return measured, "measured"
+    if declared is not None:
+        return declared, "declared"
+    raise ValueError(
+        f"no recorded search breadth for {name!r}; run `algua backtest sweep {name} ...` "
+        f"(records breadth) or pass --n-combos N to declare it explicitly"
+    )

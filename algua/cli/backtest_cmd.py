@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import typer
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
-from algua.backtest.sweep import parse_grid, sweep
+from algua.backtest.sweep import SweepResult, parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import ok, registry_conn, resolve_eval_inputs
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
@@ -118,8 +120,30 @@ def sweep_cmd(
     run_id = None
     if track:
         run_id = _track(lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
+    recorded = _record_search_breadth(name, result)
     payload = result.to_dict()
     payload["ranked"] = payload["ranked"][:top]
+    # Surface the MEASURED breadth this sweep contributed (this sweep's n_combos) and the
+    # cumulative family total now on record, so the operator sees what promotion will read back.
+    # `recorded_breadth` is None when the strategy is unregistered (nothing recorded — fine).
+    payload["recorded_breadth"] = recorded
     if run_id is not None:
         payload["mlflow_run_id"] = run_id
     emit(ok(payload))
+
+
+def _record_search_breadth(name: str, result: SweepResult) -> dict[str, int] | None:
+    """Record this sweep's measured breadth into the registry IF the strategy is registered.
+
+    A sweep of an UNREGISTERED strategy records nothing and returns None — that is fine;
+    promotion requires registration anyway. Returns the recorded count plus the new cumulative
+    family total for the emitted JSON.
+    """
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        try:
+            rec = repo.get(name)
+        except StrategyNotFound:
+            return None
+        repo.record_search_trial(rec.id, result.n_combos, json.dumps(result.grid, sort_keys=True))
+        return {"n_combos": result.n_combos, "cumulative": repo.total_search_combos(rec.id)}
