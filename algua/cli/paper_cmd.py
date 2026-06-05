@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 
 import typer
 
@@ -21,6 +22,7 @@ from algua.execution.order_state import (
     get_peak_equity,
     persist_run,
     record_submitted_order,
+    record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import SimBroker
@@ -240,6 +242,13 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
+            record_tick_snapshot(
+                conn, name, tick_ts=datetime.now(UTC).isoformat(),
+                decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
+                equity=result.equity, peak_equity=result.peak_equity,
+                positions=result.positions_before, n_submitted=len(result.submitted),
+                reconcile_ok=result.reconcile_ok,
+            )
         audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)
 

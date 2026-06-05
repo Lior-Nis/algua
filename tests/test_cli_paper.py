@@ -246,3 +246,29 @@ def test_paper_flatten_close_failure_stays_tripped(monkeypatch):
     assert payload["ok"] is False and payload["kill_switch"] == "tripped"
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
+
+
+def test_trade_tick_persists_snapshot(monkeypatch):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import latest_tick_snapshot
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    fake = TickResult(decision_ts=datetime(2023, 6, 1, tzinfo=UTC), target_weights={"AAA": 1.0},
+                      positions_before={"AAA": 5.0}, submitted=[{"symbol": "AAA"}],
+                      equity=99000.0, peak_equity=99000.0)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: object())
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake)
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        snap = latest_tick_snapshot(conn, "cross_sectional_momentum")
+    assert snap is not None and snap["equity"] == 99000.0
+    assert snap["positions"] == {"AAA": 5.0} and snap["n_submitted"] == 1
