@@ -77,8 +77,8 @@ def test_strategy_new_scaffolds_doc_and_family(tmp_path, monkeypatch, _cleanup_s
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     _cleanup_scaffolded.append(Path(payload["path"]))
-    assert (tmp_path / "vault" / "kb_new_strat.md").exists()
-    assert (tmp_path / "vault" / "families" / "momentum.md").exists()
+    assert (tmp_path / "vault" / "strategies" / "kb_new_strat.md").exists()
+    assert (tmp_path / "vault" / "strategies" / "families" / "momentum.md").exists()
     assert payload["doc"].endswith("kb_new_strat.md")
 
 
@@ -107,8 +107,10 @@ def test_strategy_doc_syncs_and_builds_index(tmp_path, monkeypatch, _cleanup_sca
     result = runner.invoke(app, ["strategy", "doc", "--all"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["ok"] is True
-    assert "[[kb_sync_strat]]" in (tmp_path / "vault" / "_index.md").read_text()
-    assert "stage: backtested" in (tmp_path / "vault" / "kb_sync_strat.md").read_text()
+    assert "[[kb_sync_strat]]" in (tmp_path / "vault" / "strategies" / "_index.md").read_text()
+    assert "stage: backtested" in (
+        tmp_path / "vault" / "strategies" / "kb_sync_strat.md"
+    ).read_text()
 
 
 def test_strategy_doc_missing_doc_errors(tmp_path, monkeypatch):
@@ -138,4 +140,6 @@ def test_strategy_doc_single_refreshes_family_roster(tmp_path, monkeypatch, _cle
     result = runner.invoke(app, ["strategy", "doc", "kb_fam_strat"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["families"] == ["mom"]
-    assert "backtested 1" in (tmp_path / "vault" / "families" / "mom.md").read_text()
+    assert "backtested 1" in (
+        tmp_path / "vault" / "strategies" / "families" / "mom.md"
+    ).read_text()

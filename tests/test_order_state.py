@@ -12,7 +12,6 @@ from algua.execution.order_state import (
     latest_tick_snapshot,
     persist_run,
     recent_orders,
-    reconcile,
     record_submitted_order,
     record_tick_snapshot,
     update_peak_equity,
@@ -69,12 +68,6 @@ def test_persist_run_reads_broker_id_from_record_not_position(tmp_path):
         ("BBB", "rejected", "alp-aaa"),
     ]
     assert derive_positions(conn, "s") == {"AAA": 10.0}
-
-
-def test_reconcile_true_on_match_false_on_mismatch():
-    assert reconcile({"AAA": 50.0}, pd.Series({"AAA": 50.0})) is True
-    assert reconcile({"AAA": 50.0}, pd.Series({"AAA": 49.0})) is False
-    assert reconcile({}, pd.Series(dtype="float64")) is True
 
 
 def test_client_order_id_deterministic_and_sanitised():

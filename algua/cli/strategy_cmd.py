@@ -11,7 +11,9 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.knowledge.sync import (
+    family_doc_path,
     generate_indexes,
+    strategy_doc_path,
     strategy_family,
     sync_all,
     sync_family_doc,
@@ -87,17 +89,17 @@ def new(
         raise ValueError(f"strategy already exists: {path}")
     path.write_text(_TEMPLATE.format(name=name))
 
-    vault = get_settings().knowledge_dir
-    vault.mkdir(parents=True, exist_ok=True)
-    doc_path = vault / f"{name}.md"
+    settings = get_settings()
+    doc_path = strategy_doc_path(settings, name)
+    doc_path.parent.mkdir(parents=True, exist_ok=True)
     if not doc_path.exists():
         doc_path.write_text(
             scaffold_strategy_doc(name, family=family, derived_from=derived_from)
         )
     family_doc: str | None = None
     if family:
-        (vault / "families").mkdir(parents=True, exist_ok=True)
-        fam_path = vault / "families" / f"{family}.md"
+        fam_path = family_doc_path(settings, family)
+        fam_path.parent.mkdir(parents=True, exist_ok=True)
         if not fam_path.exists():
             fam_path.write_text(scaffold_family_doc(family))
         family_doc = str(fam_path)

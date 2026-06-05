@@ -1,5 +1,10 @@
 # Strategy Knowledge Base Implementation Plan
 
+> **Historical record — completed.** This plan was executed and merged (PR #105). **The vault
+> root has since moved from `docs/strategies/` to `kb/strategies/` (PR #111, 2026-06-05);**
+> every `docs/strategies/...` path below is stale. Do not run the commands here verbatim —
+> they're kept for provenance, not execution.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A living, markdown-per-strategy knowledge base — authored prose plus synced fact blocks generated from the registry + MLflow — that renders as an emergent graph in Obsidian and feeds the agent's next-idea reasoning.
