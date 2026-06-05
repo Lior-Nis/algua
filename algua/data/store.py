@@ -129,28 +129,9 @@ class DataStore:
             adjustment=adjustment,
             source_metadata=source_metadata,
         )
-        normalized = _normalize_bar_frame(frame)
-        payload = frame_to_parquet_bytes(normalized)
-        content_hash = sha256_bytes(payload)
-        snapshot_id = _snapshot_id(metadata, content_hash)
-
-        existing = self.manifest.find(snapshot_id)
-        if existing is not None:
-            return existing
-
-        relative_path = Path("snapshots") / Dataset.BARS.value / snapshot_id / "bars.parquet"
-        write_bytes_snapshot(payload, self.data_dir, relative_path)
-        rec = SnapshotRecord(
-            snapshot_id=snapshot_id,
-            metadata=metadata,
-            row_count=len(normalized),
-            content_hash=content_hash,
-            data_path=relative_path,
-            created_at=datetime.now(UTC).isoformat(),
-            storage_format="parquet",
+        return self._ingest_parquet(
+            metadata=metadata, frame=_normalize_bar_frame(frame), filename="bars.parquet"
         )
-        self.manifest.append(rec)
-        return rec
 
     def ingest_universe(
         self,
@@ -179,6 +160,19 @@ class DataStore:
             universe=universe,
             source_metadata=source_metadata,
         )
+        return self._ingest_parquet(
+            metadata=metadata, frame=frame, filename="universe.parquet"
+        )
+
+    def _ingest_parquet(
+        self, *, metadata: SnapshotMetadata, frame: pd.DataFrame, filename: str
+    ) -> SnapshotRecord:
+        """Hash a frame to parquet, dedup on snapshot id, write it, and append the manifest record.
+
+        The shared tail of ``ingest_bars`` and ``ingest_universe``: both differ only in how they
+        build ``metadata``/``frame`` and the on-disk ``filename``. The dataset path component is
+        ``metadata.dataset`` (already a clean enum value for both parquet datasets).
+        """
         payload = frame_to_parquet_bytes(frame)
         content_hash = sha256_bytes(payload)
         snapshot_id = _snapshot_id(metadata, content_hash)
@@ -187,9 +181,7 @@ class DataStore:
         if existing is not None:
             return existing
 
-        relative_path = (
-            Path("snapshots") / Dataset.UNIVERSES.value / snapshot_id / "universe.parquet"
-        )
+        relative_path = Path("snapshots") / metadata.dataset / snapshot_id / filename
         write_bytes_snapshot(payload, self.data_dir, relative_path)
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,

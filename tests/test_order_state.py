@@ -4,14 +4,17 @@ import pandas as pd
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.order_state import (
+    clear_all_peaks,
     clear_peak_equity,
     client_order_id,
     count_orders,
     derive_positions,
     get_peak_equity,
+    latest_tick_snapshot,
     persist_run,
-    reconcile,
+    recent_orders,
     record_submitted_order,
+    record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import Fill
@@ -66,12 +69,6 @@ def test_persist_run_reads_broker_id_from_record_not_position(tmp_path):
         ("BBB", "rejected", "alp-aaa"),
     ]
     assert derive_positions(conn, "s") == {"AAA": 10.0}
-
-
-def test_reconcile_true_on_match_false_on_mismatch():
-    assert reconcile({"AAA": 50.0}, pd.Series({"AAA": 50.0})) is True
-    assert reconcile({"AAA": 50.0}, pd.Series({"AAA": 49.0})) is False
-    assert reconcile({}, pd.Series(dtype="float64")) is True
 
 
 def test_client_order_id_deterministic_and_sanitised():
@@ -175,3 +172,35 @@ def test_persist_run_replaces_prior_paper_state_not_accumulates(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM paper_fills").fetchone()[0] == 1
     assert derive_positions(conn, "s") == {"AAA": 50.0}
+
+
+def test_tick_snapshot_roundtrip_latest_wins(tmp_path):
+    conn = _conn(tmp_path)
+    assert latest_tick_snapshot(conn, "s") is None
+    record_tick_snapshot(conn, "s", tick_ts="2023-06-01T00:00:00+00:00",
+                         decision_ts="2023-05-31T00:00:00+00:00", equity=100.0, peak_equity=100.0,
+                         positions={"AAA": 10.0}, n_submitted=1, reconcile_ok=True)
+    record_tick_snapshot(conn, "s", tick_ts="2023-06-02T00:00:00+00:00",
+                         decision_ts="2023-06-01T00:00:00+00:00", equity=120.0, peak_equity=120.0,
+                         positions={"AAA": 12.0}, n_submitted=0, reconcile_ok=False)
+    latest = latest_tick_snapshot(conn, "s")
+    assert latest["equity"] == 120.0 and latest["positions"] == {"AAA": 12.0}
+    assert latest["reconcile_ok"] is False and latest["n_submitted"] == 0
+
+
+def test_recent_orders_newest_first_and_limit(tmp_path):
+    conn = _conn(tmp_path)
+    for i in range(3):
+        record_submitted_order(conn, "s", f"SYM{i}", "buy", 1.0, "2023-06-01T00:00:00+00:00",
+                               f"o-{i}")
+    rows = recent_orders(conn, "s", limit=2)
+    assert [r["broker_order_id"] for r in rows] == ["o-2", "o-1"]  # newest first, limited
+    assert rows[0]["symbol"] == "SYM2" and rows[0]["side"] == "buy"
+
+
+def test_clear_all_peaks_wipes_every_strategy(tmp_path):
+    conn = _conn(tmp_path)
+    update_peak_equity(conn, "a", 100.0)
+    update_peak_equity(conn, "b", 200.0)
+    clear_all_peaks(conn)
+    assert get_peak_equity(conn, "a") is None and get_peak_equity(conn, "b") is None

@@ -83,3 +83,15 @@ def test_operational_rows_survive_strategy_deletion(tmp_path):
     assert conn.execute(
         "SELECT COUNT(*) FROM kill_switches WHERE strategy = ?", ("alpha",)
     ).fetchone()[0] == 1
+
+
+def test_migrate_creates_tick_snapshots_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    assert "tick_snapshots" in _tables(conn)
+
+
+def test_migrate_creates_global_halt_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    assert "global_halt" in _tables(conn)

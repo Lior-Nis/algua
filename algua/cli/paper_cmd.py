@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 
 import typer
 
@@ -14,20 +15,24 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
+    clear_all_peaks,
     clear_peak_equity,
     client_order_id,
     count_orders,
     derive_positions,
     get_peak_equity,
+    latest_tick_snapshot,
     persist_run,
+    recent_orders,
     record_submitted_order,
+    record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.store import SqliteStrategyRepository
-from algua.risk import kill_switch
+from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
@@ -59,9 +64,20 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage is not Stage.PAPER:
         raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
+    if global_halt.is_engaged(conn):
+        raise ValueError("global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
     return strategy
+
+
+def _breach_payload(error: str, **extra: object) -> dict:
+    """A failure envelope for a tripped kill-switch: ``{"ok": false, "kill_switch": "tripped"...}``.
+
+    The shared skeleton of every paper-command halt/breach emit; callers pass the human-readable
+    ``error`` plus whatever variant keys (``kind``, ``strategy``, ``halted``, ...) that path adds.
+    """
+    return {"ok": False, "kill_switch": "tripped", "error": error, **extra}
 
 
 def _trip(conn: sqlite3.Connection, name: str, exc: RiskBreach) -> None:
@@ -97,7 +113,7 @@ def run(
                                utc(start), utc(end), max_drawdown=max_drawdown)
         except RiskBreach as exc:
             _trip(conn, name, exc)
-            emit({"ok": False, "kind": exc.kind, "kill_switch": "tripped", "error": exc.detail})
+            emit(_breach_payload(exc.detail, kind=exc.kind))
             raise typer.Exit(1) from exc
         persist_run(conn, result)
         audit_append(
@@ -120,14 +136,42 @@ def run(
 @paper_app.command("show")
 @json_errors(ValueError, LookupError)
 def show(name: str) -> None:
-    """Show persisted paper state (orders count + derived positions) for a strategy."""
+    """Consolidated per-strategy operability view — stage, kill-switch, drawdown, last tick,
+    recent orders, and a health rollup. A pure read of persisted state (no broker call)."""
     with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
         n_orders = count_orders(conn, name)
         positions = derive_positions(conn, name)
         ks = kill_switch.get(conn, name)
+        halted_globally = global_halt.is_engaged(conn)
+        peak = get_peak_equity(conn, name)
+        last = latest_tick_snapshot(conn, name)
+        orders = recent_orders(conn, name, 10)
+    tripped = ks is not None
+    last_equity = last["equity"] if last else None
+    drawdown = (
+        1.0 - last_equity / peak
+        if last_equity is not None and peak is not None and peak > 0 else None
+    )
+    if tripped or halted_globally:
+        health = "halted"
+    elif last is not None and not last["reconcile_ok"]:
+        health = "drift"
+    elif last is None:
+        health = "idle"
+    else:
+        health = "ok"
     emit(ok({
-        "strategy": name, "n_orders": n_orders, "positions": positions,
-        "kill_switch": {"tripped": ks is not None, "reason": ks["reason"] if ks else None},
+        "strategy": name,
+        "stage": rec.stage.value,
+        "kill_switch": {"tripped": tripped, "reason": ks["reason"] if ks else None,
+                        "global_halt": halted_globally},
+        "drawdown": {"peak_equity": peak, "last_equity": last_equity, "drawdown": drawdown},
+        "last_tick": last,
+        "positions": positions,
+        "n_orders": n_orders,
+        "recent_orders": orders,
+        "health": health,
     }))
 
 
@@ -206,7 +250,7 @@ def trade_tick(
             on_submitted=_persist,
             # Re-read the switch from the DB right before submit so an externally-tripped switch
             # aborts before any order goes out (#21).
-            should_halt=lambda: kill_switch.is_tripped(conn, name),
+            should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
             peak_equity=get_peak_equity(conn, name),
             derived_positions=derive_positions(conn, name),
         )
@@ -217,8 +261,7 @@ def trade_tick(
             # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
             audit_append(conn, actor="system", action="trade_tick_halted",
                          reason=str(exc), strategy=name)
-            emit({"ok": False, "strategy": name, "kill_switch": "tripped", "halted": True,
-                  "error": str(exc)})
+            emit(_breach_payload(str(exc), strategy=name, halted=True))
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
             _trip(conn, name, exc)
@@ -232,14 +275,21 @@ def trade_tick(
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
-            payload = {"ok": False, "kind": exc.kind, "kill_switch": "tripped",
-                       "liquidation_submitted": liquidation_submitted, "error": exc.detail}
+            payload = _breach_payload(exc.detail, kind=exc.kind,
+                                      liquidation_submitted=liquidation_submitted)
             if flatten_error is not None:
                 payload["flatten_error"] = flatten_error
             emit(payload)
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
+            record_tick_snapshot(
+                conn, name, tick_ts=datetime.now(UTC).isoformat(),
+                decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
+                equity=result.equity, peak_equity=result.peak_equity,
+                positions=result.positions_before, n_submitted=len(result.submitted),
+                reconcile_ok=result.reconcile_ok,
+            )
         audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)
 
@@ -274,8 +324,48 @@ def flatten(
             broker.cancel_open_orders()
             broker.close_positions(strategy.universe)
         except BrokerError as exc:
-            emit({"ok": False, "strategy": name, "kill_switch": "tripped",
-                  "liquidation_submitted": False, "error": str(exc)})
+            emit(_breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
     # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
     emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))
+
+
+@paper_app.command("halt-all")
+@json_errors(ValueError, LookupError, BrokerError)
+def halt_all(
+    reason: str = typer.Option(..., "--reason", help="why the whole account is being halted"),
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+) -> None:
+    """ACCOUNT-WIDE emergency: engage the global halt and flatten the ENTIRE Alpaca account."""
+    with registry_conn() as conn:
+        broker = _alpaca_broker_from_settings()
+        # Engage first (fail-safe): all trading is stopped even if the close call then fails.
+        global_halt.engage(conn, reason=reason, actor=actor)
+        audit_append(conn, actor=actor, action="halt_all", reason=reason, strategy=None)
+        try:
+            broker.close_all_positions()
+        except BrokerError as exc:
+            audit_append(conn, actor="system", action="flatten_failed", reason=str(exc),
+                         strategy=None)
+            emit({"ok": False, "global_halt": "set", "liquidation_submitted": False,
+                  "error": str(exc)})
+            raise typer.Exit(1) from exc
+    emit(ok({"global_halt": "set", "liquidation_submitted": True}))
+
+
+@paper_app.command("resume-all")
+@json_errors(ValueError)
+def resume_all(
+    actor: str = typer.Option("human", "--actor", help="human | agent"),
+) -> None:
+    """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
+    to cash). Per-strategy kill-switches are left untouched."""
+    with registry_conn() as conn:
+        was_set = global_halt.is_engaged(conn)
+        if was_set:
+            audit_append(conn, actor=actor, action="resume_all",
+                         reason="clear global halt; re-base all drawdown peaks", strategy=None)
+            # Re-base peaks first, clear the halt LAST so the un-halt is the final write (#109).
+            clear_all_peaks(conn)
+            global_halt.clear(conn)
+    emit(ok({"global_halt": "reset" if was_set else "not_set"}))

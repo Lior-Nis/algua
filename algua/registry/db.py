@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -155,6 +155,27 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
 );
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
+-- Append-only per-tick operability record (equity + positions per completed tick); the equity
+-- time-series `paper show` and the future dashboard read. Permanent history — no pruning path yet
+-- (`trade-tick` is wall-clock-per-invocation, so growth is modest); add retention when it matters.
+CREATE TABLE IF NOT EXISTS tick_snapshots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy     TEXT NOT NULL,
+    tick_ts      TEXT NOT NULL,
+    decision_ts  TEXT,
+    equity       REAL NOT NULL,
+    peak_equity  REAL,
+    positions    TEXT NOT NULL,
+    n_submitted  INTEGER NOT NULL,
+    reconcile_ok INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_tick_snapshots_strategy_ts ON tick_snapshots(strategy, tick_ts);
+CREATE TABLE IF NOT EXISTS global_halt (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    reason     TEXT,
+    actor      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 

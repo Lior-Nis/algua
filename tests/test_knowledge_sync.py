@@ -9,6 +9,7 @@ from algua.knowledge.sync import (
     generate_indexes,
     kb_check,
     render_results_block,
+    strategies_dir,
     strategy_doc_path,
     strategy_family,
     sync_all,
@@ -29,6 +30,14 @@ def _settings(tmp_path) -> Settings:
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def _scaffold(s: Settings, name: str, **kw) -> None:
+    _write(strategy_doc_path(s, name), scaffold_strategy_doc(name, created="2026-06-03", **kw))
+
+
+def _scaffold_family(s: Settings, name: str) -> None:
+    _write(family_doc_path(s, name), scaffold_family_doc(name, created="2026-06-03"))
 
 
 def test_render_results_block_handles_no_metrics():
@@ -52,10 +61,9 @@ def test_render_results_block_renders_metrics():
 
 def test_sync_strategy_doc_updates_stage_and_preserves_prose(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", created="2026-06-03"))
+    _scaffold(s, "alpha")
     assert sync_strategy_doc(s, "alpha", stage="backtested") is True
-    fm, body = parse_doc((s.knowledge_dir / "alpha.md").read_text())
+    fm, body = parse_doc(strategy_doc_path(s, "alpha").read_text())
     assert fm["stage"] == "backtested"          # synced stage (passed in from the seam)
     assert "## Hypothesis" in body              # prose preserved
     assert "No tracked runs yet" in body        # synced RESULTS block present
@@ -63,10 +71,9 @@ def test_sync_strategy_doc_updates_stage_and_preserves_prose(tmp_path):
 
 def test_sync_strategy_doc_leaves_stage_when_unregistered(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", created="2026-06-03"))
+    _scaffold(s, "alpha")
     assert sync_strategy_doc(s, "alpha", stage=None) is True
-    fm, _ = parse_doc((s.knowledge_dir / "alpha.md").read_text())
+    fm, _ = parse_doc(strategy_doc_path(s, "alpha").read_text())
     assert fm["stage"] == "idea"                # scaffold default, untouched
 
 
@@ -74,6 +81,12 @@ def test_sync_strategy_doc_false_when_doc_missing(tmp_path):
     s = _settings(tmp_path)
     s.knowledge_dir.mkdir(parents=True)
     assert sync_strategy_doc(s, "ghost", stage=None) is False
+
+
+def test_doc_paths_live_under_strategies_subdir(tmp_path):
+    s = _settings(tmp_path)
+    assert strategy_doc_path(s, "alpha") == s.knowledge_dir / "strategies" / "alpha.md"
+    assert family_doc_path(s, "mom") == s.knowledge_dir / "strategies" / "families" / "mom.md"
 
 
 def test_doc_paths_reject_traversal(tmp_path):
@@ -89,34 +102,29 @@ def test_doc_paths_reject_traversal(tmp_path):
 
 def test_strategy_family_unwraps_wikilink(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
+    _scaffold(s, "alpha", family="momentum")
     assert strategy_family(s, "alpha") == "momentum"
     assert strategy_family(s, "ghost") is None
 
 
 def test_generate_indexes_lists_strategies_and_families(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
-    _write(s.knowledge_dir / "families" / "momentum.md",
-           scaffold_family_doc("momentum", created="2026-06-03"))
+    _scaffold(s, "alpha", family="momentum")
+    _scaffold_family(s, "momentum")
     generate_indexes(s)
-    index = (s.knowledge_dir / "_index.md").read_text()
-    families = (s.knowledge_dir / "_families.md").read_text()
+    index = (strategies_dir(s) / "_index.md").read_text()
+    families = (strategies_dir(s) / "_families.md").read_text()
     assert "[[alpha]]" in index
     assert "[[momentum]]" in families
 
 
 def test_sync_family_doc_counts_members_by_stage(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
-    _write(s.knowledge_dir / "families" / "momentum.md",
-           scaffold_family_doc("momentum", created="2026-06-03"))
+    _scaffold(s, "alpha", family="momentum")
+    _scaffold_family(s, "momentum")
     sync_strategy_doc(s, "alpha", stage="backtested")
     assert sync_family_doc(s, "momentum") is True
-    members = (s.knowledge_dir / "families" / "momentum.md").read_text()
+    members = family_doc_path(s, "momentum").read_text()
     assert "backtested 1" in members
 
 
@@ -130,8 +138,7 @@ def test_kb_check_flags_missing_doc(tmp_path):
 
 def test_kb_check_passes_when_in_sync(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", created="2026-06-03"))
+    _scaffold(s, "alpha")
     sync_strategy_doc(s, "alpha", stage="idea")
     ok, _ = kb_check(s, {"alpha": "idea"})
     assert ok is True
@@ -139,12 +146,10 @@ def test_kb_check_passes_when_in_sync(tmp_path):
 
 def test_sync_all_returns_summary(tmp_path):
     s = _settings(tmp_path)
-    _write(s.knowledge_dir / "alpha.md",
-           scaffold_strategy_doc("alpha", family="momentum", created="2026-06-03"))
-    _write(s.knowledge_dir / "families" / "momentum.md",
-           scaffold_family_doc("momentum", created="2026-06-03"))
+    _scaffold(s, "alpha", family="momentum")
+    _scaffold_family(s, "momentum")
     summary = sync_all(s, {"alpha": "idea"})
     assert "alpha" in summary["strategies"]
     assert "momentum" in summary["families"]
-    members = (s.knowledge_dir / "families" / "momentum.md").read_text()
+    members = family_doc_path(s, "momentum").read_text()
     assert "1 members" in members or "members: idea 1" in members
