@@ -183,3 +183,22 @@ Keep this module pure of CLI concerns; the command wires it to the DB + emit.
 - This is the foundation for the rest of sub-project 6 (the actual live execution path), which can
   now rely on a genuinely human-gated `live` stage. Recovery is "enroll a backup key"; richer
   rotation/WebAuthn are later slices.
+
+## 11. Security boundary — MANDATE for the live-execution slice
+
+This slice gates the **transition ceremony**. It does NOT, and cannot, make agent-writable DB state
+unforgeable: an agent with raw SQLite write can set `strategies.stage='live'` or insert an
+`approvals` row, and no DB CHECK/trigger stops that (the agent could drop the trigger too). That is
+**by design** — the `stage` column and `approvals` rows are *records, not the wall* (see
+`docs/agent/operating.md`).
+
+Therefore the actual money wall lives at **trade time**, and the future live-execution slice MUST,
+before placing any live order, **re-verify cryptographic evidence against the vetted
+`approvers/allowed_signers` trust anchor** — not trust `stage` or an `approvals` row. Concretely it
+should: re-run `compute_artifact_hashes`, reconstruct the go-live challenge for the consumed nonce,
+and `ssh-keygen -Y verify` the stored signature against the still-enrolled key. To enable that,
+**when the live-execution slice lands, persist the signature bytes + signer principal + nonce**
+alongside the go-live record (the approver principal is already stored via `record_approval`; the
+signature bytes are deferred until there is a consumer that re-verifies them — YAGNI). This was
+Codex's CRITICAL/HIGH finding on PR #115; it is correctly the live-execution slice's job, recorded
+here so it is not lost.

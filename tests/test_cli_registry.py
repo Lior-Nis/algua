@@ -224,3 +224,18 @@ def test_enroll_approver_appends_line(tmp_path, monkeypatch):
     r2 = runner.invoke(app, ["registry", "enroll-approver", "--name", "x",
                              "--pubkey", "ssh-ed25519 AAAAC3NzaC1lZDI1 other"])
     assert r2.exit_code == 1  # duplicate pubkey rejected
+
+
+def test_enroll_approver_rejects_bad_principal(tmp_path, monkeypatch):
+    import json as _json
+    signers = tmp_path / "allowed_signers"
+    signers.write_text("# header\n")
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+    # a --name with whitespace/newline must be rejected (no allowed_signers line injection)
+    r = runner.invoke(app, ["registry", "enroll-approver", "--name", "bad name",
+                            "--pubkey", "ssh-ed25519 AAAAaaa x"])
+    assert r.exit_code == 1 and _json.loads(r.stdout)["ok"] is False
+    r2 = runner.invoke(app, ["registry", "enroll-approver", "--name", "evil\nattacker",
+                             "--pubkey", "ssh-ed25519 BBBBbbb x"])
+    assert r2.exit_code == 1
+    assert "namespaces" not in signers.read_text().replace("# header", "")  # nothing enrolled

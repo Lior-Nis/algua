@@ -72,7 +72,10 @@ class SignatureError(RuntimeError):
 def verify_signature(allowed_signers_path: Path, payload: str, signature: bytes) -> str | None:
     """Verify an SSH signature over `payload` against the enrolled keys in `allowed_signers_path`.
     Returns the matched principal on success, or None if the signature is invalid / the signer is
-    not enrolled. Raises SignatureError only when ssh-keygen itself can't run."""
+    not enrolled. Raises SignatureError when ssh-keygen can't run OR the trust anchor file is
+    missing — a missing anchor is a configuration error, never a silent pass (codex review)."""
+    if not allowed_signers_path.is_file():
+        raise SignatureError(f"allowed_signers trust anchor not found: {allowed_signers_path}")
     with tempfile.NamedTemporaryFile("wb", suffix=".sig", delete=True) as sigf:
         sigf.write(signature)
         sigf.flush()

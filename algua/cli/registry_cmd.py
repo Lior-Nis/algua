@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import typer
@@ -14,7 +15,10 @@ from algua.registry.live_gate import SignatureError
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 
-ALLOWED_SIGNERS_PATH = Path("approvers/allowed_signers")
+# Anchor the trust anchor to the INSTALLED source tree, NOT the process CWD: the live gate must
+# read the vetted, CODEOWNERS-reviewed copy that ships with this (main) code, never an
+# `approvers/allowed_signers` an agent could plant in some other working directory (codex review).
+ALLOWED_SIGNERS_PATH = Path(__file__).resolve().parents[2] / "approvers" / "allowed_signers"
 
 registry_app = typer.Typer(help="Strategy lifecycle registry", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
@@ -114,14 +118,24 @@ def enroll_approver(
 ) -> None:
     """Enroll a go-live approver PUBLIC key. The trust comes from committing this through code-owner
     review — the live gate uses the reviewed copy on main."""
-    if not name.strip():
-        raise ValueError("--name must not be empty")
+    # Strict principal: a single token, so a crafted --name can't inject a second allowed_signers
+    # line (e.g. a newline + an extra key) into the trust anchor (codex review).
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", name):
+        raise ValueError("--name must be one token of [A-Za-z0-9_.@-] (no whitespace/newlines)")
     parts = pubkey.split()
     if len(parts) < 2 or not parts[0].startswith("ssh-"):
         raise ValueError("--pubkey must be an SSH public key, e.g. 'ssh-ed25519 AAAA... comment'")
     keytype, keyblob = parts[0], parts[1]
-    existing = ALLOWED_SIGNERS_PATH.read_text() if ALLOWED_SIGNERS_PATH.exists() else ""
-    if keyblob in existing:
+    # Dup check on the EXACT enrolled key blobs (parse each line), not a substring of the file —
+    # a comment or a prefix blob must not cause a false match either way (codex review).
+    enrolled: set[str] = set()
+    if ALLOWED_SIGNERS_PATH.exists():
+        for ln in ALLOWED_SIGNERS_PATH.read_text().splitlines():
+            fields = ln.split()
+            for i, tok in enumerate(fields):
+                if tok.startswith("ssh-") and i + 1 < len(fields):
+                    enrolled.add(fields[i + 1])
+    if keyblob in enrolled:
         raise ValueError("that public key is already enrolled")
     line = f'{name} namespaces="algua-go-live" {keytype} {keyblob}\n'
     with ALLOWED_SIGNERS_PATH.open("a") as fh:

@@ -85,3 +85,11 @@ def test_verify_signature_rejects_tampered_payload(tmp_path):
     signers = _allowed_signers(tmp_path, "lior", pub)
     sig = _sign(key, "original-payload", tmp_path)
     assert live_gate.verify_signature(signers, "DIFFERENT-payload", sig) is None
+
+
+def test_verify_signature_missing_anchor_raises(tmp_path):
+    import pytest
+
+    from algua.registry.live_gate import SignatureError
+    with pytest.raises(SignatureError):
+        live_gate.verify_signature(tmp_path / "nope", "payload", b"sig")
