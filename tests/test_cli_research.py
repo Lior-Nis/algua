@@ -256,3 +256,166 @@ def test_config_change_alone_does_not_bypass(tmp_path):
                                  "--n-combos", "9"])
     assert second.exit_code == 1, second.stdout
     assert json.loads(second.stdout)["ok"] is False
+
+
+# --- Point-in-time universe wiring through the promotion gate -----------------
+
+
+def _ingest_snapshot(tmp_path):
+    """Ingest synthetic momentum-universe bars; return the snapshot id."""
+    from datetime import UTC, datetime
+
+    from algua.backtest._sample import SyntheticProvider
+    from algua.data.store import DataStore
+
+    symbols = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
+    start, end = datetime(2022, 1, 1, tzinfo=UTC), datetime(2023, 12, 31, tzinfo=UTC)
+    bars = SyntheticProvider(seed=0).get_bars(symbols, start, end, "1d")
+    frame = bars.reset_index().rename(columns={"timestamp": "ts"})
+    rec = DataStore(tmp_path).ingest_bars(
+        provider="synthetic", symbols=symbols, start="2022-01-01", end="2023-12-31",
+        as_of="2024-01-01", source="test", frame=frame, timeframe="1d", adjustment="none",
+    )
+    return rec.snapshot_id
+
+
+def _ingest_pit_universe(tmp_path):
+    """Ingest a time-varying universe `pit_core`: AAPL/MSFT from 2022, NVDA added 2023.
+
+    Returns the two snapshot ids in effective-date order.
+    """
+    from algua.data.store import DataStore
+
+    store = DataStore(tmp_path)
+    first = store.ingest_universe(
+        universe="pit_core", symbols=["AAPL", "MSFT"], effective_date="2022-01-01",
+        as_of="2022-01-02T00:00:00+00:00", source="test",
+    )
+    second = store.ingest_universe(
+        universe="pit_core", symbols=["AAPL", "MSFT", "NVDA"], effective_date="2023-01-01",
+        as_of="2023-01-02T00:00:00+00:00", source="test",
+    )
+    return first.snapshot_id, second.snapshot_id
+
+
+def _register_backtested_on_snapshot(snap):
+    return runner.invoke(app, ["backtest", "run", "cross_sectional_momentum",
+                               "--snapshot", snap, "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"])
+
+
+def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    first_u, second_u = _ingest_pit_universe(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "pit_core",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["promoted"] is True
+    assert payload["universe_name"] == "pit_core"
+    eff = [s["effective_date"] for s in payload["universe_snapshots"]]
+    assert eff == ["2022-01-01", "2023-01-01"]
+    assert {s["snapshot_id"] for s in payload["universe_snapshots"]} == {first_u, second_u}
+    # The bars snapshot_id is a SEPARATE provenance dimension — still the bars snapshot.
+    assert payload["snapshot_id"] == snap
+    assert _stage() == "shortlisted"
+
+
+def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):
+    """A PIT-restricted universe (excluding symbols static mode would include) yields a
+    different holdout metric than the static run — proving the map threads into the engine."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    _ingest_pit_universe(tmp_path)  # AAPL/MSFT then +NVDA — excludes AMZN/GOOGL always
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+
+    static = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap,
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--min-holdout-sharpe", "999", "--n-combos", "9"])
+    assert static.exit_code == 0, static.stdout
+    static_holdout = json.loads(static.stdout)["holdout"]
+
+    pit = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                              "--snapshot", snap, "--universe", "pit_core",
+                              "--start", "2022-01-01", "--end", "2023-12-31",
+                              "--min-holdout-sharpe", "999", "--n-combos", "9",
+                              "--allow-holdout-reuse"])
+    assert pit.exit_code == 0, pit.stdout
+    pit_payload = json.loads(pit.stdout)
+    assert pit_payload["universe_name"] == "pit_core"
+    # PIT membership excludes AMZN/GOOGL the static run includes -> different holdout metrics.
+    assert pit_payload["holdout"]["total_return"] != static_holdout["total_return"]
+
+
+def test_promote_without_universe_has_null_universe_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    assert _backtest_to_backtested().exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["universe_name"] is None
+    assert payload["universe_snapshots"] is None
+
+
+def test_promote_unknown_universe_is_json_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "does_not_exist",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_promote_universe_burn_keyed_on_window_not_universe(tmp_path, monkeypatch):
+    """The holdout burn is keyed on the data window, NOT the universe: a second promote on the
+    same window+snapshot under a DIFFERENT universe is still refused (conservative)."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    _ingest_pit_universe(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                "--snapshot", snap,
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                *_PASS, "--n-combos", "9"])
+    assert first.exit_code == 0, first.stdout
+    # Same window/snapshot, now WITH a universe -> still refused (universe not in burn identity).
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "pit_core",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--n-combos", "9"])
+    assert second.exit_code == 1, second.stdout
+    assert "holdout" in json.loads(second.stdout)["error"].lower()
+
+
+def test_promote_with_universe_refuses_with_no_breadth_before_walkforward(tmp_path, monkeypatch):
+    """Breadth refusal still fires before walk_forward even with --universe present."""
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    snap = _ingest_snapshot(tmp_path)
+    _ingest_pit_universe(tmp_path)
+    assert _register_backtested_on_snapshot(snap).exit_code == 0
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+                                 "--snapshot", snap, "--universe", "pit_core",
+                                 "--start", "2022-01-01", "--end", "2023-12-31", *_PASS])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "search breadth" in payload["error"]
+    # No holdout row written: refusal happened before walk_forward burned anything.
+    assert len(_holdout_rows(tmp_path)) == 0

@@ -6,7 +6,12 @@ import typer
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import walk_forward
-from algua.cli._common import ok, registry_conn, resolve_eval_inputs
+from algua.cli._common import (
+    ok,
+    registry_conn,
+    resolve_eval_inputs,
+    resolve_universe_inputs,
+)
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.contracts.lifecycle import Actor, Stage
@@ -42,6 +47,9 @@ def promote(
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe",
+        help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     windows: int = typer.Option(4, "--windows", help="walk-forward windows"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
     min_holdout_sharpe: float = typer.Option(0.5, "--min-holdout-sharpe"),
@@ -73,8 +81,12 @@ def promote(
         raise ValueError("--n-combos must be >= 1 when provided")
     if not 0.0 <= min_pct_positive <= 1.0:
         raise ValueError("--min-pct-positive must be in [0, 1]")
-    # 1. Resolve inputs.
+    # 1. Resolve inputs. The PIT universe is resolved up front alongside the other inputs (a bad
+    # --universe refuses here, before any holdout is peeked at). The universe is intentionally NOT
+    # part of the holdout-burn identity below (conservative: the same OOS data window is burned
+    # regardless of universe).
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     data_source = type(provider).__name__
     snapshot_id = getattr(provider, "snapshot_id", None)
     period_start = start_dt.date().isoformat()
@@ -90,6 +102,9 @@ def promote(
         # 2. Resolve search breadth — if it would refuse, refuse here, before evaluating anything.
         breadth, provenance = _resolve_breadth(repo, name, n_combos)
         # 3. Holdout-reuse pre-check — BEFORE walk_forward, so a burned holdout is never peeked at.
+        # The match identity is the data window (strategy, data_source, snapshot_id, period,
+        # holdout_frac) and deliberately EXCLUDES the universe: the same OOS data window is burned
+        # regardless of which universe it was evaluated under (conservative).
         overlap = repo.overlapping_holdout_evaluations(
             rec.id, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
@@ -105,9 +120,13 @@ def promote(
                 f"cost (the result will be flagged as a holdout reuse)."
             )
         reused = overlap and allow_holdout_reuse
-        # 4. Run walk_forward — this evaluates (consumes) the holdout.
+        # 4. Run walk_forward — this evaluates (consumes) the holdout. The PIT universe threads
+        # into the engine here so the holdout/stability that drives the gate is computed against
+        # point-in-time membership, not the static (survivorship-biased) universe.
         wf = walk_forward(strategy, provider, start_dt, end_dt,
-                          windows=windows, holdout_frac=holdout_frac)
+                          windows=windows, holdout_frac=holdout_frac,
+                          universe_by_date=universe_by_date,
+                          universe_name=universe, universe_snapshots=universe_prov)
         # 5. Record the holdout evaluation NOW — looking at it consumes it regardless of pass/fail.
         repo.record_holdout_evaluation(
             rec.id, data_source=data_source, snapshot_id=snapshot_id,
@@ -132,6 +151,8 @@ def promote(
         "snapshot_id": wf.snapshot_id,
         "holdout": wf.holdout_metrics,
         "stability": wf.stability,
+        "universe_name": wf.universe_name,
+        "universe_snapshots": wf.universe_snapshots,
     }
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
