@@ -207,7 +207,11 @@ class AlpacaPaperBroker:
         results = self._read(
             self._delete("/v2/positions?cancel_orders=true"), "/v2/positions", ok=(200, 207)
         )
-        if isinstance(results, list) and _multistatus_failures(results):
+        if not isinstance(results, list):
+            # A panic flatten must not call an unexpected (non-list) body a success and let the
+            # operator believe the account is flat.
+            raise BrokerError(f"alpaca /v2/positions: expected a list, got {results!r}")
+        if _multistatus_failures(results):
             raise BrokerError(f"alpaca failed to close some positions: {results}")
 
     def snapshot(self, universe: list[str]) -> TickSnapshot:

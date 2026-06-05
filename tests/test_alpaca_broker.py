@@ -370,3 +370,10 @@ def test_close_all_positions_partial_failure_raises(monkeypatch):
     monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError):
         _broker().close_all_positions()
+
+
+def test_close_all_positions_non_list_body_raises(monkeypatch):
+    # a panic flatten must not treat an unexpected (non-list) body as success
+    monkeypatch.setattr(ab, "requests", _FakeRequestsWithDelete(_FakeResp(207, {"oops": 1})))
+    with pytest.raises(BrokerError):
+        _broker().close_all_positions()
