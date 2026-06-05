@@ -114,10 +114,13 @@ def test_verify_and_consume_writes_live_authorization(tmp_path):
     row = conn.execute("SELECT * FROM live_authorizations WHERE strategy_id=1").fetchone()
     assert row is not None
     assert row["code_hash"] == "ch" and row["config_hash"] == "cfg"
-    assert row["dependency_hash"] == "dep"
-    assert row["principal"] == "lior" and row["challenge"] == issued["challenge"]
-    assert live_gate.verify_signature(signers, row["challenge"],
-                                      base64.b64decode(row["signature"])) == "lior"
+    assert row["dependency_hash"] == "dep" and row["principal"] == "lior"
+    # nonce+expires_at are stored (so the payload can be REBUILT), not the challenge text
+    assert row["nonce"] == issued["nonce"] and row["expires_at"] == issued["expires_at"]
+    rebuilt = live_gate.build_challenge("s", 1, "ch", "cfg", "dep", row["nonce"], row["expires_at"])
+    assert rebuilt == issued["challenge"]
+    sig_bytes = base64.b64decode(row["signature"])
+    assert live_gate.verify_signature(signers, rebuilt, sig_bytes) == "lior"
 
 
 def test_verify_and_consume_no_authorization_on_bad_signature(tmp_path):
@@ -207,5 +210,43 @@ def test_verify_live_authorization_rejects_revoked_or_unenrolled(tmp_path, monke
     conn.execute("UPDATE live_authorizations SET revoked_at=NULL WHERE strategy_id=1")
     conn.commit()
     signers.write_text("# no keys enrolled\n")
+    with pytest.raises(LiveAuthorizationError):
+        live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+
+
+def test_verify_live_authorization_rejects_forged_identity_columns(tmp_path, monkeypatch):
+    # CRITICAL regression: an agent inserts a row whose identity COLUMNS match the current vetted
+    # code, but whose signature is a real human signature over DIFFERENT code. Trade-time verify
+    # must reject it — it rebuilds the payload from the recomputed identity, not the stored bytes.
+    import pytest
+
+    from algua.registry.live_gate import LiveAuthorizationError
+    from algua.registry.store import SqliteStrategyRepository
+    conn = _conn(tmp_path)
+    signers = _seed_authorization(conn, tmp_path, code="ORIG")  # real signature over code=ORIG
+    conn.execute("UPDATE live_authorizations SET code_hash='CURRENT' WHERE strategy_id=1")
+    conn.commit()
+    _live_strategy(conn)
+    _identity(monkeypatch, code="CURRENT")
+    with pytest.raises(LiveAuthorizationError):
+        live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+
+
+def test_verify_live_authorization_revoked_newest_blocks_older(tmp_path, monkeypatch):
+    import pytest
+
+    from algua.registry.live_gate import LiveAuthorizationError
+    from algua.registry.store import SqliteStrategyRepository
+    conn = _conn(tmp_path)
+    signers = _seed_authorization(conn, tmp_path)  # valid unrevoked (older) row
+    conn.execute(
+        "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash, dependency_hash, "
+        "nonce, expires_at, signature, principal, authorized_at, revoked_at) "
+        "SELECT strategy_id, code_hash, config_hash, dependency_hash, nonce, expires_at, "
+        "signature, principal, authorized_at, '2026-06-05' FROM live_authorizations "
+        "WHERE id=(SELECT MAX(id) FROM live_authorizations)")
+    conn.commit()
+    _live_strategy(conn)
+    _identity(monkeypatch)
     with pytest.raises(LiveAuthorizationError):
         live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)

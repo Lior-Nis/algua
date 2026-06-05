@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import secrets
 import sqlite3
 import subprocess
@@ -132,13 +133,14 @@ def verify_and_consume(conn: sqlite3.Connection, strategy: str, strategy_id: int
         return None
     if not consume_challenge(conn, row["nonce"], now=now):
         return None
-    # Persist the durable, re-verifiable proof of this go-live: the exact signed challenge, the
-    # signature, the approver, and the artifact identity. Trade-time verify_live_authorization
-    # re-verifies THIS against the trust anchor rather than trusting agent-writable stage/approvals.
+    # Persist the durable proof of this go-live: the identity, the nonce+expires_at (so the exact
+    # signed payload can be REBUILT from a recomputed identity at trade time), the signature, and
+    # the approver. We deliberately do NOT store the challenge text — trade-time verification must
+    # rebuild it from the recomputed identity, never trust agent-writable bytes (codex CRITICAL).
     conn.execute(
         "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash, dependency_hash, "
-        "challenge, signature, principal, authorized_at) VALUES (?,?,?,?,?,?,?,?)",
-        (strategy_id, code_hash, config_hash, dependency_hash, payload,
+        "nonce, expires_at, signature, principal, authorized_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (strategy_id, code_hash, config_hash, dependency_hash, row["nonce"], row["expires_at"],
          base64.b64encode(signature).decode(), principal, now.isoformat()),
     )
     conn.commit()
@@ -162,16 +164,31 @@ def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyRepository
     if rec.stage is not Stage.LIVE:
         raise LiveAuthorizationError(f"{name} is not live (stage={rec.stage.value})")
     identity = compute_artifact_hashes(name)
+    # Newest authorization for this strategy + recomputed identity REGARDLESS of revocation, so a
+    # revoked newest row BLOCKS even if an older unrevoked one for the same artifact exists.
     row = conn.execute(
         "SELECT * FROM live_authorizations WHERE strategy_id=? AND code_hash=? AND config_hash=? "
-        "AND dependency_hash IS ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1",
+        "AND dependency_hash IS ? ORDER BY id DESC LIMIT 1",
         (rec.id, identity.code_hash, identity.config_hash, identity.dependency_hash),
     ).fetchone()
     if row is None:
         raise LiveAuthorizationError(
-            f"no unrevoked live authorization matching the current artifact of {name}")
-    principal = verify_signature(allowed_signers_path, row["challenge"],
-                                 base64.b64decode(row["signature"]))
+            f"no live authorization matching the current artifact of {name}")
+    if row["revoked_at"] is not None:
+        raise LiveAuthorizationError(f"the live authorization for the current artifact of {name} "
+                                     "is revoked")
+    # REBUILD the canonical payload from the RECOMPUTED identity (+ strategy + the stored
+    # nonce/expires_at) and re-verify the signature over THAT — never over agent-writable stored
+    # bytes. A signature validates only if the human signed this exact strategy + current identity,
+    # so forged identity columns paired with a foreign signature can't pass (codex CRITICAL).
+    payload = build_challenge(name, rec.id, identity.code_hash, identity.config_hash,
+                              identity.dependency_hash, row["nonce"], row["expires_at"])
+    try:
+        principal = verify_signature(allowed_signers_path, payload,
+                                     base64.b64decode(row["signature"]))
+    except (SignatureError, binascii.Error) as exc:
+        raise LiveAuthorizationError(
+            f"could not re-verify the live authorization for {name}: {exc}") from exc
     if principal is None or principal != row["principal"]:
         raise LiveAuthorizationError(
             f"live authorization signature for {name} failed re-verification against the anchor")

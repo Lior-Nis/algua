@@ -186,13 +186,19 @@ CREATE TABLE IF NOT EXISTS live_challenges (
     expires_at      TEXT NOT NULL,
     consumed_at     TEXT
 );
+-- The signed payload is NEVER stored verbatim and re-verified — an agent with DB write could then
+-- pair vetted-identity columns with a foreign signature (codex CRITICAL). We store only the
+-- non-identity payload parts (nonce, expires_at); trade-time verification REBUILDS the canonical
+-- challenge from the RECOMPUTED identity + strategy + these, so a signature is valid only over the
+-- current artifact.
 CREATE TABLE IF NOT EXISTS live_authorizations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id     INTEGER NOT NULL REFERENCES strategies(id),
     code_hash       TEXT NOT NULL,
     config_hash     TEXT NOT NULL,
     dependency_hash TEXT,
-    challenge       TEXT NOT NULL,
+    nonce           TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
     signature       TEXT NOT NULL,
     principal       TEXT NOT NULL,
     authorized_at   TEXT NOT NULL,
