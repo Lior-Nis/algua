@@ -7,8 +7,10 @@ import typer
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.contracts.lifecycle import Actor, Stage
-from algua.registry.approvals import record_approval
+from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.registry import live_gate
+from algua.registry.approvals import compute_artifact_hashes, record_approval
+from algua.registry.live_gate import SignatureError
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 
@@ -50,38 +52,58 @@ def show(name: str) -> None:
 
 
 @registry_app.command("transition")
-@json_errors(ValueError, LookupError)
+@json_errors(ValueError, LookupError, TransitionError, SignatureError)
 def transition(
     name: str,
     to: str = typer.Option(..., "--to"),
     actor: str = typer.Option(..., "--actor"),
     reason: str = typer.Option(None, "--reason"),
+    signature: str = typer.Option(
+        None, "--signature",
+        help="path to the SSH signature over the printed go-live challenge"),
 ) -> None:
-    """Advance a strategy to a new lifecycle stage.
+    """Advance a strategy's lifecycle stage. Going live is a two-step signed ceremony.
 
-    Going live pins the *recomputed* code+config hash of the loaded strategy and requires a
-    matching human approval; callers cannot supply the hashes.
-    """
+    Run with no --signature to print a challenge, sign it with your enrolled key,
+    then re-run with --signature."""
+    target = Stage(to)
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        rec = transition_strategy(repo, name, Stage(to), Actor(actor), reason)
+        if target is Stage.LIVE and signature is None:
+            if Actor(actor) is not Actor.HUMAN:
+                raise TransitionError("transition to live requires a human actor")
+            rec = repo.get(name)
+            validate_transition(rec.stage, Stage.LIVE)  # reject non-paper before issuing
+            code_hash, config_hash = compute_artifact_hashes(name)
+            issued = live_gate.issue_challenge(conn, rec.id, name, code_hash, config_hash)
+            emit(ok({
+                "action": "go_live_challenge", "strategy": name, **issued,
+                "instructions": ("sign the 'challenge' value with your enrolled key: "
+                                 "ssh-keygen -Y sign -n algua-go-live -f <key> <file>; "
+                                 "then re-run this command with --signature <file>.sig"),
+            }))
+            return
+
+        verifier = None
+        approver: dict[str, str] = {}
+        if target is Stage.LIVE:
+            sig_bytes = Path(signature).read_bytes()
+
+            def _verify(_repo: object, sid: int, ch: str, cfg: str) -> bool:
+                principal = live_gate.verify_and_consume(
+                    conn, name, sid, ch, cfg, sig_bytes, ALLOWED_SIGNERS_PATH)
+                if principal is None:
+                    return False
+                approver["id"] = principal
+                return True
+
+            verifier = _verify
+
+        rec = transition_strategy(repo, name, target, Actor(actor), reason,
+                                  approval_verifier=verifier)
+        if target is Stage.LIVE:
+            record_approval(repo, name, approver["id"])
     emit(ok({"name": rec.name, "stage": rec.stage.value}))
-
-
-@registry_app.command("approve")
-@json_errors(ValueError, LookupError)
-def approve(
-    name: str,
-    by: str = typer.Option(..., "--by", help="human approver identity"),
-) -> None:
-    """Record a human approval pinning the strategy's current code+config (required for live).
-
-    The approved hashes are computed from the live strategy source and config, so the approval
-    binds to the exact artifact rather than to operator-supplied strings.
-    """
-    with registry_conn() as conn:
-        aid = record_approval(SqliteStrategyRepository(conn), name, by)
-    emit(ok({"approval_id": aid}))
 
 
 @registry_app.command("enroll-approver")

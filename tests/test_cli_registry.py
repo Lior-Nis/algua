@@ -45,18 +45,118 @@ def test_transition_illegal_exits_nonzero():
     assert json.loads(result.stdout)["ok"] is False
 
 
-def test_full_path_to_live_with_approval():
-    # The live gate pins the recomputed hash of the loaded module, so this exercises a real,
-    # loadable strategy and supplies no caller-controlled hashes.
-    strategy = "cross_sectional_momentum"
+def _advance_to_paper(strategy: str) -> None:
     runner.invoke(app, ["registry", "add", strategy])
     for stage in ("backtested", "shortlisted", "paper"):
         runner.invoke(app, ["registry", "transition", strategy,
                             "--to", stage, "--actor", "agent"])
-    runner.invoke(app, ["registry", "approve", strategy, "--by", "lior"])
-    out = _json(runner.invoke(
-        app, ["registry", "transition", strategy, "--to", "live", "--actor", "human"]))
-    assert out["stage"] == "live"
+
+
+def _make_key(tmp_path, name="id"):
+    import subprocess
+    key = tmp_path / name
+    subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "test", "-f", str(key)],
+                   check=True, capture_output=True)
+    return key, (tmp_path / f"{name}.pub").read_text().strip()
+
+
+def _allowed_signers_file(tmp_path, principal, pub):
+    keytype, keyblob = pub.split()[0], pub.split()[1]
+    path = tmp_path / "allowed_signers"
+    path.write_text(f'{principal} namespaces="algua-go-live" {keytype} {keyblob}\n')
+    return path
+
+
+def _sign_file(key, content_path):
+    import subprocess
+    subprocess.run(["ssh-keygen", "-Y", "sign", "-n", "algua-go-live", "-f", str(key),
+                    str(content_path)],
+                   check=True, capture_output=True)
+    return content_path.parent / (content_path.name + ".sig")
+
+
+def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
+    """Two-step signed go-live: challenge then signature."""
+    strategy = "cross_sectional_momentum"
+    _advance_to_paper(strategy)
+
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers_file(tmp_path, "lior", pub)
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+
+    # Step 1: transition --to live with no --signature -> challenge issued, stage stays paper
+    result1 = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
+                                  "--actor", "human"])
+    assert result1.exit_code == 0, result1.stdout
+    out1 = json.loads(result1.stdout)
+    assert out1["ok"] is True
+    assert out1["action"] == "go_live_challenge"
+    assert "challenge" in out1
+
+    show_after_challenge = json.loads(
+        runner.invoke(app, ["registry", "show", strategy]).stdout)
+    assert show_after_challenge["stage"] == "paper", "stage must still be paper after step-1"
+
+    # Sign the challenge value
+    challenge_file = tmp_path / "challenge.txt"
+    challenge_file.write_text(out1["challenge"])
+    sig_file = _sign_file(key, challenge_file)
+
+    # Step 2: transition --to live --signature <file>.sig -> accepted, stage becomes live
+    result2 = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
+                                  "--actor", "human", "--signature", str(sig_file)])
+    assert result2.exit_code == 0, result2.stdout
+    out2 = json.loads(result2.stdout)
+    assert out2["ok"] is True
+    assert out2["stage"] == "live"
+
+    # Replay: same .sig again must NOT succeed (challenge consumed / strategy already live)
+    result3 = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
+                                  "--actor", "human", "--signature", str(sig_file)])
+    assert result3.exit_code != 0 or json.loads(result3.stdout).get("ok") is False, \
+        "replayed signature must not produce a fresh go-live"
+
+
+def test_go_live_without_signature_stays_paper(tmp_path, monkeypatch):
+    """Step-1 alone (no --signature) returns challenge and leaves stage paper."""
+    strategy = "cross_sectional_momentum"
+    _advance_to_paper(strategy)
+
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers_file(tmp_path, "lior", pub)
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+
+    result = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
+                                 "--actor", "human"])
+    assert result.exit_code == 0, result.stdout
+    out = json.loads(result.stdout)
+    assert out["action"] == "go_live_challenge"
+    assert "challenge" in out
+
+    show = json.loads(runner.invoke(app, ["registry", "show", strategy]).stdout)
+    assert show["stage"] == "paper"
+
+
+def test_go_live_with_signature_but_no_pending_challenge(tmp_path, monkeypatch):
+    """Presenting a signature without a prior challenge must fail."""
+
+    strategy = "cross_sectional_momentum"
+    _advance_to_paper(strategy)
+
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers_file(tmp_path, "lior", pub)
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+
+    # Sign an arbitrary payload (no challenge was issued)
+    arb = tmp_path / "arbitrary.txt"
+    arb.write_text("not a real challenge")
+    sig_file = _sign_file(key, arb)
+
+    result = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
+                                 "--actor", "human", "--signature", str(sig_file)])
+    assert result.exit_code != 0 or json.loads(result.stdout).get("ok") is False
+    show = json.loads(runner.invoke(app, ["registry", "show", strategy]).stdout)
+    assert show["stage"] == "paper"
 
 
 def test_unknown_strategy_emits_json_error():
