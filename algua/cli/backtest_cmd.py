@@ -9,7 +9,12 @@ from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
 from algua.backtest.sweep import SweepResult, parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
-from algua.cli._common import ok, registry_conn, resolve_eval_inputs
+from algua.cli._common import (
+    ok,
+    registry_conn,
+    resolve_eval_inputs,
+    resolve_universe_inputs,
+)
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -40,12 +45,20 @@ def run(
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe",
+        help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
-    result = run_backtest(strategy, provider, start_dt, end_dt)
+    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    result = run_backtest(
+        strategy, provider, start_dt, end_dt,
+        universe_by_date=universe_by_date,
+        universe_name=universe, universe_snapshots=universe_prov,
+    )
 
     if register:
         with registry_conn() as conn:
@@ -77,14 +90,20 @@ def walk_forward_cmd(
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe",
+        help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     windows: int = typer.Option(4, "--windows", help="number of equal out-of-sample windows"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Walk-forward (out-of-sample) evaluation: per-window metrics, holdout, and stability."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     result = walk_forward(strategy, provider, start_dt, end_dt,
-                          windows=windows, holdout_frac=holdout_frac)
+                          windows=windows, holdout_frac=holdout_frac,
+                          universe_by_date=universe_by_date,
+                          universe_name=universe, universe_snapshots=universe_prov)
     payload = result.to_dict()
     if track:
         payload["mlflow_run_id"] = _track(
@@ -103,6 +122,9 @@ def sweep_cmd(
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe",
+        help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     windows: int = typer.Option(4, "--windows", help="walk-forward windows per combo"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
     param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),
@@ -114,9 +136,12 @@ def sweep_cmd(
     if top < 1:
         raise ValueError("--top must be >= 1")
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     grid = parse_grid(param or [])
     result = sweep(strategy, provider, start_dt, end_dt,
-                   grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by)
+                   grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by,
+                   universe_by_date=universe_by_date,
+                   universe_name=universe, universe_snapshots=universe_prov)
     run_id = None
     if track:
         run_id = _track(lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))

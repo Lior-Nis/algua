@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
@@ -68,6 +69,9 @@ class WalkForwardResult:
     stability: dict[str, float]
     code_hash: str | None = None
     dependency_hash: str | None = None
+    # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
+    universe_name: str | None = None
+    universe_snapshots: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -93,9 +97,13 @@ def walk_forward(
     windows: int = 4,
     holdout_frac: float = 0.2,
     seed: int | None = None,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout."""
-    pf, _weights = build_portfolio(strategy, provider, start, end)
+    pf, _weights = build_portfolio(strategy, provider, start, end,
+                                   universe_by_date=universe_by_date)
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 
@@ -127,5 +135,7 @@ def walk_forward(
         window_metrics=window_metrics,
         holdout_metrics=holdout_metrics,
         stability=stability,
+        universe_name=universe_name,
+        universe_snapshots=universe_snapshots,
         **prov,
     )

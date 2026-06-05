@@ -3,8 +3,9 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import math
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from algua.backtest.engine import BacktestError
@@ -117,6 +118,9 @@ class SweepResult:
     best: dict[str, Any] | None
     code_hash: str | None = None
     dependency_hash: str | None = None
+    # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
+    universe_name: str | None = None
+    universe_snapshots: list[dict[str, str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -132,6 +136,9 @@ def sweep(
     windows: int = 4,
     holdout_frac: float = 0.2,
     rank_by: str = "mean_sharpe",
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
 ) -> SweepResult:
     """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
 
@@ -147,6 +154,8 @@ def sweep(
         wf = walk_forward(
             _override(strategy, combo), provider, start, end,
             windows=windows, holdout_frac=holdout_frac,
+            universe_by_date=universe_by_date,
+            universe_name=universe_name, universe_snapshots=universe_snapshots,
         )
         if meta is None:
             meta = wf
@@ -182,4 +191,6 @@ def sweep(
         rank_by=rank_by,
         ranked=ranked,
         best=best,
+        universe_name=meta.universe_name,
+        universe_snapshots=meta.universe_snapshots,
     )

@@ -17,7 +17,13 @@ from algua.data.files import (
     write_bytes_snapshot,
 )
 from algua.data.manifest import SnapshotManifest
-from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
+from algua.data.models import (
+    Dataset,
+    Kind,
+    SnapshotMetadata,
+    SnapshotRecord,
+    UniverseSnapshot,
+)
 from algua.data.schema import to_bar_schema
 
 
@@ -215,6 +221,41 @@ class DataStore:
             )
         frame = pd.read_parquet(self.data_dir / rec.data_path)
         return to_bar_schema(frame)
+
+    def read_universe(self, universe: str) -> list[UniverseSnapshot]:
+        """Read a named universe's point-in-time membership timeline.
+
+        A time-varying universe is recorded as one membership snapshot per `effective_date`,
+        all sharing the universe NAME (see `ingest_universe`). This reads every snapshot tagged
+        with `universe`, normalizes its symbols, and returns the timeline sorted ascending by
+        `effective_date`. The as-of-date-t membership is the snapshot with the greatest
+        `effective_date <= t` (empty before the earliest effective date) — that resolution is the
+        consumer's, but the timeline this returns is what makes it leak-free.
+
+        Raises ``ValueError`` if two snapshots share an `effective_date` but disagree on
+        membership: the as-of answer for that date would be ambiguous, so we refuse rather than
+        silently pick one.
+        """
+        records = [
+            rec
+            for rec in self.manifest.list_records(Dataset.UNIVERSES.value)
+            if rec.metadata.universe == universe
+        ]
+        by_date: dict[date, UniverseSnapshot] = {}
+        for rec in records:
+            frame = pd.read_parquet(self.data_dir / rec.data_path)
+            eff = date.fromisoformat(str(frame["effective_date"].iloc[0]))
+            symbols = frozenset(normalize_symbols([str(s) for s in frame["symbol"]]))
+            existing = by_date.get(eff)
+            if existing is not None and existing.symbols != symbols:
+                raise ValueError(
+                    f"ambiguous as-of membership for universe {universe!r} on {eff.isoformat()}: "
+                    f"two snapshots disagree ({sorted(existing.symbols)} vs {sorted(symbols)})"
+                )
+            by_date[eff] = UniverseSnapshot(
+                snapshot_id=rec.snapshot_id, effective_date=eff, symbols=symbols
+            )
+        return [by_date[eff] for eff in sorted(by_date)]
 
     def summary(self) -> dict[str, Any]:
         records = self.list_snapshots()

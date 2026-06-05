@@ -81,6 +81,7 @@ def test_backtest_result_to_dict_has_expected_keys():
     assert set(d) == {
         "strategy", "metrics", "config_hash", "data_source", "timeframe",
         "period", "seed", "snapshot_id", "code_hash", "dependency_hash",
+        "universe_name", "universe_snapshots",
     }
 
 
@@ -90,6 +91,7 @@ def test_walkforward_result_to_dict_has_expected_keys():
         "strategy", "config_hash", "data_source", "snapshot_id", "timeframe",
         "seed", "period", "windows", "holdout_frac", "window_metrics",
         "holdout_metrics", "stability", "code_hash", "dependency_hash",
+        "universe_name", "universe_snapshots",
     }
 
 
@@ -99,4 +101,5 @@ def test_sweep_result_to_dict_has_expected_keys():
         "strategy", "data_source", "snapshot_id", "timeframe", "seed",
         "period", "windows", "holdout_frac", "grid", "n_combos",
         "rank_by", "ranked", "best", "code_hash", "dependency_hash",
+        "universe_name", "universe_snapshots",
     }

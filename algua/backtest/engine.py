@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Collection, Mapping
+from datetime import date, datetime
 
 import pandas as pd
 import vectorbt as vbt
@@ -19,8 +20,28 @@ class BacktestError(RuntimeError):
     pass
 
 
+def _members_as_of(
+    universe_by_date: Mapping[date, Collection[str]], t: pd.Timestamp
+) -> frozenset[str]:
+    """As-of-t membership: the snapshot with the greatest effective_date <= t.date().
+
+    The map is keyed by effective_date (one entry per session here, pre-expanded by the wiring
+    layer, but the rule holds for any sparse map). Empty before the earliest effective date.
+    Uses only dates <= t, so membership at t can never see a later snapshot — no look-ahead.
+    """
+    target = t.date()
+    eligible = [d for d in universe_by_date if d <= target]
+    if not eligible:
+        return frozenset()
+    return frozenset(universe_by_date[max(eligible)])
+
+
 def _decision_weights(
-    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+    strategy: LoadedStrategy,
+    bars: pd.DataFrame,
+    adj: pd.DataFrame,
+    *,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
 ) -> pd.DataFrame:
     """Run the per-bar decision loop and return raw target weights (pre-lag).
 
@@ -36,6 +57,13 @@ def _decision_weights(
 
     Each evaluated bar runs the SAME long-only + gross-exposure risk checks as the paper/live
     decision core, so a decision that passes the backtest is one paper/live will also accept.
+
+    Point-in-time universe (`universe_by_date`): when provided, the strategy only ever sees the
+    symbols that were as-of-t members (the snapshot with the greatest effective_date <= t),
+    eliminating survivorship bias. `None` reproduces the original static behavior exactly (the
+    full fetched panel is visible every bar). Empty as-of membership => that bar is flat. A weight
+    returned for a non-member is a strategy bug and raises `BacktestError`. As-of membership at t
+    uses only snapshots dated <= t, so the masking introduces no look-ahead.
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
@@ -50,9 +78,23 @@ def _decision_weights(
         if i < warmup:
             continue
         view = bars_sorted.iloc[:stop]
+        if universe_by_date is not None:
+            members = _members_as_of(universe_by_date, t)
+            if not members:
+                continue  # before the earliest effective date -> flat
+            view = view[view["symbol"].isin(members)]
+            if view.empty:
+                continue  # members exist but no bar data for any of them yet -> flat
         w = strategy.target_weights(view)
         if len(w) == 0:
             continue
+        if universe_by_date is not None:
+            non_members = [s for s in w.index[w != 0.0] if s not in members]
+            if non_members:
+                raise BacktestError(
+                    f"strategy {strategy.name!r} returned weight for non-member symbol(s) "
+                    f"{sorted(non_members)} at {t} (as-of members: {sorted(members)})"
+                )
         # The shared checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error
         # contract while preserving the breach (and its `.kind`) as the cause.
         try:
@@ -67,14 +109,41 @@ def _decision_weights(
     return weights
 
 
+def _fetch_symbols(
+    strategy: LoadedStrategy, universe_by_date: Mapping[date, Collection[str]] | None
+) -> list[str]:
+    """Symbols to fetch bars for.
+
+    Static mode: the strategy's declared universe. PIT mode: the UNION of every symbol ever
+    effective across the membership timeline — so price data exists for any ever-member, including
+    membership active at `start` that derives from a snapshot dated before it. (The wiring layer
+    already restricts the timeline to snapshots effective <= end_date.)
+    """
+    if universe_by_date is None:
+        return strategy.universe
+    union: set[str] = set()
+    for members in universe_by_date.values():
+        union.update(members)
+    return sorted(union)
+
+
 def simulate(
-    strategy: LoadedStrategy, provider: DataProvider, start: datetime, end: datetime
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
 ) -> tuple[vbt.Portfolio, pd.DataFrame]:
     """Fetch bars, run the per-bar decision loop (enforcing the shared long-only + gross-exposure
     risk checks), apply the t->t+1 shift, and simulate. Returns (portfolio, effective-weights).
 
     This is the public simulation step: bars -> (portfolio, effective weights). Metrics are
-    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward()."""
+    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+
+    Point-in-time universe (`universe_by_date`): when provided, bars are fetched for the UNION of
+    all ever-effective members and the per-bar decision is masked to as-of-t membership (see
+    `_decision_weights`). `None` is the original static behavior — fetch the declared universe."""
     cadence = strategy.execution.rebalance_frequency.lower()
     if cadence not in _SUPPORTED_CADENCES:
         raise BacktestError(
@@ -82,7 +151,7 @@ def simulate(
             f"this slice rebalances daily only ({sorted(_SUPPORTED_CADENCES)})"
         )
     try:
-        bars = provider.get_bars(strategy.universe, start, end, "1d")
+        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
@@ -91,7 +160,7 @@ def simulate(
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     adj = adj.sort_index()
 
-    weights = _decision_weights(strategy, bars, adj)
+    weights = _decision_weights(strategy, bars, adj, universe_by_date=universe_by_date)
 
     lag = strategy.execution.decision_lag_bars
     weights_eff = weights.shift(lag).fillna(0.0)
@@ -118,8 +187,11 @@ def run(
     end: datetime,
     *,
     seed: int | None = None,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
 ) -> BacktestResult:
-    pf, weights_eff = simulate(strategy, provider, start, end)
+    pf, weights_eff = simulate(strategy, provider, start, end, universe_by_date=universe_by_date)
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
@@ -131,5 +203,7 @@ def run(
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         code_hash=stamps["code_hash"],
         dependency_hash=stamps["dependency_hash"],
+        universe_name=universe_name,
+        universe_snapshots=universe_snapshots,
         **prov,
     )
