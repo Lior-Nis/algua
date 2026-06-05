@@ -4,6 +4,7 @@ import pandas as pd
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.order_state import (
+    clear_peak_equity,
     client_order_id,
     count_orders,
     derive_positions,
@@ -120,6 +121,14 @@ def test_peak_equity_ratchets_up(tmp_path):
     assert update_peak_equity(conn, "s", 120.0) == 120.0  # new high
     assert update_peak_equity(conn, "s", 90.0) == 120.0   # below peak -> peak unchanged
     assert get_peak_equity(conn, "s") == 120.0
+
+
+def test_clear_peak_equity_rebases(tmp_path):
+    conn = _conn(tmp_path)
+    update_peak_equity(conn, "s", 200.0)
+    clear_peak_equity(conn, "s")
+    assert get_peak_equity(conn, "s") is None  # re-based: next tick starts a fresh high-water mark
+    clear_peak_equity(conn, "s")  # idempotent: clearing an absent row is a no-op
 
 
 def test_persist_run_partial_fill_reaches_partial_status(tmp_path):

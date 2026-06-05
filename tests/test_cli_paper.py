@@ -65,6 +65,26 @@ def test_manual_kill_blocks_run_then_resume_allows(monkeypatch):
     assert ok.exit_code == 0
 
 
+def test_resume_rebases_drawdown_peak():
+    # After a drawdown halt the account is flattened to a lower equity; resume must clear the
+    # persisted peak, else the next tick re-trips the breaker against the stale pre-loss high.
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import get_peak_equity, update_peak_equity
+    from algua.registry.db import connect, migrate
+
+    _to_paper()
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        update_peak_equity(conn, "cross_sectional_momentum", 200_000.0)
+    runner.invoke(app, ["paper", "kill", "cross_sectional_momentum", "--reason", "drawdown"])
+    assert runner.invoke(app, ["paper", "resume", "cross_sectional_momentum"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert get_peak_equity(conn, "cross_sectional_momentum") is None
+
+
 def test_breach_trips_killswitch_and_persists_nothing(monkeypatch):
     _to_paper()
 
