@@ -174,7 +174,9 @@ def log_walk_forward(
             "timeframe": result.timeframe,
         })
         # Strip the holdout from the persisted artifact too (it lives only in `research promote`).
+        # No default: a KeyError here means the field was renamed and the strip silently no-oped,
+        # which would re-leak the holdout into result.json — fail loud so the rename is caught.
         wf_dict = result.to_dict()
-        wf_dict.pop("holdout_metrics", None)
+        wf_dict.pop("holdout_metrics")
         mlflow.log_dict(wf_dict, "result.json")
         return run.info.run_id

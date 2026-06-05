@@ -79,6 +79,17 @@ def test_degenerate_holdout_makes_gate_fail_not_pass():
     assert check["passed"] is False
 
 
+def test_degenerate_holdout_to_dict_nulls_inf_threshold_and_is_json_serializable():
+    import json
+
+    # n_bars=0 drives effective_min_holdout_sharpe to inf; to_dict() must null it so inf never
+    # reaches JSON — regression guard against re-leaking a non-finite value into the payload.
+    d = evaluate_gate(_wf(holdout_sharpe=99.0, n_bars=0), GateCriteria(), n_combos=9)
+    d_dict = d.to_dict()
+    assert d_dict["effective_min_holdout_sharpe"] is None
+    json.dumps(d_dict)  # must not raise (no inf/NaN in payload)
+
+
 def test_n1_effective_equals_base():
     d = evaluate_gate(_wf(), GateCriteria(min_holdout_sharpe=0.5), n_combos=1)
     assert d.base_min_holdout_sharpe == 0.5

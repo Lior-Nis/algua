@@ -65,6 +65,8 @@ class WalkForwardResult:
     windows: int
     holdout_frac: float
     window_metrics: list[dict[str, Any]]
+    # SENSITIVE: any operator-facing emission of a WalkForwardResult MUST withhold this field
+    # EXCEPT `research promote`, which is the sole command that reveals and burns the holdout.
     holdout_metrics: dict[str, Any]
     stability: dict[str, float]
     code_hash: str | None = None
@@ -101,7 +103,12 @@ def walk_forward(
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
 ) -> WalkForwardResult:
-    """Run the strategy once, then segment its return series into K windows + a final holdout."""
+    """Run the strategy once, then segment its return series into K windows + a final holdout.
+
+    The returned ``holdout_metrics`` are SENSITIVE: callers that emit this result to operators
+    (CLI output, MLflow artifacts, API responses, etc.) MUST withhold the ``holdout_metrics``
+    field. Only ``research promote`` may reveal it — and doing so burns the holdout (single-use).
+    """
     pf, _weights = build_portfolio(strategy, provider, start, end,
                                    universe_by_date=universe_by_date)
     returns = pf.returns()
