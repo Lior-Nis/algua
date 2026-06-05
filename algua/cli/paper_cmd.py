@@ -14,6 +14,7 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
+    clear_peak_equity,
     client_order_id,
     count_orders,
     derive_positions,
@@ -158,6 +159,9 @@ def resume(name: str) -> None:
             audit_append(conn, actor="human", action="kill_switch_reset",
                          reason="manual resume", strategy=name)
             kill_switch.reset(conn, name)
+            # Re-base the drawdown high-water mark to the (post-flatten) current equity, so the
+            # next tick doesn't instantly re-trip the breaker against the stale pre-loss peak (#27).
+            clear_peak_equity(conn, name)
     emit(ok({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"}))
 
 

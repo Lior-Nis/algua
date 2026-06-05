@@ -143,3 +143,11 @@ def update_peak_equity(conn: sqlite3.Connection, strategy: str, equity: float) -
     )
     conn.commit()
     return peak
+
+
+def clear_peak_equity(conn: sqlite3.Connection, strategy: str) -> None:
+    """Drop a strategy's persisted peak so the next tick re-bases the high-water mark to current
+    equity. Called on resume after a trip: without it, a strategy halted by the drawdown breaker
+    and flattened to cash would re-trip every tick against its stale pre-loss peak (#27)."""
+    conn.execute("DELETE FROM strategy_peaks WHERE strategy = ?", (strategy,))
+    conn.commit()
