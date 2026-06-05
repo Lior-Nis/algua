@@ -51,6 +51,12 @@ def promote(
         help="OPERATOR DECLARATION of search breadth, used ONLY when no measured sweep trials "
              "exist; the measured sum from `backtest sweep` is preferred and always wins",
     ),
+    allow_holdout_reuse: bool = typer.Option(
+        False, "--allow-holdout-reuse",
+        help="OVERRIDE the single-use holdout guard: re-evaluate a holdout window already burned "
+             "by a prior promote. Records the reuse (reused=1) and marks it in the audit trail. "
+             "Statistically costly — only with fresh justification.",
+    ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
 ) -> None:
     """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass.
@@ -65,9 +71,12 @@ def promote(
         raise ValueError("--n-combos must be >= 1 when provided")
     if not 0.0 <= min_pct_positive <= 1.0:
         raise ValueError("--min-pct-positive must be in [0, 1]")
+    # 1. Resolve inputs.
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
-    wf = walk_forward(strategy, provider, start_dt, end_dt,
-                      windows=windows, holdout_frac=holdout_frac)
+    data_source = type(provider).__name__
+    snapshot_id = getattr(provider, "snapshot_id", None)
+    period_start = start_dt.date().isoformat()
+    period_end = end_dt.date().isoformat()
     criteria = GateCriteria(
         min_holdout_sharpe=min_holdout_sharpe, min_holdout_return=min_holdout_return,
         min_pct_positive_windows=min_pct_positive, min_window_sharpe=min_window_sharpe,
@@ -75,11 +84,42 @@ def promote(
 
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
+        rec = repo.get(name)  # StrategyNotFound -> JSON error before any evaluation
+        # 2. Resolve search breadth — if it would refuse, refuse here, before evaluating anything.
         breadth, provenance = _resolve_breadth(repo, name, n_combos)
+        # 3. Holdout-reuse pre-check — BEFORE walk_forward, so a burned holdout is never peeked at.
+        overlap = repo.overlapping_holdout_evaluations(
+            rec.id, data_source=data_source, snapshot_id=snapshot_id,
+            period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
+        )
+        if overlap and not allow_holdout_reuse:
+            raise ValueError(
+                f"holdout already consumed for {name!r}: an overlapping out-of-sample window was "
+                f"already evaluated ({data_source}"
+                f"{f'/{snapshot_id}' if snapshot_id else ''}, "
+                f"{period_start}..{period_end}, holdout_frac={holdout_frac}). Re-gating the same "
+                f"holdout leaks it. Use fresh out-of-sample data (a different period or data "
+                f"snapshot), or pass --allow-holdout-reuse to override and accept the statistical "
+                f"cost (the result will be flagged as a holdout reuse)."
+            )
+        reused = overlap and allow_holdout_reuse
+        # 4. Run walk_forward — this evaluates (consumes) the holdout.
+        wf = walk_forward(strategy, provider, start_dt, end_dt,
+                          windows=windows, holdout_frac=holdout_frac)
+        # 5. Record the holdout evaluation NOW — looking at it consumes it regardless of pass/fail.
+        repo.record_holdout_evaluation(
+            rec.id, data_source=wf.data_source, snapshot_id=wf.snapshot_id,
+            period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
+            config_hash=wf.config_hash, reused=reused,
+        )
+        # 6. Evaluate the gate and promote on pass.
         decision = evaluate_gate(wf, criteria, n_combos=breadth, breadth_provenance=provenance)
         promoted = False
         if decision.passed:
-            transition_strategy(repo, name, Stage.SHORTLISTED, actor_enum, _gate_reason(decision))
+            reason = _gate_reason(decision)
+            if reused:
+                reason += "; holdout_reuse=override"
+            transition_strategy(repo, name, Stage.SHORTLISTED, actor_enum, reason)
             promoted = True
 
     payload: dict[str, Any] = {
@@ -91,6 +131,8 @@ def promote(
         "holdout": wf.holdout_metrics,
         "stability": wf.stability,
     }
+    if reused:
+        payload["holdout_reuse"] = "override"
     emit(ok(payload))
 
 

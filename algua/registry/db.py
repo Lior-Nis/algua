@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -125,6 +125,31 @@ CREATE TABLE IF NOT EXISTS search_trials (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_id);
+-- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
+-- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
+-- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
+-- holdout that was looked at (regardless of gate pass/fail — looking consumes it). A later promote
+-- whose (strategy, data identity, OVERLAPPING period, same holdout_frac) collides with a recorded
+-- row is REFUSED unless the operator passes --allow-holdout-reuse, which writes a row with
+-- reused=1 to make the statistical compromise auditable. Matching is on the WINDOW, not on
+-- config_hash: re-gating the same out-of-sample window with a tweaked config is exactly the leak
+-- being closed (config_hash is recorded as evidence only). Data identity = snapshot_id when both
+-- sides have one, else data_source. FK into strategies(id) — relational state, not an audit
+-- snapshot, so it should not outlive its strategy.
+CREATE TABLE IF NOT EXISTS holdout_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+    data_source TEXT NOT NULL,
+    snapshot_id TEXT,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    holdout_frac REAL NOT NULL,
+    config_hash TEXT NOT NULL,
+    reused INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
+    ON holdout_evaluations(strategy_id);
 """
 
 

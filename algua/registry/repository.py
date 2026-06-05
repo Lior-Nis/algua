@@ -109,3 +109,40 @@ class StrategyRepository(Protocol):
         """Sum of ``n_combos`` across every recorded ``search_trials`` row for the strategy —
         the cumulative count of parameter combinations searched in this family (0 if none)."""
         ...
+
+    def record_holdout_evaluation(
+        self,
+        strategy_id: int,
+        *,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+        config_hash: str,
+        reused: bool,
+    ) -> int:
+        """Persist that a walk-forward holdout window was consumed (looked at); return its row id.
+
+        Recorded after the holdout is evaluated, on BOTH pass and fail — looking at the
+        out-of-sample window burns it regardless of outcome. ``reused=True`` flags an audited
+        ``--allow-holdout-reuse`` override of a prior overlapping evaluation."""
+        ...
+
+    def overlapping_holdout_evaluations(
+        self,
+        strategy_id: int,
+        *,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+    ) -> bool:
+        """True iff a prior holdout evaluation for this strategy collides with the given window.
+
+        Collision rule (matches on the WINDOW, never on config): SAME data identity
+        (``snapshot_id`` equal when both have one, else ``data_source`` equal) AND OVERLAPPING
+        period (``period_start <= other.period_end AND other.period_start <= period_end``) AND
+        SAME ``holdout_frac``."""
+        ...

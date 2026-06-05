@@ -156,3 +156,56 @@ class SqliteStrategyRepository:
             (strategy_id,),
         ).fetchone()
         return int(row["total"])
+
+    def record_holdout_evaluation(
+        self,
+        strategy_id: int,
+        *,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+        config_hash: str,
+        reused: bool,
+    ) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO holdout_evaluations"
+                "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
+                " config_hash, reused, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,
+                 config_hash, int(reused), _now()),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None  # a successful INSERT always sets lastrowid
+        return rowid
+
+    def overlapping_holdout_evaluations(
+        self,
+        strategy_id: int,
+        *,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+    ) -> bool:
+        # Data identity: when BOTH the probe and a stored row carry a snapshot_id, identity is the
+        # snapshot_id; otherwise fall back to data_source equality. Period overlap is the standard
+        # interval test (start1 <= end2 AND start2 <= end1). Match is on the window, never config.
+        if snapshot_id is not None:
+            data_match = "snapshot_id = ?"
+            data_param: str = snapshot_id
+        else:
+            # Probe has no snapshot -> identity is the data_source (compare only rows that also
+            # lack a snapshot, so a snapshot-backed row is a distinct identity, not a match).
+            data_match = "snapshot_id IS NULL AND data_source = ?"
+            data_param = data_source
+        row = self._conn.execute(
+            f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ? AND holdout_frac = ?"
+            f" AND {data_match}"
+            f" AND period_start <= ? AND ? <= period_end LIMIT 1",
+            (strategy_id, holdout_frac, data_param, period_end, period_start),
+        ).fetchone()
+        return row is not None

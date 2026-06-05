@@ -147,6 +147,54 @@ def test_migrate_adds_search_trials_to_legacy_db(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
 
 
+def test_migrate_creates_holdout_evaluations_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "holdout_evaluations" in tables
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(holdout_evaluations)")}
+    assert {"id", "strategy_id", "data_source", "snapshot_id", "period_start", "period_end",
+            "holdout_frac", "config_hash", "reused", "created_at"} <= cols
+
+
+def test_migrate_adds_holdout_evaluations_to_legacy_db(tmp_path):
+    """A legacy populated DB that predates holdout_evaluations gains the whole table via the
+    CREATE TABLE IF NOT EXISTS bootstrap; re-running stays idempotent."""
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    assert "holdout_evaluations" not in {
+        r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "holdout_evaluations" in tables
+    sid = conn.execute("SELECT id FROM strategies WHERE name='s'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO holdout_evaluations(strategy_id, data_source, snapshot_id, period_start,"
+        " period_end, holdout_frac, config_hash, reused, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        (sid, "SyntheticProvider", None, "2022-01-01", "2023-12-31", 0.2, "cfg", 0,
+         "2026-01-02T00:00:00+00:00"),
+    )
+    conn.commit()
+
+    migrate(conn)  # idempotent re-run must not drop the row or raise
+    assert conn.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 1
+
+
 def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     """migrate() is an idempotent bootstrap, not a version-gated migrator.
 
