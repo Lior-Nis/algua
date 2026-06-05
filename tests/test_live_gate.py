@@ -96,3 +96,39 @@ def test_verify_signature_missing_anchor_raises(tmp_path):
     from algua.registry.live_gate import SignatureError
     with pytest.raises(SignatureError):
         live_gate.verify_signature(tmp_path / "nope", "payload", b"sig")
+
+
+def test_verify_and_consume_writes_live_authorization(tmp_path):
+    import base64
+
+    conn = _conn(tmp_path)
+    now = datetime(2026, 6, 5, tzinfo=UTC)
+    issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers(tmp_path, "lior", pub)
+    sig = _sign(key, issued["challenge"], tmp_path)
+    principal = live_gate.verify_and_consume(
+        conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now
+    )
+    assert principal == "lior"
+    row = conn.execute("SELECT * FROM live_authorizations WHERE strategy_id=1").fetchone()
+    assert row is not None
+    assert row["code_hash"] == "ch" and row["config_hash"] == "cfg"
+    assert row["dependency_hash"] == "dep"
+    assert row["principal"] == "lior" and row["challenge"] == issued["challenge"]
+    assert live_gate.verify_signature(signers, row["challenge"],
+                                      base64.b64decode(row["signature"])) == "lior"
+
+
+def test_verify_and_consume_no_authorization_on_bad_signature(tmp_path):
+    conn = _conn(tmp_path)
+    now = datetime(2026, 6, 5, tzinfo=UTC)
+    issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
+    key, _pub = _make_key(tmp_path, "mine")
+    _ok, other_pub = _make_key(tmp_path, "other")
+    signers = _allowed_signers(tmp_path, "lior", other_pub)  # different key enrolled
+    sig = _sign(key, issued["challenge"], tmp_path)
+    assert live_gate.verify_and_consume(
+        conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now
+    ) is None
+    assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0

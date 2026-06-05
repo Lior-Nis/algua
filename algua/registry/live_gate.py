@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import secrets
 import sqlite3
 import subprocess
@@ -122,4 +123,16 @@ def verify_and_consume(conn: sqlite3.Connection, strategy: str, strategy_id: int
     principal = verify_signature(allowed_signers_path, payload, signature)
     if principal is None:
         return None
-    return principal if consume_challenge(conn, row["nonce"], now=now) else None
+    if not consume_challenge(conn, row["nonce"], now=now):
+        return None
+    # Persist the durable, re-verifiable proof of this go-live: the exact signed challenge, the
+    # signature, the approver, and the artifact identity. Trade-time verify_live_authorization
+    # re-verifies THIS against the trust anchor rather than trusting agent-writable stage/approvals.
+    conn.execute(
+        "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash, dependency_hash, "
+        "challenge, signature, principal, authorized_at) VALUES (?,?,?,?,?,?,?,?)",
+        (strategy_id, code_hash, config_hash, dependency_hash, payload,
+         base64.b64encode(signature).decode(), principal, now.isoformat()),
+    )
+    conn.commit()
+    return principal

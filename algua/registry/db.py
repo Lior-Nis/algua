@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -185,6 +185,18 @@ CREATE TABLE IF NOT EXISTS live_challenges (
     issued_at       TEXT NOT NULL,
     expires_at      TEXT NOT NULL,
     consumed_at     TEXT
+);
+CREATE TABLE IF NOT EXISTS live_authorizations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id     INTEGER NOT NULL REFERENCES strategies(id),
+    code_hash       TEXT NOT NULL,
+    config_hash     TEXT NOT NULL,
+    dependency_hash TEXT,
+    challenge       TEXT NOT NULL,
+    signature       TEXT NOT NULL,
+    principal       TEXT NOT NULL,
+    authorized_at   TEXT NOT NULL,
+    revoked_at      TEXT
 );
 """
 
