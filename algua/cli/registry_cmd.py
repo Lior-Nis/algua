@@ -11,14 +11,9 @@ from algua.cli.errors import json_errors
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry import live_gate
 from algua.registry.approvals import compute_artifact_hashes, record_approval
-from algua.registry.live_gate import SignatureError
+from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, SignatureError
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
-
-# Anchor the trust anchor to the INSTALLED source tree, NOT the process CWD: the live gate must
-# read the vetted, CODEOWNERS-reviewed copy that ships with this (main) code, never an
-# `approvers/allowed_signers` an agent could plant in some other working directory (codex review).
-ALLOWED_SIGNERS_PATH = Path(__file__).resolve().parents[2] / "approvers" / "allowed_signers"
 
 registry_app = typer.Typer(help="Strategy lifecycle registry", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")

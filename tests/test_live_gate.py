@@ -132,3 +132,80 @@ def test_verify_and_consume_no_authorization_on_bad_signature(tmp_path):
         conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now
     ) is None
     assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0
+
+
+def _live_strategy(conn, stage="live"):
+    conn.execute("UPDATE strategies SET stage=? WHERE id=1", (stage,))
+    conn.commit()
+
+
+def _seed_authorization(conn, tmp_path, *, code="ch", cfg="cfg", dep="dep", principal="lior"):
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers(tmp_path, principal, pub)
+    issued = live_gate.issue_challenge(conn, 1, "s", code, cfg, dep,
+                                       now=datetime(2026, 6, 5, tzinfo=UTC))
+    sig = _sign(key, issued["challenge"], tmp_path)
+    live_gate.verify_and_consume(conn, "s", 1, code, cfg, dep, sig, signers,
+                                 now=datetime(2026, 6, 5, tzinfo=UTC))
+    return signers
+
+
+def _identity(monkeypatch, code="ch", cfg="cfg", dep="dep"):
+    from algua.registry.repository import ArtifactIdentity
+    monkeypatch.setattr("algua.registry.approvals.compute_artifact_hashes",
+                        lambda name: ArtifactIdentity(code, cfg, dep))
+
+
+def test_verify_live_authorization_happy_path(tmp_path, monkeypatch):
+    from algua.registry.store import SqliteStrategyRepository
+    conn = _conn(tmp_path)
+    signers = _seed_authorization(conn, tmp_path)
+    _live_strategy(conn)
+    _identity(monkeypatch)
+    row = live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+    assert row["principal"] == "lior"
+
+
+def test_verify_live_authorization_rejects_non_live(tmp_path, monkeypatch):
+    import pytest
+
+    from algua.registry.live_gate import LiveAuthorizationError
+    from algua.registry.store import SqliteStrategyRepository
+    conn = _conn(tmp_path)
+    signers = _seed_authorization(conn, tmp_path)  # stage stays 'paper'
+    _identity(monkeypatch)
+    with pytest.raises(LiveAuthorizationError):
+        live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+
+
+def test_verify_live_authorization_rejects_changed_code(tmp_path, monkeypatch):
+    import pytest
+
+    from algua.registry.live_gate import LiveAuthorizationError
+    from algua.registry.store import SqliteStrategyRepository
+    conn = _conn(tmp_path)
+    signers = _seed_authorization(conn, tmp_path, code="ch")
+    _live_strategy(conn)
+    _identity(monkeypatch, code="CHANGED")
+    with pytest.raises(LiveAuthorizationError):
+        live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+
+
+def test_verify_live_authorization_rejects_revoked_or_unenrolled(tmp_path, monkeypatch):
+    import pytest
+
+    from algua.registry.live_gate import LiveAuthorizationError
+    from algua.registry.store import SqliteStrategyRepository
+    conn = _conn(tmp_path)
+    signers = _seed_authorization(conn, tmp_path)
+    _live_strategy(conn)
+    _identity(monkeypatch)
+    conn.execute("UPDATE live_authorizations SET revoked_at='2026-06-05' WHERE strategy_id=1")
+    conn.commit()
+    with pytest.raises(LiveAuthorizationError):
+        live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+    conn.execute("UPDATE live_authorizations SET revoked_at=NULL WHERE strategy_id=1")
+    conn.commit()
+    signers.write_text("# no keys enrolled\n")
+    with pytest.raises(LiveAuthorizationError):
+        live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)

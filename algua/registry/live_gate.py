@@ -8,8 +8,15 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from algua.registry.repository import StrategyRepository
+
 _NAMESPACE = "algua-go-live"
 _TTL = timedelta(minutes=10)
+
+# The go-live trust anchor: enrolled approver PUBLIC keys, resolved from the INSTALLED source tree
+# (not CWD) so the gate always reads the vetted, CODEOWNERS-reviewed copy. Shared by the CLI and
+# the trade-time verifier so there is exactly one anchor.
+ALLOWED_SIGNERS_PATH = Path(__file__).resolve().parents[2] / "approvers" / "allowed_signers"
 
 
 def _now() -> datetime:
@@ -136,3 +143,36 @@ def verify_and_consume(conn: sqlite3.Connection, strategy: str, strategy_id: int
     )
     conn.commit()
     return principal
+
+
+class LiveAuthorizationError(RuntimeError):
+    """The current live artifact is NOT covered by a re-verifiable human go-live signature."""
+
+
+def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyRepository, name: str,
+                              allowed_signers_path: Path) -> sqlite3.Row:
+    """Trade-time wall: prove the strategy's CURRENT artifact is human-authorized for live by
+    re-verifying a stored signature against the CURRENT trust anchor. Trusts nothing forgeable —
+    not the `stage` column, not an `approvals` row. Raises LiveAuthorizationError on any failure;
+    returns the authorization row on success. The future live loop calls this before every order."""
+    from algua.contracts.lifecycle import Stage
+    from algua.registry.approvals import compute_artifact_hashes
+
+    rec = repo.get(name)
+    if rec.stage is not Stage.LIVE:
+        raise LiveAuthorizationError(f"{name} is not live (stage={rec.stage.value})")
+    identity = compute_artifact_hashes(name)
+    row = conn.execute(
+        "SELECT * FROM live_authorizations WHERE strategy_id=? AND code_hash=? AND config_hash=? "
+        "AND dependency_hash IS ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1",
+        (rec.id, identity.code_hash, identity.config_hash, identity.dependency_hash),
+    ).fetchone()
+    if row is None:
+        raise LiveAuthorizationError(
+            f"no unrevoked live authorization matching the current artifact of {name}")
+    principal = verify_signature(allowed_signers_path, row["challenge"],
+                                 base64.b64decode(row["signature"]))
+    if principal is None or principal != row["principal"]:
+        raise LiveAuthorizationError(
+            f"live authorization signature for {name} failed re-verification against the anchor")
+    return row
