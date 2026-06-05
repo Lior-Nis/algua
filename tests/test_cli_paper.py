@@ -392,3 +392,40 @@ def test_resume_all_clears_and_wipes_peaks_but_keeps_strategy_switch(monkeypatch
         assert global_halt.is_engaged(conn) is False
         assert get_peak_equity(conn, "cross_sectional_momentum") is None  # peaks wiped
         assert kill_switch.is_tripped(conn, "cross_sectional_momentum") is True  # untouched
+
+
+def _engage_global_halt():
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        global_halt.engage(conn, reason="halted", actor="human")
+
+
+def test_trade_tick_refused_when_globally_halted(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _engage_global_halt()
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1 and json.loads(result.stdout)["ok"] is False
+
+
+def test_paper_run_refused_when_globally_halted():
+    _to_paper()
+    _engage_global_halt()
+    result = runner.invoke(app, ["paper", "run", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert result.exit_code == 1 and json.loads(result.stdout)["ok"] is False
+
+
+def test_show_reflects_global_halt():
+    _to_paper()
+    _engage_global_halt()
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["health"] == "halted"
+    assert payload["kill_switch"]["global_halt"] is True

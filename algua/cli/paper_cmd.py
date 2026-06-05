@@ -64,6 +64,8 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage is not Stage.PAPER:
         raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
+    if global_halt.is_engaged(conn):
+        raise ValueError("global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
     return strategy
@@ -141,6 +143,7 @@ def show(name: str) -> None:
         n_orders = count_orders(conn, name)
         positions = derive_positions(conn, name)
         ks = kill_switch.get(conn, name)
+        halted_globally = global_halt.is_engaged(conn)
         peak = get_peak_equity(conn, name)
         last = latest_tick_snapshot(conn, name)
         orders = recent_orders(conn, name, 10)
@@ -150,7 +153,7 @@ def show(name: str) -> None:
         1.0 - last_equity / peak
         if last_equity is not None and peak is not None and peak > 0 else None
     )
-    if tripped:
+    if tripped or halted_globally:
         health = "halted"
     elif last is not None and not last["reconcile_ok"]:
         health = "drift"
@@ -161,7 +164,8 @@ def show(name: str) -> None:
     emit(ok({
         "strategy": name,
         "stage": rec.stage.value,
-        "kill_switch": {"tripped": tripped, "reason": ks["reason"] if ks else None},
+        "kill_switch": {"tripped": tripped, "reason": ks["reason"] if ks else None,
+                        "global_halt": halted_globally},
         "drawdown": {"peak_equity": peak, "last_equity": last_equity, "drawdown": drawdown},
         "last_tick": last,
         "positions": positions,
@@ -246,7 +250,7 @@ def trade_tick(
             on_submitted=_persist,
             # Re-read the switch from the DB right before submit so an externally-tripped switch
             # aborts before any order goes out (#21).
-            should_halt=lambda: kill_switch.is_tripped(conn, name),
+            should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
             peak_equity=get_peak_equity(conn, name),
             derived_positions=derive_positions(conn, name),
         )
