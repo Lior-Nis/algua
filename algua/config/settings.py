@@ -16,7 +16,9 @@ class Settings(BaseSettings):
 
     db_path: Path = Path("data/algua.db")
     data_dir: Path = Path("data")
-    knowledge_dir: Path = Path("docs/strategies")
+    # Root of the Obsidian-mountable knowledge base (vault). Strategy docs live under
+    # `<knowledge_dir>/strategies/`; other domains (research, news, …) are added as they arrive.
+    knowledge_dir: Path = Path("kb")
     exchange: str = "XNYS"
     timezone: str = "America/New_York"
     alpaca_api_key: str | None = None
