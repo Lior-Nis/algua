@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-# Repo root: algua/provenance/dependency_hash.py -> parents[2] is the project root that holds
+# Repo root: algua/provenance/lockfile.py -> parents[2] is the project root that holds
 # uv.lock. Kept here (not in backtest) so the registry can pin the same locked-dependency set
 # the backtest stamps record, without the registry importing the backtest engine.
 _ROOT = Path(__file__).resolve().parents[2]

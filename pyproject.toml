@@ -66,6 +66,25 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+# provenance is a pure stdlib-only leaf: it holds the ONE locked-dependency hash that both
+# the backtest stamps and the registry's live-approval identity share, so both lanes may
+# depend on it without crossing a boundary. It must import no other algua.* module.
+name = "provenance layer is pure (imports no other algua module)"
+type = "forbidden"
+source_modules = ["algua.provenance"]
+forbidden_modules = [
+    "algua.cli",
+    "algua.registry",
+    "algua.config",
+    "algua.calendar",
+    "algua.contracts",
+    "algua.features",
+    "algua.data",
+    "algua.backtest",
+    "algua.strategies",
+]
+
+[[tool.importlinter.contracts]]
 name = "calendar stays independent of cli and registry"
 type = "forbidden"
 source_modules = ["algua.calendar"]

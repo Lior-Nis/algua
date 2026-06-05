@@ -59,6 +59,47 @@ def test_migrate_adds_dependency_hash_column_to_legacy_approvals(tmp_path):
     assert "dependency_hash" in cols_again
 
 
+def test_migrate_adds_dependency_hash_column_to_legacy_stage_transitions(tmp_path):
+    """A pre-existing, populated stage_transitions table without dependency_hash gets the column
+    added in place (ALTER), with existing rows defaulting to NULL — same idempotent mechanism as
+    the approvals migration."""
+    conn = connect(tmp_path / "r.db")
+    # Build a legacy stage_transitions table lacking dependency_hash, with one row already in it.
+    conn.executescript(
+        """
+        CREATE TABLE strategies (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE stage_transitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            from_stage TEXT,
+            to_stage TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT,
+            code_hash TEXT,
+            config_hash TEXT,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(id, name) VALUES (1, 's');
+        INSERT INTO stage_transitions(strategy_id, to_stage, actor, created_at)
+            VALUES (1, 'idea', 'system', '2026-01-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(stage_transitions)")}
+    assert "dependency_hash" in cols
+    legacy = conn.execute(
+        "SELECT dependency_hash FROM stage_transitions WHERE id=1"
+    ).fetchone()
+    assert legacy["dependency_hash"] is None  # existing row fails closed
+
+    migrate(conn)  # re-running the ALTER path must stay idempotent
+    cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(stage_transitions)")}
+    assert "dependency_hash" in cols_again
+
+
 def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     """migrate() is an idempotent bootstrap, not a version-gated migrator.
 

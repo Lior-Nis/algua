@@ -71,6 +71,7 @@ class StrategyRepository(Protocol):
         reason: str | None = None,
         code_hash: str | None = None,
         config_hash: str | None = None,
+        dependency_hash: str | None = None,
     ) -> StrategyRecord:
         """Atomically advance ``rec`` to ``to``, append a transition row, return the new state."""
         ...

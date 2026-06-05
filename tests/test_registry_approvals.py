@@ -159,12 +159,30 @@ def test_legacy_null_dependency_row_never_matches(repo):
     assert has_valid_approval(repo, rec.id, code_hash, config_hash, None) is False
 
 
-def test_live_succeeds_when_dependency_matches(repo):
-    # Happy path: a matching code+config+dependency approval still permits the live transition.
+def test_live_transition_records_full_identity_hashes(repo):
+    # Audit symmetry: a successful paper -> live transition must record the full pinned identity
+    # (code, config, AND dependency hash) in the stage_transitions history, not just code+config.
     _advance_to_paper(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
-    rec = transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
-    assert rec.stage is Stage.LIVE
+    code_hash, config_hash, dependency_hash = compute_artifact_hashes(STRATEGY)
+
+    transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
+
+    live_row = repo.list_transitions(STRATEGY)[-1]
+    assert live_row["to_stage"] == Stage.LIVE.value
+    assert live_row["code_hash"] == code_hash
+    assert live_row["config_hash"] == config_hash
+    assert live_row["dependency_hash"] == dependency_hash
+
+
+def test_non_live_transition_records_null_dependency_hash(repo):
+    # Non-live transitions carry no hashes; dependency_hash stays NULL, exactly as code/config do.
+    repo.add(STRATEGY)
+    transition_strategy(repo, STRATEGY, Stage.BACKTESTED, Actor.AGENT)
+    row = repo.list_transitions(STRATEGY)[-1]
+    assert row["dependency_hash"] is None
+    assert row["code_hash"] is None
+    assert row["config_hash"] is None
 
 
 def test_code_hash_ignores_thirdparty_and_stdlib_changes(repo, monkeypatch):

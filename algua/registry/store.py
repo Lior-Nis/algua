@@ -81,6 +81,7 @@ class SqliteStrategyRepository:
         reason: str | None = None,
         code_hash: str | None = None,
         config_hash: str | None = None,
+        dependency_hash: str | None = None,
     ) -> StrategyRecord:
         from_stage = rec.stage
         now = _now()
@@ -92,9 +93,9 @@ class SqliteStrategyRepository:
             self._conn.execute(
                 "INSERT INTO stage_transitions"
                 "(strategy_id, from_stage, to_stage, actor, reason, code_hash, config_hash,"
-                " created_at) VALUES (?,?,?,?,?,?,?,?)",
+                " dependency_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (rec.id, from_stage.value, to.value, actor.value, reason,
-                 code_hash, config_hash, now),
+                 code_hash, config_hash, dependency_hash, now),
             )
         return self.get(rec.name)
 

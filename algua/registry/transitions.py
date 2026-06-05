@@ -22,6 +22,7 @@ def transition_strategy(
     validate_transition(rec.stage, target)
     code_hash: str | None = None
     config_hash: str | None = None
+    dependency_hash: str | None = None
     if target == Stage.LIVE:
         identity = _validate_live_gate(
             repo=repo,
@@ -30,7 +31,7 @@ def transition_strategy(
             actor=transition_actor,
             approval_verifier=approval_verifier,
         )
-        code_hash, config_hash = identity.code_hash, identity.config_hash
+        code_hash, config_hash, dependency_hash = identity
     return repo.apply_transition(
         rec=rec,
         to=target,
@@ -38,6 +39,7 @@ def transition_strategy(
         reason=reason,
         code_hash=code_hash,
         config_hash=config_hash,
+        dependency_hash=dependency_hash,
     )
 
 
@@ -66,7 +68,7 @@ def _validate_live_gate(
         identity.config_hash,
         identity.dependency_hash,
     ):
-        raise TransitionError("no matching human approval for this code+config")
+        raise TransitionError("no matching human approval for this code+config+dependency")
     return identity
 
 

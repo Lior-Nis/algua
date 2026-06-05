@@ -5,11 +5,15 @@ from pathlib import Path
 
 # Identifies the current schema generation. This is a marker stamped into the
 # DB's user_version, NOT a migration cursor: there is no per-version migration
-# logic. `migrate()` is an idempotent bootstrap (CREATE TABLE/INDEX IF NOT EXISTS),
-# so it can add new tables/indexes to an existing DB but CANNOT ALTER a populated one.
-# Any column/constraint change to an existing table needs a real migration
-# (write it explicitly when the need arrives) — not just a bump of this number.
-SCHEMA_VERSION = 5
+# logic. `migrate()` is an idempotent bootstrap (CREATE TABLE/INDEX IF NOT EXISTS)
+# that ALSO performs guarded in-place column additions via `_add_missing_columns`
+# (PRAGMA table_info introspection + ALTER TABLE), so it can both add new
+# tables/indexes AND add columns to an already-populated table. Adding a column
+# is therefore the established pattern — but a SCHEMA_VERSION bump MUST be
+# accompanied by the corresponding migration step (a new table/index in _SCHEMA
+# and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
+# bump this number without the migration that earns it.
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -28,6 +32,11 @@ CREATE TABLE IF NOT EXISTS stage_transitions (
     reason TEXT,
     code_hash TEXT,
     config_hash TEXT,
+    -- dependency_hash mirrors code_hash/config_hash: it is the locked-dependency identity pinned
+    -- by the live gate, recorded here so the "what was promoted to live" audit trail carries the
+    -- full (code, config, dependency) identity. NULL for non-live transitions (no hashes), exactly
+    -- as code_hash/config_hash are.
+    dependency_hash TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS approvals (
@@ -121,6 +130,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     """
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
+    _add_missing_columns(conn, "stage_transitions", {"dependency_hash": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
