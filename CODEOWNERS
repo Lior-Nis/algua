@@ -12,3 +12,6 @@
 /algua/contracts/lifecycle.py   @Lior-Nis   # lifecycle stages + allowed transitions
 /algua/backtest/engine.py       @Lior-Nis   # anti-look-ahead t->t+1 enforcement
 /algua/research/gates.py        @Lior-Nis   # promotion-gate criteria
+/approvers/                     @Lior-Nis   # go-live approver public keys (the signature trust anchor)
+/algua/registry/live_gate.py    @Lior-Nis   # the signed paper->live gate
+/algua/registry/transitions.py  @Lior-Nis   # live-gate enforcement

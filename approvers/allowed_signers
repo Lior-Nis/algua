@@ -1,0 +1,4 @@
+# Enrolled go-live approver PUBLIC keys (SSH allowed_signers format, namespace algua-go-live).
+# This file is the TRUST ANCHOR for the paper->live gate and is CODEOWNERS-protected: an agent
+# may edit it in a worktree but the real gate uses the reviewed copy on main. One line per key:
+#   <principal> namespaces="algua-go-live" ssh-ed25519 AAAA... comment

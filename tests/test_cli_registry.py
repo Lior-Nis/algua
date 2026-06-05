@@ -107,3 +107,20 @@ def test_registry_command_closes_connection(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.stdout
     assert closed == [True]
+
+
+def test_enroll_approver_appends_line(tmp_path, monkeypatch):
+    import json as _json
+
+    signers = tmp_path / "allowed_signers"
+    signers.write_text("# header\n")
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+    r = runner.invoke(app, ["registry", "enroll-approver", "--name", "lior",
+                            "--pubkey", "ssh-ed25519 AAAAC3NzaC1lZDI1 lior@dev"])
+    assert r.exit_code == 0, r.stdout
+    assert _json.loads(r.stdout)["ok"] is True
+    body = signers.read_text()
+    assert 'lior namespaces="algua-go-live" ssh-ed25519 AAAAC3NzaC1lZDI1' in body
+    r2 = runner.invoke(app, ["registry", "enroll-approver", "--name", "x",
+                             "--pubkey", "ssh-ed25519 AAAAC3NzaC1lZDI1 other"])
+    assert r2.exit_code == 1  # duplicate pubkey rejected

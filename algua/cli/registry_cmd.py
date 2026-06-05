@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
 
 from algua.cli._common import ok, registry_conn
@@ -9,6 +11,8 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.approvals import record_approval
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+
+ALLOWED_SIGNERS_PATH = Path("approvers/allowed_signers")
 
 registry_app = typer.Typer(help="Strategy lifecycle registry", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
@@ -78,3 +82,26 @@ def approve(
     with registry_conn() as conn:
         aid = record_approval(SqliteStrategyRepository(conn), name, by)
     emit(ok({"approval_id": aid}))
+
+
+@registry_app.command("enroll-approver")
+@json_errors(ValueError)
+def enroll_approver(
+    name: str = typer.Option(..., "--name", help="approver identity (allowed_signers principal)"),
+    pubkey: str = typer.Option(..., "--pubkey", help="SSH public key (ssh-ed25519 AAAA...)"),
+) -> None:
+    """Enroll a go-live approver PUBLIC key. The trust comes from committing this through code-owner
+    review — the live gate uses the reviewed copy on main."""
+    if not name.strip():
+        raise ValueError("--name must not be empty")
+    parts = pubkey.split()
+    if len(parts) < 2 or not parts[0].startswith("ssh-"):
+        raise ValueError("--pubkey must be an SSH public key, e.g. 'ssh-ed25519 AAAA... comment'")
+    keytype, keyblob = parts[0], parts[1]
+    existing = ALLOWED_SIGNERS_PATH.read_text() if ALLOWED_SIGNERS_PATH.exists() else ""
+    if keyblob in existing:
+        raise ValueError("that public key is already enrolled")
+    line = f'{name} namespaces="algua-go-live" {keytype} {keyblob}\n'
+    with ALLOWED_SIGNERS_PATH.open("a") as fh:
+        fh.write(line)
+    emit(ok({"enrolled": name, "keytype": keytype}))
