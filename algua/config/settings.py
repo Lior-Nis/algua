@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Alpaca's paper-trading API host. The hard live boundary is enforced at config load:
 # the paper URL must point here, never at the live host (api.alpaca.markets).
 _ALPACA_PAPER_HOST = "paper-api.alpaca.markets"
+_ALPACA_LIVE_HOST = "api.alpaca.markets"
 
 
 class Settings(BaseSettings):
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     alpaca_api_secret: str | None = None
     alpaca_data_url: str = "https://data.alpaca.markets/v2"
     alpaca_paper_url: str = "https://paper-api.alpaca.markets"
+    alpaca_live_api_key: str | None = None
+    alpaca_live_api_secret: str | None = None
+    alpaca_live_url: str = "https://api.alpaca.markets"
     mlflow_tracking_uri: str = "mlruns"
 
     @field_validator("db_path", "data_dir")
@@ -36,12 +40,24 @@ class Settings(BaseSettings):
     @field_validator("alpaca_paper_url")
     @classmethod
     def _paper_url_is_paper_endpoint(cls, value: str) -> str:
-        host = urlparse(value).hostname
-        if host != _ALPACA_PAPER_HOST:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.hostname != _ALPACA_PAPER_HOST:
             raise ValueError(
-                f"alpaca_paper_url must point at the paper endpoint "
-                f"({_ALPACA_PAPER_HOST}); got host {host!r}. "
+                f"alpaca_paper_url must be https to the paper endpoint "
+                f"({_ALPACA_PAPER_HOST}); got {value!r}. "
                 "The live endpoint is forbidden by the paper-only boundary."
+            )
+        return value
+
+    @field_validator("alpaca_live_url")
+    @classmethod
+    def _live_url_is_live_endpoint(cls, value: str) -> str:
+        # https-only: API keys must never travel over plaintext (codex review).
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.hostname != _ALPACA_LIVE_HOST:
+            raise ValueError(
+                f"alpaca_live_url must be https to the live endpoint ({_ALPACA_LIVE_HOST}); "
+                f"got {value!r}"
             )
         return value
 

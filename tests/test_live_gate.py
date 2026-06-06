@@ -165,8 +165,10 @@ def test_verify_live_authorization_happy_path(tmp_path, monkeypatch):
     signers = _seed_authorization(conn, tmp_path)
     _live_strategy(conn)
     _identity(monkeypatch)
-    row = live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
-    assert row["principal"] == "lior"
+    auth = live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+    from algua.contracts.types import LiveAuthorization
+    assert isinstance(auth, LiveAuthorization)
+    assert auth.principal == "lior" and auth.strategy_id == 1
 
 
 def test_verify_live_authorization_rejects_non_live(tmp_path, monkeypatch):
