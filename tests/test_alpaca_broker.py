@@ -459,3 +459,14 @@ def test_cancel_order_by_id(monkeypatch):
     # a 204 (or 200) is success; a 404 (already gone) is a no-op, not an error
     monkeypatch.setattr(fake, "delete", lambda url, headers=None, timeout=None: _FakeResp(204))
     _broker().cancel_order("o1")  # must not raise
+
+
+def test_submit_offset_posts_qty_order(monkeypatch):
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "off-1"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    oid = _broker().submit_offset("AAA", 7.0, "coid-flat")      # long 7 -> SELL 7
+    assert oid == "off-1"
+    assert fake.posted[0] == {"symbol": "AAA", "qty": "7", "side": "sell", "type": "market",
+                              "time_in_force": "day", "client_order_id": "coid-flat"}
+    _broker().submit_offset("BBB", -3.0, "coid-cover")          # short 3 -> BUY 3
+    assert fake.posted[1]["side"] == "buy" and fake.posted[1]["qty"] == "3"
