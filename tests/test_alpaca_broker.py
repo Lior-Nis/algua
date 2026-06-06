@@ -430,3 +430,10 @@ def test_brokers_reject_http_plaintext():
         AlpacaPaperBroker("k", "s", "http://paper-api.alpaca.markets")
     with pytest.raises(BrokerError, match="https"):
         AlpacaLiveBroker(_live_auth(), "k", "s", "http://api.alpaca.markets")
+
+
+def test_account_activities_reads_list(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/account/activities": _FakeResp(200, [{"id": "a1", "activity_type": "FILL"}])}))
+    acts = _broker().account_activities()
+    assert acts == [{"id": "a1", "activity_type": "FILL"}]

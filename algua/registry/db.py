@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -203,6 +203,53 @@ CREATE TABLE IF NOT EXISTS live_authorizations (
     principal       TEXT NOT NULL,
     authorized_at   TEXT NOT NULL,
     revoked_at      TEXT
+);
+CREATE TABLE IF NOT EXISTS strategy_allocations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id   INTEGER NOT NULL REFERENCES strategies(id),
+    capital       REAL NOT NULL,
+    effective_ts  TEXT NOT NULL,
+    actor         TEXT NOT NULL,
+    revoked_ts    TEXT
+);
+CREATE TABLE IF NOT EXISTS live_orders (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy          TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    side              TEXT NOT NULL,
+    intended_notional REAL,
+    client_order_id   TEXT NOT NULL UNIQUE,
+    broker_order_id   TEXT,
+    status            TEXT NOT NULL,
+    submitted_ts      TEXT NOT NULL
+);
+-- broker_order_id is the fill-attribution key: at most one order may own it (partial unique so the
+-- many pre-backfill NULLs are allowed).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_live_orders_broker_order_id
+    ON live_orders(broker_order_id) WHERE broker_order_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS live_fills (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id     TEXT NOT NULL UNIQUE,
+    broker_order_id TEXT,
+    strategy        TEXT,
+    symbol          TEXT NOT NULL,
+    qty             REAL NOT NULL CHECK(qty != 0),
+    price           REAL NOT NULL CHECK(price > 0),
+    fill_ts         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_live_fills_strategy_symbol ON live_fills(strategy, symbol);
+CREATE TABLE IF NOT EXISTS live_activities (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id  TEXT NOT NULL UNIQUE,
+    type         TEXT NOT NULL,
+    symbol       TEXT,
+    amount       REAL,
+    ts           TEXT,
+    raw          TEXT
+);
+CREATE TABLE IF NOT EXISTS live_fill_cursor (
+    name    TEXT PRIMARY KEY,
+    cursor  TEXT
 );
 """
 

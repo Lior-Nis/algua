@@ -20,6 +20,8 @@ from algua.execution.order_state import (
     update_peak_equity,
 )
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.registry import allocations
+from algua.registry.allocations import AllocationError
 from algua.registry.live_gate import (
     ALLOWED_SIGNERS_PATH,
     LiveAuthorizationError,
@@ -34,6 +36,42 @@ from algua.strategies.loader import load_strategy
 live_app = typer.Typer(help="LIVE (real-money) trading — human-authorized strategies only",
                        no_args_is_help=True)
 app.add_typer(live_app, name="live")
+
+
+def _live_account_equity() -> float:
+    """Read the live account equity (read-only; no go-live authorization needed — not trading)."""
+    s = get_settings()
+    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
+        raise ValueError("Alpaca LIVE credentials not configured")
+    import requests
+    from requests import RequestException
+    try:
+        resp = requests.get(
+            f"{s.alpaca_live_url.rstrip('/')}/v2/account",
+            headers={"APCA-API-KEY-ID": s.alpaca_live_api_key,
+                     "APCA-API-SECRET-KEY": s.alpaca_live_api_secret},
+            timeout=30,
+        )
+    except RequestException as exc:
+        raise ValueError(f"alpaca account equity request failed: {exc}") from exc
+    if resp.status_code != 200:
+        raise ValueError(f"alpaca {resp.status_code} reading account equity")
+    return float(resp.json()["equity"])
+
+
+@live_app.command("allocate")
+@json_errors(ValueError, LookupError, AllocationError)
+def allocate(
+    name: str,
+    capital: float = typer.Option(..., "--capital", help="live capital base $"),
+) -> None:
+    """Set a strategy's live capital base (its fixed sizing denominator). Enforces that the sum of
+    all live allocations does not exceed account equity."""
+    with registry_conn() as conn:
+        sid = SqliteStrategyRepository(conn).get(name).id
+        allocations.allocate(conn, sid, capital=capital, actor="human",
+                             account_equity=_live_account_equity())
+    emit(ok({"strategy": name, "capital": capital}))
 
 
 def _alpaca_live_broker(authorization: LiveAuthorization) -> AlpacaLiveBroker:
