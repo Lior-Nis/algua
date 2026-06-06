@@ -20,12 +20,13 @@ class _FakeResp:
 
 
 class _FakeRequests:
-    """Routes GET by URL suffix; records POST bodies."""
+    """Routes GET and DELETE by URL suffix; records POST bodies."""
 
     def __init__(self, routes, post_resp=None):
         self.routes = routes
         self.post_resp = post_resp
         self.posted = []
+        self.deleted = []
 
     def get(self, url, headers=None, timeout=None):
         for suffix, resp in self.routes.items():
@@ -36,6 +37,13 @@ class _FakeRequests:
     def post(self, url, headers=None, json=None, timeout=None):
         self.posted.append(json)
         return self.post_resp
+
+    def delete(self, url, headers=None, timeout=None):
+        self.deleted.append(url)
+        for suffix, resp in self.routes.items():
+            if url.endswith(suffix):
+                return resp
+        return _FakeResp(404, text="not found")
 
 
 def _broker():
@@ -437,3 +445,17 @@ def test_account_activities_reads_list(monkeypatch):
         {"/v2/account/activities": _FakeResp(200, [{"id": "a1", "activity_type": "FILL"}])}))
     acts = _broker().account_activities()
     assert acts == [{"id": "a1", "activity_type": "FILL"}]
+
+
+def test_list_open_orders(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/orders?status=open": _FakeResp(200, [{"id": "o1", "client_order_id": "c1"}])}))
+    assert _broker().list_open_orders() == [{"id": "o1", "client_order_id": "c1"}]
+
+
+def test_cancel_order_by_id(monkeypatch):
+    fake = _FakeRequests({})
+    monkeypatch.setattr(ab, "requests", fake)
+    # a 204 (or 200) is success; a 404 (already gone) is a no-op, not an error
+    monkeypatch.setattr(fake, "delete", lambda url, headers=None, timeout=None: _FakeResp(204))
+    _broker().cancel_order("o1")  # must not raise

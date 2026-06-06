@@ -269,6 +269,20 @@ class _AlpacaBroker:
         symbol, so this self-snapshotting path is reserved for single-order callers."""
         return self.submit_sized(intent, self.snapshot([intent.symbol]), client_order_id)
 
+    def list_open_orders(self) -> list[Any]:
+        """All OPEN orders on the account (GET /v2/orders?status=open). Each carries `id` and
+        `client_order_id`; the caller scopes cancellation to a strategy by client_order_id."""
+        return self._read(self._get("/v2/orders?status=open"), "/v2/orders")
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancel ONE order by broker id (DELETE /v2/orders/{id}). 404/422 (already gone/terminal)
+        is a no-op; any other non-2xx raises BrokerError."""
+        path = f"/v2/orders/{order_id}"
+        resp = self._delete(path)
+        if resp.status_code in (404, 422):
+            return
+        self._read(resp, path, ok=(200, 204))
+
     def account_activities(self, after: str | None = None) -> list[Any]:
         """Account activities (fills + cash), oldest-first. `after` is an activity-id/time cursor;
         the ledger re-pulls an overlap window and dedupes by activity id, so exact cursor semantics
