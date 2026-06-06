@@ -23,6 +23,7 @@ from algua.execution.live_ledger import (
     owned_open_order_ids,
     record_live_order,
 )
+from algua.execution.live_reservations import record_reservation
 from algua.execution.live_sizing import LiveSizingError, build_live_sizing_snapshot
 from algua.execution.order_state import (
     client_order_id,
@@ -98,7 +99,7 @@ def _alpaca_live_broker(authorization: LiveAuthorization) -> AlpacaLiveBroker:
 
 def _run_strategy_tick(  # noqa: PLR0913
     conn, name: str, authorization, broker, provider, max_drawdown,
-    start: str = "2023-01-01", end: str = "2023-12-31", cancel=None,
+    start: str = "2023-01-01", end: str = "2023-12-31", reserve_buy=None, cancel=None,
 ) -> dict:
     """Drive ONE strategy's live tick: hooks (incl. the scoped `cancel`), run_tick, breach handling
     (trip + scoped flatten), snapshot persistence. Returns a result dict; raises typer.Exit(1) with
@@ -133,6 +134,7 @@ def _run_strategy_tick(  # noqa: PLR0913
         should_halt=lambda: (kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn)
                              or not authorization_active(conn, authorization)),
         peak_equity=get_nav_peak(conn, name),
+        reserve_buy=reserve_buy,
     )
     try:
         result = run_tick(strategy, broker, provider, utc(start), utc(end),
@@ -201,6 +203,10 @@ def _broker_account_activities(broker, after):
 def _broker_net_positions(broker) -> dict:
     pos = broker.get_positions()  # pandas Series symbol->qty
     return {sym: float(q) for sym, q in pos.items() if float(q) != 0.0}
+
+
+def _broker_buying_power(broker) -> float:
+    return float(broker.account().buying_power)
 
 
 @live_app.command("run-all")
@@ -277,11 +283,24 @@ def run_all(
                 "strategies": [],
             }))
             return
+        pool = {"available": _broker_buying_power(broker)}
+
+        def _reserve_for(strategy_name):
+            def _reserve(symbol: str, notional: float) -> float:
+                permitted = min(notional, max(0.0, pool["available"]))
+                pool["available"] -= permitted
+                if permitted < notional:  # trimmed or fully skipped -> audit the shortfall
+                    record_reservation(
+                        conn, cycle, strategy_name, symbol, notional, permitted
+                    )
+                return permitted
+            return _reserve
+
         results = []
         for name, authorization in verified:
             results.append(_run_strategy_tick(
                 conn, name, authorization, broker, provider, max_drawdown,
-                start=start, end=end,
+                reserve_buy=_reserve_for(name),
                 cancel=lambda n=name: _scoped_cancel(conn, broker, n),
             ))
     emit(ok({"reconcile": recon_payload, "skipped": skipped, "strategies": results}))
