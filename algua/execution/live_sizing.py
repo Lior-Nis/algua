@@ -70,4 +70,9 @@ def build_live_sizing_snapshot(
             pnl = position_pnl(fills, mark=mark)
             nav += pnl.realized + pnl.unrealized
 
-    return SizingSnapshot(equity=min(allocation, nav), market_values=market_values, qtys=qtys), nav
+    equity = min(allocation, nav)
+    if equity <= 0.0:
+        # A non-positive sizing denominator would ZeroDivision / invert weights in run_tick — fail
+        # closed (skip the strategy) rather than size off it (codex C1 review).
+        raise LiveSizingError(f"{strategy}: NAV {nav:.2f} leaves a non-positive sizing equity")
+    return SizingSnapshot(equity=equity, market_values=market_values, qtys=qtys), nav

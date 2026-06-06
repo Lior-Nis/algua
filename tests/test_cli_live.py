@@ -152,3 +152,16 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
     r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
     assert r.exit_code == 1
     assert broker.offsets == [("AAA", 5.0)]  # offset sized to the believed qty
+    # the offset is RECORDED in the books (+backfilled) so its fill attributes back to the strategy
+    # and believed_positions can drop to flat — else the resume gate blocks resume forever (codex)
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT side, broker_order_id FROM live_orders "
+            "WHERE strategy = 'cross_sectional_momentum' AND symbol = 'AAA'"
+        ).fetchone()
+        assert row["side"] == "sell" and row["broker_order_id"] == "off"

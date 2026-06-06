@@ -68,3 +68,13 @@ def test_held_symbol_missing_mark_fails_closed(tmp_path):
     bars = _bars({"AAA": [100.0]})
     with pytest.raises(S.LiveSizingError, match="mark"):
         S.build_live_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars, universe=["AAA"])
+
+
+def test_nav_collapse_fails_closed(tmp_path):
+    # NAV driven negative by a large unrealized loss against a small allocation -> non-positive
+    # sizing denominator must fail closed, not ZeroDivision/invert weights in run_tick (codex)
+    conn = _conn(tmp_path)
+    _fill(conn, "a1", "s1", "AAA", 10.0, 100.0)        # long 10 @100
+    bars = _bars({"AAA": [100.0, 1.0]})                # mark 1 -> unrealized -990 -> NAV 100-990<0
+    with pytest.raises(S.LiveSizingError, match="non-positive"):
+        S.build_live_sizing_snapshot(conn, "s1", allocation=100.0, bars=bars, universe=["AAA"])

@@ -492,3 +492,20 @@ def test_resume_refused_while_live_strategy_not_flat(monkeypatch, tmp_path):
     # once flat (belief cleared), resume succeeds
     _clear_belief(tmp_path, name)
     assert runner.invoke(app, ["paper", "resume", name]).exit_code == 0
+
+
+def test_resume_clears_live_nav_peak(monkeypatch, tmp_path):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import get_nav_peak, update_nav_peak
+    from algua.registry.db import connect, migrate
+    name = _seed_live_killed_with_position(monkeypatch, tmp_path)
+    _clear_belief(tmp_path, name)                       # make it flat so resume is allowed
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        update_nav_peak(conn, name, 12_000.0)           # a stale pre-breach NAV peak
+    assert runner.invoke(app, ["paper", "resume", name]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert get_nav_peak(conn, name) is None          # cleared on resume (else it re-trips)

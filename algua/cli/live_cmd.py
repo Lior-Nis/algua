@@ -110,8 +110,9 @@ def _run_strategy_tick(  # noqa: PLR0913
     if alloc is None:
         raise ValueError(f"{name} has no live allocation")
     allocation = float(alloc["capital"])
-    if allocation > broker.account().buying_power:           # minimal C1 BP preflight (codex #8)
-        raise ValueError(f"{name}: allocation {allocation} exceeds account buying power")
+    # No buying-power preflight here: min(allocation, NAV) sizing already de-risks toward what the
+    # account can fund, and a coarse allocation-vs-BP check would falsely refuse a fully-invested
+    # strategy that only rebalances. The proper per-order BP reservation is C2 (codex C1 review).
 
     def _live_snap(bars):
         return build_live_sizing_snapshot(conn, name, allocation, bars, strategy.universe)
@@ -149,7 +150,14 @@ def _run_strategy_tick(  # noqa: PLR0913
             _scoped_cancel(conn, broker, name)                       # cancel only our orders
             ingest_activities(conn, _broker_account_activities(broker, fill_cursor(conn)))
             for sym, qty in believed_positions(conn, name).items():  # fresh believed qty
-                broker.submit_offset(sym, qty, client_order_id(name, datetime.now(UTC), sym))
+                # RECORD the offset in the books (+ backfill) so its fill attributes back to this
+                # strategy and believed_positions drops to flat — else the resume gate would block
+                # resume forever (codex CRITICAL). The kill-switch (just tripped) prevents a re-run
+                # from re-offsetting, so the per-attempt coid is safe.
+                coid = client_order_id(name, datetime.now(UTC), sym)
+                record_live_order(conn, name, sym, "sell" if qty > 0 else "buy", None, coid)
+                oid = broker.submit_offset(sym, qty, coid)
+                backfill_broker_order_id(conn, coid, oid)
         except BrokerError as fexc:
             liquidation_submitted = False
             flatten_error = str(fexc)

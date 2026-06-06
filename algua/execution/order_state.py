@@ -184,6 +184,12 @@ def clear_nav_peak(conn: sqlite3.Connection, strategy: str) -> None:
     conn.commit()
 
 
+def clear_all_nav_peaks(conn: sqlite3.Connection) -> None:
+    """Wipe every strategy's NAV peak — the live counterpart of clear_all_peaks, for resume-all."""
+    conn.execute("DELETE FROM live_nav_peaks")
+    conn.commit()
+
+
 def record_tick_snapshot(
     conn: sqlite3.Connection, strategy: str, *, tick_ts: str, decision_ts: str | None,
     equity: float, peak_equity: float | None, positions: dict[str, float], n_submitted: int,
