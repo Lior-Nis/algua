@@ -76,3 +76,14 @@ def test_db_path_rejects_empty():
 def test_data_dir_rejects_empty():
     with pytest.raises(ValidationError):
         Settings(data_dir=Path(""))
+
+
+def test_alpaca_live_url_validator(monkeypatch):
+    import pytest
+
+    from algua.config.settings import Settings
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_URL", "https://paper-api.alpaca.markets")
+    with pytest.raises(ValueError):
+        Settings()
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_URL", "https://api.alpaca.markets")
+    assert Settings().alpaca_live_url == "https://api.alpaca.markets"

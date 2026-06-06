@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 from requests import RequestException
 
-from algua.contracts.types import OrderIntent
+from algua.contracts.types import LiveAuthorization, OrderIntent
 from algua.execution.sizing import size_order
 
 _TIMEOUT = 30  # seconds: per-request connect+read timeout for every Alpaca HTTP call
@@ -276,3 +276,18 @@ class AlpacaPaperBroker(_AlpacaBroker):
 
     def __init__(self, api_key: str, api_secret: str, base_url: str = _PAPER_DEFAULT_URL) -> None:
         super().__init__(api_key, api_secret, base_url)
+
+
+class AlpacaLiveBroker(_AlpacaBroker):
+    """The Alpaca LIVE (real-money) venue. Constructable ONLY with a verified LiveAuthorization
+    (the construction tollbooth) AND against the live host — so a live broker cannot exist without
+    a passed go-live gate. The authorization is kept for audit/the loop, never used for REST."""
+
+    _ALLOWED_HOSTS = frozenset({"api.alpaca.markets"})
+
+    def __init__(self, authorization: LiveAuthorization, api_key: str, api_secret: str,
+                 base_url: str = _LIVE_DEFAULT_URL) -> None:
+        if not isinstance(authorization, LiveAuthorization):
+            raise BrokerError("AlpacaLiveBroker requires a verified LiveAuthorization")
+        super().__init__(api_key, api_secret, base_url)
+        self.authorization = authorization

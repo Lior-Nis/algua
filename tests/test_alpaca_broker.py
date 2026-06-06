@@ -384,3 +384,40 @@ def test_base_broker_alone_reaches_no_venue():
     from algua.execution.alpaca_broker import _AlpacaBroker
     with pytest.raises(BrokerError):
         _AlpacaBroker("k", "s", "https://paper-api.alpaca.markets")
+
+
+def _live_auth():
+    from algua.contracts.types import LiveAuthorization
+    return LiveAuthorization(strategy_id=1, code_hash="c", config_hash="cf",
+                             dependency_hash="d", principal="lior", authorized_at="2026-06-05")
+
+
+def test_live_broker_requires_authorization():
+    from algua.execution.alpaca_broker import AlpacaLiveBroker
+    with pytest.raises(BrokerError, match="LiveAuthorization"):
+        AlpacaLiveBroker(None, "k", "s")  # no token
+    with pytest.raises(BrokerError):
+        AlpacaLiveBroker({"principal": "lior"}, "k", "s")  # a look-alike dict is not the token
+
+
+def test_live_broker_constructs_with_authorization_and_live_host():
+    from algua.execution.alpaca_broker import AlpacaLiveBroker
+    b = AlpacaLiveBroker(_live_auth(), "k", "s")
+    assert b.base_url == "https://api.alpaca.markets"
+    assert b.authorization.principal == "lior"
+
+
+def test_live_broker_rejects_non_live_host():
+    from algua.execution.alpaca_broker import AlpacaLiveBroker
+    with pytest.raises(BrokerError, match="refusing"):
+        AlpacaLiveBroker(_live_auth(), "k", "s", base_url="https://paper-api.alpaca.markets")
+
+
+def test_live_broker_account_uses_inherited_rest(monkeypatch):
+    from algua.execution import alpaca_broker as ab
+    from algua.execution.alpaca_broker import AlpacaLiveBroker
+    fake = _FakeRequests({"/v2/account": _FakeResp(200, {"equity": "5", "cash": "5",
+                                                         "buying_power": "5"})})
+    monkeypatch.setattr(ab, "requests", fake)
+    acct = AlpacaLiveBroker(_live_auth(), "k", "s").account()
+    assert acct.equity == 5.0
