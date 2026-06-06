@@ -509,3 +509,23 @@ def test_resume_clears_live_nav_peak(monkeypatch, tmp_path):
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         assert get_nav_peak(conn, name) is None          # cleared on resume (else it re-trips)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (C2): stage-aware paper show — live -> believed positions + NAV peak
+# ---------------------------------------------------------------------------
+
+def test_show_live_strategy_uses_believed_positions_and_nav_peak(monkeypatch, tmp_path):
+    import json
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import update_nav_peak
+    from algua.registry.db import connect, migrate
+    name = _seed_live_killed_with_position(monkeypatch, tmp_path)  # live stage + live_fills belief
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        update_nav_peak(conn, name, 12_345.0)
+    payload = json.loads(runner.invoke(app, ["paper", "show", name]).stdout)
+    assert payload["drawdown"]["peak_equity"] == 12_345.0  # NAV peak, not the (absent) paper peak
+    assert payload["positions"]                             # believed positions, not empty paper

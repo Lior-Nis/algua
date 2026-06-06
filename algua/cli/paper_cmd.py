@@ -143,10 +143,16 @@ def show(name: str) -> None:
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
         n_orders = count_orders(conn, name)
-        positions = derive_positions(conn, name)
+        if rec.stage is Stage.LIVE:
+            from algua.execution.live_ledger import believed_positions
+            from algua.execution.order_state import get_nav_peak
+            positions = believed_positions(conn, name)
+            peak = get_nav_peak(conn, name)
+        else:
+            positions = derive_positions(conn, name)
+            peak = get_peak_equity(conn, name)
         ks = kill_switch.get(conn, name)
         halted_globally = global_halt.is_engaged(conn)
-        peak = get_peak_equity(conn, name)
         last = latest_tick_snapshot(conn, name)
         orders = recent_orders(conn, name, 10)
     tripped = ks is not None
