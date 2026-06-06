@@ -53,7 +53,7 @@ def record_live_order(
     strategy: str,
     symbol: str,
     side: str,
-    intended_notional: float,
+    intended_notional: float | None,
     client_order_id: str,
 ) -> None:
     """Record a live order at submit time, keyed by client_order_id (the durable identity). A retry

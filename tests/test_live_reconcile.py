@@ -64,3 +64,17 @@ def test_reconcile_clears_pending_when_it_resolves(tmp_path):
     R.reconcile(conn, {"AAA": 12.0}, cycle=1)            # pending recorded
     R.reconcile(conn, {"AAA": 10.0}, cycle=2)            # resolves -> row cleared
     assert conn.execute("SELECT COUNT(*) FROM live_reconcile_state").fetchone()[0] == 0
+
+
+def test_reconcile_clears_pending_when_symbol_goes_flat_on_both(tmp_path):
+    # a mismatch that resolves to flat on BOTH sides (symbol absent from expected and broker) must
+    # still clear its pending row, else a later mismatch reads a stale first_seen_cycle (codex)
+    conn = _conn(tmp_path)
+    _fill(conn, "a1", "s1", "AAA", 10.0)
+    R.reconcile(conn, {"AAA": 12.0}, cycle=1)            # pending recorded for AAA
+    # now AAA is flat on both: remove the books' fills and the broker shows nothing
+    conn.execute("DELETE FROM live_fills")
+    conn.commit()
+    res = R.reconcile(conn, {}, cycle=2)                 # AAA absent from expected AND broker
+    assert res.clean
+    assert conn.execute("SELECT COUNT(*) FROM live_reconcile_state").fetchone()[0] == 0

@@ -48,7 +48,11 @@ def reconcile(
     NOTHING mismatches (the caller trades only on a clean cycle; a pending mismatch defers
     trading, not halts)."""
     expected = account_expected_net(conn)
-    symbols = set(expected) | set(broker_net)
+    # Include symbols with an existing pending row even if now absent from both expected and broker
+    # (a mismatch that resolved to flat-on-both): they must be re-examined so the stale row clears,
+    # else a future mismatch on that symbol would read a long-ago first_seen_cycle and mis-halt.
+    pending = {r["symbol"] for r in conn.execute("SELECT symbol FROM live_reconcile_state")}
+    symbols = set(expected) | set(broker_net) | pending
     mismatches: list[dict] = []
     halt = False
     for sym in sorted(symbols):

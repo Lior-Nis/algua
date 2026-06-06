@@ -15,7 +15,13 @@ from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
-from algua.execution.live_ledger import fill_cursor, ingest_activities, owned_open_order_ids
+from algua.execution.live_ledger import (
+    backfill_broker_order_id,
+    fill_cursor,
+    ingest_activities,
+    owned_open_order_ids,
+    record_live_order,
+)
 from algua.execution.order_state import (
     client_order_id,
     get_peak_equity,
@@ -99,8 +105,12 @@ def _run_strategy_tick(  # noqa: PLR0913
     strategy = load_strategy(name)
 
     def _persist(record: SubmittedOrder) -> None:
-        # Audit each accepted LIVE order IMMEDIATELY (before the next submit) so a mid-loop
-        # crash still records what hit the real-money venue (#18) — never batch after the loop.
+        # Record the order in the BOOKS immediately (client_order_id is the durable identity): this
+        # is what lets fills attribute back to this strategy and lets scoped cancel find this
+        # strategy's own open orders. Also audit it so a mid-loop crash still records what hit the
+        # real-money venue (#18) — never batch after the loop.
+        record_live_order(conn, name, record.symbol, record.side, None, record.client_order_id)
+        backfill_broker_order_id(conn, record.client_order_id, record.order_id)
         audit_append(conn, actor="agent", action="live_order",
                      reason=f"{record.side} {record.symbol} {record.order_id}", strategy=name)
 
@@ -216,6 +226,8 @@ def run_all(
     """One sequenced portfolio cycle over ALL live strategies: re-verify each, ingest fills,
     reconcile the account against the broker, then tick each (scoped cancel). Trades only when the
     account reconciles clean; a persistent unexplained drift engages the global halt."""
+    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
+        raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
         live = repo.list_strategies(Stage.LIVE)

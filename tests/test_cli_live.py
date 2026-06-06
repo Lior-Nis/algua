@@ -101,6 +101,13 @@ def test_live_trade_tick_happy_path(monkeypatch):
         assert latest_tick_snapshot(conn, "cross_sectional_momentum") is not None
         n = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='live_order'").fetchone()[0]
         assert n == 1
+        # the order is recorded in the BOOKS (client_order_id primary + broker_order_id backfilled)
+        # so fills can attribute + scoped cancel can find it (codex HIGH)
+        order = conn.execute(
+            "SELECT strategy, broker_order_id FROM live_orders WHERE client_order_id='c'"
+        ).fetchone()
+        assert order["strategy"] == "cross_sectional_momentum"
+        assert order["broker_order_id"] == "o-1"
 
 
 def test_live_trade_tick_breach_trips_and_flattens(monkeypatch):
@@ -194,3 +201,8 @@ def test_live_allocate_records_and_enforces_sum(monkeypatch):
     runner.invoke(app, ["registry", "add", "s2"])
     r2 = runner.invoke(app, ["live", "allocate", "s2", "--capital", "45000"])
     assert r2.exit_code == 1 and json.loads(r2.stdout)["ok"] is False
+
+
+def test_run_all_rejects_bad_max_drawdown():
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x", "--max-drawdown", "1.5"])
+    assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False
