@@ -68,6 +68,17 @@ def transition(
     target = Stage(to)
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
+        if target is Stage.LIVE:
+            from algua.registry import allocations
+            rec = repo.get(name)
+            if len(repo.list_strategies(Stage.LIVE)) > 0 and rec.stage is not Stage.LIVE:
+                raise TransitionError(
+                    "refusing: only one live strategy is allowed until multi-strategy controls "
+                    "land (slice C). Retire the current live strategy first.")
+            if allocations.active_allocation(conn, rec.id) is None:
+                raise TransitionError(
+                    f"{name} has no live allocation; run `algua live allocate {name} --capital X` "
+                    "before going live.")
         if target is Stage.LIVE and signature is None:
             if Actor(actor) is not Actor.HUMAN:
                 raise TransitionError("transition to live requires a human actor")

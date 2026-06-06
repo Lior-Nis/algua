@@ -12,6 +12,7 @@ from algua.risk.limits import RiskBreach
 runner = CliRunner()
 
 
+
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
@@ -124,3 +125,23 @@ def test_live_trade_tick_breach_trips_and_flattens(monkeypatch):
     payload = json.loads(r.stdout)
     assert payload["ok"] is False and payload["kind"] == "drawdown"
     assert broker.closed is not None  # scoped flatten ran on the live broker
+
+
+def test_live_allocate_records_and_enforces_sum(monkeypatch):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 50_000.0)
+    assert runner.invoke(app, ["registry", "add", "s1"]).exit_code == 0
+    r = runner.invoke(app, ["live", "allocate", "s1", "--capital", "10000"])
+    assert r.exit_code == 0, r.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        n = conn.execute("SELECT COUNT(*) FROM strategy_allocations WHERE revoked_ts IS NULL"
+                         ).fetchone()[0]
+        assert n == 1
+    # over-commit refused
+    runner.invoke(app, ["registry", "add", "s2"])
+    r2 = runner.invoke(app, ["live", "allocate", "s2", "--capital", "45000"])
+    assert r2.exit_code == 1 and json.loads(r2.stdout)["ok"] is False

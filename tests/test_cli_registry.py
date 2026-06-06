@@ -84,6 +84,10 @@ def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
     signers = _allowed_signers_file(tmp_path, "lior", pub)
     monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
 
+    # Allocate capital so the go-live guard is satisfied (guard: requires allocation)
+    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 100_000.0)
+    assert runner.invoke(app, ["live", "allocate", strategy, "--capital", "10000"]).exit_code == 0
+
     # Step 1: transition --to live with no --signature -> challenge issued, stage stays paper
     result1 = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
                                   "--actor", "human"])
@@ -125,6 +129,10 @@ def test_go_live_without_signature_stays_paper(tmp_path, monkeypatch):
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
     monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+
+    # Allocate capital so the go-live guard is satisfied (guard: requires allocation)
+    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 100_000.0)
+    assert runner.invoke(app, ["live", "allocate", strategy, "--capital", "10000"]).exit_code == 0
 
     result = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
                                  "--actor", "human"])
@@ -239,3 +247,49 @@ def test_enroll_approver_rejects_bad_principal(tmp_path, monkeypatch):
                              "--pubkey", "ssh-ed25519 BBBBbbb x"])
     assert r2.exit_code == 1
     assert "namespaces" not in signers.read_text().replace("# header", "")  # nothing enrolled
+
+
+# ---------------------------------------------------------------------------
+# Go-live guard helpers (Task 5: requires allocation + ≤1 live strategy)
+# ---------------------------------------------------------------------------
+
+def _seed_paper(monkeypatch, tmp_path, name: str) -> str:
+    """Register a strategy and advance it to the paper stage; return its name."""
+    _advance_to_paper(name)
+    return name
+
+
+def _force_live(monkeypatch, tmp_path, name: str) -> None:
+    """Register a strategy and force-set its stage to 'live' directly in the DB."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    runner.invoke(app, ["registry", "add", name])
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name=?", (name,))
+        conn.commit()
+
+
+def _allocate(monkeypatch, tmp_path, name: str, capital: float) -> None:
+    """Set a live allocation for the named strategy via the CLI (monkeypatching equity read)."""
+    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 1_000_000.0)
+    r = runner.invoke(app, ["live", "allocate", name, "--capital", str(capital)])
+    assert r.exit_code == 0, f"_allocate failed: {r.stdout}"
+
+
+def test_go_live_requires_allocation(monkeypatch, tmp_path):
+    # a strategy at paper with NO allocation cannot be issued a go-live challenge
+    name = _seed_paper(monkeypatch, tmp_path, "s1")
+    r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
+    assert r.exit_code == 1 and "allocation" in r.stdout.lower()
+
+
+def test_go_live_refuses_second_live_strategy(monkeypatch, tmp_path):
+    # with one strategy already live, a second is refused (slice-A hard guard, ≤1 live)
+    _force_live(monkeypatch, tmp_path, "already")
+    name = _seed_paper(monkeypatch, tmp_path, "s2")
+    _allocate(monkeypatch, tmp_path, name, 1000.0)
+    r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
+    assert r.exit_code == 1 and "one live strategy" in r.stdout.lower()
