@@ -45,7 +45,7 @@ def _broker():
 def test_rejects_non_paper_base_url():
     # #28: the platform invariant is paper-only, never live — constructing against the live host
     # (or any non-paper host) must be impossible, not a warning.
-    with pytest.raises(BrokerError, match="non-paper"):
+    with pytest.raises(BrokerError, match="refusing"):
         AlpacaPaperBroker(api_key="k", api_secret="s", base_url="https://api.alpaca.markets")
 
 
@@ -377,3 +377,10 @@ def test_close_all_positions_non_list_body_raises(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequestsWithDelete(_FakeResp(207, {"oops": 1})))
     with pytest.raises(BrokerError):
         _broker().close_all_positions()
+
+
+def test_base_broker_alone_reaches_no_venue():
+    # the base class has an EMPTY allowed-host set, so it can't be constructed against any host
+    from algua.execution.alpaca_broker import _AlpacaBroker
+    with pytest.raises(BrokerError):
+        _AlpacaBroker("k", "s", "https://paper-api.alpaca.markets")

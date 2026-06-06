@@ -14,8 +14,9 @@ from algua.contracts.types import OrderIntent
 from algua.execution.sizing import size_order
 
 _TIMEOUT = 30  # seconds: per-request connect+read timeout for every Alpaca HTTP call
-# The ONLY permitted endpoint (its host must be in _PAPER_HOSTS).
-_DEFAULT_BASE_URL = "https://paper-api.alpaca.markets"
+# Default endpoints for the two Alpaca venues.
+_PAPER_DEFAULT_URL = "https://paper-api.alpaca.markets"
+_LIVE_DEFAULT_URL = "https://api.alpaca.markets"
 
 # Retry policy for transient broker failures (#24). Reads are always safe to retry; submits are
 # safe ONLY because they carry a deterministic client_order_id, so a retried POST that already
@@ -23,11 +24,6 @@ _DEFAULT_BASE_URL = "https://paper-api.alpaca.markets"
 _RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 _MAX_RETRIES = 3  # total attempts = 1 + retries on a retryable failure
 _BACKOFF_BASE = 0.5  # seconds; sleep grows _BACKOFF_BASE * 2**attempt between attempts
-
-# Hostnames that are unambiguously the Alpaca PAPER venue. The platform invariant is paper-only,
-# never live; a non-paper base URL must be impossible, not merely discouraged (#28). The live
-# trading host (api.alpaca.markets) is deliberately absent.
-_PAPER_HOSTS = frozenset({"paper-api.alpaca.markets"})
 
 
 def _coerce_status(value: Any) -> int:
@@ -74,22 +70,24 @@ class TickSnapshot:
     qtys: dict[str, float]  # symbol -> current position shares (0.0 => flat)
 
 
-class AlpacaPaperBroker:
-    """requests-based wrapper of the Alpaca paper-trading REST. Implements the contracts Broker
-    protocol (get_positions, submit) and sizes via the shared `size_order` rule so it sizes target
-    weights identically to SimBroker. The tick loop drives it through snapshot()/submit_sized() to
-    keep round-trips to 1 account GET + 1 positions GET + N POSTs with a fixed sizing denominator
-    (#20). Async by nature: submit returns an order id; fills land later and show up in
-    get_positions()."""
+class _AlpacaBroker:
+    """requests-based wrapper of the Alpaca REST API. Implements the contracts Broker protocol
+    (get_positions, submit) and sizes via the shared `size_order` rule so it sizes target weights
+    identically to SimBroker. The tick loop drives it through snapshot()/submit_sized() to keep
+    round-trips to 1 account GET + 1 positions GET + N POSTs with a fixed sizing denominator (#20).
+    Async by nature: submit returns an order id; fills land later and show up in get_positions().
 
-    def __init__(self, api_key: str, api_secret: str, base_url: str = _DEFAULT_BASE_URL) -> None:
+    Subclasses declare `_ALLOWED_HOSTS` to restrict which Alpaca endpoint may be used. The base
+    class carries an empty set and therefore cannot be constructed against ANY host."""
+
+    _ALLOWED_HOSTS: frozenset[str] = frozenset()
+
+    def __init__(self, api_key: str, api_secret: str, base_url: str) -> None:
         host = urlparse(base_url).hostname
-        if host not in _PAPER_HOSTS:
-            # Hard refusal, not a warning: the platform invariant is paper-only, never live, and
-            # there is no human live gate yet — a non-paper venue must be impossible (#28).
+        if host not in self._ALLOWED_HOSTS:
             raise BrokerError(
-                f"refusing non-paper Alpaca endpoint {base_url!r} (host {host!r}); "
-                f"only the paper venue {sorted(_PAPER_HOSTS)} is permitted"
+                f"refusing Alpaca endpoint {base_url!r} (host {host!r}); "
+                f"permitted hosts: {sorted(self._ALLOWED_HOSTS)}"
             )
         self.api_key = api_key
         self.api_secret = api_secret
@@ -269,3 +267,12 @@ class AlpacaPaperBroker:
         POST. The tick loop instead snapshots the whole universe ONCE and calls submit_sized per
         symbol, so this self-snapshotting path is reserved for single-order callers."""
         return self.submit_sized(intent, self.snapshot([intent.symbol]), client_order_id)
+
+
+class AlpacaPaperBroker(_AlpacaBroker):
+    """The Alpaca PAPER venue. Hard-refuses any non-paper host (the platform invariant)."""
+
+    _ALLOWED_HOSTS = frozenset({"paper-api.alpaca.markets"})
+
+    def __init__(self, api_key: str, api_secret: str, base_url: str = _PAPER_DEFAULT_URL) -> None:
+        super().__init__(api_key, api_secret, base_url)
