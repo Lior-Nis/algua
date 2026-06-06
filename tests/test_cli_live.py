@@ -127,6 +127,55 @@ def test_live_trade_tick_breach_trips_and_flattens(monkeypatch):
     assert broker.closed is not None  # scoped flatten ran on the live broker
 
 
+def test_run_all_no_live_strategies_is_noop(monkeypatch):
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0
+    assert json.loads(r.stdout)["strategies"] == []
+
+
+def test_run_all_halts_on_unexplained_reconcile_drift(monkeypatch):
+    from algua.risk import global_halt
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    # broker activities -> none; positions -> an unexplained holding the books don't have
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {"ZZZ": 99.0})
+    # --grace-cycles 0 forces the mismatch straight to unexplained -> assert global halt engaged
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x", "--grace-cycles", "0"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False and payload["reconcile"]["halt"] is True
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn)
+
+
+def test_run_all_ticks_strategy_when_clean(monkeypatch):
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick",
+                        lambda *a, **k: {"strategy": "cross_sectional_momentum", "submitted": []})
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0
+    payload = json.loads(r.stdout)
+    assert payload["reconcile"]["clean"] is True
+    assert payload["strategies"][0]["strategy"] == "cross_sectional_momentum"
+
+
 def test_live_allocate_records_and_enforces_sum(monkeypatch):
     from contextlib import closing
 
