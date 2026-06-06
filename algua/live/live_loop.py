@@ -51,12 +51,16 @@ class TickHooks:
       can't leave Alpaca with an order the DB never recorded (#18).
     - `should_halt() -> bool`: re-checked right before the submit phase so an externally-tripped
       kill-switch aborts BEFORE any order is sent (#21).
+    - `cancel() -> None`: how to cancel stale open orders before the submit phase. Defaults to the
+      broker's ACCOUNT-WIDE cancel (paper); the live multi-strategy loop supplies a SCOPED cancel so
+      a strategy never cancels a sibling's orders.
     - `peak_equity`: the persisted per-strategy peak (drawdown denominator across ticks, #27).
     """
 
     client_order_id_for: Callable[[str, datetime, str], str] | None = None
     on_submitted: Callable[[SubmittedOrder], None] | None = None
     should_halt: Callable[[], bool] | None = None
+    cancel: Callable[[], None] | None = None
     peak_equity: float | None = None
     # None == hook not supplied (pure decide+submit path, no reconcile). A supplied dict — even an
     # EMPTY one — means "the DB says we hold this"; an empty DB against a held broker book is the
@@ -144,7 +148,7 @@ def run_tick(
     if hooks.should_halt is not None and hooks.should_halt():
         raise TickHalted("kill-switch tripped before submit phase")
 
-    broker.cancel_open_orders()
+    (hooks.cancel or broker.cancel_open_orders)()
 
     # Re-check the kill-switch AFTER cancel and immediately before the submit loop (#21): if the
     # switch tripped while cancellation was in flight, abort before sending any order.

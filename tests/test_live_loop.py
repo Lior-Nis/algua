@@ -291,3 +291,15 @@ def test_run_tick_should_halt_aborts_between_orders():
         run_tick(_strategy({"AAA": 0.5, "BBB": 0.5}), broker, _FakeProvider(bars),
                  DATES[0], DATES[-1], hooks=hooks)
     assert len(broker.submitted) == 1  # only the first order went out (adapt attr name if needed)
+
+
+def test_run_tick_uses_cancel_hook_when_supplied():
+    from algua.live.live_loop import TickHooks
+    broker = _FakeBroker()
+    called = {"scoped": 0, "account_wide": 0}
+    broker.cancel_open_orders = lambda: called.__setitem__("account_wide",
+                                                           called["account_wide"] + 1)
+    hooks = TickHooks(cancel=lambda: called.__setitem__("scoped", called["scoped"] + 1))
+    run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
+             DATES[0], DATES[-1], hooks=hooks)
+    assert called == {"scoped": 1, "account_wide": 0}  # the hook replaced the account-wide cancel
