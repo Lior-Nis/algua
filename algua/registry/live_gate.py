@@ -9,6 +9,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from algua.contracts.types import LiveAuthorization
 from algua.registry.repository import StrategyRepository
 
 _NAMESPACE = "algua-go-live"
@@ -152,7 +153,7 @@ class LiveAuthorizationError(RuntimeError):
 
 
 def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyRepository, name: str,
-                              allowed_signers_path: Path) -> sqlite3.Row:
+                              allowed_signers_path: Path) -> LiveAuthorization:
     """Trade-time wall: prove the strategy's CURRENT artifact is human-authorized for live by
     re-verifying a stored signature against the CURRENT trust anchor. Trusts nothing forgeable —
     not the `stage` column, not an `approvals` row. Raises LiveAuthorizationError on any failure;
@@ -192,4 +193,11 @@ def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyRepository
     if principal is None or principal != row["principal"]:
         raise LiveAuthorizationError(
             f"live authorization signature for {name} failed re-verification against the anchor")
-    return row
+    return LiveAuthorization(
+        strategy_id=rec.id,
+        code_hash=row["code_hash"],
+        config_hash=row["config_hash"],
+        dependency_hash=row["dependency_hash"],
+        principal=row["principal"],
+        authorized_at=row["authorized_at"],
+    )

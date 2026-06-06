@@ -73,3 +73,19 @@ class Broker(Protocol):
     def get_positions(self) -> pd.Series: ...
 
     def submit(self, intent: OrderIntent) -> str: ...
+
+
+@dataclass(frozen=True)
+class LiveAuthorization:
+    """Proof that a strategy's CURRENT artifact is human-authorized for live trading.
+
+    Minted ONLY by `algua.registry.live_gate.verify_live_authorization` after a successful
+    signature re-verification; holding one is the proof. `AlpacaLiveBroker` requires one to
+    construct, so a live broker cannot exist without a passed gate."""
+
+    strategy_id: int
+    code_hash: str
+    config_hash: str
+    dependency_hash: str | None
+    principal: str
+    authorized_at: str
