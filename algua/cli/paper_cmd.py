@@ -195,7 +195,14 @@ def kill(
 @json_errors(ValueError)
 def resume(name: str) -> None:
     """Reset (clear) a strategy's kill-switch so paper runs may resume. Human action."""
+    from algua.execution.live_ledger import believed_positions
     with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        if rec.stage is Stage.LIVE and believed_positions(conn, name):
+            raise ValueError(
+                f"{name} is not flat (believed positions: {believed_positions(conn, name)}); "
+                "re-flatten before resuming a live strategy"
+            )
         was_tripped = kill_switch.is_tripped(conn, name)
         if was_tripped:
             # Audit BEFORE mutating: if a write fails the switch stays tripped (fail-safe — still
@@ -360,12 +367,28 @@ def resume_all(
 ) -> None:
     """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
     to cash). Per-strategy kill-switches are left untouched."""
+    from algua.execution.live_ledger import believed_positions
     with registry_conn() as conn:
         was_set = global_halt.is_engaged(conn)
+        # Flag any LIVE strategies that still carry a ledger position (partial-fill residual): they
+        # are not flat and must be re-flattened before their individual kill-switches can be reset.
+        # We skip+flag rather than aborting so the global halt clears and other strategies recover.
+        live_rows = conn.execute(
+            "SELECT name FROM strategies WHERE stage = 'live'"
+        ).fetchall()
+        not_flat = [
+            r["name"] for r in live_rows if believed_positions(conn, r["name"])
+        ]
         if was_set:
             audit_append(conn, actor=actor, action="resume_all",
                          reason="clear global halt; re-base all drawdown peaks", strategy=None)
             # Re-base peaks first, clear the halt LAST so the un-halt is the final write (#109).
             clear_all_peaks(conn)
             global_halt.clear(conn)
-    emit(ok({"global_halt": "reset" if was_set else "not_set"}))
+    result: dict = {"global_halt": "reset" if was_set else "not_set"}
+    if not_flat:
+        result["live_not_flat"] = not_flat
+        result["warning"] = (
+            "the above live strategies are not flat; re-flatten each before resuming individually"
+        )
+    emit(ok(result))

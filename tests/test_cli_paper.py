@@ -429,3 +429,66 @@ def test_show_reflects_global_halt():
     payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert payload["health"] == "halted"
     assert payload["kill_switch"]["global_halt"] is True
+
+
+# ---------------------------------------------------------------------------
+# Task 6: ledger-flat resume gate
+# ---------------------------------------------------------------------------
+
+def _seed_live_killed_with_position(monkeypatch, tmp_path, name="cross_sectional_momentum"):
+    """Bring a strategy to LIVE stage, trip its kill-switch, and insert a live_fills row so
+    believed_positions is non-empty. Returns the strategy name."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+
+    # Advance through the registry to the paper stage first (CLI path).
+    _to_paper(name)
+
+    # Forcibly set stage = live directly in the DB (bypassing the signed go-live challenge).
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage = 'live' WHERE name = ?", (name,))
+        conn.commit()
+
+    # Trip the kill-switch (simulate a drawdown halt or manual stop).
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        kill_switch.trip(conn, name, reason="test-breach", actor="system")
+
+    # Insert a live_fills row so believed_positions returns a non-empty dict.
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute(
+            "INSERT INTO live_fills"
+            "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("act-1", "boid-1", name, "AAA", 5.0, 100.0, "2026-06-06T00:00:00+00:00"),
+        )
+        conn.commit()
+
+    return name
+
+
+def _clear_belief(tmp_path, name="cross_sectional_momentum"):
+    """Delete all live_fills for the strategy so believed_positions returns empty (flat)."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("DELETE FROM live_fills WHERE strategy = ?", (name,))
+        conn.commit()
+
+
+def test_resume_refused_while_live_strategy_not_flat(monkeypatch, tmp_path):
+    name = _seed_live_killed_with_position(monkeypatch, tmp_path)
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 1 and "not flat" in r.stdout.lower()
+    # once flat (belief cleared), resume succeeds
+    _clear_belief(tmp_path, name)
+    assert runner.invoke(app, ["paper", "resume", name]).exit_code == 0
