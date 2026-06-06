@@ -269,6 +269,15 @@ class _AlpacaBroker:
         symbol, so this self-snapshotting path is reserved for single-order callers."""
         return self.submit_sized(intent, self.snapshot([intent.symbol]), client_order_id)
 
+    def account_activities(self, after: str | None = None) -> list[Any]:
+        """Account activities (fills + cash), oldest-first. `after` is an activity-id/time cursor;
+        the ledger re-pulls an overlap window and dedupes by activity id, so exact cursor semantics
+        are not load-bearing for correctness."""
+        path = "/v2/account/activities"
+        if after:
+            path += f"?after={after}"
+        return self._read(self._get(path), path)
+
 
 class AlpacaPaperBroker(_AlpacaBroker):
     """The Alpaca PAPER venue. Hard-refuses any non-paper host (the platform invariant)."""

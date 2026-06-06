@@ -3,6 +3,7 @@ P&L / NAV derivations. The broker account is the netted custodian; this ledger i
 truth for per-strategy attribution. Pure derivations are kept side-effect-free for testing."""
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -115,3 +116,63 @@ def strategy_nav(
         pnl = position_pnl(fills, mark=marks.get(sym, fills[-1][1] if fills else 0.0))
         total += pnl.realized + pnl.unrealized
     return total
+
+
+def fill_cursor(conn: sqlite3.Connection) -> str | None:
+    row = conn.execute(
+        "SELECT cursor FROM live_fill_cursor WHERE name = 'activities'"
+    ).fetchone()
+    return row["cursor"] if row else None
+
+
+def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
+    """Idempotently record a batch of Alpaca activities and advance the cursor in ONE transaction.
+
+    FILL activities become signed `live_fills` rows (buy +qty, sell -qty), attributed to a strategy
+    via order_id -> live_orders.broker_order_id; non-fill activities become `live_activities` rows.
+    Dedupe is by `activity_id` (UNIQUE + INSERT OR IGNORE), so re-pulling an overlap window never
+    double-counts. The cursor advances to the max activity id seen, in the same transaction as the
+    inserts, so a crash leaves the books and the cursor consistent (overlap replay re-dedupes)."""
+    try:
+        max_id: str | None = None
+        for act in activities:
+            aid = str(act["id"])
+            max_id = aid if max_id is None or aid > max_id else max_id
+            if act.get("activity_type") == "FILL":
+                signed = float(act["qty"]) * (1.0 if act["side"] == "buy" else -1.0)
+                boid = act.get("order_id")
+                strat_row = conn.execute(
+                    "SELECT strategy FROM live_orders WHERE broker_order_id = ?", (boid,)
+                ).fetchone()
+                conn.execute(
+                    "INSERT OR IGNORE INTO live_fills"
+                    "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (
+                        aid, boid,
+                        strat_row["strategy"] if strat_row else None,
+                        act["symbol"], signed, float(act["price"]),
+                        act.get("transaction_time", ""),
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO live_activities"
+                    "(activity_id, type, symbol, amount, ts, raw) VALUES (?,?,?,?,?,?)",
+                    (
+                        aid, act.get("activity_type", "UNKNOWN"), act.get("symbol"),
+                        float(act["net_amount"]) if act.get("net_amount") is not None else None,
+                        act.get("date") or act.get("transaction_time"),
+                        json.dumps(act),
+                    ),
+                )
+        if max_id is not None:
+            conn.execute(
+                "INSERT INTO live_fill_cursor(name, cursor) VALUES ('activities', ?) "
+                "ON CONFLICT(name) DO UPDATE SET cursor = excluded.cursor",
+                (max_id,),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
