@@ -35,22 +35,29 @@ def allocate(conn: sqlite3.Connection, strategy_id: int, capital: float, actor: 
     if capital <= 0.0:
         raise AllocationError("capital must be positive")
     now = datetime.now(UTC).isoformat()
-    existing = active_allocation(conn, strategy_id)
-    prior = float(existing["capital"]) if existing is not None else 0.0
-    prospective = total_allocated(conn) - prior + capital
-    if prospective > account_equity:
-        raise AllocationError(
-            f"Σ allocations {prospective:.2f} exceeds account equity {account_equity:.2f}"
+    # BEGIN IMMEDIATE takes the write lock up front so the read-check-write (Σ ≤ equity) is atomic:
+    # two concurrent allocate calls can't both read the same total and both slip past the cap.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = active_allocation(conn, strategy_id)
+        prior = float(existing["capital"]) if existing is not None else 0.0
+        prospective = total_allocated(conn) - prior + capital
+        if prospective > account_equity:
+            raise AllocationError(
+                f"Σ allocations {prospective:.2f} exceeds account equity {account_equity:.2f}"
+            )
+        if existing is not None:
+            conn.execute("UPDATE strategy_allocations SET revoked_ts = ? WHERE id = ?",
+                         (now, existing["id"]))
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (strategy_id, capital, now, actor),
         )
-    if existing is not None:
-        conn.execute("UPDATE strategy_allocations SET revoked_ts = ? WHERE id = ?",
-                     (now, existing["id"]))
-    conn.execute(
-        "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
-        "VALUES (?,?,?,?)",
-        (strategy_id, capital, now, actor),
-    )
-    conn.commit()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def deallocate(conn: sqlite3.Connection, strategy_id: int, actor: str, is_flat: bool) -> None:

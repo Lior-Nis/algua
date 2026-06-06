@@ -72,11 +72,21 @@ def backfill_broker_order_id(
     conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
 ) -> None:
     """Attach the broker's order id once the broker accepts (covers a submit that timed out after
-    Alpaca accepted it: the client_order_id row exists, the broker id arrives later)."""
+    Alpaca accepted it: the client_order_id row exists, the broker id arrives later). Also
+    back-attributes any fills already ingested under this broker order id while the mapping was
+    missing (strategy was NULL), so an early fill is never orphaned in the books."""
+    row = conn.execute(
+        "SELECT strategy FROM live_orders WHERE client_order_id = ?", (client_order_id,)
+    ).fetchone()
     conn.execute(
         "UPDATE live_orders SET broker_order_id = ? WHERE client_order_id = ?",
         (broker_order_id, client_order_id),
     )
+    if row is not None:
+        conn.execute(
+            "UPDATE live_fills SET strategy = ? WHERE broker_order_id = ? AND strategy IS NULL",
+            (row["strategy"], broker_order_id),
+        )
     conn.commit()
 
 
@@ -130,28 +140,41 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
 
     FILL activities become signed `live_fills` rows (buy +qty, sell -qty), attributed to a strategy
     via order_id -> live_orders.broker_order_id; non-fill activities become `live_activities` rows.
-    Dedupe is by `activity_id` (UNIQUE + INSERT OR IGNORE), so re-pulling an overlap window never
-    double-counts. The cursor advances to the max activity id seen, in the same transaction as the
-    inserts, so a crash leaves the books and the cursor consistent (overlap replay re-dedupes)."""
+    Dedupe is by `activity_id` (UNIQUE), so re-pulling an overlap window never double-counts; a
+    re-pull DOES back-fill a previously-missing strategy/broker_order_id (COALESCE on conflict), so
+    a fill ingested before its order mapping existed is attributed once the mapping lands. The
+    cursor advances to the max activity id seen, in the same transaction as the inserts, so a crash
+    leaves books and cursor consistent (overlap replay re-dedupes). Malformed fills fail closed."""
     try:
         max_id: str | None = None
         for act in activities:
             aid = str(act["id"])
             max_id = aid if max_id is None or aid > max_id else max_id
             if act.get("activity_type") == "FILL":
-                signed = float(act["qty"]) * (1.0 if act["side"] == "buy" else -1.0)
+                side = act.get("side")
+                if side not in {"buy", "sell"}:
+                    raise ValueError(f"bad fill side {side!r}")
+                qty = float(act["qty"])
+                price = float(act["price"])
+                if qty <= 0.0 or price <= 0.0:
+                    raise ValueError("fill qty and price must be positive")
+                signed = qty if side == "buy" else -qty
                 boid = act.get("order_id")
                 strat_row = conn.execute(
                     "SELECT strategy FROM live_orders WHERE broker_order_id = ?", (boid,)
                 ).fetchone()
                 conn.execute(
-                    "INSERT OR IGNORE INTO live_fills"
+                    "INSERT INTO live_fills"
                     "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
-                    " VALUES (?,?,?,?,?,?,?)",
+                    " VALUES (?,?,?,?,?,?,?)"
+                    " ON CONFLICT(activity_id) DO UPDATE SET"
+                    "  strategy = COALESCE(live_fills.strategy, excluded.strategy),"
+                    "  broker_order_id = COALESCE(live_fills.broker_order_id,"
+                    "                             excluded.broker_order_id)",
                     (
                         aid, boid,
                         strat_row["strategy"] if strat_row else None,
-                        act["symbol"], signed, float(act["price"]),
+                        act["symbol"], signed, price,
                         act.get("transaction_time", ""),
                     ),
                 )

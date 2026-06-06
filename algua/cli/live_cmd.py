@@ -44,12 +44,16 @@ def _live_account_equity() -> float:
     if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
         raise ValueError("Alpaca LIVE credentials not configured")
     import requests
-    resp = requests.get(
-        f"{s.alpaca_live_url.rstrip('/')}/v2/account",
-        headers={"APCA-API-KEY-ID": s.alpaca_live_api_key,
-                 "APCA-API-SECRET-KEY": s.alpaca_live_api_secret},
-        timeout=30,
-    )
+    from requests import RequestException
+    try:
+        resp = requests.get(
+            f"{s.alpaca_live_url.rstrip('/')}/v2/account",
+            headers={"APCA-API-KEY-ID": s.alpaca_live_api_key,
+                     "APCA-API-SECRET-KEY": s.alpaca_live_api_secret},
+            timeout=30,
+        )
+    except RequestException as exc:
+        raise ValueError(f"alpaca account equity request failed: {exc}") from exc
     if resp.status_code != 200:
         raise ValueError(f"alpaca {resp.status_code} reading account equity")
     return float(resp.json()["equity"])

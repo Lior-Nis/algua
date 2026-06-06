@@ -223,16 +223,21 @@ CREATE TABLE IF NOT EXISTS live_orders (
     status            TEXT NOT NULL,
     submitted_ts      TEXT NOT NULL
 );
+-- broker_order_id is the fill-attribution key: at most one order may own it (partial unique so the
+-- many pre-backfill NULLs are allowed).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_live_orders_broker_order_id
+    ON live_orders(broker_order_id) WHERE broker_order_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS live_fills (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     activity_id     TEXT NOT NULL UNIQUE,
     broker_order_id TEXT,
     strategy        TEXT,
     symbol          TEXT NOT NULL,
-    qty             REAL NOT NULL,
-    price           REAL NOT NULL,
+    qty             REAL NOT NULL CHECK(qty != 0),
+    price           REAL NOT NULL CHECK(price > 0),
     fill_ts         TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ix_live_fills_strategy_symbol ON live_fills(strategy, symbol);
 CREATE TABLE IF NOT EXISTS live_activities (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     activity_id  TEXT NOT NULL UNIQUE,
