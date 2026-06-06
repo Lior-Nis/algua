@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -250,6 +250,17 @@ CREATE TABLE IF NOT EXISTS live_activities (
 CREATE TABLE IF NOT EXISTS live_fill_cursor (
     name    TEXT PRIMARY KEY,
     cursor  TEXT
+);
+CREATE TABLE IF NOT EXISTS live_reconcile_state (
+    symbol           TEXT PRIMARY KEY,
+    expected_qty     REAL NOT NULL,
+    broker_qty       REAL NOT NULL,
+    first_seen_cycle INTEGER NOT NULL,
+    status           TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_cycle (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    n  INTEGER NOT NULL
 );
 """
 

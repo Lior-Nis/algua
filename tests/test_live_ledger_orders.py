@@ -49,3 +49,17 @@ def test_strategy_nav(tmp_path):
     # allocation 10_000; mark 105 -> unrealized 50, realized 0 -> NAV 10_050
     nav = L.strategy_nav(conn, "s1", allocation=10_000.0, marks={"AAA": 105.0})
     assert nav == 10_050.0
+
+
+def test_owned_open_order_ids_filters_to_strategy(tmp_path):
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "c1")
+    L.record_live_order(conn, "s2", "BBB", "buy", 1000.0, "c2")
+
+    class _B:
+        def list_open_orders(self):
+            return [{"id": "o1", "client_order_id": "c1"},   # s1's
+                    {"id": "o2", "client_order_id": "c2"},   # s2's
+                    {"id": "o3", "client_order_id": "unknown"}]  # not ours
+
+    assert L.owned_open_order_ids(conn, _B(), "s1") == ["o1"]

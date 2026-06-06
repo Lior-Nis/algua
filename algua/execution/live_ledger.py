@@ -53,7 +53,7 @@ def record_live_order(
     strategy: str,
     symbol: str,
     side: str,
-    intended_notional: float,
+    intended_notional: float | None,
     client_order_id: str,
 ) -> None:
     """Record a live order at submit time, keyed by client_order_id (the durable identity). A retry
@@ -199,3 +199,19 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+def owned_open_order_ids(
+    conn: sqlite3.Connection, broker: object, strategy: str
+) -> list[str]:
+    """The broker order ids of THIS strategy's currently-open orders: list the account's open
+    orders and keep those whose client_order_id maps (via live_orders) to `strategy`. Used to
+    scope cancellation so one strategy never cancels a sibling's orders."""
+    open_orders = broker.list_open_orders()  # type: ignore[attr-defined]
+    owned = {
+        r["client_order_id"]
+        for r in conn.execute(
+            "SELECT client_order_id FROM live_orders WHERE strategy = ?", (strategy,)
+        )
+    }
+    return [o["id"] for o in open_orders if o.get("client_order_id") in owned]
