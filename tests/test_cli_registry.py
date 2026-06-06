@@ -286,10 +286,17 @@ def test_go_live_requires_allocation(monkeypatch, tmp_path):
     assert r.exit_code == 1 and "allocation" in r.stdout.lower()
 
 
-def test_go_live_refuses_second_live_strategy(monkeypatch, tmp_path):
-    # with one strategy already live, a second is refused (slice-A hard guard, ≤1 live)
+def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
+    # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
+    from algua.registry.repository import ArtifactIdentity
     _force_live(monkeypatch, tmp_path, "already")
     name = _seed_paper(monkeypatch, tmp_path, "s2")
     _allocate(monkeypatch, tmp_path, name, 1000.0)
+    # patch compute_artifact_hashes so s2 (no real module) doesn't raise StrategyNotFound
+    monkeypatch.setattr(
+        "algua.cli.registry_cmd.compute_artifact_hashes",
+        lambda n: ArtifactIdentity(code_hash="aabb", config_hash="ccdd", dependency_hash="eeff"),
+    )
     r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
-    assert r.exit_code == 1 and "one live strategy" in r.stdout.lower()
+    assert r.exit_code == 0  # a challenge is issued (no ≤1-live refusal)
+    assert json.loads(r.stdout)["action"] == "go_live_challenge"
