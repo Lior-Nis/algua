@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -231,16 +232,22 @@ class _AlpacaBroker:
         )
 
     def submit_sized(self, intent: OrderIntent, snap: TickSnapshot,
-                     client_order_id: str | None = None) -> str:
+                     client_order_id: str | None = None,
+                     reserve: Callable[[str, float], float] | None = None) -> str:
         """Size ONE intent against the tick snapshot (shared `size_order`) and POST it. The symbol
         MUST be in the snapshot's universe — an unknown symbol raises rather than silently sizing a
         full target-weight buy against a phantom flat position (#29). Returns the order id, or
-        "noop" if the delta is below the minimum notional.
+        "noop" if the delta is below the minimum notional, or "skipped" if a BUY is refused by the
+        reserve hook (permitted notional == 0).
 
         `client_order_id`, when given, is sent as Alpaca's `client_order_id`: it makes the submit
         idempotent so a retried POST (after a transient 429/5xx/timeout) that already landed is
         de-duplicated by Alpaca rather than double-filling, and lets a re-run of the same tick
-        reconcile against orders it already placed (#18, #24)."""
+        reconcile against orders it already placed (#18, #24).
+
+        `reserve`, when given, is called ONLY for BUY orders: `reserve(symbol, amount)` returns the
+        permitted notional (≤ amount). Zero means skip the order entirely; a partial amount trims
+        the notional. Sells are never reserved."""
         if intent.symbol not in snap.market_values:
             raise BrokerError(
                 f"alpaca submit: {intent.symbol!r} is not in the strategy universe "
@@ -252,7 +259,13 @@ class _AlpacaBroker:
         if sized.is_noop:
             return "noop"
         side = "buy" if sized.delta_notional > 0 else "sell"
-        notional = format(Decimal(str(abs(sized.delta_notional))).quantize(Decimal("0.01")), "f")
+        amount = abs(sized.delta_notional)
+        if side == "buy" and reserve is not None:
+            permitted = reserve(intent.symbol, amount)
+            if permitted <= 0.0:
+                return "skipped"
+            amount = min(amount, permitted)
+        notional = format(Decimal(str(amount)).quantize(Decimal("0.01")), "f")
         body: dict[str, Any] = {"symbol": intent.symbol, "notional": notional,
                                 "side": side, "type": "market", "time_in_force": "day"}
         if client_order_id is not None:

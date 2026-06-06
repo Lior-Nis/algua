@@ -470,3 +470,41 @@ def test_submit_offset_posts_qty_order(monkeypatch):
                               "time_in_force": "day", "client_order_id": "coid-flat"}
     _broker().submit_offset("BBB", -3.0, "coid-cover")          # short 3 -> BUY 3
     assert fake.posted[1]["side"] == "buy" and fake.posted[1]["qty"] == "3"
+
+
+def test_submit_sized_reserve_trims_buy(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [])},
+        post_resp=_FakeResp(201, {"id": "o1"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    # reserve grants only 20k of the intended 50k -> posted notional is trimmed to 20000.00
+    _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                           reserve=lambda sym, n: 20_000.0)
+    assert fake.posted[0]["notional"] == "20000.00"
+
+
+def test_submit_sized_reserve_zero_skips_buy(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [])},
+        post_resp=_FakeResp(201, {"id": "o1"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    assert _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                                  reserve=lambda sym, n: 0.0) == "skipped"
+    assert fake.posted == []   # nothing posted
+
+
+def test_submit_sized_reserve_ignores_sells(monkeypatch):
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "600",
+                                           "market_value": "60000"}])},
+        post_resp=_FakeResp(201, {"id": "o2"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    # a SELL toward 0.5 must not consult reserve (a reserve returning 0 would wrongly skip a sell)
+    _broker().submit_sized(OrderIntent("AAA", Side.SELL, 0.5, T0),
+                           _broker().snapshot(["AAA"]), reserve=lambda sym, n: 0.0)
+    assert fake.posted[0]["side"] == "sell"
