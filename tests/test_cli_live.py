@@ -1,13 +1,10 @@
 import json
-from datetime import UTC, datetime
 
 import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.contracts.types import LiveAuthorization
-from algua.live.live_loop import TickResult
-from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
 
@@ -41,97 +38,6 @@ def _to_live(name="cross_sectional_momentum"):
 def _auth():
     return LiveAuthorization(1, "c", "cf", "d", "lior", "t")
 
-
-def test_live_trade_tick_refused_without_authorization(monkeypatch):
-    from algua.registry.live_gate import LiveAuthorizationError
-    _to_live()
-    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization",
-                        lambda *a, **k: (_ for _ in ()).throw(LiveAuthorizationError("nope")))
-    r = runner.invoke(app, ["live", "trade-tick", "cross_sectional_momentum", "--snapshot", "x"])
-    assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False
-
-
-def test_live_trade_tick_refused_when_killed(monkeypatch):
-    _to_live()
-    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
-    runner.invoke(app, ["paper", "kill", "cross_sectional_momentum", "--reason", "x"])
-    r = runner.invoke(app, ["live", "trade-tick", "cross_sectional_momentum", "--snapshot", "x"])
-    assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False
-
-
-def test_live_trade_tick_missing_live_keys(monkeypatch):
-    _to_live()
-    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "")
-    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
-    r = runner.invoke(app, ["live", "trade-tick", "cross_sectional_momentum", "--snapshot", "x"])
-    assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False
-
-
-def test_live_trade_tick_happy_path(monkeypatch):
-    _to_live()
-    ts = datetime(2023, 6, 1, tzinfo=UTC)
-    fake = TickResult(decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
-                      submitted=[{"symbol": "AAA", "side": "buy", "target_weight": 1.0,
-                                  "order_id": "o-1", "client_order_id": "c"}],
-                      equity=50000.0, peak_equity=50000.0)
-    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
-    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
-    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
-
-    def _fake_run_tick(*a, **k):
-        # mimic run_tick invoking on_submitted per accepted order (the immediate-audit path)
-        from algua.live.live_loop import SubmittedOrder
-        k["hooks"].on_submitted(SubmittedOrder(symbol="AAA", side="buy", target_weight=1.0,
-                                               order_id="o-1", client_order_id="c", decision_ts=ts))
-        return fake
-
-    monkeypatch.setattr("algua.cli.live_cmd.run_tick", _fake_run_tick)
-    r = runner.invoke(app, ["live", "trade-tick", "cross_sectional_momentum", "--snapshot", "x"])
-    assert r.exit_code == 0, r.stdout
-    payload = json.loads(r.stdout)
-    assert payload["submitted"][0]["order_id"] == "o-1"
-    # the live order was audited and a tick snapshot recorded
-    from contextlib import closing
-
-    from algua.config.settings import get_settings
-    from algua.execution.order_state import latest_tick_snapshot
-    from algua.registry.db import connect, migrate
-    with closing(connect(get_settings().db_path)) as conn:
-        migrate(conn)
-        assert latest_tick_snapshot(conn, "cross_sectional_momentum") is not None
-        n = conn.execute("SELECT COUNT(*) FROM audit_log WHERE action='live_order'").fetchone()[0]
-        assert n == 1
-        # the order is recorded in the BOOKS (client_order_id primary + broker_order_id backfilled)
-        # so fills can attribute + scoped cancel can find it (codex HIGH)
-        order = conn.execute(
-            "SELECT strategy, broker_order_id FROM live_orders WHERE client_order_id='c'"
-        ).fetchone()
-        assert order["strategy"] == "cross_sectional_momentum"
-        assert order["broker_order_id"] == "o-1"
-
-
-def test_live_trade_tick_breach_trips_and_flattens(monkeypatch):
-    _to_live()
-    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
-
-    class _FlatBroker:
-        def __init__(self):
-            self.closed = None
-        def cancel_open_orders(self):
-            pass
-        def close_positions(self, syms):
-            self.closed = list(syms)
-
-    broker = _FlatBroker()
-    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
-    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
-    monkeypatch.setattr("algua.cli.live_cmd.run_tick",
-                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "dd")))
-    r = runner.invoke(app, ["live", "trade-tick", "cross_sectional_momentum", "--snapshot", "x"])
-    assert r.exit_code == 1
-    payload = json.loads(r.stdout)
-    assert payload["ok"] is False and payload["kind"] == "drawdown"
-    assert broker.closed is not None  # scoped flatten ran on the live broker
 
 
 def test_run_all_no_live_strategies_is_noop(monkeypatch):
@@ -206,3 +112,43 @@ def test_live_allocate_records_and_enforces_sum(monkeypatch):
 def test_run_all_rejects_bad_max_drawdown():
     r = runner.invoke(app, ["live", "run-all", "--snapshot", "x", "--max-drawdown", "1.5"])
     assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False
+
+
+def test_run_all_breach_liquidates_per_strategy(monkeypatch):
+    from algua.live.live_loop import RiskBreach
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+
+    class _LiqBroker:
+        def __init__(self):
+            self.offsets = []
+        def account_activities(self, after=None):
+            return []
+        def get_positions(self):
+            import pandas as pd
+            return pd.Series(dtype=float)
+        def list_open_orders(self):
+            return []
+        def cancel_order(self, oid):
+            pass
+        def submit_offset(self, symbol, qty, coid):
+            self.offsets.append((symbol, qty))
+            return "off"
+        def account(self):
+            from algua.execution.alpaca_broker import AccountState
+            return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0)
+
+    broker = _LiqBroker()
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd.believed_positions",
+                        lambda conn, name: {"AAA": 5.0})  # strategy believes it holds 5 AAA
+    monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
+                        lambda conn, sid: {"capital": 10_000.0})
+    monkeypatch.setattr("algua.cli.live_cmd.run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "dd")))
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    assert broker.offsets == [("AAA", 5.0)]  # offset sized to the believed qty

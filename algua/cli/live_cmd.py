@@ -17,20 +17,22 @@ from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
 from algua.execution.live_ledger import (
     backfill_broker_order_id,
+    believed_positions,
     fill_cursor,
     ingest_activities,
     owned_open_order_ids,
     record_live_order,
 )
+from algua.execution.live_sizing import LiveSizingError, build_live_sizing_snapshot
 from algua.execution.order_state import (
     client_order_id,
-    get_peak_equity,
+    get_nav_peak,
     record_tick_snapshot,
-    update_peak_equity,
+    update_nav_peak,
 )
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.registry import allocations
-from algua.registry.allocations import AllocationError
+from algua.registry.allocations import AllocationError, active_allocation
 from algua.registry.live_gate import (
     ALLOWED_SIGNERS_PATH,
     LiveAuthorizationError,
@@ -104,6 +106,16 @@ def _run_strategy_tick(  # noqa: PLR0913
     command)."""
     strategy = load_strategy(name)
 
+    alloc = active_allocation(conn, SqliteStrategyRepository(conn).get(name).id)
+    if alloc is None:
+        raise ValueError(f"{name} has no live allocation")
+    allocation = float(alloc["capital"])
+    if allocation > broker.account().buying_power:           # minimal C1 BP preflight (codex #8)
+        raise ValueError(f"{name}: allocation {allocation} exceeds account buying power")
+
+    def _live_snap(bars):
+        return build_live_sizing_snapshot(conn, name, allocation, bars, strategy.universe)
+
     def _persist(record: SubmittedOrder) -> None:
         # Record the order in the BOOKS immediately (client_order_id is the durable identity): this
         # is what lets fills attribute back to this strategy and lets scoped cancel find this
@@ -115,14 +127,11 @@ def _run_strategy_tick(  # noqa: PLR0913
                      reason=f"{record.side} {record.symbol} {record.order_id}", strategy=name)
 
     hooks = TickHooks(
-        client_order_id_for=client_order_id,
-        on_submitted=_persist,
-        cancel=cancel,
-        should_halt=lambda: (kill_switch.is_tripped(conn, name)
-                             or global_halt.is_engaged(conn)
+        client_order_id_for=client_order_id, on_submitted=_persist, cancel=cancel,
+        live_snapshot=_live_snap, live_positions=lambda: believed_positions(conn, name),
+        should_halt=lambda: (kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn)
                              or not authorization_active(conn, authorization)),
-        peak_equity=get_peak_equity(conn, name),
-        derived_positions=None,  # Alpaca is the sole source of truth; no local-ledger reconcile
+        peak_equity=get_nav_peak(conn, name),
     )
     try:
         result = run_tick(strategy, broker, provider, utc(start), utc(end),
@@ -137,8 +146,10 @@ def _run_strategy_tick(  # noqa: PLR0913
         liquidation_submitted = True
         flatten_error = None
         try:
-            broker.cancel_open_orders()
-            broker.close_positions(strategy.universe)
+            _scoped_cancel(conn, broker, name)                       # cancel only our orders
+            ingest_activities(conn, _broker_account_activities(broker, fill_cursor(conn)))
+            for sym, qty in believed_positions(conn, name).items():  # fresh believed qty
+                broker.submit_offset(sym, qty, client_order_id(name, datetime.now(UTC), sym))
         except BrokerError as fexc:
             liquidation_submitted = False
             flatten_error = str(fexc)
@@ -150,8 +161,12 @@ def _run_strategy_tick(  # noqa: PLR0913
             payload["flatten_error"] = flatten_error
         emit(payload)
         raise typer.Exit(1) from exc
+    except LiveSizingError as exc:        # fail-closed mark -> skip this strategy, don't trade
+        audit_append(conn, actor="system", action="live_sizing_skipped",
+                     reason=str(exc), strategy=name)
+        return {"strategy": name, "skipped": str(exc)}
     if result.peak_equity is not None:
-        update_peak_equity(conn, name, result.peak_equity)
+        update_nav_peak(conn, name, result.peak_equity)
         record_tick_snapshot(
             conn, name, tick_ts=datetime.now(UTC).isoformat(),
             decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
@@ -169,36 +184,6 @@ def _run_strategy_tick(  # noqa: PLR0913
         "reconcile_ok": result.reconcile_ok,
     }
 
-
-@live_app.command("trade-tick")
-@json_errors(ValueError, LookupError, BrokerError, LiveAuthorizationError)
-def trade_tick(
-    name: str,
-    snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
-    start: str = typer.Option("2023-01-01", "--start"),
-    end: str = typer.Option("2023-12-31", "--end"),
-    max_drawdown: float = typer.Option(None, "--max-drawdown",
-                                       help="halt + flatten if equity falls this fraction "
-                                            "below the persisted peak"),
-) -> None:
-    """Run ONE wall-clock tick against the Alpaca LIVE venue (REAL MONEY). Re-verifies the human
-    go-live signature against the trust anchor before trading; Alpaca is the source of truth (no
-    local ledger). A drawdown/exposure breach trips the kill-switch and scoped-flattens."""
-    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
-        raise ValueError("--max-drawdown must be in (0, 1]")
-    with registry_conn() as conn:
-        repo = SqliteStrategyRepository(conn)
-        # THE WALL: re-verify the human signature for the current artifact (requires Stage.LIVE).
-        authorization = verify_live_authorization(conn, repo, name, ALLOWED_SIGNERS_PATH)
-        if kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn):
-            raise ValueError(f"{name} is halted; resume before live trading")
-        broker = _alpaca_live_broker(authorization)
-        provider = _select_provider(False, snapshot)
-        result = _run_strategy_tick(
-            conn, name, authorization, broker, provider, max_drawdown,
-            start=start, end=end,
-        )
-    emit(ok(result))
 
 
 def _broker_account_activities(broker, after):
