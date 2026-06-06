@@ -87,3 +87,16 @@ def test_alpaca_live_url_validator(monkeypatch):
         Settings()
     monkeypatch.setenv("ALGUA_ALPACA_LIVE_URL", "https://api.alpaca.markets")
     assert Settings().alpaca_live_url == "https://api.alpaca.markets"
+
+
+def test_alpaca_urls_require_https(monkeypatch):
+    import pytest
+
+    from algua.config.settings import Settings
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_URL", "http://api.alpaca.markets")
+    with pytest.raises(ValueError):
+        Settings()
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_URL", raising=False)
+    monkeypatch.setenv("ALGUA_ALPACA_PAPER_URL", "http://paper-api.alpaca.markets")
+    with pytest.raises(ValueError):
+        Settings()

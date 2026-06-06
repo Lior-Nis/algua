@@ -421,3 +421,12 @@ def test_live_broker_account_uses_inherited_rest(monkeypatch):
     monkeypatch.setattr(ab, "requests", fake)
     acct = AlpacaLiveBroker(_live_auth(), "k", "s").account()
     assert acct.equity == 5.0
+
+
+def test_brokers_reject_http_plaintext():
+    # API keys must never travel over plaintext (codex review)
+    from algua.execution.alpaca_broker import AlpacaLiveBroker, AlpacaPaperBroker
+    with pytest.raises(BrokerError, match="https"):
+        AlpacaPaperBroker("k", "s", "http://paper-api.alpaca.markets")
+    with pytest.raises(BrokerError, match="https"):
+        AlpacaLiveBroker(_live_auth(), "k", "s", "http://api.alpaca.markets")

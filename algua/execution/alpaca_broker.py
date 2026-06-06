@@ -83,11 +83,12 @@ class _AlpacaBroker:
     _ALLOWED_HOSTS: frozenset[str] = frozenset()
 
     def __init__(self, api_key: str, api_secret: str, base_url: str) -> None:
-        host = urlparse(base_url).hostname
-        if host not in self._ALLOWED_HOSTS:
+        parsed = urlparse(base_url)
+        # Require https to a permitted host — API keys must never travel over plaintext (codex).
+        if parsed.scheme != "https" or parsed.hostname not in self._ALLOWED_HOSTS:
             raise BrokerError(
-                f"refusing Alpaca endpoint {base_url!r} (host {host!r}); "
-                f"permitted hosts: {sorted(self._ALLOWED_HOSTS)}"
+                f"refusing Alpaca endpoint {base_url!r} (host {parsed.hostname!r}); "
+                f"must be https to one of {sorted(self._ALLOWED_HOSTS)}"
             )
         self.api_key = api_key
         self.api_secret = api_secret
@@ -279,9 +280,11 @@ class AlpacaPaperBroker(_AlpacaBroker):
 
 
 class AlpacaLiveBroker(_AlpacaBroker):
-    """The Alpaca LIVE (real-money) venue. Constructable ONLY with a verified LiveAuthorization
-    (the construction tollbooth) AND against the live host — so a live broker cannot exist without
-    a passed go-live gate. The authorization is kept for audit/the loop, never used for REST."""
+    """The Alpaca LIVE (real-money) venue. Requires a `LiveAuthorization` to construct (a
+    defense-in-depth tollbooth — NOT the primary wall; the dataclass is forgeable in-process) and
+    only an https live host. The REAL controls are the live keys (trusted env only) and the loop
+    re-verifying the signature via `verify_live_authorization` before EVERY order (slice 3). The
+    authorization is kept for audit, never used for REST."""
 
     _ALLOWED_HOSTS = frozenset({"api.alpaca.markets"})
 

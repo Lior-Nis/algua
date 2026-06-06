@@ -40,11 +40,11 @@ class Settings(BaseSettings):
     @field_validator("alpaca_paper_url")
     @classmethod
     def _paper_url_is_paper_endpoint(cls, value: str) -> str:
-        host = urlparse(value).hostname
-        if host != _ALPACA_PAPER_HOST:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.hostname != _ALPACA_PAPER_HOST:
             raise ValueError(
-                f"alpaca_paper_url must point at the paper endpoint "
-                f"({_ALPACA_PAPER_HOST}); got host {host!r}. "
+                f"alpaca_paper_url must be https to the paper endpoint "
+                f"({_ALPACA_PAPER_HOST}); got {value!r}. "
                 "The live endpoint is forbidden by the paper-only boundary."
             )
         return value
@@ -52,11 +52,12 @@ class Settings(BaseSettings):
     @field_validator("alpaca_live_url")
     @classmethod
     def _live_url_is_live_endpoint(cls, value: str) -> str:
-        host = urlparse(value).hostname
-        if host != _ALPACA_LIVE_HOST:
+        # https-only: API keys must never travel over plaintext (codex review).
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or parsed.hostname != _ALPACA_LIVE_HOST:
             raise ValueError(
-                f"alpaca_live_url must point at the live endpoint ({_ALPACA_LIVE_HOST}); "
-                f"got host {host!r}"
+                f"alpaca_live_url must be https to the live endpoint ({_ALPACA_LIVE_HOST}); "
+                f"got {value!r}"
             )
         return value
 

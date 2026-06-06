@@ -77,11 +77,15 @@ class Broker(Protocol):
 
 @dataclass(frozen=True)
 class LiveAuthorization:
-    """Proof that a strategy's CURRENT artifact is human-authorized for live trading.
+    """A token representing a human go-live authorization, returned by
+    `algua.registry.live_gate.verify_live_authorization` after it re-verifies the signature.
 
-    Minted ONLY by `algua.registry.live_gate.verify_live_authorization` after a successful
-    signature re-verification; holding one is the proof. `AlpacaLiveBroker` requires one to
-    construct, so a live broker cannot exist without a passed gate."""
+    DEFENSE IN DEPTH, NOT THE WALL: in-process this dataclass is forgeable (any code can construct
+    one), so requiring it to build `AlpacaLiveBroker` is a tollbooth that catches accidental
+    unauthorized construction — it is NOT the primary control. The real wall is (a) the live API
+    keys living only in the trusted operator env and (b) the live loop calling
+    `verify_live_authorization` (re-verifying the SSH signature against the trust anchor)
+    immediately before EVERY live order."""
 
     strategy_id: int
     code_hash: str
