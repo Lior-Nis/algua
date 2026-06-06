@@ -17,6 +17,12 @@ def _positions(broker: _AlpacaBroker) -> dict[str, float]:
     return {s: float(q) for s, q in broker.get_positions().items()}
 
 
+def _early_positions(hooks: TickHooks, broker: _AlpacaBroker) -> dict[str, float]:
+    """Return ledger positions from the hook when supplied, else fall back to broker positions.
+    Used on early-return paths (no-bars / warmup) so live reports the ledger view, not broker."""
+    return hooks.live_positions() if hooks.live_positions is not None else _positions(broker)
+
+
 @dataclass
 class SubmittedOrder:
     symbol: str
@@ -66,6 +72,13 @@ class TickHooks:
     # EMPTY one — means "the DB says we hold this"; an empty DB against a held broker book is the
     # drift case we must catch, so reconcile is unconditional once the hook is present (#18).
     derived_positions: dict[str, float] | None = None
+    # live_snapshot(bars) -> (SizingSnapshot, nav): supplies the ledger-backed sizing snapshot + NAV
+    # (live path). When set, sizing is off the snapshot equity and drawdown off NAV (not account
+    # equity). Paper passes None -> broker.snapshot + equity for both (unchanged).
+    live_snapshot: Callable[[Any], tuple[Any, float]] | None = None
+    # live_positions() -> dict[str, float]: supplies ledger positions for the no-decision early-
+    # return paths (empty bars / warmup). Paper passes None -> broker.get_positions().
+    live_positions: Callable[[], dict[str, float]] | None = None
 
 
 class TickHalted(RuntimeError):
@@ -96,7 +109,7 @@ def run_tick(
         cutoff = now.date()
         bars = bars[[ts.date() < cutoff for ts in bars.index]]
     if bars.empty:
-        return TickResult(None, {}, _positions(broker), [])
+        return TickResult(None, {}, _early_positions(hooks, broker), [])
 
     t = bars.index.max()
     # warmup_bars = N holds the first N closed sessions flat: refuse to decide until strictly MORE
@@ -105,17 +118,27 @@ def run_tick(
     # `if i < warmup: continue` and the paper loop's `if bars_seen <= warmup: continue`
     # (#1: reconcile the historical off-by-one, which decided one bar early at nunique() == N).
     if bars.index.nunique() <= strategy.execution.warmup_bars:
-        return TickResult(t, {}, _positions(broker), [])  # warm-up not met
+        return TickResult(t, {}, _early_positions(hooks, broker), [])  # warm-up not met
 
     # Snapshot equity + positions ONCE (1 account GET + 1 positions GET); reuse it as the fixed
     # sizing denominator AND as the deterministic position state for the report, reconcile, and the
     # symbol union, so nothing can drift between two network calls mid-tick (#20, #23).
-    snap = broker.snapshot(strategy.universe)
+    # When live_snapshot is supplied, it provides a ledger-backed SizingSnapshot (equity =
+    # min(allocation, NAV)) and the NAV used as the drawdown basis — so sizing is off the virtual
+    # subaccount and drawdown is off NAV (not account equity). Paper passes None -> broker path.
+    snap: Any
+    if hooks.live_snapshot is not None:
+        snap, drawdown_equity = hooks.live_snapshot(bars)
+    else:
+        snap = broker.snapshot(strategy.universe)
+        drawdown_equity = snap.equity
 
     # Drawdown against the persisted peak BEFORE trading: equity below the breaker threshold halts
-    # the tick before any order goes out (#27). The peak ratchets up to this tick's equity.
-    peak = snap.equity if hooks.peak_equity is None else max(hooks.peak_equity, snap.equity)
-    check_drawdown(snap.equity, peak, max_drawdown)
+    # the tick before any order goes out (#27). The peak ratchets up to this tick's drawdown basis.
+    peak = (
+        drawdown_equity if hooks.peak_equity is None else max(hooks.peak_equity, drawdown_equity)
+    )
+    check_drawdown(drawdown_equity, peak, max_drawdown)
 
     positions_before = {s: q for s, q in snap.qtys.items() if q != 0.0}
     # Realized current weight per held symbol from the SAME snapshot (market_value / equity), so the
@@ -182,7 +205,7 @@ def run_tick(
         target_weights={s: float(w) for s, w in weights.items()},
         positions_before=positions_before,
         submitted=submitted,
-        equity=snap.equity,
+        equity=drawdown_equity,
         peak_equity=peak,
         reconcile_ok=reconcile_ok,
         realized_gross=realized_gross,

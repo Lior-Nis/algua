@@ -263,6 +263,24 @@ class _AlpacaBroker:
             raise BrokerError(f"alpaca /v2/orders: response missing 'id': {data}")
         return str(order_id)
 
+    def submit_offset(self, symbol: str, signed_qty: float, client_order_id: str) -> str:
+        """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long
+        (signed_qty>0), buy them back if short (<0). Used by per-strategy liquidation — sized to the
+        strategy's ledger qty so the account net moves by exactly this strategy's contribution."""
+        qty = abs(signed_qty)
+        if qty == 0.0:
+            return "noop"
+        body: dict[str, Any] = {
+            "symbol": symbol, "qty": format(qty, "g"),
+            "side": "sell" if signed_qty > 0 else "buy",
+            "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
+        }
+        data = self._read(self._post("/v2/orders", body), "/v2/orders", ok=(200, 201))
+        order_id = data.get("id") if isinstance(data, dict) else None
+        if not order_id:
+            raise BrokerError(f"alpaca /v2/orders (offset): response missing 'id': {data}")
+        return str(order_id)
+
     def submit(self, intent: OrderIntent, client_order_id: str | None = None) -> str:
         """Broker-protocol single-symbol submit: snapshot scoped to this one symbol, then size +
         POST. The tick loop instead snapshots the whole universe ONCE and calls submit_sized per

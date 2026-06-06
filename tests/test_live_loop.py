@@ -303,3 +303,27 @@ def test_run_tick_uses_cancel_hook_when_supplied():
     run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
              DATES[0], DATES[-1], hooks=hooks)
     assert called == {"scoped": 1, "account_wide": 0}  # the hook replaced the account-wide cancel
+
+
+def test_run_tick_live_snapshot_sizes_off_hook_and_drawdowns_off_nav(monkeypatch):
+    from algua.execution.alpaca_broker import TickSnapshot
+    from algua.live.live_loop import RiskBreach, TickHooks
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    # ledger snapshot: allocation 10k as equity, flat; NAV 6k vs peak 10k -> 40% drawdown trips
+    snap = TickSnapshot(equity=10_000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    hooks = TickHooks(live_snapshot=lambda b: (snap, 6_000.0), peak_equity=10_000.0)
+    with pytest.raises(RiskBreach):  # NAV 6k vs peak 10k = 40% drawdown
+        run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=hooks, max_drawdown=0.2)
+
+
+def test_run_tick_live_positions_on_warmup_early_return():
+    from algua.live.live_loop import TickHooks
+    broker = _FakeBroker()
+    # 3 bars, warmup_bars=5 -> nunique() (3) <= warmup (5) -> warmup early-return
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(live_positions=lambda: {"AAA": 7.0})
+    res = run_tick(_strategy({"AAA": 0.5}, warmup_bars=5), broker, _FakeProvider(bars),
+                   DATES[0], DATES[-1], hooks=hooks)
+    assert res.positions_before == {"AAA": 7.0}  # ledger positions, not broker's
