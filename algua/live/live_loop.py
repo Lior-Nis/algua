@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from algua.execution.alpaca_broker import AlpacaPaperBroker
+from algua.execution.alpaca_broker import _AlpacaBroker
 from algua.live.paper_loop import decide
 from algua.risk.limits import WEIGHT_TOL, RiskBreach, check_drawdown
 from algua.strategies.base import LoadedStrategy
 
 
-def _positions(broker: AlpacaPaperBroker) -> dict[str, float]:
+def _positions(broker: _AlpacaBroker) -> dict[str, float]:
     """Current broker positions as {symbol: qty} — used only on early-return paths (no decision),
     where no sizing snapshot is taken."""
     return {s: float(q) for s, q in broker.get_positions().items()}
@@ -70,7 +70,7 @@ class TickHalted(RuntimeError):
 
 def run_tick(
     strategy: LoadedStrategy,
-    broker: AlpacaPaperBroker,
+    broker: _AlpacaBroker,
     provider: Any,
     start: datetime,
     end: datetime,
