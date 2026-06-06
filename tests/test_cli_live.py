@@ -178,7 +178,8 @@ def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 30_000.0)
 
-    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, reserve_buy=None, cancel=None):
+    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
+                   reserve_buy=None, cancel=None):
         captured["first"] = reserve_buy("AAA", 50_000.0)   # ask for 50k from a 30k pool
         captured["second"] = reserve_buy("BBB", 50_000.0)  # pool now drained
         return {"strategy": name}
@@ -196,3 +197,26 @@ def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
         migrate(conn)
         n = conn.execute("SELECT COUNT(*) FROM live_reservations").fetchone()[0]
         assert n == 2   # one trim + one skip recorded
+
+
+def test_run_all_forwards_start_end_to_tick(monkeypatch):
+    # operator-supplied --start/--end must reach the per-strategy tick (codex C2: were ignored)
+    _to_live()
+    captured = {}
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 1_000.0)
+
+    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
+                   reserve_buy=None, cancel=None):
+        captured["start"], captured["end"] = start, end
+        return {"strategy": name}
+
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x", "--start", "2021-01-01",
+                            "--end", "2021-12-31"])
+    assert r.exit_code == 0
+    assert captured == {"start": "2021-01-01", "end": "2021-12-31"}

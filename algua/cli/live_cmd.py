@@ -300,6 +300,7 @@ def run_all(
         for name, authorization in verified:
             results.append(_run_strategy_tick(
                 conn, name, authorization, broker, provider, max_drawdown,
+                start=start, end=end,
                 reserve_buy=_reserve_for(name),
                 cancel=lambda n=name: _scoped_cancel(conn, broker, n),
             ))

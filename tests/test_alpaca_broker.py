@@ -508,3 +508,16 @@ def test_submit_sized_reserve_ignores_sells(monkeypatch):
     _broker().submit_sized(OrderIntent("AAA", Side.SELL, 0.5, T0),
                            _broker().snapshot(["AAA"]), reserve=lambda sym, n: 0.0)
     assert fake.posted[0]["side"] == "sell"
+
+
+def test_submit_sized_reserve_below_min_notional_skips(monkeypatch):
+    # a buy trimmed below Alpaca's $1 minimum must skip, not post a sub-$1 order that gets rejected
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [])},
+        post_resp=_FakeResp(201, {"id": "o1"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    assert _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                                  reserve=lambda sym, n: 0.50) == "skipped"
+    assert fake.posted == []

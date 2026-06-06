@@ -12,7 +12,7 @@ import requests
 from requests import RequestException
 
 from algua.contracts.types import LiveAuthorization, OrderIntent
-from algua.execution.sizing import size_order
+from algua.execution.sizing import MIN_NOTIONAL, size_order
 
 _TIMEOUT = 30  # seconds: per-request connect+read timeout for every Alpaca HTTP call
 # Default endpoints for the two Alpaca venues.
@@ -265,6 +265,10 @@ class _AlpacaBroker:
             if permitted <= 0.0:
                 return "skipped"
             amount = min(amount, permitted)
+            if amount < MIN_NOTIONAL:
+                # A trim below Alpaca's min notional must SKIP, not post a sub-$1 order the venue
+                # rejects (a BrokerError would abort the whole run-all cycle) — codex C2 review.
+                return "skipped"
         notional = format(Decimal(str(amount)).quantize(Decimal("0.01")), "f")
         body: dict[str, Any] = {"symbol": intent.symbol, "notional": notional,
                                 "side": side, "type": "market", "time_in_force": "day"}
