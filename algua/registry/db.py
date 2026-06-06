@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -266,6 +266,16 @@ CREATE TABLE IF NOT EXISTS live_nav_peaks (
     strategy   TEXT PRIMARY KEY,
     peak       REAL NOT NULL,
     updated_ts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_reservations (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    cycle              INTEGER NOT NULL,
+    strategy           TEXT NOT NULL,
+    symbol             TEXT NOT NULL,
+    intended_notional  REAL NOT NULL,
+    permitted_notional REAL NOT NULL,
+    reason             TEXT NOT NULL,
+    ts                 TEXT NOT NULL
 );
 """
 

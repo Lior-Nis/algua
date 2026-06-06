@@ -79,6 +79,10 @@ class TickHooks:
     # live_positions() -> dict[str, float]: supplies ledger positions for the no-decision early-
     # return paths (empty bars / warmup). Paper passes None -> broker.get_positions().
     live_positions: Callable[[], dict[str, float]] | None = None
+    # reserve_buy(symbol, notional) -> permitted_notional: the loop's buying-power reservation hook;
+    # caps a BUY's notional to the shared per-cycle pool, returning 0 to skip the order entirely.
+    # Sells are never consulted. None == no reservation (paper and any non-reserved path).
+    reserve_buy: Callable[[str, float], float] | None = None
 
 
 class TickHalted(RuntimeError):
@@ -187,8 +191,8 @@ def run_tick(
             hooks.client_order_id_for(strategy.name, t, intent.symbol)
             if hooks.client_order_id_for is not None else None
         )
-        order_id = broker.submit_sized(intent, snap, coid)
-        if order_id == "noop":
+        order_id = broker.submit_sized(intent, snap, coid, reserve=hooks.reserve_buy)
+        if order_id in ("noop", "skipped"):
             continue
         record = SubmittedOrder(symbol=intent.symbol, side=intent.side.value,
                                 target_weight=intent.target_weight, order_id=order_id,

@@ -51,7 +51,7 @@ class _FakeBroker:
         # market value priced at $1/share for simplicity (qty == market value)
         return TickSnapshot(equity=self._equity, market_values=dict(qtys), qtys=qtys)
 
-    def submit_sized(self, intent, snap, client_order_id=None):
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
         if intent.symbol not in snap.qtys:
             raise BrokerError(f"{intent.symbol} not in universe")
         self.submitted.append(intent)
@@ -327,3 +327,16 @@ def test_run_tick_live_positions_on_warmup_early_return():
     res = run_tick(_strategy({"AAA": 0.5}, warmup_bars=5), broker, _FakeProvider(bars),
                    DATES[0], DATES[-1], hooks=hooks)
     assert res.positions_before == {"AAA": 7.0}  # ledger positions, not broker's
+
+
+def test_run_tick_threads_reserve_buy_to_submit_sized():
+    from algua.live.live_loop import TickHooks
+    seen = {}
+    broker = _FakeBroker()
+    orig = broker.submit_sized
+    broker.submit_sized = lambda intent, snap, coid=None, reserve=None: (
+        seen.__setitem__("reserve", reserve) or orig(intent, snap, coid))
+    hooks = TickHooks(reserve_buy=lambda sym, n: n)
+    run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
+             DATES[0], DATES[-1], hooks=hooks)
+    assert seen["reserve"] is hooks.reserve_buy   # run_tick forwarded the hook

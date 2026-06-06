@@ -71,10 +71,6 @@ def transition(
         if target is Stage.LIVE:
             from algua.registry import allocations
             rec = repo.get(name)
-            if len(repo.list_strategies(Stage.LIVE)) > 0 and rec.stage is not Stage.LIVE:
-                raise TransitionError(
-                    "refusing: only one live strategy is allowed until multi-strategy controls "
-                    "land (slice C). Retire the current live strategy first.")
             if allocations.active_allocation(conn, rec.id) is None:
                 raise TransitionError(
                     f"{name} has no live allocation; run `algua live allocate {name} --capital X` "
