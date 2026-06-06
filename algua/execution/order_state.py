@@ -158,6 +158,32 @@ def clear_all_peaks(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def get_nav_peak(conn: sqlite3.Connection, strategy: str) -> float | None:
+    row = conn.execute(
+        "SELECT peak FROM live_nav_peaks WHERE strategy = ?", (strategy,)
+    ).fetchone()
+    return float(row["peak"]) if row is not None else None
+
+
+def update_nav_peak(conn: sqlite3.Connection, strategy: str, nav: float) -> float:
+    """Persist the running per-strategy NAV peak (the live drawdown denominator) and return it.
+    Ratchets up only; a tick's NAV below it is the drawdown the breaker acts on."""
+    prior = get_nav_peak(conn, strategy)
+    peak = nav if prior is None else max(prior, nav)
+    conn.execute(
+        "INSERT INTO live_nav_peaks(strategy, peak, updated_ts) VALUES (?,?,?) "
+        "ON CONFLICT(strategy) DO UPDATE SET peak=excluded.peak, updated_ts=excluded.updated_ts",
+        (strategy, peak, datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+    return peak
+
+
+def clear_nav_peak(conn: sqlite3.Connection, strategy: str) -> None:
+    conn.execute("DELETE FROM live_nav_peaks WHERE strategy = ?", (strategy,))
+    conn.commit()
+
+
 def record_tick_snapshot(
     conn: sqlite3.Connection, strategy: str, *, tick_ts: str, decision_ts: str | None,
     equity: float, peak_equity: float | None, positions: dict[str, float], n_submitted: int,

@@ -204,3 +204,15 @@ def test_clear_all_peaks_wipes_every_strategy(tmp_path):
     update_peak_equity(conn, "b", 200.0)
     clear_all_peaks(conn)
     assert get_peak_equity(conn, "a") is None and get_peak_equity(conn, "b") is None
+
+
+def test_nav_peak_ratchets_and_clears(tmp_path):
+    from algua.execution.order_state import clear_nav_peak, get_nav_peak, update_nav_peak
+    conn = _conn(tmp_path)
+    assert get_nav_peak(conn, "s1") is None
+    assert update_nav_peak(conn, "s1", 10_000.0) == 10_000.0
+    assert update_nav_peak(conn, "s1", 9_000.0) == 10_000.0   # only ratchets up
+    assert update_nav_peak(conn, "s1", 11_000.0) == 11_000.0
+    assert get_nav_peak(conn, "s1") == 11_000.0
+    clear_nav_peak(conn, "s1")
+    assert get_nav_peak(conn, "s1") is None
