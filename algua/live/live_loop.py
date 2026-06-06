@@ -153,6 +153,9 @@ def run_tick(
 
     submitted: list[dict[str, Any]] = []
     for intent in intents:
+        # Re-check before EACH order so a halt / authorization-revoke mid-loop stops further orders.
+        if hooks.should_halt is not None and hooks.should_halt():
+            raise TickHalted("kill-switch tripped during submit phase")
         coid = (
             hooks.client_order_id_for(strategy.name, t, intent.symbol)
             if hooks.client_order_id_for is not None else None
