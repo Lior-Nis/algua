@@ -3,7 +3,9 @@ P&L / NAV derivations. The broker account is the netted custodian; this ledger i
 truth for per-strategy attribution. Pure derivations are kept side-effect-free for testing."""
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -43,3 +45,73 @@ def position_pnl(fills: list[tuple[float, float]], mark: float) -> PositionPnl:
                 avg = 0.0
     unrealized = (mark - avg) * qty
     return PositionPnl(qty=qty, avg_cost=avg, realized=realized, unrealized=unrealized)
+
+
+def record_live_order(
+    conn: sqlite3.Connection,
+    strategy: str,
+    symbol: str,
+    side: str,
+    intended_notional: float,
+    client_order_id: str,
+) -> None:
+    """Record a live order at submit time, keyed by client_order_id (the durable identity). A retry
+    that re-submits the same client_order_id is a no-op (INSERT OR IGNORE on the UNIQUE column)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO live_orders"
+        "(strategy, symbol, side, intended_notional, client_order_id, status, submitted_ts)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (strategy, symbol, side, intended_notional, client_order_id, "submitted",
+         datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def backfill_broker_order_id(
+    conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
+) -> None:
+    """Attach the broker's order id once the broker accepts (covers a submit that timed out after
+    Alpaca accepted it: the client_order_id row exists, the broker id arrives later)."""
+    conn.execute(
+        "UPDATE live_orders SET broker_order_id = ? WHERE client_order_id = ?",
+        (broker_order_id, client_order_id),
+    )
+    conn.commit()
+
+
+def believed_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float]:
+    """Per-symbol signed net position for a strategy = Σ its own live_fills.qty (nonzero only)."""
+    rows = conn.execute(
+        "SELECT symbol, SUM(qty) AS q FROM live_fills WHERE strategy = ? GROUP BY symbol",
+        (strategy,),
+    ).fetchall()
+    return {r["symbol"]: float(r["q"]) for r in rows if float(r["q"]) != 0.0}
+
+
+def _fills_for(
+    conn: sqlite3.Connection, strategy: str, symbol: str
+) -> list[tuple[float, float]]:
+    rows = conn.execute(
+        "SELECT qty, price FROM live_fills WHERE strategy = ? AND symbol = ? ORDER BY fill_ts, id",
+        (strategy, symbol),
+    ).fetchall()
+    return [(float(r["qty"]), float(r["price"])) for r in rows]
+
+
+def strategy_nav(
+    conn: sqlite3.Connection, strategy: str, allocation: float, marks: dict[str, float]
+) -> float:
+    """NAV = allocation + Σ realized + Σ unrealized across the strategy's symbols. `marks` supplies
+    the current price per symbol (a missing mark falls back to the average cost → 0 unrealized)."""
+    symbols = {
+        r["symbol"]
+        for r in conn.execute(
+            "SELECT DISTINCT symbol FROM live_fills WHERE strategy = ?", (strategy,)
+        )
+    }
+    total = allocation
+    for sym in symbols:
+        fills = _fills_for(conn, strategy, sym)
+        pnl = position_pnl(fills, mark=marks.get(sym, fills[-1][1] if fills else 0.0))
+        total += pnl.realized + pnl.unrealized
+    return total
