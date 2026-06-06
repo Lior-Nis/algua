@@ -252,3 +252,17 @@ def test_verify_live_authorization_revoked_newest_blocks_older(tmp_path, monkeyp
     _identity(monkeypatch)
     with pytest.raises(LiveAuthorizationError):
         live_gate.verify_live_authorization(conn, SqliteStrategyRepository(conn), "s", signers)
+
+
+def test_authorization_active_true_until_revoked(tmp_path):
+    from algua.contracts.types import LiveAuthorization
+    conn = _conn(tmp_path)
+    _seed_authorization(conn, tmp_path, code="ch", cfg="cfg", dep="dep")
+    auth = LiveAuthorization(strategy_id=1, code_hash="ch", config_hash="cfg",
+                             dependency_hash="dep", principal="lior", authorized_at="t")
+    assert live_gate.authorization_active(conn, auth) is True
+    conn.execute("UPDATE live_authorizations SET revoked_at='2026-06-05' WHERE strategy_id=1")
+    conn.commit()
+    assert live_gate.authorization_active(conn, auth) is False
+    other = LiveAuthorization(1, "OTHER", "cfg", "dep", "lior", "t")
+    assert live_gate.authorization_active(conn, other) is False

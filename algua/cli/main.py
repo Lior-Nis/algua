@@ -13,6 +13,7 @@ from typer.main import get_command
 from algua.cli import (  # noqa: F401 - imports register subcommands
     backtest_cmd,
     data_cmd,
+    live_cmd,
     paper_cmd,
     registry_cmd,
     research_cmd,

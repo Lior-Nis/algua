@@ -273,3 +273,21 @@ def test_run_tick_result_carries_equity():
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
     assert result.equity == 123_456.0  # the tick's snapshot equity is surfaced on the result
+
+
+def test_run_tick_should_halt_aborts_between_orders():
+    from algua.live.live_loop import TickHalted, TickHooks
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0]})
+    calls = {"n": 0}
+
+    def should_halt():
+        calls["n"] += 1
+        # False for pre-loop checks (x2) + 1st order; True before the 2nd.
+        return calls["n"] > 3
+
+    hooks = TickHooks(should_halt=should_halt)
+    with pytest.raises(TickHalted):
+        run_tick(_strategy({"AAA": 0.5, "BBB": 0.5}), broker, _FakeProvider(bars),
+                 DATES[0], DATES[-1], hooks=hooks)
+    assert len(broker.submitted) == 1  # only the first order went out (adapt attr name if needed)

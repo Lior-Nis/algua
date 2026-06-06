@@ -201,3 +201,22 @@ def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyRepository
         principal=row["principal"],
         authorized_at=row["authorized_at"],
     )
+
+
+def authorization_active(conn: sqlite3.Connection, authorization: LiveAuthorization) -> bool:
+    """Cheap mid-tick check: does an UNREVOKED live_authorizations row matching the (already
+    re-verified) authorization's identity still exist? No ssh-keygen, no hash recompute — for the
+    per-order should_halt hook so a legitimate operator revocation aborts the rest of a tick.
+
+    ADVISORY, NOT A SECURITY BOUNDARY: it matches identity columns only and does NOT re-verify the
+    signature, so it trusts that `verify_live_authorization` signature-verified the row at the START
+    of THIS invocation (the real wall, run every tick before any order). It is an in-tick liveness
+    check for mid-tick revocation, not protection against a forged row — that is the full
+    re-verify's job. (Slice 4 may tie this to the verified row id for defense in depth.)"""
+    row = conn.execute(
+        "SELECT 1 FROM live_authorizations WHERE strategy_id=? AND code_hash=? AND config_hash=? "
+        "AND dependency_hash IS ? AND revoked_at IS NULL LIMIT 1",
+        (authorization.strategy_id, authorization.code_hash, authorization.config_hash,
+         authorization.dependency_hash),
+    ).fetchone()
+    return row is not None
