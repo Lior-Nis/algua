@@ -93,12 +93,19 @@ On success: `update_peak_equity` + `record_tick_snapshot` (the live equity curve
 
 ## 6. Shared scaffolding
 
-`_trip`, `_breach_payload`, `_select_provider`/`utc` are reused. Move the genuinely-shared tick
-helpers (`_trip`, `_breach_payload`) into a small shared module (e.g. `algua/cli/_tick.py` or
-`_common.py`) so `live_cmd` and `paper_cmd` share one copy rather than duplicate. `live_cmd` imports
-`run_tick`/`TickHooks`/`TickHalted`/`RiskBreach`/`client_order_id`/`get_peak_equity`/
-`update_peak_equity`/`record_tick_snapshot`/`audit_append`/`kill_switch`/`global_halt`/`live_gate`/
-`AlpacaLiveBroker`/`verify_live_authorization`/`ALLOWED_SIGNERS_PATH`/`load_strategy`/`_select_provider`.
+To avoid duplicating the breach scaffolding without touching the money-critical paper command,
+`live_cmd` **imports** the shared helpers `_trip` and `_breach_payload` from `paper_cmd` (one copy,
+no refactor of `paper_cmd`). It also imports `run_tick`/`TickHooks`/`TickHalted`/`RiskBreach`/
+`client_order_id`/`get_peak_equity`/`update_peak_equity`/`record_tick_snapshot`/`audit_append`/
+`kill_switch`/`global_halt`/`live_gate`/`AlpacaLiveBroker`/`verify_live_authorization`/
+`ALLOWED_SIGNERS_PATH`/`load_strategy`/`_select_provider`/`ok`/`registry_conn`/`utc`/`json_errors`.
+The `live` Typer group is registered onto the root app the same way `paper` is (the CLI entry imports
+`live_cmd`).
+
+The per-order revoke check requires one addition to `run_tick`: re-check `should_halt` at the TOP of
+each submit-loop iteration (today it is checked only once before the loop), raising `TickHalted` so a
+mid-loop halt/revoke stops further orders. This is behaviour-preserving for paper (an extra cheap
+check that only fires when already halting).
 
 ## 7. The walls, end to end
 
