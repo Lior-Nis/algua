@@ -141,6 +141,48 @@ def transition(
     emit(ok({"name": rec.name, "stage": rec.stage.value}))
 
 
+@registry_app.command("set")
+@json_errors(ValueError, LookupError)
+def set_(
+    name: str,
+    family: str = typer.Option(None, "--family"),
+    author: Author = typer.Option(None, "--author"),
+    hypothesis_status: HypothesisStatus = typer.Option(None, "--hypothesis-status"),
+    derived_from: str = typer.Option(None, "--derived-from"),
+    description: str = typer.Option(None, "--description"),
+    add_tag: list[str] = typer.Option(None, "--add-tag", help="add a tag (repeatable)"),
+    remove_tag: list[str] = typer.Option(None, "--remove-tag", help="remove a tag (repeatable)"),
+) -> None:
+    """Update a strategy's organizational metadata (never its stage); re-syncs the kb doc."""
+    if family is not None and not _FAMILY_RE.match(family):
+        raise ValueError(f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)")
+    fields = ("family", "author", "hypothesis_status", "derived_from", "description", "tags")
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        before = repo.get(name)
+        after = repo.update_metadata(
+            name, family=family, author=author, hypothesis_status=hypothesis_status,
+            derived_from=derived_from, description=description,
+            add_tags=add_tag or [], remove_tags=remove_tag or [],
+        )
+    changed = {}
+    for f in fields:
+        b, a = getattr(before, f), getattr(after, f)
+        if isinstance(b, (Author, HypothesisStatus)):
+            b = b.value
+        if isinstance(a, (Author, HypothesisStatus)):
+            a = a.value
+        if b != a:
+            changed[f] = {"before": b, "after": a}
+    # Re-sync the kb doc so frontmatter reflects the new registry truth.
+    # Best-effort: absent doc is ok (sync_strategy_doc returns False).
+    # NOTE: `sync_strategy_doc` gains `metadata=` in Task 11; this call stays stage-only until then.
+    from algua.config.settings import get_settings
+    from algua.knowledge.sync import sync_strategy_doc
+    sync_strategy_doc(get_settings(), name, stage=after.stage.value)
+    emit(ok({**_record_json(after), "changed": changed}))
+
+
 @registry_app.command("enroll-approver")
 @json_errors(ValueError)
 def enroll_approver(

@@ -317,6 +317,18 @@ def test_add_with_metadata_flags():
     assert rec["hypothesis_status"] == "supported"
 
 
+def test_set_changes_metadata_and_reports_before_after(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    runner.invoke(app, ["registry", "add", "a", "--hypothesis-status", "untested"])
+    out = _json(runner.invoke(app, [
+        "registry", "set", "a", "--hypothesis-status", "supported", "--add-tag", "carry",
+    ]))
+    assert out["changed"]["hypothesis_status"] == {"before": "untested", "after": "supported"}
+    rec = _json(runner.invoke(app, ["registry", "show", "a"]))
+    assert rec["hypothesis_status"] == "supported"
+    assert rec["tags"] == ["carry"]
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity
