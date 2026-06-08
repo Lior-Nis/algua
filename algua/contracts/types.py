@@ -27,6 +27,8 @@ class ExecutionContract:
     decision_lag_bars: int = 1
     allow_fractional: bool = True
     max_gross_exposure: float = 1.0
+    max_weight_per_symbol: float = 1.0  # cap on |weight| per symbol; 1.0 = no cap
+    allow_short: bool = False           # False = long-only (today's behavior)
     warmup_bars: int = 0
 
     def __post_init__(self) -> None:
@@ -34,6 +36,8 @@ class ExecutionContract:
             raise ValueError("decision_lag_bars must be >= 1 (no same-bar fills)")
         if self.warmup_bars < 0:
             raise ValueError("warmup_bars must be >= 0")
+        if self.max_weight_per_symbol <= 0:
+            raise ValueError("max_weight_per_symbol must be > 0")
 
 
 @dataclass(frozen=True)
