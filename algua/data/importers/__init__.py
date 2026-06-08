@@ -13,11 +13,16 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from algua.data.contracts import BarImporter
+from algua.data.importers.firstrate import FirstRateImporter
 
 ImporterFactory = Callable[[], BarImporter]
 
 
-_REGISTRY: dict[str, ImporterFactory] = {}
+def _build_firstrate() -> BarImporter:
+    return FirstRateImporter()
+
+
+_REGISTRY: dict[str, ImporterFactory] = {"firstrate": _build_firstrate}
 
 
 def register_importer(name: str, factory: ImporterFactory) -> None:

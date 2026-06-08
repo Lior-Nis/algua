@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
 
+from algua.data.contracts import ImportRequest, ProviderBars
 from algua.data.store import normalize_symbols
 
 _FIRSTRATE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
@@ -54,3 +56,80 @@ def parse_firstrate_file(path: Path) -> pd.DataFrame:
     for col in [*_PRICE_COLUMNS, "volume"]:
         out[col] = pd.to_numeric(out[col], errors="raise").astype("float64")
     return out
+
+
+def _discover(directory: Path) -> dict[str, Path]:
+    """Map canonical symbol -> file path for every file in `directory`.
+
+    Raises ValueError if two files canonicalize to the same symbol (alias collision — the route by
+    which a global (timestamp, symbol) duplicate would sneak into the consolidated snapshot).
+    """
+    mapping: dict[str, Path] = {}
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        symbol = symbol_from_filename(path.name)
+        if symbol in mapping:
+            raise ValueError(
+                f"duplicate symbol {symbol!r} in {directory.name}: "
+                f"{mapping[symbol].name} and {path.name}"
+            )
+        mapping[symbol] = path
+    return mapping
+
+
+class FirstRateImporter:
+    name = "firstrate"
+
+    def import_bars(self, request: ImportRequest) -> Iterator[ProviderBars]:
+        if request.timeframe != "1d":
+            raise ValueError("intraday import not yet supported (1d only)")
+        raw_map = _discover(request.raw_dir)
+        adj_map = _discover(request.adjusted_dir)
+        if set(raw_map) != set(adj_map):
+            only_raw = sorted(set(raw_map) - set(adj_map))
+            only_adj = sorted(set(adj_map) - set(raw_map))
+            raise ValueError(
+                f"raw/adjusted symbol sets differ; refusing partial import. "
+                f"only in raw: {only_raw}; only in adjusted: {only_adj}"
+            )
+        symbols = sorted(raw_map)
+        if request.symbols is not None:
+            wanted = set(normalize_symbols(list(request.symbols)))
+            missing = sorted(wanted - set(symbols))
+            if missing:
+                raise ValueError(f"requested symbols with no files: {missing}")
+            symbols = [s for s in symbols if s in wanted]
+        for symbol in symbols:
+            yield self._merge_symbol(symbol, raw_map[symbol], adj_map[symbol])
+
+    def _merge_symbol(self, symbol: str, raw_path: Path, adj_path: Path) -> ProviderBars:
+        raw = parse_firstrate_file(raw_path)
+        adj = parse_firstrate_file(adj_path)[["ts", "close"]].rename(columns={"close": "adj_close"})
+
+        raw_keys = set(raw["ts"])
+        adj_keys = set(adj["ts"])
+        if raw_keys != adj_keys:
+            unmatched = sorted(str(ts.date()) for ts in raw_keys.symmetric_difference(adj_keys))
+            raise ValueError(
+                f"{symbol}: raw and adjusted key sets differ; refusing partial merge. "
+                f"unmatched dates: {unmatched}"
+            )
+
+        merged = raw.merge(adj, on="ts", how="inner")
+        merged["symbol"] = symbol
+        price_cols = ["open", "high", "low", "close", "adj_close"]
+        if (merged[price_cols] <= 0).to_numpy().any():
+            raise ValueError(f"{symbol}: nonpositive price(s) in raw/adjusted data")
+        frame = merged[
+            ["ts", "symbol", "open", "high", "low", "close", "adj_close", "volume"]
+        ].sort_values("ts").reset_index(drop=True)
+        return ProviderBars(
+            frame=frame,
+            source_metadata={
+                "vendor": "firstratedata",
+                "symbol": symbol,
+                "raw_file": raw_path.name,
+                "adjusted_file": adj_path.name,
+            },
+        )
