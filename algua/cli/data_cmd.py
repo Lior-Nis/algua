@@ -146,7 +146,11 @@ def import_bars(
         adjustment=adjustment,
         start=start,
         end=end,
-        source_metadata={"vendor": importer.vendor_label},
+        source_metadata={
+            "vendor": importer.vendor_label,
+            "raw_dir": raw_dir.name,
+            "adjusted_dir": adjusted_dir.name,
+        },
     )
     if rec.row_count is not None and rec.row_count >= IMPORT_WARN_ROWS:
         # stderr: non-fatal advisory; the snapshot is valid, just not servable by the current

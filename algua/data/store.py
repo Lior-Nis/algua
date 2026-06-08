@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 import uuid
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
@@ -205,11 +206,23 @@ class DataStore:
         self.manifest.append(rec)
         return rec
 
-    def clear_staging(self) -> None:
-        """Remove any leftover streamed-import staging dirs (crash residue)."""
+    def clear_staging(self, *, max_age_seconds: float = 3600.0) -> None:
+        """Remove stale streamed-import staging dirs (crash residue) older than `max_age_seconds`.
+
+        Age-based so a concurrent in-progress import (its own fresh UUID staging dir) is never
+        deleted out from under its writer. Each `ingest_bars_streamed` run already cleans its own
+        staging dir in a `finally`; this only sweeps residue left by a hard kill.
+        """
         staging = self.data_dir / "snapshots" / "_staging"
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
+        if not staging.exists():
+            return
+        cutoff = time.time() - max_age_seconds
+        for child in staging.iterdir():
+            try:
+                if child.stat().st_mtime < cutoff:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                continue
 
     def ingest_bars_streamed(
         self,
@@ -233,12 +246,10 @@ class DataStore:
         in the order received (the importer yields canonical sorted-symbol order — required for a
         stable `snapshot_id`).
 
-        Precondition (caller-owned): the chunk stream must already be globally unique on
-        (timestamp, symbol) — this method validates each chunk individually but does NOT validate
-        uniqueness ACROSS chunks. Passing overlapping chunks commits a snapshot that `read_bars`
-        will reject (its `validate_bars` catches the duplicate). The FirstRate importer satisfies
-        this by yielding exactly one chunk per symbol with per-file duplicate checks. A future
-        scaled read path (#130) may add cross-chunk validation over the consolidated file.
+        Cross-chunk integrity: each symbol must appear in exactly one chunk — the method rejects a
+        symbol that recurs in a later chunk (so the consolidated snapshot is globally unique on
+        (timestamp, symbol) given each chunk is internally schema-valid). The FirstRate importer
+        satisfies this by yielding one chunk per symbol.
 
         Note: when `start`/`end` are given, the coverage check is span-only (observed range covers
         the requested endpoints); it does not detect interior gaps.
@@ -250,9 +261,18 @@ class DataStore:
         row_count = 0
         observed_min: pd.Timestamp | None = None
         observed_max: pd.Timestamp | None = None
+        seen_symbols_set: set[str] = set()
         try:
             for chunk in chunks:
                 normalized = to_bar_schema(chunk).reset_index()  # columns: timestamp, *BAR_COLUMNS
+                chunk_symbols = set(normalized["symbol"].unique())
+                clash = chunk_symbols & seen_symbols_set
+                if clash:
+                    raise ValueError(
+                        f"symbol(s) {sorted(clash)} appear in more than one chunk; streamed "
+                        "ingest requires each symbol's bars in a single contiguous chunk"
+                    )
+                seen_symbols_set |= chunk_symbols
                 table = pa.Table.from_pandas(
                     normalized, preserve_index=False
                 ).replace_schema_metadata(None)

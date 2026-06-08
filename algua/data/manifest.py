@@ -30,9 +30,18 @@ class SnapshotManifest:
     def _read_all(self) -> list[SnapshotRecord]:
         if not self.path.exists():
             return []
-        records = []
-        with self.path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                if line.strip():
-                    records.append(SnapshotRecord.from_dict(json.loads(line)))
+        raw = self.path.read_text(encoding="utf-8")
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        ends_clean = raw.endswith("\n")
+        records: list[SnapshotRecord] = []
+        for index, line in enumerate(lines):
+            is_last = index == len(lines) - 1
+            try:
+                records.append(SnapshotRecord.from_dict(json.loads(line)))
+            except (json.JSONDecodeError, KeyError, ValueError):
+                # A crash mid-append can leave a torn final line with no trailing newline.
+                # Tolerate ONLY that case; any other parse failure is real corruption.
+                if is_last and not ends_clean:
+                    break
+                raise
         return records

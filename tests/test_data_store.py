@@ -394,3 +394,35 @@ def test_read_universe_allows_identical_duplicate_effective_date(tmp_path):
     timeline = store.read_universe("core")
     assert [s.effective_date for s in timeline] == [date(2026, 1, 1)]
     assert timeline[0].symbols == frozenset({"AAPL", "MSFT"})
+
+
+def test_manifest_tolerates_torn_trailing_line(tmp_path):
+    from algua.data.manifest import SnapshotManifest
+
+    store = DataStore(tmp_path)
+    # ingest one good bars snapshot so the manifest has a valid first line
+    frame = pd.DataFrame({
+        "ts": ["2024-07-01T00:00:00+00:00"], "symbol": ["AAA"],
+        "open": [10.0], "high": [10.0], "low": [10.0], "close": [10.0],
+        "adj_close": [10.0], "volume": [100.0],
+    })
+    rec = store.ingest_bars(
+        provider="t", symbols=["AAA"], start="2024-07-01", end="2024-07-01",
+        as_of="2024-07-02", source="unit", frame=frame, timeframe="1d", adjustment="none",
+    )
+    manifest_path = tmp_path / "manifest.jsonl"
+    with manifest_path.open("a", encoding="utf-8") as fh:
+        fh.write('{"snapshot_id": "torn", "dataset": "bars"')  # torn JSON, no newline
+    recs = SnapshotManifest(manifest_path).list_records()
+    # good record survives, torn tail dropped
+    assert [r.snapshot_id for r in recs] == [rec.snapshot_id]
+
+
+def test_manifest_raises_on_corrupt_nonfinal_line(tmp_path):
+    from algua.data.manifest import SnapshotManifest
+
+    manifest_path = tmp_path / "manifest.jsonl"
+    # corrupt NON-trailing line
+    manifest_path.write_text('not-json\n{"also": "bad"}\n', encoding="utf-8")
+    with pytest.raises((ValueError, KeyError)):
+        SnapshotManifest(manifest_path).list_records()

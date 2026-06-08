@@ -103,14 +103,35 @@ def test_large_row_warning_flag(tmp_path, monkeypatch):
     assert rec.metadata.source_metadata["servable"] == "deferred-130"
 
 
-def test_clear_staging_removes_residue(tmp_path):
+def test_clear_staging_removes_stale_residue(tmp_path):
+    import os
     store = DataStore(tmp_path)
     staging = tmp_path / "snapshots" / "_staging" / "leftover"
     staging.mkdir(parents=True)
     (staging / "bars.parquet").write_text("partial", encoding="utf-8")
+    old = __import__("time").time() - 7200  # 2h ago, older than the 1h default
+    os.utime(staging, (old, old))
     store.clear_staging()
-    assert not (tmp_path / "snapshots" / "_staging").exists()
+    assert not staging.exists()
+
+
+def test_clear_staging_keeps_fresh_residue(tmp_path):
+    store = DataStore(tmp_path)
+    staging = tmp_path / "snapshots" / "_staging" / "active"
+    staging.mkdir(parents=True)
+    store.clear_staging()  # fresh dir must survive (could be a concurrent active import)
+    assert staging.exists()
 
 
 def test_clear_staging_noop_when_absent(tmp_path):
     DataStore(tmp_path).clear_staging()  # must not raise when nothing to clean
+
+
+def test_streamed_ingest_rejects_symbol_split_across_chunks(tmp_path):
+    store = DataStore(tmp_path)
+    chunks = [
+        _chunk("AAPL", [("2024-07-01", 100.0)]),
+        _chunk("AAPL", [("2024-07-02", 101.0)]),  # same symbol again -> reject
+    ]
+    with pytest.raises(ValueError, match="more than one chunk"):
+        _ingest_streamed(store, chunks)

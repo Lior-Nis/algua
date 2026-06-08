@@ -43,6 +43,8 @@ def test_import_bars_happy_path(tmp_path):
     assert snap["symbols"] == ["AAPL", "MSFT"]
     assert snap["row_count"] == 2
     assert snap["source_metadata"]["vendor"] == "firstratedata"
+    assert snap["source_metadata"]["raw_dir"] == "raw"
+    assert snap["source_metadata"]["adjusted_dir"] == "adj"
 
 
 def test_import_bars_unknown_vendor_errors(tmp_path):
