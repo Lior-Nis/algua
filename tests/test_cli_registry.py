@@ -598,6 +598,32 @@ def test_backfill_derived_from_ghost_goes_to_unmappable(monkeypatch, tmp_path):
     assert rec["derived_from"] is None
 
 
+def test_backfill_derived_from_valid_parent_is_stored(monkeypatch, tmp_path):
+    """A kb doc with a valid derived_from wikilink stores the bare parent name in the registry."""
+    from algua.knowledge.frontmatter import render_doc
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    # Register both parent and child via the CLI (plain add leaves derived_from NULL).
+    runner.invoke(app, ["registry", "add", "parent"])
+    runner.invoke(app, ["registry", "add", "child"])
+
+    # Seed the child kb doc with a valid wikilinked derived_from pointing to parent.
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    fm = {"name": "child", "stage": "idea", "derived_from": "[[parent]]"}
+    (strat_dir / "child.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    # child must not appear in unmappable
+    assert not any(u["name"] == "child" and u["field"] == "derived_from"
+                   for u in out["unmappable"])
+    # derived_from must be stored as the bare parent name (unwikilinked)
+    rec = _json(runner.invoke(app, ["registry", "show", "child"]))
+    assert rec["derived_from"] == "parent"
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity
