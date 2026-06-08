@@ -15,6 +15,9 @@ The vault is organised by domain. Each domain is a subdirectory:
 
 - **`strategies/`** — one note per trading strategy, plus thesis-family hubs under
   `strategies/families/`. This is the only domain wired to tooling today (see below).
+- **`principles/`** — hand-authored methodology / standards notes (no tooling behind them, unlike
+  `strategies/`). Start with `principles/research-methodology.md` — the data-science judgment layer
+  above the code walls.
 
 Future domains (research reports, a news field, pivot/decision logs, …) get their own
 subdirectory when they have real content and tooling behind them — we don't pre-create empty
