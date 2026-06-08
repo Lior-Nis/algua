@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -155,6 +155,41 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
 );
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
+-- gate_evaluations records every promotion-gate evaluation (pass AND fail) for the audit trail,
+-- AND is the single-use, AGENT-ONLY token the BACKTESTED->SHORTLISTED transition consumes (the
+-- shortlist gate, mirroring the live gate: trust the gate record, not the stage flag). A passing
+-- AGENT row is minted by `research promote` (via the protected registry.promotion orchestrator)
+-- stamped with the artifact identity recomputed by approvals.compute_artifact_hashes; the
+-- transition consumes THAT row's id, in the same transaction as the stage change. A human/override
+-- promote writes an actor='human' row that is NEVER an agent-consumable token (audit only). FK into
+-- strategies(id) — relational state, not an audit snapshot.
+CREATE TABLE IF NOT EXISTS gate_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+    passed INTEGER NOT NULL,
+    n_funnel INTEGER NOT NULL,
+    own_lifetime_combos INTEGER NOT NULL,
+    windowed_total_combos INTEGER NOT NULL,
+    funnel_window_days INTEGER NOT NULL,
+    breadth_provenance TEXT NOT NULL,
+    pit_ok INTEGER NOT NULL,
+    pit_override INTEGER NOT NULL DEFAULT 0,
+    holdout_n_bars INTEGER NOT NULL,
+    min_holdout_observations INTEGER NOT NULL,
+    code_hash TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    dependency_hash TEXT,
+    data_source TEXT NOT NULL,
+    snapshot_id TEXT,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    holdout_frac REAL NOT NULL,
+    actor TEXT NOT NULL,
+    decision_json TEXT NOT NULL,
+    consumed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_gate_evaluations_strategy ON gate_evaluations(strategy_id);
 -- Append-only per-tick operability record (equity + positions per completed tick); the equity
 -- time-series `paper show` and the future dashboard read. Permanent history — no pruning path yet
 -- (`trade-tick` is wall-clock-per-invocation, so growth is modest); add retention when it matters.

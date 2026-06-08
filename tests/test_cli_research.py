@@ -30,6 +30,40 @@ def _sweep():
                                "--param", "lookback=20,40", "--param", "top_k=1,3"])
 
 
+def test_agent_promote_demo_refuses_relaxation():
+    assert _backtest_to_backtested().exit_code == 0
+    r = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31", "--n-combos", "9"])
+    assert r.exit_code != 0
+    assert "human" in r.stdout.lower()
+
+
+def test_human_promote_demo_overrides_shortlists():
+    assert _backtest_to_backtested().exit_code == 0
+    r = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                            "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+                            "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["promoted"] is True and p["n_funnel"] == 9 and p["pit_override"] is True
+    assert _stage() == "shortlisted"
+
+
+def test_agent_promote_blocked_without_pit():
+    assert _backtest_to_backtested().exit_code == 0
+    assert _sweep().exit_code == 0
+    r = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                            "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["promoted"] is False
+    assert next(c for c in p["checks"] if c["name"] == "pit_required")["passed"] is False
+
+
 def test_promote_passes_and_shortlists():
     assert _backtest_to_backtested().exit_code == 0
     # No sweep recorded yet, so declare breadth explicitly via --n-combos.
@@ -37,12 +71,12 @@ def test_promote_passes_and_shortlists():
                                  "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
                                  "--min-pct-positive", "0", "--min-window-sharpe", "-100",
-                                 "--n-combos", "9"])
+                                 "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["passed"] is True
     assert payload["promoted"] is True
-    assert payload["n_combos"] == 9
+    assert payload["n_funnel"] == 9
     assert payload["breadth_provenance"] == "declared"
     # A declared breadth still raises the bar: effective > base.
     assert payload["effective_min_holdout_sharpe"] > payload["base_min_holdout_sharpe"]
@@ -55,11 +89,12 @@ def test_promote_uses_measured_breadth_from_sweep():
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
-                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+                                 "--allow-non-pit", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["breadth_provenance"] == "measured"
-    assert payload["n_combos"] == 4
+    assert payload["n_funnel"] == 4
 
 
 def test_measured_breadth_wins_over_declaration():
@@ -69,11 +104,12 @@ def test_measured_breadth_wins_over_declaration():
                                  "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
                                  "--min-pct-positive", "0", "--min-window-sharpe", "-100",
-                                 "--n-combos", "999"])  # declaration ignored
+                                 "--n-combos", "999",  # declaration ignored
+                                 "--allow-non-pit", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["breadth_provenance"] == "measured"
-    assert payload["n_combos"] == 4
+    assert payload["n_funnel"] == 4
 
 
 def test_two_sweeps_accumulate_breadth():
@@ -83,9 +119,10 @@ def test_two_sweeps_accumulate_breadth():
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
-                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100"])
+                                 "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+                                 "--allow-non-pit", "--actor", "human"])
     payload = json.loads(result.stdout)
-    assert payload["n_combos"] == 8  # 4 + 4
+    assert payload["n_funnel"] == 8  # 4 + 4
 
 
 def test_promote_refuses_with_no_breadth():
@@ -105,7 +142,8 @@ def test_promote_fails_does_not_transition():
     assert _backtest_to_backtested().exit_code == 0
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--min-holdout-sharpe", "999", "--n-combos", "1"])
+                                 "--min-holdout-sharpe", "999", "--n-combos", "1",
+                                 "--allow-non-pit", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["passed"] is False
@@ -155,11 +193,63 @@ def _holdout_rows(tmp_path):
         conn.close()
 
 
+def _gate_rows(tmp_path):
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "r.db")
+    try:
+        return conn.execute("SELECT passed FROM gate_evaluations ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+
+def test_promote_system_actor_refused_before_holdout_and_gate_row(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    assert _sweep().exit_code == 0  # measured breadth, so the actor check is the refusal
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--allow-non-pit", "--actor", "system"])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "agent or human" in payload["error"]
+    # Refused in preflight, before walk_forward: no gate row minted, no holdout burned.
+    assert len(_gate_rows(tmp_path)) == 0
+    assert len(_holdout_rows(tmp_path)) == 0
+    assert _stage() == "backtested"
+
+
+def test_gate_row_written_on_both_pass_and_fail(tmp_path):
+    # A FAILING gate (impossible Sharpe) still records an audit row with passed=0; a PASSING gate
+    # records one with passed=1. The strategy stays `backtested` after the fail so the second
+    # (passing) promote on the same lifecycle is legal.
+    assert _backtest_to_backtested().exit_code == 0
+    fail = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                               "--start", "2022-01-01", "--end", "2023-12-31",
+                               "--min-holdout-sharpe", "999", "--n-combos", "9",
+                               "--allow-non-pit", "--actor", "human"])
+    assert fail.exit_code == 0, fail.stdout
+    assert json.loads(fail.stdout)["passed"] is False
+    rows = _gate_rows(tmp_path)
+    assert len(rows) == 1 and rows[0][0] == 0  # one row, passed=0
+    assert _stage() == "backtested"
+
+    # Passing promote on a DISJOINT window (avoids the burned-holdout refusal) records passed=1.
+    ok = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                             "--start", "2022-01-01", "--end", "2023-12-31",
+                             *_PASS, "--n-combos", "9", "--allow-holdout-reuse",
+                             "--allow-non-pit", "--actor", "human"])
+    assert ok.exit_code == 0, ok.stdout
+    assert json.loads(ok.stdout)["passed"] is True
+    rows = _gate_rows(tmp_path)
+    assert len(rows) == 2 and rows[1][0] == 1  # second row, passed=1
+    assert _stage() == "shortlisted"
+
+
 def test_first_promote_records_holdout_evaluation(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9"])
+                                 *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     rows = _holdout_rows(tmp_path)
     assert len(rows) == 1
@@ -169,18 +259,22 @@ def test_first_promote_records_holdout_evaluation(tmp_path):
 
 def test_second_promote_same_window_refused(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
+    # First promote FAILS the gate (impossible Sharpe) so the strategy stays `backtested`; this
+    # isolates the holdout-reuse refusal on the second run from the stage-legality preflight check.
     first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                *_PASS, "--n-combos", "9"])
+                                "--min-holdout-sharpe", "999", "--n-combos", "9",
+                                "--allow-non-pit", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
+    assert json.loads(first.stdout)["passed"] is False
     second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9"])
+                                 *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert second.exit_code == 1, second.stdout
     payload = json.loads(second.stdout)
     assert payload["ok"] is False
     assert "holdout" in payload["error"].lower()
-    # No second row written; stage unchanged from the first (passing) promote.
+    # No second row written; stage unchanged (first promote failed the gate).
     assert len(_holdout_rows(tmp_path)) == 1
 
 
@@ -189,13 +283,14 @@ def test_failing_first_promote_still_burns_holdout(tmp_path):
     # Impossible Sharpe bar -> gate fails, but the holdout was looked at and is now burned.
     first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "1"])
+                                "--min-holdout-sharpe", "999", "--n-combos", "1",
+                                "--allow-non-pit", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     assert json.loads(first.stdout)["passed"] is False
     assert len(_holdout_rows(tmp_path)) == 1
     second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "1"])
+                                 *_PASS, "--n-combos", "1", "--allow-non-pit", "--actor", "human"])
     assert second.exit_code == 1, second.stdout
     assert json.loads(second.stdout)["ok"] is False
     assert len(_holdout_rows(tmp_path)) == 1
@@ -207,12 +302,14 @@ def test_allow_holdout_reuse_overrides(tmp_path):
     # holdout is burned. The override then re-evaluates the same window and promotes on the merits.
     first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "9"])
+                                "--min-holdout-sharpe", "999", "--n-combos", "9",
+                                "--allow-non-pit", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     assert json.loads(first.stdout)["passed"] is False
     second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9", "--allow-holdout-reuse"])
+                                 *_PASS, "--n-combos", "9", "--allow-holdout-reuse",
+                                 "--allow-non-pit", "--actor", "human"])
     assert second.exit_code == 0, second.stdout
     payload = json.loads(second.stdout)
     assert payload["holdout_reuse"] == "override"
@@ -231,12 +328,14 @@ def test_non_overlapping_window_allowed(tmp_path):
     # attempts a same-stage transition -- this isolates the holdout pre-check from the lifecycle.
     first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2022-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "1"])
+                                "--min-holdout-sharpe", "999", "--n-combos", "1",
+                                "--allow-non-pit", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     # Disjoint period -> allowed without override (no refusal), records a second row.
     second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2023-01-01", "--end", "2023-12-31",
-                                 "--min-holdout-sharpe", "999", "--n-combos", "1"])
+                                 "--min-holdout-sharpe", "999", "--n-combos", "1",
+                                 "--allow-non-pit", "--actor", "human"])
     assert second.exit_code == 0, second.stdout
     assert len(_holdout_rows(tmp_path)) == 2
 
@@ -245,7 +344,7 @@ def test_config_change_alone_does_not_bypass(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
     first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                *_PASS, "--n-combos", "9"])
+                                *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     # Same window + holdout_frac, tweaked gate params (config_hash unchanged here, but the rule
     # matches on the WINDOW regardless of config): still refused.
@@ -253,7 +352,7 @@ def test_config_change_alone_does_not_bypass(tmp_path):
                                  "--start", "2022-01-01", "--end", "2023-12-31",
                                  "--min-holdout-sharpe", "0.1", "--min-holdout-return", "-100",
                                  "--min-pct-positive", "0", "--min-window-sharpe", "-100",
-                                 "--n-combos", "9"])
+                                 "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert second.exit_code == 1, second.stdout
     assert json.loads(second.stdout)["ok"] is False
 
@@ -313,7 +412,7 @@ def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
                                  "--snapshot", snap, "--universe", "pit_core",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9"])
+                                 *_PASS, "--n-combos", "9", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["passed"] is True
@@ -339,7 +438,8 @@ def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):
     static = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
                                  "--snapshot", snap,
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--min-holdout-sharpe", "999", "--n-combos", "9"])
+                                 "--min-holdout-sharpe", "999", "--n-combos", "9",
+                                 "--allow-non-pit", "--actor", "human"])
     assert static.exit_code == 0, static.stdout
     static_holdout = json.loads(static.stdout)["holdout"]
 
@@ -347,7 +447,7 @@ def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):
                               "--snapshot", snap, "--universe", "pit_core",
                               "--start", "2022-01-01", "--end", "2023-12-31",
                               "--min-holdout-sharpe", "999", "--n-combos", "9",
-                              "--allow-holdout-reuse"])
+                              "--allow-holdout-reuse", "--actor", "human"])
     assert pit.exit_code == 0, pit.stdout
     pit_payload = json.loads(pit.stdout)
     assert pit_payload["universe_name"] == "pit_core"
@@ -361,7 +461,7 @@ def test_promote_without_universe_has_null_universe_provenance(tmp_path, monkeyp
     assert _backtest_to_backtested().exit_code == 0
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9"])
+                                 *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["universe_name"] is None
@@ -376,7 +476,7 @@ def test_promote_unknown_universe_is_json_error(tmp_path, monkeypatch):
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
                                  "--snapshot", snap, "--universe", "does_not_exist",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9"])
+                                 *_PASS, "--n-combos", "9", "--actor", "human"])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
 
@@ -389,16 +489,20 @@ def test_promote_universe_burn_keyed_on_window_not_universe(tmp_path, monkeypatc
     snap = _ingest_snapshot(tmp_path)
     _ingest_pit_universe(tmp_path)
     assert _register_backtested_on_snapshot(snap).exit_code == 0
+    # First promote FAILS the gate (impossible Sharpe) so the strategy stays `backtested`; this
+    # isolates the holdout-burn refusal on the second run from the stage-legality preflight check.
     first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
                                 "--snapshot", snap,
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                *_PASS, "--n-combos", "9"])
+                                "--min-holdout-sharpe", "999", "--n-combos", "9",
+                                "--allow-non-pit", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
+    assert json.loads(first.stdout)["passed"] is False
     # Same window/snapshot, now WITH a universe -> still refused (universe not in burn identity).
     second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
                                  "--snapshot", snap, "--universe", "pit_core",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 *_PASS, "--n-combos", "9"])
+                                 *_PASS, "--n-combos", "9", "--actor", "human"])
     assert second.exit_code == 1, second.stdout
     assert "holdout" in json.loads(second.stdout)["error"].lower()
 
@@ -415,7 +519,7 @@ def test_walk_forward_does_not_burn_holdout_then_promote_succeeds(tmp_path):
 
     promote = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                   "--start", "2022-01-01", "--end", "2023-12-31",
-                                  *_PASS, "--n-combos", "9"])
+                                  *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert promote.exit_code == 0, promote.stdout  # not refused — holdout was still fresh
     payload = json.loads(promote.stdout)
     assert payload["promoted"] is True

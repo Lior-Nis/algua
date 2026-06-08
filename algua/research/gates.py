@@ -8,6 +8,15 @@ from typing import Any
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 
+# Funnel-level multiple-testing window (Wall A). Protected constant, not an agent-tunable knob
+# (relaxing it would weaken the gate). Rolling window keeps the bar bounded; the wait-out-the-window
+# trade-off is accepted and auditable via search_trials.created_at.
+FUNNEL_WINDOW_DAYS = 90
+
+# Minimum holdout sample (Wall C). A holdout with fewer observations is underpowered and fails
+# closed — complements the 1/sqrt(T) haircut, which is ZERO at N=1. ~one trading quarter. Protected.
+MIN_HOLDOUT_OBSERVATIONS = 63
+
 
 @dataclass
 class GateCriteria:
@@ -18,6 +27,7 @@ class GateCriteria:
     min_holdout_return: float = 0.0       # strict > 0
     min_pct_positive_windows: float = 0.6
     min_window_sharpe: float = 0.0        # the worst window's Sharpe must be >= this
+    min_holdout_observations: int = MIN_HOLDOUT_OBSERVATIONS  # Wall C: power floor, fails closed
 
 
 def sharpe_haircut(n_combos: int, n_bars: int) -> float:
@@ -56,6 +66,16 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
     return math.sqrt(2.0 * math.log(n)) * math.sqrt(ANN) / math.sqrt(n_bars)
 
 
+def effective_funnel_breadth(own_lifetime: int, windowed_total: int) -> int:
+    """Effective funnel breadth fed to the haircut (Wall A): ``max`` of this strategy's LIFETIME
+    recorded breadth and the funnel-wide breadth recorded in the rolling window (``windowed_total``
+    INCLUDES this strategy's own windowed sweeps, so no double-count, no name-exclusion subtlety).
+    An *effective funnel-breadth policy*, NOT a literal independent-trial count. A lone hypothesis
+    with no siblings has ``windowed_total <= own_lifetime`` ⇒ returns ``own_lifetime`` ⇒ identical
+    to the prior per-strategy behavior (no regression)."""
+    return max(int(own_lifetime), int(windowed_total))
+
+
 @dataclass
 class GateDecision:
     passed: bool
@@ -64,6 +84,11 @@ class GateDecision:
     breadth_provenance: str | None = None
     base_min_holdout_sharpe: float | None = None
     effective_min_holdout_sharpe: float | None = None
+    own_lifetime_combos: int | None = None
+    windowed_total_combos: int | None = None
+    funnel_window_days: int | None = None
+    pit_ok: bool | None = None
+    pit_override: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -78,6 +103,11 @@ class GateDecision:
             "effective_min_holdout_sharpe": (
                 eff if eff is None or math.isfinite(eff) else None
             ),
+            "own_lifetime_combos": self.own_lifetime_combos,
+            "windowed_total_combos": self.windowed_total_combos,
+            "funnel_window_days": self.funnel_window_days,
+            "pit_ok": self.pit_ok,
+            "pit_override": self.pit_override,
         }
 
 
@@ -109,6 +139,7 @@ GATE_SPECS: tuple[GateSpec, ...] = (
     GateSpec("pct_positive_windows", "stability", "pct_positive_windows",
              "min_pct_positive_windows", ">="),
     GateSpec("min_window_sharpe", "stability", "min_sharpe", "min_window_sharpe", ">="),
+    GateSpec("min_holdout_observations", "holdout", "n_bars", "min_holdout_observations", ">="),
 )
 
 
@@ -121,6 +152,11 @@ def evaluate_gate(
     *,
     n_combos: int | None = None,
     breadth_provenance: str | None = None,
+    pit_ok: bool,
+    allow_non_pit: bool = False,
+    own_lifetime_combos: int | None = None,
+    windowed_total_combos: int | None = None,
+    funnel_window_days: int | None = None,
 ) -> GateDecision:
     """Judge a walk-forward result against the gate criteria. Pure; no side effects.
 
@@ -164,6 +200,13 @@ def evaluate_gate(
         passed = _OPS[spec.op](value, threshold)
         checks.append({"name": spec.name, "value": value, "threshold": threshold,
                        "op": spec.op, "passed": bool(passed)})
+    # PIT precondition (Wall B): boolean, not a metric comparison. pit_ok is computed by the
+    # protected promotion orchestrator (presence + coverage). Non-PIT fails closed unless a human
+    # passed allow_non_pit (recorded as an audited override).
+    pit_passed = bool(pit_ok or allow_non_pit)
+    pit_override = bool((not pit_ok) and allow_non_pit)
+    checks.append({"name": "pit_required", "passed": pit_passed,
+                   "pit_ok": bool(pit_ok), "override": "non_pit" if pit_override else None})
     return GateDecision(
         passed=all(c["passed"] for c in checks),
         checks=checks,
@@ -171,4 +214,9 @@ def evaluate_gate(
         breadth_provenance=breadth_provenance,
         base_min_holdout_sharpe=base_holdout_sharpe,
         effective_min_holdout_sharpe=effective_holdout_sharpe,
+        own_lifetime_combos=own_lifetime_combos,
+        windowed_total_combos=windowed_total_combos,
+        funnel_window_days=funnel_window_days,
+        pit_ok=bool(pit_ok),
+        pit_override=pit_override,
     )

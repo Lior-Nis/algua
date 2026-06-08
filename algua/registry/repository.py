@@ -145,6 +145,7 @@ class StrategyRepository(Protocol):
         code_hash: str | None = None,
         config_hash: str | None = None,
         dependency_hash: str | None = None,
+        consume_gate_id: int | None = None,
     ) -> StrategyRecord:
         """Atomically advance ``rec`` to ``to``, append a transition row, return the new state."""
         ...
@@ -219,4 +220,50 @@ class StrategyRepository(Protocol):
         (``snapshot_id`` equal when both have one, else ``data_source`` equal) AND OVERLAPPING
         period (``period_start <= other.period_end AND other.period_start <= period_end``) AND
         SAME ``holdout_frac``."""
+        ...
+
+    def windowed_search_combos(self, window_days: int) -> int:
+        """Sum of ``n_combos`` across ALL strategies' ``search_trials`` recorded within the trailing
+        ``window_days`` — funnel-wide search effort for the breadth wall (0 if none)."""
+        ...
+
+    def record_gate_evaluation(
+        self,
+        strategy_id: int,
+        *,
+        passed: bool,
+        n_funnel: int,
+        own_lifetime_combos: int,
+        windowed_total_combos: int,
+        funnel_window_days: int,
+        breadth_provenance: str,
+        pit_ok: bool,
+        pit_override: bool,
+        holdout_n_bars: int,
+        min_holdout_observations: int,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+        data_source: str,
+        snapshot_id: str | None,
+        period_start: str,
+        period_end: str,
+        holdout_frac: float,
+        actor: str,
+        decision_json: str,
+    ) -> int:
+        """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
+        the single-use token the shortlist transition consumes."""
+        ...
+
+    def find_consumable_gate_evaluation(
+        self,
+        strategy_id: int,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+    ) -> int | None:
+        """Return the id of the most-recent AGENT passing unconsumed gate row whose identity matches
+        the recomputed (code, config, dependency), or None. A human row and a NULL
+        ``dependency_hash`` are never consumable tokens — fail-closed."""
         ...

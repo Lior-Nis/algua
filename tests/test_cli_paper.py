@@ -22,7 +22,7 @@ def _to_paper(name="cross_sectional_momentum"):
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "shortlisted",
-                               "--actor", "agent", "--reason", "ok"]).exit_code == 0
+                               "--actor", "human", "--reason", "ok"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
                                "--actor", "agent", "--reason", "paper"]).exit_code == 0
 

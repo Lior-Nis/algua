@@ -5,8 +5,8 @@ from algua.registry.db import SCHEMA_VERSION, connect, migrate
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
 
 
-def test_schema_version_is_17():
-    assert SCHEMA_VERSION == 17
+def test_schema_version_is_18():
+    assert SCHEMA_VERSION == 18
 
 
 def test_strategies_has_metadata_columns(tmp_path):
@@ -36,11 +36,11 @@ def test_metadata_columns_are_null_on_existing_rows(tmp_path):
         assert row[col] is None, f"{col} should be NULL on a pre-existing row, got {row[col]!r}"
 
 
-def test_migrate_is_idempotent_at_v17(tmp_path):
+def test_migrate_is_idempotent_at_v18(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     migrate(conn)  # second run must be a no-op, not an error
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
 
 
 def test_migrate_creates_tables_and_sets_version(tmp_path):
@@ -293,3 +293,18 @@ def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert {"strategies", "stage_transitions", "approvals"} <= tables
+
+
+def test_gate_evaluations_table_exists(tmp_path):
+    from algua.registry.db import connect, migrate
+    conn = connect(tmp_path / "g.db")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)").fetchall()}
+    assert {
+        "id", "strategy_id", "passed", "n_funnel", "own_lifetime_combos",
+        "windowed_total_combos", "funnel_window_days", "breadth_provenance", "pit_ok",
+        "pit_override", "holdout_n_bars", "min_holdout_observations", "code_hash", "config_hash",
+        "dependency_hash", "data_source", "snapshot_id", "period_start", "period_end",
+        "holdout_frac", "actor", "decision_json", "consumed", "created_at",
+    } <= cols
+    conn.close()

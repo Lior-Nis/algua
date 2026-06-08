@@ -23,6 +23,7 @@ def transition_strategy(
     code_hash: str | None = None
     config_hash: str | None = None
     dependency_hash: str | None = None
+    consume_gate_id: int | None = None
     if target == Stage.LIVE:
         identity = _validate_live_gate(
             repo=repo,
@@ -32,6 +33,10 @@ def transition_strategy(
             approval_verifier=approval_verifier,
         )
         code_hash, config_hash, dependency_hash = identity
+    elif target == Stage.SHORTLISTED and transition_actor is not Actor.HUMAN:
+        # Wall D: an agent reaches shortlisted ONLY by consuming a fresh, identity-matched,
+        # single-use gate token (minted by `research promote`). Humans are exempt.
+        consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
     return repo.apply_transition(
         rec=rec,
         to=target,
@@ -40,6 +45,7 @@ def transition_strategy(
         code_hash=code_hash,
         config_hash=config_hash,
         dependency_hash=dependency_hash,
+        consume_gate_id=consume_gate_id,
     )
 
 
@@ -70,6 +76,21 @@ def _validate_live_gate(
     ):
         raise TransitionError("no matching human approval for this code+config+dependency")
     return identity
+
+
+def _validate_shortlist_gate(*, repo: StrategyRepository, name: str, strategy_id: int) -> int:
+    """Return the id of a fresh passing AGENT gate token whose recomputed identity matches the
+    strategy's current code+config+dependency, or raise. Consumption itself happens inside
+    apply_transition, in one transaction with the stage change."""
+    identity = _compute_hashes(name)
+    gate_id = repo.find_consumable_gate_evaluation(
+        strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
+    if gate_id is None:
+        raise TransitionError(
+            "transition to shortlisted requires a fresh passing gate evaluation for the current "
+            "code+config+dependency; run `algua research promote` (no matching gate record found)"
+        )
+    return gate_id
 
 
 def _compute_hashes(name: str) -> ArtifactIdentity:

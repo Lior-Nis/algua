@@ -47,9 +47,10 @@ def test_transition_illegal_exits_nonzero():
 
 def _advance_to_paper(strategy: str) -> None:
     runner.invoke(app, ["registry", "add", strategy])
-    for stage in ("backtested", "shortlisted", "paper"):
+    # SHORTLISTED via human: scaffolding to paper, not exercising the agent shortlist gate.
+    for stage, actor in (("backtested", "agent"), ("shortlisted", "human"), ("paper", "agent")):
         runner.invoke(app, ["registry", "transition", strategy,
-                            "--to", stage, "--actor", "agent"])
+                            "--to", stage, "--actor", actor])
 
 
 def _make_key(tmp_path, name="id"):
