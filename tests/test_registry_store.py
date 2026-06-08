@@ -142,3 +142,63 @@ def test_holdout_snapshot_identity_takes_precedence(repo):
         rec.id, data_source="StoreBackedProvider", snapshot_id="snapA",
         period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2,
     )
+
+
+def _record_pass(repo, sid, *, actor="agent", code="c0", config="cfg0", dep="dep0"):
+    return repo.record_gate_evaluation(
+        sid, passed=True, n_funnel=9, own_lifetime_combos=9, windowed_total_combos=9,
+        funnel_window_days=90, breadth_provenance="measured", pit_ok=True, pit_override=False,
+        holdout_n_bars=80, min_holdout_observations=63, code_hash=code, config_hash=config,
+        dependency_hash=dep, data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2022-01-01", period_end="2023-12-31", holdout_frac=0.2, actor=actor,
+        decision_json="{}")
+
+
+def test_windowed_search_combos_sums_recent(repo):
+    repo.record_search_trial("alpha", 4, "{}")
+    repo.record_search_trial("beta", 5, "{}")
+    assert repo.windowed_search_combos(window_days=90) == 9
+
+
+def test_find_consumable_matches_agent_passing_identity(repo):
+    rec = repo.add("alpha")
+    gid = _record_pass(repo, rec.id)
+    assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", "dep0") == gid
+
+
+def test_find_consumable_ignores_human_failing_and_mismatch(repo):
+    rec = repo.add("alpha")
+    _record_pass(repo, rec.id, actor="human")            # human row is not a token
+    assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", "dep0") is None
+    repo.record_gate_evaluation(  # failing agent row
+        rec.id, passed=False, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=90, breadth_provenance="measured", pit_ok=True, pit_override=False,
+        holdout_n_bars=80, min_holdout_observations=63, code_hash="c0", config_hash="cfg0",
+        dependency_hash="dep0", data_source="SyntheticProvider", snapshot_id=None,
+        period_start="2022-01-01", period_end="2023-12-31", holdout_frac=0.2, actor="agent",
+        decision_json="{}")
+    assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", "dep0") is None
+    gid = _record_pass(repo, rec.id)                     # passing agent row, but...
+    assert repo.find_consumable_gate_evaluation(rec.id, "BAD", "cfg0", "dep0") is None  # identity
+    assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", None) is None     # NULL dep
+    assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", "dep0") == gid
+
+
+def test_apply_transition_consumes_token_atomically(repo):
+    rec = repo.add("alpha")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    rec = repo.get("alpha")
+    gid = _record_pass(repo, rec.id)
+    out = repo.apply_transition(rec, Stage.SHORTLISTED, Actor.AGENT, "go", consume_gate_id=gid)
+    assert out.stage == Stage.SHORTLISTED
+    # token consumed (single-use)
+    assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", "dep0") is None
+
+
+def test_apply_transition_bad_token_rolls_back(repo):
+    rec = repo.add("alpha")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    rec = repo.get("alpha")
+    with pytest.raises(TransitionError):
+        repo.apply_transition(rec, Stage.SHORTLISTED, Actor.AGENT, "go", consume_gate_id=999999)
+    assert repo.get("alpha").stage == Stage.BACKTESTED  # stage unchanged (rolled back)

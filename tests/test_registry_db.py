@@ -251,3 +251,18 @@ def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert {"strategies", "stage_transitions", "approvals"} <= tables
+
+
+def test_gate_evaluations_table_exists(tmp_path):
+    from algua.registry.db import connect, migrate
+    conn = connect(tmp_path / "g.db")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)").fetchall()}
+    assert {
+        "id", "strategy_id", "passed", "n_funnel", "own_lifetime_combos",
+        "windowed_total_combos", "funnel_window_days", "breadth_provenance", "pit_ok",
+        "pit_override", "holdout_n_bars", "min_holdout_observations", "code_hash", "config_hash",
+        "dependency_hash", "data_source", "snapshot_id", "period_start", "period_end",
+        "holdout_frac", "actor", "decision_json", "consumed", "created_at",
+    } <= cols
+    conn.close()
