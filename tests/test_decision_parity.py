@@ -168,3 +168,58 @@ def test_warmup_means_the_same_number_of_flat_bars_in_both_paths() -> None:
     # The first bar the paper loop decides on is exactly session index N (the same bar the
     # backtest first evaluates), not N-1.
     assert decided[0] == sessions[warmup]
+
+
+def test_concentration_cap_fails_backtest_and_paper_identically() -> None:
+    """A weight vector busting the per-symbol cap must FAIL the backtest the same way it fails
+    paper/live — the cap is a shared decision-time rail, not a live-only afterthought (#135)."""
+    cfg = StrategyConfig(
+        name="concentrated", universe=["AAA", "BBB"],
+        execution=ExecutionContract(
+            rebalance_frequency="1d", decision_lag_bars=1, max_weight_per_symbol=0.5
+        ),
+        params={},
+    )
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series({"AAA": 0.9, "BBB": 0.1}))
+    with pytest.raises(BacktestError) as ei:
+        run(strat, SyntheticProvider(seed=0), START, END)
+    assert isinstance(ei.value.__cause__, RiskBreach)
+    assert ei.value.__cause__.kind == "max_weight_per_symbol"
+    with pytest.raises(RiskBreach) as ei_paper:
+        run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
+    assert ei_paper.value.kind == "max_weight_per_symbol"
+
+
+def test_allow_short_lets_a_short_through_in_both_paths() -> None:
+    """With allow_short=True a negative weight is permitted in BOTH backtest and paper; the default
+    (False) rejects it in both (the latter pinned by the existing long-only parity test)."""
+    cfg = StrategyConfig(
+        name="ls", universe=["AAA", "BBB"],
+        execution=ExecutionContract(
+            rebalance_frequency="1d", decision_lag_bars=1, allow_short=True
+        ),
+        params={},
+    )
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series({"AAA": 0.5, "BBB": -0.5}))
+    # Neither path raises (long/short now declared+permitted); a clean run is the assertion.
+    run(strat, SyntheticProvider(seed=0), START, END)
+    run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
+
+
+def test_named_symbol_nan_breaches_both_paths() -> None:
+    """A strategy that names a symbol but returns NaN for it must hard-breach (not silently flatten)
+    in backtest and paper — fail-closed finite guard (#135)."""
+    import numpy as np
+    cfg = StrategyConfig(
+        name="nanny", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={},
+    )
+    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series({"AAA": np.nan}))
+    with pytest.raises(BacktestError) as ei:
+        run(strat, SyntheticProvider(seed=0), START, END)
+    assert isinstance(ei.value.__cause__, RiskBreach)
+    assert ei.value.__cause__.kind == "non_finite_weight"
+    with pytest.raises(RiskBreach) as ei_paper:
+        run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
+    assert ei_paper.value.kind == "non_finite_weight"
