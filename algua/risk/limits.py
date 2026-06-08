@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 # Single tolerance for "is this weight materially different from another / from a limit".
@@ -31,6 +32,34 @@ def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
         raise RiskBreach(
             "gross_exposure",
             f"gross exposure {gross:.4f} exceeds max_gross_exposure {max_gross:.4f}",
+        )
+
+
+def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
+    """Fail-closed guard against non-finite target weights. A strategy returning NaN/inf for a named
+    symbol, a non-numeric weight, or a duplicated symbol index must HARD-BREACH, not be silently
+    flattened by a downstream fillna(0.0) (NaN-skipping .sum() / `NaN < 0` would let it through). The
+    panel fast-path's omitted-cell NaN is filled to flat BEFORE this runs, so its sparse-NaN-as-flat
+    convention is preserved; only real non-finite VALUES reach here (#135)."""
+    if len(weights) == 0:
+        return
+    if weights.index.has_duplicates:
+        dups = sorted(set(weights.index[weights.index.duplicated(keep=False)]))
+        raise RiskBreach(
+            "non_finite_weight",
+            f"strategy '{strategy_name}' returned duplicate symbol weight(s) for {dups}",
+        )
+    if not pd.api.types.is_numeric_dtype(weights):
+        raise RiskBreach(
+            "non_finite_weight",
+            f"strategy '{strategy_name}' returned non-numeric target weights",
+        )
+    finite = np.isfinite(weights.to_numpy())
+    if not bool(finite.all()):
+        bad = sorted(weights.index[~finite])
+        raise RiskBreach(
+            "non_finite_weight",
+            f"strategy '{strategy_name}' returned non-finite target weight(s) for {bad}",
         )
 
 

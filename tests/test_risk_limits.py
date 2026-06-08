@@ -58,3 +58,27 @@ def test_max_weight_per_symbol_breaches_over_cap_long_and_short():
     with pytest.raises(RiskBreach) as ei_short:
         check_max_weight_per_symbol(pd.Series({"AAA": -0.6}), 0.5)
     assert ei_short.value.kind == "max_weight_per_symbol"
+
+
+def test_finite_weights_passes_on_clean_series():
+    from algua.risk.limits import check_finite_weights
+    check_finite_weights(pd.Series({"AAA": 0.5, "BBB": -0.5}), "s")
+    check_finite_weights(pd.Series(dtype="float64"), "s")
+
+
+def test_finite_weights_breaches_on_nan_inf_dupes():
+    import numpy as np
+
+    from algua.risk.limits import RiskBreach, check_finite_weights
+    for bad in (
+        pd.Series({"AAA": np.nan}),
+        pd.Series({"AAA": np.inf}),
+        pd.Series({"AAA": -np.inf}),
+    ):
+        with pytest.raises(RiskBreach) as ei:
+            check_finite_weights(bad, "s")
+        assert ei.value.kind == "non_finite_weight"
+    dupe = pd.Series([0.5, 0.5], index=["AAA", "AAA"])
+    with pytest.raises(RiskBreach) as ei_dupe:
+        check_finite_weights(dupe, "s")
+    assert ei_dupe.value.kind == "non_finite_weight"
