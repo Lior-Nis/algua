@@ -123,3 +123,15 @@ def test_validate_decision_weights_runs_all_rails_in_order():
             pd.Series({"AAA": 0.7, "BBB": 0.7}), _contract(max_gross_exposure=1.0), "s"
         )
     assert ei_gross.value.kind == "gross_exposure"
+
+
+def test_finite_weights_rejects_bool_dtype_and_null_labels():
+    import numpy as np
+
+    from algua.risk.limits import RiskBreach, check_finite_weights
+    with pytest.raises(RiskBreach) as ei_bool:
+        check_finite_weights(pd.Series({"AAA": True, "BBB": False}), "s")
+    assert ei_bool.value.kind == "non_finite_weight"
+    with pytest.raises(RiskBreach) as ei_null:
+        check_finite_weights(pd.Series([0.5], index=[np.nan]), "s")
+    assert ei_null.value.kind == "non_finite_weight"

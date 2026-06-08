@@ -48,13 +48,20 @@ def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
     sparse-NaN-as-flat convention is preserved; only real non-finite VALUES reach here (#135)."""
     if len(weights) == 0:
         return
+    if weights.index.isnull().any():
+        raise RiskBreach(
+            "non_finite_weight",
+            f"strategy '{strategy_name}' returned a null symbol label",
+        )
     if weights.index.has_duplicates:
         dups = sorted(set(weights.index[weights.index.duplicated(keep=False)]))
         raise RiskBreach(
             "non_finite_weight",
             f"strategy '{strategy_name}' returned duplicate symbol weight(s) for {dups}",
         )
-    if not pd.api.types.is_numeric_dtype(weights):
+    # bool is a numpy numeric subtype, so is_numeric_dtype accepts a bool Series and
+    # np.isfinite(True) is True — a True weight would silently coerce to 1.0. Reject it.
+    if pd.api.types.is_bool_dtype(weights) or not pd.api.types.is_numeric_dtype(weights):
         raise RiskBreach(
             "non_finite_weight",
             f"strategy '{strategy_name}' returned non-numeric target weights",

@@ -56,3 +56,25 @@ def test_execution_contract_rejects_nonpositive_per_symbol_cap():
         ExecutionContract(rebalance_frequency="1d", max_weight_per_symbol=0.0)
     with pytest.raises(ValueError, match="max_weight_per_symbol must be > 0"):
         ExecutionContract(rebalance_frequency="1d", max_weight_per_symbol=-0.1)
+
+
+def test_execution_contract_rejects_nonfinite_per_symbol_cap():
+    import math
+
+    import pytest as _pytest
+
+    from algua.contracts.types import ExecutionContract
+    with _pytest.raises(ValueError, match="max_weight_per_symbol must be finite"):
+        ExecutionContract(rebalance_frequency="1d", max_weight_per_symbol=math.nan)
+    with _pytest.raises(ValueError, match="max_weight_per_symbol must be finite"):
+        ExecutionContract(rebalance_frequency="1d", max_weight_per_symbol=math.inf)
+
+
+def test_execution_contract_rejects_non_bool_allow_short():
+    import pytest as _pytest
+
+    from algua.contracts.types import ExecutionContract
+    with _pytest.raises(ValueError, match="allow_short must be a bool"):
+        ExecutionContract(rebalance_frequency="1d", allow_short="false")  # type: ignore[arg-type]
+    with _pytest.raises(ValueError, match="allow_short must be a bool"):
+        ExecutionContract(rebalance_frequency="1d", allow_short=1)  # type: ignore[arg-type]
