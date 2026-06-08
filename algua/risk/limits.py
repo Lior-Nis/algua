@@ -98,16 +98,6 @@ def check_short_policy(weights: pd.Series, allow_short: bool, strategy_name: str
         )
 
 
-def check_long_only(weights: pd.Series, strategy_name: str) -> None:
-    if len(weights) and bool((weights < 0).any()):
-        negative = sorted(weights[weights < 0].index)
-        raise RiskBreach(
-            "long_only",
-            f"long-only: strategy '{strategy_name}' returned negative target weight(s) "
-            f"for {negative}",
-        )
-
-
 def check_drawdown(equity: float, peak: float, max_drawdown: float | None) -> None:
     if max_drawdown is None or peak <= 0:
         return  # disabled (explicit None sentinel), or no peak yet

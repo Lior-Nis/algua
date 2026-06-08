@@ -11,7 +11,7 @@ from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider
-from algua.risk.limits import WEIGHT_TOL, RiskBreach, check_gross_exposure, check_long_only
+from algua.risk.limits import WEIGHT_TOL, RiskBreach, validate_decision_weights
 from algua.strategies.base import LoadedStrategy
 
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
@@ -107,8 +107,7 @@ def _decision_weights(
         # The shared checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error
         # contract while preserving the breach (and its `.kind`) as the cause.
         try:
-            check_long_only(w, strategy.name)
-            check_gross_exposure(w, strategy.execution.max_gross_exposure)
+            validate_decision_weights(w, strategy.execution, strategy.name)
         except RiskBreach as breach:
             raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
@@ -177,8 +176,7 @@ def _decision_weights_fast(
         if len(nz) == 0:
             continue
         try:
-            check_long_only(nz, strategy.name)
-            check_gross_exposure(nz, strategy.execution.max_gross_exposure)
+            validate_decision_weights(nz, strategy.execution, strategy.name)
         except RiskBreach as breach:
             raise BacktestError(f"{breach.detail} at {t}") from breach
 

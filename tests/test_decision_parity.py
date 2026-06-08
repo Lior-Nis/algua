@@ -102,7 +102,7 @@ def test_backtest_and_paper_decide_identical_target_weights_bar_for_bar() -> Non
 
 def test_backtest_enforces_long_only_identically_to_live() -> None:
     """A strategy returning a negative (short) weight must FAIL the backtest, the same way it
-    fails paper/live via check_long_only. Previously the backtest only checked gross exposure."""
+    fails paper/live via check_short_policy. Previously the backtest only checked gross exposure."""
     cfg = StrategyConfig(
         name="shorty", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
@@ -125,8 +125,10 @@ def test_backtest_gross_exposure_uses_the_shared_risk_check() -> None:
         ),
         params={},
     )
+    # Each name is within the default per-symbol cap (1.0) so the gross rail is what trips:
+    # 0.6 + 0.6 = 1.2 gross > 1.0, isolating the gross-exposure breach.
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series([1.5, 1.5], index=["AAA", "BBB"])
+        config=cfg, fn=lambda v, p: pd.Series([0.6, 0.6], index=["AAA", "BBB"])
     )
     with pytest.raises(BacktestError) as ei:
         simulate(strat, SyntheticProvider(seed=1), START, END)

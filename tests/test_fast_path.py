@@ -160,7 +160,9 @@ def test_fast_path_applies_warmup_flat_period() -> None:
 def test_fast_path_gross_breach_raises() -> None:
     def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-        return pd.DataFrame(1.5, index=adj.index, columns=adj.columns)
+        # 0.6 per name is within the default per-symbol cap (1.0); the sum (1.2) breaches gross,
+        # isolating the gross-exposure rail rather than tripping the concentration cap first.
+        return pd.DataFrame(0.6, index=adj.index, columns=adj.columns)
 
     cfg = StrategyConfig(
         name="lev", universe=["AAA", "BBB"],

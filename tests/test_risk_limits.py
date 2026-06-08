@@ -33,16 +33,6 @@ def test_drawdown_over_limit_raises():
     assert ei.value.kind == "drawdown"
 
 
-def test_check_long_only_passes_and_raises():
-    from algua.risk.limits import check_long_only
-
-    check_long_only(pd.Series({"AAA": 0.6, "BBB": 0.4}), "s")  # ok
-    check_long_only(pd.Series(dtype="float64"), "s")           # empty ok
-    with pytest.raises(RiskBreach) as ei:
-        check_long_only(pd.Series({"AAA": -0.5}), "s")
-    assert ei.value.kind == "long_only"
-
-
 def test_max_weight_per_symbol_passes_at_or_under_cap():
     from algua.risk.limits import check_max_weight_per_symbol
     check_max_weight_per_symbol(pd.Series({"AAA": 0.5, "BBB": 0.5}), 0.5)   # == cap, ok
