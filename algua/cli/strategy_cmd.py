@@ -130,11 +130,11 @@ def new(
                 if not fam_path.exists():
                     fam_path.write_text(scaffold_family_doc(family))
                 family_doc = str(fam_path)
-        except Exception:
+        except Exception as exc:
             repo.delete(name)
             # best-effort: remove a half-written module file so a retry isn't blocked
             path.unlink(missing_ok=True)
-            raise
+            raise ValueError(f"scaffold failed for {name!r}: {exc}") from exc
     emit(ok({"name": name, "path": str(path), "doc": str(doc_path), "family_doc": family_doc}))
 
 
