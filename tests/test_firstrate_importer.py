@@ -138,3 +138,22 @@ def test_bad_timeframe_errors(tmp_path):
     with pytest.raises(ValueError, match="intraday import not yet supported"):
         list(FirstRateImporter().import_bars(
             ImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1h")))
+
+
+def test_duplicate_timestamp_in_raw_errors(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    _write_pair(
+        raw, adj, "AAPL",
+        ["2024-07-01,1,1,1,1,1\n", "2024-07-01,2,2,2,2,2\n"],  # dup date in raw
+        ["2024-07-01,1,1,1,1,1\n"],
+    )
+    with pytest.raises(ValueError, match="duplicate timestamps in raw file"):
+        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+
+
+def test_nan_price_errors(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    # blank close field in raw -> NaN
+    _write_pair(raw, adj, "AAPL", ["2024-07-01,1,1,1,,1\n"], ["2024-07-01,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="NaN or nonpositive"):
+        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))

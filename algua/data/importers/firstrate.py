@@ -107,6 +107,17 @@ class FirstRateImporter:
         raw = parse_firstrate_file(raw_path)
         adj = parse_firstrate_file(adj_path)[["ts", "close"]].rename(columns={"close": "adj_close"})
 
+        if raw["ts"].duplicated().any():
+            dupes = sorted(
+                str(d) for d in raw.loc[raw["ts"].duplicated(keep=False), "ts"].dt.date.unique()
+            )
+            raise ValueError(f"{symbol}: duplicate timestamps in raw file: {dupes}")
+        if adj["ts"].duplicated().any():
+            dupes = sorted(
+                str(d) for d in adj.loc[adj["ts"].duplicated(keep=False), "ts"].dt.date.unique()
+            )
+            raise ValueError(f"{symbol}: duplicate timestamps in adjusted file: {dupes}")
+
         raw_keys = set(raw["ts"])
         adj_keys = set(adj["ts"])
         if raw_keys != adj_keys:
@@ -119,8 +130,8 @@ class FirstRateImporter:
         merged = raw.merge(adj, on="ts", how="inner")
         merged["symbol"] = symbol
         price_cols = ["open", "high", "low", "close", "adj_close"]
-        if (merged[price_cols] <= 0).to_numpy().any():
-            raise ValueError(f"{symbol}: nonpositive price(s) in raw/adjusted data")
+        if merged[price_cols].isna().to_numpy().any() or (merged[price_cols] <= 0).to_numpy().any():
+            raise ValueError(f"{symbol}: NaN or nonpositive price(s) in raw/adjusted data")
         frame = merged[
             ["ts", "symbol", "open", "high", "low", "close", "adj_close", "volume"]
         ].sort_values("ts").reset_index(drop=True)
