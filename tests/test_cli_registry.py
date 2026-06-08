@@ -286,6 +286,23 @@ def test_go_live_requires_allocation(monkeypatch, tmp_path):
     assert r.exit_code == 1 and "allocation" in r.stdout.lower()
 
 
+def test_list_emits_metadata_fields():
+    runner.invoke(app, ["registry", "add", "alpha"])
+    out = _json(runner.invoke(app, ["registry", "list"]))
+    assert out[0]["author"] == "agent"
+    assert out[0]["hypothesis_status"] == "untested"
+    assert out[0]["tags"] == []
+    assert out[0]["family"] is None
+
+
+def test_show_emits_metadata_fields():
+    runner.invoke(app, ["registry", "add", "alpha"])
+    out = _json(runner.invoke(app, ["registry", "show", "alpha"]))
+    assert out["author"] == "agent"
+    assert out["hypothesis_status"] == "untested"
+    assert out["tags"] == []
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity
