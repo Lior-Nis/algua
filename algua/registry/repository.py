@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.registry_metadata import Author, HypothesisStatus
 
 
 class ArtifactIdentity(NamedTuple):
@@ -33,6 +34,12 @@ class StrategyRecord:
     stage: Stage
     created_at: str
     updated_at: str
+    family: str | None = None
+    tags: list[str] = field(default_factory=list)
+    author: Author = Author.AGENT
+    hypothesis_status: HypothesisStatus = HypothesisStatus.UNTESTED
+    derived_from: str | None = None
+    description: str | None = None
 
 
 class StrategyRepository(Protocol):

@@ -1,10 +1,39 @@
 import pytest
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
+from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry.db import connect, migrate
 from algua.registry.repository import StrategyExists
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+
+
+def test_record_exposes_metadata_defaults(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec = repo.add("plain")
+    assert rec.author == Author.AGENT
+    assert rec.hypothesis_status == HypothesisStatus.UNTESTED
+    assert rec.tags == []
+    assert rec.family is None
+    assert rec.derived_from is None
+    assert rec.description is None
+
+
+def test_null_metadata_columns_read_as_defaults(tmp_path):
+    # A row written before the columns existed (all NULL) must read as the defaults.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('legacy', 'idea', '2026-01-01', '2026-01-01')"
+    )
+    conn.commit()
+    rec = SqliteStrategyRepository(conn).get("legacy")
+    assert rec.author == Author.AGENT
+    assert rec.hypothesis_status == HypothesisStatus.UNTESTED
+    assert rec.tags == []
 
 
 @pytest.fixture()

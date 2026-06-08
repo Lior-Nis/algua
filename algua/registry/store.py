@@ -4,6 +4,8 @@ import sqlite3
 from datetime import UTC, datetime
 
 from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.registry_metadata import Author, HypothesisStatus
+from algua.registry.metadata import load_tags
 from algua.registry.repository import StrategyExists, StrategyNotFound, StrategyRecord
 
 __all__ = [
@@ -22,6 +24,15 @@ def _row_to_record(row: sqlite3.Row) -> StrategyRecord:
     return StrategyRecord(
         id=row["id"], name=row["name"], stage=Stage(row["stage"]),
         created_at=row["created_at"], updated_at=row["updated_at"],
+        family=row["family"],
+        tags=load_tags(row["tags"]),
+        author=Author(row["author"]) if row["author"] else Author.AGENT,
+        hypothesis_status=(
+            HypothesisStatus(row["hypothesis_status"])
+            if row["hypothesis_status"] else HypothesisStatus.UNTESTED
+        ),
+        derived_from=row["derived_from"],
+        description=row["description"],
     )
 
 
@@ -36,8 +47,11 @@ class SqliteStrategyRepository:
         with self._conn:
             try:
                 cur = self._conn.execute(
-                    "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES (?,?,?,?)",
-                    (name, Stage.IDEA.value, now, now),
+                    "INSERT INTO strategies"
+                    "(name, stage, created_at, updated_at, tags, author, hypothesis_status)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (name, Stage.IDEA.value, now, now,
+                     "[]", Author.AGENT.value, HypothesisStatus.UNTESTED.value),
                 )
             except sqlite3.IntegrityError as exc:
                 raise StrategyExists(name) from exc
