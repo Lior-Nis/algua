@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import typer
@@ -8,7 +9,8 @@ from algua.cli._common import now_iso, ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.data.contracts import BarProvider, BarRequest
+from algua.data.contracts import BarProvider, BarRequest, ImportRequest
+from algua.data.importers import get_importer
 from algua.data.providers import get_provider
 from algua.data.store import DataStore, normalize_symbols
 
@@ -92,6 +94,64 @@ def ingest_bars(
         adjustment=adjustment,
         source_metadata=result.source_metadata,
     )
+    emit(ok({"snapshot": rec.to_dict()}))
+
+
+@data_app.command("import-bars")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def import_bars(
+    vendor: str = typer.Option(..., "--vendor", help="bulk-file vendor, e.g. firstrate"),
+    raw_dir: Path = typer.Option(..., "--raw-dir", help="dir of unadjusted per-symbol files"),
+    adjusted_dir: Path = typer.Option(
+        ..., "--adjusted-dir", help="dir of adjusted per-symbol files (supplies adj_close)"
+    ),
+    timeframe: str = typer.Option("1d", "--timeframe"),
+    as_of: str = typer.Option(..., "--as-of", help="point-in-time ISO datetime"),
+    adjustment: str = typer.Option(
+        "split_div", "--adjustment", help="operator-declared adjusted-file flavor (recorded as-is)"
+    ),
+    start: str = typer.Option(None, "--start", help="optional requested coverage start YYYY-MM-DD"),
+    end: str = typer.Option(None, "--end", help="optional requested coverage end YYYY-MM-DD"),
+    symbols: str = typer.Option(None, "--symbols", help="optional comma-separated subset"),
+) -> None:
+    """Import local vendor bar files into one consolidated, normalized bars snapshot."""
+    importer = get_importer(vendor)
+    request = ImportRequest(
+        raw_dir=raw_dir,
+        adjusted_dir=adjusted_dir,
+        timeframe=timeframe,
+        as_of=as_of,
+        adjustment=adjustment,
+        symbols=tuple(normalize_symbols(symbols.split(","))) if symbols else None,
+    )
+    store = _store()
+    store.clear_staging()
+    chunks = importer.import_bars(request)
+    seen_symbols: list[str] = []
+
+    def _tracked() -> Iterator[object]:
+        for chunk in chunks:
+            seen_symbols.append(str(chunk.frame["symbol"].iloc[0]))
+            yield chunk.frame
+
+    rec = store.ingest_bars_streamed(
+        provider=vendor,
+        symbols=seen_symbols,
+        as_of=as_of,
+        source=f"{vendor}-import",
+        chunks=_tracked(),
+        timeframe=timeframe,
+        adjustment=adjustment,
+        start=start,
+        end=end,
+        source_metadata={"vendor": "firstratedata"} if vendor == "firstrate" else {},
+    )
+    if rec.row_count is not None and rec.row_count >= 5_000_000:
+        typer.echo(
+            f"warning: imported {rec.row_count} rows; snapshot not servable by the current "
+            f"read path until #130 (marked servable=deferred-130)",
+            err=True,
+        )
     emit(ok({"snapshot": rec.to_dict()}))
 
 
