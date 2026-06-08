@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import shutil
+import struct
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as pads
 import pyarrow.parquet as pq
+
+from algua.data.schema import BARS_FILE_HASH_COLUMNS
 
 
 def sha256_file(path: Path) -> str:
@@ -58,3 +64,102 @@ def write_bytes_snapshot(data: bytes, data_dir: Path, relative_path: Path) -> No
     target_path = data_dir / relative_path
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_bytes(data)
+
+
+BARS_FILE_SCHEMA = pa.schema(
+    [
+        ("ts", pa.timestamp("ns", tz="UTC")),
+        ("symbol", pa.string()),
+        ("open", pa.float64()),
+        ("high", pa.float64()),
+        ("low", pa.float64()),
+        ("close", pa.float64()),
+        ("adj_close", pa.float64()),
+        ("volume", pa.float64()),
+    ]
+)
+_BARS_PARTITIONING = pads.partitioning(pa.schema([("symbol", pa.string())]), flavor="hive")
+
+
+def write_partitioned_bars(canon: pd.DataFrame, dest_dir: Path) -> int:
+    """Write `canon` (a tz-aware-UTC `ts` column + `symbol` + OHLCV, pre-sorted by symbol then ts)
+    as a hive-partitioned-by-symbol parquet dataset under `dest_dir`. Returns the parquet file
+    count. The snapshot identity is the caller's `logical_bars_hash`, NOT these bytes, so write
+    threading / file splitting are free to vary (issue #130)."""
+    table = pa.Table.from_pandas(
+        canon[["ts", "symbol", *BARS_FILE_HASH_COLUMNS]],
+        schema=BARS_FILE_SCHEMA,
+        preserve_index=False,
+    )
+    pads.write_dataset(
+        table,
+        dest_dir,
+        format="parquet",
+        partitioning=_BARS_PARTITIONING,
+        basename_template="part-{i}.parquet",
+    )
+    return sum(1 for _ in dest_dir.rglob("*.parquet"))
+
+
+def read_partitioned_bars(
+    dest_dir: Path,
+    *,
+    symbols: list[str] | None = None,
+    start: object | None = None,
+    end: object | None = None,
+) -> pd.DataFrame:
+    """Read a hive-partitioned bars dataset with predicate pushdown. `symbols` prunes partitions at
+    the directory level (no other symbol's footer is read); `start`/`end` push a half-open
+    `[start, end)` filter on `ts` down to the scanner. Any of the three may be None (unbounded).
+    Returns a raw frame (`ts` column + `symbol` + OHLCV); the caller reshapes to bar-schema. Only
+    matching fragments are scanned (issue #130)."""
+    dataset = pads.dataset(dest_dir, format="parquet", partitioning=_BARS_PARTITIONING)
+    conds = []
+    if symbols is not None:
+        conds.append(pads.field("symbol").isin(list(symbols)))
+    if start is not None:
+        conds.append(pads.field("ts") >= _ts_scalar(start))
+    if end is not None:
+        conds.append(pads.field("ts") < _ts_scalar(end))
+    filt = functools.reduce(lambda a, b: a & b, conds) if conds else None
+    table = dataset.to_table(columns=["ts", "symbol", *BARS_FILE_HASH_COLUMNS], filter=filt)
+    return table.to_pandas()
+
+
+def _ts_scalar(value: object) -> pa.Scalar:
+    """Build a `timestamp[ns, tz=UTC]` pyarrow scalar from a datetime/Timestamp, normalizing naive
+    inputs to UTC. Constructing the literal in the column's exact type avoids tz/precision-mismatch
+    boundary bugs in the pushed-down filter (GATE-1 MEDIUM #4)."""
+    ts = pd.Timestamp(value)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return pa.scalar(ts.value, type=pa.timestamp("ns", tz="UTC"))
+
+
+def logical_bars_hash(canon: pd.DataFrame) -> str:
+    """Content hash over the *logical* bar rows — independent of physical parquet layout/version.
+
+    `canon` carries a tz-aware UTC `ts` column, a `symbol` column, and the six float columns. Rows
+    are sorted by (ts, symbol); each column is serialized as fixed-width little-endian bytes (ts as
+    int64 nanoseconds-since-epoch UTC, floats as IEEE-754 float64). Symbols are encoded as a
+    parallel little-endian uint64 length array followed by concatenated UTF-8 bytes
+    (length-prefixed, collision-safe). Signed zeros in float columns are canonicalized to +0.0
+    before hashing so that
+    -0.0 and 0.0 compare as identical logical data.
+    Identical logical bars => identical digest regardless of write threading, file splitting, or
+    pyarrow version. This is the snapshot identity for the partitioned bars layout (issue #130,
+    GATE-1 HIGH #1/#2), replacing the single-file physical-bytes hash.
+    """
+    ordered = canon.sort_values(["ts", "symbol"], kind="stable")
+    digest = hashlib.sha256()
+    digest.update(struct.pack("<Q", len(ordered)))
+    ts_utc = ordered["ts"].dt.tz_convert("UTC").dt.tz_localize(None)
+    ts_ns = ts_utc.to_numpy(dtype="datetime64[ns]").view("int64").astype("<i8")
+    digest.update(ts_ns.tobytes())
+    symbol_bytes = [s.encode("utf-8") for s in ordered["symbol"].astype(str)]
+    lengths = np.array([len(b) for b in symbol_bytes], dtype="<u8")
+    digest.update(lengths.tobytes())
+    digest.update(b"".join(symbol_bytes))
+    for col in BARS_FILE_HASH_COLUMNS:
+        values = ordered[col].to_numpy(dtype="<f8") + 0.0  # +0.0 maps -0.0 -> +0.0
+        digest.update(values.astype("<f8").tobytes())
+    return digest.hexdigest()

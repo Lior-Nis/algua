@@ -9,6 +9,10 @@ FLOAT_COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
 NON_NULL_COLUMNS = FLOAT_COLUMNS
 BAR_COLUMNS = ["symbol", *FLOAT_COLUMNS]
 
+# Re-exported so algua.data.files can serialize the numeric bar columns for the logical content
+# hash without importing store (schema imports only pandas, so this stays cycle-free).
+BARS_FILE_HASH_COLUMNS = FLOAT_COLUMNS
+
 
 def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
     """Assert `df` matches the frozen bar schema; return it unchanged on success.
@@ -40,6 +44,18 @@ def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
     if not keys.equals(keys.sort_values(["timestamp", "symbol"]).reset_index(drop=True)):
         raise ValueError("bars must be sorted by (timestamp, symbol)")
     return df
+
+
+def empty_bars() -> pd.DataFrame:
+    """The contract's empty-but-typed bars frame: exact `BAR_COLUMNS`, float64 numeric dtypes, and
+    a tz-aware empty UTC `timestamp` index. The read path returns this when a pushdown filter
+    matches no rows (issue #130, GATE-1 MEDIUM #5) so consumers can rely on the schema even when a
+    query is empty, instead of whatever an empty `to_pandas()` happens to produce."""
+    index = pd.DatetimeIndex([], tz="UTC", name="timestamp")
+    data = {"symbol": pd.Series([], dtype="object")}
+    for col in FLOAT_COLUMNS:
+        data[col] = pd.Series([], dtype="float64")
+    return validate_bars(pd.DataFrame(data, index=index))
 
 
 def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:

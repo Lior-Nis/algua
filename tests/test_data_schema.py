@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from algua.data.schema import BAR_COLUMNS, to_bar_schema, validate_bars
+from algua.data.schema import BAR_COLUMNS, empty_bars, to_bar_schema, validate_bars
 
 
 def _good() -> pd.DataFrame:
@@ -133,3 +133,12 @@ def test_validate_rejects_duplicate_keys():
     dup = dup.sort_index()
     with pytest.raises(ValueError):
         validate_bars(dup)
+
+
+def test_empty_bars_is_contract_shaped():
+    out = empty_bars()
+    assert out.empty
+    assert list(out.columns) == BAR_COLUMNS
+    assert out.index.name == "timestamp"
+    assert str(out.index.tz) == "UTC"
+    validate_bars(out)  # must satisfy the frozen schema unconditionally

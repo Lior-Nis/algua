@@ -33,12 +33,6 @@ class StoreBackedProvider:
                 f"snapshot {self.snapshot_id} is timeframe {rec.metadata.timeframe!r}, "
                 f"not {timeframe!r}"
             )
-        bars = self.store.read_bars(self.snapshot_id)
-        bars = bars[bars["symbol"].isin(set(symbols))]
-        start_ts = pd.Timestamp(start)
-        end_ts = pd.Timestamp(end)
-        if start_ts.tzinfo is None:
-            start_ts = start_ts.tz_localize("UTC")
-        if end_ts.tzinfo is None:
-            end_ts = end_ts.tz_localize("UTC")
-        return bars[(bars.index >= start_ts) & (bars.index < end_ts)]
+        # Filtering (symbol pruning + half-open [start, end) on ts, with naive->UTC normalization)
+        # is pushed down to the partitioned dataset in read_bars — no full-snapshot materialization.
+        return self.store.read_bars(self.snapshot_id, symbols=symbols, start=start, end=end)

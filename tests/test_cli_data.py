@@ -104,7 +104,7 @@ def test_data_ingest_bars_with_provider(monkeypatch):
     )
 
     assert out["snapshot"]["dataset"] == "bars"
-    assert out["snapshot"]["storage_format"] == "parquet"
+    assert out["snapshot"]["storage_format"] == "parquet_dataset"
 
 
 def test_data_ingest_bars_provider_failure_emits_json(monkeypatch):
