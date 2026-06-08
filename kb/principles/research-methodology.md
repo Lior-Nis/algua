@@ -11,7 +11,7 @@ research integrity. It is **advisory** — and it lives by three rules:
    floor.
 
 The walls are a **backstop**: they catch only the leaks they can enumerate, *after* a strategy is
-authored, at the gate. This note is **prevention** — it covers the unbounded space of leaks no wall
+authored — during evaluation and at promotion. This note is **prevention** — it covers the unbounded space of leaks no wall
 can catch, which is exactly where the agent (the researcher most able to fool itself) does the
 damage.
 

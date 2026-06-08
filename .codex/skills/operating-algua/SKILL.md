@@ -35,7 +35,7 @@ idea → backtested → shortlisted → paper → live → retired
 - `uv run algua doctor` — environment readiness (non-zero exit = a failed check).
 - `uv run algua registry list [--stage S]` / `registry show <name>` — inspect strategies + history.
 - `uv run algua backtest run <name> --demo --register` — backtest + register + advance to `backtested`.
-- `uv run algua backtest walk-forward <name> --demo` — holdout + K windows + stability (out-of-sample evidence).
+- `uv run algua backtest walk-forward <name> --demo` — K windows + stability (out-of-sample evidence); the holdout is withheld until `research promote`.
 - `uv run algua backtest sweep <name> --demo --param KEY=v1,v2` — bounded parameter grid, ranked.
 - `uv run algua research promote <name> --demo` — gate `backtested → shortlisted`; promotes only on pass.
 - `uv run algua data inspect --summary` — what data snapshots exist.

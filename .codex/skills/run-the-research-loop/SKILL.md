@@ -33,8 +33,8 @@ For each hypothesis:
    `uv run algua backtest run <name> --demo`.
 3. **Backtest + register.** `uv run algua backtest run <name> --demo --register` (advances `idea →
    backtested`).
-4. **Out-of-sample evidence.** `uv run algua backtest walk-forward <name> --demo` (holdout + K
-   windows + stability). Optionally `uv run algua backtest sweep <name> --demo --param KEY=v1,v2,...`
+4. **Out-of-sample evidence.** `uv run algua backtest walk-forward <name> --demo` (K windows +
+   stability; the holdout is withheld until `research promote`). Optionally `uv run algua backtest sweep <name> --demo --param KEY=v1,v2,...`
    to scan parameters — but remember every combo you search raises the bar the holdout must clear
    (see `interpret-results` on search breadth).
 5. **Interpret.** Delegate the results JSON to the `interpret` subagent for a promote/discard

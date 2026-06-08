@@ -46,8 +46,8 @@ a better hypothesis) — that's the gate doing its job.
   good by chance. Record the number searched (`promote --n-combos K`); treat a thin holdout margin
   after a wide search as weak. The holdout is your defense against search-induced overfitting.
 - **Look-ahead.** The engine enforces the `t→t+1` decision lag centrally, so a *correctly authored*
-  strategy can't peek — but if results look too good to be true, re-read the `target_weights` for
-  any accidental use of current-bar information.
+  strategy can't peek — but if results look too good to be true, re-read `compute_weights` (and
+  `compute_weights_panel` if present) for any accidental use of current-bar information.
 - **Tiny samples / degenerate periods.** Very short windows or flat data produce noisy metrics;
   prefer a multi-year `--start/--end`.
 - **The judgment layer.** `kb/principles/research-methodology.md` explains *why* these walls exist,
