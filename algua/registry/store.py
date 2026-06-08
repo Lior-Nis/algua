@@ -4,6 +4,8 @@ import sqlite3
 from datetime import UTC, datetime
 
 from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.registry_metadata import Author, HypothesisStatus
+from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import StrategyExists, StrategyNotFound, StrategyRecord
 
 __all__ = [
@@ -22,6 +24,15 @@ def _row_to_record(row: sqlite3.Row) -> StrategyRecord:
     return StrategyRecord(
         id=row["id"], name=row["name"], stage=Stage(row["stage"]),
         created_at=row["created_at"], updated_at=row["updated_at"],
+        family=row["family"],
+        tags=load_tags(row["tags"]),
+        author=Author(row["author"]) if row["author"] else Author.AGENT,
+        hypothesis_status=(
+            HypothesisStatus(row["hypothesis_status"])
+            if row["hypothesis_status"] else HypothesisStatus.UNTESTED
+        ),
+        derived_from=row["derived_from"],
+        description=row["description"],
     )
 
 
@@ -31,13 +42,31 @@ class SqliteStrategyRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def add(self, name: str) -> StrategyRecord:
+    def add(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author = Author.AGENT,
+        hypothesis_status: HypothesisStatus = HypothesisStatus.UNTESTED,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        if derived_from is not None:
+            if derived_from == name:
+                raise ValueError(f"{name} cannot be derived from itself")
+            self.get(derived_from)  # raises StrategyNotFound if the parent is unknown
         now = _now()
         with self._conn:
             try:
                 cur = self._conn.execute(
-                    "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES (?,?,?,?)",
-                    (name, Stage.IDEA.value, now, now),
+                    "INSERT INTO strategies"
+                    "(name, stage, created_at, updated_at, family, tags, author,"
+                    " hypothesis_status, derived_from, description)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (name, Stage.IDEA.value, now, now, family, dump_tags(tags or []),
+                     author.value, hypothesis_status.value, derived_from, description),
                 )
             except sqlite3.IntegrityError as exc:
                 raise StrategyExists(name) from exc
@@ -57,14 +86,154 @@ class SqliteStrategyRepository:
             raise StrategyNotFound(name)
         return _row_to_record(row)
 
-    def list_strategies(self, stage: Stage | None = None) -> list[StrategyRecord]:
-        if stage is None:
-            rows = self._conn.execute("SELECT * FROM strategies ORDER BY id").fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM strategies WHERE stage = ? ORDER BY id", (stage.value,)
-            ).fetchall()
+    def update_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> StrategyRecord:
+        rec = self.get(name)
+        if derived_from is not None:
+            if derived_from == name:
+                raise ValueError(f"{name} cannot be derived from itself")
+            self.get(derived_from)
+        sets: list[str] = []
+        params: list[object] = []
+        if family is not None:
+            sets.append("family = ?")
+            params.append(family)
+        if author is not None:
+            sets.append("author = ?")
+            params.append(author.value)
+        if hypothesis_status is not None:
+            sets.append("hypothesis_status = ?")
+            params.append(hypothesis_status.value)
+        if derived_from is not None:
+            sets.append("derived_from = ?")
+            params.append(derived_from)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description)
+        if add_tags or remove_tags:
+            tags = set(rec.tags)
+            tags |= set(canonicalize_tags(add_tags or []))
+            tags -= set(canonicalize_tags(remove_tags or []))
+            sets.append("tags = ?")
+            params.append(dump_tags(tags))
+        if sets:
+            sets.append("updated_at = ?")
+            params.append(_now())
+            params.append(rec.id)
+            with self._conn:
+                self._conn.execute(
+                    f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params
+                )
+        return self.get(name)
+
+    def list_strategies(
+        self,
+        stage: Stage | None = None,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+    ) -> list[StrategyRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if stage is not None:
+            clauses.append("stage = ?")
+            params.append(stage.value)
+        if family is not None:
+            clauses.append("family = ?")
+            params.append(family)
+        if author is not None:
+            # COALESCE so legacy NULL rows (pre-metadata schema) match the default 'agent'.
+            clauses.append("COALESCE(author, ?) = ?")
+            params.extend((Author.AGENT.value, author.value))
+        if hypothesis_status is not None:
+            # Same NULL-legacy treatment; hypothesis_status defaults to 'untested'.
+            clauses.append("COALESCE(hypothesis_status, ?) = ?")
+            params.extend((HypothesisStatus.UNTESTED.value, hypothesis_status.value))
+        for tag in canonicalize_tags(tags or []):
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each("
+                "CASE WHEN json_valid(tags) THEN tags ELSE '[]' END"
+                ") WHERE value = ?)"
+            )
+            params.append(tag)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM strategies{where} ORDER BY id", params
+        ).fetchall()
         return [_row_to_record(r) for r in rows]
+
+    def backfill_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: str | None = None,
+        hypothesis_status: str | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        """Fill only currently-NULL metadata columns (one-shot recovery). Uses COALESCE so any
+        column already holding a value is left untouched. Idempotent: re-running is a no-op."""
+        cols: dict[str, object] = {
+            "family": family,
+            "tags": dump_tags(tags) if tags is not None else None,
+            "author": author,
+            "hypothesis_status": hypothesis_status,
+            "derived_from": derived_from,
+            "description": description,
+        }
+        # Filter to columns where the caller provided a non-None value.
+        to_fill = {c: v for c, v in cols.items() if v is not None}
+        if to_fill:
+            rec = self.get(name)
+            # COALESCE keeps any existing non-NULL value; only NULLs are filled.
+            assignments = ", ".join(f"{c} = COALESCE({c}, ?)" for c in to_fill)
+            params: list[object] = [*to_fill.values(), rec.id]
+            with self._conn:
+                self._conn.execute(
+                    f"UPDATE strategies SET {assignments} WHERE id = ?", params
+                )
+        return self.get(name)
+
+    def default_fill_metadata_nulls(self) -> None:
+        """Fill every strategy row's author/hypothesis_status/tags column from its default when
+        still NULL. Used as the terminal step of the backfill-from-kb command. Idempotent.
+
+        Runs in a single transaction so a partial run is not committed.
+        """
+        with self._conn:
+            self._conn.execute(
+                "UPDATE strategies SET author = COALESCE(author, ?)",
+                (Author.AGENT.value,),
+            )
+            self._conn.execute(
+                "UPDATE strategies SET hypothesis_status = COALESCE(hypothesis_status, ?)",
+                (HypothesisStatus.UNTESTED.value,),
+            )
+            self._conn.execute("UPDATE strategies SET tags = COALESCE(tags, '[]')")
+
+    def delete(self, name: str) -> None:
+        """Remove a strategy row and its transition rows. ONLY for rolling back a failed
+        ``strategy new`` that just created it — there is no general deletion workflow."""
+        rec = self.get(name)
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM stage_transitions WHERE strategy_id = ?", (rec.id,)
+            )
+            self._conn.execute("DELETE FROM strategies WHERE id = ?", (rec.id,))
 
     def list_transitions(self, name: str) -> list[dict]:
         rec = self.get(name)

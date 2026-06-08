@@ -1,10 +1,39 @@
 import pytest
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
+from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry.db import connect, migrate
 from algua.registry.repository import StrategyExists
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+
+
+def test_record_exposes_metadata_defaults(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec = repo.add("plain")
+    assert rec.author == Author.AGENT
+    assert rec.hypothesis_status == HypothesisStatus.UNTESTED
+    assert rec.tags == []
+    assert rec.family is None
+    assert rec.derived_from is None
+    assert rec.description is None
+
+
+def test_null_metadata_columns_read_as_defaults(tmp_path):
+    # A row written before the columns existed (all NULL) must read as the defaults.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('legacy', 'idea', '2026-01-01', '2026-01-01')"
+    )
+    conn.commit()
+    rec = SqliteStrategyRepository(conn).get("legacy")
+    assert rec.author == Author.AGENT
+    assert rec.hypothesis_status == HypothesisStatus.UNTESTED
+    assert rec.tags == []
 
 
 @pytest.fixture()
@@ -142,3 +171,292 @@ def test_holdout_snapshot_identity_takes_precedence(repo):
         rec.id, data_source="StoreBackedProvider", snapshot_id="snapA",
         period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 6: add() accepts metadata + derived_from validation
+# ---------------------------------------------------------------------------
+
+def test_add_with_metadata_roundtrips(tmp_path):
+    from algua.contracts.registry_metadata import Author, HypothesisStatus
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec = repo.add(
+        "child",
+        family="mean-reversion",
+        tags=["Slow", "slow", " carry "],
+        author=Author.HUMAN,
+        hypothesis_status=HypothesisStatus.SUPPORTED,
+        description="a thing",
+    )
+    assert rec.family == "mean-reversion"
+    assert rec.tags == ["carry", "slow"]
+    assert rec.author == Author.HUMAN
+    assert rec.hypothesis_status == HypothesisStatus.SUPPORTED
+    assert rec.description == "a thing"
+
+
+def test_add_derived_from_requires_existing_parent(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.repository import StrategyNotFound
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    with pytest.raises(StrategyNotFound):
+        repo.add("orphan", derived_from="ghost")
+    repo.add("parent")
+    rec = repo.add("kid", derived_from="parent")
+    assert rec.derived_from == "parent"
+
+
+def test_add_derived_from_rejects_self(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    with pytest.raises(ValueError):
+        repo.add("self", derived_from="self")
+
+
+# ---------------------------------------------------------------------------
+# Task 7: update_metadata repository method
+# ---------------------------------------------------------------------------
+
+def test_update_metadata_partial(tmp_path):
+    from algua.contracts.registry_metadata import HypothesisStatus
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", family="mean-reversion", tags=["slow"])
+    before = repo.get("a")
+    rec = repo.update_metadata(
+        "a", hypothesis_status=HypothesisStatus.SUPPORTED, add_tags=["carry"]
+    )
+    assert rec.hypothesis_status == HypothesisStatus.SUPPORTED
+    assert rec.tags == ["carry", "slow"]
+    assert rec.family == "mean-reversion"  # untouched
+    assert rec.updated_at >= before.updated_at
+
+
+def test_update_metadata_remove_tag(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", tags=["slow", "carry"])
+    rec = repo.update_metadata("a", remove_tags=["slow"])
+    assert rec.tags == ["carry"]
+
+
+def test_update_metadata_derived_from_validation(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a")
+    with pytest.raises(ValueError):
+        repo.update_metadata("a", derived_from="a")
+
+
+def test_update_metadata_unknown_parent_raises(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.repository import StrategyNotFound
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a")
+    with pytest.raises(StrategyNotFound):
+        repo.update_metadata("a", derived_from="ghost")
+
+
+# ---------------------------------------------------------------------------
+# Task 9: list_strategies filter params
+# ---------------------------------------------------------------------------
+
+def _seed_pool(repo):
+    from algua.contracts.registry_metadata import Author, HypothesisStatus
+    repo.add("a", family="mean-reversion", tags=["slow"], author=Author.AGENT)
+    repo.add("b", family="mean-reversion", tags=["slow", "carry"], author=Author.HUMAN,
+             hypothesis_status=HypothesisStatus.SUPPORTED)
+    repo.add("c", family="momentum", tags=["fast"], author=Author.AGENT)
+
+
+def test_filter_by_family(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)
+    assert {r.name for r in repo.list_strategies(family="mean-reversion")} == {"a", "b"}
+
+
+def test_filter_by_tag_is_all_of(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)
+    assert {r.name for r in repo.list_strategies(tags=["slow", "carry"])} == {"b"}
+
+
+def test_filter_by_author_and_status_compose(tmp_path):
+    from algua.contracts.registry_metadata import Author
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)
+    got = repo.list_strategies(author=Author.AGENT, family="mean-reversion")
+    assert {r.name for r in got} == {"a"}
+
+
+def test_filter_author_matches_null_legacy_row(tmp_path):
+    # A legacy NULL-author row must match --author agent (COALESCE semantics).
+    from algua.contracts.registry_metadata import Author
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute("INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+                 "('legacy','idea','2026-01-01','2026-01-01')")
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    assert {r.name for r in repo.list_strategies(author=Author.AGENT)} == {"legacy"}
+
+
+def test_filter_by_stage_and_family(tmp_path):
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)  # a,b are mean-reversion at idea; c is momentum at idea
+    rec_a = repo.get("a")
+    repo.apply_transition(rec_a, Stage.BACKTESTED, Actor.AGENT)
+    # only b remains at idea within mean-reversion
+    assert {r.name for r in repo.list_strategies(Stage.IDEA, family="mean-reversion")} == {"b"}
+
+
+# ---------------------------------------------------------------------------
+# Task 13: backfill_metadata — fills only NULL columns
+# ---------------------------------------------------------------------------
+
+def test_backfill_metadata_fills_only_nulls(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # legacy NULL row (bypasses add() which writes defaults)
+    conn.execute("INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+                 "('a','idea','2026-01-01','2026-01-01')")
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    repo.backfill_metadata("a", family="mean-reversion", hypothesis_status="supported")
+    rec = repo.get("a")
+    assert rec.family == "mean-reversion"
+    assert rec.hypothesis_status.value == "supported"
+    # second backfill must NOT overwrite a now-non-NULL value
+    repo.backfill_metadata("a", family="momentum")
+    assert repo.get("a").family == "mean-reversion"
+
+
+def test_backfill_metadata_all_none_is_noop(tmp_path):
+    # Calling backfill_metadata with all args None must be a clean no-op (no error,
+    # no mutation): the returned record must equal the pre-call state.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", family="momentum", tags=["fast"])
+    before = repo.get("a")
+    after = repo.backfill_metadata("a")
+    assert after.family == before.family
+    assert after.tags == before.tags
+    assert after.author == before.author
+    assert after.hypothesis_status == before.hypothesis_status
+    assert after.derived_from == before.derived_from
+    assert after.description == before.description
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: default_fill_metadata_nulls — lives in store, not CLI
+# ---------------------------------------------------------------------------
+
+def test_default_fill_metadata_nulls_fills_remaining_nulls(tmp_path):
+    """default_fill_metadata_nulls must fill author/hypothesis_status/tags NULLs to defaults."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # Raw-insert a legacy NULL row (bypasses add() which writes defaults).
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('legacy','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    repo.default_fill_metadata_nulls()
+    rec = repo.get("legacy")
+    assert rec.author == Author.AGENT
+    assert rec.hypothesis_status == HypothesisStatus.UNTESTED
+    assert rec.tags == []
+
+
+def test_default_fill_metadata_nulls_does_not_overwrite_existing(tmp_path):
+    """default_fill_metadata_nulls must leave already-set values untouched."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", author=Author.HUMAN, hypothesis_status=HypothesisStatus.SUPPORTED,
+             tags=["carry"])
+    repo.default_fill_metadata_nulls()
+    rec = repo.get("a")
+    assert rec.author == Author.HUMAN
+    assert rec.hypothesis_status == HypothesisStatus.SUPPORTED
+    assert rec.tags == ["carry"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: tag filter with malformed non-NULL JSON must not crash
+# ---------------------------------------------------------------------------
+
+def test_list_strategies_tag_filter_tolerates_malformed_tags(tmp_path):
+    """list_strategies(tags=[...]) must not crash on a row with malformed non-NULL tags."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # Raw-insert a row with malformed tags JSON.
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at, tags) VALUES "
+        "('malformed','idea','2026-01-01','2026-01-01','not json')"
+    )
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    # Must not raise; malformed row must simply be absent from results.
+    results = repo.list_strategies(tags=["x"])
+    assert all(r.name != "malformed" for r in results)

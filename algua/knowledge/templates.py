@@ -16,7 +16,11 @@ def scaffold_strategy_doc(
     derived_from: str | None = None,
     created: str | None = None,
 ) -> str:
-    """Initial strategy doc: authored sections empty, synced RESULTS block empty."""
+    """Initial strategy doc: authored sections empty, synced RESULTS block empty.
+
+    Frontmatter keys family/tags/author/hypothesis_status/derived_from/description are
+    registry-owned — edit via ``registry set``; they are overwritten on every sync.
+    """
     fm: dict[str, object] = {
         "name": name,
         "stage": "idea",
