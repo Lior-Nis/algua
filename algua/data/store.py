@@ -225,12 +225,23 @@ class DataStore:
         end: str | None = None,
         source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
-        """Stream per-symbol bar chunks into one consolidated, deduplicated bars snapshot.
+        """Stream per-symbol bar chunks into one consolidated bars snapshot.
 
-        Crash-safe: stream -> staging file, hash, dedup, atomic rename into the immutable snapshot
-        path, append the manifest last. Each chunk is normalized via `to_bar_schema` (so output is
-        schema-valid) and written as one row group, in the order received (the importer yields
-        canonical sorted-symbol order — required for a stable `snapshot_id`).
+        Crash-safe: stream -> staging file, hash, dedup on snapshot_id (idempotent re-ingest),
+        atomic rename into the immutable snapshot path, append the manifest last. Each chunk is
+        normalized via `to_bar_schema` (so output is schema-valid) and written as one row group,
+        in the order received (the importer yields canonical sorted-symbol order — required for a
+        stable `snapshot_id`).
+
+        Precondition (caller-owned): the chunk stream must already be globally unique on
+        (timestamp, symbol) — this method validates each chunk individually but does NOT validate
+        uniqueness ACROSS chunks. Passing overlapping chunks commits a snapshot that `read_bars`
+        will reject (its `validate_bars` catches the duplicate). The FirstRate importer satisfies
+        this by yielding exactly one chunk per symbol with per-file duplicate checks. A future
+        scaled read path (#130) may add cross-chunk validation over the consolidated file.
+
+        Note: when `start`/`end` are given, the coverage check is span-only (observed range covers
+        the requested endpoints); it does not detect interior gaps.
         """
         staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
         staging_file = staging_dir / "bars.parquet"
@@ -260,7 +271,8 @@ class DataStore:
             writer.close()
             writer = None
 
-            assert observed_min is not None and observed_max is not None  # writer-not-None implies
+            if observed_min is None or observed_max is None:  # unreachable: writer set => loop ran
+                raise ValueError("no bars to ingest (empty chunk stream)")
             observed_start = observed_min.date().isoformat()
             observed_end = observed_max.date().isoformat()
             if start is not None or end is not None:

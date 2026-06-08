@@ -101,3 +101,16 @@ def test_large_row_warning_flag(tmp_path, monkeypatch):
     store = DataStore(tmp_path)
     rec = _ingest_streamed(store, _two_symbol_chunks())
     assert rec.metadata.source_metadata["servable"] == "deferred-130"
+
+
+def test_clear_staging_removes_residue(tmp_path):
+    store = DataStore(tmp_path)
+    staging = tmp_path / "snapshots" / "_staging" / "leftover"
+    staging.mkdir(parents=True)
+    (staging / "bars.parquet").write_text("partial", encoding="utf-8")
+    store.clear_staging()
+    assert not (tmp_path / "snapshots" / "_staging").exists()
+
+
+def test_clear_staging_noop_when_absent(tmp_path):
+    DataStore(tmp_path).clear_staging()  # must not raise when nothing to clean
