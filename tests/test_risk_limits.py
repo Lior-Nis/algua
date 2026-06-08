@@ -82,3 +82,17 @@ def test_finite_weights_breaches_on_nan_inf_dupes():
     with pytest.raises(RiskBreach) as ei_dupe:
         check_finite_weights(dupe, "s")
     assert ei_dupe.value.kind == "non_finite_weight"
+
+
+def test_short_policy_long_only_rejects_negatives():
+    from algua.risk.limits import RiskBreach, check_short_policy
+    check_short_policy(pd.Series({"AAA": 0.6, "BBB": 0.4}), allow_short=False, strategy_name="s")
+    check_short_policy(pd.Series(dtype="float64"), allow_short=False, strategy_name="s")
+    with pytest.raises(RiskBreach) as ei:
+        check_short_policy(pd.Series({"AAA": -0.5}), allow_short=False, strategy_name="s")
+    assert ei.value.kind == "long_only"
+
+
+def test_short_policy_allows_negatives_when_allow_short():
+    from algua.risk.limits import check_short_policy
+    check_short_policy(pd.Series({"AAA": -0.5, "BBB": 0.5}), allow_short=True, strategy_name="s")

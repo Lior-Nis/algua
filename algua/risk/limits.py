@@ -79,6 +79,20 @@ def check_max_weight_per_symbol(weights: pd.Series, max_per_symbol: float) -> No
         )
 
 
+def check_short_policy(weights: pd.Series, allow_short: bool, strategy_name: str) -> None:
+    """Declared long/short gate. When allow_short is False (the default, long-only), any negative
+    target weight hard-breaches; when True, shorts are permitted (the per-symbol cap still bounds
+    |weight|). Replaces the old undeclared check_long_only: the constraint is now a hashed contract
+    field, not an invisible convention (#135)."""
+    if not allow_short and len(weights) and bool((weights < 0).any()):
+        negative = sorted(weights[weights < 0].index)
+        raise RiskBreach(
+            "long_only",
+            f"long-only: strategy '{strategy_name}' returned negative target weight(s) "
+            f"for {negative}",
+        )
+
+
 def check_long_only(weights: pd.Series, strategy_name: str) -> None:
     if len(weights) and bool((weights < 0).any()):
         negative = sorted(weights[weights < 0].index)
