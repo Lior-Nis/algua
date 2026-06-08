@@ -62,10 +62,11 @@ def add(
 @json_errors(ValueError, LookupError)
 def list_(
     stage: str = typer.Option(None, "--stage", help="filter by stage"),
-    family: str = typer.Option(None, "--family"),
+    family: str = typer.Option(None, "--family", help="filter by thesis family"),
     tag: list[str] = typer.Option(None, "--tag", help="require this tag (repeatable, all-of)"),
-    author: Author = typer.Option(None, "--author"),
-    hypothesis_status: HypothesisStatus = typer.Option(None, "--hypothesis-status"),
+    author: Author = typer.Option(None, "--author", help="filter by author (agent|human)"),
+    hypothesis_status: HypothesisStatus = typer.Option(
+        None, "--hypothesis-status", help="filter by hypothesis status"),
 ) -> None:
     """List strategies with optional filters (AND-ed). Emits a bare JSON array."""
     st = Stage(stage) if stage else None

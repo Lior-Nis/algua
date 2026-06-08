@@ -154,9 +154,11 @@ class SqliteStrategyRepository:
             clauses.append("family = ?")
             params.append(family)
         if author is not None:
+            # COALESCE so legacy NULL rows (pre-metadata schema) match the default 'agent'.
             clauses.append("COALESCE(author, ?) = ?")
             params.extend((Author.AGENT.value, author.value))
         if hypothesis_status is not None:
+            # Same NULL-legacy treatment; hypothesis_status defaults to 'untested'.
             clauses.append("COALESCE(hypothesis_status, ?) = ?")
             params.extend((HypothesisStatus.UNTESTED.value, hypothesis_status.value))
         for tag in canonicalize_tags(tags or []):

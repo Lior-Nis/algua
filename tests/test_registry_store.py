@@ -350,3 +350,17 @@ def test_filter_author_matches_null_legacy_row(tmp_path):
     conn.commit()
     repo = SqliteStrategyRepository(conn)
     assert {r.name for r in repo.list_strategies(author=Author.AGENT)} == {"legacy"}
+
+
+def test_filter_by_stage_and_family(tmp_path):
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)  # a,b are mean-reversion at idea; c is momentum at idea
+    rec_a = repo.get("a")
+    repo.apply_transition(rec_a, Stage.BACKTESTED, Actor.AGENT)
+    # only b remains at idea within mean-reversion
+    assert {r.name for r in repo.list_strategies(Stage.IDEA, family="mean-reversion")} == {"b"}
