@@ -93,6 +93,9 @@ class SqliteStrategyRepository:
                 # already consumed or is missing, raise so the whole transition rolls back — the
                 # stage can never advance on a vanished token, nor a token be spent without the
                 # stage advancing.
+                # NOTE: this UPDATE does NOT re-check artifact identity (code/config/dependency) —
+                # identity binding lives in `find_consumable_gate_evaluation`, so callers MUST
+                # always pair find->consume and never pass a hand-held id.
                 cur = self._conn.execute(
                     "UPDATE gate_evaluations SET consumed=1"
                     " WHERE id=? AND strategy_id=? AND passed=1 AND actor='agent' AND consumed=0",
