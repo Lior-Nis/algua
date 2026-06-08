@@ -136,13 +136,38 @@ class SqliteStrategyRepository:
                 )
         return self.get(name)
 
-    def list_strategies(self, stage: Stage | None = None) -> list[StrategyRecord]:
-        if stage is None:
-            rows = self._conn.execute("SELECT * FROM strategies ORDER BY id").fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM strategies WHERE stage = ? ORDER BY id", (stage.value,)
-            ).fetchall()
+    def list_strategies(
+        self,
+        stage: Stage | None = None,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+    ) -> list[StrategyRecord]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if stage is not None:
+            clauses.append("stage = ?")
+            params.append(stage.value)
+        if family is not None:
+            clauses.append("family = ?")
+            params.append(family)
+        if author is not None:
+            clauses.append("COALESCE(author, ?) = ?")
+            params.extend((Author.AGENT.value, author.value))
+        if hypothesis_status is not None:
+            clauses.append("COALESCE(hypothesis_status, ?) = ?")
+            params.extend((HypothesisStatus.UNTESTED.value, hypothesis_status.value))
+        for tag in canonicalize_tags(tags or []):
+            clauses.append(
+                "EXISTS (SELECT 1 FROM json_each(COALESCE(tags, '[]')) WHERE value = ?)"
+            )
+            params.append(tag)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM strategies{where} ORDER BY id", params
+        ).fetchall()
         return [_row_to_record(r) for r in rows]
 
     def list_transitions(self, name: str) -> list[dict]:

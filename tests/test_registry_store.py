@@ -292,3 +292,61 @@ def test_update_metadata_unknown_parent_raises(tmp_path):
     repo.add("a")
     with pytest.raises(StrategyNotFound):
         repo.update_metadata("a", derived_from="ghost")
+
+
+# ---------------------------------------------------------------------------
+# Task 9: list_strategies filter params
+# ---------------------------------------------------------------------------
+
+def _seed_pool(repo):
+    from algua.contracts.registry_metadata import Author, HypothesisStatus
+    repo.add("a", family="mean-reversion", tags=["slow"], author=Author.AGENT)
+    repo.add("b", family="mean-reversion", tags=["slow", "carry"], author=Author.HUMAN,
+             hypothesis_status=HypothesisStatus.SUPPORTED)
+    repo.add("c", family="momentum", tags=["fast"], author=Author.AGENT)
+
+
+def test_filter_by_family(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)
+    assert {r.name for r in repo.list_strategies(family="mean-reversion")} == {"a", "b"}
+
+
+def test_filter_by_tag_is_all_of(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)
+    assert {r.name for r in repo.list_strategies(tags=["slow", "carry"])} == {"b"}
+
+
+def test_filter_by_author_and_status_compose(tmp_path):
+    from algua.contracts.registry_metadata import Author
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    _seed_pool(repo)
+    got = repo.list_strategies(author=Author.AGENT, family="mean-reversion")
+    assert {r.name for r in got} == {"a"}
+
+
+def test_filter_author_matches_null_legacy_row(tmp_path):
+    # A legacy NULL-author row must match --author agent (COALESCE semantics).
+    from algua.contracts.registry_metadata import Author
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute("INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+                 "('legacy','idea','2026-01-01','2026-01-01')")
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    assert {r.name for r in repo.list_strategies(author=Author.AGENT)} == {"legacy"}

@@ -90,8 +90,18 @@ class StrategyRepository(Protocol):
         """
         ...
 
-    def list_strategies(self, stage: Stage | None = None) -> list[StrategyRecord]:
-        """List strategies, optionally filtered to a single stage, ordered by insertion."""
+    def list_strategies(
+        self,
+        stage: Stage | None = None,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+    ) -> list[StrategyRecord]:
+        """List strategies, optionally filtered. Filters AND together; repeated ``tags`` means
+        all-of. ``author``/``hypothesis_status`` use COALESCE so NULL legacy rows match the
+        default. Ordered by insertion."""
         ...
 
     def list_transitions(self, name: str) -> list[dict]:
