@@ -303,6 +303,20 @@ def test_show_emits_metadata_fields():
     assert out["tags"] == []
 
 
+def test_add_with_metadata_flags():
+    out = _json(runner.invoke(app, [
+        "registry", "add", "mr1", "--family", "mean-reversion",
+        "--tag", "slow", "--tag", "carry", "--author", "human",
+        "--hypothesis-status", "supported", "--description", "desc",
+    ]))
+    assert out["ok"] is True
+    rec = _json(runner.invoke(app, ["registry", "show", "mr1"]))
+    assert rec["family"] == "mean-reversion"
+    assert rec["tags"] == ["carry", "slow"]
+    assert rec["author"] == "human"
+    assert rec["hypothesis_status"] == "supported"
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity

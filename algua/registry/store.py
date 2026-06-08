@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
-from algua.registry.metadata import load_tags
+from algua.registry.metadata import dump_tags, load_tags
 from algua.registry.repository import StrategyExists, StrategyNotFound, StrategyRecord
 
 __all__ = [
@@ -42,16 +42,31 @@ class SqliteStrategyRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
-    def add(self, name: str) -> StrategyRecord:
+    def add(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author = Author.AGENT,
+        hypothesis_status: HypothesisStatus = HypothesisStatus.UNTESTED,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        if derived_from is not None:
+            if derived_from == name:
+                raise ValueError(f"{name} cannot be derived from itself")
+            self.get(derived_from)  # raises StrategyNotFound if the parent is unknown
         now = _now()
         with self._conn:
             try:
                 cur = self._conn.execute(
                     "INSERT INTO strategies"
-                    "(name, stage, created_at, updated_at, tags, author, hypothesis_status)"
-                    " VALUES (?,?,?,?,?,?,?)",
-                    (name, Stage.IDEA.value, now, now,
-                     "[]", Author.AGENT.value, HypothesisStatus.UNTESTED.value),
+                    "(name, stage, created_at, updated_at, family, tags, author,"
+                    " hypothesis_status, derived_from, description)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (name, Stage.IDEA.value, now, now, family, dump_tags(tags or []),
+                     author.value, hypothesis_status.value, derived_from, description),
                 )
             except sqlite3.IntegrityError as exc:
                 raise StrategyExists(name) from exc

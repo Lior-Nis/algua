@@ -51,10 +51,21 @@ class StrategyRepository(Protocol):
     touching policy code.
     """
 
-    def add(self, name: str) -> StrategyRecord:
-        """Insert a new strategy at stage ``idea`` with its initial transition row.
-
-        Raises ``StrategyExists`` if the name is already registered.
+    def add(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author = Author.AGENT,
+        hypothesis_status: HypothesisStatus = HypothesisStatus.UNTESTED,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        """Insert a new strategy at stage ``idea`` with its initial transition row and the given
+        organizational metadata. ``derived_from``, if set, must name an existing strategy and may
+        not be the strategy itself.
+        Raises ``StrategyExists`` / ``StrategyNotFound`` / ``ValueError``.
         """
         ...
 

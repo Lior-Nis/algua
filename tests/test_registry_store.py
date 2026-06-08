@@ -171,3 +171,60 @@ def test_holdout_snapshot_identity_takes_precedence(repo):
         rec.id, data_source="StoreBackedProvider", snapshot_id="snapA",
         period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 6: add() accepts metadata + derived_from validation
+# ---------------------------------------------------------------------------
+
+def test_add_with_metadata_roundtrips(tmp_path):
+    from algua.contracts.registry_metadata import Author, HypothesisStatus
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec = repo.add(
+        "child",
+        family="mean-reversion",
+        tags=["Slow", "slow", " carry "],
+        author=Author.HUMAN,
+        hypothesis_status=HypothesisStatus.SUPPORTED,
+        description="a thing",
+    )
+    assert rec.family == "mean-reversion"
+    assert rec.tags == ["carry", "slow"]
+    assert rec.author == Author.HUMAN
+    assert rec.hypothesis_status == HypothesisStatus.SUPPORTED
+    assert rec.description == "a thing"
+
+
+def test_add_derived_from_requires_existing_parent(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.repository import StrategyNotFound
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    with pytest.raises(StrategyNotFound):
+        repo.add("orphan", derived_from="ghost")
+    repo.add("parent")
+    rec = repo.add("kid", derived_from="parent")
+    assert rec.derived_from == "parent"
+
+
+def test_add_derived_from_rejects_self(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    with pytest.raises(ValueError):
+        repo.add("self", derived_from="self")

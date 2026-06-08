@@ -9,12 +9,15 @@ from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry import live_gate
 from algua.registry.approvals import compute_artifact_hashes, record_approval
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, SignatureError
 from algua.registry.repository import StrategyRecord
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+
+_FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 registry_app = typer.Typer(help="Strategy lifecycle registry", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
@@ -31,10 +34,25 @@ def _record_json(r: StrategyRecord) -> dict:
 
 @registry_app.command("add")
 @json_errors(ValueError, LookupError)
-def add(name: str) -> None:
-    """Register a new strategy at stage 'idea'."""
+def add(
+    name: str,
+    family: str = typer.Option(None, "--family", help="thesis family slug"),
+    tag: list[str] = typer.Option(None, "--tag", help="tag (repeatable)"),
+    author: Author = typer.Option(Author.AGENT, "--author", help="agent|human"),
+    hypothesis_status: HypothesisStatus = typer.Option(
+        HypothesisStatus.UNTESTED, "--hypothesis-status"),
+    derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),
+    description: str = typer.Option(None, "--description"),
+) -> None:
+    """Register a new strategy at stage 'idea' with organizational metadata."""
+    if family is not None and not _FAMILY_RE.match(family):
+        raise ValueError(f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)")
     with registry_conn() as conn:
-        rec = SqliteStrategyRepository(conn).add(name)
+        rec = SqliteStrategyRepository(conn).add(
+            name, family=family, tags=tag or [], author=author,
+            hypothesis_status=hypothesis_status, derived_from=derived_from,
+            description=description,
+        )
     emit(ok(_record_json(rec)))
 
 
