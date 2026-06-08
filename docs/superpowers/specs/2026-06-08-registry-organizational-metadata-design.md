@@ -202,9 +202,10 @@ For each registered strategy with a kb doc:
   case that cannot occur on the one run this command is for.
 - **Enum mapping is explicit:** a kb `hypothesis_status` not in the enum (or absent) is reported as
   `unmappable` and left for the operator, not silently coerced. Same for an invalid `author`.
-- **Report, don't hide:** emit a JSON report — `{filled: [...], unmappable: [...],
+- **Report, don't hide:** emit a JSON report — `{processed: [...], unmappable: [...],
   kb_docs_without_registry_row: [...], registry_rows_without_kb_doc: [...]}` — so nothing is
-  silently dropped.
+  silently dropped. `processed` = strategies whose kb doc was found and reconciled (fill-only-NULL
+  means already-populated columns are untouched, so this is not a "changed" list).
 - **Final default-fill:** after kb recovery, any row still NULL on `author`/`hypothesis_status`/
   `tags` gets the standard defaults (`agent`/`untested`/`[]`) so the columns are never left NULL on
   an existing row.

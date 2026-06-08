@@ -387,3 +387,20 @@ def test_backfill_metadata_fills_only_nulls(tmp_path):
     # second backfill must NOT overwrite a now-non-NULL value
     repo.backfill_metadata("a", family="momentum")
     assert repo.get("a").family == "mean-reversion"
+
+
+def test_backfill_metadata_all_none_is_noop(tmp_path):
+    # Calling backfill_metadata with all args None must be a clean no-op (no error,
+    # no mutation): the returned record must equal the pre-call state.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", family="momentum", tags=["fast"])
+    before = repo.get("a")
+    after = repo.backfill_metadata("a")
+    assert after.family == before.family
+    assert after.tags == before.tags
+    assert after.author == before.author
+    assert after.hypothesis_status == before.hypothesis_status
+    assert after.derived_from == before.derived_from
+    assert after.description == before.description

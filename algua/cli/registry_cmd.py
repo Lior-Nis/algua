@@ -213,7 +213,7 @@ def backfill_from_kb() -> None:
     from algua.knowledge.sync import _unwikilink, strategy_doc_path
 
     settings = get_settings()
-    filled: list[str] = []
+    processed: list[str] = []
     unmappable: list[dict] = []
     kb_without_row: list[str] = []
     rows_without_kb: list[str] = []
@@ -235,6 +235,10 @@ def backfill_from_kb() -> None:
                 fm, _ = parse_doc(doc.read_text())
                 if fm.get("type") == "family":
                     continue
+                # Convention: a strategy's kb doc filename equals its name. If a doc's `name`
+                # frontmatter diverges from its filename, that strategy can surface in BOTH
+                # `processed` and `registry_rows_without_kb_doc` — an authoring error to fix
+                # in the vault.
                 doc_name = str(fm.get("name", doc.stem))
                 if doc_name not in names:
                     kb_without_row.append(doc_name)
@@ -258,7 +262,7 @@ def backfill_from_kb() -> None:
                     description=fm.get("description"),
                     tags=list(tags) if isinstance(tags, list) else None,
                 )
-                filled.append(doc_name)
+                processed.append(doc_name)
         # Final default-fill of any remaining NULLs
         conn.execute("UPDATE strategies SET author = COALESCE(author, ?)", (Author.AGENT.value,))
         conn.execute(
@@ -267,11 +271,13 @@ def backfill_from_kb() -> None:
         )
         conn.execute("UPDATE strategies SET tags = COALESCE(tags, '[]')")
         conn.commit()
+    # `processed` = strategies whose kb doc was found and reconciled into the registry.
+    # Fill-only-NULL means already-populated columns are left untouched (not a "changed" list).
     emit(ok({
-        "filled": sorted(set(filled)),
+        "processed": sorted(processed),
         "unmappable": unmappable,
-        "kb_docs_without_registry_row": sorted(set(kb_without_row)),
-        "registry_rows_without_kb_doc": sorted(set(rows_without_kb)),
+        "kb_docs_without_registry_row": sorted(kb_without_row),
+        "registry_rows_without_kb_doc": sorted(rows_without_kb),
     }))
 
 

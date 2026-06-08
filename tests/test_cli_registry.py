@@ -389,7 +389,7 @@ def test_backfill_from_kb_reports_and_fills(monkeypatch, tmp_path):
     (strat_dir / "alpha.md").write_text(render_doc(fm, "## Hypothesis\n"))
 
     out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
-    assert "alpha" in out["filled"]
+    assert "alpha" in out["processed"]
     assert "unmappable" in out
     assert "kb_docs_without_registry_row" in out
     assert "registry_rows_without_kb_doc" in out

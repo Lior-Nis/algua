@@ -1437,7 +1437,7 @@ def test_backfill_from_kb_reports_and_fills(registry_env_with_kb):
     # (Use the project's kb settings fixture; write kb/strategies/a.md with family/hypothesis_status.)
     ...
     out = json_of(run_cli(["registry", "backfill-from-kb"]))
-    assert "a" in out["filled"]
+    assert "a" in out["processed"]
     rec = json_of(run_cli(["registry", "show", "a"]))
     assert rec["family"] == "mean-reversion"
 ```
@@ -1460,7 +1460,7 @@ def backfill_from_kb() -> None:
     from algua.knowledge.sync import _unwikilink, strategy_doc_path
 
     settings = get_settings()
-    filled: list[str] = []
+    processed: list[str] = []
     unmappable: list[dict] = []
     kb_without_row: list[str] = []
     rows_without_kb: list[str] = []
@@ -1502,7 +1502,7 @@ def backfill_from_kb() -> None:
                 description=fm.get("description"),
                 tags=list(tags) if isinstance(tags, list) else None,
             )
-            filled.append(name)
+            processed.append(name)
         # final default-fill of any remaining NULLs
         conn.execute("UPDATE strategies SET author = COALESCE(author, ?)", (Author.AGENT.value,))
         conn.execute(
@@ -1512,10 +1512,10 @@ def backfill_from_kb() -> None:
         conn.execute("UPDATE strategies SET tags = COALESCE(tags, '[]')")
         conn.commit()
     emit(ok({
-        "filled": sorted(set(filled)),
+        "processed": sorted(processed),
         "unmappable": unmappable,
-        "kb_docs_without_registry_row": sorted(set(kb_without_row)),
-        "registry_rows_without_kb_doc": sorted(set(rows_without_kb)),
+        "kb_docs_without_registry_row": sorted(kb_without_row),
+        "registry_rows_without_kb_doc": sorted(rows_without_kb),
     }))
 ```
 
