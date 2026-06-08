@@ -47,7 +47,12 @@ def resolve_pit_ok(
     on or before the backtest start (coverage, not mere presence)."""
     if universe_name is None or not universe_snapshots:
         return False
-    earliest = min(date.fromisoformat(s["effective_date"]) for s in universe_snapshots)
+    # Fail closed: a malformed/missing effective_date means we CANNOT prove PIT coverage, so treat
+    # it as non-PIT (not promotable) rather than raising after the holdout has been recorded.
+    try:
+        earliest = min(date.fromisoformat(s["effective_date"]) for s in universe_snapshots)
+    except (KeyError, ValueError, TypeError):
+        return False
     return earliest <= period_start
 
 
@@ -72,6 +77,13 @@ def promotion_preflight(
     is touched and before any gate row is minted: (1) relaxations-need-human; (2) stage legality
     (BACKTESTED -> SHORTLISTED must be legal — never mint a passing token for an illegal source
     stage); (3) breadth resolution (refuse "no measured breadth" here)."""
+    # FIRST check, before any holdout-affecting work and before the relaxation guard: only an agent
+    # or a human may promote. SYSTEM is not a valid promote actor — it would pass as "not human"
+    # (strict), burn the holdout, mint a gate_evaluations row it can NEVER consume (consumable rows
+    # are filtered actor='agent'), leaving an orphaned token.
+    if actor not in (Actor.AGENT, Actor.HUMAN):
+        raise ValueError(
+            f"research promote requires --actor agent or human, got {actor.value}")
     guard_agent_relaxations(actor, declared_combos=declared_combos,
                             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit)
     rec = repo.get(name)

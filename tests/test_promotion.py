@@ -41,6 +41,17 @@ def test_resolve_pit_ok_requires_coverage():
     assert resolve_pit_ok(None, None, date(2022, 1, 1)) is False
 
 
+def test_resolve_pit_ok_fails_closed_on_malformed_snapshot():
+    # A malformed/missing effective_date must NOT raise (the holdout was already recorded) — it
+    # fails closed to non-PIT (not promotable).
+    missing = [{"snapshot_id": "u1"}]  # KeyError
+    bad_format = [{"snapshot_id": "u1", "effective_date": "not-a-date"}]  # ValueError
+    wrong_type = [{"snapshot_id": "u1", "effective_date": None}]  # TypeError
+    assert resolve_pit_ok("sp", missing, date(2022, 1, 1)) is False
+    assert resolve_pit_ok("sp", bad_format, date(2022, 1, 1)) is False
+    assert resolve_pit_ok("sp", wrong_type, date(2022, 1, 1)) is False
+
+
 @pytest.mark.parametrize("stages", [
     (),                                              # idea
     (Stage.BACKTESTED, Stage.SHORTLISTED),           # shortlisted
@@ -56,6 +67,20 @@ def test_preflight_refuses_non_backtested_source(tmp_path, stages):
         promotion_preflight(repo, "alpha", actor=Actor.AGENT, declared_combos=None,
                             allow_holdout_reuse=False, allow_non_pit=False)
     # Refused in preflight => no gate row, no holdout burn.
+    assert repo._conn.execute("SELECT COUNT(*) c FROM gate_evaluations").fetchone()["c"] == 0
+    assert repo._conn.execute("SELECT COUNT(*) c FROM holdout_evaluations").fetchone()["c"] == 0
+
+
+def test_preflight_refuses_system_actor_before_any_holdout_or_gate_row(tmp_path):
+    # SYSTEM is not a valid promote actor. The refusal is the FIRST check in preflight (before the
+    # relaxation guard and before walk_forward), so no holdout is burned and no gate row is minted.
+    repo = _repo(tmp_path)
+    rec = repo.add("alpha")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    repo.record_search_trial("alpha", 4, "{}")  # measured breadth present (isolate the actor check)
+    with pytest.raises(ValueError, match="agent or human"):
+        promotion_preflight(repo, "alpha", actor=Actor.SYSTEM, declared_combos=None,
+                            allow_holdout_reuse=False, allow_non_pit=False)
     assert repo._conn.execute("SELECT COUNT(*) c FROM gate_evaluations").fetchone()["c"] == 0
     assert repo._conn.execute("SELECT COUNT(*) c FROM holdout_evaluations").fetchone()["c"] == 0
 

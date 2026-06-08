@@ -193,6 +193,58 @@ def _holdout_rows(tmp_path):
         conn.close()
 
 
+def _gate_rows(tmp_path):
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "r.db")
+    try:
+        return conn.execute("SELECT passed FROM gate_evaluations ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+
+def test_promote_system_actor_refused_before_holdout_and_gate_row(tmp_path):
+    assert _backtest_to_backtested().exit_code == 0
+    assert _sweep().exit_code == 0  # measured breadth, so the actor check is the refusal
+    result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 *_PASS, "--allow-non-pit", "--actor", "system"])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "agent or human" in payload["error"]
+    # Refused in preflight, before walk_forward: no gate row minted, no holdout burned.
+    assert len(_gate_rows(tmp_path)) == 0
+    assert len(_holdout_rows(tmp_path)) == 0
+    assert _stage() == "backtested"
+
+
+def test_gate_row_written_on_both_pass_and_fail(tmp_path):
+    # A FAILING gate (impossible Sharpe) still records an audit row with passed=0; a PASSING gate
+    # records one with passed=1. The strategy stays `backtested` after the fail so the second
+    # (passing) promote on the same lifecycle is legal.
+    assert _backtest_to_backtested().exit_code == 0
+    fail = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                               "--start", "2022-01-01", "--end", "2023-12-31",
+                               "--min-holdout-sharpe", "999", "--n-combos", "9",
+                               "--allow-non-pit", "--actor", "human"])
+    assert fail.exit_code == 0, fail.stdout
+    assert json.loads(fail.stdout)["passed"] is False
+    rows = _gate_rows(tmp_path)
+    assert len(rows) == 1 and rows[0][0] == 0  # one row, passed=0
+    assert _stage() == "backtested"
+
+    # Passing promote on a DISJOINT window (avoids the burned-holdout refusal) records passed=1.
+    ok = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                             "--start", "2022-01-01", "--end", "2023-12-31",
+                             *_PASS, "--n-combos", "9", "--allow-holdout-reuse",
+                             "--allow-non-pit", "--actor", "human"])
+    assert ok.exit_code == 0, ok.stdout
+    assert json.loads(ok.stdout)["passed"] is True
+    rows = _gate_rows(tmp_path)
+    assert len(rows) == 2 and rows[1][0] == 1  # second row, passed=1
+    assert _stage() == "shortlisted"
+
+
 def test_first_promote_records_holdout_evaluation(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
     result = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
