@@ -108,9 +108,11 @@ def new(
         except StrategyNotFound:
             pass
         if derived_from is not None:
-            repo.get(derived_from)  # raises StrategyNotFound if parent unknown
+            if derived_from == name:
+                raise ValueError(f"{name} cannot be derived from itself")
+            repo.get(derived_from)  # StrategyNotFound if the parent is unknown
         # --- register first (fast, transactional) ---
-        repo.add(
+        rec = repo.add(
             name, family=family, tags=tag or [], author=author,
             hypothesis_status=hypothesis_status, derived_from=derived_from,
             description=description,
@@ -130,10 +132,12 @@ def new(
                 if not fam_path.exists():
                     fam_path.write_text(scaffold_family_doc(family))
                 family_doc = str(fam_path)
+            sync_strategy_doc(settings, name, stage=rec.stage.value, metadata=_kb_metadata(rec))
         except Exception as exc:
             repo.delete(name)
-            # best-effort: remove a half-written module file so a retry isn't blocked
+            # best-effort: remove half-written files so a retry isn't blocked
             path.unlink(missing_ok=True)
+            doc_path.unlink(missing_ok=True)
             raise ValueError(f"scaffold failed for {name!r}: {exc}") from exc
     emit(ok({"name": name, "path": str(path), "doc": str(doc_path), "family_doc": family_doc}))
 

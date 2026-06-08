@@ -187,6 +187,7 @@ def test_strategy_new_rollback_on_scaffold_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
 
     import algua.cli.strategy_cmd as sc
+    import algua.strategies  # noqa: PLC0415
 
     def boom(*a, **k):
         raise OSError("disk full")
@@ -197,6 +198,9 @@ def test_strategy_new_rollback_on_scaffold_failure(tmp_path, monkeypatch):
     # The registry row must have been removed by the rollback.
     listed = json.loads(runner.invoke(app, ["registry", "list"]).stdout)
     assert "rollbackme" not in [r["name"] for r in listed]
+    # The module .py file must also have been cleaned up by the rollback.
+    module_path = Path(algua.strategies.__file__).parent / "examples" / "rollbackme.py"
+    assert not module_path.exists(), f"rollback left behind module file: {module_path}"
 
 
 # ---------------------------------------------------------------------------
@@ -226,3 +230,26 @@ def test_new_doc_frontmatter_matches_registry(tmp_path, monkeypatch, _cleanup_sc
     fm, _ = parse_doc(doc_path.read_text())
     assert fm["hypothesis_status"] == "untested"
     assert fm.get("family") == "[[mean-reversion]]"
+
+
+def test_strategy_new_metadata_roundtrips_to_doc(tmp_path, monkeypatch, _cleanup_scaffolded):
+    """strategy new --author/--tag metadata must appear in the kb doc at creation time (Fix 3)."""
+    from algua.knowledge.frontmatter import parse_doc
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    result = runner.invoke(
+        app,
+        ["strategy", "new", "mdoc", "--author", "human", "--tag", "carry",
+         "--hypothesis-status", "untested"],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    _cleanup_scaffolded.append(Path(payload["path"]))
+
+    doc_path = Path(payload["doc"])
+    fm, _ = parse_doc(doc_path.read_text())
+    assert fm["author"] == "human", f"expected author='human', got {fm.get('author')!r}"
+    assert fm["tags"] == ["carry"], f"expected tags=['carry'], got {fm.get('tags')!r}"
