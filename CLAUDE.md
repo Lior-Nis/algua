@@ -36,6 +36,10 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   historical bars into a parquet snapshot.
 - `uv run algua data ingest-universe NAME --symbols AAPL,MSFT --effective-date D` — record
   point-in-time universe membership.
+- `uv run algua data import-bars --vendor firstrate --raw-dir DIR --adjusted-dir DIR --as-of TS` —
+  bulk-import local vendor files (FirstRateData: per-symbol unadjusted + adjusted), normalized to
+  the bar-schema as one consolidated snapshot. Streamed (bounded RAM); `adj_close` from the adjusted
+  file (no corporate-action math yet).
 - `uv run algua data inspect [--summary|--dataset NAME|--snapshot-id ID]` — inspect data snapshots.
 
 ## Lifecycle stages

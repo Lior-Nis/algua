@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import time
+import uuid
+from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from algua.data.files import (
     copy_snapshot,
@@ -28,6 +35,10 @@ from algua.data.models import (
     UniverseSnapshot,
 )
 from algua.data.schema import empty_bars, to_bar_schema
+
+# Above this row count, a streamed import warns and self-marks "not servable until #130", because
+# the read path still fully materializes a snapshot. Not a hard cap — deep history is the point.
+IMPORT_WARN_ROWS = 5_000_000
 
 
 class SnapshotNotFound(LookupError):
@@ -217,6 +228,154 @@ class DataStore:
         )
         self.manifest.append(rec)
         return rec
+
+    def clear_staging(self, *, max_age_seconds: float = 3600.0) -> None:
+        """Remove stale streamed-import staging dirs (crash residue) older than `max_age_seconds`.
+
+        Age-based so a concurrent in-progress import (its own fresh UUID staging dir) is never
+        deleted out from under its writer. Each `ingest_bars_streamed` run already cleans its own
+        staging dir in a `finally`; this only sweeps residue left by a hard kill.
+        """
+        staging = self.data_dir / "snapshots" / "_staging"
+        if not staging.exists():
+            return
+        cutoff = time.time() - max_age_seconds
+        for child in staging.iterdir():
+            try:
+                if child.stat().st_mtime < cutoff:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                continue
+
+    def ingest_bars_streamed(
+        self,
+        *,
+        provider: str,
+        symbols: list[str],
+        as_of: str,
+        source: str,
+        chunks: Iterable[pd.DataFrame],
+        timeframe: str = "1d",
+        adjustment: str = "split_div",
+        start: str | None = None,
+        end: str | None = None,
+        source_metadata: dict[str, str] | None = None,
+    ) -> SnapshotRecord:
+        """Stream per-symbol bar chunks into one consolidated bars snapshot.
+
+        Crash-safe: stream -> staging file, hash, dedup on snapshot_id (idempotent re-ingest),
+        atomic rename into the immutable snapshot path, append the manifest last. Each chunk is
+        normalized via `to_bar_schema` (so output is schema-valid) and written as one row group,
+        in the order received (the importer yields canonical sorted-symbol order — required for a
+        stable `snapshot_id`).
+
+        Cross-chunk integrity: each symbol must appear in exactly one chunk — the method rejects a
+        symbol that recurs in a later chunk (so the consolidated snapshot is globally unique on
+        (timestamp, symbol) given each chunk is internally schema-valid). The FirstRate importer
+        satisfies this by yielding one chunk per symbol.
+
+        Note: when `start`/`end` are given, the coverage check is span-only (observed range covers
+        the requested endpoints); it does not detect interior gaps.
+        """
+        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
+        staging_file = staging_dir / "bars.parquet"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        writer: pq.ParquetWriter | None = None
+        row_count = 0
+        observed_min: pd.Timestamp | None = None
+        observed_max: pd.Timestamp | None = None
+        seen_symbols_set: set[str] = set()
+        try:
+            for chunk in chunks:
+                normalized = to_bar_schema(chunk).reset_index()  # columns: timestamp, *BAR_COLUMNS
+                chunk_symbols = set(normalized["symbol"].unique())
+                clash = chunk_symbols & seen_symbols_set
+                if clash:
+                    raise ValueError(
+                        f"symbol(s) {sorted(clash)} appear in more than one chunk; streamed "
+                        "ingest requires each symbol's bars in a single contiguous chunk"
+                    )
+                seen_symbols_set |= chunk_symbols
+                table = pa.Table.from_pandas(
+                    normalized, preserve_index=False
+                ).replace_schema_metadata(None)
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        staging_file, table.schema, compression="snappy", version="2.6"
+                    )
+                writer.write_table(table)
+                row_count += len(normalized)
+                cmin = normalized["timestamp"].min()
+                cmax = normalized["timestamp"].max()
+                observed_min = cmin if observed_min is None else min(observed_min, cmin)
+                observed_max = cmax if observed_max is None else max(observed_max, cmax)
+            if writer is None:
+                raise ValueError("no bars to ingest (empty chunk stream)")
+            writer.close()
+            writer = None
+
+            if observed_min is None or observed_max is None:  # unreachable: writer set => loop ran
+                raise ValueError("no bars to ingest (empty chunk stream)")
+            observed_start = observed_min.date().isoformat()
+            observed_end = observed_max.date().isoformat()
+            if start is not None or end is not None:
+                if (start is not None and observed_start > start) or (
+                    end is not None and observed_end < end
+                ):
+                    raise ValueError(
+                        f"observed coverage [{observed_start}, {observed_end}] does not cover "
+                        f"requested [{start}, {end}]"
+                    )
+
+            meta_extra = dict(source_metadata or {})
+            if start is not None:
+                meta_extra["requested_start"] = start
+            if end is not None:
+                meta_extra["requested_end"] = end
+            meta_extra["observed_start"] = observed_start
+            meta_extra["observed_end"] = observed_end
+            if row_count >= IMPORT_WARN_ROWS:
+                meta_extra["servable"] = "deferred-130"
+
+            metadata = _metadata(
+                dataset=Dataset.BARS.value,
+                provider=provider,
+                symbols=symbols,
+                start=observed_start,
+                end=observed_end,
+                as_of=as_of,
+                source=source,
+                kind=Kind.BARS.value,
+                timeframe=timeframe,
+                adjustment=adjustment,
+                source_metadata=meta_extra,
+            )
+            content_hash = sha256_file(staging_file)
+            snapshot_id = _snapshot_id(metadata, content_hash)
+
+            existing = self.manifest.find(snapshot_id)
+            if existing is not None:
+                return existing
+
+            relative_path = Path("snapshots") / metadata.dataset / snapshot_id / "bars.parquet"
+            target = self.data_dir / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staging_file, target)
+            rec = SnapshotRecord(
+                snapshot_id=snapshot_id,
+                metadata=metadata,
+                row_count=row_count,
+                content_hash=content_hash,
+                data_path=relative_path,
+                created_at=datetime.now(UTC).isoformat(),
+                storage_format="parquet",
+            )
+            self.manifest.append(rec)
+            return rec
+        finally:
+            if writer is not None:
+                writer.close()
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def list_snapshots(self, dataset: str | None = None) -> list[SnapshotRecord]:
         return self.manifest.list_records(dataset)
