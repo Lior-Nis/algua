@@ -269,3 +269,97 @@ def test_simulate_applies_lag_after_fast_path() -> None:
                                   rtol=0.0)
     # First row is flat (shifted-in NaN -> 0) — proves the lag was applied.
     assert (weights_eff.iloc[0] == 0.0).all()
+
+
+# --- new rails (#135) enforced in the vectorized fast-path, not just the loop ----------------
+
+
+def test_fast_path_concentration_cap_breach_raises() -> None:
+    """The single-name cap is enforced in the fast-path, identically to the loop: a panel putting
+    0.9 in a name when the cap is 0.5 must raise (cap trips before gross given the bundle order)."""
+    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(0.9, index=adj.index, columns=adj.columns)
+
+    cfg = StrategyConfig(
+        name="conc", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
+                                    warmup_bars=0, max_weight_per_symbol=0.5),
+        params={},
+    )
+    strat = LoadedStrategy(
+        config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel_fn
+    )
+    bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    with pytest.raises(BacktestError, match="max_weight_per_symbol"):
+        _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
+
+
+def test_fast_path_inf_weight_raises_non_finite() -> None:
+    """A non-finite VALUE survives the panel's reindex+fillna(0.0) (fillna only fills NaN), so the
+    fail-closed finite guard must catch an inf in the fast-path rather than let it reach a fill."""
+    import numpy as np
+
+    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(np.inf, index=adj.index, columns=adj.columns)
+
+    cfg = StrategyConfig(
+        name="inf", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    strat = LoadedStrategy(
+        config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel_fn
+    )
+    bars, adj = _bars_adj(["AAA"], seed=2)
+    with pytest.raises(BacktestError, match="non-finite"):
+        _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
+
+
+def test_fast_path_omitted_cell_nan_stays_flat() -> None:
+    """The panel's documented NaN-as-flat convention is preserved: an omitted cell (NaN) is
+    filled to 0.0 (flat) BEFORE the finite guard, so it must NOT breach — only real values do."""
+    import numpy as np
+
+    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        df = pd.DataFrame(0.5, index=adj.index, columns=adj.columns)
+        df["BBB"] = np.nan  # BBB omitted -> flat by convention, not a breach
+        return df
+
+    cfg = StrategyConfig(
+        name="sparse", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={},
+    )
+    # The per-bar fn must agree with the panel for the parity guard: AAA at 0.5, BBB omitted (flat).
+    strat = LoadedStrategy(
+        config=cfg, fn=lambda v, p: pd.Series({"AAA": 0.5}), panel_fn=panel_fn
+    )
+    bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    # Runs clean: AAA at 0.5 (within cap + gross), BBB held flat. No raise is the assertion.
+    weights = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
+    assert (weights["BBB"] == 0.0).all()
+
+
+def test_fast_path_allow_short_permits_negative_panel() -> None:
+    """With allow_short=True a negative panel weight passes the fast-path short policy (the cap
+    still bounds |weight|); the default-False rejection is pinned by the long-only test."""
+    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(-0.5, index=adj.index, columns=adj.columns)
+
+    cfg = StrategyConfig(
+        name="shortable", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
+                                    warmup_bars=0, allow_short=True),
+        params={},
+    )
+    # The per-bar fn must agree with the panel for the parity guard: AAA short at -0.5.
+    strat = LoadedStrategy(
+        config=cfg, fn=lambda v, p: pd.Series({"AAA": -0.5}), panel_fn=panel_fn
+    )
+    bars, adj = _bars_adj(["AAA"], seed=2)
+    weights = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
+    assert (weights["AAA"] == -0.5).all()
