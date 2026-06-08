@@ -94,6 +94,11 @@ consumers must not assume as-of reads exist.
   `validate_bars` (it is called on the read path).
 - Research/backtest layer: the synthetic fixture `DataProvider` emits this same shape, so
   swapping in a real store-backed snapshot is a no-op at the seam.
+- **Streamed bulk imports** (`data import-bars`) store the consolidated `bars.parquet` in
+  **symbol-major `(symbol, timestamp)`** order to keep ingest RAM bounded. This is contract-safe
+  because `read_bars` re-sorts to canonical `(timestamp, symbol)` via `to_bar_schema` on read — the
+  contract governs returned order, not on-disk layout. A future scaled read path (#130) must treat
+  these datasets as symbol-major (per-symbol pruning / streaming merge), not time-major.
 
 ## Change control
 This schema and `algua/contracts/types.py::DataProvider` are the **authoritative interface**
