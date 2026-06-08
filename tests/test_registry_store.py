@@ -404,3 +404,59 @@ def test_backfill_metadata_all_none_is_noop(tmp_path):
     assert after.hypothesis_status == before.hypothesis_status
     assert after.derived_from == before.derived_from
     assert after.description == before.description
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: default_fill_metadata_nulls — lives in store, not CLI
+# ---------------------------------------------------------------------------
+
+def test_default_fill_metadata_nulls_fills_remaining_nulls(tmp_path):
+    """default_fill_metadata_nulls must fill author/hypothesis_status/tags NULLs to defaults."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # Raw-insert a legacy NULL row (bypasses add() which writes defaults).
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('legacy','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    repo.default_fill_metadata_nulls()
+    rec = repo.get("legacy")
+    assert rec.author == Author.AGENT
+    assert rec.hypothesis_status == HypothesisStatus.UNTESTED
+    assert rec.tags == []
+
+
+def test_default_fill_metadata_nulls_does_not_overwrite_existing(tmp_path):
+    """default_fill_metadata_nulls must leave already-set values untouched."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", author=Author.HUMAN, hypothesis_status=HypothesisStatus.SUPPORTED,
+             tags=["carry"])
+    repo.default_fill_metadata_nulls()
+    rec = repo.get("a")
+    assert rec.author == Author.HUMAN
+    assert rec.hypothesis_status == HypothesisStatus.SUPPORTED
+    assert rec.tags == ["carry"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: tag filter with malformed non-NULL JSON must not crash
+# ---------------------------------------------------------------------------
+
+def test_list_strategies_tag_filter_tolerates_malformed_tags(tmp_path):
+    """list_strategies(tags=[...]) must not crash on a row with malformed non-NULL tags."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # Raw-insert a row with malformed tags JSON.
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at, tags) VALUES "
+        "('malformed','idea','2026-01-01','2026-01-01','not json')"
+    )
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    # Must not raise; malformed row must simply be absent from results.
+    results = repo.list_strategies(tags=["x"])
+    assert all(r.name != "malformed" for r in results)

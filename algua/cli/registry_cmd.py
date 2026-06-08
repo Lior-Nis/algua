@@ -217,6 +217,7 @@ def backfill_from_kb() -> None:
     unmappable: list[dict] = []
     kb_without_row: list[str] = []
     rows_without_kb: list[str] = []
+    frontmatter_name_mismatches: list[dict] = []
     valid_status = {h.value for h in HypothesisStatus}
     valid_author = {a.value for a in Author}
     with registry_conn() as conn:
@@ -235,11 +236,15 @@ def backfill_from_kb() -> None:
                 fm, _ = parse_doc(doc.read_text())
                 if fm.get("type") == "family":
                     continue
-                # Convention: a strategy's kb doc filename equals its name. If a doc's `name`
-                # frontmatter diverges from its filename, that strategy can surface in BOTH
-                # `processed` and `registry_rows_without_kb_doc` — an authoring error to fix
-                # in the vault.
-                doc_name = str(fm.get("name", doc.stem))
+                # The filename (doc.stem) is the authoritative registry key.
+                # A hand-edited frontmatter `name:` that differs from the filename would
+                # mis-attribute the backfill, so we always use doc.stem.
+                doc_name = doc.stem
+                fm_name = fm.get("name")
+                if fm_name is not None and str(fm_name) != doc_name:
+                    frontmatter_name_mismatches.append(
+                        {"file": doc.name, "frontmatter_name": str(fm_name)}
+                    )
                 if doc_name not in names:
                     kb_without_row.append(doc_name)
                     continue
@@ -252,25 +257,27 @@ def backfill_from_kb() -> None:
                 if author is not None and author not in valid_author:
                     unmappable.append({"name": doc_name, "field": "author", "value": author})
                     author = None
+                derived_from = _unwikilink(fm.get("derived_from"))
+                # Validate derived_from: reject self-reference or unknown strategy name.
+                if derived_from:
+                    if derived_from == doc_name or derived_from not in names:
+                        unmappable.append(
+                            {"name": doc_name, "field": "derived_from", "value": derived_from}
+                        )
+                        derived_from = None
                 tags = fm.get("tags")
                 repo.backfill_metadata(
                     doc_name,
                     family=_unwikilink(fm.get("family")),
-                    derived_from=_unwikilink(fm.get("derived_from")),
+                    derived_from=derived_from,
                     hypothesis_status=status,
                     author=author,
                     description=fm.get("description"),
                     tags=list(tags) if isinstance(tags, list) else None,
                 )
                 processed.append(doc_name)
-        # Final default-fill of any remaining NULLs
-        conn.execute("UPDATE strategies SET author = COALESCE(author, ?)", (Author.AGENT.value,))
-        conn.execute(
-            "UPDATE strategies SET hypothesis_status = COALESCE(hypothesis_status, ?)",
-            (HypothesisStatus.UNTESTED.value,),
-        )
-        conn.execute("UPDATE strategies SET tags = COALESCE(tags, '[]')")
-        conn.commit()
+        # Final default-fill of any remaining NULLs — delegated to the repository.
+        repo.default_fill_metadata_nulls()
     # `processed` = strategies whose kb doc was found and reconciled into the registry.
     # Fill-only-NULL means already-populated columns are left untouched (not a "changed" list).
     emit(ok({
@@ -278,6 +285,7 @@ def backfill_from_kb() -> None:
         "unmappable": unmappable,
         "kb_docs_without_registry_row": sorted(kb_without_row),
         "registry_rows_without_kb_doc": sorted(rows_without_kb),
+        "frontmatter_name_mismatches": frontmatter_name_mismatches,
     }))
 
 

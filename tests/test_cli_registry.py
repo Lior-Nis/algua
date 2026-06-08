@@ -487,6 +487,117 @@ def test_backfill_from_kb_reports_orphan_lists(monkeypatch, tmp_path):
     assert "ghost_doc" in out["kb_docs_without_registry_row"]
 
 
+# ---------------------------------------------------------------------------
+# Fix 1: backfill-from-kb keys on filename (doc.stem), not frontmatter name
+# ---------------------------------------------------------------------------
+
+def test_backfill_keys_on_filename_not_frontmatter_name(monkeypatch, tmp_path):
+    """When frontmatter name: differs from filename, doc.stem is used as the registry key;
+    the mismatch is reported in frontmatter_name_mismatches."""
+    from algua.config.settings import get_settings
+    from algua.knowledge.frontmatter import render_doc
+    from algua.registry.db import connect, migrate
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    db_path = get_settings().db_path
+    conn = connect(db_path)
+    migrate(conn)
+    # Row registered under the filename stem, NOT under the frontmatter name.
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('file_stem','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    # The file is named file_stem.md but frontmatter says name: wrong_name
+    fm = {"name": "wrong_name", "stage": "idea", "family": "[[momentum]]"}
+    (strat_dir / "file_stem.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    # The strategy should be processed under file_stem (the filename), not wrong_name.
+    assert "file_stem" in out["processed"]
+    # The mismatch should be reported.
+    assert any(m["file"] == "file_stem.md" and m["frontmatter_name"] == "wrong_name"
+               for m in out["frontmatter_name_mismatches"])
+    # The family fill should have landed on file_stem (not on wrong_name).
+    rec = _json(runner.invoke(app, ["registry", "show", "file_stem"]))
+    assert rec["family"] == "momentum"
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: backfill validates derived_from (self-reference and ghost name)
+# ---------------------------------------------------------------------------
+
+def test_backfill_derived_from_self_reference_goes_to_unmappable(monkeypatch, tmp_path):
+    """A kb doc with derived_from pointing to itself must land in unmappable, not stored."""
+    from algua.config.settings import get_settings
+    from algua.knowledge.frontmatter import render_doc
+    from algua.registry.db import connect, migrate
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    db_path = get_settings().db_path
+    conn = connect(db_path)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('self_ref','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    # derived_from is a wikilink to the strategy itself (self-reference)
+    fm = {"name": "self_ref", "stage": "idea", "derived_from": "[[self_ref]]"}
+    (strat_dir / "self_ref.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    assert any(u["name"] == "self_ref" and u["field"] == "derived_from"
+               for u in out["unmappable"])
+    rec = _json(runner.invoke(app, ["registry", "show", "self_ref"]))
+    assert rec["derived_from"] is None
+
+
+def test_backfill_derived_from_ghost_goes_to_unmappable(monkeypatch, tmp_path):
+    """A kb doc with derived_from pointing to an unregistered strategy must go to unmappable."""
+    from algua.config.settings import get_settings
+    from algua.knowledge.frontmatter import render_doc
+    from algua.registry.db import connect, migrate
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    db_path = get_settings().db_path
+    conn = connect(db_path)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('child_strat','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    # derived_from references a strategy that is not in the registry
+    fm = {"name": "child_strat", "stage": "idea", "derived_from": "[[ghost_parent]]"}
+    (strat_dir / "child_strat.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    assert any(u["name"] == "child_strat" and u["field"] == "derived_from"
+               and u["value"] == "ghost_parent"
+               for u in out["unmappable"])
+    rec = _json(runner.invoke(app, ["registry", "show", "child_strat"]))
+    assert rec["derived_from"] is None
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity

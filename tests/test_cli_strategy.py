@@ -232,6 +232,66 @@ def test_new_doc_frontmatter_matches_registry(tmp_path, monkeypatch, _cleanup_sc
     assert fm.get("family") == "[[mean-reversion]]"
 
 
+def test_strategy_new_rollback_removes_created_family_hub(tmp_path, monkeypatch):
+    """If scaffold fails AFTER the family hub is written, rollback must remove the hub file."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    import algua.cli.strategy_cmd as sc
+
+    # Force failure after the family hub has been written (sync_strategy_doc is called last).
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sc, "sync_strategy_doc", boom)
+    result = runner.invoke(
+        app, ["strategy", "new", "rollback_fam", "--family", "new-family"]
+    )
+    assert json.loads(result.stdout)["ok"] is False
+
+    # The family hub must have been removed by rollback (it was created this call).
+    from algua.config.settings import get_settings
+    from algua.knowledge.sync import family_doc_path
+    fam_path = family_doc_path(get_settings(), "new-family")
+    assert not fam_path.exists(), f"rollback left behind family hub: {fam_path}"
+
+
+def test_strategy_new_rollback_keeps_preexisting_family_hub(tmp_path, monkeypatch,
+                                                             _cleanup_scaffolded):
+    """If the family hub already existed before this call, rollback must NOT remove it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    import algua.cli.strategy_cmd as sc
+    from algua.config.settings import get_settings
+    from algua.knowledge.sync import family_doc_path
+
+    # Pre-create a strategy that establishes the family hub.
+    result0 = runner.invoke(
+        app, ["strategy", "new", "prior_strat", "--family", "existing-family"]
+    )
+    assert result0.exit_code == 0, result0.stdout
+    _cleanup_scaffolded.append(Path(json.loads(result0.stdout)["path"]))
+
+    fam_path = family_doc_path(get_settings(), "existing-family")
+    assert fam_path.exists(), "pre-existing family hub must exist before test"
+
+    # Force failure after family hub check (sync_strategy_doc is called last).
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sc, "sync_strategy_doc", boom)
+    result = runner.invoke(
+        app, ["strategy", "new", "second_strat", "--family", "existing-family"]
+    )
+    assert json.loads(result.stdout)["ok"] is False
+
+    # The pre-existing family hub must NOT have been removed.
+    assert fam_path.exists(), "rollback must not remove a pre-existing family hub"
+
+
 def test_strategy_new_metadata_roundtrips_to_doc(tmp_path, monkeypatch, _cleanup_scaffolded):
     """strategy new --author/--tag metadata must appear in the kb doc at creation time (Fix 3)."""
     from algua.knowledge.frontmatter import parse_doc

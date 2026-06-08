@@ -163,7 +163,9 @@ class SqliteStrategyRepository:
             params.extend((HypothesisStatus.UNTESTED.value, hypothesis_status.value))
         for tag in canonicalize_tags(tags or []):
             clauses.append(
-                "EXISTS (SELECT 1 FROM json_each(COALESCE(tags, '[]')) WHERE value = ?)"
+                "EXISTS (SELECT 1 FROM json_each("
+                "CASE WHEN json_valid(tags) THEN tags ELSE '[]' END"
+                ") WHERE value = ?)"
             )
             params.append(tag)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -205,6 +207,23 @@ class SqliteStrategyRepository:
                     f"UPDATE strategies SET {assignments} WHERE id = ?", params
                 )
         return self.get(name)
+
+    def default_fill_metadata_nulls(self) -> None:
+        """Fill every strategy row's author/hypothesis_status/tags column from its default when
+        still NULL. Used as the terminal step of the backfill-from-kb command. Idempotent.
+
+        Runs in a single transaction so a partial run is not committed.
+        """
+        with self._conn:
+            self._conn.execute(
+                "UPDATE strategies SET author = COALESCE(author, ?)",
+                (Author.AGENT.value,),
+            )
+            self._conn.execute(
+                "UPDATE strategies SET hypothesis_status = COALESCE(hypothesis_status, ?)",
+                (HypothesisStatus.UNTESTED.value,),
+            )
+            self._conn.execute("UPDATE strategies SET tags = COALESCE(tags, '[]')")
 
     def delete(self, name: str) -> None:
         """Remove a strategy row and its transition rows. ONLY for rolling back a failed

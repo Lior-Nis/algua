@@ -122,6 +122,11 @@ class StrategyRepository(Protocol):
         """
         ...
 
+    def default_fill_metadata_nulls(self) -> None:
+        """Fill every strategy row's author/hypothesis_status/tags column from its default when
+        still NULL. Terminal step of the ``backfill-from-kb`` command. Idempotent."""
+        ...
+
     def delete(self, name: str) -> None:
         """Remove a strategy row and its transition rows. ONLY for rolling back a failed
         ``strategy new`` that just created it — there is no general deletion workflow."""

@@ -118,6 +118,8 @@ def new(
             description=description,
         )
         # --- scaffold; roll the registration back on any failure ---
+        fam_path: Path = family_doc_path(settings, family) if family else Path("/dev/null")
+        fam_created = False
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(_TEMPLATE.format(name=name))
@@ -127,10 +129,10 @@ def new(
             )
             family_doc: str | None = None
             if family:
-                fam_path = family_doc_path(settings, family)
                 fam_path.parent.mkdir(parents=True, exist_ok=True)
                 if not fam_path.exists():
                     fam_path.write_text(scaffold_family_doc(family))
+                    fam_created = True
                 family_doc = str(fam_path)
             sync_strategy_doc(settings, name, stage=rec.stage.value, metadata=_kb_metadata(rec))
         except Exception as exc:
@@ -138,6 +140,8 @@ def new(
             # best-effort: remove half-written files so a retry isn't blocked
             path.unlink(missing_ok=True)
             doc_path.unlink(missing_ok=True)
+            if fam_created:
+                fam_path.unlink(missing_ok=True)
             raise ValueError(f"scaffold failed for {name!r}: {exc}") from exc
     emit(ok({"name": name, "path": str(path), "doc": str(doc_path), "family_doc": family_doc}))
 
