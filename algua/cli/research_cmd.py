@@ -62,10 +62,15 @@ def promote(
 ) -> None:
     """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass.
 
-    The holdout-Sharpe bar is DEFLATED by the strategy's search breadth (the multiple-testing
-    defense). Breadth is MEASURED as the sum of recorded `search_trials` (from `backtest sweep`)
-    when any exist; otherwise it must be DECLARED via --n-combos, else promotion is refused. A
-    declared number is recorded with provenance="declared" so it is auditably less trustworthy.
+    The holdout-Sharpe bar is DEFLATED by FUNNEL-WIDE search breadth (the multiple-testing defense):
+    the max of this strategy's lifetime recorded breadth and the funnel-wide breadth in the rolling
+    window. Breadth is MEASURED as the sum of recorded `search_trials` (from `backtest sweep`); an
+    agent must have measured breadth (no measured trials => refused). Declaring breadth via
+    --n-combos is HUMAN-ONLY and recorded with provenance="declared" (auditably less trustworthy).
+    For an agent the universe must be PIT (`--universe`); non-PIT fails closed unless a human passes
+    --allow-non-pit. A minimum holdout-observations floor (63) also fails closed (underpowered
+    holdouts). On pass for an agent this mints the single-use gate token the BACKTESTED->SHORTLISTED
+    transition consumes.
     """
     actor_enum = Actor(actor)  # fail fast on a bad actor before running the walk-forward
     if n_combos is not None and n_combos < 1:
