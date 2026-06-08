@@ -53,3 +53,55 @@ def test_read_bars_rejects_non_bars_dataset(tmp_path):
     rec = _make_non_bars_snapshot(store, tmp_path)
     with pytest.raises(ValueError):
         store.read_bars(rec.snapshot_id)
+
+
+from datetime import UTC, datetime
+
+
+def test_read_bars_pushes_down_symbol_and_window(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest(store)  # AAA/BBB on 2024-07-01 and 2024-07-02
+    out = store.read_bars(
+        rec.snapshot_id, symbols=["AAA"],
+        start=datetime(2024, 7, 1, tzinfo=UTC), end=datetime(2024, 7, 2, tzinfo=UTC),
+    )
+    validate_bars(out)
+    assert set(out["symbol"]) == {"AAA"}
+    assert out.index.max() == pd.Timestamp("2024-07-01", tz="UTC")  # 07-02 == end, excluded
+
+
+def test_read_bars_empty_window_returns_typed_empty(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest(store)
+    out = store.read_bars(
+        rec.snapshot_id, symbols=["AAA"],
+        start=datetime(2030, 1, 1, tzinfo=UTC), end=datetime(2030, 1, 2, tzinfo=UTC),
+    )
+    validate_bars(out)
+    assert out.empty
+    assert list(out.columns) == BAR_COLUMNS
+
+
+def test_read_bars_rejects_legacy_single_file_snapshot(tmp_path):
+    from pathlib import Path
+
+    from algua.data.manifest import SnapshotManifest
+    from algua.data.models import SnapshotMetadata, SnapshotRecord
+
+    store = DataStore(tmp_path)
+    _ingest(store)
+    # Forge a manifest record claiming the old single-file layout for a bars dataset.
+    legacy = SnapshotRecord(
+        snapshot_id="legacyid00000000",
+        metadata=SnapshotMetadata(
+            dataset="bars", provider="p", symbols=("AAA",), start="2024-07-01",
+            end="2024-07-01", as_of="2024-07-02T00:00:00+00:00", source="s", kind="bars",
+            timeframe="1d", adjustment="none",
+        ),
+        row_count=1, content_hash="h",
+        data_path=Path("snapshots/bars/legacyid00000000/bars.parquet"),
+        created_at="2024-07-02T00:00:00+00:00", storage_format="parquet",
+    )
+    SnapshotManifest(tmp_path / "manifest.jsonl").append(legacy)
+    with pytest.raises(ValueError, match="legacy"):
+        store.read_bars("legacyid00000000")

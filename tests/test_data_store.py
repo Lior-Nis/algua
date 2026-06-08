@@ -132,7 +132,7 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
 
     assert rec.dataset == "bars"
     assert rec.kind == "bars"
-    assert rec.storage_format == "parquet"
+    assert rec.storage_format == "parquet_dataset"
     assert rec.row_count == 2
     assert rec.metadata.timeframe == "1d"
     assert rec.metadata.adjustment == "none"
@@ -275,18 +275,25 @@ def test_ingest_bars_is_idempotent_on_identical_content(tmp_path):
     assert len(store.list_snapshots()) == 1
 
 
-def test_content_hash_is_canonical_parquet_bytes(tmp_path):
-    # #55: hash is the sha256 of the canonical on-disk parquet bytes, so what's hashed is exactly
-    # what's stored and dedup is reproducible across runs.
-    from algua.data.files import sha256_file
-
-    ts = ["2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"]
+def test_content_hash_is_logical_and_layout_independent(tmp_path):
+    # #130: identity is a logical hash over canonical rows, so the same logical bars in a different
+    # input row order dedup to the same snapshot (independent of physical file layout/order).
     store = DataStore(tmp_path / "data")
-    rec = store.ingest_bars(
+    rows = {
+        "ts": ["2026-01-03T00:00:00+00:00", "2026-01-02T00:00:00+00:00"],
+        "symbol": ["AAPL", "AAPL"],
+        "open": [100.0, 99.0], "high": [102.0, 101.0], "low": [99.0, 98.0],
+        "close": [101.0, 100.0], "adj_close": [100.5, 99.5], "volume": [1100.0, 1000.0],
+    }
+    kwargs = dict(
         provider="fixture", symbols=["AAPL"], start="2026-01-02", end="2026-01-03",
-        as_of="2026-01-04T00:00:00+00:00", source="fixture", frame=_bars_frame(ts),
+        as_of="2026-01-04T00:00:00+00:00", source="fixture",
     )
-    assert rec.content_hash == sha256_file(tmp_path / "data" / rec.data_path)
+    first = store.ingest_bars(frame=pd.DataFrame(rows), **kwargs)
+    shuffled = {k: list(reversed(v)) for k, v in rows.items()}
+    second = store.ingest_bars(frame=pd.DataFrame(shuffled), **kwargs)
+    assert second.snapshot_id == first.snapshot_id
+    assert len(store.list_snapshots()) == 1
 
 
 def test_from_dict_requires_schema_version():

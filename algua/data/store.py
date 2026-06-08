@@ -12,9 +12,12 @@ from algua.data.files import (
     copy_snapshot,
     count_tabular_rows,
     frame_to_parquet_bytes,
+    logical_bars_hash,
+    read_partitioned_bars,
     sha256_bytes,
     sha256_file,
     write_bytes_snapshot,
+    write_partitioned_bars,
 )
 from algua.data.manifest import SnapshotManifest
 from algua.data.models import (
@@ -24,7 +27,7 @@ from algua.data.models import (
     SnapshotRecord,
     UniverseSnapshot,
 )
-from algua.data.schema import to_bar_schema
+from algua.data.schema import empty_bars, to_bar_schema
 
 
 class SnapshotNotFound(LookupError):
@@ -129,9 +132,29 @@ class DataStore:
             adjustment=adjustment,
             source_metadata=source_metadata,
         )
-        return self._ingest_parquet(
-            metadata=metadata, frame=_normalize_bar_frame(frame), filename="bars.parquet"
+        canon = to_bar_schema(frame).reset_index().rename(columns={"timestamp": "ts"})
+        content_hash = logical_bars_hash(canon)
+        snapshot_id = _snapshot_id(metadata, content_hash)
+
+        existing = self.manifest.find(snapshot_id)
+        if existing is not None:
+            return existing
+
+        relative_path = Path("snapshots") / metadata.dataset / snapshot_id
+        write_partitioned_bars(
+            canon.sort_values(["symbol", "ts"]), self.data_dir / relative_path
         )
+        rec = SnapshotRecord(
+            snapshot_id=snapshot_id,
+            metadata=metadata,
+            row_count=len(canon),
+            content_hash=content_hash,
+            data_path=relative_path,
+            created_at=datetime.now(UTC).isoformat(),
+            storage_format="parquet_dataset",
+        )
+        self.manifest.append(rec)
+        return rec
 
     def ingest_universe(
         self,
@@ -204,15 +227,33 @@ class DataStore:
             raise SnapshotNotFound(snapshot_id)
         return rec
 
-    def read_bars(self, snapshot_id: str) -> pd.DataFrame:
-        """Read a bars snapshot back as a bar-schema DataFrame (tz-aware UTC timestamp index)."""
+    def read_bars(
+        self,
+        snapshot_id: str,
+        *,
+        symbols: list[str] | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> pd.DataFrame:
+        """Read a bars snapshot as a bar-schema DataFrame, pushing `symbols` + half-open
+        `[start, end)` filters down to the partitioned parquet dataset (issue #130). Any filter left
+        as None is unbounded. Empty result => the contract's empty-but-typed frame."""
         rec = self.get_snapshot(snapshot_id)  # raises SnapshotNotFound
         if rec.dataset != Dataset.BARS.value:
             raise ValueError(
                 f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not {Dataset.BARS.value!r}"
             )
-        frame = pd.read_parquet(self.data_dir / rec.data_path)
-        return to_bar_schema(frame)
+        if rec.storage_format != "parquet_dataset":
+            raise ValueError(
+                f"snapshot {snapshot_id} is a legacy single-file bars snapshot "
+                f"({rec.storage_format!r}); re-ingest under the partitioned layout"
+            )
+        raw = read_partitioned_bars(
+            self.data_dir / rec.data_path, symbols=symbols, start=start, end=end
+        )
+        if raw.empty:
+            return empty_bars()
+        return to_bar_schema(raw)
 
     def read_universe(self, universe: str) -> list[UniverseSnapshot]:
         """Read a named universe's point-in-time membership timeline.
@@ -376,7 +417,3 @@ def _path_part(value: str) -> str:
     return clean.strip("-") or "dataset"
 
 
-def _normalize_bar_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
-        raise ValueError("bars frame must not be empty")
-    return to_bar_schema(frame).reset_index()
