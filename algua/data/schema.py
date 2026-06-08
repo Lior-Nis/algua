@@ -9,6 +9,10 @@ FLOAT_COLUMNS = ["open", "high", "low", "close", "adj_close", "volume"]
 NON_NULL_COLUMNS = FLOAT_COLUMNS
 BAR_COLUMNS = ["symbol", *FLOAT_COLUMNS]
 
+# Re-exported so algua.data.files can serialize the numeric bar columns for the logical content
+# hash without importing store (schema imports only pandas, so this stays cycle-free).
+BARS_FILE_HASH_COLUMNS = FLOAT_COLUMNS
+
 
 def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
     """Assert `df` matches the frozen bar schema; return it unchanged on success.
