@@ -12,8 +12,7 @@ from algua.execution.sim_broker import Fill, SimBroker
 from algua.risk.limits import (
     WEIGHT_TOL,
     check_drawdown,
-    check_gross_exposure,
-    check_long_only,
+    validate_decision_weights,
 )
 from algua.strategies.base import LoadedStrategy
 
@@ -66,12 +65,11 @@ def decide(
     decision_ts: datetime,
 ) -> tuple[pd.Series, list[OrderIntent]]:
     """Shared decision core both loops call: evaluate target weights on the closed-bar `view`, run
-    the target-weight risk checks (long-only + gross), then build the per-symbol intents against the
-    caller's current market-value weights. Broker mechanics (sim fill_pending vs Alpaca submit) stay
-    in each loop; only this weights->risk->intents step is shared (#25)."""
+    the shared decision-weight rails, then build the per-symbol intents against the caller's current
+    market-value weights. Broker mechanics (sim fill_pending vs Alpaca submit) stay in each loop;
+    only this weights->risk->intents step is shared (#25)."""
     weights = strategy.target_weights(view)
-    check_long_only(weights, strategy.name)
-    check_gross_exposure(weights, strategy.execution.max_gross_exposure)
+    validate_decision_weights(weights, strategy.execution, strategy.name)
     intents = build_intents(weights, current_weights, decision_ts)
     return weights, intents
 
