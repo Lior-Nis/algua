@@ -34,6 +34,22 @@ def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
         )
 
 
+def check_max_weight_per_symbol(weights: pd.Series, max_per_symbol: float) -> None:
+    """Single-name concentration cap: reject any |weight| above the per-symbol limit. Caps the
+    LARGEST position, where gross caps the sum — an agent can pass gross with 100% in one name, so
+    this is the rail that stops it. Absolute value, so it holds for shorts too (#135)."""
+    if len(weights) == 0:
+        return
+    over = weights[weights.abs() > max_per_symbol + WEIGHT_TOL]
+    if len(over):
+        worst = sorted(over.index)
+        raise RiskBreach(
+            "max_weight_per_symbol",
+            f"single-name weight(s) for {worst} exceed max_weight_per_symbol "
+            f"{max_per_symbol:.4f}",
+        )
+
+
 def check_long_only(weights: pd.Series, strategy_name: str) -> None:
     if len(weights) and bool((weights < 0).any()):
         negative = sorted(weights[weights < 0].index)

@@ -41,3 +41,20 @@ def test_check_long_only_passes_and_raises():
     with pytest.raises(RiskBreach) as ei:
         check_long_only(pd.Series({"AAA": -0.5}), "s")
     assert ei.value.kind == "long_only"
+
+
+def test_max_weight_per_symbol_passes_at_or_under_cap():
+    from algua.risk.limits import check_max_weight_per_symbol
+    check_max_weight_per_symbol(pd.Series({"AAA": 0.5, "BBB": 0.5}), 0.5)   # == cap, ok
+    check_max_weight_per_symbol(pd.Series({"AAA": -0.5}), 0.5)              # short |w|==cap, ok
+    check_max_weight_per_symbol(pd.Series(dtype="float64"), 0.5)           # empty, ok
+
+
+def test_max_weight_per_symbol_breaches_over_cap_long_and_short():
+    from algua.risk.limits import RiskBreach, check_max_weight_per_symbol
+    with pytest.raises(RiskBreach) as ei_long:
+        check_max_weight_per_symbol(pd.Series({"AAA": 0.6, "BBB": 0.4}), 0.5)
+    assert ei_long.value.kind == "max_weight_per_symbol"
+    with pytest.raises(RiskBreach) as ei_short:
+        check_max_weight_per_symbol(pd.Series({"AAA": -0.6}), 0.5)
+    assert ei_short.value.kind == "max_weight_per_symbol"
