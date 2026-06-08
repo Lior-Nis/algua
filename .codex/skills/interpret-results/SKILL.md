@@ -13,10 +13,11 @@ accident.
 
 - **`backtest run`** → `metrics`: `sharpe`, `total_return`, `max_drawdown`, plus `config_hash`,
   `snapshot_id`, data provenance. This is **in-sample** — necessary, not sufficient.
-- **`backtest walk-forward`** → `holdout_metrics` (`sharpe`, `total_return` on a reserved holdout
-  segment) and `stability` (`pct_positive_windows` = fraction of the K out-of-sample windows with
-  positive return; `min_sharpe` = the worst window's Sharpe). The **holdout is the headline
-  evidence**; stability tells you whether performance is consistent or driven by one lucky window.
+- **`backtest walk-forward`** → `window_metrics` (per out-of-sample window) and `stability`
+  (`pct_positive_windows` = fraction of the K windows with positive return; `min_sharpe` = the worst
+  window's Sharpe). The **holdout is WITHHELD here** — `research promote` is the only command that
+  reveals it (and burns it, single-use). Stability tells you whether performance is consistent or
+  driven by one lucky window; the burned holdout (seen at promote time) is the headline evidence.
 - **`backtest sweep`** → ranked combos by `mean_sharpe` or `min_sharpe`. Useful for exploration,
   but see "search breadth" below.
 
@@ -49,6 +50,8 @@ a better hypothesis) — that's the gate doing its job.
   any accidental use of current-bar information.
 - **Tiny samples / degenerate periods.** Very short windows or flat data produce noisy metrics;
   prefer a multi-year `--start/--end`.
+- **The judgment layer.** `kb/principles/research-methodology.md` explains *why* these walls exist,
+  the leakage vectors no wall catches, and how to read an in-sample↔holdout gap honestly.
 
 ## Your recommendation
 
