@@ -228,3 +228,52 @@ def test_add_derived_from_rejects_self(tmp_path):
     repo = SqliteStrategyRepository(conn)
     with pytest.raises(ValueError):
         repo.add("self", derived_from="self")
+
+
+# ---------------------------------------------------------------------------
+# Task 7: update_metadata repository method
+# ---------------------------------------------------------------------------
+
+def test_update_metadata_partial(tmp_path):
+    from algua.contracts.registry_metadata import HypothesisStatus
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", family="mean-reversion", tags=["slow"])
+    before = repo.get("a")
+    rec = repo.update_metadata(
+        "a", hypothesis_status=HypothesisStatus.SUPPORTED, add_tags=["carry"]
+    )
+    assert rec.hypothesis_status == HypothesisStatus.SUPPORTED
+    assert rec.tags == ["carry", "slow"]
+    assert rec.family == "mean-reversion"  # untouched
+    assert rec.updated_at >= before.updated_at
+
+
+def test_update_metadata_remove_tag(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a", tags=["slow", "carry"])
+    rec = repo.update_metadata("a", remove_tags=["slow"])
+    assert rec.tags == ["carry"]
+
+
+def test_update_metadata_derived_from_validation(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a")
+    with pytest.raises(ValueError):
+        repo.update_metadata("a", derived_from="a")

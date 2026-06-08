@@ -73,6 +73,23 @@ class StrategyRepository(Protocol):
         """Return the strategy by name, or raise ``StrategyNotFound``."""
         ...
 
+    def update_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> StrategyRecord:
+        """Update only the supplied organizational-metadata fields (never the stage).
+        ``add_tags``/``remove_tags`` mutate the tag set. Returns the updated record.
+        """
+        ...
+
     def list_strategies(self, stage: Stage | None = None) -> list[StrategyRecord]:
         """List strategies, optionally filtered to a single stage, ordered by insertion."""
         ...

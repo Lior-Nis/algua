@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
-from algua.registry.metadata import dump_tags, load_tags
+from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import StrategyExists, StrategyNotFound, StrategyRecord
 
 __all__ = [
@@ -85,6 +85,56 @@ class SqliteStrategyRepository:
         if row is None:
             raise StrategyNotFound(name)
         return _row_to_record(row)
+
+    def update_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> StrategyRecord:
+        rec = self.get(name)
+        if derived_from is not None:
+            if derived_from == name:
+                raise ValueError(f"{name} cannot be derived from itself")
+            self.get(derived_from)
+        sets: list[str] = []
+        params: list[object] = []
+        if family is not None:
+            sets.append("family = ?")
+            params.append(family)
+        if author is not None:
+            sets.append("author = ?")
+            params.append(author.value)
+        if hypothesis_status is not None:
+            sets.append("hypothesis_status = ?")
+            params.append(hypothesis_status.value)
+        if derived_from is not None:
+            sets.append("derived_from = ?")
+            params.append(derived_from)
+        if description is not None:
+            sets.append("description = ?")
+            params.append(description)
+        if add_tags or remove_tags:
+            tags = set(rec.tags)
+            tags |= set(canonicalize_tags(add_tags or []))
+            tags -= set(canonicalize_tags(remove_tags or []))
+            sets.append("tags = ?")
+            params.append(dump_tags(tags))
+        if sets:
+            sets.append("updated_at = ?")
+            params.append(_now())
+            params.append(rec.id)
+            with self._conn:
+                self._conn.execute(
+                    f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params
+                )
+        return self.get(name)
 
     def list_strategies(self, stage: Stage | None = None) -> list[StrategyRecord]:
         if stage is None:
