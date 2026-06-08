@@ -173,6 +173,33 @@ def test_sync_all_applies_metadata(tmp_path):
     assert fm["tags"] == ["slow"]
 
 
+def test_sync_clears_owned_keys_when_metadata_value_is_none(tmp_path):
+    from algua.knowledge.frontmatter import parse_doc, render_doc
+
+    s = _settings(tmp_path)
+    path = strategy_doc_path(s, "a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Seed a doc with registry-owned keys already set.
+    from algua.knowledge.templates import scaffold_strategy_doc
+    fm, body = parse_doc(scaffold_strategy_doc("a", family="old-family", derived_from="old-parent"))
+    path.write_text(render_doc(fm, body))
+
+    meta = {
+        "family": None,
+        "tags": [],
+        "author": "agent",
+        "hypothesis_status": "untested",
+        "derived_from": None,
+        "description": None,
+    }
+    sync_strategy_doc(s, "a", stage="idea", metadata=meta)
+
+    fm2, _ = parse_doc(path.read_text())
+    assert "family" not in fm2          # cleared, not left as stale [[old-family]]
+    assert "derived_from" not in fm2    # cleared, not left as stale [[old-parent]]
+    assert fm2["tags"] == []            # empty list written, not absent
+
+
 def test_sync_writes_owned_metadata_and_preserves_foreign_keys(tmp_path):
     from algua.knowledge.frontmatter import parse_doc, render_doc
 

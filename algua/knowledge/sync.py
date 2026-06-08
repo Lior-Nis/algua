@@ -73,7 +73,11 @@ def render_results_block(metrics: dict[str, Any] | None) -> str:
 
 def _apply_owned_metadata(fm: dict[str, Any], metadata: dict[str, Any]) -> None:
     """Write the registry-owned frontmatter keys from a registry metadata dict, wrapping
-    ``family``/``derived_from`` as Obsidian wikilinks. NULL/None values clear the key."""
+    ``family``/``derived_from`` as Obsidian wikilinks. NULL/None values clear the key.
+
+    These keys are registry-owned: edit them via ``registry set``, not by hand in the kb doc.
+    Every sync overwrites them, so hand edits to these keys are lost on the next sync.
+    """
     for key in ("family", "derived_from"):
         val = metadata.get(key)
         if val:
