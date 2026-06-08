@@ -342,6 +342,15 @@ def test_set_changes_metadata_and_reports_before_after(monkeypatch, tmp_path):
     assert rec["tags"] == ["carry"]
 
 
+def test_list_filters_compose():
+    runner.invoke(app, ["registry", "add", "a", "--family", "mean-reversion", "--tag", "slow"])
+    runner.invoke(app, ["registry", "add", "b", "--family", "momentum", "--tag", "fast"])
+    out = _json(runner.invoke(app, ["registry", "list", "--family", "mean-reversion"]))
+    assert [r["name"] for r in out] == ["a"]
+    out2 = _json(runner.invoke(app, ["registry", "list", "--tag", "fast"]))
+    assert [r["name"] for r in out2] == ["b"]
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity

@@ -60,11 +60,20 @@ def add(
 
 @registry_app.command("list")
 @json_errors(ValueError, LookupError)
-def list_(stage: str = typer.Option(None, "--stage", help="filter by stage")) -> None:
-    """List strategies, optionally filtered by stage. Emits a bare JSON array (collection)."""
+def list_(
+    stage: str = typer.Option(None, "--stage", help="filter by stage"),
+    family: str = typer.Option(None, "--family"),
+    tag: list[str] = typer.Option(None, "--tag", help="require this tag (repeatable, all-of)"),
+    author: Author = typer.Option(None, "--author"),
+    hypothesis_status: HypothesisStatus = typer.Option(None, "--hypothesis-status"),
+) -> None:
+    """List strategies with optional filters (AND-ed). Emits a bare JSON array."""
     st = Stage(stage) if stage else None
     with registry_conn() as conn:
-        recs = SqliteStrategyRepository(conn).list_strategies(st)
+        recs = SqliteStrategyRepository(conn).list_strategies(
+            st, family=family, tags=tag or [], author=author,
+            hypothesis_status=hypothesis_status,
+        )
     emit([_record_json(r) for r in recs])
 
 
