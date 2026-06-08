@@ -54,3 +54,28 @@ def test_import_bars_unknown_vendor_errors(tmp_path):
     ])
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_import_bars_symbols_filter(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    result = runner.invoke(app, [
+        "data", "import-bars", "--vendor", "firstrate",
+        "--raw-dir", str(raw), "--adjusted-dir", str(adj),
+        "--as-of", "2024-07-02T00:00:00+00:00", "--symbols", "AAPL",
+    ])
+    assert result.exit_code == 0, result.stdout
+    snap = json.loads(result.stdout)["snapshot"]
+    assert snap["symbols"] == ["AAPL"]
+    assert snap["row_count"] == 1
+
+
+def test_import_bars_requested_bounds_mismatch_errors(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    result = runner.invoke(app, [
+        "data", "import-bars", "--vendor", "firstrate",
+        "--raw-dir", str(raw), "--adjusted-dir", str(adj),
+        "--as-of", "2024-07-02T00:00:00+00:00",
+        "--start", "2020-01-01", "--end", "2024-07-01",
+    ])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False

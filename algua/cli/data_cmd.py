@@ -12,7 +12,7 @@ from algua.config.settings import get_settings
 from algua.data.contracts import BarProvider, BarRequest, ImportRequest
 from algua.data.importers import get_importer
 from algua.data.providers import get_provider
-from algua.data.store import DataStore, normalize_symbols
+from algua.data.store import IMPORT_WARN_ROWS, DataStore, normalize_symbols
 
 data_app = typer.Typer(help="Point-in-time data snapshots", no_args_is_help=True)
 app.add_typer(data_app, name="data")
@@ -127,11 +127,13 @@ def import_bars(
     store = _store()
     store.clear_staging()
     chunks = importer.import_bars(request)
+    # seen_symbols is populated lazily by _tracked() as chunks stream; ingest_bars_streamed reads
+    # it only after exhausting the stream (it builds metadata post-loop), so it is complete by then.
     seen_symbols: list[str] = []
 
     def _tracked() -> Iterator[object]:
         for chunk in chunks:
-            seen_symbols.append(str(chunk.frame["symbol"].iloc[0]))
+            seen_symbols.extend(str(s) for s in chunk.frame["symbol"].unique())
             yield chunk.frame
 
     rec = store.ingest_bars_streamed(
@@ -144,9 +146,11 @@ def import_bars(
         adjustment=adjustment,
         start=start,
         end=end,
-        source_metadata={"vendor": "firstratedata"} if vendor == "firstrate" else {},
+        source_metadata={"vendor": importer.vendor_label},
     )
-    if rec.row_count is not None and rec.row_count >= 5_000_000:
+    if rec.row_count is not None and rec.row_count >= IMPORT_WARN_ROWS:
+        # stderr: non-fatal advisory; the snapshot is valid, just not servable by the current
+        # read path
         typer.echo(
             f"warning: imported {rec.row_count} rows; snapshot not servable by the current "
             f"read path until #130 (marked servable=deferred-130)",

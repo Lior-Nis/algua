@@ -80,6 +80,7 @@ def _discover(directory: Path) -> dict[str, Path]:
 
 class FirstRateImporter:
     name = "firstrate"
+    vendor_label = "firstratedata"
 
     def import_bars(self, request: ImportRequest) -> Iterator[ProviderBars]:
         if request.timeframe != "1d":

@@ -71,9 +71,11 @@ class BarImporter(Protocol):
     Yielding per symbol (rather than returning one giant frame) is what bounds RAM for a multi-GB
     import. Each yielded frame has the same column shape as a `BarProvider` frame
     (`ts, symbol, open, high, low, close, adj_close, volume`) so both seams converge at
-    `algua.data.schema.to_bar_schema`.
+    `algua.data.schema.to_bar_schema`. `vendor_label` is the provenance vendor name stamped into
+    the snapshot (e.g. 'firstratedata').
     """
 
     name: str
+    vendor_label: str
 
     def import_bars(self, request: ImportRequest) -> Iterator[ProviderBars]: ...
