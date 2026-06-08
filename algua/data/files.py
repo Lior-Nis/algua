@@ -3,8 +3,8 @@ from __future__ import annotations
 import csv
 import functools
 import hashlib
-import struct
 import shutil
+import struct
 from pathlib import Path
 
 import pandas as pd

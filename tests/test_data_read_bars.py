@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import pandas as pd
 import pytest
 
@@ -53,9 +55,6 @@ def test_read_bars_rejects_non_bars_dataset(tmp_path):
     rec = _make_non_bars_snapshot(store, tmp_path)
     with pytest.raises(ValueError):
         store.read_bars(rec.snapshot_id)
-
-
-from datetime import UTC, datetime
 
 
 def test_read_bars_pushes_down_symbol_and_window(tmp_path):

@@ -1,8 +1,9 @@
 import hashlib
+from datetime import UTC, datetime
 
 import pandas as pd
 
-from algua.data.files import logical_bars_hash
+from algua.data.files import logical_bars_hash, read_partitioned_bars, write_partitioned_bars
 
 
 def _canon(rows):
@@ -30,11 +31,6 @@ def test_logical_hash_changes_on_value_change():
     base = _canon([("2024-07-01T00:00:00+00:00", "AAA", 10.0, 10.0, 10.0, 10.0, 10.0, 1.0)])
     changed = _canon([("2024-07-01T00:00:00+00:00", "AAA", 10.0, 10.0, 10.0, 10.0, 10.0, 2.0)])
     assert logical_bars_hash(base) != logical_bars_hash(changed)
-
-
-from datetime import datetime, UTC
-
-from algua.data.files import read_partitioned_bars, write_partitioned_bars
 
 
 def _canon_sorted(rows):
