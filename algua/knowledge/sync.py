@@ -167,14 +167,20 @@ def generate_indexes(settings: Settings) -> None:
     (base / "_families.md").write_text("# Thesis families\n\n" + "\n".join(fam_lines) + "\n")
 
 
-def sync_all(settings: Settings, stages: dict[str, str]) -> dict[str, list[str]]:
-    """Sync each registered strategy's doc (stage from `stages`), every family doc, then indexes.
+def sync_all(
+    settings: Settings,
+    stages: dict[str, str],
+    metadata: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Sync each registered strategy's doc (stage + optional metadata), every family doc, then
+    indexes. ``metadata`` maps strategy name -> its registry metadata dict.
 
     Strategy docs are synced before family docs so member rosters count freshly-synced stages.
     """
+    metadata = metadata or {}
     synced: list[str] = []
     for name, stage in stages.items():
-        if sync_strategy_doc(settings, name, stage=stage):
+        if sync_strategy_doc(settings, name, stage=stage, metadata=metadata.get(name)):
             synced.append(name)
     families: list[str] = []
     fam_dir = strategies_dir(settings) / "families"

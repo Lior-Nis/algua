@@ -155,6 +155,24 @@ def test_sync_all_returns_summary(tmp_path):
     assert "1 members" in members or "members: idea 1" in members
 
 
+def test_sync_all_applies_metadata(tmp_path):
+    from algua.knowledge.frontmatter import parse_doc
+    from algua.knowledge.templates import scaffold_strategy_doc
+
+    s = _settings(tmp_path)
+    p = strategy_doc_path(s, "a")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(scaffold_strategy_doc("a"))
+    a_meta = {
+        "family": "mean-reversion", "tags": ["slow"], "author": "agent",
+        "hypothesis_status": "untested", "derived_from": None, "description": None,
+    }
+    sync_all(s, {"a": "idea"}, metadata={"a": a_meta})
+    fm, _ = parse_doc(p.read_text())
+    assert fm["family"] == "[[mean-reversion]]"
+    assert fm["tags"] == ["slow"]
+
+
 def test_sync_writes_owned_metadata_and_preserves_foreign_keys(tmp_path):
     from algua.knowledge.frontmatter import parse_doc, render_doc
 

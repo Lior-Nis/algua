@@ -124,7 +124,7 @@ def doc(
         recs = {rec.name: rec for rec in SqliteStrategyRepository(conn).list_strategies()}
     stages = {n: r.stage.value for n, r in recs.items()}
     if all_ or name is None:
-        summary = sync_all(settings, stages)
+        summary = sync_all(settings, stages, metadata={n: _kb_metadata(r) for n, r in recs.items()})
     else:
         meta = _kb_metadata(recs[name]) if name in recs else None
         if not sync_strategy_doc(settings, name, stage=stages.get(name), metadata=meta):
