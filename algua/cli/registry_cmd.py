@@ -8,8 +8,10 @@ import typer
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
+from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate
 from algua.registry.approvals import compute_artifact_hashes, record_approval
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, SignatureError
@@ -177,8 +179,6 @@ def set_(
     # Re-sync the kb doc so frontmatter reflects the new registry truth.
     # Best-effort: absent doc is ok (sync_strategy_doc returns False).
     # NOTE: `sync_strategy_doc` gains `metadata=` in Task 11; this call stays stage-only until then.
-    from algua.config.settings import get_settings
-    from algua.knowledge.sync import sync_strategy_doc
     sync_strategy_doc(get_settings(), name, stage=after.stage.value)
     emit(ok({**_record_json(after), "changed": changed}))
 

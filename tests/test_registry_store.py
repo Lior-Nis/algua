@@ -277,3 +277,18 @@ def test_update_metadata_derived_from_validation(tmp_path):
     repo.add("a")
     with pytest.raises(ValueError):
         repo.update_metadata("a", derived_from="a")
+
+
+def test_update_metadata_unknown_parent_raises(tmp_path):
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.repository import StrategyNotFound
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add("a")
+    with pytest.raises(StrategyNotFound):
+        repo.update_metadata("a", derived_from="ghost")

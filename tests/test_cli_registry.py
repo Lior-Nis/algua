@@ -317,6 +317,19 @@ def test_add_with_metadata_flags():
     assert rec["hypothesis_status"] == "supported"
 
 
+def test_invalid_family_slug_emits_json_error():
+    runner.invoke(app, ["registry", "add", "alpha"])
+    result = runner.invoke(app, ["registry", "add", "beta", "--family", "Bad_Family"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+
+    result2 = runner.invoke(app, ["registry", "set", "alpha", "--family", "-bad"])
+    assert result2.exit_code != 0
+    payload2 = json.loads(result2.stdout)
+    assert payload2["ok"] is False
+
+
 def test_set_changes_metadata_and_reports_before_after(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
     runner.invoke(app, ["registry", "add", "a", "--hypothesis-status", "untested"])
