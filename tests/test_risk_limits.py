@@ -96,3 +96,40 @@ def test_short_policy_long_only_rejects_negatives():
 def test_short_policy_allows_negatives_when_allow_short():
     from algua.risk.limits import check_short_policy
     check_short_policy(pd.Series({"AAA": -0.5, "BBB": 0.5}), allow_short=True, strategy_name="s")
+
+
+def _contract(**kw):
+    from algua.contracts.types import ExecutionContract
+    return ExecutionContract(rebalance_frequency="1d", **kw)
+
+
+def test_validate_decision_weights_runs_all_rails_in_order():
+    from algua.risk.limits import RiskBreach, validate_decision_weights
+
+    # clean long-only vector passes
+    validate_decision_weights(pd.Series({"AAA": 0.6, "BBB": 0.4}), _contract(), "s")
+
+    # finite runs first: a NaN breaches as non_finite even though it also "looks" long-only-clean
+    import numpy as np
+    with pytest.raises(RiskBreach) as ei_fin:
+        validate_decision_weights(pd.Series({"AAA": np.nan}), _contract(), "s")
+    assert ei_fin.value.kind == "non_finite_weight"
+
+    # short policy before cap/gross: a short under default long-only breaches long_only
+    with pytest.raises(RiskBreach) as ei_short:
+        validate_decision_weights(pd.Series({"AAA": -0.3}), _contract(), "s")
+    assert ei_short.value.kind == "long_only"
+
+    # per-symbol cap binds (allow_short so it isn't caught by long_only first)
+    with pytest.raises(RiskBreach) as ei_cap:
+        validate_decision_weights(
+            pd.Series({"AAA": 0.9}), _contract(max_weight_per_symbol=0.5), "s"
+        )
+    assert ei_cap.value.kind == "max_weight_per_symbol"
+
+    # gross still enforced last
+    with pytest.raises(RiskBreach) as ei_gross:
+        validate_decision_weights(
+            pd.Series({"AAA": 0.7, "BBB": 0.7}), _contract(max_gross_exposure=1.0), "s"
+        )
+    assert ei_gross.value.kind == "gross_exposure"

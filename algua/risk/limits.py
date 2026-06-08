@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from algua.contracts.types import ExecutionContract
 
 # Single tolerance for "is this weight materially different from another / from a limit".
 # One named constant rather than a scatter of bare 1e-9 / 1e-6 literals so both brokers and
@@ -36,11 +41,11 @@ def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
 
 
 def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
-    """Fail-closed guard against non-finite target weights. A strategy returning NaN/inf for a named
-    symbol, a non-numeric weight, or a duplicated symbol index must HARD-BREACH, not be silently
-    flattened by a downstream fillna(0.0) (NaN-skipping .sum() / `NaN < 0` would let it through). The
-    panel fast-path's omitted-cell NaN is filled to flat BEFORE this runs, so its sparse-NaN-as-flat
-    convention is preserved; only real non-finite VALUES reach here (#135)."""
+    """Fail-closed guard against non-finite target weights. A strategy returning NaN/inf for a
+    named symbol, a non-numeric weight, or a duplicated symbol index must HARD-BREACH, not be
+    silently flattened by a downstream fillna(0.0) (NaN-skipping .sum() / `NaN < 0` would let it
+    through). The panel fast-path's omitted-cell NaN is filled to flat BEFORE this runs, so its
+    sparse-NaN-as-flat convention is preserved; only real non-finite VALUES reach here (#135)."""
     if len(weights) == 0:
         return
     if weights.index.has_duplicates:
@@ -113,3 +118,15 @@ def check_drawdown(equity: float, peak: float, max_drawdown: float | None) -> No
             f"drawdown {dd:.4f} exceeds max_drawdown {max_drawdown:.4f} "
             f"(equity {equity:.2f}, peak {peak:.2f})",
         )
+
+
+def validate_decision_weights(
+    weights: pd.Series, contract: ExecutionContract, strategy_name: str
+) -> None:
+    """The ONE decision-weight validation every path calls (paper/live decide + backtest loop +
+    fast-path), so the rails can never drift between research and live. Order: finite (fail-closed)
+    -> short policy -> per-symbol cap -> gross exposure (#135)."""
+    check_finite_weights(weights, strategy_name)
+    check_short_policy(weights, contract.allow_short, strategy_name)
+    check_max_weight_per_symbol(weights, contract.max_weight_per_symbol)
+    check_gross_exposure(weights, contract.max_gross_exposure)
