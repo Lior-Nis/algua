@@ -46,6 +46,18 @@ def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def empty_bars() -> pd.DataFrame:
+    """The contract's empty-but-typed bars frame: exact `BAR_COLUMNS`, float64 numeric dtypes, and
+    a tz-aware empty UTC `timestamp` index. The read path returns this when a pushdown filter
+    matches no rows (issue #130, GATE-1 MEDIUM #5) so consumers can rely on the schema even when a
+    query is empty, instead of whatever an empty `to_pandas()` happens to produce."""
+    index = pd.DatetimeIndex([], tz="UTC", name="timestamp")
+    data = {"symbol": pd.Series([], dtype="object")}
+    for col in FLOAT_COLUMNS:
+        data[col] = pd.Series([], dtype="float64")
+    return validate_bars(pd.DataFrame(data, index=index))
+
+
 def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:
     """Reshape a stored bars frame (a `ts` column + OHLCV + symbol, any column order) into the
     bar schema: tz-aware UTC `timestamp` index, ordered columns, sorted, validated."""
