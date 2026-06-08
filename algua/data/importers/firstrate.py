@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from algua.data.store import normalize_symbols
 
 _FIRSTRATE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
 _PRICE_COLUMNS = ["open", "high", "low", "close"]
-_UNADJUSTED_MARKER = "unadjusted"
+# Delimiter-bounded so the role marker is matched as a token, not a bare substring: a raw file
+# named `…notunadjusted…` doesn't count as unadjusted, and an adjusted file whose name merely
+# contains the letters "unadjusted" mid-word isn't false-rejected.
+_UNADJUSTED_TOKEN_RE = re.compile(r"(?:^|[_\-.])unadjusted(?:$|[_\-.])")
+
+
+def _looks_unadjusted(name: str) -> bool:
+    """True if the filename carries FirstRate's `unadjusted` role token (case-insensitive)."""
+    return _UNADJUSTED_TOKEN_RE.search(name.lower()) is not None
 
 
 def symbol_from_filename(name: str) -> str:
@@ -87,7 +96,7 @@ def _check_directory_roles(raw_map: dict[str, Path], adj_map: dict[str, Path]) -
     raises ValueError. Together these also catch both dirs pointing at the same directory.
     """
     raw_not_unadjusted = sorted(
-        path.name for path in raw_map.values() if _UNADJUSTED_MARKER not in path.name.lower()
+        path.name for path in raw_map.values() if not _looks_unadjusted(path.name)
     )
     if raw_not_unadjusted:
         raise ValueError(
@@ -95,7 +104,7 @@ def _check_directory_roles(raw_map: dict[str, Path], adj_map: dict[str, Path]) -
             f"--raw-dir/--adjusted-dir may be swapped"
         )
     adj_unadjusted = sorted(
-        path.name for path in adj_map.values() if _UNADJUSTED_MARKER in path.name.lower()
+        path.name for path in adj_map.values() if _looks_unadjusted(path.name)
     )
     if adj_unadjusted:
         raise ValueError(
