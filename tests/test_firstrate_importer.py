@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from algua.data.importers.firstrate import parse_firstrate_file, symbol_from_filename
 
@@ -33,3 +34,11 @@ def test_parse_with_header(tmp_path):
 def test_symbol_from_filename():
     assert symbol_from_filename("AAPL_full_1day_UNADJUSTED.txt") == "AAPL"
     assert symbol_from_filename("brk.b_full_1day_adjsplitdiv.csv") == "BRK.B"
+
+
+def test_parse_missing_columns_raises(tmp_path):
+    f = tmp_path / "AAPL_full_1day_UNADJUSTED.txt"
+    # only 4 columns (no low/volume) -> required columns missing
+    f.write_text("datetime,open,high,close\n2024-07-01,10.0,11.0,10.5\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing columns"):
+        parse_firstrate_file(f)

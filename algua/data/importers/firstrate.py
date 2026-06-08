@@ -27,7 +27,7 @@ def parse_firstrate_file(path: Path) -> pd.DataFrame:
     a malformed file (wrong column count, unparseable dates/numbers).
     """
     first_line = ""
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig") as fh:
         for line in fh:
             if line.strip():
                 first_line = line.strip().lower()
@@ -37,6 +37,7 @@ def parse_firstrate_file(path: Path) -> pd.DataFrame:
         path,
         header=0 if has_header else None,
         names=None if has_header else _FIRSTRATE_COLUMNS,
+        encoding="utf-8-sig",
     )
     frame.columns = [str(c).strip().lower() for c in frame.columns]
     missing = [c for c in _FIRSTRATE_COLUMNS if c not in frame.columns]
