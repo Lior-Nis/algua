@@ -20,7 +20,9 @@ research explores. Ground your hypotheses in this thesis unless told otherwise.
 For each hypothesis:
 
 1. **Ideate.** First read the knowledge base: `kb/strategies/_index.md` and
-   `kb/strategies/_families.md`. Prefer a thesis family marked `exploring`/`promising` with an open axis
+   `kb/strategies/_families.md`, plus the research methodology
+   `kb/principles/research-methodology.md` (leakage vectors, search-breadth honesty, designing for
+   generalization). Prefer a thesis family marked `exploring`/`promising` with an open axis
    in its `## Open questions`; read that family doc and the relevant strategy docs to avoid
    re-running a refuted idea. Form one concrete, testable hypothesis on the most promising
    open axis. Pick a unique strategy name; skip names already in `uv run algua registry list`.
@@ -31,8 +33,8 @@ For each hypothesis:
    `uv run algua backtest run <name> --demo`.
 3. **Backtest + register.** `uv run algua backtest run <name> --demo --register` (advances `idea →
    backtested`).
-4. **Out-of-sample evidence.** `uv run algua backtest walk-forward <name> --demo` (holdout + K
-   windows + stability). Optionally `uv run algua backtest sweep <name> --demo --param KEY=v1,v2,...`
+4. **Out-of-sample evidence.** `uv run algua backtest walk-forward <name> --demo` (K windows +
+   stability; the holdout is withheld until `research promote`). Optionally `uv run algua backtest sweep <name> --demo --param KEY=v1,v2,...`
    to scan parameters — but remember every combo you search raises the bar the holdout must clear
    (see `interpret-results` on search breadth).
 5. **Interpret.** Delegate the results JSON to the `interpret` subagent for a promote/discard

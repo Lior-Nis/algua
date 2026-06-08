@@ -51,6 +51,10 @@ Rules that matter:
   enforces the `t→t+1` execution lag (`decision_lag_bars=1`). Do not re-implement or weaken this.
 - `rebalance_frequency` is `"1d"` (daily) for now.
 - Keep weights sane (they're target portfolio weights; the engine handles gross-exposure limits).
+- **Read the methodology before authoring.** `kb/principles/research-methodology.md` covers the
+  leakage vectors no wall catches — full-sample fitting, target leakage inside a custom feature,
+  `adj_close`/provenance leaks, and the `compute_weights_panel` parity-vs-validity trap. The rules
+  here are the floor, not the whole job.
 
 ## The bars you receive
 
