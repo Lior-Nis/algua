@@ -17,7 +17,12 @@ def test_register_and_get_importer_roundtrip():
             return iter(())
 
     register_importer("dummy", lambda: _Dummy())
-    assert get_importer("dummy").name == "dummy"
+    try:
+        assert get_importer("dummy").name == "dummy"
+    finally:
+        from algua.data.importers import _REGISTRY
+
+        del _REGISTRY["dummy"]
 
 
 def test_import_request_defaults(tmp_path):
