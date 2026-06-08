@@ -14,29 +14,15 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.lifecycle import Actor
+from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
-from algua.registry.transitions import transition_strategy
-from algua.research.gates import GateCriteria, GateDecision, evaluate_gate
+from algua.research.gates import GateCriteria
 
 research_app = typer.Typer(help="Research workflow: gates and promotion", no_args_is_help=True)
 app.add_typer(research_app, name="research")
 
 _HOLDOUT_REUSE_OVERRIDE = "override"
-
-
-def _gate_reason(decision: GateDecision) -> str:
-    parts = [f"{c['name']}={c['value']:.4g}{c['op']}{c['threshold']:.4g}" for c in decision.checks]
-    # The `n_combos is not None` guard is defensive: `promote` refuses unless _resolve_breadth
-    # succeeds, so n_combos is always set when this function is reached on a passing decision.
-    breadth = (
-        f"; breadth={decision.n_combos}({decision.breadth_provenance})"
-        f"; min_holdout_sharpe={decision.base_min_holdout_sharpe:.4g}"
-        f"->{decision.effective_min_holdout_sharpe:.4g}"
-        if decision.n_combos is not None
-        else ""
-    )
-    return "gate pass: " + ", ".join(parts) + breadth
 
 
 @research_app.command("promote")
@@ -66,6 +52,11 @@ def promote(
         help="OVERRIDE the single-use holdout guard: re-evaluate a holdout window already burned "
              "by a prior promote. Records the reuse (reused=1) and marks it in the audit trail. "
              "Statistically costly — only with fresh justification.",
+    ),
+    allow_non_pit: bool = typer.Option(
+        False, "--allow-non-pit",
+        help="HUMAN-ONLY override: promote a non-PIT (survivorship-biased) backtest. Audited. "
+             "Agents may not pass this.",
     ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
 ) -> None:
@@ -98,53 +89,43 @@ def promote(
 
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        rec = repo.get(name)  # StrategyNotFound -> JSON error before any evaluation
-        # 2. Resolve search breadth — if it would refuse, refuse here, before evaluating anything.
-        breadth, provenance = _resolve_breadth(repo, name, n_combos)
-        # 3. Holdout-reuse pre-check — BEFORE walk_forward, so a burned holdout is never peeked at.
-        # The match identity is the data window (strategy, data_source, snapshot_id, period,
-        # holdout_frac) and deliberately EXCLUDES the universe: the same OOS data window is burned
-        # regardless of which universe it was evaluated under (conservative).
+        repo.get(name)  # StrategyNotFound -> JSON error before any work
+        # PREFLIGHT (pre-peek): relaxations-need-human + stage legality + breadth. Refuses here,
+        # before walk_forward touches the holdout.
+        breadth = promotion_preflight(
+            repo, name, actor=actor_enum, declared_combos=n_combos,
+            allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit)
+        # Holdout-reuse pre-check — BEFORE walk_forward (the match identity is the data window and
+        # deliberately EXCLUDES the universe: the same OOS data window is burned regardless of
+        # which universe it was evaluated under, conservative).
         overlap = repo.overlapping_holdout_evaluations(
-            rec.id, data_source=data_source, snapshot_id=snapshot_id,
-            period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
-        )
+            repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
+            period_start=period_start, period_end=period_end, holdout_frac=holdout_frac)
         if overlap and not allow_holdout_reuse:
             raise ValueError(
                 f"holdout already consumed for {name!r}: an overlapping out-of-sample window was "
-                f"already evaluated ({data_source}"
-                f"{f'/{snapshot_id}' if snapshot_id else ''}, "
-                f"{period_start}..{period_end}, holdout_frac={holdout_frac}). Re-gating the same "
-                f"holdout leaks it. Use fresh out-of-sample data (a different period or data "
-                f"snapshot), or pass --allow-holdout-reuse to override and accept the statistical "
-                f"cost (the result will be flagged as a holdout reuse)."
+                f"already evaluated. Use fresh out-of-sample data, or --allow-holdout-reuse "
+                f"(--actor human) to override and accept the statistical cost."
             )
-        reused = overlap and allow_holdout_reuse
-        # 4. Run walk_forward — this evaluates (consumes) the holdout. The PIT universe threads
-        # into the engine here so the holdout/stability that drives the gate is computed against
-        # point-in-time membership, not the static (survivorship-biased) universe.
-        wf = walk_forward(strategy, provider, start_dt, end_dt,
-                          windows=windows, holdout_frac=holdout_frac,
-                          universe_by_date=universe_by_date,
+        reused = bool(overlap and allow_holdout_reuse)
+        wf = walk_forward(strategy, provider, start_dt, end_dt, windows=windows,
+                          holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                           universe_name=universe, universe_snapshots=universe_prov)
-        # 5. Record the holdout evaluation NOW — looking at it consumes it regardless of pass/fail.
         repo.record_holdout_evaluation(
-            rec.id, data_source=data_source, snapshot_id=snapshot_id,
+            repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
-            config_hash=wf.config_hash, reused=reused,
-        )
-        # 6. Evaluate the gate and promote on pass.
-        decision = evaluate_gate(wf, criteria, n_combos=breadth, breadth_provenance=provenance)
-        promoted = False
-        if decision.passed:
-            reason = _gate_reason(decision)
-            if reused:
-                reason += "; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE
-            transition_strategy(repo, name, Stage.SHORTLISTED, actor_enum, reason)
-            promoted = True
+            config_hash=wf.config_hash, reused=reused)
+        outcome = run_gate(
+            repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
+            universe_name=universe, universe_snapshots=universe_prov,
+            period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
+            data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
+            reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
+        decision, promoted = outcome.decision, outcome.promoted
 
     payload: dict[str, Any] = {
         **decision.to_dict(),
+        "n_funnel": decision.n_combos,
         "strategy": name,
         "promoted": promoted,
         "config_hash": wf.config_hash,
@@ -157,26 +138,3 @@ def promote(
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
     emit(ok(payload))
-
-
-def _resolve_breadth(
-    repo: SqliteStrategyRepository, name: str, declared: int | None
-) -> tuple[int, str]:
-    """Resolve the search breadth N and its provenance for the gate.
-
-    The MEASURED sum of recorded `search_trials` is the default, trusted path and always wins
-    over a declaration. If nothing is recorded, fall back to the operator DECLARATION
-    (--n-combos). If neither exists, REFUSE — never silently default breadth to 1, which would
-    waive the multiple-testing penalty for an unmeasured search.
-    """
-    repo.get(name)  # raises StrategyNotFound -> JSON error (promotion needs registration)
-    # Breadth is summed by NAME (not the registry id) so pre-registration sweeps count too.
-    measured = repo.total_search_combos(name)
-    if measured > 0:
-        return measured, "measured"
-    if declared is not None:
-        return declared, "declared"
-    raise ValueError(
-        f"no recorded search breadth for {name!r}; run `algua backtest sweep {name} ...` "
-        f"(records breadth) or pass --n-combos N to declare it explicitly"
-    )

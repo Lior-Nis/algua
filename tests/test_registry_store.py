@@ -63,8 +63,10 @@ def test_illegal_transition_raises(repo):
 
 def test_transition_service_allows_injected_live_approval_verifier(repo):
     repo.add("cross_sectional_momentum")
-    for stage in (Stage.BACKTESTED, Stage.SHORTLISTED, Stage.PAPER):
-        _transition(repo, "cross_sectional_momentum", stage, Actor.AGENT)
+    # SHORTLISTED via human: scaffolding to a later stage, not exercising the agent shortlist gate.
+    _transition(repo, "cross_sectional_momentum", Stage.BACKTESTED, Actor.AGENT)
+    _transition(repo, "cross_sectional_momentum", Stage.SHORTLISTED, Actor.HUMAN)
+    _transition(repo, "cross_sectional_momentum", Stage.PAPER, Actor.AGENT)
 
     rec = transition_strategy(
         repo,

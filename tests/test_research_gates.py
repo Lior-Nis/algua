@@ -3,8 +3,11 @@ import math
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
+    FUNNEL_WINDOW_DAYS,
+    MIN_HOLDOUT_OBSERVATIONS,
     GateCriteria,
     GateDecision,
+    effective_funnel_breadth,
     evaluate_gate,
     sharpe_haircut,
 )
@@ -25,11 +28,12 @@ def _wf(holdout_sharpe=0.8, holdout_return=0.05, pct_positive=0.75, min_sharpe=0
 
 def test_all_thresholds_met_passes():
     # n_combos=1 ⇒ zero haircut, so a clean result clears the base bar.
-    d = evaluate_gate(_wf(), GateCriteria(), n_combos=1)
+    d = evaluate_gate(_wf(), GateCriteria(), n_combos=1, pit_ok=True)
     assert isinstance(d, GateDecision)
     assert d.passed is True
     assert {c["name"] for c in d.checks} == {
-        "holdout_sharpe", "holdout_return", "pct_positive_windows", "min_window_sharpe"}
+        "holdout_sharpe", "holdout_return", "pct_positive_windows", "min_window_sharpe",
+        "min_holdout_observations", "pit_required"}
     assert all(c["passed"] for c in d.checks)
     assert d.n_combos == 1
 
@@ -73,7 +77,7 @@ def test_haircut_fails_closed_on_degenerate_holdout():
 def test_degenerate_holdout_makes_gate_fail_not_pass():
     # n_bars=0 -> the holdout_sharpe check must FAIL (never pass), even with an otherwise stellar
     # holdout Sharpe, because a zero-length holdout is no evidence at all.
-    d = evaluate_gate(_wf(holdout_sharpe=99.0, n_bars=0), GateCriteria(), n_combos=9)
+    d = evaluate_gate(_wf(holdout_sharpe=99.0, n_bars=0), GateCriteria(), n_combos=9, pit_ok=True)
     assert d.passed is False
     check = next(c for c in d.checks if c["name"] == "holdout_sharpe")
     assert check["passed"] is False
@@ -84,14 +88,14 @@ def test_degenerate_holdout_to_dict_nulls_inf_threshold_and_is_json_serializable
 
     # n_bars=0 drives effective_min_holdout_sharpe to inf; to_dict() must null it so inf never
     # reaches JSON — regression guard against re-leaking a non-finite value into the payload.
-    d = evaluate_gate(_wf(holdout_sharpe=99.0, n_bars=0), GateCriteria(), n_combos=9)
+    d = evaluate_gate(_wf(holdout_sharpe=99.0, n_bars=0), GateCriteria(), n_combos=9, pit_ok=True)
     d_dict = d.to_dict()
     assert d_dict["effective_min_holdout_sharpe"] is None
     json.dumps(d_dict)  # must not raise (no inf/NaN in payload)
 
 
 def test_n1_effective_equals_base():
-    d = evaluate_gate(_wf(), GateCriteria(min_holdout_sharpe=0.5), n_combos=1)
+    d = evaluate_gate(_wf(), GateCriteria(min_holdout_sharpe=0.5), n_combos=1, pit_ok=True)
     assert d.base_min_holdout_sharpe == 0.5
     assert d.effective_min_holdout_sharpe == 0.5
     check = next(c for c in d.checks if c["name"] == "holdout_sharpe")
@@ -99,16 +103,16 @@ def test_n1_effective_equals_base():
 
 
 def test_more_combos_strictly_raises_effective_bar():
-    low = evaluate_gate(_wf(), GateCriteria(), n_combos=2)
-    high = evaluate_gate(_wf(), GateCriteria(), n_combos=200)
+    low = evaluate_gate(_wf(), GateCriteria(), n_combos=2, pit_ok=True)
+    high = evaluate_gate(_wf(), GateCriteria(), n_combos=200, pit_ok=True)
     assert high.effective_min_holdout_sharpe > low.effective_min_holdout_sharpe > 0.5
 
 
 def test_passes_at_n1_fails_at_large_n_with_identical_metrics():
     # Holdout sharpe 0.8 clears base 0.5 at N=1, but the N=200 haircut lifts the bar above 0.8.
     base = GateCriteria(min_holdout_sharpe=0.5)
-    at_one = evaluate_gate(_wf(holdout_sharpe=0.8), base, n_combos=1)
-    at_many = evaluate_gate(_wf(holdout_sharpe=0.8), base, n_combos=200)
+    at_one = evaluate_gate(_wf(holdout_sharpe=0.8), base, n_combos=1, pit_ok=True)
+    at_many = evaluate_gate(_wf(holdout_sharpe=0.8), base, n_combos=200, pit_ok=True)
     assert at_one.passed is True
     assert at_many.passed is False
     failed = [c["name"] for c in at_many.checks if not c["passed"]]
@@ -116,33 +120,34 @@ def test_passes_at_n1_fails_at_large_n_with_identical_metrics():
 
 
 def test_effective_threshold_equals_base_plus_haircut():
-    d = evaluate_gate(_wf(n_bars=100), GateCriteria(min_holdout_sharpe=0.5), n_combos=9)
+    d = evaluate_gate(
+        _wf(n_bars=100), GateCriteria(min_holdout_sharpe=0.5), n_combos=9, pit_ok=True)
     assert math.isclose(
         d.effective_min_holdout_sharpe, 0.5 + sharpe_haircut(9, 100), rel_tol=1e-12
     )
 
 
 def test_provenance_carried_into_decision_and_dict():
-    d = evaluate_gate(_wf(), GateCriteria(), n_combos=4, breadth_provenance="declared")
+    d = evaluate_gate(_wf(), GateCriteria(), n_combos=4, breadth_provenance="declared", pit_ok=True)
     assert d.breadth_provenance == "declared"
     assert d.to_dict()["breadth_provenance"] == "declared"
     assert "effective_min_holdout_sharpe" in d.to_dict()
 
 
 def test_low_holdout_sharpe_fails_that_check():
-    d = evaluate_gate(_wf(holdout_sharpe=0.1), GateCriteria(min_holdout_sharpe=0.5))
+    d = evaluate_gate(_wf(holdout_sharpe=0.1), GateCriteria(min_holdout_sharpe=0.5), pit_ok=True)
     assert d.passed is False
     assert [c["name"] for c in d.checks if not c["passed"]] == ["holdout_sharpe"]
 
 
 def test_zero_holdout_return_fails_strict_gt():
-    d = evaluate_gate(_wf(holdout_return=0.0), GateCriteria())
+    d = evaluate_gate(_wf(holdout_return=0.0), GateCriteria(), pit_ok=True)
     assert d.passed is False
     assert [c["name"] for c in d.checks if not c["passed"]] == ["holdout_return"]
 
 
 def test_low_pct_positive_and_negative_window_fail():
-    d = evaluate_gate(_wf(pct_positive=0.4, min_sharpe=-0.5), GateCriteria())
+    d = evaluate_gate(_wf(pct_positive=0.4, min_sharpe=-0.5), GateCriteria(), pit_ok=True)
     assert d.passed is False
     failed = {c["name"] for c in d.checks if not c["passed"]}
     assert failed == {"pct_positive_windows", "min_window_sharpe"}
@@ -150,7 +155,7 @@ def test_low_pct_positive_and_negative_window_fail():
 
 def test_infinite_metric_fails_gate_not_passes():
     # float('inf') trivially satisfies >=/>; it must instead fail the check.
-    d = evaluate_gate(_wf(holdout_sharpe=float("inf")), GateCriteria())
+    d = evaluate_gate(_wf(holdout_sharpe=float("inf")), GateCriteria(), pit_ok=True)
     assert d.passed is False
     failed = [c for c in d.checks if c["name"] == "holdout_sharpe"]
     assert failed and failed[0]["passed"] is False
@@ -160,7 +165,7 @@ def test_nan_metric_fails_gate_and_is_not_recorded_as_value():
     # NaN must not be recorded as a passing value in the decision payload.
     import math
 
-    d = evaluate_gate(_wf(holdout_sharpe=float("nan")), GateCriteria())
+    d = evaluate_gate(_wf(holdout_sharpe=float("nan")), GateCriteria(), pit_ok=True)
     assert d.passed is False
     check = next(c for c in d.checks if c["name"] == "holdout_sharpe")
     assert check["passed"] is False
@@ -171,12 +176,13 @@ def test_nan_metric_fails_gate_and_is_not_recorded_as_value():
 def test_nan_gate_decision_is_json_serializable():
     import json
 
-    json.dumps(evaluate_gate(_wf(holdout_sharpe=float("nan")), GateCriteria()).to_dict())
+    decision = evaluate_gate(_wf(holdout_sharpe=float("nan")), GateCriteria(), pit_ok=True)
+    json.dumps(decision.to_dict())
 
 
 def test_to_dict_serializable():
     import json
-    json.dumps(evaluate_gate(_wf(), GateCriteria()).to_dict())
+    json.dumps(evaluate_gate(_wf(), GateCriteria(), pit_ok=True).to_dict())
 
 
 def test_gate_checks_are_table_driven():
@@ -184,8 +190,56 @@ def test_gate_checks_are_table_driven():
     from algua.research.gates import GATE_SPECS
 
     names_from_table = {spec.name for spec in GATE_SPECS}
-    names_from_eval = {c["name"] for c in evaluate_gate(_wf(), GateCriteria()).checks}
-    assert names_from_table == names_from_eval
+    names_from_eval = {c["name"] for c in evaluate_gate(_wf(), GateCriteria(), pit_ok=True).checks}
+    assert names_from_eval == names_from_table | {"pit_required"}
     # Each spec points at a real GateCriteria threshold attribute.
     for spec in GATE_SPECS:
         assert hasattr(GateCriteria(), spec.threshold_attr)
+
+
+# --- DS-integrity walls (issue 137) ---------------------------------------------------------
+
+
+def test_constants_defaults():
+    assert FUNNEL_WINDOW_DAYS == 90
+    assert MIN_HOLDOUT_OBSERVATIONS == 63
+
+
+def test_effective_funnel_breadth_is_max():
+    assert effective_funnel_breadth(own_lifetime=10, windowed_total=3) == 10
+    assert effective_funnel_breadth(own_lifetime=3, windowed_total=10) == 10
+    assert effective_funnel_breadth(own_lifetime=0, windowed_total=0) == 0
+
+
+_LAX = dict(min_holdout_sharpe=-100, min_holdout_return=-100, min_pct_positive_windows=0,
+            min_window_sharpe=-100)
+
+
+def test_min_holdout_observations_fails_closed_below_floor():
+    d = evaluate_gate(_wf(n_bars=10), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
+    floor = next(c for c in d.checks if c["name"] == "min_holdout_observations")
+    assert floor["passed"] is False and d.passed is False
+
+
+def test_min_holdout_observations_passes_at_floor():
+    d = evaluate_gate(_wf(n_bars=63), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
+    floor = next(c for c in d.checks if c["name"] == "min_holdout_observations")
+    assert floor["passed"] is True
+
+
+def test_pit_required_fails_closed():
+    d = evaluate_gate(_wf(), GateCriteria(**_LAX), n_combos=1, pit_ok=False)
+    pit = next(c for c in d.checks if c["name"] == "pit_required")
+    assert pit["passed"] is False and pit["override"] is None and d.passed is False
+
+
+def test_pit_override_passes_and_flags():
+    d = evaluate_gate(_wf(), GateCriteria(**_LAX), n_combos=1, pit_ok=False, allow_non_pit=True)
+    pit = next(c for c in d.checks if c["name"] == "pit_required")
+    assert pit["passed"] is True and pit["override"] == "non_pit" and d.pit_override is True
+
+
+def test_pit_ok_passes_clean():
+    d = evaluate_gate(_wf(), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
+    pit = next(c for c in d.checks if c["name"] == "pit_required")
+    assert pit["passed"] is True and d.pit_ok is True and d.pit_override is False

@@ -69,11 +69,12 @@ def test_pre_registration_sweep_breadth_used_by_promote():
                                   "--start", "2022-01-01", "--end", "2023-12-31",
                                   "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
                                   "--min-pct-positive", "0", "--min-window-sharpe", "-100",
-                                  "--n-combos", "1"])  # smaller declaration must NOT undercut
+                                  "--n-combos", "1",  # smaller declaration must NOT undercut
+                                  "--allow-non-pit", "--actor", "human"])
     assert promote.exit_code == 0, promote.stdout
     payload = json.loads(promote.stdout)
     assert payload["breadth_provenance"] == "measured"
-    assert payload["n_combos"] == 4
+    assert payload["n_funnel"] == 4
 
 
 def test_sweep_of_registered_strategy_records_breadth():

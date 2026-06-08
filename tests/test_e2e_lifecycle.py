@@ -58,7 +58,7 @@ def test_full_research_lifecycle_to_shortlist_and_live_wall(capsys):
                          "--start", "2022-01-01", "--end", "2023-12-31",
                          "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
                          "--min-pct-positive", "0", "--min-window-sharpe", "-100",
-                         "--n-combos", "9")
+                         "--n-combos", "9", "--allow-non-pit", "--actor", "human")
     assert code == 0, payload
     assert payload["passed"] is True
     assert payload["promoted"] is True
