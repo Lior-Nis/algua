@@ -7,6 +7,7 @@ import shutil
 import struct
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as pads
@@ -139,7 +140,11 @@ def logical_bars_hash(canon: pd.DataFrame) -> str:
 
     `canon` carries a tz-aware UTC `ts` column, a `symbol` column, and the six float columns. Rows
     are sorted by (ts, symbol); each column is serialized as fixed-width little-endian bytes (ts as
-    int64 nanoseconds-since-epoch UTC, floats as IEEE-754 float64) with a NUL-joined symbol blob.
+    int64 nanoseconds-since-epoch UTC, floats as IEEE-754 float64). Symbols are encoded as a
+    parallel little-endian uint64 length array followed by concatenated UTF-8 bytes
+    (length-prefixed, collision-safe). Signed zeros in float columns are canonicalized to +0.0
+    before hashing so that
+    -0.0 and 0.0 compare as identical logical data.
     Identical logical bars => identical digest regardless of write threading, file splitting, or
     pyarrow version. This is the snapshot identity for the partitioned bars layout (issue #130,
     GATE-1 HIGH #1/#2), replacing the single-file physical-bytes hash.
@@ -150,8 +155,11 @@ def logical_bars_hash(canon: pd.DataFrame) -> str:
     ts_utc = ordered["ts"].dt.tz_convert("UTC").dt.tz_localize(None)
     ts_ns = ts_utc.to_numpy(dtype="datetime64[ns]").view("int64").astype("<i8")
     digest.update(ts_ns.tobytes())
-    digest.update("\x00".join(ordered["symbol"].astype(str)).encode("utf-8"))
-    digest.update(b"\x00")
+    symbol_bytes = [s.encode("utf-8") for s in ordered["symbol"].astype(str)]
+    lengths = np.array([len(b) for b in symbol_bytes], dtype="<u8")
+    digest.update(lengths.tobytes())
+    digest.update(b"".join(symbol_bytes))
     for col in BARS_FILE_HASH_COLUMNS:
-        digest.update(ordered[col].to_numpy(dtype="<f8").tobytes())
+        values = ordered[col].to_numpy(dtype="<f8") + 0.0  # +0.0 maps -0.0 -> +0.0
+        digest.update(values.astype("<f8").tobytes())
     return digest.hexdigest()

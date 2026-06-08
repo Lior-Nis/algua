@@ -1,6 +1,7 @@
 import hashlib
 from datetime import UTC, datetime
 
+import numpy as np
 import pandas as pd
 
 from algua.data.files import logical_bars_hash, read_partitioned_bars, write_partitioned_bars
@@ -84,3 +85,24 @@ def test_read_empty_window_returns_empty_frame(tmp_path):
         start=datetime(2025, 1, 1, tzinfo=UTC), end=datetime(2025, 1, 2, tzinfo=UTC),
     )
     assert out.empty
+
+
+def test_logical_hash_no_symbol_delimiter_collision():
+    # distinct symbol sets must not collide via a NUL-flattened blob
+    a = _canon([
+        ("2024-07-01T00:00:00+00:00", "A\x00B", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        ("2024-07-01T00:00:00+00:00", "C", 2.0, 2.0, 2.0, 2.0, 2.0, 2.0),
+    ])
+    b = _canon([
+        ("2024-07-01T00:00:00+00:00", "A", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        ("2024-07-01T00:00:00+00:00", "B\x00C", 2.0, 2.0, 2.0, 2.0, 2.0, 2.0),
+    ])
+    assert logical_bars_hash(a) != logical_bars_hash(b)
+
+
+def test_logical_hash_canonicalizes_signed_zero():
+    pos = _canon([("2024-07-01T00:00:00+00:00", "AAA", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)])
+    neg = _canon([("2024-07-01T00:00:00+00:00", "AAA", -0.0, -0.0, -0.0, -0.0, -0.0, -0.0)])
+    # sanity: the inputs really do carry negative-zero bits
+    assert np.signbit(neg["open"].to_numpy()).all()
+    assert logical_bars_hash(pos) == logical_bars_hash(neg)
