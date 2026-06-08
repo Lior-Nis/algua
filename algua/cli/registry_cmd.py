@@ -201,6 +201,80 @@ def set_(
     emit(ok({**_record_json(after), "changed": changed}))
 
 
+@registry_app.command("backfill-from-kb")
+@json_errors(ValueError, LookupError)
+def backfill_from_kb() -> None:
+    """One-shot: recover kb-authored metadata into NULL registry columns; report conflicts.
+
+    Fills only currently-NULL columns. kb hypothesis_status/author values that aren't valid enum
+    members are reported as 'unmappable' and left for the operator. Finally default-fills any row
+    still NULL on author/hypothesis_status/tags."""
+    from algua.knowledge.frontmatter import parse_doc
+    from algua.knowledge.sync import _unwikilink, strategy_doc_path
+
+    settings = get_settings()
+    filled: list[str] = []
+    unmappable: list[dict] = []
+    kb_without_row: list[str] = []
+    rows_without_kb: list[str] = []
+    valid_status = {h.value for h in HypothesisStatus}
+    valid_author = {a.value for a in Author}
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        names = {r.name for r in repo.list_strategies()}
+        # Rows with no kb doc
+        for name in names:
+            if not strategy_doc_path(settings, name).exists():
+                rows_without_kb.append(name)
+        # kb docs -> registry backfill
+        strat_dir = settings.knowledge_dir / "strategies"
+        if strat_dir.exists():
+            for doc in sorted(strat_dir.glob("*.md")):
+                if doc.name.startswith("_"):
+                    continue
+                fm, _ = parse_doc(doc.read_text())
+                if fm.get("type") == "family":
+                    continue
+                doc_name = str(fm.get("name", doc.stem))
+                if doc_name not in names:
+                    kb_without_row.append(doc_name)
+                    continue
+                status = fm.get("hypothesis_status")
+                author = fm.get("author")
+                if status is not None and status not in valid_status:
+                    unmappable.append({"name": doc_name, "field": "hypothesis_status",
+                                       "value": status})
+                    status = None
+                if author is not None and author not in valid_author:
+                    unmappable.append({"name": doc_name, "field": "author", "value": author})
+                    author = None
+                tags = fm.get("tags")
+                repo.backfill_metadata(
+                    doc_name,
+                    family=_unwikilink(fm.get("family")),
+                    derived_from=_unwikilink(fm.get("derived_from")),
+                    hypothesis_status=status,
+                    author=author,
+                    description=fm.get("description"),
+                    tags=list(tags) if isinstance(tags, list) else None,
+                )
+                filled.append(doc_name)
+        # Final default-fill of any remaining NULLs
+        conn.execute("UPDATE strategies SET author = COALESCE(author, ?)", (Author.AGENT.value,))
+        conn.execute(
+            "UPDATE strategies SET hypothesis_status = COALESCE(hypothesis_status, ?)",
+            (HypothesisStatus.UNTESTED.value,),
+        )
+        conn.execute("UPDATE strategies SET tags = COALESCE(tags, '[]')")
+        conn.commit()
+    emit(ok({
+        "filled": sorted(set(filled)),
+        "unmappable": unmappable,
+        "kb_docs_without_registry_row": sorted(set(kb_without_row)),
+        "registry_rows_without_kb_doc": sorted(set(rows_without_kb)),
+    }))
+
+
 @registry_app.command("enroll-approver")
 @json_errors(ValueError)
 def enroll_approver(

@@ -104,6 +104,24 @@ class StrategyRepository(Protocol):
         default. Ordered by insertion."""
         ...
 
+    def backfill_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: str | None = None,
+        hypothesis_status: str | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        """Fill only currently-NULL metadata columns from the given values (one-shot recovery).
+        A column already holding a value is left untouched. ``author``/``hypothesis_status`` are
+        raw validated strings (the caller maps/validates against the enums). Idempotent: re-running
+        is a no-op once columns are non-NULL.
+        """
+        ...
+
     def list_transitions(self, name: str) -> list[dict]:
         """Return the strategy's ordered stage-transition history."""
         ...

@@ -364,3 +364,26 @@ def test_filter_by_stage_and_family(tmp_path):
     repo.apply_transition(rec_a, Stage.BACKTESTED, Actor.AGENT)
     # only b remains at idea within mean-reversion
     assert {r.name for r in repo.list_strategies(Stage.IDEA, family="mean-reversion")} == {"b"}
+
+
+# ---------------------------------------------------------------------------
+# Task 13: backfill_metadata — fills only NULL columns
+# ---------------------------------------------------------------------------
+
+def test_backfill_metadata_fills_only_nulls(tmp_path):
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # legacy NULL row (bypasses add() which writes defaults)
+    conn.execute("INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+                 "('a','idea','2026-01-01','2026-01-01')")
+    conn.commit()
+    repo = SqliteStrategyRepository(conn)
+    repo.backfill_metadata("a", family="mean-reversion", hypothesis_status="supported")
+    rec = repo.get("a")
+    assert rec.family == "mean-reversion"
+    assert rec.hypothesis_status.value == "supported"
+    # second backfill must NOT overwrite a now-non-NULL value
+    repo.backfill_metadata("a", family="momentum")
+    assert repo.get("a").family == "mean-reversion"

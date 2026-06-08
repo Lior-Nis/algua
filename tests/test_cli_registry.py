@@ -351,6 +351,142 @@ def test_list_filters_compose():
     assert [r["name"] for r in out2] == ["b"]
 
 
+# ---------------------------------------------------------------------------
+# Task 13: registry backfill-from-kb
+# ---------------------------------------------------------------------------
+
+def test_backfill_from_kb_reports_and_fills(monkeypatch, tmp_path):
+    """A legacy NULL-column registry row is filled from a kb doc's frontmatter."""
+    from algua.config.settings import get_settings
+    from algua.knowledge.frontmatter import render_doc
+    from algua.registry.db import connect, migrate
+
+    # Isolate the kb vault.
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    # Insert a legacy NULL-metadata row directly (bypassing add() which writes defaults).
+    db_path = get_settings().db_path
+    conn = connect(db_path)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('alpha','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    # Write a kb doc for "alpha" with family and hypothesis_status in frontmatter.
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    fm = {
+        "name": "alpha",
+        "stage": "idea",
+        "family": "[[mean-reversion]]",
+        "hypothesis_status": "supported",
+        "tags": ["slow", "carry"],
+    }
+    (strat_dir / "alpha.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    assert "alpha" in out["filled"]
+    assert "unmappable" in out
+    assert "kb_docs_without_registry_row" in out
+    assert "registry_rows_without_kb_doc" in out
+
+    rec = _json(runner.invoke(app, ["registry", "show", "alpha"]))
+    assert rec["family"] == "mean-reversion"
+    assert rec["hypothesis_status"] == "supported"
+    assert rec["tags"] == ["carry", "slow"]
+
+
+def test_backfill_from_kb_does_not_overwrite_existing_values(monkeypatch, tmp_path):
+    """A second backfill run is a no-op once columns are non-NULL."""
+    from algua.knowledge.frontmatter import render_doc
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    # Register with a concrete family value.
+    runner.invoke(app, ["registry", "add", "alpha", "--family", "momentum"])
+
+    # Write a kb doc claiming a different family.
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    fm = {
+        "name": "alpha",
+        "stage": "idea",
+        "family": "[[mean-reversion]]",
+        "hypothesis_status": "supported",
+    }
+    (strat_dir / "alpha.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    rec = _json(runner.invoke(app, ["registry", "show", "alpha"]))
+    # family was already 'momentum'; backfill must not overwrite it
+    assert rec["family"] == "momentum"
+
+
+def test_backfill_from_kb_reports_unmappable_status(monkeypatch, tmp_path):
+    """A kb doc with an unknown hypothesis_status value is reported as unmappable."""
+    from algua.config.settings import get_settings
+    from algua.knowledge.frontmatter import render_doc
+    from algua.registry.db import connect, migrate
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    db_path = get_settings().db_path
+    conn = connect(db_path)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('beta','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    fm = {"name": "beta", "stage": "idea", "hypothesis_status": "unknown_value"}
+    (strat_dir / "beta.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    assert any(u["name"] == "beta" and u["field"] == "hypothesis_status"
+               for u in out["unmappable"])
+
+
+def test_backfill_from_kb_reports_orphan_lists(monkeypatch, tmp_path):
+    """Orphan reporting: kb doc without registry row and registry row without kb doc."""
+    from algua.config.settings import get_settings
+    from algua.knowledge.frontmatter import render_doc
+    from algua.registry.db import connect, migrate
+
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+
+    db_path = get_settings().db_path
+    conn = connect(db_path)
+    migrate(conn)
+    # Row with no matching kb doc
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('no_doc','idea','2026-01-01','2026-01-01')"
+    )
+    conn.commit()
+    conn.close()
+
+    # kb doc with no matching registry row
+    strat_dir = vault / "strategies"
+    strat_dir.mkdir(parents=True)
+    fm = {"name": "ghost_doc", "stage": "idea"}
+    (strat_dir / "ghost_doc.md").write_text(render_doc(fm, "## Hypothesis\n"))
+
+    out = _json(runner.invoke(app, ["registry", "backfill-from-kb"]))
+    assert "no_doc" in out["registry_rows_without_kb_doc"]
+    assert "ghost_doc" in out["kb_docs_without_registry_row"]
+
+
 def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity

@@ -172,6 +172,40 @@ class SqliteStrategyRepository:
         ).fetchall()
         return [_row_to_record(r) for r in rows]
 
+    def backfill_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: str | None = None,
+        hypothesis_status: str | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        """Fill only currently-NULL metadata columns (one-shot recovery). Uses COALESCE so any
+        column already holding a value is left untouched. Idempotent: re-running is a no-op."""
+        cols: dict[str, object] = {
+            "family": family,
+            "tags": dump_tags(tags) if tags is not None else None,
+            "author": author,
+            "hypothesis_status": hypothesis_status,
+            "derived_from": derived_from,
+            "description": description,
+        }
+        # Filter to columns where the caller provided a non-None value.
+        to_fill = {c: v for c, v in cols.items() if v is not None}
+        if to_fill:
+            rec = self.get(name)
+            # COALESCE keeps any existing non-NULL value; only NULLs are filled.
+            assignments = ", ".join(f"{c} = COALESCE({c}, ?)" for c in to_fill)
+            params: list[object] = [*to_fill.values(), rec.id]
+            with self._conn:
+                self._conn.execute(
+                    f"UPDATE strategies SET {assignments} WHERE id = ?", params
+                )
+        return self.get(name)
+
     def list_transitions(self, name: str) -> list[dict]:
         rec = self.get(name)
         rows = self._conn.execute(
