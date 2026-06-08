@@ -65,3 +65,26 @@ def test_get_bars_end_boundary_is_half_open(tmp_path):
     )
 
     assert list(out.index) == [pd.Timestamp("2024-07-01", tz="UTC")]  # 07-02 == end, excluded
+
+
+def test_get_bars_prunes_to_requested_symbol(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest(store)  # AAA/BBB across 2024-07-01..07-03
+    provider = StoreBackedProvider(store, rec.snapshot_id)
+    out = provider.get_bars(
+        ["BBB"], datetime(2024, 7, 1, tzinfo=UTC), datetime(2024, 7, 3, tzinfo=UTC), "1d"
+    )
+    validate_bars(out)
+    assert set(out["symbol"]) == {"BBB"}
+    assert out.index.max() == pd.Timestamp("2024-07-02", tz="UTC")  # half-open end
+
+
+def test_get_bars_naive_datetimes_are_treated_as_utc(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest(store)
+    provider = StoreBackedProvider(store, rec.snapshot_id)
+    out = provider.get_bars(
+        ["AAA"], datetime(2024, 7, 1), datetime(2024, 7, 2), "1d"  # naive
+    )
+    validate_bars(out)
+    assert out.index.max() == pd.Timestamp("2024-07-01", tz="UTC")
