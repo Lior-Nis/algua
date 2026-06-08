@@ -122,6 +122,11 @@ class StrategyRepository(Protocol):
         """
         ...
 
+    def delete(self, name: str) -> None:
+        """Remove a strategy row and its transition rows. ONLY for rolling back a failed
+        ``strategy new`` that just created it — there is no general deletion workflow."""
+        ...
+
     def list_transitions(self, name: str) -> list[dict]:
         """Return the strategy's ordered stage-transition history."""
         ...

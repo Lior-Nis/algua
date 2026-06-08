@@ -206,6 +206,16 @@ class SqliteStrategyRepository:
                 )
         return self.get(name)
 
+    def delete(self, name: str) -> None:
+        """Remove a strategy row and its transition rows. ONLY for rolling back a failed
+        ``strategy new`` that just created it — there is no general deletion workflow."""
+        rec = self.get(name)
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM stage_transitions WHERE strategy_id = ?", (rec.id,)
+            )
+            self._conn.execute("DELETE FROM strategies WHERE id = ?", (rec.id,))
+
     def list_transitions(self, name: str) -> list[dict]:
         rec = self.get(name)
         rows = self._conn.execute(

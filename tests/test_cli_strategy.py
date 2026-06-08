@@ -71,6 +71,8 @@ def test_strategy_new_rejects_unsafe_names(tmp_path, monkeypatch):
 def test_strategy_new_scaffolds_doc_and_family(tmp_path, monkeypatch, _cleanup_scaffolded):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    # strategy new now validates derived_from against the registry; register the parent first.
+    runner.invoke(app, ["registry", "add", "seed"])
     result = runner.invoke(
         app, ["strategy", "new", "kb_new_strat", "--family", "momentum", "--derived-from", "seed"]
     )
@@ -98,7 +100,7 @@ def test_strategy_doc_syncs_and_builds_index(tmp_path, monkeypatch, _cleanup_sca
     new_result = runner.invoke(app, ["strategy", "new", "kb_sync_strat"])
     assert new_result.exit_code == 0, new_result.stdout
     _cleanup_scaffolded.append(Path(json.loads(new_result.stdout)["path"]))
-    assert runner.invoke(app, ["registry", "add", "kb_sync_strat"]).exit_code == 0
+    # strategy new now registers; no separate registry add needed
     assert runner.invoke(
         app, ["registry", "transition", "kb_sync_strat", "--to", "backtested",
               "--actor", "agent", "--reason", "x"]
@@ -130,7 +132,6 @@ def test_strategy_doc_single_refreshes_family_roster(tmp_path, monkeypatch, _cle
     new_result = runner.invoke(app, ["strategy", "new", "kb_fam_strat", "--family", "mom"])
     assert new_result.exit_code == 0, new_result.stdout
     _cleanup_scaffolded.append(Path(json.loads(new_result.stdout)["path"]))
-    assert runner.invoke(app, ["registry", "add", "kb_fam_strat", "--family", "mom"]).exit_code == 0
     assert runner.invoke(
         app, ["registry", "transition", "kb_fam_strat", "--to", "backtested",
               "--actor", "agent", "--reason", "x"]
@@ -143,3 +144,85 @@ def test_strategy_doc_single_refreshes_family_roster(tmp_path, monkeypatch, _cle
     assert "backtested 1" in (
         tmp_path / "vault" / "strategies" / "families" / "mom.md"
     ).read_text()
+
+
+# ---------------------------------------------------------------------------
+# Task 14: strategy new registers with preflight + rollback
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_new_registers(tmp_path, monkeypatch, _cleanup_scaffolded):
+    """strategy new must insert a registry row and expose the metadata via registry show."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    out = json.loads(runner.invoke(app, [
+        "strategy", "new", "newstrat", "--family", "mean-reversion",
+        "--hypothesis-status", "untested",
+    ]).stdout)
+    assert out["ok"] is True, out
+    _cleanup_scaffolded.append(Path(out["path"]))
+    rec = json.loads(runner.invoke(app, ["registry", "show", "newstrat"]).stdout)
+    assert rec["family"] == "mean-reversion"
+    assert rec["stage"] == "idea"
+
+
+def test_strategy_new_preflight_rejects_existing_registration(tmp_path, monkeypatch):
+    """strategy new must fail if a strategy with the same name is already registered."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    # Register the name first via registry add.
+    runner.invoke(app, ["registry", "add", "dup"])
+    result = runner.invoke(app, ["strategy", "new", "dup"])
+    out = json.loads(result.stdout)
+    assert out["ok"] is False
+    assert result.exit_code == 1
+
+
+def test_strategy_new_rollback_on_scaffold_failure(tmp_path, monkeypatch):
+    """If the kb scaffold fails after registry insert, the registry row must be rolled back."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    import algua.cli.strategy_cmd as sc
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sc, "scaffold_strategy_doc", boom)
+    result = runner.invoke(app, ["strategy", "new", "rollbackme"])
+    assert json.loads(result.stdout)["ok"] is False
+    # The registry row must have been removed by the rollback.
+    listed = json.loads(runner.invoke(app, ["registry", "list"]).stdout)
+    assert "rollbackme" not in [r["name"] for r in listed]
+
+
+# ---------------------------------------------------------------------------
+# Task 15: guard test — new doc frontmatter matches registry defaults
+# ---------------------------------------------------------------------------
+
+
+def test_new_doc_frontmatter_matches_registry(tmp_path, monkeypatch, _cleanup_scaffolded):
+    """A freshly-created strategy's kb-doc frontmatter must match its registry record."""
+    from algua.knowledge.frontmatter import parse_doc
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+
+    result = runner.invoke(app, ["strategy", "new", "s1", "--family", "mean-reversion"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    _cleanup_scaffolded.append(Path(payload["path"]))
+
+    rec = json.loads(runner.invoke(app, ["registry", "show", "s1"]).stdout)
+    assert rec["family"] == "mean-reversion"
+    assert rec["hypothesis_status"] == "untested"
+
+    # Also verify the frontmatter in the doc itself matches.
+    doc_path = Path(payload["doc"])
+    fm, _ = parse_doc(doc_path.read_text())
+    assert fm["hypothesis_status"] == "untested"
+    assert fm.get("family") == "[[mean-reversion]]"
