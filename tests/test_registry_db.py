@@ -1,4 +1,46 @@
+import sqlite3
+
 from algua.registry.db import SCHEMA_VERSION, connect, migrate
+
+_META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
+
+
+def test_schema_version_is_17():
+    assert SCHEMA_VERSION == 17
+
+
+def test_strategies_has_metadata_columns(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(strategies)")}
+    assert _META_COLS <= cols
+
+
+def test_metadata_columns_are_null_on_existing_rows(tmp_path):
+    # Simulate a pre-v17 DB: create the old-shaped table, insert a row, then migrate.
+    db = tmp_path / "r.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE strategies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL "
+        "UNIQUE, stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+        "('legacy', 'idea', '2026-01-01', '2026-01-01')"
+    )
+    conn.commit()
+    migrate(conn)
+    row = conn.execute("SELECT * FROM strategies WHERE name='legacy'").fetchone()
+    for col in _META_COLS:
+        assert row[col] is None, f"{col} should be NULL on a pre-existing row, got {row[col]!r}"
+
+
+def test_migrate_is_idempotent_at_v17(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    migrate(conn)  # second run must be a no-op, not an error
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 17
 
 
 def test_migrate_creates_tables_and_sets_version(tmp_path):

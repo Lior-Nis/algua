@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -303,6 +303,18 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
     _add_missing_columns(conn, "stage_transitions", {"dependency_hash": "TEXT"})
+    _add_missing_columns(
+        conn,
+        "strategies",
+        {
+            "family": "TEXT",
+            "tags": "TEXT",
+            "author": "TEXT",
+            "hypothesis_status": "TEXT",
+            "derived_from": "TEXT",
+            "description": "TEXT",
+        },
+    )
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
