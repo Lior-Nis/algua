@@ -130,7 +130,7 @@ def test_strategy_doc_single_refreshes_family_roster(tmp_path, monkeypatch, _cle
     new_result = runner.invoke(app, ["strategy", "new", "kb_fam_strat", "--family", "mom"])
     assert new_result.exit_code == 0, new_result.stdout
     _cleanup_scaffolded.append(Path(json.loads(new_result.stdout)["path"]))
-    assert runner.invoke(app, ["registry", "add", "kb_fam_strat"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "add", "kb_fam_strat", "--family", "mom"]).exit_code == 0
     assert runner.invoke(
         app, ["registry", "transition", "kb_fam_strat", "--to", "backtested",
               "--actor", "agent", "--reason", "x"]

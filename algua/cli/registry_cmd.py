@@ -34,6 +34,15 @@ def _record_json(r: StrategyRecord) -> dict:
     }
 
 
+def _kb_metadata(rec: StrategyRecord) -> dict:
+    """Return the registry-owned frontmatter fields for kb sync (no id/name/stage)."""
+    return {
+        "family": rec.family, "tags": rec.tags, "author": rec.author.value,
+        "hypothesis_status": rec.hypothesis_status.value,
+        "derived_from": rec.derived_from, "description": rec.description,
+    }
+
+
 @registry_app.command("add")
 @json_errors(ValueError, LookupError)
 def add(
@@ -188,8 +197,7 @@ def set_(
             changed[f] = {"before": b, "after": a}
     # Re-sync the kb doc so frontmatter reflects the new registry truth.
     # Best-effort: absent doc is ok (sync_strategy_doc returns False).
-    # NOTE: `sync_strategy_doc` gains `metadata=` in Task 11; this call stays stage-only until then.
-    sync_strategy_doc(get_settings(), name, stage=after.stage.value)
+    sync_strategy_doc(get_settings(), name, stage=after.stage.value, metadata=_kb_metadata(after))
     emit(ok({**_record_json(after), "changed": changed}))
 
 

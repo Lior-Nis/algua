@@ -153,3 +153,31 @@ def test_sync_all_returns_summary(tmp_path):
     assert "momentum" in summary["families"]
     members = family_doc_path(s, "momentum").read_text()
     assert "1 members" in members or "members: idea 1" in members
+
+
+def test_sync_writes_owned_metadata_and_preserves_foreign_keys(tmp_path):
+    from algua.knowledge.frontmatter import parse_doc, render_doc
+
+    s = _settings(tmp_path)
+    path = strategy_doc_path(s, "a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Seed a doc with a foreign frontmatter key that must survive the sync.
+    from algua.knowledge.templates import scaffold_strategy_doc
+    fm, body = parse_doc(scaffold_strategy_doc("a"))
+    fm["my_note"] = "keep me"
+    path.write_text(render_doc(fm, body))
+
+    meta = {
+        "family": "mean-reversion", "tags": ["carry", "slow"], "author": "human",
+        "hypothesis_status": "supported", "derived_from": "parent", "description": "d",
+    }
+    sync_strategy_doc(s, "a", stage="backtested", metadata=meta)
+
+    fm2, _ = parse_doc(path.read_text())
+    assert fm2["family"] == "[[mean-reversion]]"
+    assert fm2["derived_from"] == "[[parent]]"
+    assert fm2["tags"] == ["carry", "slow"]
+    assert fm2["author"] == "human"
+    assert fm2["hypothesis_status"] == "supported"
+    assert fm2["stage"] == "backtested"
+    assert fm2["my_note"] == "keep me"  # foreign key preserved

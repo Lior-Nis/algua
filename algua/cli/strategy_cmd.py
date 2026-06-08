@@ -9,6 +9,7 @@ import typer
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.cli.registry_cmd import _kb_metadata
 from algua.config.settings import get_settings
 from algua.knowledge.sync import (
     family_doc_path,
@@ -118,15 +119,15 @@ def doc(
 ) -> None:
     """Regenerate the synced blocks of strategy/family docs + rebuild the indexes."""
     settings = get_settings()
-    # Read lifecycle stage at the CLI seam; the knowledge layer stays registry-free.
+    # Read full records at the CLI seam; the knowledge layer stays registry-free.
     with registry_conn() as conn:
-        stages = {
-            rec.name: rec.stage.value for rec in SqliteStrategyRepository(conn).list_strategies()
-        }
+        recs = {rec.name: rec for rec in SqliteStrategyRepository(conn).list_strategies()}
+    stages = {n: r.stage.value for n, r in recs.items()}
     if all_ or name is None:
         summary = sync_all(settings, stages)
     else:
-        if not sync_strategy_doc(settings, name, stage=stages.get(name)):
+        meta = _kb_metadata(recs[name]) if name in recs else None
+        if not sync_strategy_doc(settings, name, stage=stages.get(name), metadata=meta):
             raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
         # Keep the family roster consistent with this strategy's freshly-synced stage.
         family = strategy_family(settings, name)

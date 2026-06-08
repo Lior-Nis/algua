@@ -71,11 +71,35 @@ def render_results_block(metrics: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def sync_strategy_doc(settings: Settings, name: str, *, stage: str | None) -> bool:
+def _apply_owned_metadata(fm: dict[str, Any], metadata: dict[str, Any]) -> None:
+    """Write the registry-owned frontmatter keys from a registry metadata dict, wrapping
+    ``family``/``derived_from`` as Obsidian wikilinks. NULL/None values clear the key."""
+    for key in ("family", "derived_from"):
+        val = metadata.get(key)
+        if val:
+            fm[key] = f"[[{val}]]"
+        else:
+            fm.pop(key, None)
+    for key in ("tags", "author", "hypothesis_status", "description"):
+        val = metadata.get(key)
+        if val is not None:
+            fm[key] = val
+        else:
+            fm.pop(key, None)
+
+
+def sync_strategy_doc(
+    settings: Settings,
+    name: str,
+    *,
+    stage: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> bool:
     """Rewrite the synced parts of one strategy doc. Returns False if the doc is absent.
 
-    `stage` is the registry lifecycle stage (None if the strategy isn't registered yet);
-    the caller reads it at the CLI seam so this layer never touches the registry.
+    ``stage`` and ``metadata`` are read by the caller at the CLI seam so this layer never touches
+    the registry. ``metadata`` carries the registry-owned organizational fields; only those keys
+    (plus ``stage``/``mlflow_run``) are overwritten — any other frontmatter key is preserved.
     """
     path = strategy_doc_path(settings, name)
     if not path.exists():
@@ -83,6 +107,8 @@ def sync_strategy_doc(settings: Settings, name: str, *, stage: str | None) -> bo
     fm, body = parse_doc(path.read_text())
     if stage is not None:
         fm["stage"] = stage
+    if metadata is not None:
+        _apply_owned_metadata(fm, metadata)
     metrics = latest_run_metrics(name, tracking_uri=settings.mlflow_tracking_uri)
     if metrics:
         fm["mlflow_run"] = metrics["run_id"][:8]
