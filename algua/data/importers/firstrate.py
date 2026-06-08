@@ -10,6 +10,7 @@ from algua.data.store import normalize_symbols
 
 _FIRSTRATE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
 _PRICE_COLUMNS = ["open", "high", "low", "close"]
+_UNADJUSTED_MARKER = "unadjusted"
 
 
 def symbol_from_filename(name: str) -> str:
@@ -78,6 +79,31 @@ def _discover(directory: Path) -> dict[str, Path]:
     return mapping
 
 
+def _check_directory_roles(raw_map: dict[str, Path], adj_map: dict[str, Path]) -> None:
+    """Fail closed if the raw/adjusted dirs look swapped or mislabeled.
+
+    FirstRate unadjusted files carry the case-insensitive token `unadjusted` in their name; adjusted
+    files do not. So every raw file must look unadjusted and no adjusted file may — either violation
+    raises ValueError. Together these also catch both dirs pointing at the same directory.
+    """
+    raw_not_unadjusted = sorted(
+        path.name for path in raw_map.values() if _UNADJUSTED_MARKER not in path.name.lower()
+    )
+    if raw_not_unadjusted:
+        raise ValueError(
+            f"raw dir holds files that don't look unadjusted: {raw_not_unadjusted}; "
+            f"--raw-dir/--adjusted-dir may be swapped"
+        )
+    adj_unadjusted = sorted(
+        path.name for path in adj_map.values() if _UNADJUSTED_MARKER in path.name.lower()
+    )
+    if adj_unadjusted:
+        raise ValueError(
+            f"adjusted dir holds unadjusted-looking files: {adj_unadjusted}; "
+            f"--raw-dir/--adjusted-dir may be swapped"
+        )
+
+
 class FirstRateImporter:
     name = "firstrate"
     vendor_label = "firstratedata"
@@ -87,6 +113,7 @@ class FirstRateImporter:
             raise ValueError("intraday import not yet supported (1d only)")
         raw_map = _discover(request.raw_dir)
         adj_map = _discover(request.adjusted_dir)
+        _check_directory_roles(raw_map, adj_map)
         if set(raw_map) != set(adj_map):
             only_raw = sorted(set(raw_map) - set(adj_map))
             only_adj = sorted(set(adj_map) - set(raw_map))
