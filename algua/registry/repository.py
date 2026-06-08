@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.registry_metadata import Author, HypothesisStatus
 
 
 class ArtifactIdentity(NamedTuple):
@@ -33,6 +34,12 @@ class StrategyRecord:
     stage: Stage
     created_at: str
     updated_at: str
+    family: str | None = None
+    tags: list[str] = field(default_factory=list)
+    author: Author = Author.AGENT
+    hypothesis_status: HypothesisStatus = HypothesisStatus.UNTESTED
+    derived_from: str | None = None
+    description: str | None = None
 
 
 class StrategyRepository(Protocol):
@@ -44,10 +51,21 @@ class StrategyRepository(Protocol):
     touching policy code.
     """
 
-    def add(self, name: str) -> StrategyRecord:
-        """Insert a new strategy at stage ``idea`` with its initial transition row.
-
-        Raises ``StrategyExists`` if the name is already registered.
+    def add(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author = Author.AGENT,
+        hypothesis_status: HypothesisStatus = HypothesisStatus.UNTESTED,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        """Insert a new strategy at stage ``idea`` with its initial transition row and the given
+        organizational metadata. ``derived_from``, if set, must name an existing strategy and may
+        not be the strategy itself.
+        Raises ``StrategyExists`` / ``StrategyNotFound`` / ``ValueError``.
         """
         ...
 
@@ -55,8 +73,63 @@ class StrategyRepository(Protocol):
         """Return the strategy by name, or raise ``StrategyNotFound``."""
         ...
 
-    def list_strategies(self, stage: Stage | None = None) -> list[StrategyRecord]:
-        """List strategies, optionally filtered to a single stage, ordered by insertion."""
+    def update_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> StrategyRecord:
+        """Update only the supplied organizational-metadata fields (never the stage).
+        ``add_tags``/``remove_tags`` mutate the tag set. Returns the updated record.
+        """
+        ...
+
+    def list_strategies(
+        self,
+        stage: Stage | None = None,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+    ) -> list[StrategyRecord]:
+        """List strategies, optionally filtered. Filters AND together; repeated ``tags`` means
+        all-of. ``author``/``hypothesis_status`` use COALESCE so NULL legacy rows match the
+        default. Ordered by insertion."""
+        ...
+
+    def backfill_metadata(
+        self,
+        name: str,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: str | None = None,
+        hypothesis_status: str | None = None,
+        derived_from: str | None = None,
+        description: str | None = None,
+    ) -> StrategyRecord:
+        """Fill only currently-NULL metadata columns from the given values (one-shot recovery).
+        A column already holding a value is left untouched. ``author``/``hypothesis_status`` are
+        raw validated strings (the caller maps/validates against the enums). Idempotent: re-running
+        is a no-op once columns are non-NULL.
+        """
+        ...
+
+    def default_fill_metadata_nulls(self) -> None:
+        """Fill every strategy row's author/hypothesis_status/tags column from its default when
+        still NULL. Terminal step of the ``backfill-from-kb`` command. Idempotent."""
+        ...
+
+    def delete(self, name: str) -> None:
+        """Remove a strategy row and its transition rows. ONLY for rolling back a failed
+        ``strategy new`` that just created it — there is no general deletion workflow."""
         ...
 
     def list_transitions(self, name: str) -> list[dict]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -27,6 +28,8 @@ class ExecutionContract:
     decision_lag_bars: int = 1
     allow_fractional: bool = True
     max_gross_exposure: float = 1.0
+    max_weight_per_symbol: float = 1.0  # cap on |weight| per symbol; 1.0 = no cap
+    allow_short: bool = False           # False = long-only (today's behavior)
     warmup_bars: int = 0
 
     def __post_init__(self) -> None:
@@ -34,6 +37,16 @@ class ExecutionContract:
             raise ValueError("decision_lag_bars must be >= 1 (no same-bar fills)")
         if self.warmup_bars < 0:
             raise ValueError("warmup_bars must be >= 0")
+        if not math.isfinite(self.max_weight_per_symbol):
+            # A non-finite cap silently disables the rail: every `|w| > nan` / `> inf`
+            # comparison is false, so a fallible/injectable agent could neuter the cap by
+            # declaring nan. Fail closed (codex GATE 2 HIGH).
+            raise ValueError("max_weight_per_symbol must be finite")
+        if self.max_weight_per_symbol <= 0:
+            raise ValueError("max_weight_per_symbol must be > 0")
+        if not isinstance(self.allow_short, bool):
+            # A truthy non-bool (e.g. the string "false") would silently enable shorts.
+            raise ValueError("allow_short must be a bool")
 
 
 @dataclass(frozen=True)

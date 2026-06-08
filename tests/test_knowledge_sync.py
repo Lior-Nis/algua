@@ -153,3 +153,76 @@ def test_sync_all_returns_summary(tmp_path):
     assert "momentum" in summary["families"]
     members = family_doc_path(s, "momentum").read_text()
     assert "1 members" in members or "members: idea 1" in members
+
+
+def test_sync_all_applies_metadata(tmp_path):
+    from algua.knowledge.frontmatter import parse_doc
+    from algua.knowledge.templates import scaffold_strategy_doc
+
+    s = _settings(tmp_path)
+    p = strategy_doc_path(s, "a")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(scaffold_strategy_doc("a"))
+    a_meta = {
+        "family": "mean-reversion", "tags": ["slow"], "author": "agent",
+        "hypothesis_status": "untested", "derived_from": None, "description": None,
+    }
+    sync_all(s, {"a": "idea"}, metadata={"a": a_meta})
+    fm, _ = parse_doc(p.read_text())
+    assert fm["family"] == "[[mean-reversion]]"
+    assert fm["tags"] == ["slow"]
+
+
+def test_sync_clears_owned_keys_when_metadata_value_is_none(tmp_path):
+    from algua.knowledge.frontmatter import parse_doc, render_doc
+
+    s = _settings(tmp_path)
+    path = strategy_doc_path(s, "a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Seed a doc with registry-owned keys already set.
+    from algua.knowledge.templates import scaffold_strategy_doc
+    fm, body = parse_doc(scaffold_strategy_doc("a", family="old-family", derived_from="old-parent"))
+    path.write_text(render_doc(fm, body))
+
+    meta = {
+        "family": None,
+        "tags": [],
+        "author": "agent",
+        "hypothesis_status": "untested",
+        "derived_from": None,
+        "description": None,
+    }
+    sync_strategy_doc(s, "a", stage="idea", metadata=meta)
+
+    fm2, _ = parse_doc(path.read_text())
+    assert "family" not in fm2          # cleared, not left as stale [[old-family]]
+    assert "derived_from" not in fm2    # cleared, not left as stale [[old-parent]]
+    assert fm2["tags"] == []            # empty list written, not absent
+
+
+def test_sync_writes_owned_metadata_and_preserves_foreign_keys(tmp_path):
+    from algua.knowledge.frontmatter import parse_doc, render_doc
+
+    s = _settings(tmp_path)
+    path = strategy_doc_path(s, "a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Seed a doc with a foreign frontmatter key that must survive the sync.
+    from algua.knowledge.templates import scaffold_strategy_doc
+    fm, body = parse_doc(scaffold_strategy_doc("a"))
+    fm["my_note"] = "keep me"
+    path.write_text(render_doc(fm, body))
+
+    meta = {
+        "family": "mean-reversion", "tags": ["carry", "slow"], "author": "human",
+        "hypothesis_status": "supported", "derived_from": "parent", "description": "d",
+    }
+    sync_strategy_doc(s, "a", stage="backtested", metadata=meta)
+
+    fm2, _ = parse_doc(path.read_text())
+    assert fm2["family"] == "[[mean-reversion]]"
+    assert fm2["derived_from"] == "[[parent]]"
+    assert fm2["tags"] == ["carry", "slow"]
+    assert fm2["author"] == "human"
+    assert fm2["hypothesis_status"] == "supported"
+    assert fm2["stage"] == "backtested"
+    assert fm2["my_note"] == "keep me"  # foreign key preserved
