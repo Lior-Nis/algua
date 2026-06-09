@@ -63,6 +63,7 @@ forbidden_modules = [
     "algua.registry",
     "algua.config",
     "algua.calendar",
+    "algua.data",
 ]
 
 [[tool.importlinter.contracts]]
@@ -159,3 +160,23 @@ name = "pure + execution lanes stay off the knowledge layer"
 type = "forbidden"
 source_modules = ["algua.backtest", "algua.live", "algua.features", "algua.contracts"]
 forbidden_modules = ["algua.knowledge"]
+
+[[tool.importlinter.contracts]]
+# Strategy modules are pure authored functions — they receive ALL data (bars, fundamentals) via the
+# engine, never by importing the data layer. Without this, a strategy could import the hindsight
+# accessor straight into compute_weights (issue #132 — the worst leak in the platform).
+name = "strategies layer stays off the data lane"
+type = "forbidden"
+source_modules = ["algua.strategies"]
+forbidden_modules = ["algua.data"]
+
+[[tool.importlinter.contracts]]
+# The hindsight (full-future) fundamentals accessor must be structurally unreachable from any lane
+# that can influence a trading decision. Stated directly so it survives a future relocation.
+name = "hindsight fundamentals accessor is unreachable from decision lanes"
+type = "forbidden"
+source_modules = [
+    "algua.backtest", "algua.features", "algua.contracts",
+    "algua.strategies", "algua.live", "algua.execution",
+]
+forbidden_modules = ["algua.data.hindsight"]
