@@ -26,6 +26,11 @@ from algua.data.files import (
     write_bytes_snapshot,
     write_partitioned_bars,
 )
+from algua.data.fundamentals_schema import (
+    empty_fundamentals,
+    logical_fundamentals_hash,
+    to_fundamentals_schema,
+)
 from algua.data.manifest import SnapshotManifest
 from algua.data.models import (
     Dataset,
@@ -413,6 +418,83 @@ class DataStore:
         if raw.empty:
             return empty_bars()
         return to_bar_schema(raw)
+
+    def ingest_fundamentals(
+        self,
+        *,
+        provider: str,
+        symbols: list[str],
+        as_of: str,
+        source: str,
+        frame: pd.DataFrame,
+        source_metadata: dict[str, str] | None = None,
+    ) -> SnapshotRecord:
+        """Validate + normalize a tidy fundamentals frame and persist one immutable snapshot.
+        `start`/`end` are DERIVED from the data (knowable_at range); every knowable_at must be
+        <= `as_of` (you cannot have fetched a record that becomes knowable after you fetched it)."""
+        canon = to_fundamentals_schema(frame)
+        as_of_ts = pd.Timestamp(as_of)
+        as_of_ts = (
+            as_of_ts.tz_localize("UTC") if as_of_ts.tzinfo is None else as_of_ts.tz_convert("UTC")
+        )
+        if (canon["knowable_at"] > as_of_ts).any():
+            raise ValueError(
+                "fundamentals knowable_at must be <= as_of "
+                "(cannot ingest a record knowable after the fetch time)"
+            )
+        start = canon["knowable_at"].min().date().isoformat()
+        end = canon["knowable_at"].max().date().isoformat()
+        metadata = _metadata(
+            dataset=Dataset.FUNDAMENTALS.value,
+            provider=provider,
+            symbols=symbols,
+            start=start,
+            end=end,
+            as_of=as_of,
+            source=source,
+            kind=Kind.FUNDAMENTALS.value,
+            source_metadata=source_metadata,
+        )
+        content_hash = logical_fundamentals_hash(canon)
+        snapshot_id = _snapshot_id(metadata, content_hash)
+        existing = self.manifest.find(snapshot_id)
+        if existing is not None:
+            return existing
+        relative_path = (
+            Path("snapshots") / metadata.dataset / snapshot_id / "fundamentals.parquet"
+        )
+        write_bytes_snapshot(frame_to_parquet_bytes(canon), self.data_dir, relative_path)
+        rec = SnapshotRecord(
+            snapshot_id=snapshot_id,
+            metadata=metadata,
+            row_count=len(canon),
+            content_hash=content_hash,
+            data_path=relative_path,
+            created_at=datetime.now(UTC).isoformat(),
+            storage_format="parquet",
+        )
+        self.manifest.append(rec)
+        return rec
+
+    def read_fundamentals(
+        self, snapshot_id: str, *, symbols: list[str] | None = None
+    ) -> pd.DataFrame:
+        """Read a fundamentals snapshot as a validated tidy frame. `symbols` filters in-memory
+        (fundamentals are far smaller than bars; partitioned pushdown is deferred). Re-normalizes
+        on read so parquet dtype drift cannot escape the schema. Empty => empty_fundamentals()."""
+        rec = self.get_snapshot(snapshot_id)
+        if rec.dataset != Dataset.FUNDAMENTALS.value:
+            raise ValueError(
+                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, "
+                f"not {Dataset.FUNDAMENTALS.value!r}"
+            )
+        raw = pd.read_parquet(self.data_dir / rec.data_path)
+        if symbols is not None:
+            wanted = set(normalize_symbols(symbols))
+            raw = raw[raw["symbol"].astype(str).str.upper().isin(wanted)]
+        if raw.empty:
+            return empty_fundamentals()
+        return to_fundamentals_schema(raw)
 
     def read_universe(self, universe: str) -> list[UniverseSnapshot]:
         """Read a named universe's point-in-time membership timeline.
