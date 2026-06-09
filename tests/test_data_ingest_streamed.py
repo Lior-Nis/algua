@@ -140,6 +140,22 @@ def test_streamed_ingest_adopts_orphan_dataset(tmp_path):
     assert len(out) == 4
 
 
+def test_streamed_ingest_propagates_unexpected_replace_error(tmp_path, monkeypatch):
+    # An os.replace failure that is NOT "target dir exists" (e.g. permission) must propagate, not be
+    # mistaken for an adoptable orphan.
+    import errno
+    import os
+
+    store = DataStore(tmp_path)
+
+    def boom(src, dst):
+        raise PermissionError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(PermissionError):
+        _ingest_streamed(store, _two_symbol_chunks())
+
+
 def test_streamed_ingest_dotted_symbol_roundtrips(tmp_path):
     store = DataStore(tmp_path)
     chunk = _chunk("BRK.B", [("2024-07-01", 410.0), ("2024-07-02", 412.0)])

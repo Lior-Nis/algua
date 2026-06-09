@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -354,14 +355,17 @@ class DataStore:
             target.parent.mkdir(parents=True, exist_ok=True)
             try:
                 os.replace(staging_dir, target)
-            except OSError:
-                if not target.exists():
+            except OSError as exc:
+                # Adopt ONLY the expected "target dir already exists and is non-empty" failure (an
+                # orphan from a crash between rename and manifest-append, or a concurrent winner).
+                # Re-raise anything else (permission, I/O, cross-device) — those are not adoptable.
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST) or not target.is_dir():
                     raise
                 found = self.manifest.find(snapshot_id)
                 if found is not None:
                     return found
-                # else: adopt the orphan target dir committed by a crashed/concurrent run ->
-                # fall through
+                # else: adopt the orphan target dir (content-addressed → identical content) by
+                # falling through to append the manifest record
             rec = SnapshotRecord(
                 snapshot_id=snapshot_id,
                 metadata=metadata,
