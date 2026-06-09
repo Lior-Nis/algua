@@ -81,11 +81,25 @@ class LoadedStrategy:
     def params(self) -> dict[str, Any]:
         return self.config.params
 
+    @property
+    def signal_fn(self) -> ComputeWeightsFn | ComputeFundamentalsWeightsFn:
+        """The active authored function — `fundamentals_fn` for the fundamentals lane, else `fn`.
+        Used wherever code needs the strategy's source module (e.g. code_hash), since `fn` is None
+        for a needs_fundamentals strategy."""
+        fn = self.fundamentals_fn if self.config.needs_fundamentals else self.fn
+        assert fn is not None  # __post_init__ guarantees the active fn is set
+        return fn
+
     def target_weights(
         self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
     ) -> pd.Series:
         if self.config.needs_fundamentals:
-            assert self.fundamentals_fn is not None  # __post_init__ guarantees this
+            if fundamentals is None:
+                raise ValueError(
+                    f"strategy {self.name!r} needs fundamentals but target_weights was called "
+                    f"without a fundamentals frame (fail closed)"
+                )
+            assert self.fundamentals_fn is not None
             return self.fundamentals_fn(features, self.config.params, fundamentals)
         assert self.fn is not None
         return self.fn(features, self.config.params)

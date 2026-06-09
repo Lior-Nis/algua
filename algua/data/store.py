@@ -433,6 +433,8 @@ class DataStore:
         `start`/`end` are DERIVED from the data (knowable_at range); every knowable_at must be
         <= `as_of` (you cannot have fetched a record that becomes knowable after you fetched it)."""
         canon = to_fundamentals_schema(frame)
+        if canon.empty:
+            raise ValueError("cannot ingest an empty fundamentals frame")
         as_of_ts = pd.Timestamp(as_of)
         as_of_ts = (
             as_of_ts.tz_localize("UTC") if as_of_ts.tzinfo is None else as_of_ts.tz_convert("UTC")

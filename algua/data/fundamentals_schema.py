@@ -29,6 +29,8 @@ def validate_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
             raise ValueError(f"fundamentals {col!r} must be non-null strings")
     if str(df["value"].dtype) != "float64":
         raise ValueError("fundamentals 'value' must be float64 (NaN permitted)")
+    if bool(np.isinf(df["value"].to_numpy(dtype="float64")).any()):
+        raise ValueError("fundamentals 'value' must not be +/-inf")
     fpe = df["fiscal_period_end"]
     if not all(isinstance(v, date) and not isinstance(v, datetime) for v in fpe):
         raise ValueError("fundamentals 'fiscal_period_end' must be datetime.date values")

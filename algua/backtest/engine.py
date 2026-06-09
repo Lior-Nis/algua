@@ -52,15 +52,24 @@ def _members_as_of(
 
 
 def _assert_fundamentals_shape(frame: pd.DataFrame) -> None:
-    """Cheap structural defense at the engine seam (no algua.data import): the provider must hand
-    back the contract columns with a tz-aware knowable_at. This is the no-branded-types insurance
-    against an accidental wrong-frame swap (spec §2.1)."""
+    """Structural defense at the engine seam (no algua.data import): a foreign
+    FundamentalsProvider must hand back contract-shaped, UTC, unique-keyed data.
+    Store-backed reads already validate; this fails closed for any other provider (spec §2.1)."""
     missing = [c for c in FUNDAMENTALS_COLUMNS if c not in frame.columns]
     if missing:
         raise BacktestError(f"fundamentals frame missing columns {missing}")
     ka = frame[FUNDAMENTALS_KNOWABLE_AT]
-    if not isinstance(ka.dtype, pd.DatetimeTZDtype):
-        raise BacktestError("fundamentals 'knowable_at' must be tz-aware")
+    if not isinstance(ka.dtype, pd.DatetimeTZDtype) or str(ka.dt.tz) != "UTC":
+        raise BacktestError("fundamentals 'knowable_at' must be tz-aware UTC")
+    if ka.isna().any():
+        raise BacktestError("fundamentals 'knowable_at' must not be null")
+    if str(frame["value"].dtype) != "float64":
+        raise BacktestError("fundamentals 'value' must be float64")
+    key = [*FUNDAMENTALS_AS_OF_KEY, FUNDAMENTALS_KNOWABLE_AT]
+    if frame[key].duplicated().any():
+        raise BacktestError(
+            "fundamentals has duplicate (symbol, fiscal_period_end, metric, knowable_at) rows"
+        )
 
 
 def _fundamentals_as_of(frame: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
@@ -131,8 +140,8 @@ def _decision_weights(
                 continue  # members exist but no bar data for any of them yet -> flat
         if fundamentals is not None:
             f_asof = _fundamentals_as_of(fundamentals, t)
-            if universe_by_date is not None:
-                f_asof = f_asof[f_asof["symbol"].isin(members)]
+            allowed = members if universe_by_date is not None else set(columns)
+            f_asof = f_asof[f_asof["symbol"].isin(allowed)]
             w = strategy.target_weights(view, f_asof)
         else:
             w = strategy.target_weights(view)

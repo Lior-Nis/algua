@@ -32,7 +32,7 @@ def compute_artifact_hashes(name: str) -> ArtifactIdentity:
     drift.
     """
     loaded = load_strategy(name)
-    root = inspect.getmodule(loaded.fn)
+    root = inspect.getmodule(loaded.signal_fn)
     closure = _first_party_closure(root)
     payload = "\n".join(
         f"# module: {mod_name}\n{source}" for mod_name, source in sorted(closure.items())

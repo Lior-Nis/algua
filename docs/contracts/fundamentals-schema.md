@@ -29,4 +29,4 @@ Bitemporal key `(symbol, fiscal_period_end, metric, knowable_at)` is unique with
 ## Two access modes
 - **As-of (signal):** `FundamentalsProvider.get_fundamentals` → engine mask → `compute_weights`.
 - **Hindsight (analysis):** `algua data query-fundamentals` (full history) — agent post-mortems only,
-  structurally walled from the engine (import-linter).
+  structurally walled from the engine (import-linter). The wall is a STATIC import-graph guarantee enforced by `lint-imports` (and an AST test); it is not a runtime sandbox — defending against a strategy that dynamically imports `algua.data.hindsight` (via `importlib`/`__import__`) is deferred to a strategy-purity-hardening follow-up.
