@@ -62,7 +62,34 @@ class Strategy(Protocol):
     name: str
     execution: ExecutionContract
 
-    def target_weights(self, features: pd.DataFrame) -> pd.Series: ...
+    def target_weights(
+        self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
+    ) -> pd.Series: ...
+
+
+# --- Non-tabular: fundamentals seam (issue #132) -----------------------------------------------
+# Canonical column names live HERE (the base layer the engine may import) so the backtest engine's
+# as-of mask and the data-layer validator share one source of truth without the engine importing
+# algua.data (which the import wall forbids). Pure strings — no pandas needed.
+FUNDAMENTALS_COLUMNS: tuple[str, ...] = (
+    "symbol", "fiscal_period_end", "metric", "value", "knowable_at", "source",
+)
+# The identity of a fact across revisions: a restatement is a new row sharing this key with a later
+# knowable_at. The as-of mask keeps, per key, the row with the greatest knowable_at <= t.
+FUNDAMENTALS_AS_OF_KEY: tuple[str, ...] = ("symbol", "fiscal_period_end", "metric")
+FUNDAMENTALS_KNOWABLE_AT = "knowable_at"
+
+
+@runtime_checkable
+class FundamentalsProvider(Protocol):
+    """As-of consumption seam for point-in-time fundamentals (issue #132). Returns the FULL
+    bitemporal history for `symbols` with knowable_at < end — no lower time bound, since the first
+    decision bar needs the latest prior report. The engine owns decision `t` and masks
+    knowable_at <= t per bar; the provider never sees `t`."""
+
+    snapshot_id: str
+
+    def get_fundamentals(self, symbols: list[str], end: datetime) -> pd.DataFrame: ...
 
 
 @runtime_checkable

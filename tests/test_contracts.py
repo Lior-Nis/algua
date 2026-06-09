@@ -78,3 +78,25 @@ def test_execution_contract_rejects_non_bool_allow_short():
         ExecutionContract(rebalance_frequency="1d", allow_short="false")  # type: ignore[arg-type]
     with _pytest.raises(ValueError, match="allow_short must be a bool"):
         ExecutionContract(rebalance_frequency="1d", allow_short=1)  # type: ignore[arg-type]
+
+
+def test_fundamentals_provider_protocol_and_constants():
+    from algua.contracts.types import (
+        FUNDAMENTALS_AS_OF_KEY,
+        FUNDAMENTALS_COLUMNS,
+        FUNDAMENTALS_KNOWABLE_AT,
+        FundamentalsProvider,
+    )
+
+    assert FUNDAMENTALS_COLUMNS == (
+        "symbol", "fiscal_period_end", "metric", "value", "knowable_at", "source",
+    )
+    assert FUNDAMENTALS_AS_OF_KEY == ("symbol", "fiscal_period_end", "metric")
+    assert FUNDAMENTALS_KNOWABLE_AT == "knowable_at"
+
+    class _P:
+        snapshot_id = "x"
+        def get_fundamentals(self, symbols, end):
+            return None
+
+    assert isinstance(_P(), FundamentalsProvider)

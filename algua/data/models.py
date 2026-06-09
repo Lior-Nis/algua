@@ -14,6 +14,7 @@ class Dataset(StrEnum):
 
     BARS = "bars"
     UNIVERSES = "universes"
+    FUNDAMENTALS = "fundamentals"
 
 
 class Kind(StrEnum):
@@ -22,6 +23,7 @@ class Kind(StrEnum):
     BARS = "bars"
     UNIVERSE = "universe"
     FILE = "file"
+    FUNDAMENTALS = "fundamentals"
 
 
 @dataclass(frozen=True)

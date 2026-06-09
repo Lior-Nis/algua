@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import pkgutil
 
 from algua.strategies import examples
@@ -19,14 +20,33 @@ def load_strategy(name: str) -> LoadedStrategy:
         raise StrategyNotFound(name) from exc
     if not hasattr(module, "CONFIG") or not hasattr(module, "compute_weights"):
         raise StrategyNotFound(f"{name} is missing CONFIG or compute_weights")
-    # OPTIONAL vectorized acceleration hook: a module MAY additionally define a module-level
-    # `compute_weights_panel(bars, params) -> DataFrame`. It is bound as `panel_fn` (and the engine
-    # uses it only behind a fail-closed parity guard). Validate it's callable; reject a non-callable
-    # so a typo'd attribute fails loudly rather than silently disabling the fast path.
+
     panel_fn = getattr(module, "compute_weights_panel", None)
     if panel_fn is not None and not callable(panel_fn):
         raise StrategyNotFound(
             f"{name}.compute_weights_panel is not callable (got {type(panel_fn).__name__})"
+        )
+
+    needs_fundamentals = bool(getattr(module.CONFIG, "needs_fundamentals", False))
+    n_params = len(inspect.signature(module.compute_weights).parameters)
+    if needs_fundamentals:
+        # The fundamentals lane forces the per-bar loop (no vectorized fast path yet) and needs a
+        # 3-arg signature. Reject the panel hook + a wrong arity, loudly, at load time.
+        if panel_fn is not None:
+            raise StrategyNotFound(
+                f"{name}: compute_weights_panel is not supported with needs_fundamentals "
+                f"(no vectorized fundamentals fast path yet)"
+            )
+        if n_params != 3:
+            raise StrategyNotFound(
+                f"{name}: needs_fundamentals=True requires compute_weights(view, params, "
+                f"fundamentals); got {n_params} params"
+            )
+        return LoadedStrategy(config=module.CONFIG, fundamentals_fn=module.compute_weights)
+
+    if n_params != 2:
+        raise StrategyNotFound(
+            f"{name}: compute_weights must take (view, params); got {n_params} params"
         )
     return LoadedStrategy(config=module.CONFIG, fn=module.compute_weights, panel_fn=panel_fn)
 

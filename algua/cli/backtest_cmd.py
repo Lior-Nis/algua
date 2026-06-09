@@ -19,6 +19,8 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.data.serve import StoreBackedFundamentalsProvider
+from algua.data.store import DataStore
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
@@ -47,16 +49,25 @@ def run(
     universe: str = typer.Option(
         None, "--universe",
         help="point-in-time universe name (opt into survivorship-bias-free membership)"),
+    fundamentals_snapshot: str = typer.Option(
+        None, "--fundamentals-snapshot",
+        help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    fundamentals_provider = (
+        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
+        if fundamentals_snapshot
+        else None
+    )
     result = run_backtest(
         strategy, provider, start_dt, end_dt,
         universe_by_date=universe_by_date,
         universe_name=universe, universe_snapshots=universe_prov,
+        fundamentals_provider=fundamentals_provider,
     )
 
     if register:

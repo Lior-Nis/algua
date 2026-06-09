@@ -94,6 +94,20 @@ def promotion_preflight(
         raise TransitionError(
             f"research promote requires stage backtested, got {rec.stage.value}")
     validate_transition(rec.stage, Stage.SHORTLISTED)  # TransitionError (a ValueError) if illegal
+    # Fundamentals strategies cannot be promoted past backtested until the paper/live fundamentals
+    # lane exists (#132): block the agent's only path to shortlisted early, with a clear message.
+    # Silently skip if the strategy is not a bundled module (e.g. tests using synthetic names).
+    from algua.strategies.loader import StrategyNotFound, load_strategy
+
+    try:
+        _loaded = load_strategy(name)
+    except StrategyNotFound:
+        _loaded = None
+    if _loaded is not None and _loaded.config.needs_fundamentals:
+        raise ValueError(
+            f"strategy {name!r} declares needs_fundamentals; it cannot be promoted past "
+            f"backtested until the paper/live fundamentals lane is built (#132)"
+        )
     measured = repo.total_search_combos(name)
     windowed_total = repo.windowed_search_combos(FUNNEL_WINDOW_DAYS)
     if measured > 0:

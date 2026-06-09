@@ -24,6 +24,12 @@ ComputeWeightsFn = Callable[[pd.DataFrame, dict[str, Any]], pd.Series]
 # view, but spanning the whole period). `None` for strategies that don't define it.
 ComputeWeightsPanelFn = Callable[[pd.DataFrame, dict[str, Any]], pd.DataFrame]
 
+# OPT-IN fundamentals signal (issue #132): a strategy that declares `needs_fundamentals=True` in
+# CONFIG authors `compute_weights(view, params, fundamentals)` — the 3rd arg is the PIT-correct tidy
+# fundamentals frame the engine materialized for decision bar t (knowable_at <= t). Distinct type so
+# the 2-arg and 3-arg forms never silently overload.
+ComputeFundamentalsWeightsFn = Callable[[pd.DataFrame, dict[str, Any], pd.DataFrame], pd.Series]
+
 
 class StrategyConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
@@ -31,19 +37,33 @@ class StrategyConfig(BaseModel):
     universe: list[str]
     execution: ExecutionContract
     params: dict[str, Any] = {}
+    # Opt into the as-of fundamentals lane (issue #132). When True the loader binds the 3-arg
+    # compute_weights as `fundamentals_fn` and the engine injects the PIT-correct frame per bar.
+    needs_fundamentals: bool = False
 
 
 @dataclass
 class LoadedStrategy:
-    """Binds a StrategyConfig + a pure authored compute_weights(view, params) function into an
-    object that satisfies the Strategy protocol (.name, .execution, .target_weights). The adapter
-    is the ONLY place the protocol-level 1-arg `target_weights` exists — it injects params."""
+    """Binds a StrategyConfig + the authored signal function(s) into an object satisfying the
+    Strategy protocol. Exactly one of (`fn`, `fundamentals_fn`) is active, selected by
+    `config.needs_fundamentals`. The adapter is the ONLY place the protocol-level `target_weights`
+    exists — it injects params (and, for the fundamentals lane, the masked frame)."""
 
     config: StrategyConfig
-    fn: ComputeWeightsFn
+    fn: ComputeWeightsFn | None = None
     # OPTIONAL vectorized fast-path hook (loader-detected, see ComputeWeightsPanelFn). `None` when
     # the strategy module does not define `compute_weights_panel`. `fn` stays canonical regardless.
     panel_fn: ComputeWeightsPanelFn | None = None
+    fundamentals_fn: ComputeFundamentalsWeightsFn | None = None
+
+    def __post_init__(self) -> None:
+        if self.config.needs_fundamentals:
+            if self.fundamentals_fn is None:
+                raise ValueError(
+                    "needs_fundamentals=True requires a 3-arg compute_weights (fundamentals_fn)"
+                )
+        elif self.fn is None:
+            raise ValueError("needs_fundamentals=False requires a 2-arg compute_weights (fn)")
 
     @property
     def name(self) -> str:
@@ -61,8 +81,39 @@ class LoadedStrategy:
     def params(self) -> dict[str, Any]:
         return self.config.params
 
-    def target_weights(self, features: pd.DataFrame) -> pd.Series:
+    @property
+    def signal_fn(self) -> ComputeWeightsFn | ComputeFundamentalsWeightsFn:
+        """The active authored function — `fundamentals_fn` for the fundamentals lane, else `fn`.
+        Used wherever code needs the strategy's source module (e.g. code_hash), since `fn` is None
+        for a needs_fundamentals strategy."""
+        fn = self.fundamentals_fn if self.config.needs_fundamentals else self.fn
+        assert fn is not None  # __post_init__ guarantees the active fn is set
+        return fn
+
+    def target_weights(
+        self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
+    ) -> pd.Series:
+        if self.config.needs_fundamentals:
+            if fundamentals is None:
+                raise ValueError(
+                    f"strategy {self.name!r} needs fundamentals but target_weights was called "
+                    f"without a fundamentals frame (fail closed)"
+                )
+            assert self.fundamentals_fn is not None
+            return self.fundamentals_fn(features, self.config.params, fundamentals)
+        assert self.fn is not None
         return self.fn(features, self.config.params)
+
+
+def assert_tradable_without_fundamentals(strategy: LoadedStrategy) -> None:
+    """Fail closed: a needs_fundamentals strategy must NOT run paper/live yet — the as-of
+    fundamentals lane is wired only into the backtest engine (issue #132). Called at every trading
+    load point so no actor (agent promote OR human raw transition) can run it blind."""
+    if strategy.config.needs_fundamentals:
+        raise ValueError(
+            f"strategy {strategy.name!r} declares needs_fundamentals; paper/live fundamentals "
+            f"wiring is not built yet (#132 follow-up) — refusing to trade it blind"
+        )
 
 
 def config_hash(strategy: LoadedStrategy) -> str:
@@ -80,6 +131,7 @@ def config_hash(strategy: LoadedStrategy) -> str:
             "universe": strategy.universe,
             "params": strategy.params,
             "execution": asdict(strategy.execution),
+            "needs_fundamentals": strategy.config.needs_fundamentals,
         },
         sort_keys=True,
     )

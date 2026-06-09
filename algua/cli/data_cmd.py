@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from pathlib import Path
 
+import pandas as pd
 import typer
 
 from algua.cli._common import now_iso, ok
@@ -10,6 +11,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.data.contracts import BarProvider, BarRequest, ImportRequest
+from algua.data.hindsight import query_fundamentals
 from algua.data.importers import get_importer
 from algua.data.providers import get_provider
 from algua.data.store import DataStore, normalize_symbols
@@ -173,6 +175,51 @@ def ingest_universe(
         source=source,
     )
     emit(ok({"snapshot": rec.to_dict()}))
+
+
+@data_app.command("ingest-fundamentals")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def ingest_fundamentals(
+    provider: str = typer.Option(..., "--provider"),
+    symbols: str = typer.Option(..., "--symbols", help="comma-separated symbols"),
+    as_of: str = typer.Option(..., "--as-of", help="point-in-time ISO datetime"),
+    source: str = typer.Option(..., "--source", help="source/provenance label"),
+    from_file: Path = FROM_FILE_OPTION,
+) -> None:
+    """Ingest a local tidy fundamentals file (CSV/parquet) as one validated snapshot."""
+    path = from_file.expanduser()
+    raw = pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
+    rec = _store().ingest_fundamentals(
+        provider=provider,
+        symbols=normalize_symbols(symbols.split(",")),
+        as_of=as_of,
+        source=source,
+        frame=raw,
+    )
+    emit(ok({"snapshot": rec.to_dict()}))
+
+
+@data_app.command("query-fundamentals")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def query_fundamentals_cmd(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    symbols: str = typer.Option(None, "--symbols", help="optional comma-separated subset"),
+) -> None:
+    """HINDSIGHT fundamentals read (full history) — the agent's post-mortem/analysis surface."""
+    syms = normalize_symbols(symbols.split(",")) if symbols else None
+    frame = query_fundamentals(_store(), snapshot_id, symbols=syms)
+    records = [
+        {
+            "symbol": row.symbol,
+            "fiscal_period_end": row.fiscal_period_end.isoformat(),
+            "metric": row.metric,
+            "value": None if pd.isna(row.value) else float(row.value),
+            "knowable_at": row.knowable_at.isoformat(),
+            "source": row.source,
+        }
+        for row in frame.itertuples(index=False)
+    ]
+    emit(records)
 
 
 @data_app.command("inspect")
