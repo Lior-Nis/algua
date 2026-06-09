@@ -12,7 +12,7 @@ from algua.config.settings import get_settings
 from algua.data.contracts import BarProvider, BarRequest, ImportRequest
 from algua.data.importers import get_importer
 from algua.data.providers import get_provider
-from algua.data.store import IMPORT_WARN_ROWS, DataStore, normalize_symbols
+from algua.data.store import DataStore, normalize_symbols
 
 data_app = typer.Typer(help="Point-in-time data snapshots", no_args_is_help=True)
 app.add_typer(data_app, name="data")
@@ -152,14 +152,6 @@ def import_bars(
             "adjusted_dir": adjusted_dir.name,
         },
     )
-    if rec.row_count is not None and rec.row_count >= IMPORT_WARN_ROWS:
-        # stderr: non-fatal advisory; the snapshot is valid, just not servable by the current
-        # read path
-        typer.echo(
-            f"warning: imported {rec.row_count} rows; snapshot not servable by the current "
-            f"read path until #130 (marked servable=deferred-130)",
-            err=True,
-        )
     emit(ok({"snapshot": rec.to_dict()}))
 
 

@@ -85,7 +85,13 @@ def write_partitioned_bars(canon: pd.DataFrame, dest_dir: Path) -> int:
     """Write `canon` (a tz-aware-UTC `ts` column + `symbol` + OHLCV, pre-sorted by symbol then ts)
     as a hive-partitioned-by-symbol parquet dataset under `dest_dir`. Returns the parquet file
     count. The snapshot identity is the caller's `logical_bars_hash`, NOT these bytes, so write
-    threading / file splitting are free to vary (issue #130)."""
+    threading / file splitting are free to vary (issue #130).
+
+    Idempotent-additive across calls into the same `dest_dir`: `existing_data_behavior=
+    "overwrite_or_ignore"` writes only the partitions for the symbols in `canon` and leaves any
+    sibling `symbol=<SYM>/` partitions from a prior call untouched (it never deletes the directory's
+    other contents). The streamed importer relies on this to write one chunk's partition at a time
+    into a shared staging dir; a single-shot `ingest_bars` write is unaffected."""
     table = pa.Table.from_pandas(
         canon[["ts", "symbol", *BARS_FILE_HASH_COLUMNS]],
         schema=BARS_FILE_SCHEMA,
@@ -97,6 +103,7 @@ def write_partitioned_bars(canon: pd.DataFrame, dest_dir: Path) -> int:
         format="parquet",
         partitioning=_BARS_PARTITIONING,
         basename_template="part-{i}.parquet",
+        existing_data_behavior="overwrite_or_ignore",
     )
     return sum(1 for _ in dest_dir.rglob("*.parquet"))
 
@@ -133,6 +140,25 @@ def _ts_scalar(value: object) -> pa.Scalar:
     ts = pd.Timestamp(value)
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
     return pa.scalar(ts.value, type=pa.timestamp("ns", tz="UTC"))
+
+
+BARS_STREAMED_HASH_ALGO = "bars-symbol-merkle-v1"
+
+
+def compose_bars_symbol_hash(leaves: list[tuple[str, int, str]]) -> str:
+    """Order-independent (sorted-by-symbol), domain-separated composition of per-symbol logical
+    leaf hashes into one streamed-bars content hash. Each leaf = (symbol, row_count, hex digest)."""
+    digest = hashlib.sha256()
+    digest.update(BARS_STREAMED_HASH_ALGO.encode())
+    ordered = sorted(leaves, key=lambda leaf: leaf[0])
+    digest.update(struct.pack("<Q", len(ordered)))
+    for symbol, row_count, leaf_hex in ordered:
+        sb = symbol.encode("utf-8")
+        digest.update(struct.pack("<Q", len(sb)))
+        digest.update(sb)
+        digest.update(struct.pack("<Q", row_count))
+        digest.update(bytes.fromhex(leaf_hex))
+    return digest.hexdigest()
 
 
 def logical_bars_hash(canon: pd.DataFrame) -> str:
