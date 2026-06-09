@@ -62,7 +62,9 @@ class Strategy(Protocol):
     name: str
     execution: ExecutionContract
 
-    def target_weights(self, features: pd.DataFrame) -> pd.Series: ...
+    def target_weights(
+        self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
+    ) -> pd.Series: ...
 
 
 # --- Non-tabular: fundamentals seam (issue #132) -----------------------------------------------
