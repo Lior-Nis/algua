@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -12,10 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from algua.data.files import (
+    BARS_STREAMED_HASH_ALGO,
+    compose_bars_symbol_hash,
     copy_snapshot,
     count_tabular_rows,
     frame_to_parquet_bytes,
@@ -35,10 +36,6 @@ from algua.data.models import (
     UniverseSnapshot,
 )
 from algua.data.schema import empty_bars, to_bar_schema
-
-# Above this row count, a streamed import warns and self-marks "not servable until #130", because
-# the read path still fully materializes a snapshot. Not a hard cap — deep history is the point.
-IMPORT_WARN_ROWS = 5_000_000
 
 
 class SnapshotNotFound(LookupError):
@@ -261,34 +258,39 @@ class DataStore:
         end: str | None = None,
         source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
-        """Stream per-symbol bar chunks into one consolidated bars snapshot.
+        """Stream per-symbol bar chunks into one hive-partitioned-by-symbol bars snapshot.
 
-        Crash-safe: stream -> staging file, hash, dedup on snapshot_id (idempotent re-ingest),
-        atomic rename into the immutable snapshot path, append the manifest last. Each chunk is
-        normalized via `to_bar_schema` (so output is schema-valid) and written as one row group,
-        in the order received (the importer yields canonical sorted-symbol order — required for a
-        stable `snapshot_id`).
+        Crash-safe: each chunk is normalized via `to_bar_schema` (so output is schema-valid) and
+        written as its own `symbol=<SYM>/` partition under a UUID staging dir (one chunk in memory
+        at a time -> bounded RAM). The per-symbol logical leaf hashes are composed (sorted by
+        symbol, so order-independent) into the snapshot `content_hash`; the snapshot_id is content-
+        addressed. Commit is adopt-on-target-exists: dedup on snapshot_id (idempotent re-ingest),
+        then `os.replace` the staging dir onto the immutable snapshot dir — if that target dir
+        already exists (an orphan from a crash between rename and manifest-append, or a concurrent
+        winner) re-check the manifest and otherwise adopt it. The manifest record is appended last,
+        with `storage_format="parquet_dataset"` so `read_bars` serves it with pushdown.
 
         Cross-chunk integrity: each symbol must appear in exactly one chunk — the method rejects a
-        symbol that recurs in a later chunk (so the consolidated snapshot is globally unique on
-        (timestamp, symbol) given each chunk is internally schema-valid). The FirstRate importer
-        satisfies this by yielding one chunk per symbol.
+        symbol that recurs in a later chunk (so each `symbol=<SYM>/` partition is written once and
+        the snapshot is globally unique on (timestamp, symbol) given each chunk is internally
+        schema-valid). The FirstRate importer satisfies this by yielding one chunk per symbol.
 
         Note: when `start`/`end` are given, the coverage check is span-only (observed range covers
         the requested endpoints); it does not detect interior gaps.
         """
         staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
-        staging_file = staging_dir / "bars.parquet"
         staging_dir.mkdir(parents=True, exist_ok=True)
-        writer: pq.ParquetWriter | None = None
         row_count = 0
         observed_min: pd.Timestamp | None = None
         observed_max: pd.Timestamp | None = None
         seen_symbols_set: set[str] = set()
+        leaves: list[tuple[str, int, str]] = []
         try:
             for chunk in chunks:
-                normalized = to_bar_schema(chunk).reset_index()  # columns: timestamp, *BAR_COLUMNS
-                chunk_symbols = set(normalized["symbol"].unique())
+                chunk_canon = (
+                    to_bar_schema(chunk).reset_index().rename(columns={"timestamp": "ts"})
+                )
+                chunk_symbols = set(chunk_canon["symbol"].unique())
                 clash = chunk_symbols & seen_symbols_set
                 if clash:
                     raise ValueError(
@@ -296,25 +298,18 @@ class DataStore:
                         "ingest requires each symbol's bars in a single contiguous chunk"
                     )
                 seen_symbols_set |= chunk_symbols
-                table = pa.Table.from_pandas(
-                    normalized, preserve_index=False
-                ).replace_schema_metadata(None)
-                if writer is None:
-                    writer = pq.ParquetWriter(
-                        staging_file, table.schema, compression="snappy", version="2.6"
-                    )
-                writer.write_table(table)
-                row_count += len(normalized)
-                cmin = normalized["timestamp"].min()
-                cmax = normalized["timestamp"].max()
+                write_partitioned_bars(chunk_canon, staging_dir)
+                row_count += len(chunk_canon)
+                cmin = chunk_canon["ts"].min()
+                cmax = chunk_canon["ts"].max()
                 observed_min = cmin if observed_min is None else min(observed_min, cmin)
                 observed_max = cmax if observed_max is None else max(observed_max, cmax)
-            if writer is None:
+                for sym, group in chunk_canon.groupby("symbol"):
+                    leaves.append((str(sym), len(group), logical_bars_hash(group)))
+            if not leaves or row_count == 0:
                 raise ValueError("no bars to ingest (empty chunk stream)")
-            writer.close()
-            writer = None
 
-            if observed_min is None or observed_max is None:  # unreachable: writer set => loop ran
+            if observed_min is None or observed_max is None:  # unreachable: leaves => loop ran
                 raise ValueError("no bars to ingest (empty chunk stream)")
             observed_start = observed_min.date().isoformat()
             observed_end = observed_max.date().isoformat()
@@ -334,8 +329,7 @@ class DataStore:
                 meta_extra["requested_end"] = end
             meta_extra["observed_start"] = observed_start
             meta_extra["observed_end"] = observed_end
-            if row_count >= IMPORT_WARN_ROWS:
-                meta_extra["servable"] = "deferred-130"
+            meta_extra["content_hash_algorithm"] = BARS_STREAMED_HASH_ALGO
 
             metadata = _metadata(
                 dataset=Dataset.BARS.value,
@@ -350,17 +344,28 @@ class DataStore:
                 adjustment=adjustment,
                 source_metadata=meta_extra,
             )
-            content_hash = sha256_file(staging_file)
+            content_hash = compose_bars_symbol_hash(leaves)
             snapshot_id = _snapshot_id(metadata, content_hash)
 
+            relative_path = Path("snapshots") / metadata.dataset / snapshot_id  # a DIR now
+            target = self.data_dir / relative_path
             existing = self.manifest.find(snapshot_id)
             if existing is not None:
                 return existing
-
-            relative_path = Path("snapshots") / metadata.dataset / snapshot_id / "bars.parquet"
-            target = self.data_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staging_file, target)
+            try:
+                os.replace(staging_dir, target)
+            except OSError as exc:
+                # Adopt ONLY the expected "target dir already exists and is non-empty" failure (an
+                # orphan from a crash between rename and manifest-append, or a concurrent winner).
+                # Re-raise anything else (permission, I/O, cross-device) — those are not adoptable.
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST) or not target.is_dir():
+                    raise
+                found = self.manifest.find(snapshot_id)
+                if found is not None:
+                    return found
+                # else: adopt the orphan target dir (content-addressed → identical content) by
+                # falling through to append the manifest record
             rec = SnapshotRecord(
                 snapshot_id=snapshot_id,
                 metadata=metadata,
@@ -368,13 +373,11 @@ class DataStore:
                 content_hash=content_hash,
                 data_path=relative_path,
                 created_at=datetime.now(UTC).isoformat(),
-                storage_format="parquet",
+                storage_format="parquet_dataset",
             )
             self.manifest.append(rec)
             return rec
         finally:
-            if writer is not None:
-                writer.close()
             shutil.rmtree(staging_dir, ignore_errors=True)
 
     def list_snapshots(self, dataset: str | None = None) -> list[SnapshotRecord]:
