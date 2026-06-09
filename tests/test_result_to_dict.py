@@ -81,7 +81,7 @@ def test_backtest_result_to_dict_has_expected_keys():
     assert set(d) == {
         "strategy", "metrics", "config_hash", "data_source", "timeframe",
         "period", "seed", "snapshot_id", "code_hash", "dependency_hash",
-        "universe_name", "universe_snapshots",
+        "universe_name", "universe_snapshots", "fundamentals_snapshot",
     }
 
 

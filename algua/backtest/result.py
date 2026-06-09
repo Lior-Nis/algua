@@ -42,6 +42,8 @@ class BacktestResult:
     # (which still names only the bars provider snapshot). `None` in static-universe runs.
     universe_name: str | None = None
     universe_snapshots: list[dict[str, str]] | None = None
+    # Fundamentals snapshot used by a needs_fundamentals strategy (issue #132); None otherwise.
+    fundamentals_snapshot: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

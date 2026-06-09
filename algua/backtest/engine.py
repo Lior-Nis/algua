@@ -10,7 +10,13 @@ import vectorbt as vbt
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
-from algua.contracts.types import DataProvider
+from algua.contracts.types import (
+    FUNDAMENTALS_AS_OF_KEY,
+    FUNDAMENTALS_COLUMNS,
+    FUNDAMENTALS_KNOWABLE_AT,
+    DataProvider,
+    FundamentalsProvider,
+)
 from algua.risk.limits import WEIGHT_TOL, RiskBreach, validate_decision_weights
 from algua.strategies.base import LoadedStrategy
 
@@ -45,12 +51,41 @@ def _members_as_of(
     return frozenset(universe_by_date[max(eligible)])
 
 
+def _assert_fundamentals_shape(frame: pd.DataFrame) -> None:
+    """Cheap structural defense at the engine seam (no algua.data import): the provider must hand
+    back the contract columns with a tz-aware knowable_at. This is the no-branded-types insurance
+    against an accidental wrong-frame swap (spec §2.1)."""
+    missing = [c for c in FUNDAMENTALS_COLUMNS if c not in frame.columns]
+    if missing:
+        raise BacktestError(f"fundamentals frame missing columns {missing}")
+    ka = frame[FUNDAMENTALS_KNOWABLE_AT]
+    if not isinstance(ka.dtype, pd.DatetimeTZDtype):
+        raise BacktestError("fundamentals 'knowable_at' must be tz-aware")
+
+
+def _fundamentals_as_of(frame: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
+    """As-of-t fundamentals: of the rows with knowable_at <= t, keep for each
+    (symbol, fiscal_period_end, metric) the row with the greatest knowable_at (latest revision
+    knowable by t). knowable_at is unique per key within a snapshot, so the pick is deterministic.
+    Uses only knowable_at <= t -> no look-ahead. Empty in/empty out (returns a 0-row slice, never a
+    view into future rows)."""
+    if t.tz is None:
+        raise BacktestError("fundamentals as-of mask requires a tz-aware (UTC) timestamp t")
+    visible = frame[frame[FUNDAMENTALS_KNOWABLE_AT] <= t]
+    if visible.empty:
+        return frame.iloc[0:0].copy()
+    ordered = visible.sort_values(FUNDAMENTALS_KNOWABLE_AT, kind="stable")
+    latest = ordered.drop_duplicates(subset=list(FUNDAMENTALS_AS_OF_KEY), keep="last")
+    return latest.reset_index(drop=True)
+
+
 def _decision_weights(
     strategy: LoadedStrategy,
     bars: pd.DataFrame,
     adj: pd.DataFrame,
     *,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
+    fundamentals: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Run the per-bar decision loop and return raw target weights (pre-lag).
 
@@ -94,7 +129,13 @@ def _decision_weights(
             view = view[view["symbol"].isin(members)]
             if view.empty:
                 continue  # members exist but no bar data for any of them yet -> flat
-        w = strategy.target_weights(view)
+        if fundamentals is not None:
+            f_asof = _fundamentals_as_of(fundamentals, t)
+            if universe_by_date is not None:
+                f_asof = f_asof[f_asof["symbol"].isin(members)]
+            w = strategy.target_weights(view, f_asof)
+        else:
+            w = strategy.target_weights(view)
         if len(w) == 0:
             continue
         if universe_by_date is not None:
@@ -235,6 +276,7 @@ def _decision_weights_fast_or_loop(
     adj: pd.DataFrame,
     *,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
+    fundamentals: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Selector for the decision step. Returns the same pre-lag weights matrix the loop returns.
 
@@ -242,10 +284,14 @@ def _decision_weights_fast_or_loop(
     - PIT mode (`universe_by_date is not None`) -> FORCE the loop. The per-bar as-of masking cannot
       be reproduced by a generic whole-period panel fn (membership at t depends on t), and we do not
       attempt a vectorized PIT mask here (deferred). The fast path is for the static-universe case.
+    - Fundamentals (`fundamentals is not None`) -> FORCE the loop. No vectorized fundamentals fast
+      path yet (issue #132).
     - Otherwise -> the vectorized fast path, gated by the fail-closed parity guard.
     """
-    if strategy.panel_fn is None or universe_by_date is not None:
-        return _decision_weights(strategy, bars, adj, universe_by_date=universe_by_date)
+    if strategy.panel_fn is None or universe_by_date is not None or fundamentals is not None:
+        return _decision_weights(
+            strategy, bars, adj, universe_by_date=universe_by_date, fundamentals=fundamentals
+        )
     return _decision_weights_fast(strategy, bars, adj)
 
 
@@ -274,6 +320,7 @@ def simulate(
     end: datetime,
     *,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
+    fundamentals_provider: FundamentalsProvider | None = None,
 ) -> tuple[vbt.Portfolio, pd.DataFrame]:
     """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
     the strategy exposes a parity-guarded `panel_fn` — see `_decision_weights_fast_or_loop`),
@@ -303,8 +350,20 @@ def simulate(
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     adj = adj.sort_index()
 
+    fundamentals: pd.DataFrame | None = None
+    if strategy.config.needs_fundamentals:
+        if fundamentals_provider is None:
+            raise BacktestError(
+                f"strategy {strategy.name!r} declares needs_fundamentals but no "
+                f"fundamentals_provider was supplied (fail closed)"
+            )
+        fundamentals = fundamentals_provider.get_fundamentals(
+            _fetch_symbols(strategy, universe_by_date), end
+        )
+        _assert_fundamentals_shape(fundamentals)
+
     weights = _decision_weights_fast_or_loop(
-        strategy, bars, adj, universe_by_date=universe_by_date
+        strategy, bars, adj, universe_by_date=universe_by_date, fundamentals=fundamentals
     )
 
     lag = strategy.execution.decision_lag_bars
@@ -335,8 +394,12 @@ def run(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
+    fundamentals_provider: FundamentalsProvider | None = None,
 ) -> BacktestResult:
-    pf, weights_eff = simulate(strategy, provider, start, end, universe_by_date=universe_by_date)
+    pf, weights_eff = simulate(
+        strategy, provider, start, end,
+        universe_by_date=universe_by_date, fundamentals_provider=fundamentals_provider,
+    )
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
@@ -350,5 +413,6 @@ def run(
         dependency_hash=stamps["dependency_hash"],
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
+        fundamentals_snapshot=getattr(fundamentals_provider, "snapshot_id", None),
         **prov,
     )
