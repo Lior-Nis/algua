@@ -205,15 +205,22 @@ that wall; a second status axis was considered and declined as redundant.
   *strategy* blocks its idea's near-duplicates without mutating idea rows or touching the
   protected transition path.
 - `research idea add` **fails closed** on collision (non-zero exit + `collisions` payload).
-  `--allow-duplicate --reason "..."` overrides, recording `duplicate_of_idea_id` + `override_reason`.
+  A **refuted** collision (a `status=refuted` idea, or one whose linked strategy is now refuted)
+  is NOT overridable — it fails closed unconditionally (GATE-2 HIGH). Only non-refuted
+  collisions may be overridden with `--allow-duplicate --reason "..."`, recording
+  `duplicate_of_idea_id` + `override_reason`.
 
 **Layer 2 — agent semantic judgment** (the `source-ideas` skill): reads kb `_index`/`_families`
 + the near-misses from `dedup-check`; only overrides for a genuinely new angle, with a reason.
 
 **Guarantee level (documented):** the deterministic wall is exact for anything that flowed
-through the pool (incl. refuted strategies linked by FK). *Legacy* strategies authored before
-the pool (no idea row, hypothesis text only in kb docs) are caught best-effort by family +
-`description`, with kb-wide novelty as the agent's job. This residual is explicit, not silent.
+through the pool — duplicate ideas, `status=refuted` ideas, and ideas whose FK-linked strategy
+is now refuted (all blocked, the refuted ones unconditionally). It does NOT string-match against
+*legacy* strategies that never had an idea row (authored before the pool, or via `registry add`/
+`strategy new` directly): their hypothesis text lives in kb docs, not the registry DB, and a
+`name + description` match on sparse slug data would be noise, not a wall. Kb-wide novelty for
+those is **layer 2's job** (the agent reads `_index`/`_families`, which list refuted strategies).
+This residual is explicit, not silent — see GATE-2 triage finding #2.
 
 ## CLI surface (`algua/cli/idea_cmd.py`, registered under `research`)
 
@@ -289,7 +296,7 @@ left unchanged this slice.
 | # | Finding (sev; who) | Disposition |
 |---|--------------------|-------------|
 | 1 | Funnel widens before breadth accounting (CRITICAL; both) | **Accept** → collection-only; don't auto-wire the loop (decision C). |
-| 2 | "Never refill a refuted idea" not enforced (CRITICAL; both) | **Accept** → FK + refuted live-join in dedup; legacy = best-effort + agent (decision D). |
+| 2 | "Never refill a refuted idea" not enforced (CRITICAL; both) | **Accept** → FK + refuted live-join in dedup (pool-linked); legacy strategies (no idea row) = agent/kb layer only (decision D). |
 | 3 | Dedup key gameable/misfires (HIGH; both) | **Partial** → enrich signature/blocking (family + required_data); agent layer for paraphrase. Decline full taxonomy (gold-plating). |
 | 4 | Nullable family fails open (HIGH; both) | **Accept** → null/unknown compares against ALL, never suppresses. |
 | 5 | `required_data` needs controlled vocab (HIGH; both) | **Accept** → `DataCapability` enum, validated. |
@@ -300,6 +307,14 @@ left unchanged this slice.
 | 10 | `--allow-duplicate` audit too weak (MED; Codex) | **Accept** → dedicated `duplicate_of_idea_id` + `override_reason`. |
 | 11 | `windowed_idea_count` not decision-grade (MED; Codex) | **Accept** → counts by status. |
 | 12 | Provenance shallow (LOW; Codex) | **Partial** → add `source_date`; defer credibility-tier taxonomy. |
+
+## GATE-2 review triage (Codex deep-lens, on the branch diff)
+
+| # | Finding (sev) | Disposition |
+|---|---------------|-------------|
+| 1 | Refuted wall overridable by `--allow-duplicate` (HIGH) | **Accept** → a refuted collision (idea or FK-linked refuted strategy) now fails closed unconditionally; only non-refuted collisions are overridable. |
+| 2 | Dedup doesn't string-match legacy refuted strategies (MED) | **Resolve by correcting the spec** → the deterministic wall covers pool-linked refuted strategies (FK join); legacy strategies (no idea row) are layer-2/kb's job. A `name+description` match on sparse slug data is noise, not a wall — declined as gold-plating. |
+| 3 | `set_status` persists `authored_strategy_id` on non-authored transitions (LOW) | **Accept** → reject a strategy link unless the target status is `authored`. |
 
 ## Interactions
 
