@@ -151,6 +151,8 @@ class IdeaRepository:
                 f"illegal idea status change {idea.status.value} -> {to.value}")
         if to is IdeaStatus.AUTHORED and authored_strategy_id is None:
             raise ValueError("authored status requires a strategy link")
+        if to is not IdeaStatus.AUTHORED and authored_strategy_id is not None:
+            raise ValueError("authored_strategy_id is only valid for the authored status")
         with self._conn:
             self._conn.execute(
                 "UPDATE ideas SET status=?,"

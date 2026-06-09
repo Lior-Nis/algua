@@ -83,6 +83,15 @@ def add(
     with registry_conn() as conn:
         repo = IdeaRepository(conn)
         collisions = repo.find_collisions(title=title, hypothesis=hypothesis, family=family)
+        refuted = [c for c in collisions if c.effective_status is IdeaStatus.REFUTED]
+        if refuted:
+            emit({
+                "ok": False,
+                "error": "refuted collision: a refuted idea/strategy cannot be re-added "
+                         "(the refuted wall is not overridable)",
+                "collisions": [_collision_json(c) for c in collisions],
+            })
+            raise typer.Exit(code=1)
         dup_of: int | None = None
         if collisions:
             if not allow_duplicate:

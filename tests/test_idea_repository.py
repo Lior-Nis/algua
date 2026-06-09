@@ -90,6 +90,13 @@ def test_set_status_rejects_illegal(tmp_path):
         repo.set_status(idea.id, to=IdeaStatus.OPEN)
 
 
+def test_set_status_rejects_strategy_link_on_non_authored(tmp_path):
+    repo, _ = _conns(tmp_path)
+    idea = _add(repo)
+    with pytest.raises(ValueError, match="authored_strategy_id is only valid"):
+        repo.set_status(idea.id, to=IdeaStatus.DISCARDED, authored_strategy_id=5)
+
+
 def test_windowed_counts_by_status(tmp_path):
     repo, _ = _conns(tmp_path)
     _add(repo, title="a")

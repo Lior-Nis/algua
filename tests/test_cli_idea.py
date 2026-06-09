@@ -77,6 +77,25 @@ def test_allow_duplicate_requires_reason():
     assert json.loads(result.stdout)["ok"] is False
 
 
+def test_refuted_collision_not_overridable():
+    added = _json(_add())
+    runner.invoke(app, ["registry", "add", "lowvol_v1", "--family", "vol"])
+    _json(runner.invoke(app, [
+        "research", "idea", "set-status", str(added["id"]), "--to", "authored",
+        "--strategy", "lowvol_v1"]))
+    # Refute the linked strategy; its authored idea now surfaces as effective REFUTED.
+    _json(runner.invoke(app, [
+        "registry", "set", "lowvol_v1", "--hypothesis-status", "refuted"]))
+    # Even with --allow-duplicate --reason the refuted wall must hold.
+    result = _add("--title", "the low vol anomaly",
+                  "--hypothesis", "low vol stocks outperform on a risk adjusted basis",
+                  "--allow-duplicate", "--reason", "x")
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "refuted" in payload["error"]
+
+
 def test_list_is_bare_array():
     _add()
     listed = _json(runner.invoke(app, ["research", "idea", "list"]))
