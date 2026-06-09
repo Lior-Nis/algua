@@ -91,6 +91,17 @@ class LoadedStrategy:
         return self.fn(features, self.config.params)
 
 
+def assert_tradable_without_fundamentals(strategy: LoadedStrategy) -> None:
+    """Fail closed: a needs_fundamentals strategy must NOT run paper/live yet — the as-of
+    fundamentals lane is wired only into the backtest engine (issue #132). Called at every trading
+    load point so no actor (agent promote OR human raw transition) can run it blind."""
+    if strategy.config.needs_fundamentals:
+        raise ValueError(
+            f"strategy {strategy.name!r} declares needs_fundamentals; paper/live fundamentals "
+            f"wiring is not built yet (#132 follow-up) — refusing to trade it blind"
+        )
+
+
 def config_hash(strategy: LoadedStrategy) -> str:
     """Stable digest of a strategy's resolved configuration (name + universe + params +
     execution contract). The single source of truth for the config side of the artifact identity,

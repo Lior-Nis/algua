@@ -63,6 +63,8 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     switch (kill/flatten) do their own, narrower gating instead.
     """
     strategy = load_strategy(name)
+    from algua.strategies.base import assert_tradable_without_fundamentals
+    assert_tradable_without_fundamentals(strategy)
     rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage is not Stage.PAPER:
         raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
