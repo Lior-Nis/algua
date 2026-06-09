@@ -21,9 +21,12 @@ Like its sibling [[research-methodology]], this note lives by three rules:
 
 ## The walls are the floor (enforced today)
 
-These hard checks run on **every** decision — backtest, paper, and live — through
-`algua/risk/limits.py::validate_decision_weights`, so the rails cannot drift between research and live.
-The conventions in the next section sit *above* these and never replace them:
+The **decision-weight** checks below — the concentration cap, long/short gate, gross cap, and
+finite-weights guard (the first four rows) — run on **every** decision (backtest, paper, live) through
+`algua/risk/limits.py::validate_decision_weights`, so those rails can't drift between research and live.
+**Execution-timing look-ahead is a separate hard wall** (last row): the engine applies the `t→t+1` shift
+in `algua/backtest/engine.py::simulate`, and the `decision_lag_bars >= 1` floor is enforced on the
+contract itself. The conventions in the next section sit *above* all of these and never replace them:
 
 | Hard control | Code wall (`path::symbol`) | Contract field |
 |---|---|---|
