@@ -5,8 +5,8 @@ from algua.registry.db import SCHEMA_VERSION, connect, migrate
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
 
 
-def test_schema_version_is_18():
-    assert SCHEMA_VERSION == 18
+def test_schema_version_is_19():
+    assert SCHEMA_VERSION == 19
 
 
 def test_strategies_has_metadata_columns(tmp_path):
@@ -36,11 +36,11 @@ def test_metadata_columns_are_null_on_existing_rows(tmp_path):
         assert row[col] is None, f"{col} should be NULL on a pre-existing row, got {row[col]!r}"
 
 
-def test_migrate_is_idempotent_at_v18(tmp_path):
+def test_migrate_is_idempotent_at_v19(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     migrate(conn)  # second run must be a no-op, not an error
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 18
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
 
 
 def test_migrate_creates_tables_and_sets_version(tmp_path):
@@ -308,3 +308,18 @@ def test_gate_evaluations_table_exists(tmp_path):
         "holdout_frac", "actor", "decision_json", "consumed", "created_at",
     } <= cols
     conn.close()
+
+
+def test_ideas_table_created_with_expected_columns(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(ideas)")}
+    assert {
+        "id", "title", "hypothesis", "family", "tags", "source_type", "source_ref",
+        "source_date", "source_note", "required_data", "status", "signature",
+        "authored_strategy_id", "duplicate_of_idea_id", "override_reason",
+        "created_at", "updated_at",
+    } <= cols
+    # FK to strategies(id) is declared
+    fks = {row["table"] for row in conn.execute("PRAGMA foreign_key_list(ideas)")}
+    assert "strategies" in fks

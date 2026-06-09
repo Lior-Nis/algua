@@ -157,3 +157,42 @@ def test_nan_price_errors(tmp_path):
     _write_pair(raw, adj, "AAPL", ["2024-07-01,1,1,1,,1\n"], ["2024-07-01,1,1,1,1,1\n"])
     with pytest.raises(ValueError, match="NaN or nonpositive"):
         list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+
+
+def test_raw_dir_with_adjusted_files_errors(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    # dirs swapped: raw_dir holds an adjusted-named file, adj_dir holds the unadjusted one.
+    (raw / "AAPL_full_1day_adjsplitdiv.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    (adj / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="raw dir holds files that don't look unadjusted"):
+        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+
+
+def test_adjusted_dir_with_unadjusted_file_errors(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    # operator pointed both dirs at the raw dir: adj_dir holds an unadjusted-named file.
+    (raw / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    (adj / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="adjusted dir holds unadjusted-looking files"):
+        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+
+
+def test_unadjusted_matched_as_token_not_substring(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    # An adjusted file whose name contains "unadjusted" only mid-word (no delimiter boundary) is
+    # NOT a role marker, so it must not trip the adjusted-dir guard.
+    (raw / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    (adj / "AAPL_preunadjustedx_adjsplitdiv.txt").write_text(
+        "2024-07-01,1,1,1,1,1\n", encoding="utf-8"
+    )
+    chunks = list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+    assert len(chunks) == 1
+
+
+def test_case_insensitive_unadjusted_marker_ok(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    # raw uses lower-case `unadjusted`; adjusted uses `adjsplitdiv` -> import succeeds.
+    (raw / "AAPL_full_1day_unadjusted.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    (adj / "AAPL_full_1day_adjsplitdiv.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
+    chunks = list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+    assert len(chunks) == 1

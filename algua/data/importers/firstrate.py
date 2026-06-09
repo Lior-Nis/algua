@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -10,6 +11,15 @@ from algua.data.store import normalize_symbols
 
 _FIRSTRATE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
 _PRICE_COLUMNS = ["open", "high", "low", "close"]
+# Delimiter-bounded so the role marker is matched as a token, not a bare substring: a raw file
+# named `…notunadjusted…` doesn't count as unadjusted, and an adjusted file whose name merely
+# contains the letters "unadjusted" mid-word isn't false-rejected.
+_UNADJUSTED_TOKEN_RE = re.compile(r"(?:^|[_\-.])unadjusted(?:$|[_\-.])")
+
+
+def _looks_unadjusted(name: str) -> bool:
+    """True if the filename carries FirstRate's `unadjusted` role token (case-insensitive)."""
+    return _UNADJUSTED_TOKEN_RE.search(name.lower()) is not None
 
 
 def symbol_from_filename(name: str) -> str:
@@ -78,6 +88,31 @@ def _discover(directory: Path) -> dict[str, Path]:
     return mapping
 
 
+def _check_directory_roles(raw_map: dict[str, Path], adj_map: dict[str, Path]) -> None:
+    """Fail closed if the raw/adjusted dirs look swapped or mislabeled.
+
+    FirstRate unadjusted files carry the case-insensitive token `unadjusted` in their name; adjusted
+    files do not. So every raw file must look unadjusted and no adjusted file may — either violation
+    raises ValueError. Together these also catch both dirs pointing at the same directory.
+    """
+    raw_not_unadjusted = sorted(
+        path.name for path in raw_map.values() if not _looks_unadjusted(path.name)
+    )
+    if raw_not_unadjusted:
+        raise ValueError(
+            f"raw dir holds files that don't look unadjusted: {raw_not_unadjusted}; "
+            f"--raw-dir/--adjusted-dir may be swapped"
+        )
+    adj_unadjusted = sorted(
+        path.name for path in adj_map.values() if _looks_unadjusted(path.name)
+    )
+    if adj_unadjusted:
+        raise ValueError(
+            f"adjusted dir holds unadjusted-looking files: {adj_unadjusted}; "
+            f"--raw-dir/--adjusted-dir may be swapped"
+        )
+
+
 class FirstRateImporter:
     name = "firstrate"
     vendor_label = "firstratedata"
@@ -87,6 +122,7 @@ class FirstRateImporter:
             raise ValueError("intraday import not yet supported (1d only)")
         raw_map = _discover(request.raw_dir)
         adj_map = _discover(request.adjusted_dir)
+        _check_directory_roles(raw_map, adj_map)
         if set(raw_map) != set(adj_map):
             only_raw = sorted(set(raw_map) - set(adj_map))
             only_adj = sorted(set(adj_map) - set(raw_map))

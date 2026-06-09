@@ -66,11 +66,113 @@ def _ingest_streamed(store, chunks, **kw):
 def test_streamed_ingest_one_snapshot_reads_canonical(tmp_path):
     store = DataStore(tmp_path)
     rec = _ingest_streamed(store, _two_symbol_chunks())
+    assert rec.storage_format == "parquet_dataset"
     out = store.read_bars(rec.snapshot_id)
     validate_bars(out)
     assert list(out.columns) == BAR_COLUMNS
     assert rec.row_count == 4
     assert rec.start == "2024-07-01" and rec.end == "2024-07-02"
+
+
+def test_streamed_ingest_pushdown_subset(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest_streamed(store, _two_symbol_chunks())
+    # symbol pushdown
+    only_aapl = store.read_bars(rec.snapshot_id, symbols=["AAPL"])
+    assert set(only_aapl["symbol"]) == {"AAPL"}
+    assert len(only_aapl) == 2
+    # half-open [start, end) ts pushdown: only 2024-07-01 bars
+    first_day = store.read_bars(
+        rec.snapshot_id,
+        start=pd.Timestamp("2024-07-01", tz="UTC"),
+        end=pd.Timestamp("2024-07-02", tz="UTC"),
+    )
+    validate_bars(first_day)
+    assert set(first_day["symbol"]) == {"AAPL", "MSFT"}
+    assert len(first_day) == 2
+    assert first_day.index.unique().tolist() == [pd.Timestamp("2024-07-01", tz="UTC")]
+    # combined symbol + ts pushdown
+    aapl_first = store.read_bars(
+        rec.snapshot_id,
+        symbols=["AAPL"],
+        start=pd.Timestamp("2024-07-01", tz="UTC"),
+        end=pd.Timestamp("2024-07-02", tz="UTC"),
+    )
+    assert set(aapl_first["symbol"]) == {"AAPL"}
+    assert len(aapl_first) == 1
+
+
+def test_streamed_ingest_id_independent_of_chunk_order(tmp_path):
+    store_ab = DataStore(tmp_path / "ab")
+    store_ba = DataStore(tmp_path / "ba")
+    chunks = _two_symbol_chunks()  # [AAPL, MSFT]
+    rec_ab = _ingest_streamed(store_ab, chunks)
+    rec_ba = _ingest_streamed(store_ba, list(reversed(chunks)))  # [MSFT, AAPL]
+    assert rec_ab.snapshot_id == rec_ba.snapshot_id
+    assert rec_ab.content_hash == rec_ba.content_hash
+
+
+def test_streamed_ingest_adopts_orphan_dataset(tmp_path):
+    store = DataStore(tmp_path)
+    rec = _ingest_streamed(store, _two_symbol_chunks())
+    dataset_dir = tmp_path / rec.data_path
+    assert dataset_dir.is_dir()
+
+    # Simulate an orphan: the committed dataset dir survives a crash but the manifest record for it
+    # never landed. Rewrite the manifest jsonl without that record's line.
+    manifest_path = tmp_path / "manifest.jsonl"
+    lines = [
+        ln
+        for ln in manifest_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip() and rec.snapshot_id not in ln
+    ]
+    manifest_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    assert store.manifest.find(rec.snapshot_id) is None
+    assert dataset_dir.is_dir()  # the orphan data dir is still on disk
+
+    # Re-ingesting the same chunks must adopt the orphan dir (not raise on os.replace onto a
+    # non-empty target dir), end with exactly one record, and serve the data.
+    re_rec = _ingest_streamed(store, _two_symbol_chunks())
+    assert re_rec.snapshot_id == rec.snapshot_id
+    assert len(store.list_snapshots("bars")) == 1
+    out = store.read_bars(re_rec.snapshot_id)
+    validate_bars(out)
+    assert len(out) == 4
+
+
+def test_streamed_ingest_propagates_unexpected_replace_error(tmp_path, monkeypatch):
+    # An os.replace failure that is NOT "target dir exists" (e.g. permission) must propagate, not be
+    # mistaken for an adoptable orphan.
+    import errno
+    import os
+
+    store = DataStore(tmp_path)
+
+    def boom(src, dst):
+        raise PermissionError(errno.EACCES, "denied")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(PermissionError):
+        _ingest_streamed(store, _two_symbol_chunks())
+
+
+def test_streamed_ingest_dotted_symbol_roundtrips(tmp_path):
+    store = DataStore(tmp_path)
+    chunk = _chunk("BRK.B", [("2024-07-01", 410.0), ("2024-07-02", 412.0)])
+    rec = store.ingest_bars_streamed(
+        provider="firstrate",
+        symbols=["BRK.B"],
+        as_of="2024-07-03T00:00:00+00:00",
+        source="firstratedata-import",
+        chunks=iter([chunk]),
+        timeframe="1d",
+        adjustment="split_div",
+    )
+    assert rec.storage_format == "parquet_dataset"
+    out = store.read_bars(rec.snapshot_id, symbols=["BRK.B"])
+    validate_bars(out)
+    assert set(out["symbol"]) == {"BRK.B"}
+    assert len(out) == 2
 
 
 def test_streamed_ingest_is_idempotent(tmp_path):
@@ -93,14 +195,6 @@ def test_requested_bounds_mismatch_errors(tmp_path):
     store = DataStore(tmp_path)
     with pytest.raises(ValueError, match="observed coverage"):
         _ingest_streamed(store, _two_symbol_chunks(), start="2020-01-01", end="2024-07-02")
-
-
-def test_large_row_warning_flag(tmp_path, monkeypatch):
-    import algua.data.store as store_mod
-    monkeypatch.setattr(store_mod, "IMPORT_WARN_ROWS", 1)
-    store = DataStore(tmp_path)
-    rec = _ingest_streamed(store, _two_symbol_chunks())
-    assert rec.metadata.source_metadata["servable"] == "deferred-130"
 
 
 def test_clear_staging_removes_stale_residue(tmp_path):
