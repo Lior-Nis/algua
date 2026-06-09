@@ -39,8 +39,13 @@ Two facts reshaped the original design:
   discipline wall; the operator's **main working tree is untouched** (sourcing runs in a throwaway
   worktree — important, the repo has concurrent sessions on main).
 - **NOT protected (accepted, documented):** under bypass the sourcing agent has full local
-  shell/net/fs and could read local secrets / exfil. Closed by OS isolation (VPS/container),
-  deferred to scale-out by operator decision (§6).
+  shell/net/fs and could read local secrets / exfil. Sharper: it is handed `ALGUA_DB_PATH` → the
+  **real registry DB**, so a prompt-injected agent could run other `uv run algua …` commands against
+  the production registry/pool (the "only `research idea add`" boundary is prompt-level). The live
+  wall still holds (signed gate + CODEOWNERS — it cannot reach `live`), but pool/registry-row
+  integrity is exposed. Closed by OS isolation (VPS/container) and/or a staging-DB → host-side
+  idea-row import (the agent never touches the production DB) — both deferred to scale-out by
+  operator decision (§6).
 
 ## 3. Capability spike
 
@@ -112,8 +117,9 @@ pool + dedup CLI are reused as-is.
 
 ## 6. Deferred / out of scope
 
-- **OS isolation of the sourcing agent (containerize / VPS).** Closes the §2 residual; deferred to
-  scale-out by operator decision — the primary follow-up.
+- **OS isolation of the sourcing agent (containerize / VPS) + a staging-DB → host-side idea-row
+  import** so the bypass agent never touches the production registry. Together these close the §2
+  residual; deferred to scale-out by operator decision — the primary follow-up.
 - **Wiring the pool into the loop as the default ideation step** — #126's deliberate non-default;
   waits on the promotion gate counting idea breadth (a human/CODEOWNERS change).
 - **`interpret`/`author` subagents run under bypass despite declared sandboxes** — pre-existing,

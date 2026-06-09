@@ -35,24 +35,35 @@ FIRECRAWL_MCP_VERSION="${FIRECRAWL_MCP_VERSION:-firecrawl-mcp}"
 PAPER_SEARCH_MCP_VERSION="${PAPER_SEARCH_MCP_VERSION:-paper-search-mcp}"
 DRY_RUN=0
 
+_need_val() { [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --thesis)     THESIS="$2"; shift 2 ;;
-    --max-ideas)  MAX_IDEAS="$2"; shift 2 ;;
-    --timeout)    TIMEOUT="$2"; shift 2 ;;
+    --thesis)     _need_val "$@"; THESIS="$2"; shift 2 ;;
+    --max-ideas)  _need_val "$@"; MAX_IDEAS="$2"; shift 2 ;;
+    --timeout)    _need_val "$@"; TIMEOUT="$2"; shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
     -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
+# MCP versions land inside an inline TOML string; a stray quote/backslash would break it. Restrict
+# to a conservative package-spec charset (name, optional @version/extras) before interpolating.
+_pkgspec_re='^[A-Za-z0-9._@/+-]+$'
+for _v in "${FIRECRAWL_MCP_VERSION}" "${PAPER_SEARCH_MCP_VERSION}"; do
+  [[ "${_v}" =~ ${_pkgspec_re} ]] || { echo "invalid MCP package spec: ${_v}" >&2; exit 2; }
+done
+
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BRANCH="source-ideas/${STAMP}"
 WORKTREE="${REPO_ROOT}/../algua-source-ideas-${STAMP}"
-# The persistent pool: honor an existing override, else the main checkout's DB. Absolute, so the
-# `uv run algua` invocations inside the worktree write here, not into the worktree's throwaway DB.
-POOL_DB="${ALGUA_DB_PATH:-${REPO_ROOT}/data/algua.db}"
+# The persistent pool: honor an existing override, else the MAIN checkout's DB — resolved via the
+# shared git dir so this is correct even when launched from another worktree (not just REPO_ROOT,
+# which is the current worktree). Absolute, so the `uv run algua` calls inside our throwaway worktree
+# write to the real pool, not the worktree's ephemeral DB.
+MAIN_CHECKOUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+POOL_DB="${ALGUA_DB_PATH:-${MAIN_CHECKOUT}/data/algua.db}"
 
 read -r -d '' GOAL <<EOF || true
 You are sourcing external trading-idea priors into algua's structured idea pool. Follow the
@@ -104,6 +115,14 @@ fi
 echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}"
 
+# The worktree is genuinely disposable: sourced ideas persist in the pool DB, not here. Auto-remove
+# it (and its branch) on exit so source-only runs don't accumulate stale worktrees.
+cleanup() {
+  git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE}" 2>/dev/null || true
+  git -C "${REPO_ROOT}" branch -D "${BRANCH}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 echo "Pre-warming the worktree environment (uv sync, timeout ${SYNC_TIMEOUT})..."
 ( cd "${WORKTREE}" && timeout "${SYNC_TIMEOUT}" uv sync ) \
   || { echo "pre-warm (uv sync) failed or timed out after ${SYNC_TIMEOUT}; aborting." >&2; exit 1; }
@@ -119,12 +138,14 @@ fi
 echo "Sourcing ideas (timeout ${TIMEOUT}, up to ${MAX_IDEAS} ideas → ${POOL_DB})..."
 # ALGUA_DB_PATH → the persistent pool so added ideas survive the throwaway worktree.
 # stdin from /dev/null: unattended runs have no stdin; without this codex blocks.
-ALGUA_DB_PATH="${POOL_DB}" "${PHASE0_CMD[@]}" </dev/null \
-  || echo "codex exec exited non-zero (timeout or error) — any ideas already added persist in the pool."
+rc=0
+ALGUA_DB_PATH="${POOL_DB}" "${PHASE0_CMD[@]}" </dev/null || rc=$?
 
 echo
-echo "Done. The throwaway worktree is no longer needed (ideas live in the pool, not the branch):"
-echo "  git -C ${REPO_ROOT} worktree remove --force ${WORKTREE}"
-echo "Review what was sourced:"
+echo "Review what was sourced (ideas live in the pool, not a branch — the worktree was auto-removed):"
 echo "  uv run algua research idea list --status open"
 echo "  uv run algua research idea stats"
+if [[ "${rc}" -ne 0 ]]; then
+  echo "NOTE: codex exec exited ${rc} (timeout or error) — any ideas added before it stopped persist." >&2
+fi
+exit "${rc}"
