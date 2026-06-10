@@ -24,6 +24,13 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 4, 1, tzinfo=UTC)
 
 
+def _identity(scores: pd.Series, view: pd.DataFrame, params: dict) -> pd.Series:
+    """Test-local construction policy: the authored scores ARE the target weights. Used where a test
+    injects a PRECISE weight vector to exercise the risk rails, so no policy re-normalization
+    distorts the vector under test."""
+    return scores
+
+
 def decided_weights_by_bar(
     sink: dict[datetime, pd.Series],
 ) -> Callable[[datetime, pd.Series], None]:
@@ -52,20 +59,20 @@ def _momentum_strategy(warmup_bars: int = 3) -> LoadedStrategy:
             rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=warmup_bars
         ),
         params={"lookback": 5},
+        construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
 
-    def fn(view: pd.DataFrame, params: dict) -> pd.Series:
+    def signal(view: pd.DataFrame, params: dict) -> pd.Series:
         wide = view.reset_index().pivot(
             index="timestamp", columns="symbol", values="adj_close"
         )
         lookback = params["lookback"]
         if len(wide) <= lookback:
             return pd.Series(dtype="float64")
-        ret = wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0
-        winner = ret.idxmax()
-        return pd.Series({winner: 1.0})
+        return wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0
 
-    return LoadedStrategy(config=cfg, fn=fn)
+    from algua.portfolio.construction import top_k_equal_weight
+    return LoadedStrategy(config=cfg, signal_fn=signal, construct_fn=top_k_equal_weight)
 
 
 def test_backtest_and_paper_decide_identical_target_weights_bar_for_bar() -> None:
@@ -106,10 +113,11 @@ def test_backtest_enforces_long_only_identically_to_live() -> None:
     cfg = StrategyConfig(
         name="shorty", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-        params={},
+        params={}, construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
     short = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series({"AAA": 1.0, "BBB": -0.5})
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 1.0, "BBB": -0.5}),
+        construct_fn=_identity,
     )
     with pytest.raises(BacktestError, match="long-only"):
         run(short, SyntheticProvider(seed=0), START, END)
@@ -123,12 +131,13 @@ def test_backtest_gross_exposure_uses_the_shared_risk_check() -> None:
         execution=ExecutionContract(
             rebalance_frequency="1d", decision_lag_bars=1, max_gross_exposure=1.0
         ),
-        params={},
+        params={}, construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
     # Each name is within the default per-symbol cap (1.0) so the gross rail is what trips:
     # 0.6 + 0.6 = 1.2 gross > 1.0, isolating the gross-exposure breach.
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series([0.6, 0.6], index=["AAA", "BBB"])
+        config=cfg, signal_fn=lambda v, p: pd.Series([0.6, 0.6], index=["AAA", "BBB"]),
+        construct_fn=_identity,
     )
     with pytest.raises(BacktestError) as ei:
         simulate(strat, SyntheticProvider(seed=1), START, END)
@@ -178,9 +187,12 @@ def test_concentration_cap_fails_backtest_and_paper_identically() -> None:
         execution=ExecutionContract(
             rebalance_frequency="1d", decision_lag_bars=1, max_weight_per_symbol=0.5
         ),
-        params={},
+        params={}, construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series({"AAA": 0.9, "BBB": 0.1}))
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 0.9, "BBB": 0.1}),
+        construct_fn=_identity,
+    )
     with pytest.raises(BacktestError) as ei:
         run(strat, SyntheticProvider(seed=0), START, END)
     assert isinstance(ei.value.__cause__, RiskBreach)
@@ -198,9 +210,12 @@ def test_allow_short_lets_a_short_through_in_both_paths() -> None:
         execution=ExecutionContract(
             rebalance_frequency="1d", decision_lag_bars=1, allow_short=True
         ),
-        params={},
+        params={}, construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series({"AAA": 0.5, "BBB": -0.5}))
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 0.5, "BBB": -0.5}),
+        construct_fn=_identity,
+    )
     # Neither path raises (long/short now declared+permitted); a clean run is the assertion.
     run(strat, SyntheticProvider(seed=0), START, END)
     run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
@@ -213,9 +228,11 @@ def test_named_symbol_nan_breaches_both_paths() -> None:
     cfg = StrategyConfig(
         name="nanny", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-        params={},
+        params={}, construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series({"AAA": np.nan}))
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": np.nan}), construct_fn=_identity,
+    )
     with pytest.raises(BacktestError) as ei:
         run(strat, SyntheticProvider(seed=0), START, END)
     assert isinstance(ei.value.__cause__, RiskBreach)

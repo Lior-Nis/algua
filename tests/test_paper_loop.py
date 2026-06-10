@@ -11,6 +11,14 @@ from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 DATES = [datetime(2023, 1, d, tzinfo=UTC) for d in (2, 3, 4, 5)]
 
+_CONSTRUCTION = dict(construction="top_k_equal_weight", construction_params={"top_k": 1})
+
+
+def _identity(scores: pd.Series, view: pd.DataFrame, params: dict) -> pd.Series:
+    """Test-local construction: the injected scores ARE the target weights, so the precise vector
+    under test reaches the risk rails unchanged."""
+    return scores
+
 
 def _bars(symbol_prices: dict[str, list[float]]) -> pd.DataFrame:
     rows = []
@@ -33,8 +41,11 @@ def _all_in(symbol: str) -> LoadedStrategy:
     cfg = StrategyConfig(
         name="all_in", universe=[symbol],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        **_CONSTRUCTION,
     )
-    return LoadedStrategy(config=cfg, fn=lambda view, params: pd.Series({symbol: 1.0}))
+    return LoadedStrategy(
+        config=cfg, signal_fn=lambda view, params: pd.Series({symbol: 1.0}), construct_fn=_identity
+    )
 
 
 def test_build_intents_emits_on_weight_change():
@@ -69,8 +80,11 @@ def test_fills_never_share_timestamp_with_their_decision_bar():
 def test_run_paper_rejects_negative_weights_long_only():
     bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
     cfg = StrategyConfig(name="shorty", universe=["AAA"],
-                         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1))
-    short = LoadedStrategy(config=cfg, fn=lambda view, params: pd.Series({"AAA": -1.0}))
+                         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+                         **_CONSTRUCTION)
+    short = LoadedStrategy(
+        config=cfg, signal_fn=lambda view, params: pd.Series({"AAA": -1.0}), construct_fn=_identity
+    )
     with pytest.raises(ValueError, match="long-only"):
         run_paper(short, SimBroker(cash=10_000.0), _FakeProvider(bars), DATES[0], DATES[-1])
 
@@ -84,8 +98,11 @@ def _strategy(weights: dict, warmup_bars: int = 0):
         name="cfg", universe=sorted(weights),
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                      warmup_bars=warmup_bars),
+        **_CONSTRUCTION,
     )
-    return LoadedStrategy(config=cfg, fn=lambda view, params: pd.Series(weights))
+    return LoadedStrategy(
+        config=cfg, signal_fn=lambda view, params: pd.Series(weights), construct_fn=_identity
+    )
 
 
 def test_gross_exposure_breach_raises():

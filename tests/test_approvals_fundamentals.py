@@ -1,4 +1,4 @@
-"""FIX A: signal_fn property + code_hash for fundamentals strategies."""
+"""FIX A: authored_signal property + code_hash for fundamentals strategies."""
 from __future__ import annotations
 
 import inspect
@@ -7,13 +7,13 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.strategies.loader import load_strategy
 
 
-def test_signal_fn_for_fundamentals_strategy_resolves_to_correct_module():
-    """signal_fn on a needs_fundamentals strategy returns the 3-arg fn, not None."""
+def test_authored_signal_for_fundamentals_strategy_resolves_to_correct_module():
+    """authored_signal on a needs_fundamentals strategy returns the 3-arg fn, not None."""
     strat = load_strategy("fundamentals_earnings_tilt")
     assert strat.config.needs_fundamentals
-    # fn is None for a fundamentals strategy; signal_fn must not be None
-    assert strat.fn is None
-    sfn = strat.signal_fn
+    # signal_fn is None for a fundamentals strategy; authored_signal must not be None
+    assert strat.signal_fn is None
+    sfn = strat.authored_signal
     assert sfn is not None
     mod = inspect.getmodule(sfn)
     assert mod is not None
@@ -28,7 +28,8 @@ def test_compute_artifact_hashes_fundamentals_strategy_does_not_crash():
     assert hashes.dependency_hash
 
 
-_EMPTY_CLOSURE_HASH = "e3b0c44298fc1c14"  # sha256("") — what you get when fn=None yields no source
+# sha256("") — what you get when a None fn yields no source
+_EMPTY_CLOSURE_HASH = "e3b0c44298fc1c14"
 
 
 def test_code_hash_differs_from_plain_strategy_and_not_empty_closure():

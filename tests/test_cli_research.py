@@ -27,7 +27,7 @@ def _backtest_to_backtested():
 def _sweep():
     return runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
                                "--start", "2022-01-01", "--end", "2023-12-31",
-                               "--param", "lookback=20,40", "--param", "top_k=1,3"])
+                               "--param", "lookback=20,40", "--param", "construction.top_k=1,3"])
 
 
 def test_agent_promote_demo_refuses_relaxation():

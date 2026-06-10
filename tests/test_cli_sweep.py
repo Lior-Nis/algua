@@ -17,7 +17,7 @@ def _tmp(monkeypatch, tmp_path):
 def test_sweep_demo_emits_ranked():
     result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--param", "lookback=20,40", "--param", "top_k=1,3",
+                                 "--param", "lookback=20,40", "--param", "construction.top_k=1,3",
                                  "--top", "2"])
     assert result.exit_code == 0, result.stdout
     d = json.loads(result.stdout)
@@ -33,7 +33,7 @@ def test_sweep_combos_carry_no_holdout():
     # exact overfitting the breadth gate fights). It is revealed only by `research promote`.
     result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--param", "lookback=20,40", "--param", "top_k=1,3"])
+                                 "--param", "lookback=20,40", "--param", "construction.top_k=1,3"])
     assert result.exit_code == 0, result.stdout
     d = json.loads(result.stdout)
     assert d["ranked"]
@@ -57,7 +57,7 @@ def test_pre_registration_sweep_breadth_used_by_promote():
     # must be used (provenance "measured"), and a smaller --n-combos cannot undercut it.
     sweep = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--param", "lookback=20,40", "--param", "top_k=1,3"])
+                                "--param", "lookback=20,40", "--param", "construction.top_k=1,3"])
     assert sweep.exit_code == 0, sweep.stdout
     assert json.loads(sweep.stdout)["recorded_breadth"] == {"n_combos": 4, "cumulative": 4}
 
@@ -81,7 +81,7 @@ def test_sweep_of_registered_strategy_records_breadth():
     assert runner.invoke(app, ["registry", "add", "cross_sectional_momentum"]).exit_code == 0
     result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--param", "lookback=20,40", "--param", "top_k=1,3"])
+                                 "--param", "lookback=20,40", "--param", "construction.top_k=1,3"])
     assert result.exit_code == 0, result.stdout
     recorded = json.loads(result.stdout)["recorded_breadth"]
     assert recorded == {"n_combos": 4, "cumulative": 4}

@@ -13,8 +13,17 @@ from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 def _strategy(**execution_kwargs):
     execution = ExecutionContract(rebalance_frequency="1d", **execution_kwargs)
-    config = StrategyConfig(name="s", universe=["A"], execution=execution, params={})
-    return LoadedStrategy(config=config, fn=lambda features, params: features.iloc[-1])
+    config = StrategyConfig(
+        name="s", universe=["A"], execution=execution, params={},
+        construction="top_k_equal_weight", construction_params={"top_k": 1},
+    )
+    # These tests only exercise config_hash; the signal/construct never run. Use an identity
+    # construct (scores ARE weights) so no policy re-normalization muddies intent.
+    return LoadedStrategy(
+        config=config,
+        signal_fn=lambda features, params: features.iloc[-1],
+        construct_fn=lambda scores, view, params: scores,
+    )
 
 
 def test_turnover_counts_weight_changes():
