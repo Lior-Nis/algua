@@ -46,7 +46,9 @@ For each hypothesis:
    the doc's `## Verdict & next` (what was learned + the next idea as a `[[dangling-link]]`),
    set `hypothesis_status`, and update the family doc's `## State of exploration` and
    `status`. Finally append the hypothesis, params, key metrics, the gate decision, and your
-   candidate/discard rationale to `run-report.md`.
+   candidate/discard rationale to `run-report.md`. For a strategy worth a deeper write-up, the
+   `report-experiments` skill turns its tracked sweep/walk-forward runs into a plotted,
+   provenance-stamped report in the vault.
 
 ## Stopping
 
