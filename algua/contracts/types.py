@@ -79,6 +79,18 @@ FUNDAMENTALS_COLUMNS: tuple[str, ...] = (
 FUNDAMENTALS_AS_OF_KEY: tuple[str, ...] = ("symbol", "fiscal_period_end", "metric")
 FUNDAMENTALS_KNOWABLE_AT = "knowable_at"
 
+# --- Non-tabular: news seam (issue #132, hindsight slice) --------------------------------------
+# Tidy/long bitemporal news, one row per (article, mentioned symbol). `source` is part of the
+# identity because an article id is only unique WITHIN a source. Hindsight-only this slice (no
+# engine consumer), but the names live here beside the fundamentals constants for symmetry.
+NEWS_COLUMNS: tuple[str, ...] = (
+    "source", "article_id", "symbol", "published_at", "knowable_at", "headline", "url", "body",
+)
+# Identity of an article-mention across revisions: a correction is a new row sharing this key with
+# a later knowable_at. `source` scopes the (source-local) article_id.
+NEWS_AS_OF_KEY: tuple[str, ...] = ("source", "article_id", "symbol")
+NEWS_KNOWABLE_AT = "knowable_at"
+
 
 @runtime_checkable
 class FundamentalsProvider(Protocol):
