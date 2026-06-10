@@ -3,7 +3,8 @@
 Given a raw OHLC frame plus a typed split/dividend event list for one symbol, produce the
 back-adjusted close (`adj_close`) and the cumulative adjustment factor; plus a validator that checks
 a vendor-supplied `adj_close` against the same events (reverse-split-safe). No I/O; imports only
-pandas + numpy. See docs/superpowers/specs/2026-06-10-corporate-action-back-adjustment-engine-issue-149-design.md.
+pandas + numpy. See docs/superpowers/specs/
+2026-06-10-corporate-action-back-adjustment-engine-issue-149-design.md.
 """
 from __future__ import annotations
 
@@ -47,3 +48,68 @@ class Dividend:
 
 
 CorporateAction = Split | Dividend
+
+
+def back_adjust(raw: pd.DataFrame, events: Iterable[CorporateAction]) -> pd.DataFrame:
+    """Back-adjust `raw['close']` for `events`, anchored at the most recent bar.
+
+    Returns a frame `[ts, adj_close, adj_factor]`, one row per input bar in input order, with
+    `adj_close = close * adj_factor`. Pure; see the module docstring + design spec.
+    """
+    if "ts" not in raw.columns or "close" not in raw.columns:
+        raise ValueError("raw must have 'ts' and 'close' columns")
+
+    ts = pd.DatetimeIndex(raw["ts"])
+    n = len(ts)
+    if n > 0 and ts.tz is None:
+        raise ValueError("raw['ts'] must be tz-aware (UTC)")
+    if ts.tz is not None:
+        ts = ts.tz_convert("UTC")
+    close = raw["close"].to_numpy(dtype="float64")
+    if n > 0:
+        if not (ts.is_monotonic_increasing and ts.is_unique):
+            raise ValueError("raw['ts'] must be strictly ascending and unique")
+        if not np.all(np.isfinite(close)) or np.any(close <= 0):
+            raise ValueError("raw['close'] must be finite and > 0")
+
+    # Group events by (UTC, midnight-validated) ex_date: split ratios multiply, dividend cash sums.
+    split_ratio_prod: dict[pd.Timestamp, float] = {}
+    div_cash_sum: dict[pd.Timestamp, float] = {}
+    for ev in events:
+        ex = ev.ex_date.tz_convert("UTC")
+        if ex != ex.normalize():
+            raise ValueError(
+                f"ex_date must be UTC midnight (a session date), got {ev.ex_date!r}"
+            )
+        if isinstance(ev, Split):
+            split_ratio_prod[ex] = split_ratio_prod.get(ex, 1.0) * ev.ratio
+        else:
+            div_cash_sum[ex] = div_cash_sum.get(ex, 0.0) + ev.cash
+
+    # Suffix-product accumulator: A[idx] holds the combined multiplier applied at each ex-date
+    # boundary; factor[i] = prod(A[i+1 .. n]). A[0] and A[n] (pre-/post-range no-ops) stay 1.0.
+    A = np.ones(n + 1, dtype="float64")
+    for ex in set(split_ratio_prod) | set(div_cash_sum):
+        idx = int(ts.searchsorted(ex, side="left"))
+        if idx == 0 or idx == n:  # pre-range or post-range ex-date -> no-op (no look-ahead)
+            continue
+        split_mult = 1.0 / split_ratio_prod.get(ex, 1.0)
+        cash = div_cash_sum.get(ex, 0.0)
+        if cash > 0.0:
+            p_prev = close[idx - 1]
+            if p_prev - cash <= 0:
+                raise ValueError(
+                    f"dividend cash {cash} >= prior close {p_prev} on {ex.date()}: "
+                    f"if this is a liquidating / return-of-capital distribution, "
+                    f"exclude it from the event list; "
+                    f"otherwise check data alignment (only ordinary cash dividends are modeled)"
+                )
+            div_mult = (p_prev - cash) / p_prev
+        else:
+            div_mult = 1.0
+        A[idx] *= split_mult * div_mult
+
+    factor = np.cumprod(A[1:][::-1])[::-1] if n > 0 else np.array([], dtype="float64")
+    return pd.DataFrame(
+        {"ts": ts, "adj_close": close * factor, "adj_factor": factor}
+    )
