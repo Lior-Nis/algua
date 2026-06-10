@@ -170,9 +170,9 @@ def _decision_weights(
 def _canonical_row(
     strategy: LoadedStrategy, bars_sorted: pd.DataFrame, stop: int, columns: pd.Index
 ) -> pd.Series:
-    """The canonical per-bar weights at one bar: `target_weights` over the expanding history slice
-    ending at (and including) that bar, reindexed onto `columns` and zero-filled. This is the SAME
-    computation the loop performs per bar — reused by the fast-path parity guard so the guard
+    """The canonical per-bar weights = construct(signal(view), view) over the expanding history
+    slice ending at (and including) that bar, reindexed onto `columns` and zero-filled. This is the
+    SAME computation the loop performs per bar — reused by the fast-path parity guard so the guard
     compares the fast path against the loop's own definition, not a re-derivation."""
     view = bars_sorted.iloc[:stop]
     w = strategy.target_weights(view)
