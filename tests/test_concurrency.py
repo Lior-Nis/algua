@@ -129,3 +129,40 @@ def test_concurrent_writers_serialize(tmp_path):
             "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='backtested'",
             (row["id"],)).fetchone()["c"]
         assert n == 1, f"{name} has {n} backtested transitions"
+
+
+def test_concurrent_allocate_respects_cap(tmp_path):
+    db = tmp_path / "r.db"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    _seed_strategy(db, "a")
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(db)
+    SqliteStrategyRepository(conn).add("b")
+    conn.close()
+
+    holder = _spawn("lock-hold", db, barrier, "h")
+    w1 = _spawn("allocate", db, barrier, "w1", "a", "30000", "50000")
+    w2 = _spawn("allocate", db, barrier, "w2", "b", "30000", "50000")
+
+    _release_after_contention(barrier, ["w1", "w2"])
+
+    r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+    assert rh["ok"] is True
+
+    # invariant first: the cap is never breached, regardless of interleaving
+    from algua.registry import allocations
+    check = connect(db)
+    assert allocations.total_allocated(check) <= 50_000
+    for name in ("a", "b"):
+        sid = check.execute("SELECT id FROM strategies WHERE name=?", (name,)).fetchone()["id"]
+        n_active = check.execute(
+            "SELECT COUNT(*) c FROM strategy_allocations WHERE strategy_id=? AND revoked_ts IS NULL",
+            (sid,)).fetchone()["c"]
+        assert n_active <= 1, f"{name} has {n_active} active allocations"
+
+    # outcome: exactly one succeeded; the loser got a domain rejection, not a lock error
+    outcomes = [r1, r2]
+    assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
+    loser = next(r for r in outcomes if not r["ok"])
+    assert loser["error"] == "AllocationError", loser
