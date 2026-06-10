@@ -7,10 +7,13 @@ deterministic contention so serialization is observable, not timing-dependent.
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from algua.registry.db import connect, migrate
 
@@ -50,7 +53,9 @@ def _collect(proc, timeout: float = JOIN_TIMEOUT) -> dict:
         except subprocess.TimeoutExpired:
             proc.kill()
             out, err = proc.communicate()
-        raise AssertionError(f"worker timed out after {timeout}s; stderr:\n{err}")
+        raise AssertionError(  # noqa: B904
+            f"worker timed out after {timeout}s; stderr:\n{err}"
+        )
     assert proc.returncode == 0, f"worker exited {proc.returncode}; stderr:\n{err}"
     lines = [ln for ln in (out or "").splitlines() if ln.strip()]
     assert lines, f"worker produced no JSON; stderr:\n{err}"
@@ -123,10 +128,13 @@ def test_concurrent_writers_serialize(tmp_path):
     # final state: both advanced, each with exactly one idea->backtested transition row
     check = connect(db)
     for name in ("a", "b"):
-        row = check.execute("SELECT id, stage FROM strategies WHERE name=?", (name,)).fetchone()
+        row = check.execute(
+            "SELECT id, stage FROM strategies WHERE name=?", (name,)
+        ).fetchone()
         assert row["stage"] == "backtested"
         n = check.execute(
-            "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='backtested'",
+            "SELECT COUNT(*) c FROM stage_transitions"
+            " WHERE strategy_id=? AND to_stage='backtested'",
             (row["id"],)).fetchone()["c"]
         assert n == 1, f"{name} has {n} backtested transitions"
 
@@ -155,9 +163,12 @@ def test_concurrent_allocate_respects_cap(tmp_path):
     check = connect(db)
     assert allocations.total_allocated(check) <= 50_000
     for name in ("a", "b"):
-        sid = check.execute("SELECT id FROM strategies WHERE name=?", (name,)).fetchone()["id"]
+        sid = check.execute(
+            "SELECT id FROM strategies WHERE name=?", (name,)
+        ).fetchone()["id"]
         n_active = check.execute(
-            "SELECT COUNT(*) c FROM strategy_allocations WHERE strategy_id=? AND revoked_ts IS NULL",
+            "SELECT COUNT(*) c FROM strategy_allocations"
+            " WHERE strategy_id=? AND revoked_ts IS NULL",
             (sid,)).fetchone()["c"]
         assert n_active <= 1, f"{name} has {n_active} active allocations"
 
@@ -212,17 +223,18 @@ def test_concurrent_candidate_gate_single_use(tmp_path):
 
     # final: token consumed exactly once; strategy at candidate; exactly one new transition row
     check = connect(db)
-    assert check.execute("SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,)).fetchone()["consumed"] == 1
-    assert check.execute("SELECT stage FROM strategies WHERE id=?", (sid,)).fetchone()["stage"] == "candidate"
+    consumed = check.execute(
+        "SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,)
+    ).fetchone()["consumed"]
+    assert consumed == 1
+    stage = check.execute(
+        "SELECT stage FROM strategies WHERE id=?", (sid,)
+    ).fetchone()["stage"]
+    assert stage == "candidate"
     n = check.execute(
         "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='candidate'",
         (sid,)).fetchone()["c"]
     assert n == 1, f"{n} candidate transition rows"
-
-
-import sqlite3
-
-import pytest
 
 
 class _FaultyConn:
@@ -266,7 +278,8 @@ def test_apply_transition_rolls_back_on_failure(tmp_path):
         dependency_hash="d", data_source="test", snapshot_id=None, period_start="2026-01-01",
         period_end="2026-02-01", holdout_frac=0.3, actor="agent", decision_json="{}")
 
-    # a repo whose connection raises on the transition INSERT — fires AFTER token-consume + stage UPDATE
+    # a repo whose connection raises on the transition INSERT —
+    # fires AFTER token-consume + stage UPDATE, so all three must roll back together.
     faulty = SqliteStrategyRepository(_FaultyConn(real, "INSERT INTO stage_transitions"))
     rec_bt = repo.get("s")
     with pytest.raises(sqlite3.OperationalError, match="injected"):
@@ -275,8 +288,12 @@ def test_apply_transition_rolls_back_on_failure(tmp_path):
 
     # assert full rollback on a FRESH connection (nothing partially committed)
     fresh = connect(db)
-    assert fresh.execute("SELECT stage FROM strategies WHERE id=?", (rec.id,)).fetchone()["stage"] == "backtested"
-    assert fresh.execute("SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,)).fetchone()["consumed"] == 0
+    assert fresh.execute(
+        "SELECT stage FROM strategies WHERE id=?", (rec.id,)
+    ).fetchone()["stage"] == "backtested"
+    assert fresh.execute(
+        "SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,)
+    ).fetchone()["consumed"] == 0
     n = fresh.execute(
         "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='candidate'",
         (rec.id,)).fetchone()["c"]
