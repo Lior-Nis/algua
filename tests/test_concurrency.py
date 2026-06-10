@@ -166,3 +166,55 @@ def test_concurrent_allocate_respects_cap(tmp_path):
     assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
     loser = next(r for r in outcomes if not r["ok"])
     assert loser["error"] == "AllocationError", loser
+
+
+def _seed_backtested_with_gate_token(db_path: Path, name: str = "s") -> tuple[int, int]:
+    """Create a strategy at `backtested` and mint one passing AGENT gate token. Returns
+    (strategy_id, gate_id)."""
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.registry.transitions import transition_strategy
+
+    conn = connect(db_path)
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    rec = repo.add(name)
+    transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason="setup")
+    gate_id = repo.record_gate_evaluation(
+        rec.id, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=30, breadth_provenance="measured", pit_ok=True, pit_override=False,
+        holdout_n_bars=100, min_holdout_observations=63, code_hash="c", config_hash="cfg",
+        dependency_hash="d", data_source="test", snapshot_id=None, period_start="2026-01-01",
+        period_end="2026-02-01", holdout_frac=0.3, actor="agent", decision_json="{}")
+    conn.close()
+    return rec.id, gate_id
+
+
+def test_concurrent_candidate_gate_single_use(tmp_path):
+    db = tmp_path / "r.db"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    sid, gate_id = _seed_backtested_with_gate_token(db, "s")
+
+    holder = _spawn("lock-hold", db, barrier, "h")
+    w1 = _spawn("gate-consume", db, barrier, "w1", "s", str(gate_id))
+    w2 = _spawn("gate-consume", db, barrier, "w2", "s", str(gate_id))
+
+    _release_after_contention(barrier, ["w1", "w2"])
+
+    r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+    assert rh["ok"] is True
+
+    outcomes = [r1, r2]
+    assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
+    loser = next(r for r in outcomes if not r["ok"])
+    assert loser["error"] == "TransitionError", loser
+
+    # final: token consumed exactly once; strategy at candidate; exactly one new transition row
+    check = connect(db)
+    assert check.execute("SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,)).fetchone()["consumed"] == 1
+    assert check.execute("SELECT stage FROM strategies WHERE id=?", (sid,)).fetchone()["stage"] == "candidate"
+    n = check.execute(
+        "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='candidate'",
+        (sid,)).fetchone()["c"]
+    assert n == 1, f"{n} candidate transition rows"
