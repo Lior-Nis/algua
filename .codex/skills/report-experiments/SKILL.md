@@ -81,7 +81,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# Stable matplotlib cache dir, set BEFORE importing pyplot -> reproducible rendering across envs.
+# Stable matplotlib cache dir, set BEFORE importing pyplot. `setdefault` respects a deliberate
+# external MPLCONFIGDIR; for byte-identical re-runs leave it unset and the script pins it itself.
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "algua-mplconfig"))
 
 import matplotlib
@@ -209,7 +210,8 @@ def plot_wf_stability(result: dict[str, Any], out: Path) -> str | None:
     if not wm:
         return None
     idx = [w.get("index", i) for i, w in enumerate(wm)]
-    sharpe = [float(w.get("sharpe") or 0.0) for w in wm]
+    # A MISSING sharpe -> NaN (renders as a gap), never a fake 0.0 bar indistinguishable from a real 0.
+    sharpe = [float(w["sharpe"]) if w.get("sharpe") is not None else float("nan") for w in wm]
     fig, ax = plt.subplots()
     colors = ["#55a868" if s >= 0 else "#c44e52" for s in sharpe]
     ax.bar(idx, sharpe, color=colors)
