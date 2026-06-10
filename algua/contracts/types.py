@@ -59,6 +59,9 @@ class OrderIntent:
 
 @runtime_checkable
 class Strategy(Protocol):
+    """`target_weights` is the composed pipeline `construct(signal(features), features)` — see
+    `algua/strategies/base.py` and `algua/portfolio/construction.py` (issue #141)."""
+
     name: str
     execution: ExecutionContract
 
