@@ -37,8 +37,12 @@ class StrategyConfig(BaseModel):
     universe: list[str]
     execution: ExecutionContract
     params: dict[str, Any] = {}
+    # Portfolio-construction policy (issue #141): the id is resolved by the loader against
+    # algua.portfolio.construction; construction_params are validated per-policy at load.
+    construction: str
+    construction_params: dict[str, Any] = {}
     # Opt into the as-of fundamentals lane (issue #132). When True the loader binds the 3-arg
-    # compute_weights as `fundamentals_fn` and the engine injects the PIT-correct frame per bar.
+    # signal as `fundamentals_signal_fn` and the engine injects the PIT-correct frame per bar.
     needs_fundamentals: bool = False
 
 
@@ -118,21 +122,28 @@ def assert_tradable_without_fundamentals(strategy: LoadedStrategy) -> None:
 
 def config_hash(strategy: LoadedStrategy) -> str:
     """Stable digest of a strategy's resolved configuration (name + universe + params +
-    execution contract). The single source of truth for the config side of the artifact identity,
-    shared by the backtest engine and the registry's live-approval gate.
+    execution contract + construction policy id and params). The single source of truth for the
+    config side of the artifact identity, shared by the backtest engine and the registry's
+    live-approval gate.
 
     Serializes the *full* ExecutionContract via asdict, so every behavior-affecting field
     (warmup_bars, allow_fractional, max_gross_exposure, decision_lag_bars, rebalance_frequency)
-    is part of the identity — and any field added later is included automatically. Two configs
-    that produce different trades can therefore never collide on config_hash."""
+    is part of the identity — and any field added later is included automatically. The construction
+    policy id + its params (issue #141) are folded in too, so retuning the construction policy
+    (e.g. top_k) or swapping the policy invalidates a prior live approval. Serialized with
+    allow_nan=False so a non-finite construction param cannot produce a non-canonical hash. Two
+    configs that produce different trades can therefore never collide on config_hash."""
     payload = json.dumps(
         {
             "name": strategy.name,
             "universe": strategy.universe,
             "params": strategy.params,
             "execution": asdict(strategy.execution),
+            "construction": strategy.config.construction,
+            "construction_params": strategy.config.construction_params,
             "needs_fundamentals": strategy.config.needs_fundamentals,
         },
         sort_keys=True,
+        allow_nan=False,
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
