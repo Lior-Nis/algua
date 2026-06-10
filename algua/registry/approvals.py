@@ -1,16 +1,32 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import inspect
 import sys
 from types import ModuleType
 
 from algua.provenance import lockfile
 from algua.registry.repository import ArtifactIdentity, StrategyRepository
-from algua.strategies.base import config_hash
+from algua.strategies.base import LoadedStrategy, config_hash
 from algua.strategies.loader import load_strategy
 
 _FIRST_PARTY_ROOT = "algua"
+_CONSTRUCTION_MODULE = "algua.portfolio.construction"
+
+
+def _merged_closure_for(loaded: LoadedStrategy) -> dict[str, str]:
+    """First-party source closure for a strategy's identity: the union of the closure reachable from
+    its authored signal module AND the construction policy module (resolved by NAME, not via the
+    bound callable — getmodule on a partial returns functools). The construction module holds every
+    policy + the dispatch table, so a policy-body edit, a helper edit, or an id retarget invalidates
+    a prior approval."""
+    signal_root = inspect.getmodule(loaded.authored_signal)
+    construction_root = importlib.import_module(_CONSTRUCTION_MODULE)
+    merged: dict[str, str] = {}
+    merged.update(_first_party_closure(signal_root))
+    merged.update(_first_party_closure(construction_root))
+    return merged
 
 
 def compute_artifact_hashes(name: str) -> ArtifactIdentity:
@@ -30,10 +46,13 @@ def compute_artifact_hashes(name: str) -> ArtifactIdentity:
     function the backtest stamps use, so a lockfile bump that can change fill or numerical
     semantics invalidates a prior approval too — the binding is no longer blind to dependency
     drift.
+
+    The closure is rooted from BOTH the authored signal module AND the construction policy module
+    (issue #141), so a portfolio-construction change — a policy-body edit or a CONFIG retarget to a
+    different policy — invalidates a prior approval as well.
     """
     loaded = load_strategy(name)
-    root = inspect.getmodule(loaded.signal_fn)
-    closure = _first_party_closure(root)
+    closure = _merged_closure_for(loaded)
     payload = "\n".join(
         f"# module: {mod_name}\n{source}" for mod_name, source in sorted(closure.items())
     )
