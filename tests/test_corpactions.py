@@ -256,3 +256,27 @@ def test_validator_input_guards():
     naive = pd.Series([1.0, 2.0], index=pd.date_range("2024-01-01", periods=2))
     with pytest.raises(ValueError, match="tz-aware"):
         check_adj_close_consistent(naive, naive, ev)
+
+
+def test_back_adjust_rejects_non_utc_ts():
+    ts = pd.date_range("2024-01-01", periods=3, freq="D", tz="US/Eastern")
+    raw = pd.DataFrame({"ts": ts, "close": [100.0, 110.0, 120.0]})
+    with pytest.raises(ValueError, match="UTC"):
+        back_adjust(raw, [])
+
+
+def test_validator_rejects_non_utc_index():
+    idx = pd.date_range("2024-01-01", periods=3, freq="D", tz="US/Eastern")
+    s = pd.Series([100.0, 110.0, 120.0], index=idx)
+    with pytest.raises(ValueError, match="UTC"):
+        check_adj_close_consistent(s, s, [])
+
+
+def test_validator_accepts_hand_built_split_series():
+    # Independent ground truth (NOT produced by back_adjust): a 2:1 split on bar index 2 means
+    # pre-split bars are expressed at half price; post-split bars are unchanged.
+    closes = [100, 110, 50, 55]
+    ev = [Split(ex_date=_utc("2024-01-03"), ratio=2.0)]
+    raw = _series(closes)
+    vendor = pd.Series([50.0, 55.0, 50.0, 55.0], index=raw.index)
+    check_adj_close_consistent(raw, vendor, ev)  # no raise

@@ -61,10 +61,8 @@ def back_adjust(raw: pd.DataFrame, events: Iterable[CorporateAction]) -> pd.Data
 
     ts = pd.DatetimeIndex(raw["ts"])
     n = len(ts)
-    if n > 0 and ts.tz is None:
-        raise ValueError("raw['ts'] must be tz-aware (UTC)")
-    if ts.tz is not None:
-        ts = ts.tz_convert("UTC")
+    if n > 0 and str(ts.tz) != "UTC":
+        raise ValueError("raw['ts'] must be tz-aware UTC")
     close = raw["close"].to_numpy(dtype="float64")
     if n > 0:
         if not (ts.is_monotonic_increasing and ts.is_unique):
@@ -130,8 +128,8 @@ def check_adj_close_consistent(
     detector, not a penny-level dividend-parity certifier. See the design spec.
     """
     for name, series in (("raw_close", raw_close), ("vendor_adj", vendor_adj)):
-        if not isinstance(series.index, pd.DatetimeIndex) or series.index.tz is None:
-            raise ValueError(f"{name} must have a tz-aware DatetimeIndex")
+        if not isinstance(series.index, pd.DatetimeIndex) or str(series.index.tz) != "UTC":
+            raise ValueError(f"{name} must have a tz-aware UTC DatetimeIndex")
     if not raw_close.index.equals(vendor_adj.index):
         raise ValueError("raw_close and vendor_adj must share the same index")
     index = raw_close.index
