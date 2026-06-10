@@ -86,4 +86,5 @@ methodologically-aware author avoids them:
 
 ## Related principles
 
-- [[risk-conventions]] — weight-space risk conventions *(reserved for issue #136; not yet authored)*.
+- [[risk-conventions]] — weight-space risk conventions: sizing and protection in allocation space
+  (inverse-vol sizing, drawdown-based weight decay, conviction sizing) — judgment above the #135 walls.
