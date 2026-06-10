@@ -92,9 +92,11 @@ def new(
 ) -> None:
     """Scaffold a new strategy module + kb doc AND register it (registry owns the metadata)."""
     # --- preflight: validate everything before any write ---
-    if not name.isidentifier() or keyword.iskeyword(name):
+    if not name.isidentifier() or keyword.iskeyword(name) or name.startswith("_"):
         raise ValueError(
-            f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
+            f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier "
+            f"not starting with '_' (the loader reserves `_`-prefixed modules as private/temp, so "
+            f"such a strategy would be registered but unreachable)"
         )
     if not _FAMILY_RE.match(family or ""):
         raise ValueError(

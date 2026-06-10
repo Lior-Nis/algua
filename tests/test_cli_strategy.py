@@ -98,6 +98,17 @@ def test_strategy_new_path_is_package_relative(tmp_path, monkeypatch, _cleanup_s
     )
 
 
+def test_strategy_new_rejects_underscore_name(tmp_path, monkeypatch):
+    """`_`-prefixed names are loader-reserved (private/temp), so authoring one would register a
+    strategy the loader can never discover. `strategy new` must reject it up front."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    result = runner.invoke(app, ["strategy", "new", "_priv", "--family", "momentum"])
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["ok"] is False
+
+
 def test_strategy_new_rejects_unsafe_names(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for bad in ["../evil", "bad-name", "with space", "1abc", "class"]:
