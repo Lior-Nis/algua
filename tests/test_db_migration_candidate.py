@@ -54,7 +54,7 @@ def test_migration_strategies_only_db():
 
 
 def test_migration_runs_even_when_already_stamped():
-    """No user_version gating: a DB stamped at the new version but still holding old rows is fixed."""
+    """No user_version gating: DB stamped at the new version but still holding old rows is fixed."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     _v19_with_rows(conn)
