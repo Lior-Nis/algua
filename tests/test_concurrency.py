@@ -218,3 +218,66 @@ def test_concurrent_candidate_gate_single_use(tmp_path):
         "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='candidate'",
         (sid,)).fetchone()["c"]
     assert n == 1, f"{n} candidate transition rows"
+
+
+import sqlite3
+
+import pytest
+
+
+class _FaultyConn:
+    """Delegates to a real sqlite3 connection but raises on a chosen statement, so the
+    surrounding `with self._conn:` block rolls back exactly as a real mid-tx failure would."""
+
+    def __init__(self, real: sqlite3.Connection, fail_on: str):
+        self._real = real
+        self._fail_on = fail_on
+
+    def execute(self, sql, *args):
+        if self._fail_on in sql:
+            raise sqlite3.OperationalError("injected mid-transaction failure")
+        return self._real.execute(sql, *args)
+
+    def __enter__(self):
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_apply_transition_rolls_back_on_failure(tmp_path):
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.registry.transitions import transition_strategy
+
+    db = tmp_path / "r.db"
+    real = connect(db)
+    migrate(real)
+    repo = SqliteStrategyRepository(real)
+    rec = repo.add("s")
+    transition_strategy(repo, "s", Stage.BACKTESTED, Actor.AGENT, reason="setup")
+    gate_id = repo.record_gate_evaluation(
+        rec.id, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=30, breadth_provenance="measured", pit_ok=True, pit_override=False,
+        holdout_n_bars=100, min_holdout_observations=63, code_hash="c", config_hash="cfg",
+        dependency_hash="d", data_source="test", snapshot_id=None, period_start="2026-01-01",
+        period_end="2026-02-01", holdout_frac=0.3, actor="agent", decision_json="{}")
+
+    # a repo whose connection raises on the transition INSERT — fires AFTER token-consume + stage UPDATE
+    faulty = SqliteStrategyRepository(_FaultyConn(real, "INSERT INTO stage_transitions"))
+    rec_bt = repo.get("s")
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        faulty.apply_transition(rec_bt, to=Stage.CANDIDATE, actor=Actor.AGENT,
+                                consume_gate_id=gate_id)
+
+    # assert full rollback on a FRESH connection (nothing partially committed)
+    fresh = connect(db)
+    assert fresh.execute("SELECT stage FROM strategies WHERE id=?", (rec.id,)).fetchone()["stage"] == "backtested"
+    assert fresh.execute("SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,)).fetchone()["consumed"] == 0
+    n = fresh.execute(
+        "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='candidate'",
+        (rec.id,)).fetchone()["c"]
+    assert n == 0
