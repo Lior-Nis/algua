@@ -62,3 +62,5 @@ def test_migration_runs_even_when_already_stamped():
     conn.commit()
     migrate(conn)
     assert conn.execute("SELECT stage FROM strategies WHERE name='s1'").fetchone()[0] == "candidate"
+    # migrate() re-stamps the version marker even though it never gates on it.
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
