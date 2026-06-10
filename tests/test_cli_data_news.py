@@ -30,4 +30,23 @@ def test_ingest_then_query_news(tmp_path, monkeypatch):
     assert q.exit_code == 0, q.output
     rows = json.loads(q.output)
     assert sorted(x["symbol"] for x in rows) == ["AAPL", "MSFT"]
-    assert rows[0]["url"] in ("http://x/1", None)  # null-safe
+    # the non-null url must round-trip EXACTLY (a parquet/JSON null regression must fail here)
+    assert all(x["url"] == "http://x/1" and x["body"] == "b" for x in rows)
+
+
+def test_query_news_emits_null_for_missing_url_body(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "data"))
+    p = tmp_path / "news_null.csv"
+    pd.DataFrame([
+        {"source": "reuters", "article_id": "a9", "symbols": "AAPL",
+         "published_at": "2025-01-02T13:00:00Z", "knowable_at": "2025-01-02T13:00:00Z",
+         "headline": "h", "url": "", "body": ""},  # empty CSV cells -> null
+    ]).to_csv(p, index=False)
+    r = runner.invoke(app, ["data", "ingest-news", "--provider", "f",
+                            "--as-of", "2025-01-03T00:00:00Z", "--from-file", str(p)])
+    assert r.exit_code == 0, r.output
+    snap = json.loads(r.output)["snapshot"]["snapshot_id"]
+    q = runner.invoke(app, ["data", "query-news", "--snapshot-id", snap])
+    assert q.exit_code == 0, q.output
+    row = json.loads(q.output)[0]
+    assert row["url"] is None and row["body"] is None

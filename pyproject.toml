@@ -183,9 +183,11 @@ forbidden_modules = ["algua.data.hindsight"]
 
 [[tool.importlinter.contracts]]
 # Live/execution receive market data via the CLI composition seam, never by importing algua.data.
-# Barring them completes the data wall so NO decision/execution lane can reach an unmasked
-# full-history read (algua.data.store.read_news / read_fundamentals); only the walled hindsight
-# accessors and the CLI may. (issue #132 — news hindsight slice.)
+# Barring them COMPLETES the data wall: every decision/execution lane is now off algua.data —
+# backtest, features, strategies, and contracts are barred by their OWN contracts above; this adds
+# the last two (live, execution). So NO such lane can reach an unmasked full-history read
+# (algua.data.store.read_news / read_fundamentals); only the walled hindsight accessors and the CLI
+# may. (issue #132 — news hindsight slice.)
 name = "live and execution stay off the data lane"
 type = "forbidden"
 source_modules = ["algua.live", "algua.execution"]

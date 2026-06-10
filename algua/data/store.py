@@ -535,9 +535,13 @@ class DataStore:
         end = canon["knowable_at"].max().date().isoformat()
         symbols = sorted(canon["symbol"].unique())
         sources = sorted(canon["source"].unique())
-        derived = {"row_sources": ",".join(sources), "row_symbols": ",".join(symbols)}
-        if source_metadata:
-            derived.update(source_metadata)
+        # Derived coverage is authoritative — a caller cannot overwrite row_sources/row_symbols
+        # with values that lie about the data (GATE-2); their other keys are preserved.
+        derived = {
+            **(source_metadata or {}),
+            "row_sources": ",".join(sources),
+            "row_symbols": ",".join(symbols),
+        }
         metadata = _metadata(
             dataset=Dataset.NEWS.value,
             provider=provider,

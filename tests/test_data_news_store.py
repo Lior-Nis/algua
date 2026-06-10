@@ -1,6 +1,11 @@
 import pandas as pd
 import pytest
 
+from algua.data.news_schema import (
+    explode_news_symbols,
+    logical_news_hash,
+    to_news_schema,
+)
 from algua.data.store import DataStore
 
 
@@ -40,3 +45,19 @@ def test_read_news_symbol_pushdown(tmp_path):
     rec = store.ingest_news(provider="f", as_of="2025-01-03T00:00:00Z", frame=_raw(tmp_path))
     out = store.read_news(rec.snapshot_id, symbols=["AAPL"])
     assert list(out["symbol"].unique()) == ["AAPL"]
+
+
+def test_nullable_text_survives_parquet_roundtrip_and_hash_is_stable(tmp_path):
+    # GATE-2: null url/body must come back as pd.NA (not the string "None"/"nan") through parquet,
+    # and the read-back frame must hash identically to the ingested snapshot (no dtype drift).
+    raw = pd.DataFrame([
+        {"source": "reuters", "article_id": "a1", "symbols": "AAPL",
+         "published_at": "2025-01-02T13:00:00Z", "knowable_at": "2025-01-02T13:00:00Z",
+         "headline": "h", "url": None, "body": None},
+    ])
+    canon_before = to_news_schema(explode_news_symbols(raw.copy()))
+    store = DataStore(tmp_path)
+    rec = store.ingest_news(provider="f", as_of="2025-01-03T00:00:00Z", frame=raw)
+    out = store.read_news(rec.snapshot_id)
+    assert out["url"].isna().all() and out["body"].isna().all()
+    assert logical_news_hash(out) == logical_news_hash(canon_before) == rec.content_hash

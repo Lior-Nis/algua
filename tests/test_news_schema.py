@@ -221,3 +221,45 @@ def test_hash_changes_with_headline():
         to_news_schema(explode_news_symbols(pd.DataFrame([_raw_row(headline="b")])))
     )
     assert h1 != h2
+
+
+# --- GATE-2 regressions: null/blank required fields, tz robustness ---
+
+
+def test_to_news_schema_rejects_null_required_field():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row(symbols="AAPL")]))
+    raw.loc[0, "source"] = None  # null source must NOT become the string "none"
+    with pytest.raises(ValueError, match="source"):
+        to_news_schema(raw)
+
+
+def test_to_news_schema_rejects_blank_identity():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row(symbols="AAPL")]))
+    raw.loc[0, "article_id"] = "   "
+    with pytest.raises(ValueError, match="article_id"):
+        to_news_schema(raw)
+
+
+def test_explode_rejects_null_symbols_field():
+    # a null `symbols` value must reject (zero symbols), never become the literal symbol "NONE"
+    with pytest.raises(ValueError, match="symbol"):
+        explode_news_symbols(pd.DataFrame([_raw_row(symbols=None)]))
+
+
+def test_to_news_schema_rejects_naive_timestamps():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row(
+        symbols="AAPL", published_at="2025-01-02T13:00:00", knowable_at="2025-01-02T13:00:00")]))
+    with pytest.raises(ValueError, match="tz-aware"):
+        to_news_schema(raw)
+
+
+def test_to_news_schema_normalizes_mixed_tz_offsets():
+    raw = explode_news_symbols(pd.DataFrame([
+        _raw_row(article_id="a1", symbols="AAPL",
+                 published_at="2025-01-02T13:00:00Z", knowable_at="2025-01-02T13:00:00Z"),
+        _raw_row(article_id="a2", symbols="MSFT",
+                 published_at="2025-01-02T08:00:00-05:00", knowable_at="2025-01-02T08:00:00-05:00"),
+    ]))
+    canon = to_news_schema(raw)
+    assert str(canon["knowable_at"].dtype) == "datetime64[ns, UTC]"
+    assert (canon["knowable_at"].dt.hour == 13).all()  # the -05:00 row normalizes to 13:00Z

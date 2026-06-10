@@ -95,12 +95,16 @@ def explode_news_symbols(frame: pd.DataFrame) -> pd.DataFrame:
             out[opt] = pd.NA
 
     def _parse(v: object) -> list[str]:
+        if _is_na(v):
+            return []  # null symbols -> zero symbols -> rejected below (never "NONE")
         if isinstance(v, (list, tuple, set, np.ndarray, pd.Series)):
             items = list(v)
         else:
             items = str(v).split(",")
         seen: list[str] = []
         for s in items:
+            if _is_na(s):
+                continue
             s = str(s).strip().upper()
             if s and s not in seen:
                 seen.append(s)
@@ -129,17 +133,31 @@ def to_news_schema(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"frame missing news columns: {missing}")
     out = frame[COLUMNS].copy()
+    # Reject nulls in required columns BEFORE str-coercion — otherwise None/NaN/<NA> would silently
+    # become the literal strings "None"/"nan"/"<NA>" and pass the non-null validator (GATE-2).
+    for col in STRING_COLUMNS:
+        if out[col].isna().any():
+            raise ValueError(f"news {col!r} must be non-null (got null in input)")
     out["source"] = out["source"].astype(str).str.strip().str.lower()
-    out["article_id"] = out["article_id"].astype(str)
+    out["article_id"] = out["article_id"].astype(str).str.strip()
     out["symbol"] = out["symbol"].astype(str).str.strip().str.upper()
     out["headline"] = out["headline"].astype(str)
+    # Identity columns must be non-empty after stripping (a blank identity is meaningless).
+    for col in ["source", "article_id", "symbol"]:
+        if (out[col].str.len() == 0).any():
+            raise ValueError(f"news {col!r} must be non-empty")
     for col in NULLABLE_STRING_COLUMNS:
         out[col] = out[col].apply(lambda v: pd.NA if _is_na(v) else str(v))
     for col in TS_COLUMNS:
-        ts = pd.to_datetime(out[col], errors="raise")
-        if ts.dt.tz is None:
+        # Normalize any tz-aware input (a single offset OR a mix of offsets) to UTC, and reject
+        # naive cleanly. `utc=True` handles mixed offsets robustly (a bare pd.to_datetime can
+        # return object dtype or raise); naive is detected element-wise so the mixed-offset path
+        # can't hide a naive value (GATE-2).
+        col_vals = out[col]
+        aware = col_vals.map(lambda x: _is_na(x) or pd.Timestamp(x).tzinfo is not None)
+        if not bool(aware.all()):
             raise ValueError(f"news {col!r} must be tz-aware (UTC); naive timestamps are rejected")
-        out[col] = ts.dt.tz_convert("UTC")
+        out[col] = pd.to_datetime(col_vals, errors="raise", utc=True)
     out = out.drop_duplicates().sort_values(_SORT).reset_index(drop=True)
     return validate_news(out)
 
@@ -147,7 +165,10 @@ def to_news_schema(frame: pd.DataFrame) -> pd.DataFrame:
 def logical_news_hash(df: pd.DataFrame) -> str:
     """Deterministic content hash over the logical rows — the snapshot identity (mirrors
     logical_fundamentals_hash). Non-null strings length-prefixed UTF-8; nullable url/body carry a
-    null-flag byte (so null, "", and "None" hash distinctly); timestamps as int64 ns UTC."""
+    null-flag byte (so null, "", and "None" hash distinctly); timestamps as int64 ns UTC.
+
+    Precondition: `df` is already validated (run after `validate_news`/`to_news_schema`); in
+    particular STRING_COLUMNS are non-null, so their `.astype(str)` here cannot mask a null."""
     ordered = df.sort_values(_SORT, kind="stable").reset_index(drop=True)
     digest = hashlib.sha256()
     digest.update(struct.pack("<Q", len(ordered)))
