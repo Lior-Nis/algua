@@ -35,7 +35,7 @@ def test_agent_shortlist_refused_without_token(tmp_path, monkeypatch):
     _backtested(repo)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: _IDENT())
     with pytest.raises(TransitionError, match="gate"):
-        transition_strategy(repo, "alpha", Stage.SHORTLISTED, Actor.AGENT, "try")
+        transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.AGENT, "try")
 
 
 def test_agent_shortlist_consumes_token_single_use(tmp_path, monkeypatch):
@@ -43,11 +43,11 @@ def test_agent_shortlist_consumes_token_single_use(tmp_path, monkeypatch):
     rec = _backtested(repo)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: _IDENT())
     _token(repo, rec.id)
-    assert transition_strategy(repo, "alpha", Stage.SHORTLISTED, Actor.AGENT, "ok").stage \
-        == Stage.SHORTLISTED
+    assert transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.AGENT, "ok").stage \
+        == Stage.CANDIDATE
     repo.apply_transition(repo.get("alpha"), Stage.BACKTESTED, Actor.AGENT, "back")
     with pytest.raises(TransitionError, match="gate"):
-        transition_strategy(repo, "alpha", Stage.SHORTLISTED, Actor.AGENT, "again")
+        transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.AGENT, "again")
 
 
 def test_human_token_not_consumable_by_agent(tmp_path, monkeypatch):
@@ -56,14 +56,14 @@ def test_human_token_not_consumable_by_agent(tmp_path, monkeypatch):
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: _IDENT())
     _token(repo, rec.id, actor="human")  # human audit row is not an agent token
     with pytest.raises(TransitionError, match="gate"):
-        transition_strategy(repo, "alpha", Stage.SHORTLISTED, Actor.AGENT, "try")
+        transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.AGENT, "try")
 
 
 def test_human_shortlist_exempt(tmp_path):
     repo = _repo(tmp_path)
     _backtested(repo)
-    assert transition_strategy(repo, "alpha", Stage.SHORTLISTED, Actor.HUMAN, "manual").stage \
-        == Stage.SHORTLISTED
+    assert transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.HUMAN, "manual").stage \
+        == Stage.CANDIDATE
 
 
 def test_token_for_strategy_a_not_consumable_by_strategy_b(tmp_path, monkeypatch):
@@ -75,7 +75,7 @@ def test_token_for_strategy_a_not_consumable_by_strategy_b(tmp_path, monkeypatch
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: _IDENT())
     _token(repo, rec_a.id)  # token belongs to alpha
     with pytest.raises(TransitionError, match="gate"):
-        transition_strategy(repo, "beta", Stage.SHORTLISTED, Actor.AGENT, "steal")
+        transition_strategy(repo, "beta", Stage.CANDIDATE, Actor.AGENT, "steal")
     # alpha's token is untouched and still consumable.
-    assert transition_strategy(repo, "alpha", Stage.SHORTLISTED, Actor.AGENT, "ok").stage \
-        == Stage.SHORTLISTED
+    assert transition_strategy(repo, "alpha", Stage.CANDIDATE, Actor.AGENT, "ok").stage \
+        == Stage.CANDIDATE

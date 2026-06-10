@@ -48,7 +48,7 @@ def test_human_promote_demo_overrides_shortlists():
     assert r.exit_code == 0, r.stdout
     p = json.loads(r.stdout)
     assert p["promoted"] is True and p["n_funnel"] == 9 and p["pit_override"] is True
-    assert _stage() == "shortlisted"
+    assert _stage() == "candidate"
 
 
 def test_agent_promote_blocked_without_pit():
@@ -80,7 +80,7 @@ def test_promote_passes_and_shortlists():
     assert payload["breadth_provenance"] == "declared"
     # A declared breadth still raises the bar: effective > base.
     assert payload["effective_min_holdout_sharpe"] > payload["base_min_holdout_sharpe"]
-    assert _stage() == "shortlisted"
+    assert _stage() == "candidate"
 
 
 def test_promote_uses_measured_breadth_from_sweep():
@@ -242,7 +242,7 @@ def test_gate_row_written_on_both_pass_and_fail(tmp_path):
     assert json.loads(ok.stdout)["passed"] is True
     rows = _gate_rows(tmp_path)
     assert len(rows) == 2 and rows[1][0] == 1  # second row, passed=1
-    assert _stage() == "shortlisted"
+    assert _stage() == "candidate"
 
 
 def test_first_promote_records_holdout_evaluation(tmp_path):
@@ -254,7 +254,7 @@ def test_first_promote_records_holdout_evaluation(tmp_path):
     rows = _holdout_rows(tmp_path)
     assert len(rows) == 1
     assert rows[0][3] == 0  # reused == 0
-    assert _stage() == "shortlisted"
+    assert _stage() == "candidate"
 
 
 def test_second_promote_same_window_refused(tmp_path):
@@ -423,7 +423,7 @@ def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
     assert {s["snapshot_id"] for s in payload["universe_snapshots"]} == {first_u, second_u}
     # The bars snapshot_id is a SEPARATE provenance dimension — still the bars snapshot.
     assert payload["snapshot_id"] == snap
-    assert _stage() == "shortlisted"
+    assert _stage() == "candidate"
 
 
 def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):

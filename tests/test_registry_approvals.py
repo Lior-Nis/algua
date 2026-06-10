@@ -25,8 +25,8 @@ def repo(tmp_path):
 def _advance_to_paper(repo, name):
     repo.add(name)
     transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT)
-    # SHORTLISTED via human: scaffolding to a later stage, not exercising the agent shortlist gate.
-    transition_strategy(repo, name, Stage.SHORTLISTED, Actor.HUMAN)
+    # CANDIDATE via human: scaffolding to a later stage, not exercising the agent shortlist gate.
+    transition_strategy(repo, name, Stage.CANDIDATE, Actor.HUMAN)
     transition_strategy(repo, name, Stage.PAPER, Actor.AGENT)
 
 

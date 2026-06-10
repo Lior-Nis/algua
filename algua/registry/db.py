@@ -400,15 +400,24 @@ def _migrate_shortlisted_to_candidate(conn: sqlite3.Connection) -> None:
             is not None
         )
 
-    if _has("strategies"):
+    def _has_col(table: str, col: str) -> bool:
+        return any(
+            row[1] == col
+            for row in conn.execute(f"PRAGMA table_info({table})")
+        )
+
+    if _has("strategies") and _has_col("strategies", "stage"):
         conn.execute("UPDATE strategies SET stage='candidate' WHERE stage='shortlisted'")
     if _has("stage_transitions"):
-        conn.execute(
-            "UPDATE stage_transitions SET from_stage='candidate' WHERE from_stage='shortlisted'"
-        )
-        conn.execute(
-            "UPDATE stage_transitions SET to_stage='candidate' WHERE to_stage='shortlisted'"
-        )
+        if _has_col("stage_transitions", "from_stage"):
+            conn.execute(
+                "UPDATE stage_transitions SET from_stage='candidate'"
+                " WHERE from_stage='shortlisted'"
+            )
+        if _has_col("stage_transitions", "to_stage"):
+            conn.execute(
+                "UPDATE stage_transitions SET to_stage='candidate' WHERE to_stage='shortlisted'"
+            )
 
 
 def _rekey_search_trials_to_name(conn: sqlite3.Connection) -> None:

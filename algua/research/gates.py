@@ -20,7 +20,7 @@ MIN_HOLDOUT_OBSERVATIONS = 63
 
 @dataclass
 class GateCriteria:
-    """Thresholds for promoting backtested -> shortlisted. Holdout checks are the search-breadth
+    """Thresholds for promoting backtested -> candidate. Holdout checks are the search-breadth
     defense (the holdout was never used during selection)."""
 
     min_holdout_sharpe: float = 0.5

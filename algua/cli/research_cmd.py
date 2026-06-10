@@ -60,7 +60,7 @@ def promote(
     ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
 ) -> None:
-    """Gate backtested->shortlisted on walk-forward holdout + stability; promote only on pass.
+    """Gate backtested->candidate on walk-forward holdout + stability; promote only on pass.
 
     The holdout-Sharpe bar is DEFLATED by FUNNEL-WIDE search breadth (the multiple-testing defense):
     the max of this strategy's lifetime recorded breadth and the funnel-wide breadth in the rolling
@@ -69,7 +69,7 @@ def promote(
     --n-combos is HUMAN-ONLY and recorded with provenance="declared" (auditably less trustworthy).
     For an agent the universe must be PIT (`--universe`); non-PIT fails closed unless a human passes
     --allow-non-pit. A minimum holdout-observations floor (63) also fails closed (underpowered
-    holdouts). On pass for an agent this mints the single-use gate token the BACKTESTED->SHORTLISTED
+    holdouts). On pass for an agent this mints the single-use gate token the BACKTESTED->CANDIDATE
     transition consumes.
     """
     actor_enum = Actor(actor)  # fail fast on a bad actor before running the walk-forward

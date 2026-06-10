@@ -6,7 +6,7 @@ from enum import StrEnum
 class Stage(StrEnum):
     IDEA = "idea"
     BACKTESTED = "backtested"
-    SHORTLISTED = "shortlisted"
+    CANDIDATE = "candidate"
     PAPER = "paper"
     LIVE = "live"
     RETIRED = "retired"
@@ -23,9 +23,9 @@ class Actor(StrEnum):
 # and RETIRED is terminal.
 _LIVE_TRANSITIONS: dict[Stage, set[Stage]] = {
     Stage.IDEA: {Stage.BACKTESTED},
-    Stage.BACKTESTED: {Stage.SHORTLISTED, Stage.IDEA},
-    Stage.SHORTLISTED: {Stage.PAPER, Stage.BACKTESTED},
-    Stage.PAPER: {Stage.LIVE, Stage.SHORTLISTED},
+    Stage.BACKTESTED: {Stage.CANDIDATE, Stage.IDEA},
+    Stage.CANDIDATE: {Stage.PAPER, Stage.BACKTESTED},
+    Stage.PAPER: {Stage.LIVE, Stage.CANDIDATE},
     Stage.LIVE: {Stage.PAPER},
 }
 
