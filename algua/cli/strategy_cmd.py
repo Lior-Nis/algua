@@ -31,6 +31,13 @@ app.add_typer(strategy_app, name="strategy")
 
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
+
+def family_package_dir(family: str) -> str:
+    """The on-disk package dir name for a family slug. `_FAMILY_RE` allows hyphens but Python
+    packages can't, so hyphens map to underscores. This is the ONE place the slug->dir transform
+    lives (CLI scaffolding + any future doctor check). The registry/kb keep the hyphen slug form."""
+    return family.replace("-", "_")
+
 _TEMPLATE = '''\
 """Strategy: {name}. Edit compute_weights to express your cross-sectional logic."""
 from __future__ import annotations
@@ -74,7 +81,7 @@ def list_() -> None:
 @json_errors()
 def new(
     name: str,
-    family: str = typer.Option(None, "--family", help="thesis family this belongs to"),
+    family: str = typer.Option(None, "--family", help="thesis family this belongs to (required)"),
     derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),
     tag: list[str] = typer.Option(None, "--tag", help="tag (repeatable)"),
     author: Author = typer.Option(Author.AGENT, "--author"),
@@ -89,11 +96,14 @@ def new(
         raise ValueError(
             f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
         )
-    if family is not None and not _FAMILY_RE.match(family):
+    if not _FAMILY_RE.match(family or ""):
         raise ValueError(
-            f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)"
+            "--family is required; use a lowercase slug such as 'momentum' "
+            "(a-z, 0-9, hyphen)"
         )
-    path = Path(__file__).parent.parent / "strategies" / "examples" / f"{name}.py"
+    path = (
+        Path(__file__).parent.parent / "strategies" / family_package_dir(family) / f"{name}.py"
+    )
     settings = get_settings()
     doc_path = strategy_doc_path(settings, name)
     if path.exists():
@@ -122,6 +132,9 @@ def new(
         fam_created = False
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            init_py = path.parent / "__init__.py"
+            if not init_py.exists():
+                init_py.write_text("")
             path.write_text(_TEMPLATE.format(name=name))
             doc_path.parent.mkdir(parents=True, exist_ok=True)
             doc_path.write_text(
