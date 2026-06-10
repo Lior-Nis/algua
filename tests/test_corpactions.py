@@ -3,7 +3,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from algua.data.corpactions import Dividend, Split, back_adjust
+from algua.data.corpactions import (
+    Dividend,
+    Split,
+    back_adjust,
+    check_adj_close_consistent,
+)
 
 
 def _utc(day: str) -> pd.Timestamp:
@@ -175,3 +180,79 @@ def test_raw_frame_guards():
     naive = pd.DataFrame({"ts": pd.date_range("2024-01-01", periods=2), "close": [1.0, 2.0]})
     with pytest.raises(ValueError, match="tz-aware"):
         back_adjust(naive, ev)
+
+
+def _series(closes: list[float], start: str = "2024-01-01") -> pd.Series:
+    ts = pd.date_range(start, periods=len(closes), freq="D", tz="UTC")
+    return pd.Series([float(c) for c in closes], index=ts)
+
+
+def _vendor_adj(closes: list[float], events) -> pd.Series:
+    raw = _bars(closes)
+    out = back_adjust(raw, events)
+    return pd.Series(out["adj_close"].to_numpy(), index=pd.DatetimeIndex(out["ts"]))
+
+
+def test_validator_accepts_consistent_series():
+    closes = [100, 110, 120, 130]
+    ev = [Dividend(ex_date=_utc("2024-01-03"), cash=2.0)]
+    check_adj_close_consistent(_series(closes), _vendor_adj(closes, ev), ev)  # no raise
+
+
+def test_validator_accepts_reverse_split():
+    closes = [5, 6, 50, 55]
+    ev = [Split(ex_date=_utc("2024-01-03"), ratio=0.1)]
+    check_adj_close_consistent(_series(closes), _vendor_adj(closes, ev), ev)  # no raise
+
+
+def test_validator_rejects_globally_mis_scaled_cents_vs_dollars():
+    closes = [100, 110, 120, 130]
+    ev = [Dividend(ex_date=_utc("2024-01-03"), cash=2.0)]
+    vendor_cents = _vendor_adj(closes, ev) * 100.0  # adj in cents, raw in dollars
+    with pytest.raises(ValueError, match="anchor|mis-scaled|cents"):
+        check_adj_close_consistent(_series(closes), vendor_cents, ev)
+
+
+def test_validator_rejects_torn_shifted_series():
+    closes = [100, 110, 120, 130]
+    ev = [Split(ex_date=_utc("2024-01-03"), ratio=2.0)]
+    good = _vendor_adj(closes, ev)
+    shifted = pd.Series(np.roll(good.to_numpy(), 1), index=good.index)
+    with pytest.raises(ValueError):
+        check_adj_close_consistent(_series(closes), shifted, ev)
+
+
+def test_validator_rejects_wrong_magnitude_split():
+    closes = [100, 110, 60, 66]
+    vendor = _vendor_adj(closes, [Split(ex_date=_utc("2024-01-03"), ratio=3.0)])
+    claimed = [Split(ex_date=_utc("2024-01-03"), ratio=2.0)]
+    with pytest.raises(ValueError):
+        check_adj_close_consistent(_series(closes), vendor, claimed)
+
+
+def test_validator_low_price_small_dividend_within_tolerance_passes():
+    closes = [5.00, 5.10, 5.20, 5.30]
+    ev = [Dividend(ex_date=_utc("2024-01-03"), cash=0.03)]
+    vendor = _vendor_adj(closes, ev).round(2)  # vendor rounds adj to the cent
+    check_adj_close_consistent(_series(closes), vendor, ev)  # no false-reject
+
+
+def test_validator_input_guards():
+    closes = [100, 110, 120]
+    ev: list = []
+    good = _series(closes)
+    # mismatched index
+    other = _series(closes, start="2025-01-01")
+    with pytest.raises(ValueError, match="same index"):
+        check_adj_close_consistent(good, other, ev)
+    # NaN / inf values
+    nan_series = _series([100, float("nan"), 120])
+    with pytest.raises(ValueError, match="finite"):
+        check_adj_close_consistent(good, nan_series, ev)
+    inf_series = _series([100, float("inf"), 120])
+    with pytest.raises(ValueError, match="finite"):
+        check_adj_close_consistent(inf_series, good, ev)
+    # tz-naive index
+    naive = pd.Series([1.0, 2.0], index=pd.date_range("2024-01-01", periods=2))
+    with pytest.raises(ValueError, match="tz-aware"):
+        check_adj_close_consistent(naive, naive, ev)

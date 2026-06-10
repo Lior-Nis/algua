@@ -113,3 +113,57 @@ def back_adjust(raw: pd.DataFrame, events: Iterable[CorporateAction]) -> pd.Data
     return pd.DataFrame(
         {"ts": ts, "adj_close": close * factor, "adj_factor": factor}
     )
+
+
+def check_adj_close_consistent(
+    raw_close: pd.Series,
+    vendor_adj: pd.Series,
+    events: Iterable[CorporateAction],
+    *,
+    rtol: float = 1e-3,
+    atol: float = 5e-3,
+) -> None:
+    """Assert a vendor-supplied `adj_close` is consistent with `events`. Raise `ValueError` if not.
+
+    Precondition: a FULL symbol series through the vendor's adjustment anchor (the last bar is the
+    most recent), not an arbitrary mid-history slice. Reverse-split-safe; a gross-error / mis-units
+    detector, not a penny-level dividend-parity certifier. See the design spec.
+    """
+    for name, series in (("raw_close", raw_close), ("vendor_adj", vendor_adj)):
+        if not isinstance(series.index, pd.DatetimeIndex) or series.index.tz is None:
+            raise ValueError(f"{name} must have a tz-aware DatetimeIndex")
+    if not raw_close.index.equals(vendor_adj.index):
+        raise ValueError("raw_close and vendor_adj must share the same index")
+    index = raw_close.index
+    if len(index) and not (index.is_monotonic_increasing and index.is_unique):
+        raise ValueError("index must be strictly increasing and unique")
+    rc = raw_close.to_numpy(dtype="float64")
+    va = vendor_adj.to_numpy(dtype="float64")
+    if not (np.all(np.isfinite(rc)) and np.all(rc > 0)):
+        raise ValueError("raw_close must be finite and > 0")
+    if not (np.all(np.isfinite(va)) and np.all(va > 0)):
+        raise ValueError("vendor_adj must be finite and > 0")
+    if len(index) == 0:
+        return
+
+    factor = back_adjust(pd.DataFrame({"ts": index, "close": rc}), events)[
+        "adj_factor"
+    ].to_numpy(dtype="float64")
+    implied = va / rc
+
+    if not math.isclose(implied[-1], 1.0, rel_tol=rtol, abs_tol=atol):
+        raise ValueError(
+            f"vendor adj_close not anchored at the last bar: adj/raw = {implied[-1]:.6f} != 1.0 "
+            f"(globally mis-scaled series, e.g. cents vs dollars?). The validator requires a full "
+            f"series through the vendor's adjustment horizon."
+        )
+
+    bad = ~np.isclose(factor, implied, rtol=rtol, atol=atol)
+    if bad.any():
+        dates = [str(d.date()) for d in index[bad]]
+        raise ValueError(
+            f"vendor adj_close inconsistent with events at {dates[:10]}"
+            f"{'...' if len(dates) > 10 else ''}: "
+            f"expected factor {np.round(factor[bad][:3], 6).tolist()}, "
+            f"got {np.round(implied[bad][:3], 6).tolist()}"
+        )
