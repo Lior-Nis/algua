@@ -253,6 +253,16 @@ def test_to_news_schema_rejects_naive_timestamps():
         to_news_schema(raw)
 
 
+def test_nat_is_treated_as_null_not_literal():
+    # pd.NaT in a nullable field canonicalizes to null (not the string "NaT")
+    raw = explode_news_symbols(pd.DataFrame([_raw_row(symbols="AAPL", url=pd.NaT)]))
+    canon = to_news_schema(raw)
+    assert canon["url"].isna().all()
+    # pd.NaT as the symbols value rejects as zero-symbol (not the literal symbol "NAT")
+    with pytest.raises(ValueError, match="symbol"):
+        explode_news_symbols(pd.DataFrame([_raw_row(symbols=pd.NaT)]))
+
+
 def test_to_news_schema_normalizes_mixed_tz_offsets():
     raw = explode_news_symbols(pd.DataFrame([
         _raw_row(article_id="a1", symbols="AAPL",

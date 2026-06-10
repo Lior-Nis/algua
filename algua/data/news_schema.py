@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import struct
 
 import numpy as np
@@ -18,7 +17,14 @@ _SORT = ["symbol", "source", "article_id", NEWS_KNOWABLE_AT]
 
 
 def _is_na(v: object) -> bool:
-    return v is None or v is pd.NA or (isinstance(v, float) and math.isnan(v))
+    """True for a scalar missing value (None, NaN, pd.NA, NaT, datetime64 NaT). A container is
+    never NA itself — its items are checked individually (so `pd.isna` on an array can't raise)."""
+    if isinstance(v, (list, tuple, set, dict, np.ndarray, pd.Series)):
+        return False
+    try:
+        return bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
 
 
 def validate_news(df: pd.DataFrame) -> pd.DataFrame:
