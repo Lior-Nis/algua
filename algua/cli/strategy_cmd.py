@@ -161,11 +161,20 @@ def new(
             doc_path.unlink(missing_ok=True)
             if fam_created:
                 fam_path.unlink(missing_ok=True)
-            # Remove a family package this call introduced, if it's now empty.
-            if init_created:
-                init_py.unlink(missing_ok=True)
-            if not pkg_existed and pkg_dir.exists() and not any(pkg_dir.iterdir()):
-                pkg_dir.rmdir()
+            # Remove a family package this call introduced — but ONLY if no OTHER strategy module
+            # appeared in the meantime (e.g. a concurrent `strategy new` into the same fresh
+            # family). Guard the __init__ unlink on the same "no other strategy" condition so we
+            # never strand a sibling's file in a now-non-package dir.
+            others = (
+                [f for f in pkg_dir.glob("*.py") if f.name != "__init__.py"]
+                if pkg_dir.exists()
+                else []
+            )
+            if not others:
+                if init_created:
+                    init_py.unlink(missing_ok=True)
+                if not pkg_existed and pkg_dir.exists() and not any(pkg_dir.iterdir()):
+                    pkg_dir.rmdir()
             raise ValueError(f"scaffold failed for {name!r}: {exc}") from exc
     emit(ok({"name": name, "path": str(path), "doc": str(doc_path), "family_doc": family_doc}))
 

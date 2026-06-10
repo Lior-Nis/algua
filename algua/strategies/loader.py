@@ -14,25 +14,27 @@ class StrategyNotFound(LookupError):
 
 
 def _family_dirs() -> list[Path]:
-    """Family subpackages directly under algua/strategies/: a dir with an __init__.py. Top-level
-    infra modules (loader.py, base.py, __init__.py) are FILES, not dirs, so they are excluded
-    structurally. __pycache__ has no __init__.py so it is also excluded structurally."""
+    """Family subpackages directly under algua/strategies/: a dir with an __init__.py whose name is
+    not `_`-prefixed (private/temp). Top-level infra modules (loader.py, base.py, __init__.py) are
+    FILES not dirs, so excluded structurally; __pycache__ has no __init__.py so it is too."""
     root = Path(_strategies_pkg.__file__).parent
     return [
         p for p in sorted(root.iterdir())
-        if p.is_dir() and (p / "__init__.py").exists()
+        if p.is_dir() and not p.name.startswith("_") and (p / "__init__.py").exists()
     ]
 
 
 def _index() -> dict[str, str]:
     """Map bare strategy name -> dotted module path by walking family dirs on the FILESYSTEM —
     imports nothing. Rebuilt per call (a directory listing is cheap, and tests write temp modules
-    after import). Fails closed (raises) on a duplicate bare name across families."""
+    after import). `_`-prefixed modules (private/temp) are skipped HERE, not just at listing time —
+    so a hidden helper or two temp modules sharing a stem can never make every load fail with a
+    spurious duplicate. Fails closed (raises) on a duplicate bare name across families."""
     index: dict[str, str] = {}
     for fam in _family_dirs():
         for mod in pkgutil.iter_modules([str(fam)]):
-            if mod.ispkg:
-                continue  # sub-subpackages are not strategies
+            if mod.ispkg or mod.name.startswith("_"):
+                continue  # sub-subpackages and private/temp modules are not strategies
             dotted = f"algua.strategies.{fam.name}.{mod.name}"
             if mod.name in index:
                 raise StrategyNotFound(
@@ -81,5 +83,5 @@ def load_strategy(name: str) -> LoadedStrategy:
 
 
 def list_strategies() -> list[str]:
-    """All discoverable strategy names (excludes private/temp `_`-prefixed modules)."""
-    return sorted(name for name in _index() if not name.startswith("_"))
+    """All discoverable strategy names (`_`-prefixed modules/dirs already excluded by `_index`)."""
+    return sorted(_index())

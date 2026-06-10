@@ -101,7 +101,8 @@ def test_strategy_new_path_is_package_relative(tmp_path, monkeypatch, _cleanup_s
 def test_strategy_new_rejects_unsafe_names(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for bad in ["../evil", "bad-name", "with space", "1abc", "class"]:
-        result = runner.invoke(app, ["strategy", "new", bad])
+        # Pass a valid --family so the failure is unambiguously the bad NAME, not a missing family.
+        result = runner.invoke(app, ["strategy", "new", bad, "--family", "momentum"])
         assert result.exit_code == 1, (bad, result.stdout)
         assert json.loads(result.stdout)["ok"] is False
 
@@ -212,7 +213,8 @@ def test_strategy_new_preflight_rejects_existing_registration(tmp_path, monkeypa
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
     # Register the name first via registry add.
     runner.invoke(app, ["registry", "add", "dup"])
-    result = runner.invoke(app, ["strategy", "new", "dup"])
+    # Pass a valid --family so the failure is unambiguously the existing registration.
+    result = runner.invoke(app, ["strategy", "new", "dup", "--family", "momentum"])
     out = json.loads(result.stdout)
     assert out["ok"] is False
     assert result.exit_code == 1
