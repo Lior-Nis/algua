@@ -6,6 +6,7 @@ deterministic contention so serialization is observable, not timing-dependent.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import subprocess
@@ -62,6 +63,32 @@ def _collect(proc, timeout: float = JOIN_TIMEOUT) -> dict:
     return json.loads(lines[-1])
 
 
+@contextlib.contextmanager
+def _worker_group(barrier: Path):
+    """Spawn-and-clean-up scope: any worker still alive when the block exits (including on a
+    failed assertion) is released and terminated, so a failing test never leaks subprocesses."""
+    procs: list[subprocess.Popen] = []
+
+    def spawn(op, db_path, wid, *args):
+        p = _spawn(op, db_path, barrier, wid, *args)
+        procs.append(p)
+        return p
+
+    try:
+        yield spawn
+    finally:
+        with contextlib.suppress(OSError):
+            (barrier / "release").write_text("1")  # unblock any holder still waiting
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.communicate()
+
+
 def _seed_strategy(db_path: Path, name: str = "s") -> None:
     from algua.registry.store import SqliteStrategyRepository
     conn = connect(db_path)
@@ -76,30 +103,37 @@ def test_concurrent_writer_and_reader_no_lock_errors(tmp_path):
     barrier.mkdir()
     _seed_strategy(db, "s")
 
-    holder = _spawn("write-hold", db, barrier, "h", "s", "backtested")
-    reader = _spawn("read-poll", db, barrier, "r", "s", "200")
+    with _worker_group(barrier) as spawn:
+        holder = spawn("write-hold", db, "h", "s", "backtested")
+        reader = spawn("read-poll", db, "r", "s", "200")
 
-    # reader runs all its reads while the holder's write is uncommitted
-    result = _collect(reader)
-    (barrier / "release").write_text("1")  # let the holder commit + exit
-    holder_result = _collect(holder)
+        # reader runs all its reads while the holder's write is uncommitted
+        result = _collect(reader)
+        (barrier / "release").write_text("1")  # let the holder commit + exit
+        holder_result = _collect(holder)
 
-    assert holder_result["ok"] is True
-    assert result["ok"] is True, result
-    # WAL: reader never saw the dirty uncommitted write, only the old committed snapshot,
-    # and every multi-statement read was cross-table consistent (asserted inside the worker).
-    assert result["seen"] == ["idea"], result
+        assert holder_result["ok"] is True
+        assert result["ok"] is True, result
+        # WAL: reader never saw the dirty uncommitted write, only the old committed snapshot,
+        # and every multi-statement read was cross-table consistent (asserted inside the worker).
+        assert result["seen"] == ["idea"], result
 
 
-def _release_after_contention(barrier: Path, wids: list[str]):
-    """Wait until every contender is queued on the lock, then free the holder."""
+def _release_after_contention(barrier, contenders, wids):
+    """Wait until every contender is queued on the held lock, then free the holder.
+    Asserting each contender is still running just before release proves it genuinely
+    blocked on the lock — a contender that sailed through without contending would have
+    already exited, which is caught here rather than passing vacuously. A worker that dies
+    before writing its sentinel makes `_wait_file` time out, failing the test (no hang)."""
     _wait_file(barrier / "lock-held")
     for wid in wids:
         _wait_file(barrier / f"ready-{wid}")
     (barrier / "go").write_text("1")
     for wid in wids:
         _wait_file(barrier / f"attempting-{wid}")
-    time.sleep(0.1)  # grace: let both contenders actually block on the writer lock
+    time.sleep(0.1)  # grace: let each contender reach its lock-acquiring statement
+    for proc, wid in zip(contenders, wids, strict=True):
+        assert proc.poll() is None, f"contender {wid} exited before release — it did not contend"
     (barrier / "release").write_text("1")
 
 
@@ -114,16 +148,17 @@ def test_concurrent_writers_serialize(tmp_path):
     SqliteStrategyRepository(conn).add("b")
     conn.close()
 
-    holder = _spawn("lock-hold", db, barrier, "h")
-    w1 = _spawn("transition", db, barrier, "w1", "a")
-    w2 = _spawn("transition", db, barrier, "w2", "b")
+    with _worker_group(barrier) as spawn:
+        holder = spawn("lock-hold", db, "h")
+        w1 = spawn("transition", db, "w1", "a")
+        w2 = spawn("transition", db, "w2", "b")
 
-    _release_after_contention(barrier, ["w1", "w2"])
+        _release_after_contention(barrier, [w1, w2], ["w1", "w2"])
 
-    r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
-    assert rh["ok"] is True
-    assert r1["ok"] is True, r1
-    assert r2["ok"] is True, r2
+        r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+        assert rh["ok"] is True
+        assert r1["ok"] is True, r1
+        assert r2["ok"] is True, r2
 
     # final state: both advanced, each with exactly one idea->backtested transition row
     check = connect(db)
@@ -149,34 +184,35 @@ def test_concurrent_allocate_respects_cap(tmp_path):
     SqliteStrategyRepository(conn).add("b")
     conn.close()
 
-    holder = _spawn("lock-hold", db, barrier, "h")
-    w1 = _spawn("allocate", db, barrier, "w1", "a", "30000", "50000")
-    w2 = _spawn("allocate", db, barrier, "w2", "b", "30000", "50000")
+    with _worker_group(barrier) as spawn:
+        holder = spawn("lock-hold", db, "h")
+        w1 = spawn("allocate", db, "w1", "a", "30000", "50000")
+        w2 = spawn("allocate", db, "w2", "b", "30000", "50000")
 
-    _release_after_contention(barrier, ["w1", "w2"])
+        _release_after_contention(barrier, [w1, w2], ["w1", "w2"])
 
-    r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
-    assert rh["ok"] is True
+        r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+        assert rh["ok"] is True
 
-    # invariant first: the cap is never breached, regardless of interleaving
-    from algua.registry import allocations
-    check = connect(db)
-    assert allocations.total_allocated(check) <= 50_000
-    for name in ("a", "b"):
-        sid = check.execute(
-            "SELECT id FROM strategies WHERE name=?", (name,)
-        ).fetchone()["id"]
-        n_active = check.execute(
-            "SELECT COUNT(*) c FROM strategy_allocations"
-            " WHERE strategy_id=? AND revoked_ts IS NULL",
-            (sid,)).fetchone()["c"]
-        assert n_active <= 1, f"{name} has {n_active} active allocations"
+        # invariant first: the cap is never breached, regardless of interleaving
+        from algua.registry import allocations
+        check = connect(db)
+        assert allocations.total_allocated(check) <= 50_000
+        for name in ("a", "b"):
+            sid = check.execute(
+                "SELECT id FROM strategies WHERE name=?", (name,)
+            ).fetchone()["id"]
+            n_active = check.execute(
+                "SELECT COUNT(*) c FROM strategy_allocations"
+                " WHERE strategy_id=? AND revoked_ts IS NULL",
+                (sid,)).fetchone()["c"]
+            assert n_active <= 1, f"{name} has {n_active} active allocations"
 
-    # outcome: exactly one succeeded; the loser got a domain rejection, not a lock error
-    outcomes = [r1, r2]
-    assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
-    loser = next(r for r in outcomes if not r["ok"])
-    assert loser["error"] == "AllocationError", loser
+        # outcome: exactly one succeeded; the loser got a domain rejection, not a lock error
+        outcomes = [r1, r2]
+        assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
+        loser = next(r for r in outcomes if not r["ok"])
+        assert loser["error"] == "AllocationError", loser
 
 
 def _seed_backtested_with_gate_token(db_path: Path, name: str = "s") -> tuple[int, int]:
@@ -207,19 +243,20 @@ def test_concurrent_candidate_gate_single_use(tmp_path):
     barrier.mkdir()
     sid, gate_id = _seed_backtested_with_gate_token(db, "s")
 
-    holder = _spawn("lock-hold", db, barrier, "h")
-    w1 = _spawn("gate-consume", db, barrier, "w1", "s", str(gate_id))
-    w2 = _spawn("gate-consume", db, barrier, "w2", "s", str(gate_id))
+    with _worker_group(barrier) as spawn:
+        holder = spawn("lock-hold", db, "h")
+        w1 = spawn("gate-consume", db, "w1", "s", str(gate_id))
+        w2 = spawn("gate-consume", db, "w2", "s", str(gate_id))
 
-    _release_after_contention(barrier, ["w1", "w2"])
+        _release_after_contention(barrier, [w1, w2], ["w1", "w2"])
 
-    r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
-    assert rh["ok"] is True
+        r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+        assert rh["ok"] is True
 
-    outcomes = [r1, r2]
-    assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
-    loser = next(r for r in outcomes if not r["ok"])
-    assert loser["error"] == "TransitionError", loser
+        outcomes = [r1, r2]
+        assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
+        loser = next(r for r in outcomes if not r["ok"])
+        assert loser["error"] == "TransitionError", loser
 
     # final: token consumed exactly once; strategy at candidate; exactly one new transition row
     check = connect(db)
@@ -239,7 +276,9 @@ def test_concurrent_candidate_gate_single_use(tmp_path):
 
 class _FaultyConn:
     """Delegates to a real sqlite3 connection but raises on a chosen statement, so the
-    surrounding `with self._conn:` block rolls back exactly as a real mid-tx failure would."""
+    surrounding `with self._conn:` block rolls back exactly as a real mid-tx failure would.
+    Relies on the underlying sqlite3.Connection's context-manager behavior for transaction
+    handling (commit on success, rollback on exception)."""
 
     def __init__(self, real: sqlite3.Connection, fail_on: str):
         self._real = real
