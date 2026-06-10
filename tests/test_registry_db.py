@@ -5,8 +5,8 @@ from algua.registry.db import SCHEMA_VERSION, connect, migrate
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
 
 
-def test_schema_version_is_19():
-    assert SCHEMA_VERSION == 19
+def test_schema_version_is_20():
+    assert SCHEMA_VERSION == 20
 
 
 def test_strategies_has_metadata_columns(tmp_path):
@@ -36,11 +36,11 @@ def test_metadata_columns_are_null_on_existing_rows(tmp_path):
         assert row[col] is None, f"{col} should be NULL on a pre-existing row, got {row[col]!r}"
 
 
-def test_migrate_is_idempotent_at_v19(tmp_path):
+def test_migrate_is_idempotent_at_v20(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     migrate(conn)  # second run must be a no-op, not an error
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 19
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_migrate_creates_tables_and_sets_version(tmp_path):

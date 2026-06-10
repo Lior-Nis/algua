@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
 -- gate_evaluations records every promotion-gate evaluation (pass AND fail) for the audit trail,
--- AND is the single-use, AGENT-ONLY token the BACKTESTED->SHORTLISTED transition consumes (the
+-- AND is the single-use, AGENT-ONLY token the BACKTESTED->CANDIDATE transition consumes (the
 -- shortlist gate, mirroring the live gate: trust the gate record, not the stage flag). A passing
 -- AGENT row is minted by `research promote` (via the protected registry.promotion orchestrator)
 -- stamped with the artifact identity recomputed by approvals.compute_artifact_hashes; the
@@ -361,6 +361,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     falsely imply migration history and could skip needed table creation on a pre-stamped DB);
     we only stamp it afterward as a schema-generation marker.
     """
+    _migrate_shortlisted_to_candidate(conn)
     _rekey_search_trials_to_name(conn)
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
@@ -379,6 +380,44 @@ def migrate(conn: sqlite3.Connection) -> None:
     )
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
+
+
+def _migrate_shortlisted_to_candidate(conn: sqlite3.Connection) -> None:
+    """Rewrite the renamed lifecycle stage value `shortlisted` -> `candidate` (#120) in the typed
+    stage columns. Runs BEFORE the `CREATE TABLE IF NOT EXISTS` bootstrap, so each table is guarded
+    independently — a fresh DB has neither table yet. Idempotent: the `WHERE` matches nothing on a
+    second run, and it does NOT gate on `user_version`, so a DB already stamped at the new version
+    but still holding `shortlisted` rows is still corrected.
+
+    Only the typed `stage` / `from_stage` / `to_stage` columns are rewritten — the free-text audit
+    trail (`audit_log`, `stage_transitions.reason`) and `gate_evaluations.decision_json` are
+    immutable history and intentionally left as written."""
+    def _has(table: str) -> bool:
+        return (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            is not None
+        )
+
+    def _has_col(table: str, col: str) -> bool:
+        return any(
+            row[1] == col
+            for row in conn.execute(f"PRAGMA table_info({table})")
+        )
+
+    if _has("strategies") and _has_col("strategies", "stage"):
+        conn.execute("UPDATE strategies SET stage='candidate' WHERE stage='shortlisted'")
+    if _has("stage_transitions"):
+        if _has_col("stage_transitions", "from_stage"):
+            conn.execute(
+                "UPDATE stage_transitions SET from_stage='candidate'"
+                " WHERE from_stage='shortlisted'"
+            )
+        if _has_col("stage_transitions", "to_stage"):
+            conn.execute(
+                "UPDATE stage_transitions SET to_stage='candidate' WHERE to_stage='shortlisted'"
+            )
 
 
 def _rekey_search_trials_to_name(conn: sqlite3.Connection) -> None:

@@ -26,8 +26,8 @@ def _to_live(name="cross_sectional_momentum"):
     from algua.registry.db import connect, migrate
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    # SHORTLISTED via human: scaffolding to live, not exercising the agent shortlist gate.
-    for to, actor in (("shortlisted", "human"), ("paper", "agent")):
+    # CANDIDATE via human: scaffolding to live, not exercising the agent shortlist gate.
+    for to, actor in (("candidate", "human"), ("paper", "agent")):
         runner.invoke(app, ["registry", "transition", name, "--to", to, "--actor", actor,
                             "--reason", "x"])
     with closing(connect(get_settings().db_path)) as conn:

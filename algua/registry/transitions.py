@@ -33,8 +33,8 @@ def transition_strategy(
             approval_verifier=approval_verifier,
         )
         code_hash, config_hash, dependency_hash = identity
-    elif target == Stage.SHORTLISTED and transition_actor is not Actor.HUMAN:
-        # Wall D: an agent reaches shortlisted ONLY by consuming a fresh, identity-matched,
+    elif target == Stage.CANDIDATE and transition_actor is not Actor.HUMAN:
+        # Wall D: an agent reaches candidate ONLY by consuming a fresh, identity-matched,
         # single-use gate token (minted by `research promote`). Humans are exempt.
         consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
     return repo.apply_transition(
@@ -87,7 +87,7 @@ def _validate_shortlist_gate(*, repo: StrategyRepository, name: str, strategy_id
         strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
     if gate_id is None:
         raise TransitionError(
-            "transition to shortlisted requires a fresh passing gate evaluation for the current "
+            "transition to candidate requires a fresh passing gate evaluation for the current "
             "code+config+dependency; run `algua research promote` (no matching gate record found)"
         )
     return gate_id

@@ -54,8 +54,8 @@ def test_resolve_pit_ok_fails_closed_on_malformed_snapshot():
 
 @pytest.mark.parametrize("stages", [
     (),                                              # idea
-    (Stage.BACKTESTED, Stage.SHORTLISTED),           # shortlisted
-    (Stage.BACKTESTED, Stage.SHORTLISTED, Stage.PAPER),  # paper (PAPER->SHORTLISTED is legal!)
+    (Stage.BACKTESTED, Stage.CANDIDATE),           # candidate
+    (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER),  # paper (PAPER->CANDIDATE is legal!)
 ])
 def test_preflight_refuses_non_backtested_source(tmp_path, stages):
     repo = _repo(tmp_path)

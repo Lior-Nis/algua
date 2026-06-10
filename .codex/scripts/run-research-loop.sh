@@ -3,7 +3,7 @@
 # Launch an autonomous algua research run.
 #
 # A Codex agent operates the research lifecycle (ideate -> author -> backtest /
-# walk-forward / sweep -> gate -> shortlist) per its skills, INSIDE an isolated git
+# walk-forward / sweep -> gate -> candidate) per its skills, INSIDE an isolated git
 # worktree on its own branch, then writes a run report. Nothing touches your working
 # tree or main; you review the branch afterward and merge what's worth keeping.
 #
@@ -50,14 +50,14 @@ Thesis to explore: ${THESIS}.
 Evaluate exactly ${N_HYPOTHESES} strategy hypotheses. For each one: form a concrete
 hypothesis, delegate authoring to the 'author' subagent, then drive it through the
 lifecycle ONLY via 'uv run algua ...' (backtest run --register, backtest walk-forward,
-optionally sweep, then research promote to gate backtested->shortlisted). Delegate the
+optionally sweep, then research promote to gate backtested->candidate). Delegate the
 results to the 'interpret' subagent for a promote/discard recommendation. Trust the
-gate; never lower its thresholds. Never go past 'shortlisted' and never edit the
+gate; never lower its thresholds. Never go past 'candidate' and never edit the
 human-owned safety files.
 
 When you are done (or if you are running low on time), ensure every authored strategy
 file is committed on this branch and write run-report.md at the repo root summarizing
-every hypothesis, its results, the gate decision, and what you shortlisted or discarded
+every hypothesis, its results, the gate decision, and what you promoted to candidate or discarded
 and why.
 EOF
 
@@ -97,5 +97,5 @@ echo
 echo "Done. Review the run:"
 echo "  git -C ${REPO_ROOT} diff main...${BRANCH}"
 echo "  cat ${WORKTREE}/run-report.md"
-echo "  uv run algua registry list --stage shortlisted"
+echo "  uv run algua registry list --stage candidate"
 echo "When finished, remove the worktree:  git -C ${REPO_ROOT} worktree remove ${WORKTREE}"

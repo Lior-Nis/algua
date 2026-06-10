@@ -1,11 +1,11 @@
 # Research lifecycle — the canonical command sequence
 
 This is the end-to-end path an agent (or the human operator) drives to take a strategy from
-**idea** to **shortlisted**, and the wall that stops it from going further unaided. Every step
+**idea** to **candidate**, and the wall that stops it from going further unaided. Every step
 is a `uv run algua ...` command that emits JSON on stdout. The flow below is the one exercised by
 `tests/test_e2e_lifecycle.py`; if you change a command's surface, update both.
 
-Stages: `idea -> backtested -> shortlisted -> paper -> live -> retired`
+Stages: `idea -> backtested -> candidate -> paper -> live -> retired`
 (allowed edges live in `algua/contracts/lifecycle.py`). An agent may operate the lifecycle
 **up to and including paper**. The `paper -> live` transition is a hard wall — it requires a
 human actor and a verified approval, enforced in `algua/registry/store.py`.
@@ -50,10 +50,10 @@ uv run algua backtest sweep cross_sectional_momentum --demo \
   --param lookback=20,40,60 --param top_k=3,5 --rank-by mean_sharpe
 ```
 
-## 3. Promotion gate (`backtested -> shortlisted`)
+## 3. Promotion gate (`backtested -> candidate`)
 
 `research promote` runs the walk-forward, evaluates the gate, and transitions the strategy to
-`shortlisted` **only on pass**. On failure it reports why and leaves the stage untouched.
+`candidate` **only on pass**. On failure it reports why and leaves the stage untouched.
 
 ```bash
 uv run algua research promote cross_sectional_momentum --demo \
@@ -68,11 +68,11 @@ uv run algua research promote cross_sectional_momentum --demo \
 - The default thresholds are the gate criteria in `algua/research/gates.py`.
 
 Output carries `passed`, `promoted`, the per-check breakdown, the config hash, and the snapshot
-id. After a pass, `registry show` reports `"stage": "shortlisted"`.
+id. After a pass, `registry show` reports `"stage": "candidate"`.
 
-## 4. Toward paper (`shortlisted -> paper`)
+## 4. Toward paper (`candidate -> paper`)
 
-An agent may take a shortlisted strategy to paper:
+An agent may take a candidate strategy to paper:
 
 ```bash
 uv run algua registry transition cross_sectional_momentum \

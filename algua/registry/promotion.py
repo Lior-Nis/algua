@@ -75,7 +75,7 @@ def promotion_preflight(
 ) -> BreadthContext:
     """Pre-peek phase — runs BEFORE walk_forward, so every hard refusal happens before the holdout
     is touched and before any gate row is minted: (1) relaxations-need-human; (2) stage legality
-    (BACKTESTED -> SHORTLISTED must be legal — never mint a passing token for an illegal source
+    (BACKTESTED -> CANDIDATE must be legal — never mint a passing token for an illegal source
     stage); (3) breadth resolution (refuse "no measured breadth" here)."""
     # FIRST check, before any holdout-affecting work and before the relaxation guard: only an agent
     # or a human may promote. SYSTEM is not a valid promote actor — it would pass as "not human"
@@ -88,14 +88,14 @@ def promotion_preflight(
                             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit)
     rec = repo.get(name)
     # Source stage MUST be exactly BACKTESTED. validate_transition alone is too permissive here:
-    # PAPER -> SHORTLISTED is a legal back-step, so promoting from `paper` would otherwise pass
+    # PAPER -> CANDIDATE is a legal back-step, so promoting from `paper` would otherwise pass
     # preflight, burn the holdout, and mint a token. Require backtested explicitly, then validate.
     if rec.stage is not Stage.BACKTESTED:
         raise TransitionError(
             f"research promote requires stage backtested, got {rec.stage.value}")
-    validate_transition(rec.stage, Stage.SHORTLISTED)  # TransitionError (a ValueError) if illegal
+    validate_transition(rec.stage, Stage.CANDIDATE)  # TransitionError (a ValueError) if illegal
     # Fundamentals strategies cannot be promoted past backtested until the paper/live fundamentals
-    # lane exists (#132): block the agent's only path to shortlisted early, with a clear message.
+    # lane exists (#132): block the agent's only path to candidate early, with a clear message.
     # Silently skip if the strategy is not a bundled module (e.g. tests using synthetic names).
     from algua.strategies.loader import StrategyNotFound, load_strategy
 
@@ -148,7 +148,7 @@ def run_gate(
     reason_suffix: str,
 ) -> PromotionOutcome:
     """Post-walk phase: resolve PIT, evaluate, record the gate_evaluations row (pass AND fail), and
-    on pass transition BACKTESTED->SHORTLISTED (which consumes the just-minted agent token).
+    on pass transition BACKTESTED->CANDIDATE (which consumes the just-minted agent token).
     Identity is recomputed via compute_artifact_hashes(name) — the SAME function the shortlist gate
     matches against (NOT wf.code_hash, which is git-HEAD-based and would never match)."""
     pit_ok = resolve_pit_ok(universe_name, universe_snapshots, period_start)
@@ -174,7 +174,7 @@ def run_gate(
     )
     promoted = False
     if decision.passed:
-        transition_strategy(repo, name, Stage.SHORTLISTED, actor,
+        transition_strategy(repo, name, Stage.CANDIDATE, actor,
                             _gate_reason(decision) + reason_suffix)
         promoted = True
     return PromotionOutcome(decision=decision, promoted=promoted)

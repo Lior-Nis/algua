@@ -12,7 +12,7 @@ from algua.contracts.lifecycle import (
 
 def test_legal_transition():
     assert can_transition(Stage.IDEA, Stage.BACKTESTED) is True
-    assert can_transition(Stage.SHORTLISTED, Stage.PAPER) is True
+    assert can_transition(Stage.CANDIDATE, Stage.PAPER) is True
 
 
 def test_illegal_transition():

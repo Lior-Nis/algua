@@ -92,9 +92,9 @@ def test_illegal_transition_raises(repo):
 
 def test_transition_service_allows_injected_live_approval_verifier(repo):
     repo.add("cross_sectional_momentum")
-    # SHORTLISTED via human: scaffolding to a later stage, not exercising the agent shortlist gate.
+    # CANDIDATE via human: scaffolding to a later stage, not exercising the agent shortlist gate.
     _transition(repo, "cross_sectional_momentum", Stage.BACKTESTED, Actor.AGENT)
-    _transition(repo, "cross_sectional_momentum", Stage.SHORTLISTED, Actor.HUMAN)
+    _transition(repo, "cross_sectional_momentum", Stage.CANDIDATE, Actor.HUMAN)
     _transition(repo, "cross_sectional_momentum", Stage.PAPER, Actor.AGENT)
 
     rec = transition_strategy(
@@ -220,8 +220,8 @@ def test_apply_transition_consumes_token_atomically(repo):
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
     rec = repo.get("alpha")
     gid = _record_pass(repo, rec.id)
-    out = repo.apply_transition(rec, Stage.SHORTLISTED, Actor.AGENT, "go", consume_gate_id=gid)
-    assert out.stage == Stage.SHORTLISTED
+    out = repo.apply_transition(rec, Stage.CANDIDATE, Actor.AGENT, "go", consume_gate_id=gid)
+    assert out.stage == Stage.CANDIDATE
     # token consumed (single-use)
     assert repo.find_consumable_gate_evaluation(rec.id, "c0", "cfg0", "dep0") is None
 
@@ -231,7 +231,7 @@ def test_apply_transition_bad_token_rolls_back(repo):
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
     rec = repo.get("alpha")
     with pytest.raises(TransitionError):
-        repo.apply_transition(rec, Stage.SHORTLISTED, Actor.AGENT, "go", consume_gate_id=999999)
+        repo.apply_transition(rec, Stage.CANDIDATE, Actor.AGENT, "go", consume_gate_id=999999)
     assert repo.get("alpha").stage == Stage.BACKTESTED  # stage unchanged (rolled back)
 # ---------------------------------------------------------------------------
 # Task 6: add() accepts metadata + derived_from validation
