@@ -11,7 +11,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.data.contracts import BarProvider, BarRequest, ImportRequest
-from algua.data.hindsight import query_fundamentals
+from algua.data.hindsight import query_fundamentals, query_news
 from algua.data.importers import get_importer
 from algua.data.providers import get_provider
 from algua.data.store import DataStore, normalize_symbols
@@ -216,6 +216,49 @@ def query_fundamentals_cmd(
             "value": None if pd.isna(row.value) else float(row.value),
             "knowable_at": row.knowable_at.isoformat(),
             "source": row.source,
+        }
+        for row in frame.itertuples(index=False)
+    ]
+    emit(records)
+
+
+@data_app.command("ingest-news")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def ingest_news(
+    provider: str = typer.Option(..., "--provider"),
+    as_of: str = typer.Option(..., "--as-of", help="point-in-time ISO datetime"),
+    from_file: Path = FROM_FILE_OPTION,
+) -> None:
+    """Ingest a local news file (CSV/parquet) as one validated snapshot (hindsight lane).
+
+    Rows carry: source, article_id, symbols, published_at, knowable_at, headline, [url], [body].
+    `source` is a required per-row column and the covered symbol/source sets are derived, so there
+    is no --source/--symbols flag; --provider is the ingest label."""
+    path = from_file.expanduser()
+    raw = pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
+    rec = _store().ingest_news(provider=provider, as_of=as_of, frame=raw)
+    emit(ok({"snapshot": rec.to_dict()}))
+
+
+@data_app.command("query-news")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def query_news_cmd(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    symbols: str = typer.Option(None, "--symbols", help="optional comma-separated subset"),
+) -> None:
+    """HINDSIGHT news read (full history) — the agent's post-mortem/analysis surface."""
+    syms = normalize_symbols(symbols.split(",")) if symbols else None
+    frame = query_news(_store(), snapshot_id, symbols=syms)
+    records = [
+        {
+            "source": row.source,
+            "article_id": row.article_id,
+            "symbol": row.symbol,
+            "published_at": row.published_at.isoformat(),
+            "knowable_at": row.knowable_at.isoformat(),
+            "headline": row.headline,
+            "url": None if pd.isna(row.url) else str(row.url),
+            "body": None if pd.isna(row.body) else str(row.body),
         }
         for row in frame.itertuples(index=False)
     ]
