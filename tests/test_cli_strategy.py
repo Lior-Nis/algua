@@ -1,9 +1,10 @@
 import json
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: PLC0415
 from typer.testing import CliRunner
 
+import algua.strategies  # noqa: PLC0415
 from algua.cli.main import app
 
 runner = CliRunner()
@@ -15,19 +16,57 @@ def test_strategy_list_includes_bundled():
     assert "cross_sectional_momentum" in json.loads(result.stdout)
 
 
+# Real, committed strategy families that tests must never delete on cleanup.
+_PERMANENT_FAMILIES = {"momentum", "fundamentals"}
+
+
 @pytest.fixture()
 def _cleanup_scaffolded():
-    """Remove strategy files created in the package tree during tests."""
+    """Remove strategy files created in the package tree during tests — AND the family package dir
+    the file created, if the test introduced it. `strategy new` scaffolds into the real
+    `algua/strategies/<family>/` tree, so a test using a throwaway `--family` (e.g. `mom`,
+    `new-family`) would otherwise leave an empty `<family>/__init__.py` behind and pollute the
+    source tree. A family that still holds a strategy module after the unlink (or a permanent
+    family) is left intact."""
     created: list[Path] = []
     yield created
     for p in created:
         p.unlink(missing_ok=True)
+        fam = p.parent
+        if (
+            fam.name not in _PERMANENT_FAMILIES
+            and fam.parent.name == "strategies"
+            and not any(f.name != "__init__.py" for f in fam.glob("*.py"))
+        ):
+            import shutil
+
+            shutil.rmtree(fam, ignore_errors=True)
+
+
+def test_strategy_new_requires_family(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["strategy", "new", "needs_family"])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "family is required" in payload["error"].lower()
+
+
+def test_strategy_new_hyphen_family_maps_to_underscore_dir(
+    tmp_path, monkeypatch, _cleanup_scaffolded
+):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["strategy", "new", "hyx", "--family", "mean-reversion"])
+    assert result.exit_code == 0, result.stdout
+    p = Path(json.loads(result.stdout)["path"])
+    _cleanup_scaffolded.append(p)
+    assert p.parent.name == "mean_reversion"  # dir uses underscores
 
 
 def test_strategy_new_scaffolds_loadable_module(tmp_path, monkeypatch, _cleanup_scaffolded):
     # CWD does NOT matter — path must be package-relative, not CWD-relative (#74)
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["strategy", "new", "my_strat"])
+    result = runner.invoke(app, ["strategy", "new", "my_strat", "--family", "momentum"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
@@ -40,9 +79,9 @@ def test_strategy_new_scaffolds_loadable_module(tmp_path, monkeypatch, _cleanup_
 
 
 def test_strategy_new_path_is_package_relative(tmp_path, monkeypatch, _cleanup_scaffolded):
-    """Path must resolve to the package strategies/examples dir regardless of CWD (#74)."""
+    """Path must resolve to the package strategies/momentum dir regardless of CWD (#74)."""
     monkeypatch.chdir(tmp_path)  # CWD is a temp dir, NOT the project root
-    result = runner.invoke(app, ["strategy", "new", "cwd_test_strat"])
+    result = runner.invoke(app, ["strategy", "new", "cwd_test_strat", "--family", "momentum"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     p = Path(payload["path"])
@@ -52,18 +91,29 @@ def test_strategy_new_path_is_package_relative(tmp_path, monkeypatch, _cleanup_s
     assert not str(p).startswith(str(tmp_path)), (
         f"path {p} is inside tmp_path {tmp_path} — still CWD-relative"
     )
-    # Must be inside the algua.strategies.examples package dir
-    import algua.strategies  # noqa: PLC0415
-    expected_dir = Path(algua.strategies.__file__).parent / "examples"
+    # Must be inside the algua.strategies.momentum package dir
+    expected_dir = Path(algua.strategies.__file__).parent / "momentum"
     assert str(p).startswith(str(expected_dir)), (
-        f"path {p} is not under strategies/examples {expected_dir}"
+        f"path {p} is not under strategies/momentum {expected_dir}"
     )
+
+
+def test_strategy_new_rejects_underscore_name(tmp_path, monkeypatch):
+    """`_`-prefixed names are loader-reserved (private/temp), so authoring one would register a
+    strategy the loader can never discover. `strategy new` must reject it up front."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    result = runner.invoke(app, ["strategy", "new", "_priv", "--family", "momentum"])
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["ok"] is False
 
 
 def test_strategy_new_rejects_unsafe_names(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for bad in ["../evil", "bad-name", "with space", "1abc", "class"]:
-        result = runner.invoke(app, ["strategy", "new", bad])
+        # Pass a valid --family so the failure is unambiguously the bad NAME, not a missing family.
+        result = runner.invoke(app, ["strategy", "new", bad, "--family", "momentum"])
         assert result.exit_code == 1, (bad, result.stdout)
         assert json.loads(result.stdout)["ok"] is False
 
@@ -97,7 +147,7 @@ def test_strategy_doc_syncs_and_builds_index(tmp_path, monkeypatch, _cleanup_sca
     monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
 
-    new_result = runner.invoke(app, ["strategy", "new", "kb_sync_strat"])
+    new_result = runner.invoke(app, ["strategy", "new", "kb_sync_strat", "--family", "momentum"])
     assert new_result.exit_code == 0, new_result.stdout
     _cleanup_scaffolded.append(Path(json.loads(new_result.stdout)["path"]))
     # strategy new now registers; no separate registry add needed
@@ -174,7 +224,8 @@ def test_strategy_new_preflight_rejects_existing_registration(tmp_path, monkeypa
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
     # Register the name first via registry add.
     runner.invoke(app, ["registry", "add", "dup"])
-    result = runner.invoke(app, ["strategy", "new", "dup"])
+    # Pass a valid --family so the failure is unambiguously the existing registration.
+    result = runner.invoke(app, ["strategy", "new", "dup", "--family", "momentum"])
     out = json.loads(result.stdout)
     assert out["ok"] is False
     assert result.exit_code == 1
@@ -193,13 +244,13 @@ def test_strategy_new_rollback_on_scaffold_failure(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(sc, "scaffold_strategy_doc", boom)
-    result = runner.invoke(app, ["strategy", "new", "rollbackme"])
+    result = runner.invoke(app, ["strategy", "new", "rollbackme", "--family", "momentum"])
     assert json.loads(result.stdout)["ok"] is False
     # The registry row must have been removed by the rollback.
     listed = json.loads(runner.invoke(app, ["registry", "list"]).stdout)
     assert "rollbackme" not in [r["name"] for r in listed]
     # The module .py file must also have been cleaned up by the rollback.
-    module_path = Path(algua.strategies.__file__).parent / "examples" / "rollbackme.py"
+    module_path = Path(algua.strategies.__file__).parent / "momentum" / "rollbackme.py"
     assert not module_path.exists(), f"rollback left behind module file: {module_path}"
 
 
@@ -256,6 +307,10 @@ def test_strategy_new_rollback_removes_created_family_hub(tmp_path, monkeypatch)
     fam_path = family_doc_path(get_settings(), "new-family")
     assert not fam_path.exists(), f"rollback left behind family hub: {fam_path}"
 
+    # Rollback must also remove the empty family PACKAGE dir it created (no source-tree pollution).
+    pkg_dir = Path(algua.strategies.__file__).parent / "new_family"
+    assert not pkg_dir.exists(), f"rollback left behind family package dir: {pkg_dir}"
+
 
 def test_strategy_new_rollback_keeps_preexisting_family_hub(tmp_path, monkeypatch,
                                                              _cleanup_scaffolded):
@@ -302,7 +357,7 @@ def test_strategy_new_metadata_roundtrips_to_doc(tmp_path, monkeypatch, _cleanup
 
     result = runner.invoke(
         app,
-        ["strategy", "new", "mdoc", "--author", "human", "--tag", "carry",
+        ["strategy", "new", "mdoc", "--family", "momentum", "--author", "human", "--tag", "carry",
          "--hypothesis-status", "untested"],
     )
     assert result.exit_code == 0, result.stdout
