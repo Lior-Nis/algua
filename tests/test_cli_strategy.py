@@ -16,13 +16,31 @@ def test_strategy_list_includes_bundled():
     assert "cross_sectional_momentum" in json.loads(result.stdout)
 
 
+# Real, committed strategy families that tests must never delete on cleanup.
+_PERMANENT_FAMILIES = {"momentum", "fundamentals"}
+
+
 @pytest.fixture()
 def _cleanup_scaffolded():
-    """Remove strategy files created in the package tree during tests."""
+    """Remove strategy files created in the package tree during tests — AND the family package dir
+    the file created, if the test introduced it. `strategy new` scaffolds into the real
+    `algua/strategies/<family>/` tree, so a test using a throwaway `--family` (e.g. `mom`,
+    `new-family`) would otherwise leave an empty `<family>/__init__.py` behind and pollute the
+    source tree. A family that still holds a strategy module after the unlink (or a permanent
+    family) is left intact."""
     created: list[Path] = []
     yield created
     for p in created:
         p.unlink(missing_ok=True)
+        fam = p.parent
+        if (
+            fam.name not in _PERMANENT_FAMILIES
+            and fam.parent.name == "strategies"
+            and not any(f.name != "__init__.py" for f in fam.glob("*.py"))
+        ):
+            import shutil
+
+            shutil.rmtree(fam, ignore_errors=True)
 
 
 def test_strategy_new_requires_family(tmp_path, monkeypatch):
@@ -275,6 +293,10 @@ def test_strategy_new_rollback_removes_created_family_hub(tmp_path, monkeypatch)
     from algua.knowledge.sync import family_doc_path
     fam_path = family_doc_path(get_settings(), "new-family")
     assert not fam_path.exists(), f"rollback left behind family hub: {fam_path}"
+
+    # Rollback must also remove the empty family PACKAGE dir it created (no source-tree pollution).
+    pkg_dir = Path(algua.strategies.__file__).parent / "new_family"
+    assert not pkg_dir.exists(), f"rollback left behind family package dir: {pkg_dir}"
 
 
 def test_strategy_new_rollback_keeps_preexisting_family_hub(tmp_path, monkeypatch,

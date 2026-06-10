@@ -130,11 +130,17 @@ def new(
         # --- scaffold; roll the registration back on any failure ---
         fam_path: Path = family_doc_path(settings, family) if family else Path("/dev/null")
         fam_created = False
+        # Track whether THIS call introduces the family package dir / its __init__.py, so rollback
+        # can remove them — a failed scaffold must not leave an empty family package in the tree.
+        pkg_dir = path.parent
+        pkg_existed = pkg_dir.exists()
+        init_py = pkg_dir / "__init__.py"
+        init_created = False
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            init_py = path.parent / "__init__.py"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
             if not init_py.exists():
                 init_py.write_text("")
+                init_created = True
             path.write_text(_TEMPLATE.format(name=name))
             doc_path.parent.mkdir(parents=True, exist_ok=True)
             doc_path.write_text(
@@ -155,6 +161,11 @@ def new(
             doc_path.unlink(missing_ok=True)
             if fam_created:
                 fam_path.unlink(missing_ok=True)
+            # Remove a family package this call introduced, if it's now empty.
+            if init_created:
+                init_py.unlink(missing_ok=True)
+            if not pkg_existed and pkg_dir.exists() and not any(pkg_dir.iterdir()):
+                pkg_dir.rmdir()
             raise ValueError(f"scaffold failed for {name!r}: {exc}") from exc
     emit(ok({"name": name, "path": str(path), "doc": str(doc_path), "family_doc": family_doc}))
 
