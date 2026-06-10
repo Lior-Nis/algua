@@ -1,11 +1,11 @@
 ---
 name: run-the-research-loop
-description: The autonomous research loop playbook — ideate a hypothesis, author a strategy, backtest/walk-forward/sweep it, gate it with research promote, shortlist or discard, and record a run report. Use when running an autonomous research session.
+description: The autonomous research loop playbook — ideate a hypothesis, author a strategy, backtest/walk-forward/sweep it, gate it with research promote, promote to candidate or discard, and record a run report. Use when running an autonomous research session.
 ---
 
 # Running the research loop
 
-You operate algua autonomously to take strategy ideas to a **shortlist**, then hand back a branch
+You operate algua autonomously to take strategy ideas to **candidate**, then hand back a branch
 for human review. Read `operating-algua` first for the golden rules. Delegate authoring to the
 `author` subagent and results-judgement to the `interpret` subagent.
 
@@ -40,13 +40,13 @@ For each hypothesis:
 5. **Interpret.** Delegate the results JSON to the `interpret` subagent for a promote/discard
    recommendation with reasoning.
 6. **Gate.** Run `uv run algua research promote <name> --demo` (record the combos you searched with
-   `--n-combos K`). The gate advances `backtested → shortlisted` **only on pass**; on a fail it
+   `--n-combos K`). The gate advances `backtested → candidate` **only on pass**; on a fail it
    reports why and leaves the stage unchanged. Trust the gate — do not lower thresholds to force a pass.
 7. **Record.** Sync the synced fact blocks: `uv run algua strategy doc <name>`. Then write
    the doc's `## Verdict & next` (what was learned + the next idea as a `[[dangling-link]]`),
    set `hypothesis_status`, and update the family doc's `## State of exploration` and
    `status`. Finally append the hypothesis, params, key metrics, the gate decision, and your
-   shortlist/discard rationale to `run-report.md`.
+   candidate/discard rationale to `run-report.md`.
 
 ## Stopping
 
@@ -55,7 +55,7 @@ time, stop early — but always finish by committing your work and writing the r
 
 ## Boundaries
 
-- Operate **only** through `uv run algua ...`. Never go past `shortlisted` — do not attempt
+- Operate **only** through `uv run algua ...`. Never go past `candidate` — do not attempt
   `registry transition --to paper/live` or `registry approve`; that's the human's call.
 - Never edit the human-owned safety/integrity files (see `operating-algua`).
 - Author only **new** files under `algua/strategies/examples/`.
@@ -64,5 +64,5 @@ time, stop early — but always finish by committing your work and writing the r
 
 1. Ensure every authored strategy file is committed on the current `research-run/<stamp>` branch.
 2. Write `run-report.md` at the repo root: one section per hypothesis (name, params, backtest +
-   walk-forward + gate results, decision + why), then a summary of what you shortlisted.
+   walk-forward + gate results, decision + why), then a summary of what you promoted to candidate.
 3. Commit the report. The human reviews the branch (`git diff main...<branch>`) and merges what's worth keeping.

@@ -25,10 +25,10 @@ stdout**. You drive research; the system enforces the safety boundary.
 ## The lifecycle
 
 ```
-idea → backtested → shortlisted → paper → live → retired
+idea → backtested → candidate → paper → live → retired
 ```
 (plus allowed back-steps and `→ retired`). As an operator you take a strategy from `idea` to
-`shortlisted`. Stage lives in the SQLite registry — `uv run algua registry show <name>` reports it.
+`candidate`. Stage lives in the SQLite registry — `uv run algua registry show <name>` reports it.
 
 ## Command surface (the ones you use most)
 
@@ -37,7 +37,7 @@ idea → backtested → shortlisted → paper → live → retired
 - `uv run algua backtest run <name> --demo --register` — backtest + register + advance to `backtested`.
 - `uv run algua backtest walk-forward <name> --demo` — K windows + stability (out-of-sample evidence); the holdout is withheld until `research promote`.
 - `uv run algua backtest sweep <name> --demo --param KEY=v1,v2` — bounded parameter grid, ranked.
-- `uv run algua research promote <name> --demo` — gate `backtested → shortlisted`; promotes only on pass.
+- `uv run algua research promote <name> --demo` — gate `backtested → candidate`; promotes only on pass.
 - `uv run algua data inspect --summary` — what data snapshots exist.
 
 `--demo` uses the synthetic data provider (offline, deterministic). Swap in real bars with

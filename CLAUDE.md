@@ -32,12 +32,12 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua registry transition <name> --to live --actor human` — step 1 of go-live: prints a
   challenge. Sign it, then re-run with `--signature <file>.sig` to complete the transition.
 - `uv run algua research promote <name> --universe NAME --start D --end D` — gate
-  `backtested -> shortlisted` on the walk-forward holdout + stability and promote on pass. For an
+  `backtested -> candidate` on the walk-forward holdout + stability and promote on pass. For an
   agent: `--universe` is required (PIT — non-PIT fails closed); search breadth must be MEASURED via
   `backtest sweep` (declaring it with `--n-combos` is human-only); the holdout-Sharpe bar is
   DEFLATED by funnel-wide search breadth (multiple-testing defense); a minimum holdout-observations
   floor (63) applies (underpowered holdouts fail closed). A passing run is the ONLY way an agent
-  reaches `shortlisted` — there is no raw `registry transition --to shortlisted` shortcut for an
+  reaches `candidate` — there is no raw `registry transition --to candidate` shortcut for an
   agent (`--allow-non-pit`, `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition
   are all human-only).
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
@@ -52,9 +52,9 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data inspect [--summary|--dataset NAME|--snapshot-id ID]` — inspect data snapshots.
 
 ## Lifecycle stages
-`idea -> backtested -> shortlisted -> paper -> live -> retired`
+`idea -> backtested -> candidate -> paper -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.
-For an agent, the `backtested -> shortlisted` edge is gated: it requires a fresh passing
+For an agent, the `backtested -> candidate` edge is gated: it requires a fresh passing
 `research promote` (an identity-matched, single-use gate token), not a raw `registry transition`.
 
 ## Quality gates before committing
