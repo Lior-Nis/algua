@@ -1,7 +1,14 @@
 import pandas as pd
 import pytest
 
-from algua.data.news_schema import NEWS_COLUMNS, empty_news, validate_news
+from algua.data.news_schema import (
+    NEWS_COLUMNS,
+    empty_news,
+    explode_news_symbols,
+    logical_news_hash,
+    to_news_schema,
+    validate_news,
+)
 
 
 def _row(**over):
@@ -104,3 +111,113 @@ def test_empty_news_is_contract_shaped():
     assert list(e.columns) == list(NEWS_COLUMNS)
     assert len(e) == 0
     assert str(e["knowable_at"].dtype) == "datetime64[ns, UTC]"
+
+
+# ── Task 4: explode_news_symbols ──────────────────────────────────────────────
+
+
+def _raw_row(**over):
+    base = {
+        "source": "reuters",
+        "article_id": "a1",
+        "symbols": "AAPL,MSFT",
+        "published_at": "2025-01-02T13:00:00Z",
+        "knowable_at": "2025-01-02T13:00:00Z",
+        "headline": "two names",
+        "url": "http://x/1",
+        "body": "b",
+    }
+    base.update(over)
+    return base
+
+
+def test_explode_comma_string():
+    out = explode_news_symbols(pd.DataFrame([_raw_row()]))
+    assert sorted(out["symbol"]) == ["AAPL", "MSFT"]
+    assert set(out["headline"]) == {"two names"}
+    assert list(out.columns) == list(NEWS_COLUMNS)
+
+
+def test_explode_list_form_and_dedup_and_case():
+    out = explode_news_symbols(pd.DataFrame([_raw_row(symbols=[" aapl ", "AAPL", "msft"])]))
+    assert sorted(out["symbol"]) == ["AAPL", "MSFT"]  # stripped, upper, de-duped within article
+
+
+def test_explode_adds_missing_optional_columns():
+    row = _raw_row()
+    del row["url"]
+    del row["body"]
+    out = explode_news_symbols(pd.DataFrame([row]))
+    assert out["url"].isna().all() and out["body"].isna().all()
+
+
+def test_explode_rejects_zero_symbols():
+    with pytest.raises(ValueError, match="symbol"):
+        explode_news_symbols(pd.DataFrame([_raw_row(symbols="  ,  ")]))
+
+
+def test_explode_rejects_missing_required_input_column():
+    row = _raw_row()
+    del row["headline"]
+    with pytest.raises(ValueError, match="missing"):
+        explode_news_symbols(pd.DataFrame([row]))
+
+
+# ── Task 5: to_news_schema + logical_news_hash ───────────────────────────────
+
+
+def test_to_news_schema_normalizes_and_validates():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row(source="Reuters", symbols="aapl")]))
+    canon = to_news_schema(raw)
+    assert canon["source"].iloc[0] == "reuters"   # source canonicalized (strip+lower)
+    assert canon["symbol"].iloc[0] == "AAPL"       # symbol upper
+    assert str(canon["knowable_at"].dtype) == "datetime64[ns, UTC]"
+
+
+def test_to_news_schema_is_idempotent():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row()]))
+    once = to_news_schema(raw)
+    twice = to_news_schema(once)
+    assert once.equals(twice)
+
+
+def test_to_news_schema_requires_knowable_at():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row()])).drop(columns=["knowable_at"])
+    with pytest.raises(ValueError):
+        to_news_schema(raw)
+
+
+def test_to_news_schema_canonicalizes_null_distinct_from_empty():
+    raw = explode_news_symbols(pd.DataFrame([_raw_row(body=None)]))
+    canon = to_news_schema(raw)
+    assert canon["body"].isna().all()
+
+
+def test_hash_stable_under_row_order():
+    a = to_news_schema(explode_news_symbols(pd.DataFrame([_raw_row(symbols="AAPL,MSFT")])))
+    b = a.iloc[::-1].reset_index(drop=True)
+    assert logical_news_hash(a) == logical_news_hash(to_news_schema(b))
+
+
+def test_hash_distinguishes_null_empty_and_none_string():
+    base = _raw_row()
+    h_null = logical_news_hash(
+        to_news_schema(explode_news_symbols(pd.DataFrame([{**base, "body": None}])))
+    )
+    h_empty = logical_news_hash(
+        to_news_schema(explode_news_symbols(pd.DataFrame([{**base, "body": ""}])))
+    )
+    h_none = logical_news_hash(
+        to_news_schema(explode_news_symbols(pd.DataFrame([{**base, "body": "None"}])))
+    )
+    assert len({h_null, h_empty, h_none}) == 3
+
+
+def test_hash_changes_with_headline():
+    h1 = logical_news_hash(
+        to_news_schema(explode_news_symbols(pd.DataFrame([_raw_row(headline="a")])))
+    )
+    h2 = logical_news_hash(
+        to_news_schema(explode_news_symbols(pd.DataFrame([_raw_row(headline="b")])))
+    )
+    assert h1 != h2
