@@ -15,14 +15,14 @@ into the strategy and family notes. Read `operating-algua` first for the golden 
    ON TOP of it — it carries the **reading** of the results and the graph links, and pulls data
    *from* MLflow rather than re-storing runs. If you find yourself copying raw run tables, stop.
 2. **Reproducibility stamp.** Every report records the MLflow run id(s), `snapshot_id`, `code_hash`,
-   `config_hash`, `seed` it was generated from — labelled **"identity as logged by the run"** (it
-   pins the *run's* artifact, not the strategy's current source, which may have moved on). A plot
-   without provenance is a liability.
+   `config_hash`, `dependency_hash`, `seed` it was generated from — labelled **"identity as logged by
+   the run"** (it pins the *run's* artifact, not the strategy's current source, which may have moved
+   on). A plot without provenance is a liability.
 3. **Binaries in git, but diffable.** The vault is version-controlled. The script emits **SVG**
-   (text) deterministically (fixed `svg.hashsalt`, no embedded date, sorted inputs) so re-runs don't
-   churn git. One report dir per run.
+   (text) deterministically (fixed `svg.hashsalt`, no embedded date, stable `MPLCONFIGDIR`, sorted
+   inputs) so re-runs don't churn git. One report dir per run.
 4. **Never surface the holdout.** The single-use OOS holdout is revealed only by `research promote`
-   and is *not* in MLflow (the tracker strips it). The script filters any `holdout*` metric
+   and is *not* in MLflow (the tracker strips it). The script rejects ANY `holdout*` metric
    defensively — do not add it back.
 
 ## v1 scope (tracked data only)
@@ -76,9 +76,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# Stable matplotlib cache dir, set BEFORE importing pyplot -> reproducible rendering across envs.
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "algua-mplconfig"))
 
 import matplotlib
 
@@ -103,29 +107,45 @@ def _savefig(fig: Any, out: Path) -> None:
 
 
 def _artifact_json(run_id: str, path: str, uri: str) -> dict[str, Any] | None:
+    """Download + parse a JSON artifact. ANY failure (missing/unreadable/malformed) -> None, so a
+    corrupt run is skipped, never fatal."""
     try:
         local = mlflow.artifacts.download_artifacts(
             run_id=run_id, artifact_path=path, tracking_uri=uri
         )
+        return json.loads(Path(local).read_text())
     except Exception:
         return None
-    return json.loads(Path(local).read_text())
+
+
+def _first_with_artifact(runs: list, kind: str, artifact: str, uri: str):
+    """Newest run (runs are pre-sorted DESC) of `kind` whose `artifact` loads — falls past a corrupt
+    or artifact-less newest run to the next valid one. Returns (run, parsed) or (None, None)."""
+    for r in runs:
+        if r.data.tags.get("kind") == kind:
+            d = _artifact_json(r.info.run_id, artifact, uri)
+            if d is not None:
+                return r, d
+    return None, None
 
 
 def _filter_holdout(metrics: dict[str, float]) -> dict[str, float]:
-    """Defense-in-depth: never surface the single-use OOS holdout (mirrors knowledge/metrics.py)."""
-    return {
-        k: v for k, v in metrics.items()
-        if k != "holdout_metrics" and not k.lower().startswith("holdout.")
-    }
+    """Reject ANY key whose lowercase form starts with "holdout" (holdout_metrics, holdout.sharpe,
+    holdout_sharpe, holdoutSharpe, bare "holdout"): the single-use OOS holdout is never surfaced."""
+    return {k: v for k, v in metrics.items() if not k.lower().startswith("holdout")}
 
 
 def plot_sweep_heatmap(sweep: dict[str, Any], out: Path) -> str | None:
-    grid = {k: v for k, v in sweep["grid"].items() if len(v) > 1}
+    grid = {k: v for k, v in (sweep.get("grid") or {}).items() if len(v) > 1}
     if len(grid) != 2:
         return None
+    ranked = sweep.get("ranked") or []
     (px, xs), (py, ys) = sorted(grid.items())
-    score = {(r["params"][px], r["params"][py]): r["score"] for r in sweep["ranked"]}
+    score = {
+        (r["params"][px], r["params"][py]): r.get("score")
+        for r in ranked
+        if px in r.get("params", {}) and py in r.get("params", {})
+    }
     z = [[score.get((x, y), float("nan")) for x in xs] for y in ys]
     fig, ax = plt.subplots()
     im = ax.imshow(z, aspect="auto", origin="lower", cmap="viridis")
@@ -133,47 +153,52 @@ def plot_sweep_heatmap(sweep: dict[str, Any], out: Path) -> str | None:
     ax.set_yticks(range(len(ys)), [str(y) for y in ys])
     ax.set_xlabel(px)
     ax.set_ylabel(py)
-    ax.set_title(f"{sweep['strategy']} — {sweep['rank_by']} over ({px} × {py})")
+    ax.set_title(f"{sweep.get('strategy', '?')} — {sweep.get('rank_by', 'score')} over ({px} × {py})")
     for i, y in enumerate(ys):
         for j, x in enumerate(xs):
             v = score.get((x, y))
             if v is not None:
                 ax.text(j, i, f"{v:.2f}", ha="center", va="center", color="w", fontsize=8)
-    fig.colorbar(im, ax=ax, label=sweep["rank_by"])
+    fig.colorbar(im, ax=ax, label=sweep.get("rank_by", "score"))
     _savefig(fig, out)
     return out.name
 
 
 def plot_sensitivity(sweep: dict[str, Any], out: Path) -> str | None:
-    swept = {k: v for k, v in sweep["grid"].items() if len(v) > 1}
+    swept = {k: v for k, v in (sweep.get("grid") or {}).items() if len(v) > 1}
     if not swept:
         return None
+    ranked = sweep.get("ranked") or []
+    rank_by = sweep.get("rank_by", "score")
     fig, axes = plt.subplots(1, len(swept), squeeze=False)
     for ax, (p, vals) in zip(axes[0], sorted(swept.items()), strict=True):
         means = []
         for val in vals:
-            scores = [r["score"] for r in sweep["ranked"] if r["params"][p] == val]
+            scores = [r.get("score") for r in ranked if r.get("params", {}).get(p) == val]
+            scores = [s for s in scores if s is not None]
             means.append(sum(scores) / len(scores) if scores else float("nan"))
         ax.plot([str(v) for v in vals], means, marker="o")
         ax.set_xlabel(p)
-        ax.set_ylabel(f"mean {sweep['rank_by']}")
+        ax.set_ylabel(f"mean {rank_by}")
         ax.set_title(p)
         ax.grid(True, alpha=0.3)
-    fig.suptitle(f"{sweep['strategy']} — parameter sensitivity")
+    fig.suptitle(f"{sweep.get('strategy', '?')} — parameter sensitivity")
     _savefig(fig, out)
     return out.name
 
 
-def plot_leaderboard(sweep: dict[str, Any], out: Path, top: int = 10) -> str:
-    ranked = sweep["ranked"][:top]
-    labels = [", ".join(f"{k}={v}" for k, v in r["params"].items()) for r in ranked]
-    scores = [r["score"] for r in ranked]
+def plot_leaderboard(sweep: dict[str, Any], out: Path, top: int = 10) -> str | None:
+    ranked = (sweep.get("ranked") or [])[:top]
+    if not ranked:
+        return None
+    labels = [", ".join(f"{k}={v}" for k, v in sorted(r.get("params", {}).items())) for r in ranked]
+    scores = [r.get("score", float("nan")) for r in ranked]
     fig, ax = plt.subplots(figsize=(7.0, max(3.0, 0.4 * len(ranked) + 1)))
     ax.barh(range(len(ranked)), scores, color="#4c72b0")
     ax.set_yticks(range(len(ranked)), labels, fontsize=8)
     ax.invert_yaxis()
-    ax.set_xlabel(sweep["rank_by"])
-    ax.set_title(f"{sweep['strategy']} — top {len(ranked)} combos")
+    ax.set_xlabel(sweep.get("rank_by", "score"))
+    ax.set_title(f"{sweep.get('strategy', '?')} — top {len(ranked)} combos")
     ax.grid(True, axis="x", alpha=0.3)
     _savefig(fig, out)
     return out.name
@@ -183,8 +208,8 @@ def plot_wf_stability(result: dict[str, Any], out: Path) -> str | None:
     wm = result.get("window_metrics") or []
     if not wm:
         return None
-    idx = [w["index"] for w in wm]
-    sharpe = [w.get("sharpe", 0.0) for w in wm]
+    idx = [w.get("index", i) for i, w in enumerate(wm)]
+    sharpe = [float(w.get("sharpe") or 0.0) for w in wm]
     fig, ax = plt.subplots()
     colors = ["#55a868" if s >= 0 else "#c44e52" for s in sharpe]
     ax.bar(idx, sharpe, color=colors)
@@ -197,24 +222,25 @@ def plot_wf_stability(result: dict[str, Any], out: Path) -> str | None:
         f"min {st.get('min_sharpe', float('nan')):.2f} · "
         f"pct+ {st.get('pct_positive_windows', float('nan')):.0%}"
     )
-    ax.set_title(f"{result['strategy']} — per-window stability\n{sub}", fontsize=10)
+    ax.set_title(f"{result.get('strategy', '?')} — per-window stability\n{sub}", fontsize=10)
     ax.grid(True, axis="y", alpha=0.3)
     _savefig(fig, out)
     return out.name
 
 
-def plot_cross_run(client: MlflowClient, strategy: str, runs: list, out: Path) -> str | None:
+def plot_cross_run(strategy: str, runs: list, out: Path) -> str | None:
     pts = []
     for r in runs:
         m = _filter_holdout(dict(r.data.metrics))
         if "mean_sharpe" in m:
-            pts.append((r.info.start_time, m["mean_sharpe"], r.data.tags.get("kind", "?")))
+            pts.append((r.info.start_time or 0, r.info.run_id, m["mean_sharpe"],
+                        r.data.tags.get("kind", "?")))
     if len(pts) < 2:
         return None
-    pts.sort()
+    pts.sort()  # (start_time, run_id) — deterministic tie-break
     fig, ax = plt.subplots()
-    ax.plot(range(len(pts)), [p[1] for p in pts], marker="o")
-    ax.set_xticks(range(len(pts)), [p[2] for p in pts], rotation=45, ha="right", fontsize=8)
+    ax.plot(range(len(pts)), [p[2] for p in pts], marker="o")
+    ax.set_xticks(range(len(pts)), [p[3] for p in pts], rotation=45, ha="right", fontsize=8)
     ax.set_ylabel("mean_sharpe")
     ax.set_title(f"{strategy} — mean_sharpe across tracked runs (oldest→newest)")
     ax.grid(True, alpha=0.3)
@@ -235,10 +261,9 @@ def main() -> int:
     if exp is None:
         print(f"no MLflow experiment for {args.strategy!r} at {uri}")
         return 1
-    runs = client.search_runs([exp.experiment_id], order_by=["attributes.start_time DESC"])
-    by_kind: dict[str, Any] = {}
-    for r in runs:
-        by_kind.setdefault(r.data.tags.get("kind", "?"), r)
+    runs = client.search_runs([exp.experiment_id])
+    # Deterministic order: newest first, run_id breaks identical-start_time ties.
+    runs = sorted(runs, key=lambda r: (r.info.start_time or 0, r.info.run_id), reverse=True)
 
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     rdir = Path(args.kb) / "strategies" / args.strategy / "reports" / stamp
@@ -247,37 +272,36 @@ def main() -> int:
     figs: list[tuple[str, str]] = []
     provenance: dict[str, Any] = {}
 
-    sweep_run = by_kind.get("sweep")
-    if sweep_run is not None:
-        sweep = _artifact_json(sweep_run.info.run_id, "sweep.json", uri)
-        if sweep:
-            provenance["sweep"] = {
-                "run_id": sweep_run.info.run_id, "snapshot_id": sweep.get("snapshot_id"),
-                "code_hash": sweep.get("code_hash"), "seed": sweep.get("seed"),
-                "n_combos": sweep.get("n_combos"), "rank_by": sweep.get("rank_by"),
-            }
-            for fn, name in (
-                (plot_sweep_heatmap(sweep, rdir / "sweep_heatmap.svg"), "Parameter heatmap"),
-                (plot_sensitivity(sweep, rdir / "sweep_sensitivity.svg"), "Parameter sensitivity"),
-                (plot_leaderboard(sweep, rdir / "sweep_leaderboard.svg"), "Top-N leaderboard"),
-            ):
-                if fn:
-                    figs.append((name, fn))
-
-    wf_run = by_kind.get("walk_forward")
-    if wf_run is not None:
-        result = _artifact_json(wf_run.info.run_id, "result.json", uri)
-        if result:
-            provenance["walk_forward"] = {
-                "run_id": wf_run.info.run_id, "config_hash": result.get("config_hash"),
-                "snapshot_id": result.get("snapshot_id"), "code_hash": result.get("code_hash"),
-                "seed": result.get("seed"), "windows": result.get("windows"),
-            }
-            fn = plot_wf_stability(result, rdir / "wf_stability.svg")
+    sweep_run, sweep = _first_with_artifact(runs, "sweep", "sweep.json", uri)
+    if sweep is not None:
+        best_cfg = ((sweep.get("ranked") or [{}])[0] or {}).get("config_hash")
+        provenance["sweep"] = {
+            "run_id": sweep_run.info.run_id, "snapshot_id": sweep.get("snapshot_id"),
+            "code_hash": sweep.get("code_hash"), "dependency_hash": sweep.get("dependency_hash"),
+            "best_config_hash": best_cfg, "seed": sweep.get("seed"),
+            "n_combos": sweep.get("n_combos"), "rank_by": sweep.get("rank_by"),
+        }
+        for fn, name in (
+            (plot_sweep_heatmap(sweep, rdir / "sweep_heatmap.svg"), "Parameter heatmap"),
+            (plot_sensitivity(sweep, rdir / "sweep_sensitivity.svg"), "Parameter sensitivity"),
+            (plot_leaderboard(sweep, rdir / "sweep_leaderboard.svg"), "Top-N leaderboard"),
+        ):
             if fn:
-                figs.append(("Walk-forward per-window stability", fn))
+                figs.append((name, fn))
 
-    fn = plot_cross_run(client, args.strategy, runs, rdir / "cross_run.svg")
+    wf_run, result = _first_with_artifact(runs, "walk_forward", "result.json", uri)
+    if result is not None:
+        provenance["walk_forward"] = {
+            "run_id": wf_run.info.run_id, "config_hash": result.get("config_hash"),
+            "dependency_hash": result.get("dependency_hash"),
+            "snapshot_id": result.get("snapshot_id"), "code_hash": result.get("code_hash"),
+            "seed": result.get("seed"), "windows": result.get("windows"),
+        }
+        fn = plot_wf_stability(result, rdir / "wf_stability.svg")
+        if fn:
+            figs.append(("Walk-forward per-window stability", fn))
+
+    fn = plot_cross_run(args.strategy, runs, rdir / "cross_run.svg")
     if fn:
         figs.append(("Cross-run leaderboard", fn))
 
@@ -293,7 +317,7 @@ def main() -> int:
         "## Provenance (identity AS LOGGED BY THE RUN)",
         "",
         "```json",
-        json.dumps(provenance, indent=2),
+        json.dumps(provenance, indent=2, sort_keys=True),
         "```",
         "",
         "## Figures",
@@ -314,9 +338,11 @@ if __name__ == "__main__":
 
 ## Notes
 
-- The script is **idempotent per run-set + deterministic**: same MLflow runs → byte-identical SVGs
-  (verified), so committing a regenerated report is a clean no-op diff.
-- It degrades gracefully: a heatmap needs a 2-param grid; cross-run needs ≥2 runs with `mean_sharpe`;
-  missing pieces are simply skipped, never fatal.
+- The script is **deterministic**: same MLflow runs → byte-identical SVGs (fixed hashsalt, no date
+  metadata, stable `MPLCONFIGDIR`, `(start_time, run_id)` ordering, sorted labels/keys), so
+  committing a regenerated report is a clean no-op diff.
+- It **degrades gracefully**: missing/corrupt artifacts are skipped (it falls to the next valid run
+  of that kind); a heatmap needs a 2-param grid; cross-run needs ≥2 runs with `mean_sharpe`; missing
+  pieces are simply omitted, never fatal.
 - The `_Reading: TODO_` placeholders under each figure are your cue (step 3) — replace them. Don't
   commit a report still saying TODO.
