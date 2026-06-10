@@ -19,11 +19,9 @@ def test_unknown_strategy_raises():
 
 
 def test_strategy_missing_compute_weights_raises():
-    from pathlib import Path
+    import algua.strategies.momentum as fam
 
-    import algua.strategies.examples as examples
-
-    mod_path = Path(examples.__path__[0]) / "_tmp_no_weights_fn.py"
+    mod_path = Path(fam.__path__[0]) / "_tmp_no_weights_fn.py"
     mod_path.write_text(
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
@@ -76,7 +74,6 @@ def test_duplicate_bare_name_across_families_raises():
 
 def test_loading_one_strategy_does_not_import_siblings():
     """The single-import contract: loading one strategy must not pull a sibling into sys.modules."""
-    # Use the CURRENT path (examples family) — updated to fundamentals/ path in Task 3.
-    sys.modules.pop("algua.strategies.examples.fundamentals_earnings_tilt", None)
+    sys.modules.pop("algua.strategies.fundamentals.fundamentals_earnings_tilt", None)
     load_strategy("cross_sectional_momentum")
-    assert "algua.strategies.examples.fundamentals_earnings_tilt" not in sys.modules
+    assert "algua.strategies.fundamentals.fundamentals_earnings_tilt" not in sys.modules

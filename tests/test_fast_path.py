@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-import algua.strategies.examples as examples
+import algua.strategies.momentum as examples
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import (
     BacktestError,
