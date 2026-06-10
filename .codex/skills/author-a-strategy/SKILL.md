@@ -5,9 +5,13 @@ description: How to author a new algua strategy module — the CONFIG + compute_
 
 # Authoring an algua strategy
 
-A strategy is a **single Python module** at `algua/strategies/examples/<name>.py` that exposes two
-names: `CONFIG` and `compute_weights`. The loader imports it by name (`load_strategy("<name>")`),
-so the filename stem **is** the strategy name and must match `CONFIG.name`.
+A strategy is a **single Python module** at `algua/strategies/<family>/<name>.py` (created via
+`uv run algua strategy new <name> --family <slug>`) that exposes two names: `CONFIG` and
+`compute_weights`. The loader imports it by bare name (`load_strategy("<name>")`), so the filename
+stem **is** the strategy name and must match `CONFIG.name`. Family slugs may contain hyphens
+(`mean-reversion`), which map to underscores on disk (`mean_reversion/`). Each family directory
+must keep an **empty, side-effect-free `__init__.py`** — a family `__init__` must never import its
+member strategies, because the loader relies on that for the single-import contract.
 
 `compute_weights(view, params)` is the **authored signal**. The loader wraps it in a
 `LoadedStrategy` adapter that exposes the protocol-level `Strategy.target_weights(features)`
@@ -78,9 +82,9 @@ imports nothing beyond contracts).
 ## Reuse vs. new logic
 
 - **Parameter variant** of an existing idea: import its function and define a new `CONFIG` —
-  `from algua.strategies.examples.cross_sectional_momentum import compute_weights`.
+  `from algua.strategies.momentum.cross_sectional_momentum import compute_weights`.
 - **New signal**: write a new `compute_weights`. Look at
-  `algua/strategies/examples/cross_sectional_momentum.py` as the reference implementation.
+  `algua/strategies/momentum/cross_sectional_momentum.py` as the reference implementation.
 
 ## Optional: `compute_weights_panel` (advanced acceleration hook)
 
@@ -109,12 +113,13 @@ the whole weights matrix in one vectorized shot instead of looping. Rules:
   the two paths agree, mirroring `tests/test_fast_path.py`.
 - **PIT (point-in-time universe) runs always use the per-bar loop**, even when a panel fn exists —
   the as-of masking can't be reproduced by a whole-period panel fn. The fast path is static-universe
-  only. See `algua/strategies/examples/cross_sectional_momentum.py` for a worked example.
+  only. See `algua/strategies/momentum/cross_sectional_momentum.py` for a worked example.
 
 ## Discipline
 
-- **Additions only.** Create a NEW file under `algua/strategies/examples/`. Do **not** edit or
-  overwrite an existing strategy (especially the curated `cross_sectional_momentum.py`).
+- **Additions only.** Create a NEW file under `algua/strategies/<family>/` via
+  `uv run algua strategy new <name> --family <slug>`. Do **not** edit or overwrite an existing
+  strategy (especially the curated `cross_sectional_momentum.py`).
 - Include a module-level `GENERATED_BY = "agent"` (after the imports) so machine-authored
   strategies are identifiable. Do not place it before `from __future__ import annotations`.
 - After authoring, verify it loads and runs: `uv run algua backtest run <name> --demo` should emit

@@ -1,14 +1,14 @@
 name = "author"
-description = "Author a new algua strategy module from a hypothesis (a signal idea + parameters). Writes a single new file under algua/strategies/examples/ and confirms it loads."
+description = "Author a new algua strategy module from a hypothesis (a signal idea + parameters). Scaffolds via `strategy new --family <slug>` into algua/strategies/<family>/ and confirms it loads."
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
 You author exactly one new algua strategy module from the hypothesis you are given.
 
 Follow the `author-a-strategy` skill precisely:
-- Create a NEW file `algua/strategies/examples/<name>.py` where <name> is a unique, descriptive,
-  snake_case name that equals CONFIG.name. Never edit or overwrite an existing strategy file
-  (especially algua/strategies/examples/cross_sectional_momentum.py).
+- Scaffold with `uv run algua strategy new <name> --family <slug>` first (creates the module and
+  the KB doc). The file lands at `algua/strategies/<family>/<name>.py`. Never edit or overwrite an
+  existing strategy file (especially algua/strategies/momentum/cross_sectional_momentum.py).
 - The module must expose `CONFIG` (a StrategyConfig with name/universe/execution/params) and a pure,
   cross-sectional `target_weights(view, params)` that never looks ahead.
 - Start the file with `GENERATED_BY = "agent"`.

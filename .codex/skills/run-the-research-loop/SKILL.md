@@ -28,7 +28,7 @@ For each hypothesis:
    open axis. Pick a unique strategy name; skip names already in `uv run algua registry list`.
 2. **Author.** Scaffold with `uv run algua strategy new <name> --family <slug> --derived-from
    <parent>` (creates the module *and* the KB doc + family hub). Delegate to the `author`
-   subagent (it follows `author-a-strategy`) to write `algua/strategies/examples/<name>.py`,
+   subagent (it follows `author-a-strategy`) to write `algua/strategies/<family>/<name>.py`,
    then fill in the doc's `## Hypothesis` and `## Derivation` prose. Confirm it loads:
    `uv run algua backtest run <name> --demo`.
 3. **Backtest + register.** `uv run algua backtest run <name> --demo --register` (advances `idea →
@@ -58,7 +58,7 @@ time, stop early — but always finish by committing your work and writing the r
 - Operate **only** through `uv run algua ...`. Never go past `candidate` — do not attempt
   `registry transition --to paper/live` or `registry approve`; that's the human's call.
 - Never edit the human-owned safety/integrity files (see `operating-algua`).
-- Author only **new** files under `algua/strategies/examples/`.
+- Author only **new** files under `algua/strategies/<family>/` via `strategy new --family <slug>`.
 
 ## Finishing a run
 
