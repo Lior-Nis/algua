@@ -3,8 +3,8 @@ authorizations correctly invalidate and must re-sign (#135)."""
 import pandas as pd
 
 from algua.contracts.types import ExecutionContract
-from algua.strategies.base import LoadedStrategy, StrategyConfig, config_hash
 from algua.portfolio.construction import get_construction_policy
+from algua.strategies.base import LoadedStrategy, StrategyConfig, config_hash
 
 
 def _strategy(**execution_kw) -> LoadedStrategy:

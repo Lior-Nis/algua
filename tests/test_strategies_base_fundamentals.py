@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 
 from algua.contracts.types import ExecutionContract
-from algua.portfolio.construction import equal_weight_positive, get_construction_policy
+from algua.portfolio.construction import equal_weight_positive
 from algua.strategies.base import LoadedStrategy, StrategyConfig, config_hash
 
 
@@ -63,6 +63,7 @@ def test_config_hash_includes_needs_fundamentals():
 
 def test_target_weights_fundamentals_lane_composes():
     import pandas as pd
+
     from algua.contracts.types import ExecutionContract
     from algua.portfolio.construction import equal_weight_positive
     from algua.strategies.base import LoadedStrategy, StrategyConfig

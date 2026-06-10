@@ -19,7 +19,8 @@ class StrategyNotFound(LookupError):
 
 def load_strategy(name: str) -> LoadedStrategy:
     """Load a bundled strategy module by name; it must expose CONFIG + signal, and CONFIG must name
-    a known construction policy with valid params. Optional `signal_panel` is the vectorized twin."""
+    a known construction policy with valid params. Optional `signal_panel` is the vectorized
+    twin."""
     try:
         module = importlib.import_module(f"algua.strategies.examples.{name}")
     except ModuleNotFoundError as exc:

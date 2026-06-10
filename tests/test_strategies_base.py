@@ -29,6 +29,7 @@ def test_loaded_strategy_satisfies_protocol_and_exposes_config():
 
 def test_target_weights_composes_signal_then_construct():
     import pandas as pd
+
     from algua.contracts.types import ExecutionContract
     from algua.portfolio.construction import top_k_equal_weight
     from algua.strategies.base import LoadedStrategy, StrategyConfig
@@ -49,6 +50,7 @@ def test_target_weights_composes_signal_then_construct():
 
 def test_construct_reads_current_config_params_not_a_bound_partial():
     import pandas as pd
+
     from algua.contracts.types import ExecutionContract
     from algua.portfolio.construction import top_k_equal_weight
     from algua.strategies.base import LoadedStrategy, StrategyConfig

@@ -53,8 +53,8 @@ def test_override_preserves_signal_panel_fn():
 
 
 def test_override_routes_construction_namespace():
-    from algua.strategies.loader import load_strategy
     from algua.backtest.sweep import _override
+    from algua.strategies.loader import load_strategy
     s = load_strategy("cross_sectional_momentum")  # construction top_k_equal_weight, top_k=3
     out = _override(s, {"construction.top_k": 5, "lookback": 30})
     assert out.config.construction_params["top_k"] == 5
@@ -65,8 +65,9 @@ def test_override_routes_construction_namespace():
 
 def test_override_rejects_unknown_signal_key():
     import pytest
-    from algua.strategies.loader import load_strategy
+
     from algua.backtest.sweep import _override
+    from algua.strategies.loader import load_strategy
     s = load_strategy("cross_sectional_momentum")
     with pytest.raises(ValueError):
         _override(s, {"not_a_real_param": 1})  # non-prefixed key not in CONFIG.params
@@ -74,8 +75,9 @@ def test_override_rejects_unknown_signal_key():
 
 def test_override_revalidates_construction_params():
     import pytest
-    from algua.strategies.loader import load_strategy
+
     from algua.backtest.sweep import _override
+    from algua.strategies.loader import load_strategy
     s = load_strategy("cross_sectional_momentum")
     with pytest.raises(ValueError):
         _override(s, {"construction.top_k": 0})  # fails the policy validator

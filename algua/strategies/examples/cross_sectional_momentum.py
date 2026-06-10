@@ -1,4 +1,4 @@
-"""Cross-sectional momentum: SIGNAL = trailing return per symbol; CONSTRUCTION = top-k equal weight."""
+"""Cross-sectional momentum: SIGNAL = trailing return per symbol; CONSTRUCTION = top-k equal-wt."""
 from __future__ import annotations
 
 from typing import Any

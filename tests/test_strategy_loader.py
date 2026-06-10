@@ -50,6 +50,7 @@ def test_loader_resolves_and_binds_construction():
 def test_loader_rejects_unknown_construction(tmp_path, monkeypatch):
     # A module whose CONFIG names a missing policy must fail at load.
     import textwrap
+
     import algua.strategies.examples as ex
     p = next(iter(ex.__path__)) + "/_tmp_bad_policy.py"
     with open(p, "w") as f:
