@@ -23,7 +23,7 @@ from algua.strategies.base import LoadedStrategy
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
 
 # Fail-closed runtime parity guard: number of post-warmup bars at which the fast path is
-# re-verified against the canonical per-bar definition on every run that uses a panel_fn.
+# re-verified against the canonical per-bar definition on every run that uses a signal_panel_fn.
 # Bounded + deterministic (evenly spread across the evaluated span) so the guard costs O(_PARITY_
 # SAMPLE) per-bar evaluations rather than O(n_bars) — preserving the speedup while still catching a
 # panel fn that disagrees with its per-bar twin. Full per-bar parity is asserted in CI (test suite).
@@ -334,7 +334,7 @@ def simulate(
     fundamentals_provider: FundamentalsProvider | None = None,
 ) -> tuple[vbt.Portfolio, pd.DataFrame]:
     """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
-    the strategy exposes a parity-guarded `panel_fn` — see `_decision_weights_fast_or_loop`),
+    the strategy exposes a parity-guarded `signal_panel_fn` — see `_decision_weights_fast_or_loop`),
     enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift and
     simulate. Returns (portfolio, effective-weights). The shift lives ONLY here — the panel fn (like
     the loop) returns DECISION-time weights, never executable ones.
