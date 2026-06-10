@@ -84,3 +84,48 @@ def test_concurrent_writer_and_reader_no_lock_errors(tmp_path):
     # WAL: reader never saw the dirty uncommitted write, only the old committed snapshot,
     # and every multi-statement read was cross-table consistent (asserted inside the worker).
     assert result["seen"] == ["idea"], result
+
+
+def _release_after_contention(barrier: Path, wids: list[str]):
+    """Wait until every contender is queued on the lock, then free the holder."""
+    _wait_file(barrier / "lock-held")
+    for wid in wids:
+        _wait_file(barrier / f"ready-{wid}")
+    (barrier / "go").write_text("1")
+    for wid in wids:
+        _wait_file(barrier / f"attempting-{wid}")
+    time.sleep(0.1)  # grace: let both contenders actually block on the writer lock
+    (barrier / "release").write_text("1")
+
+
+def test_concurrent_writers_serialize(tmp_path):
+    db = tmp_path / "r.db"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    _seed_strategy(db, "a")
+    # add a second strategy on the same DB
+    from algua.registry.store import SqliteStrategyRepository
+    conn = connect(db)
+    SqliteStrategyRepository(conn).add("b")
+    conn.close()
+
+    holder = _spawn("lock-hold", db, barrier, "h")
+    w1 = _spawn("transition", db, barrier, "w1", "a")
+    w2 = _spawn("transition", db, barrier, "w2", "b")
+
+    _release_after_contention(barrier, ["w1", "w2"])
+
+    r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+    assert rh["ok"] is True
+    assert r1["ok"] is True, r1
+    assert r2["ok"] is True, r2
+
+    # final state: both advanced, each with exactly one idea->backtested transition row
+    check = connect(db)
+    for name in ("a", "b"):
+        row = check.execute("SELECT id, stage FROM strategies WHERE name=?", (name,)).fetchone()
+        assert row["stage"] == "backtested"
+        n = check.execute(
+            "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='backtested'",
+            (row["id"],)).fetchone()["c"]
+        assert n == 1, f"{name} has {n} backtested transitions"
