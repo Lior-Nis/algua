@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 
-import algua.strategies  # noqa: PLC0415
-import pytest
+import pytest  # noqa: PLC0415
 from typer.testing import CliRunner
 
+import algua.strategies  # noqa: PLC0415
 from algua.cli.main import app
 
 runner = CliRunner()
@@ -34,7 +34,9 @@ def test_strategy_new_requires_family(tmp_path, monkeypatch):
     assert "family is required" in payload["error"].lower()
 
 
-def test_strategy_new_hyphen_family_maps_to_underscore_dir(tmp_path, monkeypatch, _cleanup_scaffolded):
+def test_strategy_new_hyphen_family_maps_to_underscore_dir(
+    tmp_path, monkeypatch, _cleanup_scaffolded
+):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["strategy", "new", "hyx", "--family", "mean-reversion"])
     assert result.exit_code == 0, result.stdout
