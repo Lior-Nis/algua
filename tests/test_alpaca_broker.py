@@ -70,7 +70,7 @@ def test_alpaca_broker_conforms_to_broker_protocol():
 
 def test_account_parses_floats(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "50000",
+        {"/v2/account": _FakeResp(200, {"id": "acct-1", "equity": "100000", "cash": "50000",
                                         "buying_power": "150000"})}))
     acct = _broker().account()
     assert (acct.equity, acct.cash, acct.buying_power) == (100000.0, 50000.0, 150000.0)
@@ -89,7 +89,8 @@ def test_get_positions_parses_and_empty(monkeypatch):
 
 def test_submit_buy_delta_posts_notional(monkeypatch):
     fake = _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "100000",
+                                        "cash": "0", "buying_power": "0"}),
          "/v2/positions": _FakeResp(200, [])},  # flat
         post_resp=_FakeResp(201, {"id": "order-1"}),
     )
@@ -102,7 +103,8 @@ def test_submit_buy_delta_posts_notional(monkeypatch):
 
 def test_submit_sell_delta(monkeypatch):
     fake = _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "100000",
+                                        "cash": "0", "buying_power": "0"}),
          "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "600",
                                            "market_value": "60000"}])},
         post_resp=_FakeResp(201, {"id": "order-2"}),
@@ -114,7 +116,8 @@ def test_submit_sell_delta(monkeypatch):
 
 def test_submit_noop_below_threshold(monkeypatch):
     fake = _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "100000",
+                                        "cash": "0", "buying_power": "0"}),
          "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "500",
                                            "market_value": "50000"}])},
         post_resp=_FakeResp(201, {"id": "unused"}),
@@ -126,7 +129,8 @@ def test_submit_noop_below_threshold(monkeypatch):
 
 def test_snapshot_is_one_account_and_one_positions_get(monkeypatch):
     fake = _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "100000",
+                                        "cash": "0", "buying_power": "0"}),
          "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "10",
                                            "market_value": "1000"}])})
     monkeypatch.setattr(ab, "requests", fake)
@@ -138,7 +142,8 @@ def test_snapshot_is_one_account_and_one_positions_get(monkeypatch):
 
 def test_snapshot_includes_held_symbol_outside_universe(monkeypatch):
     fake = _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "100000",
+                                        "cash": "0", "buying_power": "0"}),
          "/v2/positions": _FakeResp(200, [{"symbol": "ZZZ", "qty": "5",
                                            "market_value": "500"}])})
     monkeypatch.setattr(ab, "requests", fake)
@@ -274,7 +279,8 @@ class _FlakyRequests(_FakeRequests):
 def test_retries_transient_status_then_succeeds(monkeypatch):
     monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
     fake = _FlakyRequests(fail_times=2,
-                          final_payload={"equity": "1", "cash": "1", "buying_power": "1"})
+                          final_payload={"id": "a", "equity": "1",
+                                         "cash": "1", "buying_power": "1"})
     monkeypatch.setattr(ab, "requests", fake)
     acct = _broker().account()
     assert acct.equity == 1.0 and fake.attempts == 3  # 2 failures + 1 success
@@ -424,8 +430,8 @@ def test_live_broker_rejects_non_live_host():
 def test_live_broker_account_uses_inherited_rest(monkeypatch):
     from algua.execution import alpaca_broker as ab
     from algua.execution.alpaca_broker import AlpacaLiveBroker
-    fake = _FakeRequests({"/v2/account": _FakeResp(200, {"equity": "5", "cash": "5",
-                                                         "buying_power": "5"})})
+    fake = _FakeRequests({"/v2/account": _FakeResp(200, {"id": "live-1", "equity": "5",
+                                                         "cash": "5", "buying_power": "5"})})
     monkeypatch.setattr(ab, "requests", fake)
     acct = AlpacaLiveBroker(_live_auth(), "k", "s").account()
     assert acct.equity == 5.0
@@ -499,7 +505,8 @@ def test_submit_sized_reserve_zero_skips_buy(monkeypatch):
 
 def test_submit_sized_reserve_ignores_sells(monkeypatch):
     fake = _FakeRequests(
-        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "100000",
+                                        "cash": "0", "buying_power": "0"}),
          "/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "600",
                                            "market_value": "60000"}])},
         post_resp=_FakeResp(201, {"id": "o2"}))
@@ -521,3 +528,124 @@ def test_submit_sized_reserve_below_min_notional_skips(monkeypatch):
     assert _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
                                   reserve=lambda sym, n: 0.50) == "skipped"
     assert fake.posted == []
+
+
+# ---------------------------------------------------------------------------
+# #124 forward-test gate: clock, account id, windowed activities
+# ---------------------------------------------------------------------------
+
+class _PaginatingRequests:
+    """Serves GET requests from a list of responses per URL prefix, recording requested URLs."""
+
+    def __init__(self, pages_by_prefix: dict[str, list[_FakeResp]]):
+        self._pages = {k: list(v) for k, v in pages_by_prefix.items()}
+        self.requested_urls: list[str] = []
+
+    def get(self, url, headers=None, timeout=None):
+        self.requested_urls.append(url)
+        for prefix, pages in self._pages.items():
+            if prefix in url:
+                if pages:
+                    return pages.pop(0)
+                return _FakeResp(500, text="no more pages configured")
+        return _FakeResp(404, text="not found")
+
+    def post(self, url, headers=None, json=None, timeout=None):  # pragma: no cover
+        return _FakeResp(405, text="unexpected POST")
+
+    def delete(self, url, headers=None, timeout=None):  # pragma: no cover
+        return _FakeResp(405, text="unexpected DELETE")
+
+
+def test_clock_returns_broker_timestamp(monkeypatch):
+    # Happy path: GET /v2/clock returns ISO timestamp string.
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/clock": _FakeResp(200, {"timestamp": "2026-06-11T14:00:00-04:00",
+                                      "is_open": True})}))
+    ts = _broker().clock()
+    assert ts == "2026-06-11T14:00:00-04:00"
+
+
+def test_clock_malformed_body_raises(monkeypatch):
+    # Body missing "timestamp" must raise BrokerError — skewed local clock cannot be silently used.
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/clock": _FakeResp(200, {"is_open": True})}))
+    with pytest.raises(BrokerError, match="missing timestamp"):
+        _broker().clock()
+
+
+def test_account_carries_id(monkeypatch):
+    # account() must surface account_id from the "id" field.
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"id": "abc-123", "equity": "100000",
+                                        "cash": "50000", "buying_power": "150000"})}))
+    acct = _broker().account()
+    assert acct.account_id == "abc-123"
+
+
+def test_account_missing_id_raises(monkeypatch):
+    # Missing "id" must raise — an account without an identity cannot anchor hygiene checks.
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "50000",
+                                        "buying_power": "150000"})}))
+    with pytest.raises(BrokerError, match="missing account id"):
+        _broker().account()
+
+
+def test_account_empty_id_raises(monkeypatch):
+    # Explicitly empty "id" must also raise.
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"id": "", "equity": "100000",
+                                        "cash": "50000", "buying_power": "150000"})}))
+    with pytest.raises(BrokerError, match="missing account id"):
+        _broker().account()
+
+
+def _make_page(n: int, start_idx: int = 0) -> list[dict]:
+    """Return n activity dicts with sequential id fields."""
+    return [{"id": f"act-{start_idx + i}", "activity_type": "FILL"} for i in range(n)]
+
+
+def test_activities_window_paginates(monkeypatch):
+    """Three pages: 100 + 100 + 3 = 203 items; page_token forwarded on calls 2 and 3."""
+    page1 = _make_page(100, start_idx=0)
+    page2 = _make_page(100, start_idx=100)
+    page3 = _make_page(3, start_idx=200)
+    fake = _PaginatingRequests({"/v2/account/activities": [
+        _FakeResp(200, page1),
+        _FakeResp(200, page2),
+        _FakeResp(200, page3),
+    ]})
+    monkeypatch.setattr(ab, "requests", fake)
+    result = _broker().account_activities_window(after="2026-01-01", until="2026-06-11")
+    # All 203 items concatenated in order.
+    assert len(result) == 203
+    assert result[0]["id"] == "act-0"
+    assert result[100]["id"] == "act-100"
+    assert result[200]["id"] == "act-200"
+    # page_token from page1's last item ("act-99") on call 2, from page2's last ("act-199") on 3.
+    assert "page_token=act-99" in fake.requested_urls[1]
+    assert "page_token=act-199" in fake.requested_urls[2]
+
+
+def test_activities_window_fails_closed(monkeypatch):
+    # (a) non-list body raises BrokerError
+    monkeypatch.setattr(ab, "requests", _PaginatingRequests(
+        {"/v2/account/activities": [_FakeResp(200, {"message": "error"})]}))
+    with pytest.raises(BrokerError, match="expected list"):
+        _broker().account_activities_window(after="2026-01-01", until="2026-06-11")
+
+    # (b) a FULL page (100 items) whose last item lacks "id" raises BrokerError
+    full_page_no_id = _make_page(100)
+    full_page_no_id[-1] = {"activity_type": "FILL"}  # last item missing "id"
+    monkeypatch.setattr(ab, "requests", _PaginatingRequests(
+        {"/v2/account/activities": [_FakeResp(200, full_page_no_id)]}))
+    with pytest.raises(BrokerError, match="cannot paginate exhaustively"):
+        _broker().account_activities_window(after="2026-01-01", until="2026-06-11")
+
+    # (c) a non-dict item in the list raises BrokerError
+    mixed_page = _make_page(3) + ["not-a-dict"]
+    monkeypatch.setattr(ab, "requests", _PaginatingRequests(
+        {"/v2/account/activities": [_FakeResp(200, mixed_page)]}))
+    with pytest.raises(BrokerError, match="malformed item"):
+        _broker().account_activities_window(after="2026-01-01", until="2026-06-11")
