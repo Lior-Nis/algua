@@ -1,7 +1,7 @@
 import pandas as pd
 
 from algua.portfolio.construction import top_k_equal_weight
-from algua.strategies.examples import cross_sectional_momentum as csm
+from algua.strategies.momentum import cross_sectional_momentum as csm
 
 
 def _bars(prices_by_symbol: dict[str, list[float]]) -> pd.DataFrame:

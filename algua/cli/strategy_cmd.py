@@ -31,6 +31,13 @@ app.add_typer(strategy_app, name="strategy")
 
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
+
+def family_package_dir(family: str) -> str:
+    """The on-disk package dir name for a family slug. `_FAMILY_RE` allows hyphens but Python
+    packages can't, so hyphens map to underscores. This is the ONE place the slug->dir transform
+    lives (CLI scaffolding + any future doctor check). The registry/kb keep the hyphen slug form."""
+    return family.replace("-", "_")
+
 _TEMPLATE = '''\
 """Strategy: {name}. Author `signal` (cross-sectional scores per symbol); the named construction
 policy in CONFIG turns scores into target weights."""
@@ -75,7 +82,7 @@ def list_() -> None:
 @json_errors()
 def new(
     name: str,
-    family: str = typer.Option(None, "--family", help="thesis family this belongs to"),
+    family: str = typer.Option(None, "--family", help="thesis family this belongs to (required)"),
     derived_from: str = typer.Option(None, "--derived-from", help="parent strategy name"),
     tag: list[str] = typer.Option(None, "--tag", help="tag (repeatable)"),
     author: Author = typer.Option(Author.AGENT, "--author"),
@@ -86,15 +93,20 @@ def new(
 ) -> None:
     """Scaffold a new strategy module + kb doc AND register it (registry owns the metadata)."""
     # --- preflight: validate everything before any write ---
-    if not name.isidentifier() or keyword.iskeyword(name):
+    if not name.isidentifier() or keyword.iskeyword(name) or name.startswith("_"):
         raise ValueError(
-            f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier"
+            f"invalid strategy name {name!r}: must be a valid, non-keyword Python identifier "
+            f"not starting with '_' (the loader reserves `_`-prefixed modules as private/temp, so "
+            f"such a strategy would be registered but unreachable)"
         )
-    if family is not None and not _FAMILY_RE.match(family):
+    if not _FAMILY_RE.match(family or ""):
         raise ValueError(
-            f"invalid family {family!r}: must be a lowercase slug (a-z, 0-9, hyphen)"
+            "--family is required; use a lowercase slug such as 'momentum' "
+            "(a-z, 0-9, hyphen)"
         )
-    path = Path(__file__).parent.parent / "strategies" / "examples" / f"{name}.py"
+    path = (
+        Path(__file__).parent.parent / "strategies" / family_package_dir(family) / f"{name}.py"
+    )
     settings = get_settings()
     doc_path = strategy_doc_path(settings, name)
     if path.exists():
@@ -121,8 +133,17 @@ def new(
         # --- scaffold; roll the registration back on any failure ---
         fam_path: Path = family_doc_path(settings, family) if family else Path("/dev/null")
         fam_created = False
+        # Track whether THIS call introduces the family package dir / its __init__.py, so rollback
+        # can remove them — a failed scaffold must not leave an empty family package in the tree.
+        pkg_dir = path.parent
+        pkg_existed = pkg_dir.exists()
+        init_py = pkg_dir / "__init__.py"
+        init_created = False
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            if not init_py.exists():
+                init_py.write_text("")
+                init_created = True
             path.write_text(_TEMPLATE.format(name=name))
             doc_path.parent.mkdir(parents=True, exist_ok=True)
             doc_path.write_text(
@@ -143,6 +164,20 @@ def new(
             doc_path.unlink(missing_ok=True)
             if fam_created:
                 fam_path.unlink(missing_ok=True)
+            # Remove a family package this call introduced — but ONLY if no OTHER strategy module
+            # appeared in the meantime (e.g. a concurrent `strategy new` into the same fresh
+            # family). Guard the __init__ unlink on the same "no other strategy" condition so we
+            # never strand a sibling's file in a now-non-package dir.
+            others = (
+                [f for f in pkg_dir.glob("*.py") if f.name != "__init__.py"]
+                if pkg_dir.exists()
+                else []
+            )
+            if not others:
+                if init_created:
+                    init_py.unlink(missing_ok=True)
+                if not pkg_existed and pkg_dir.exists() and not any(pkg_dir.iterdir()):
+                    pkg_dir.rmdir()
             raise ValueError(f"scaffold failed for {name!r}: {exc}") from exc
     emit(ok({"name": name, "path": str(path), "doc": str(doc_path), "family_doc": family_doc}))
 

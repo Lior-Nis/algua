@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-import algua.strategies.examples as examples
+import algua.strategies.momentum as momentum_pkg
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import (
     BacktestError,
@@ -54,13 +54,13 @@ def test_example_strategy_exposes_signal_panel_fn() -> None:
 
 
 def test_loader_binds_signal_panel_fn_when_present() -> None:
-    mod_path = Path(examples.__path__[0]) / "_tmp_with_panel.py"
+    mod_path = Path(momentum_pkg.__path__[0]) / "tmp_with_panel.py"
     mod_path.write_text(
         "from typing import Any\n"
         "import pandas as pd\n"
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
-        "CONFIG = StrategyConfig(name='_tmp_with_panel', universe=['AAA'],\n"
+        "CONFIG = StrategyConfig(name='tmp_with_panel', universe=['AAA'],\n"
         "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
         "    construction='equal_weight_positive')\n"
         "def signal(view, params):\n"
@@ -69,7 +69,7 @@ def test_loader_binds_signal_panel_fn_when_present() -> None:
         "    return pd.DataFrame()\n"
     )
     try:
-        strat = load_strategy("_tmp_with_panel")
+        strat = load_strategy("tmp_with_panel")
         assert strat.signal_panel_fn is not None
         assert callable(strat.signal_panel_fn)
     finally:
@@ -77,33 +77,33 @@ def test_loader_binds_signal_panel_fn_when_present() -> None:
 
 
 def test_loader_signal_panel_fn_none_when_module_omits_it() -> None:
-    mod_path = Path(examples.__path__[0]) / "_tmp_no_panel.py"
+    mod_path = Path(momentum_pkg.__path__[0]) / "tmp_no_panel.py"
     mod_path.write_text(
         "from typing import Any\n"
         "import pandas as pd\n"
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
-        "CONFIG = StrategyConfig(name='_tmp_no_panel', universe=['AAA'],\n"
+        "CONFIG = StrategyConfig(name='tmp_no_panel', universe=['AAA'],\n"
         "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
         "    construction='equal_weight_positive')\n"
         "def signal(view, params):\n"
         "    return pd.Series(dtype='float64')\n"
     )
     try:
-        strat = load_strategy("_tmp_no_panel")
+        strat = load_strategy("tmp_no_panel")
         assert strat.signal_panel_fn is None
     finally:
         mod_path.unlink()
 
 
 def test_loader_rejects_non_callable_signal_panel() -> None:
-    mod_path = Path(examples.__path__[0]) / "_tmp_bad_panel.py"
+    mod_path = Path(momentum_pkg.__path__[0]) / "tmp_bad_panel.py"
     mod_path.write_text(
         "from typing import Any\n"
         "import pandas as pd\n"
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
-        "CONFIG = StrategyConfig(name='_tmp_bad_panel', universe=['AAA'],\n"
+        "CONFIG = StrategyConfig(name='tmp_bad_panel', universe=['AAA'],\n"
         "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
         "    construction='equal_weight_positive')\n"
         "def signal(view, params):\n"
@@ -112,7 +112,7 @@ def test_loader_rejects_non_callable_signal_panel() -> None:
     )
     try:
         with pytest.raises(Exception, match="signal_panel"):
-            load_strategy("_tmp_bad_panel")
+            load_strategy("tmp_bad_panel")
     finally:
         mod_path.unlink()
 
