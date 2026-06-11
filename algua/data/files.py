@@ -4,7 +4,6 @@ import csv
 import functools
 import hashlib
 import os
-import shutil
 import struct
 import tempfile
 from pathlib import Path
@@ -41,12 +40,6 @@ def count_tabular_rows(path: Path) -> int | None:
     if suffix == ".parquet":
         return pq.ParquetFile(path).metadata.num_rows
     return None
-
-
-def copy_snapshot(source_path: Path, data_dir: Path, relative_path: Path) -> None:
-    target_path = data_dir / relative_path
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source_path, target_path)
 
 
 def frame_to_parquet_bytes(frame: pd.DataFrame) -> bytes:

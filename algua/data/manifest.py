@@ -47,11 +47,6 @@ class SnapshotManifest:
                 return rec
         return None
 
-    def append(self, rec: SnapshotRecord) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec.to_dict(), sort_keys=True) + "\n")
-
     def append_if_absent(self, rec: SnapshotRecord) -> SnapshotRecord:
         """Append `rec` unless a record with its snapshot_id is already committed; return the
         committed record (the caller's `rec`, or the concurrent winner's). Repairs any

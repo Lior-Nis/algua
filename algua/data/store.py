@@ -17,13 +17,13 @@ import pandas as pd
 from algua.data.files import (
     BARS_STREAMED_HASH_ALGO,
     compose_bars_symbol_hash,
-    copy_snapshot,
     count_tabular_rows,
     frame_to_parquet_bytes,
     logical_bars_hash,
     read_partitioned_bars,
     sha256_bytes,
     sha256_file,
+    validate_partitioned_bars_dir,
     write_bytes_snapshot,
     write_partitioned_bars,
 )
@@ -75,6 +75,12 @@ class DataStore:
         universe: str | None = None,
         source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
+        """Register a local file as an immutable snapshot via staged copy + atomic publish.
+
+        Note: `snapshot_id` excludes the source filename but `data_path` includes it — a
+        same-content-different-filename race resolves to the winner's canonical record; the
+        loser's published file may remain as a benign orphan in the same content-addressed
+        snapshot dir; reads always resolve via `record.data_path`."""
         source_path = file_path.expanduser()
         if not source_path.is_file():
             raise FileNotFoundError(str(file_path))
@@ -93,30 +99,41 @@ class DataStore:
             universe=universe,
             source_metadata=source_metadata,
         )
-        content_hash = sha256_file(source_path)
-        row_count = count_tabular_rows(source_path)
-        snapshot_id = _snapshot_id(metadata, content_hash)
+        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # Copy the external source ONCE, then hash/count THE STAGING COPY and publish that
+            # exact artifact (#158): a source mutating mid-ingest can no longer commit bytes
+            # that don't match content_hash.
+            staged = staging_dir / source_path.name
+            shutil.copy2(source_path, staged)
+            content_hash = sha256_file(staged)
+            row_count = count_tabular_rows(staged)
+            snapshot_id = _snapshot_id(metadata, content_hash)
 
-        existing = self.manifest.find(snapshot_id)
-        if existing is not None:
-            return existing
+            existing = self.manifest.find(snapshot_id)
+            if existing is not None:
+                return existing
 
-        relative_path = (
-            Path("snapshots") / _path_part(metadata.dataset) / snapshot_id / source_path.name
-        )
-        copy_snapshot(source_path, self.data_dir, relative_path)
+            relative_path = (
+                Path("snapshots") / _path_part(metadata.dataset) / snapshot_id / source_path.name
+            )
+            target = self.data_dir / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, target)
 
-        rec = SnapshotRecord(
-            snapshot_id=snapshot_id,
-            metadata=metadata,
-            row_count=row_count,
-            content_hash=content_hash,
-            data_path=relative_path,
-            created_at=datetime.now(UTC).isoformat(),
-            storage_format=source_path.suffix.lower().lstrip(".") or "file",
-        )
-        self.manifest.append(rec)
-        return rec
+            rec = SnapshotRecord(
+                snapshot_id=snapshot_id,
+                metadata=metadata,
+                row_count=row_count,
+                content_hash=content_hash,
+                data_path=relative_path,
+                created_at=datetime.now(UTC).isoformat(),
+                storage_format=source_path.suffix.lower().lstrip(".") or "file",
+            )
+            return self.manifest.append_if_absent(rec)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     def ingest_bars(
         self,
@@ -154,9 +171,6 @@ class DataStore:
             return existing
 
         relative_path = Path("snapshots") / metadata.dataset / snapshot_id
-        write_partitioned_bars(
-            canon.sort_values(["symbol", "ts"]), self.data_dir / relative_path
-        )
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,
             metadata=metadata,
@@ -166,8 +180,43 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet_dataset",
         )
-        self.manifest.append(rec)
-        return rec
+        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            write_partitioned_bars(canon.sort_values(["symbol", "ts"]), staging_dir)
+            return self._commit_bars_dir(
+                rec, staging_dir, expected_symbols={str(s) for s in canon["symbol"].unique()}
+            )
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _commit_bars_dir(
+        self, rec: SnapshotRecord, staging_dir: Path, *, expected_symbols: set[str]
+    ) -> SnapshotRecord:
+        """Atomically publish a fully-written staging dir at `rec.data_path` and commit the
+        manifest record (#158). On rename collision (target dir already exists): if the id is
+        already committed, return that record; otherwise VALIDATE the existing dir (legacy
+        direct-write ingest could have left a partial dir) and adopt it. Fails closed on
+        validation mismatch — never deletes the suspect dir. The caller owns `staging_dir`
+        creation and `finally`-cleanup."""
+        target = self.data_dir / rec.data_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(staging_dir, target)
+        except OSError as exc:
+            # Adopt ONLY the expected "target dir already exists and is non-empty" failure.
+            # Re-raise anything else (permission, I/O, cross-device).
+            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST) or not target.is_dir():
+                raise
+            found = self.manifest.find(rec.snapshot_id)
+            if found is not None:
+                return found
+            validate_partitioned_bars_dir(
+                target,
+                expected_row_count=rec.row_count or 0,
+                expected_symbols=expected_symbols,
+            )
+        return self.manifest.append_if_absent(rec)
 
     def ingest_universe(
         self,
@@ -228,8 +277,7 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet",
         )
-        self.manifest.append(rec)
-        return rec
+        return self.manifest.append_if_absent(rec)
 
     def clear_staging(self, *, max_age_seconds: float = 3600.0) -> None:
         """Remove stale streamed-import staging dirs (crash residue) older than `max_age_seconds`.
@@ -269,11 +317,13 @@ class DataStore:
         written as its own `symbol=<SYM>/` partition under a UUID staging dir (one chunk in memory
         at a time -> bounded RAM). The per-symbol logical leaf hashes are composed (sorted by
         symbol, so order-independent) into the snapshot `content_hash`; the snapshot_id is content-
-        addressed. Commit is adopt-on-target-exists: dedup on snapshot_id (idempotent re-ingest),
-        then `os.replace` the staging dir onto the immutable snapshot dir — if that target dir
-        already exists (an orphan from a crash between rename and manifest-append, or a concurrent
-        winner) re-check the manifest and otherwise adopt it. The manifest record is appended last,
-        with `storage_format="parquet_dataset"` so `read_bars` serves it with pushdown.
+        addressed. Commit goes through the shared `_commit_bars_dir` protocol (#158): dedup on
+        snapshot_id (idempotent re-ingest), then `os.replace` the staging dir onto the immutable
+        snapshot dir — if that target dir already exists (an orphan from a crash between rename and
+        manifest-append, or a concurrent winner) re-check the manifest, otherwise VALIDATE the
+        existing dir (fail closed on a partial/foreign dir) and adopt it. The manifest record is
+        committed last via `append_if_absent`, with `storage_format="parquet_dataset"` so
+        `read_bars` serves it with pushdown.
 
         Cross-chunk integrity: each symbol must appear in exactly one chunk — the method rejects a
         symbol that recurs in a later chunk (so each `symbol=<SYM>/` partition is written once and
@@ -352,25 +402,10 @@ class DataStore:
             content_hash = compose_bars_symbol_hash(leaves)
             snapshot_id = _snapshot_id(metadata, content_hash)
 
-            relative_path = Path("snapshots") / metadata.dataset / snapshot_id  # a DIR now
-            target = self.data_dir / relative_path
+            relative_path = Path("snapshots") / metadata.dataset / snapshot_id  # a DIR
             existing = self.manifest.find(snapshot_id)
             if existing is not None:
                 return existing
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.replace(staging_dir, target)
-            except OSError as exc:
-                # Adopt ONLY the expected "target dir already exists and is non-empty" failure (an
-                # orphan from a crash between rename and manifest-append, or a concurrent winner).
-                # Re-raise anything else (permission, I/O, cross-device) — those are not adoptable.
-                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST) or not target.is_dir():
-                    raise
-                found = self.manifest.find(snapshot_id)
-                if found is not None:
-                    return found
-                # else: adopt the orphan target dir (content-addressed → identical content) by
-                # falling through to append the manifest record
             rec = SnapshotRecord(
                 snapshot_id=snapshot_id,
                 metadata=metadata,
@@ -380,8 +415,7 @@ class DataStore:
                 created_at=datetime.now(UTC).isoformat(),
                 storage_format="parquet_dataset",
             )
-            self.manifest.append(rec)
-            return rec
+            return self._commit_bars_dir(rec, staging_dir, expected_symbols=seen_symbols_set)
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -478,8 +512,7 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet",
         )
-        self.manifest.append(rec)
-        return rec
+        return self.manifest.append_if_absent(rec)
 
     def read_fundamentals(
         self, snapshot_id: str, *, symbols: list[str] | None = None
