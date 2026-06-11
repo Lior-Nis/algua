@@ -162,6 +162,16 @@ def test_trade_tick_old_name_removed(monkeypatch):
     assert result.exit_code != 0
 
 
+class _MinimalBroker:
+    """Minimal broker stub with the account/clock methods trade-tick now requires."""
+    def account(self):
+        return AccountState(equity=99000.0, cash=10000.0, buying_power=89000.0,
+                            account_id="test-acct")
+
+    def clock(self):
+        return "2023-06-01T14:00:00+00:00"
+
+
 def test_trade_tick_submits_and_persists(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
@@ -246,16 +256,6 @@ def test_paper_flatten_close_failure_stays_tripped(monkeypatch):
     assert payload["ok"] is False and payload["kill_switch"] == "tripped"
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
-
-
-class _MinimalBroker:
-    """Minimal broker stub with the account/clock methods trade-tick now requires."""
-    def account(self):
-        return AccountState(equity=99000.0, cash=10000.0, buying_power=89000.0,
-                            account_id="test-acct")
-
-    def clock(self):
-        return "2023-06-01T14:00:00+00:00"
 
 
 def test_trade_tick_persists_snapshot(monkeypatch):
@@ -564,7 +564,9 @@ def test_trade_tick_persists_provenance(monkeypatch):
     _to_paper()
 
     name = "cross_sectional_momentum"
-    clock_ts = "2026-06-11T14:00:00+00:00"
+    # Venue clock reports an EDT offset: the stamp must be the converted UTC instant, pinned as a
+    # literal below — never recompute it with the same expression the implementation uses.
+    clock_ts = "2026-06-11T10:00:00-04:00"
     fake_result = TickResult(
         decision_ts=datetime(2026, 6, 11, 14, 0, 0, tzinfo=UTC),
         target_weights={"AAA": 1.0},
@@ -605,14 +607,22 @@ def test_trade_tick_persists_provenance(monkeypatch):
     assert snap["account_id"] == "acct-xyz"
     assert snap["cash"] == 10_000.0
     assert snap["clock_source"] == "broker"
-    # tick_ts is the broker clock ts, normalized to UTC ISO
-    import pandas as pd
-    expected_tick_ts = pd.Timestamp(clock_ts).tz_convert("UTC").isoformat()
-    assert snap["tick_ts"] == expected_tick_ts
+    # tick_ts is the broker clock ts (10:00-04:00), normalized to UTC: hour shifted, +00:00 offset
+    assert snap["tick_ts"] == "2026-06-11T14:00:00+00:00"
 
 
-def test_trade_tick_broker_clock_failure_falls_back_to_local(monkeypatch):
-    """If broker.clock() raises BrokerError, clock_source='local' and tick is still recorded."""
+def _raise_broker_error():
+    raise BrokerError("clock unavailable")
+
+
+@pytest.mark.parametrize("bad_clock", [
+    _raise_broker_error,                      # venue clock endpoint failed
+    lambda: "2026-06-11T14:00:00",            # tz-naive ts: tz_convert raises TypeError
+    lambda: "not-a-timestamp",                # malformed ts: pd.Timestamp raises ValueError
+], ids=["broker_error", "naive_ts", "malformed_ts"])
+def test_trade_tick_unusable_broker_clock_falls_back_to_local(monkeypatch, bad_clock):
+    """Any unusable venue clock — endpoint failure, naive ts, garbage ts — falls back to
+    clock_source='local' and the tick is still recorded (never crash after orders went out)."""
     from contextlib import closing
 
     from algua.config.settings import get_settings
@@ -635,7 +645,7 @@ def test_trade_tick_broker_clock_failure_falls_back_to_local(monkeypatch):
 
     class _ClockFailBroker:
         def clock(self):
-            raise BrokerError("clock unavailable")
+            return bad_clock()
 
         def account(self):
             return AccountState(equity=50_000.0, cash=10_000.0, buying_power=40_000.0,
@@ -659,8 +669,6 @@ def test_trade_tick_broker_clock_failure_falls_back_to_local(monkeypatch):
 
 def test_trade_tick_allowed_at_forward_tested_stage(monkeypatch):
     """A strategy at stage forward_tested (human transition from paper) can still run trade-tick."""
-
-
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
@@ -681,15 +689,7 @@ def test_trade_tick_allowed_at_forward_tested_stage(monkeypatch):
         peak_equity=50_000.0,
     )
 
-    class _FakeBroker:
-        def clock(self):
-            return "2026-06-11T14:00:00+00:00"
-
-        def account(self):
-            return AccountState(equity=50_000.0, cash=10_000.0, buying_power=40_000.0,
-                                account_id="acct-xyz")
-
-    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FakeBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
 

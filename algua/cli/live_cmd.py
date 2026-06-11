@@ -9,7 +9,7 @@ from algua.cli._common import ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.cli.paper_cmd import _breach_payload, _trip
+from algua.cli.paper_cmd import _breach_payload, _tick_clock, _trip
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization
@@ -182,14 +182,7 @@ def _run_strategy_tick(  # noqa: PLR0913
         return {"strategy": name, "skipped": str(exc)}
     if result.peak_equity is not None:
         update_nav_peak(conn, name, result.peak_equity)
-        try:
-            raw_ts = broker.clock()
-            import pandas as pd
-            tick_ts = str(pd.Timestamp(raw_ts).tz_convert("UTC").isoformat())
-            clock_source = "broker"
-        except BrokerError:
-            tick_ts = datetime.now(UTC).isoformat()
-            clock_source = "local"
+        tick_ts, clock_source = _tick_clock(broker.clock)
         acct = broker.account()
         record_tick_snapshot(
             conn, name,
@@ -201,7 +194,7 @@ def _run_strategy_tick(  # noqa: PLR0913
             lane="live", strategy_id=rec.id,
             code_hash=identity.code_hash, config_hash=identity.config_hash,
             dependency_hash=identity.dependency_hash,
-            account_id=acct.account_id, cash=float(acct.cash),
+            account_id=acct.account_id, cash=acct.cash,
             clock_source=clock_source,
         )
     audit_append(conn, actor="agent", action="live_trade_tick",

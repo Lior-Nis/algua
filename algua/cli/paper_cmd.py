@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -86,6 +87,19 @@ def _load_gated_strategy(
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
     return strategy, rec
+
+
+def _tick_clock(clock: Callable[[], str]) -> tuple[str, str]:
+    """``(tick_ts, clock_source)`` for the evidence-tick stamp: the venue's clock normalized to a
+    UTC ISO timestamp (``clock_source="broker"``), or the local clock (``clock_source="local"``)
+    when the venue's is unusable. ValueError/TypeError cover a malformed or tz-naive venue
+    timestamp — that is a clock failure too, and it must never kill the tick record after orders
+    already went out. Shared by the paper and live lanes so their stamping semantics cannot drift.
+    """
+    try:
+        return pd.Timestamp(clock()).tz_convert("UTC").isoformat(), "broker"
+    except (BrokerError, ValueError, TypeError):
+        return datetime.now(UTC).isoformat(), "local"
 
 
 def _breach_payload(error: str, **extra: object) -> dict:
@@ -322,13 +336,7 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
-            try:
-                raw_ts = broker.clock()
-                tick_ts = str(pd.Timestamp(raw_ts).tz_convert("UTC").isoformat())
-                clock_source = "broker"
-            except BrokerError:
-                tick_ts = datetime.now(UTC).isoformat()
-                clock_source = "local"
+            tick_ts, clock_source = _tick_clock(broker.clock)
             record_tick_snapshot(
                 conn, name,
                 tick_ts=tick_ts,

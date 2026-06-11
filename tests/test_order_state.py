@@ -34,9 +34,7 @@ def _conn(tmp_path):
 
 @pytest.fixture()
 def conn(tmp_path):
-    c = connect(tmp_path / "r.db")
-    migrate(c)
-    return c
+    return _conn(tmp_path)
 
 
 def test_persist_run_writes_orders_and_fills(tmp_path):
