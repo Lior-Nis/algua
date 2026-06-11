@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from algua.data.models import SnapshotRecord
+
+
+class ManifestLockReplacedError(RuntimeError):
+    """The sidecar manifest lock file was replaced/unlinked externally.
+
+    This is environmental corruption (something deleted `manifest.jsonl.lock` out from under
+    live writers — the lock file must NEVER be removed), not an ingest failure."""
+
+
+_LOCK_ACQUIRE_RETRIES = 5
+_REPAIR_TEMP_PREFIX = "manifest-repair-"
 
 
 class SnapshotManifest:
@@ -37,6 +51,87 @@ class SnapshotManifest:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec.to_dict(), sort_keys=True) + "\n")
+
+    def append_if_absent(self, rec: SnapshotRecord) -> SnapshotRecord:
+        """Append `rec` unless a record with its snapshot_id is already committed; return the
+        committed record (the caller's `rec`, or the concurrent winner's). Repairs any
+        uncommitted tail (crash residue) before appending. The ONLY manifest write path."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = self._acquire_lock()
+        try:
+            raw = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+            committed = self._committed_prefix(raw)
+            for existing in self._parse_committed(committed):
+                if existing.snapshot_id == rec.snapshot_id:
+                    return existing
+            self._clean_stale_repair_temps()
+            if committed != raw:
+                self._repair(committed)
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec.to_dict(), sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            return rec
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    def _acquire_lock(self) -> int:
+        """Blocking LOCK_EX on the sidecar lock file via a FRESH fd per call (flock is
+        per-open-file-description: a cached/shared fd would silently self-grant). After
+        acquiring, verify the path still names the locked inode — a mismatch means something
+        replaced the lock file externally; retry bounded, then fail distinctly."""
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        for _ in range(_LOCK_ACQUIRE_RETRIES):
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                fd_stat = os.fstat(fd)
+                try:
+                    path_stat = os.stat(lock_path)
+                except FileNotFoundError:
+                    path_stat = None
+                if path_stat is not None and (
+                    (path_stat.st_dev, path_stat.st_ino) == (fd_stat.st_dev, fd_stat.st_ino)
+                ):
+                    return fd
+            except BaseException:
+                os.close(fd)
+                raise
+            os.close(fd)
+        raise ManifestLockReplacedError(
+            f"lock file {lock_path} was replaced externally while acquiring; it must never "
+            "be deleted (see SnapshotManifest contract)"
+        )
+
+    def _repair(self, committed: str) -> None:
+        """Replace the manifest with its committed prefix via temp + atomic rename. Never
+        truncate in place: a lock-free reader mid-read on a shrinking inode could splice
+        old+new bytes into a malformed non-final line; the rename keeps the old inode
+        complete, so a reader sees the whole old or whole new file."""
+        temp_fd, temp_name = tempfile.mkstemp(
+            dir=self.path.parent, prefix=_REPAIR_TEMP_PREFIX, suffix=".tmp"
+        )
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as fh:
+                fh.write(committed)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temp_name, self.path)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+    def _clean_stale_repair_temps(self) -> None:
+        """Best-effort sweep of repair temps left by a crashed writer (we hold the lock, so
+        no live writer owns one)."""
+        for stale in self.path.parent.glob(f"{_REPAIR_TEMP_PREFIX}*"):
+            try:
+                stale.unlink()
+            except OSError:
+                continue
 
     def _read_all(self) -> list[SnapshotRecord]:
         if not self.path.exists():

@@ -66,3 +66,88 @@ def test_read_skips_blank_committed_lines(tmp_path):
     )
     recs = SnapshotManifest(manifest_path).list_records()
     assert [r.snapshot_id for r in recs] == ["aaa1", "bbb2"]
+
+
+def test_append_if_absent_appends_and_returns_rec(tmp_path):
+    manifest = SnapshotManifest(tmp_path / "manifest.jsonl")
+    rec = make_record("aaa1")
+    out = manifest.append_if_absent(rec)
+    assert out is rec
+    assert [r.snapshot_id for r in manifest.list_records()] == ["aaa1"]
+
+
+def test_append_if_absent_returns_existing_winner(tmp_path):
+    # Loser-returns-winner: the FIRST committed record is canonical; the second call's
+    # rec (different created_at) is discarded.
+    manifest = SnapshotManifest(tmp_path / "manifest.jsonl")
+    winner = make_record("aaa1", created_at="2026-01-01T00:00:00+00:00")
+    loser = make_record("aaa1", created_at="2026-01-02T00:00:00+00:00")
+    assert manifest.append_if_absent(winner) is winner
+    out = manifest.append_if_absent(loser)
+    assert out.created_at == winner.created_at
+    assert len(manifest.list_records()) == 1
+
+
+def test_append_if_absent_repairs_torn_tail(tmp_path):
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        committed_line(make_record("aaa1")) + '{"snapshot_id": "torn', encoding="utf-8"
+    )
+    manifest = SnapshotManifest(manifest_path)
+    manifest.append_if_absent(make_record("bbb2"))
+    raw = manifest_path.read_text(encoding="utf-8")
+    assert "torn" not in raw
+    assert raw.endswith("\n")
+    assert [r.snapshot_id for r in manifest.list_records()] == ["aaa1", "bbb2"]
+
+
+def test_append_if_absent_repairs_parseable_uncommitted_tail(tmp_path):
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text(
+        committed_line(make_record("aaa1")) + committed_line(make_record("ccc3")).rstrip("\n"),
+        encoding="utf-8",
+    )
+    manifest = SnapshotManifest(manifest_path)
+    manifest.append_if_absent(make_record("bbb2"))
+    recs = manifest.list_records()
+    # the uncommitted ccc3 tail was dropped by repair, not resurrected
+    assert [r.snapshot_id for r in recs] == ["aaa1", "bbb2"]
+
+
+def test_append_if_absent_cleans_stale_repair_temps(tmp_path):
+    manifest_path = tmp_path / "manifest.jsonl"
+    stale = tmp_path / "manifest-repair-deadbeef.tmp"
+    stale.write_text("crash residue", encoding="utf-8")
+    SnapshotManifest(manifest_path).append_if_absent(make_record("aaa1"))
+    assert not stale.exists()
+
+
+def test_append_if_absent_creates_lock_file_and_never_deletes_it(tmp_path):
+    manifest = SnapshotManifest(tmp_path / "manifest.jsonl")
+    manifest.append_if_absent(make_record("aaa1"))
+    assert (tmp_path / "manifest.jsonl.lock").exists()
+    manifest.append_if_absent(make_record("bbb2"))
+    assert (tmp_path / "manifest.jsonl.lock").exists()
+
+
+def test_acquire_raises_distinct_error_when_lock_replaced(tmp_path, monkeypatch):
+    # Force a permanent dev/ino mismatch: os.stat on the lock path reports a different inode
+    # than the held fd. The bounded retry loop must exhaust and raise the distinct error.
+    import os as _os
+
+    from algua.data.manifest import ManifestLockReplacedError
+
+    manifest = SnapshotManifest(tmp_path / "manifest.jsonl")
+    real_stat = _os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path) == str(tmp_path / "manifest.jsonl.lock"):
+            fake = list(result)
+            fake[1] = result.st_ino + 1  # st_ino is index 1
+            return _os.stat_result(fake)
+        return result
+
+    monkeypatch.setattr(_os, "stat", fake_stat)
+    with pytest.raises(ManifestLockReplacedError):
+        manifest.append_if_absent(make_record("aaa1"))
