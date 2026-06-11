@@ -36,13 +36,13 @@ def _advance_to_forward_tested(repo, name):
 
 
 def test_live_requires_approval(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     with pytest.raises(TransitionError):
         transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
 
 
 def test_live_requires_human_actor(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     with pytest.raises(TransitionError):
         transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.AGENT)
@@ -57,7 +57,7 @@ def test_live_succeeds_with_human_and_recorded_approval(repo):
 
 def test_string_live_engages_gate(repo):
     # Passing the raw string "live" (not Stage.LIVE) must still engage the gate.
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     with pytest.raises(TransitionError):
         transition_strategy(repo, STRATEGY, "live", Actor.HUMAN)
 
@@ -72,7 +72,7 @@ def test_string_live_succeeds_with_approval(repo):
 def test_approval_binds_to_real_source_not_caller_strings(repo):
     # #79: a constant hash supplied at approve time cannot satisfy the gate, because the
     # approval stores the *recomputed* source hash and the gate recomputes it again.
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     rec = repo.get(STRATEGY)
     # An attacker manually inserts a constant-hash approval row, mimicking "approve --code-hash X".
     repo.record_approval(rec.id, "constant", "constant", "constant", "attacker")
@@ -137,7 +137,7 @@ def test_dependency_change_invalidates_prior_approval(repo, monkeypatch):
     # the dependency_hash source changes. We monkeypatch the SHARED dependency-hash function.
     from algua.provenance import lockfile
 
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     rec = repo.get(STRATEGY)
     code_hash, config_hash, dependency_hash = compute_artifact_hashes(STRATEGY)

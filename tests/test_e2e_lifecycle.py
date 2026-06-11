@@ -70,12 +70,18 @@ def test_full_research_lifecycle_to_shortlist_and_live_wall(capsys):
     assert code == 0, payload
     assert _stage(capsys) == "paper"
 
-    # paper -> live by an agent is the hard wall: it must fail as JSON, leaving the stage at paper.
+    # paper -> forward_tested: a human must advance to forward_tested before the live gate.
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "forward_tested", "--actor", "human", "--reason", "e2e fwd test")
+    assert code == 0, payload
+    assert _stage(capsys) == "forward_tested"
+
+    # forward_tested -> live by an agent is the hard wall: fails, stage stays forward_tested.
     code, payload = _run(capsys, "registry", "transition", STRATEGY,
                          "--to", "live", "--actor", "agent", "--reason", "should be blocked")
     assert code == 1
     assert payload["ok"] is False
-    assert _stage(capsys) == "paper"
+    assert _stage(capsys) == "forward_tested"
 
 
 @pytest.mark.skipif(not ALGUA_BIN.exists(), reason="algua console script not installed")
