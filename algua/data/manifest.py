@@ -17,7 +17,7 @@ class ManifestLockReplacedError(RuntimeError):
 
 
 _LOCK_ACQUIRE_RETRIES = 5
-_REPAIR_TEMP_PREFIX = "manifest-repair-"
+_REPAIR_TEMP_SUFFIX = ".repair-"
 
 
 class SnapshotManifest:
@@ -59,9 +59,9 @@ class SnapshotManifest:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = self._acquire_lock()
         try:
-            raw = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
+            raw = self.path.read_bytes() if self.path.exists() else b""
             committed = self._committed_prefix(raw)
-            for existing in self._parse_committed(committed):
+            for existing in self._parse_committed(committed.decode("utf-8")):
                 if existing.snapshot_id == rec.snapshot_id:
                     return existing
             self._clean_stale_repair_temps()
@@ -104,16 +104,16 @@ class SnapshotManifest:
             "be deleted (see SnapshotManifest contract)"
         )
 
-    def _repair(self, committed: str) -> None:
+    def _repair(self, committed: bytes) -> None:
         """Replace the manifest with its committed prefix via temp + atomic rename. Never
         truncate in place: a lock-free reader mid-read on a shrinking inode could splice
         old+new bytes into a malformed non-final line; the rename keeps the old inode
         complete, so a reader sees the whole old or whole new file."""
         temp_fd, temp_name = tempfile.mkstemp(
-            dir=self.path.parent, prefix=_REPAIR_TEMP_PREFIX, suffix=".tmp"
+            dir=self.path.parent, prefix=f"{self.path.name}{_REPAIR_TEMP_SUFFIX}", suffix=".tmp"
         )
         try:
-            with os.fdopen(temp_fd, "w", encoding="utf-8") as fh:
+            with os.fdopen(temp_fd, "wb") as fh:
                 fh.write(committed)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -127,7 +127,7 @@ class SnapshotManifest:
     def _clean_stale_repair_temps(self) -> None:
         """Best-effort sweep of repair temps left by a crashed writer (we hold the lock, so
         no live writer owns one)."""
-        for stale in self.path.parent.glob(f"{_REPAIR_TEMP_PREFIX}*"):
+        for stale in self.path.parent.glob(f"{self.path.name}{_REPAIR_TEMP_SUFFIX}*"):
             try:
                 stale.unlink()
             except OSError:
@@ -136,20 +136,25 @@ class SnapshotManifest:
     def _read_all(self) -> list[SnapshotRecord]:
         if not self.path.exists():
             return []
-        raw = self.path.read_text(encoding="utf-8")
-        return self._parse_committed(self._committed_prefix(raw))
+        raw = self.path.read_bytes()
+        return self._parse_committed(self._committed_prefix(raw).decode("utf-8"))
 
     @staticmethod
-    def _committed_prefix(raw: str) -> str:
-        """Newline is the commit marker: everything after the last "\\n" (a crash-torn or
-        in-flight append) is uncommitted and dropped, EVEN IF it parses as JSON."""
-        cut = raw.rfind("\n")
-        return raw[: cut + 1] if cut >= 0 else ""
+    def _committed_prefix(raw: bytes) -> bytes:
+        """Newline is the commit marker: everything after the last b"\\n" (a crash-torn or
+        in-flight append) is uncommitted and dropped, EVEN IF it parses as JSON.
+
+        The cut must happen on BYTES, not decoded text: if the file has a torn tail that
+        splits a multi-byte UTF-8 sequence, decoding first raises UnicodeDecodeError before
+        the tail can be dropped, defeating self-healing. We cut at the last b"\\n", then
+        decode only the committed prefix (which is guaranteed to be complete UTF-8 lines)."""
+        cut = raw.rfind(b"\n")
+        return raw[: cut + 1] if cut >= 0 else b""
 
     @staticmethod
     def _parse_committed(committed: str) -> list[SnapshotRecord]:
         records: list[SnapshotRecord] = []
-        for line in committed.splitlines():
+        for line in committed.split("\n"):
             if not line.strip():
                 continue
             # A committed (newline-terminated) line that fails to parse is real corruption.

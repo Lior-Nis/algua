@@ -116,7 +116,7 @@ def test_append_if_absent_repairs_parseable_uncommitted_tail(tmp_path):
 
 def test_append_if_absent_cleans_stale_repair_temps(tmp_path):
     manifest_path = tmp_path / "manifest.jsonl"
-    stale = tmp_path / "manifest-repair-deadbeef.tmp"
+    stale = tmp_path / "manifest.jsonl.repair-deadbeef.tmp"
     stale.write_text("crash residue", encoding="utf-8")
     SnapshotManifest(manifest_path).append_if_absent(make_record("aaa1"))
     assert not stale.exists()
@@ -151,3 +151,44 @@ def test_acquire_raises_distinct_error_when_lock_replaced(tmp_path, monkeypatch)
     monkeypatch.setattr(_os, "stat", fake_stat)
     with pytest.raises(ManifestLockReplacedError):
         manifest.append_if_absent(make_record("aaa1"))
+
+
+def test_entire_content_is_uncommitted_single_line_no_newline(tmp_path):
+    # A manifest whose ENTIRE content is one uncommitted line (no newline anywhere).
+    # list_records() must return [] and append_if_absent must repair to empty then append.
+    manifest_path = tmp_path / "manifest.jsonl"
+    uncommitted = make_record("zzz9")
+    manifest_path.write_bytes(
+        json.dumps(uncommitted.to_dict(), sort_keys=True).encode("utf-8")
+        # no trailing newline — never committed
+    )
+    manifest = SnapshotManifest(manifest_path)
+    assert manifest.list_records() == []
+    new_rec = make_record("aaa1")
+    out = manifest.append_if_absent(new_rec)
+    assert out is new_rec
+    recs = manifest.list_records()
+    # zzz9 was uncommitted and must NOT appear; only the newly appended aaa1 is present
+    assert [r.snapshot_id for r in recs] == ["aaa1"]
+
+
+def test_torn_multi_byte_utf8_tail_drops_without_raising(tmp_path):
+    # A torn tail that splits a multi-byte UTF-8 character must be silently dropped.
+    # "é" encodes as b"\xc3\xa9"; writing only the first byte (b"\xc3") after a committed
+    # line simulates an OS crash mid-write of a multi-byte sequence.
+    manifest_path = tmp_path / "manifest.jsonl"
+    committed = make_record("aaa1")
+    manifest_path.write_bytes(
+        json.dumps(committed.to_dict(), sort_keys=True).encode("utf-8")
+        + b"\n"
+        + b"\xc3"  # first byte of "é" — torn tail, not a complete UTF-8 sequence
+    )
+    # Reading must not raise UnicodeDecodeError
+    manifest = SnapshotManifest(manifest_path)
+    recs = manifest.list_records()
+    assert [r.snapshot_id for r in recs] == ["aaa1"]
+    # append_if_absent must repair the torn tail and append successfully
+    new_rec = make_record("bbb2")
+    out = manifest.append_if_absent(new_rec)
+    assert out is new_rec
+    assert [r.snapshot_id for r in manifest.list_records()] == ["aaa1", "bbb2"]
