@@ -157,7 +157,7 @@ def test_go_live_with_signature_but_no_pending_challenge(tmp_path, monkeypatch):
     """Presenting a signature without a prior challenge must fail."""
 
     strategy = "cross_sectional_momentum"
-    _advance_to_paper(strategy)
+    _advance_to_forward_tested(strategy)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -172,7 +172,7 @@ def test_go_live_with_signature_but_no_pending_challenge(tmp_path, monkeypatch):
                                  "--actor", "human", "--signature", str(sig_file)])
     assert result.exit_code != 0 or json.loads(result.stdout).get("ok") is False
     show = json.loads(runner.invoke(app, ["registry", "show", strategy]).stdout)
-    assert show["stage"] == "paper"
+    assert show["stage"] == "forward_tested"
 
 
 def test_unknown_strategy_emits_json_error():
@@ -261,12 +261,6 @@ def test_enroll_approver_rejects_bad_principal(tmp_path, monkeypatch):
 # Go-live guard helpers (Task 5: requires allocation + ≤1 live strategy)
 # ---------------------------------------------------------------------------
 
-def _seed_paper(monkeypatch, tmp_path, name: str) -> str:
-    """Register a strategy and advance it to the paper stage; return its name."""
-    _advance_to_paper(name)
-    return name
-
-
 def _seed_forward_tested(monkeypatch, tmp_path, name: str) -> str:
     """Register a strategy and advance it to the forward_tested stage; return its name."""
     _advance_to_forward_tested(name)
@@ -294,8 +288,8 @@ def _allocate(monkeypatch, tmp_path, name: str, capital: float) -> None:
 
 
 def test_go_live_requires_allocation(monkeypatch, tmp_path):
-    # a strategy at paper with NO allocation cannot be issued a go-live challenge
-    name = _seed_paper(monkeypatch, tmp_path, "s1")
+    # a strategy at forward_tested with NO allocation cannot be issued a go-live challenge
+    name = _seed_forward_tested(monkeypatch, tmp_path, "s1")
     r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
     assert r.exit_code == 1 and "allocation" in r.stdout.lower()
 
