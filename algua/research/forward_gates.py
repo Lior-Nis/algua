@@ -162,8 +162,13 @@ def evaluate_forward_gate(
 
     # 3. Performance — realized Sharpe vs max(factor * raw holdout Sharpe, floor). No qualified
     # backtest gate row (holdout None, or non-finite defensively) fails closed: a re-coded
-    # strategy needs a fresh `research promote` before its forward test can count.
+    # strategy needs a fresh `research promote` before its forward test can count. The bar's
+    # COMPONENTS must each be finite BEFORE max(): max() silently drops a NaN operand
+    # (max(0.25, nan) == 0.25), so a NaN/inf criteria component could otherwise RELAX the bar
+    # instead of failing closed.
     holdout = evidence.holdout_sharpe
+    factor = float(criteria.degradation_factor)
+    floor = float(criteria.sharpe_floor)
     if holdout is None or not math.isfinite(holdout):
         realized = evidence.realized_sharpe
         checks.append({
@@ -172,9 +177,16 @@ def evaluate_forward_gate(
             "op": ">=", "threshold": None, "passed": False,
             "detail": "no qualified backtest gate row for current identity",
         })
+    elif not (math.isfinite(factor) and math.isfinite(floor)):
+        realized = evidence.realized_sharpe
+        checks.append({
+            "name": "realized_sharpe",
+            "value": float(realized) if math.isfinite(realized) else None,
+            "op": ">=", "threshold": None, "passed": False,
+            "detail": "non-finite performance criteria (degradation_factor/sharpe_floor)",
+        })
     else:
-        bar = max(float(criteria.degradation_factor) * float(holdout),
-                  float(criteria.sharpe_floor))
+        bar = max(factor * float(holdout), floor)
         checks.append(_metric_check(
             "realized_sharpe", float(evidence.realized_sharpe), ">=", bar))
 

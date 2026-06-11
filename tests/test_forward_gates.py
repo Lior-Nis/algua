@@ -110,6 +110,7 @@ BOUNDARY_PASS_CASES = [
     # floor regime: holdout=0.4 -> bar 0.3, realized 0.31 passes
     {"holdout_sharpe": 0.4, "realized_sharpe": 0.31},
     {"session_coverage": 0.9},
+    {"realized_vol": 0.02},
     {"realized_max_drawdown": 0.25},
     {"staleness_sessions": 5},
 ]
@@ -117,7 +118,7 @@ BOUNDARY_PASS_CASES = [
 
 @pytest.mark.parametrize("over", BOUNDARY_PASS_CASES, ids=[
     "sharpe_at_degradation_bar", "sharpe_just_above_floor", "coverage_at_0.9",
-    "drawdown_at_0.25", "staleness_at_5",
+    "vol_at_0.02", "drawdown_at_0.25", "staleness_at_5",
 ])
 def test_boundary_values_pass(over):
     d = evaluate_forward_gate(passing_evidence(**over), ForwardGateCriteria())
@@ -174,6 +175,35 @@ def test_nan_holdout_sharpe_fails_closed():
     c = _check(d, "realized_sharpe")
     assert c["passed"] is False
     assert c["threshold"] is None
+
+
+def test_inf_realized_vol_fails_closed():
+    # inf trivially clears a >= floor; the finite-guard must fail it, never pass it.
+    d = evaluate_forward_gate(passing_evidence(realized_vol=float("inf")),
+                              ForwardGateCriteria())
+    assert d.passed is False
+    c = _check(d, "min_forward_vol")
+    assert c["passed"] is False
+    assert c["value"] is None
+    json.dumps(d.to_dict(), allow_nan=False)
+
+
+@pytest.mark.parametrize("crit_over", [
+    # max(0.25, nan) == 0.25: a NaN floor would silently RELAX the bar below the protected 0.3.
+    {"sharpe_floor": float("nan")},
+    # -inf factor collapses the bar to the floor regardless of holdout — also a relaxation.
+    {"degradation_factor": float("-inf")},
+], ids=["nan_sharpe_floor", "neg_inf_degradation_factor"])
+def test_non_finite_performance_criteria_fail_closed(crit_over):
+    # NaN/inf criteria components must fail closed, not relax the performance bar.
+    ev = passing_evidence(holdout_sharpe=0.5, realized_sharpe=0.26)
+    d = evaluate_forward_gate(ev, ForwardGateCriteria(**crit_over))
+    assert d.passed is False
+    c = _check(d, "realized_sharpe")
+    assert c["passed"] is False
+    assert c["threshold"] is None
+    assert c["detail"] == "non-finite performance criteria (degradation_factor/sharpe_floor)"
+    json.dumps(d.to_dict(), allow_nan=False)
 
 
 # --- agent-tightened criteria respected --------------------------------------------------------
