@@ -3,9 +3,12 @@ from __future__ import annotations
 import csv
 import functools
 import hashlib
+import os
 import shutil
 import struct
+import tempfile
 from pathlib import Path
+from urllib.parse import unquote
 
 import numpy as np
 import pandas as pd
@@ -61,9 +64,49 @@ def frame_to_parquet_bytes(frame: pd.DataFrame) -> bytes:
 
 
 def write_bytes_snapshot(data: bytes, data_dir: Path, relative_path: Path) -> None:
+    """Atomically publish `data` at `data_dir/relative_path` via a same-dir temp +
+    `os.replace` (#158): a reader never observes a partially written file, and a same-id
+    concurrent re-publish is benign (content-addressed => identical bytes; readers see the
+    old or new inode, byte-identical)."""
     target_path = data_dir / relative_path
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_bytes(data)
+    temp_fd, temp_name = tempfile.mkstemp(dir=target_path.parent, prefix=".publish-")
+    try:
+        with os.fdopen(temp_fd, "wb") as fh:
+            fh.write(data)
+        os.replace(temp_name, target_path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def validate_partitioned_bars_dir(
+    target: Path, *, expected_row_count: int, expected_symbols: set[str]
+) -> None:
+    """Cheap metadata-only validation of a PRE-EXISTING bars dataset dir before adopting it
+    as a committed snapshot (#158): every part file's parquet footer must parse, the summed
+    metadata row counts must equal `expected_row_count`, and the hive `symbol=` partition set
+    must equal `expected_symbols`. This is a partial-corruption detector for dirs left by the
+    legacy direct-write ingest (not a cryptographic revalidation — content-addressing carries
+    the rest). Mismatch => raise; the caller fails closed (never auto-deletes)."""
+    total_rows = 0
+    seen_symbols: set[str] = set()
+    for part in target.rglob("part-*.parquet"):
+        total_rows += pq.ParquetFile(part).metadata.num_rows  # raises on a torn footer
+        head = part.relative_to(target).parts[0]
+        if not head.startswith("symbol="):
+            raise ValueError(
+                f"adoption validation failed for {target}: unexpected layout entry {head!r}"
+            )
+        seen_symbols.add(unquote(head[len("symbol="):]))
+    if total_rows != expected_row_count or seen_symbols != expected_symbols:
+        raise ValueError(
+            f"adoption validation failed for {target}: rows {total_rows} (expected "
+            f"{expected_row_count}), symbols {sorted(seen_symbols)} (expected "
+            f"{sorted(expected_symbols)}); refusing to adopt a partial/foreign dir"
+        )
 
 
 BARS_FILE_SCHEMA = pa.schema(
