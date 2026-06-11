@@ -91,7 +91,9 @@ def test_appender_blocks_until_lock_holder_releases(tmp_path):
     holder = _CTX.Process(target=_holder, args=(lock_path, held, release))
     holder.start()
     assert held.wait(timeout=10)
-    appender = _CTX.Process(target=_blocked_appender, args=(str(manifest_path), attempting, results))
+    appender = _CTX.Process(
+        target=_blocked_appender, args=(str(manifest_path), attempting, results)
+    )
     appender.start()
     assert attempting.wait(timeout=10)
     appender.join(timeout=0.5)  # generous beat: appender must still be blocked on the flock
