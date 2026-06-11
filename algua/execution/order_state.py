@@ -98,6 +98,7 @@ def derive_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float
 def record_submitted_order(
     conn: sqlite3.Connection, strategy: str, symbol: str, side: str,
     target_weight: float, decision_ts: str | None, broker_order_id: str,
+    *, strategy_id: int,
 ) -> None:
     """Persist ONE accepted live order IMMEDIATELY after the broker accepts it, so a mid-tick death
     can never leave Alpaca holding an order the DB never recorded (#18). Each row commits on its own
@@ -109,9 +110,9 @@ def record_submitted_order(
     conn.execute(
         "INSERT OR IGNORE INTO paper_orders"
         "(strategy, symbol, side, target_weight, decision_ts, submitted_ts,"
-        " status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
+        " status, broker_order_id, strategy_id) VALUES (?,?,?,?,?,?,?,?,?)",
         (strategy, symbol, side, target_weight, decision_ts,
-         datetime.now(UTC).isoformat(), "submitted", broker_order_id),
+         datetime.now(UTC).isoformat(), "submitted", broker_order_id, strategy_id),
     )
     conn.commit()
 
@@ -190,18 +191,40 @@ def clear_all_nav_peaks(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+_VALID_LANES = frozenset({"paper", "live"})
+_VALID_CLOCK_SOURCES = frozenset({"broker", "local"})
+
+
 def record_tick_snapshot(
     conn: sqlite3.Connection, strategy: str, *, tick_ts: str, decision_ts: str | None,
     equity: float, peak_equity: float | None, positions: dict[str, float], n_submitted: int,
     reconcile_ok: bool,
+    lane: str, strategy_id: int, code_hash: str, config_hash: str,
+    dependency_hash: str | None, account_id: str, cash: float, clock_source: str,
 ) -> None:
     """Append one completed-tick snapshot (equity + positions) for a strategy — the per-tick
-    operability/equity-curve record read by `paper show`."""
+    operability/equity-curve record read by `paper show`.
+
+    ``lane`` must be one of ``("paper", "live")`` and ``clock_source`` must be one of
+    ``("broker", "local")``. These are enforced here rather than via a DB CHECK constraint
+    because SQLite ALTER TABLE cannot add CHECK constraints to existing tables — writer
+    discipline is the enforcement layer; the forward gate rejects NULL/invalid values
+    fail-closed. Legacy rows (NULL) are inadmissible by design."""
+    if lane not in _VALID_LANES:
+        raise ValueError(f"lane must be one of {sorted(_VALID_LANES)!r}, got {lane!r}")
+    if clock_source not in _VALID_CLOCK_SOURCES:
+        raise ValueError(
+            f"clock_source must be one of {sorted(_VALID_CLOCK_SOURCES)!r}, got {clock_source!r}"
+        )
     conn.execute(
         "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, peak_equity, "
-        "positions, n_submitted, reconcile_ok) VALUES (?,?,?,?,?,?,?,?)",
+        "positions, n_submitted, reconcile_ok, lane, strategy_id, code_hash, config_hash, "
+        "dependency_hash, account_id, cash, clock_source, recorded_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (strategy, tick_ts, decision_ts, equity, peak_equity, json.dumps(positions),
-         n_submitted, 1 if reconcile_ok else 0),
+         n_submitted, 1 if reconcile_ok else 0,
+         lane, strategy_id, code_hash, config_hash, dependency_hash,
+         account_id, cash, clock_source, datetime.now(UTC).isoformat()),
     )
     conn.commit()
 
@@ -209,7 +232,9 @@ def record_tick_snapshot(
 def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None:
     """The most recent tick snapshot for a strategy (positions parsed back to a dict), or None."""
     row = conn.execute(
-        "SELECT tick_ts, decision_ts, equity, peak_equity, positions, n_submitted, reconcile_ok "
+        "SELECT tick_ts, decision_ts, equity, peak_equity, positions, n_submitted, reconcile_ok, "
+        "lane, strategy_id, code_hash, config_hash, dependency_hash, account_id, cash, "
+        "clock_source, recorded_at "
         "FROM tick_snapshots WHERE strategy = ? ORDER BY id DESC LIMIT 1", (strategy,)
     ).fetchone()
     if row is None:
@@ -218,6 +243,11 @@ def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None
         "tick_ts": row["tick_ts"], "decision_ts": row["decision_ts"], "equity": row["equity"],
         "peak_equity": row["peak_equity"], "positions": json.loads(row["positions"]),
         "n_submitted": row["n_submitted"], "reconcile_ok": bool(row["reconcile_ok"]),
+        "lane": row["lane"], "strategy_id": row["strategy_id"],
+        "code_hash": row["code_hash"], "config_hash": row["config_hash"],
+        "dependency_hash": row["dependency_hash"], "account_id": row["account_id"],
+        "cash": row["cash"], "clock_source": row["clock_source"],
+        "recorded_at": row["recorded_at"],
     }
 
 

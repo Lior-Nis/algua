@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
+import pandas as pd
 import typer
 
 from algua.audit.log import append as audit_append
@@ -33,6 +34,8 @@ from algua.execution.order_state import (
 from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
+from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.repository import StrategyRecord
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
@@ -54,9 +57,16 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> LoadedStrategy:
+def _load_gated_strategy(
+    conn: sqlite3.Connection, name: str, command: str,
+) -> tuple[LoadedStrategy, StrategyRecord]:
     """Load a strategy and clear the two gates every trading command shares: it must be at the
-    PAPER stage and its kill-switch must not be tripped. ``command`` only colours the error text.
+    PAPER or FORWARD_TESTED stage and its kill-switch must not be tripped. ``command`` only
+    colours the error text.
+
+    Returns ``(strategy, rec)`` so callers can read the registry record (e.g. ``rec.id``) without
+    a second DB round-trip.  A forward_tested strategy keeps accumulating evidence ticks while
+    awaiting the go-live signature, so it is treated the same as paper for trading purposes.
 
     Centralises the stage + kill-switch preamble that ``run`` and ``trade-tick`` both need (an SRP
     fix: the command bodies no longer hand-roll these checks). Commands that intentionally TRIP the
@@ -66,13 +76,16 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     from algua.strategies.base import assert_tradable_without_fundamentals
     assert_tradable_without_fundamentals(strategy)
     rec = SqliteStrategyRepository(conn).get(name)
-    if rec.stage is not Stage.PAPER:
-        raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
+    if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
+        raise ValueError(
+            f"{name} is at stage '{rec.stage.value}'; "
+            f"{command} requires 'paper' or 'forward_tested'"
+        )
     if global_halt.is_engaged(conn):
         raise ValueError("global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
-    return strategy
+    return strategy, rec
 
 
 def _breach_payload(error: str, **extra: object) -> dict:
@@ -110,7 +123,7 @@ def run(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy = _load_gated_strategy(conn, name, "paper run")
+        strategy, _rec = _load_gated_strategy(conn, name, "paper run")
         provider = _select_provider(demo, snapshot)
         try:
             result = run_paper(strategy, SimBroker(cash=cash), provider,
@@ -259,14 +272,17 @@ def trade_tick(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy = _load_gated_strategy(conn, name, "trade-tick")
+        strategy, rec = _load_gated_strategy(conn, name, "trade-tick")
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
+        identity = compute_artifact_hashes(name)
+        acct = broker.account()
 
         def _persist(record: SubmittedOrder) -> None:
             # Persist each accepted order immediately so a mid-loop death can't lose it (#18).
             record_submitted_order(conn, name, record.symbol, record.side, record.target_weight,
-                                   record.decision_ts.isoformat(), record.order_id)
+                                   record.decision_ts.isoformat(), record.order_id,
+                                   strategy_id=rec.id)
 
         hooks = TickHooks(
             client_order_id_for=client_order_id,
@@ -306,12 +322,25 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
+            try:
+                raw_ts = broker.clock()
+                tick_ts = str(pd.Timestamp(raw_ts).tz_convert("UTC").isoformat())
+                clock_source = "broker"
+            except BrokerError:
+                tick_ts = datetime.now(UTC).isoformat()
+                clock_source = "local"
             record_tick_snapshot(
-                conn, name, tick_ts=datetime.now(UTC).isoformat(),
+                conn, name,
+                tick_ts=tick_ts,
                 decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
                 equity=result.equity, peak_equity=result.peak_equity,
                 positions=result.positions_before, n_submitted=len(result.submitted),
                 reconcile_ok=result.reconcile_ok,
+                lane="paper", strategy_id=rec.id,
+                code_hash=identity.code_hash, config_hash=identity.config_hash,
+                dependency_hash=identity.dependency_hash,
+                account_id=acct.account_id, cash=acct.cash,
+                clock_source=clock_source,
             )
         audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)

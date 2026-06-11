@@ -180,7 +180,7 @@ def test_trade_tick_submits_and_persists(monkeypatch):
                                           order_id="o-1", client_order_id="c-1", decision_ts=ts))
         return fake_result
 
-    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: object())
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
     result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
@@ -248,6 +248,16 @@ def test_paper_flatten_close_failure_stays_tripped(monkeypatch):
     assert show["kill_switch"]["tripped"] is True
 
 
+class _MinimalBroker:
+    """Minimal broker stub with the account/clock methods trade-tick now requires."""
+    def account(self):
+        return AccountState(equity=99000.0, cash=10000.0, buying_power=89000.0,
+                            account_id="test-acct")
+
+    def clock(self):
+        return "2023-06-01T14:00:00+00:00"
+
+
 def test_trade_tick_persists_snapshot(monkeypatch):
     from contextlib import closing
 
@@ -261,7 +271,7 @@ def test_trade_tick_persists_snapshot(monkeypatch):
     fake = TickResult(decision_ts=datetime(2023, 6, 1, tzinfo=UTC), target_weights={"AAA": 1.0},
                       positions_before={"AAA": 5.0}, submitted=[{"symbol": "AAA"}],
                       equity=99000.0, peak_equity=99000.0)
-    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: object())
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake)
     result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
@@ -280,13 +290,17 @@ def _seed_snapshot(name, *, equity, peak, reconcile_ok=True, positions=None):
     from algua.config.settings import get_settings
     from algua.execution.order_state import record_tick_snapshot, update_peak_equity
     from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         update_peak_equity(conn, name, peak)
+        rec = SqliteStrategyRepository(conn).get(name)
         record_tick_snapshot(conn, name, tick_ts="2023-06-01T00:00:00+00:00",
                              decision_ts="2023-05-31T00:00:00+00:00", equity=equity,
                              peak_equity=peak, positions=positions or {}, n_submitted=0,
-                             reconcile_ok=reconcile_ok)
+                             reconcile_ok=reconcile_ok, lane="paper", strategy_id=rec.id,
+                             code_hash="c", config_hash="g", dependency_hash=None,
+                             account_id="test", cash=0.0, clock_source="local")
 
 
 def test_show_consolidated_view():
@@ -529,3 +543,156 @@ def test_show_live_strategy_uses_believed_positions_and_nav_peak(monkeypatch, tm
     payload = json.loads(runner.invoke(app, ["paper", "show", name]).stdout)
     assert payload["drawdown"]["peak_equity"] == 12_345.0  # NAV peak, not the (absent) paper peak
     assert payload["positions"]                             # believed positions, not empty paper
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (#124): stamped writers — trade-tick persists provenance columns
+# ---------------------------------------------------------------------------
+
+def test_trade_tick_persists_provenance(monkeypatch):
+    """Tick snapshot written by trade-tick carries lane, registry id, identity hashes,
+    account_id, cash, clock_source, and tick_ts derived from the mocked broker clock."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import latest_tick_snapshot
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    name = "cross_sectional_momentum"
+    clock_ts = "2026-06-11T14:00:00+00:00"
+    fake_result = TickResult(
+        decision_ts=datetime(2026, 6, 11, 14, 0, 0, tzinfo=UTC),
+        target_weights={"AAA": 1.0},
+        positions_before={},
+        submitted=[],
+        equity=50_000.0,
+        peak_equity=50_000.0,
+    )
+
+    class _FakeBroker:
+        def clock(self):
+            return clock_ts
+
+        def account(self):
+            return AccountState(equity=50_000.0, cash=10_000.0, buying_power=40_000.0,
+                                account_id="acct-xyz")
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FakeBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
+
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+
+    from algua.registry.approvals import compute_artifact_hashes
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        snap = latest_tick_snapshot(conn, name)
+        rec = SqliteStrategyRepository(conn).get(name)
+
+    identity = compute_artifact_hashes(name)
+    assert snap is not None
+    assert snap["lane"] == "paper"
+    assert snap["strategy_id"] == rec.id
+    assert snap["code_hash"] == identity.code_hash
+    assert snap["config_hash"] == identity.config_hash
+    assert snap["dependency_hash"] == identity.dependency_hash
+    assert snap["account_id"] == "acct-xyz"
+    assert snap["cash"] == 10_000.0
+    assert snap["clock_source"] == "broker"
+    # tick_ts is the broker clock ts, normalized to UTC ISO
+    import pandas as pd
+    expected_tick_ts = pd.Timestamp(clock_ts).tz_convert("UTC").isoformat()
+    assert snap["tick_ts"] == expected_tick_ts
+
+
+def test_trade_tick_broker_clock_failure_falls_back_to_local(monkeypatch):
+    """If broker.clock() raises BrokerError, clock_source='local' and tick is still recorded."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import latest_tick_snapshot
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    name = "cross_sectional_momentum"
+    fake_result = TickResult(
+        decision_ts=datetime(2026, 6, 11, 14, 0, 0, tzinfo=UTC),
+        target_weights={},
+        positions_before={},
+        submitted=[],
+        equity=50_000.0,
+        peak_equity=50_000.0,
+    )
+
+    class _ClockFailBroker:
+        def clock(self):
+            raise BrokerError("clock unavailable")
+
+        def account(self):
+            return AccountState(equity=50_000.0, cash=10_000.0, buying_power=40_000.0,
+                                account_id="acct-xyz")
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _ClockFailBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
+
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        snap = latest_tick_snapshot(conn, name)
+
+    assert snap is not None
+    assert snap["clock_source"] == "local"
+    assert snap["tick_ts"]  # some local timestamp was written
+
+
+def test_trade_tick_allowed_at_forward_tested_stage(monkeypatch):
+    """A strategy at stage forward_tested (human transition from paper) can still run trade-tick."""
+
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    name = "cross_sectional_momentum"
+    # advance to forward_tested via a human transition
+    assert runner.invoke(
+        app, ["registry", "transition", name, "--to", "forward_tested",
+              "--actor", "human", "--reason", "gate passed"]
+    ).exit_code == 0
+
+    fake_result = TickResult(
+        decision_ts=datetime(2026, 6, 11, 14, 0, 0, tzinfo=UTC),
+        target_weights={},
+        positions_before={},
+        submitted=[],
+        equity=50_000.0,
+        peak_equity=50_000.0,
+    )
+
+    class _FakeBroker:
+        def clock(self):
+            return "2026-06-11T14:00:00+00:00"
+
+        def account(self):
+            return AccountState(equity=50_000.0, cash=10_000.0, buying_power=40_000.0,
+                                account_id="acct-xyz")
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FakeBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
+
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["ok"] is True
