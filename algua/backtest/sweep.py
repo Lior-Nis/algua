@@ -11,21 +11,48 @@ from typing import Any
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import walk_forward
 from algua.contracts.types import DataProvider
+from algua.portfolio.construction import ConstructionError, validate_construction_params
 from algua.strategies.base import LoadedStrategy
 
 _MAX_COMBOS = 200
 
+_CONSTRUCTION_PREFIX = "construction."
+
 
 def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy:
-    """Return a LoadedStrategy whose params are the base params with `combo` merged over them.
-    Does not mutate the base strategy/config."""
-    new_params = {**strategy.config.params, **combo}
-    new_config = strategy.config.model_copy(update={"params": new_params})
-    # Preserve the optional fast-path hook — otherwise every sweep combo silently drops the
-    # vectorized path and re-incurs the per-bar cost (the parity guard still protects each combo).
+    """Return a LoadedStrategy whose params/construction_params are the base merged with `combo`.
+
+    A grid key prefixed `construction.` tunes `construction_params` (re-validated by the policy);
+    any other key tunes signal `params` and MUST already exist in the base params (so a typo'd key
+    is rejected, never a silent no-op). Preserves the resolved construction policy + signal_panel.
+    Does not mutate the base strategy/config.
+    """
+    new_params = dict(strategy.config.params)
+    new_cparams = dict(strategy.config.construction_params)
+    for key, value in combo.items():
+        if key.startswith(_CONSTRUCTION_PREFIX):
+            new_cparams[key[len(_CONSTRUCTION_PREFIX):]] = value
+        else:
+            if key not in strategy.config.params:
+                raise ValueError(
+                    f"sweep key {key!r} is not a base signal param "
+                    f"{sorted(strategy.config.params)}; prefix with 'construction.' to tune the "
+                    f"construction policy"
+                )
+            new_params[key] = value
+    try:
+        validate_construction_params(strategy.config.construction, new_cparams)
+    except ConstructionError as exc:
+        raise ValueError(f"swept construction_params invalid: {exc}") from exc
+    new_config = strategy.config.model_copy(
+        update={"params": new_params, "construction_params": new_cparams}
+    )
     return LoadedStrategy(
-        config=new_config, fn=strategy.fn,
-        fundamentals_fn=strategy.fundamentals_fn, panel_fn=strategy.panel_fn,
+        config=new_config,
+        construct_fn=strategy.construct_fn,
+        signal_fn=strategy.signal_fn,
+        signal_panel_fn=strategy.signal_panel_fn,
+        fundamentals_signal_fn=strategy.fundamentals_signal_fn,
     )
 
 

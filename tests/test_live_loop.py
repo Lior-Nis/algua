@@ -59,13 +59,22 @@ class _FakeBroker:
         return f"order-{len(self.submitted)}"
 
 
+def _identity(scores, view, params):
+    """Test-local construction: the injected scores ARE the target weights, so the precise vector
+    under test reaches the risk rails unchanged."""
+    return scores
+
+
 def _strategy(weights, warmup_bars=0):
     cfg = StrategyConfig(
         name="cfg", universe=sorted(weights),
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                      warmup_bars=warmup_bars),
+        construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
-    return LoadedStrategy(config=cfg, fn=lambda view, params: pd.Series(weights))
+    return LoadedStrategy(
+        config=cfg, signal_fn=lambda view, params: pd.Series(weights), construct_fn=_identity
+    )
 
 
 def test_run_tick_submits_target_and_cancels_first():

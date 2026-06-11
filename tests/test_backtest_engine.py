@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -12,19 +13,30 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 4, 1, tzinfo=UTC)
 
 
+def _passthrough(scores: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    """Test construction policy: the signal already emits the desired raw weights, so construction
+    is the identity. Lets these engine tests drive exact weight vectors at the risk rails."""
+    return scores
+
+
+def _strategy(cfg: StrategyConfig, signal) -> LoadedStrategy:
+    return LoadedStrategy(config=cfg, signal_fn=signal, construct_fn=_passthrough)
+
+
 def _equal_weight_strategy() -> LoadedStrategy:
     cfg = StrategyConfig(
         name="ew",
         universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
         params={},
+        construction="passthrough",
     )
 
-    def fn(view: pd.DataFrame, params: dict) -> pd.Series:
+    def signal(view: pd.DataFrame, params: dict) -> pd.Series:
         syms = view["symbol"].unique()
         return pd.Series(1.0 / len(syms), index=sorted(syms))
 
-    return LoadedStrategy(config=cfg, fn=fn)
+    return _strategy(cfg, signal)
 
 
 def test_run_produces_metrics_keys() -> None:
@@ -63,7 +75,7 @@ def test_t_plus_1_blocks_same_bar_fill():
     cfg = StrategyConfig(
         name="holder", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-        params={},
+        params={}, construction="passthrough",
     )
 
     def holder(view, params):
@@ -74,7 +86,7 @@ def test_t_plus_1_blocks_same_bar_fill():
             return pd.Series([1.0], index=["AAA"])
         return pd.Series(dtype="float64")
 
-    res = run(LoadedStrategy(config=cfg, fn=holder), JumpProvider(),
+    res = run(_strategy(cfg, holder), JumpProvider(),
               datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
     # Entered at t+1 (price 150), held flat at 150 -> earns ~0 from the jump it sat through.
     assert res.metrics["total_return"] < 0.01
@@ -87,9 +99,9 @@ def test_empty_universe_data_raises() -> None:
         name="x",
         universe=[],
         execution=ExecutionContract(rebalance_frequency="1d"),
-        params={},
+        params={}, construction="passthrough",
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(dtype="float64"))
+    strat = _strategy(cfg, lambda v, p: pd.Series(dtype="float64"))
     with pytest.raises(BacktestError):
         run(strat, SyntheticProvider(), START, END)
 
@@ -99,9 +111,9 @@ def test_rejects_weights_exceeding_max_gross_exposure():
         name="overlev", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                     max_gross_exposure=1.0),
-        params={},
+        params={}, construction="passthrough",
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series([1.5, 1.5], index=["AAA", "BBB"]))
+    strat = _strategy(cfg, lambda v, p: pd.Series([1.5, 1.5], index=["AAA", "BBB"]))
     with pytest.raises(BacktestError):
         run(strat, SyntheticProvider(seed=1), START, END)
 
@@ -110,9 +122,9 @@ def test_rejects_unsupported_cadence():
     cfg = StrategyConfig(
         name="weekly", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1w", decision_lag_bars=1),
-        params={},
+        params={}, construction="passthrough",
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(dtype="float64"))
+    strat = _strategy(cfg, lambda v, p: pd.Series(dtype="float64"))
     with pytest.raises(BacktestError):
         run(strat, SyntheticProvider(seed=1), START, END)
 
@@ -127,8 +139,9 @@ def test_run_stamps_snapshot_id_when_provider_exposes_it():
     cfg = StrategyConfig(
         name="ew", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1), params={},
+        construction="passthrough",
     )
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(
+    strat = _strategy(cfg, lambda v, p: pd.Series(
         1.0 / len(v["symbol"].unique()), index=sorted(v["symbol"].unique())))
     res = run(strat, StampedProvider(), START, END)
     assert res.snapshot_id == "snap-123"
@@ -166,17 +179,17 @@ def test_warmup_bars_zeroes_weights_in_warmup_window():
         name="warm", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                     warmup_bars=5),
-        params={},
+        params={}, construction="passthrough",
     )
     cfg_none = StrategyConfig(
         name="nowarm", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                     warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     fn = lambda v, p: pd.Series([1.0], index=["AAA"])  # noqa: E731
-    warm = run(LoadedStrategy(config=cfg_warm, fn=fn), SyntheticProvider(seed=2), START, END)
-    none = run(LoadedStrategy(config=cfg_none, fn=fn), SyntheticProvider(seed=2), START, END)
+    warm = run(_strategy(cfg_warm, fn), SyntheticProvider(seed=2), START, END)
+    none = run(_strategy(cfg_none, fn), SyntheticProvider(seed=2), START, END)
     # Warmup suppresses early holding -> lower average gross exposure than the no-warmup run.
     assert warm.metrics["avg_gross_exposure"] < none.metrics["avg_gross_exposure"]
 
@@ -188,10 +201,10 @@ def test_simulate_label_aligns_misordered_weights():
     cfg = StrategyConfig(
         name="rev", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-        params={},
+        params={}, construction="passthrough",
     )
     # Strategy always wants 100% BBB but returns it as the only label.
-    strat = LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series([1.0], index=["BBB"]))
+    strat = _strategy(cfg, lambda v, p: pd.Series([1.0], index=["BBB"]))
     _pf, weights_eff = simulate(strat, SyntheticProvider(seed=4), START, END)
     # Every non-zero weight must sit in the BBB column; AAA must remain flat zero.
     assert (weights_eff["AAA"] == 0.0).all()
@@ -248,9 +261,9 @@ def test_decision_weights_masks_symbol_before_effective_date():
     cfg = StrategyConfig(
         name="spy", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
-    _decision_weights(LoadedStrategy(config=cfg, fn=spy), bars, adj,
+    _decision_weights(_strategy(cfg, spy), bars, adj,
                       universe_by_date=universe_by_date)
 
     before = [d for d in seen if d < cutover]
@@ -278,10 +291,10 @@ def test_decision_weights_flat_before_earliest_membership():
     cfg = StrategyConfig(
         name="x", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     fn = lambda v, p: pd.Series([1.0], index=["AAA"])  # noqa: E731
-    weights = _decision_weights(LoadedStrategy(config=cfg, fn=fn), bars, adj,
+    weights = _decision_weights(_strategy(cfg, fn), bars, adj,
                                 universe_by_date=universe_by_date)
 
     pre = weights[weights.index.map(lambda ts: ts.date() < start_membership)]
@@ -305,11 +318,11 @@ def test_decision_weights_rejects_non_member_weight():
     cfg = StrategyConfig(
         name="cheat", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     fn = lambda v, p: pd.Series([1.0], index=["BBB"])  # noqa: E731
     with pytest.raises(BacktestError, match="BBB"):
-        _decision_weights(LoadedStrategy(config=cfg, fn=fn), bars, adj,
+        _decision_weights(_strategy(cfg, fn), bars, adj,
                           universe_by_date=universe_by_date)
 
 
@@ -325,11 +338,11 @@ def test_decision_weights_none_is_unchanged_static_behavior():
     cfg = StrategyConfig(
         name="ew", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     fn = lambda v, p: pd.Series(  # noqa: E731
         1.0 / len(v["symbol"].unique()), index=sorted(v["symbol"].unique()))
-    strat = LoadedStrategy(config=cfg, fn=fn)
+    strat = _strategy(cfg, fn)
     static = _decision_weights(strat, bars, adj)
     pit_none = _decision_weights(strat, bars, adj, universe_by_date=None)
     assert static.equals(pit_none)
@@ -349,11 +362,11 @@ def test_simulate_fetches_union_of_pit_members_not_strategy_universe():
     cfg = StrategyConfig(
         name="ew", universe=["ZZZ_DECOY"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     # Strategy only ever holds symbols it actually sees; the provider serves AAA/BBB regardless,
     # so the masked view may be empty and the run stays flat — we only assert the FETCH arg here.
     fn = lambda v, p: pd.Series(dtype="float64")  # noqa: E731
-    simulate(LoadedStrategy(config=cfg, fn=fn), provider, START, END,
+    simulate(_strategy(cfg, fn), provider, START, END,
              universe_by_date=universe_by_date)
     assert provider.requested_symbols == ["CCC", "DDD"]  # union, sorted; not ZZZ_DECOY

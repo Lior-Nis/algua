@@ -10,8 +10,13 @@ from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 
+def _passthrough(scores: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    """Identity construction: the signal already emits the desired raw weights."""
+    return scores
+
+
 class _RecordingStrategy:
-    """Captures the symbols in the fundamentals frame passed to compute_weights."""
+    """Captures the symbols in the fundamentals frame passed to the signal."""
 
     def __init__(self) -> None:
         self.seen_symbols: list[set[str]] = []
@@ -57,9 +62,10 @@ def _make_strategy(fn: Any) -> LoadedStrategy:
         name="test_strat",
         universe=["AAPL", "MSFT"],  # only 2 symbols
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        construction="passthrough",
         needs_fundamentals=True,
     )
-    return LoadedStrategy(config=cfg, fundamentals_fn=fn)
+    return LoadedStrategy(config=cfg, fundamentals_signal_fn=fn, construct_fn=_passthrough)
 
 
 def test_out_of_universe_symbol_masked_in_static_mode():
@@ -79,7 +85,7 @@ def test_out_of_universe_symbol_masked_in_static_mode():
     # No universe_by_date → static mode
     _decision_weights(strat, bars, adj, universe_by_date=None, fundamentals=funds)
 
-    # Every call to compute_weights must NOT have seen NVDA
+    # Every call to the signal must NOT have seen NVDA
     for seen in recorder.seen_symbols:
         assert "NVDA" not in seen, (
             f"NVDA (out-of-universe) leaked into fundamentals frame: {seen}"

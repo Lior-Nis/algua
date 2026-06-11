@@ -39,7 +39,8 @@ def family_package_dir(family: str) -> str:
     return family.replace("-", "_")
 
 _TEMPLATE = '''\
-"""Strategy: {name}. Edit compute_weights to express your cross-sectional logic."""
+"""Strategy: {name}. Author `signal` (cross-sectional scores per symbol); the named construction
+policy in CONFIG turns scores into target weights."""
 from __future__ import annotations
 
 from typing import Any
@@ -53,20 +54,20 @@ CONFIG = StrategyConfig(
     name="{name}",
     universe=["AAPL", "MSFT", "NVDA"],
     execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-    params={{"lookback": 60, "top_k": 2}},
+    params={{"lookback": 60}},
+    construction="top_k_equal_weight",
+    construction_params={{"top_k": 2}},
 )
 
 
-def compute_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    """Return a score per symbol (higher = more attractive). NOT weights — the construction policy
+    maps scores to weights. See algua/portfolio/construction.py for available policies."""
     lookback = int(params["lookback"])
     wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     if len(wide) <= lookback:
         return pd.Series(dtype="float64")
-    scores = (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
-    winners = scores.sort_values(ascending=False).head(int(params["top_k"])).index
-    if len(winners) == 0:
-        return pd.Series(dtype="float64")
-    return pd.Series(1.0 / len(winners), index=winners)
+    return (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
 '''
 
 

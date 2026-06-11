@@ -1,8 +1,9 @@
-"""Vectorized fast-path (#6): panel_fn detection, full parity, warmup/risk integration,
+"""Vectorized fast-path (#6): signal_panel detection, full parity, warmup/risk integration,
 fail-closed runtime parity guard, PIT-forces-loop, and the t->t+1 shift.
 
 The fast path must never become a second, silently-divergeable signal definition: it is used
-ONLY behind a fail-closed parity guard against the canonical per-bar `_decision_weights` loop.
+ONLY behind a fail-closed WEIGHT-level parity guard against the canonical per-bar
+`_decision_weights` loop (construct(signal(view), view)).
 """
 from __future__ import annotations
 
@@ -30,6 +31,12 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 6, 1, tzinfo=UTC)
 
 
+def _passthrough(scores: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+    """Identity construction: scores ARE the desired raw weights. Lets these fast-path tests drive
+    exact panel weight vectors at the risk rails (the signal/panel emit weights directly)."""
+    return scores
+
+
 def _bars_adj(symbols: list[str], seed: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     bars = SyntheticProvider(seed=seed).get_bars(symbols, START, END, "1d")
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
@@ -39,14 +46,14 @@ def _bars_adj(symbols: list[str], seed: int = 0) -> tuple[pd.DataFrame, pd.DataF
 # --- 1. loader detection -------------------------------------------------------------------
 
 
-def test_example_strategy_exposes_panel_fn() -> None:
+def test_example_strategy_exposes_signal_panel_fn() -> None:
     strat = load_strategy("cross_sectional_momentum")
-    # cross_sectional_momentum DOES define a panel fn (added in this change); use a strategy
-    # module without one for the None case.
-    assert strat.panel_fn is not None  # sanity: the example exposes it
+    # cross_sectional_momentum DOES define a signal_panel fn; use a strategy module without one
+    # for the None case.
+    assert strat.signal_panel_fn is not None  # sanity: the example exposes it
 
 
-def test_loader_binds_panel_fn_when_present() -> None:
+def test_loader_binds_signal_panel_fn_when_present() -> None:
     mod_path = Path(momentum_pkg.__path__[0]) / "tmp_with_panel.py"
     mod_path.write_text(
         "from typing import Any\n"
@@ -54,21 +61,22 @@ def test_loader_binds_panel_fn_when_present() -> None:
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
         "CONFIG = StrategyConfig(name='tmp_with_panel', universe=['AAA'],\n"
-        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1))\n"
-        "def compute_weights(view, params):\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
         "    return pd.Series(dtype='float64')\n"
-        "def compute_weights_panel(bars, params):\n"
+        "def signal_panel(bars, params):\n"
         "    return pd.DataFrame()\n"
     )
     try:
         strat = load_strategy("tmp_with_panel")
-        assert strat.panel_fn is not None
-        assert callable(strat.panel_fn)
+        assert strat.signal_panel_fn is not None
+        assert callable(strat.signal_panel_fn)
     finally:
         mod_path.unlink()
 
 
-def test_loader_panel_fn_none_when_module_omits_it() -> None:
+def test_loader_signal_panel_fn_none_when_module_omits_it() -> None:
     mod_path = Path(momentum_pkg.__path__[0]) / "tmp_no_panel.py"
     mod_path.write_text(
         "from typing import Any\n"
@@ -76,18 +84,19 @@ def test_loader_panel_fn_none_when_module_omits_it() -> None:
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
         "CONFIG = StrategyConfig(name='tmp_no_panel', universe=['AAA'],\n"
-        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1))\n"
-        "def compute_weights(view, params):\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
         "    return pd.Series(dtype='float64')\n"
     )
     try:
         strat = load_strategy("tmp_no_panel")
-        assert strat.panel_fn is None
+        assert strat.signal_panel_fn is None
     finally:
         mod_path.unlink()
 
 
-def test_loader_rejects_non_callable_panel() -> None:
+def test_loader_rejects_non_callable_signal_panel() -> None:
     mod_path = Path(momentum_pkg.__path__[0]) / "tmp_bad_panel.py"
     mod_path.write_text(
         "from typing import Any\n"
@@ -95,19 +104,20 @@ def test_loader_rejects_non_callable_panel() -> None:
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
         "CONFIG = StrategyConfig(name='tmp_bad_panel', universe=['AAA'],\n"
-        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1))\n"
-        "def compute_weights(view, params):\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
         "    return pd.Series(dtype='float64')\n"
-        "compute_weights_panel = 42\n"
+        "signal_panel = 42\n"
     )
     try:
-        with pytest.raises(Exception, match="compute_weights_panel"):
+        with pytest.raises(Exception, match="signal_panel"):
             load_strategy("tmp_bad_panel")
     finally:
         mod_path.unlink()
 
 
-# --- 2. full parity: example loop vs panel raw weights -------------------------------------
+# --- 2. full parity: example loop vs fast path ---------------------------------------------
 
 
 def test_cross_sectional_momentum_full_parity() -> None:
@@ -115,14 +125,8 @@ def test_cross_sectional_momentum_full_parity() -> None:
     syms = strat.universe
     bars, adj = _bars_adj(syms, seed=7)
     loop = _decision_weights(strat, bars, adj)
-    panel_fn = strat.panel_fn
-    assert panel_fn is not None
-    panel = panel_fn(bars, strat.params)
-    # Reindex panel like the fast path will, then compare to the loop output.
-    aligned = panel.reindex(index=adj.index, columns=adj.columns).fillna(0.0)
-    warmup = strat.execution.warmup_bars
-    aligned.iloc[:warmup] = 0.0
-    pd.testing.assert_frame_equal(loop, aligned, check_exact=False, atol=WEIGHT_TOL, rtol=0.0)
+    fast = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
+    pd.testing.assert_frame_equal(loop, fast, check_exact=False, atol=WEIGHT_TOL, rtol=0.0)
 
 
 def test_fast_or_loop_matches_loop_for_example() -> None:
@@ -137,19 +141,20 @@ def test_fast_or_loop_matches_loop_for_example() -> None:
 
 
 def test_fast_path_applies_warmup_flat_period() -> None:
-    """A panel fn that always wants 100% AAA still gets the first warmup_bars rows zeroed."""
+    """A panel that always wants 100% AAA still gets the first warmup_bars rows zeroed."""
 
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         return pd.DataFrame(1.0, index=adj.index, columns=adj.columns)
 
     cfg = StrategyConfig(
         name="warm", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=5),
-        params={},
+        params={}, construction="passthrough",
     )
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series([1.0], index=["AAA"]), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series([1.0], index=["AAA"]),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA"], seed=2)
     fast = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
@@ -158,7 +163,7 @@ def test_fast_path_applies_warmup_flat_period() -> None:
 
 
 def test_fast_path_gross_breach_raises() -> None:
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         # 0.6 per name is within the default per-symbol cap (1.0); the sum (1.2) breaches gross,
         # isolating the gross-exposure rail rather than tripping the concentration cap first.
@@ -168,10 +173,11 @@ def test_fast_path_gross_breach_raises() -> None:
         name="lev", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                     warmup_bars=0, max_gross_exposure=1.0),
-        params={},
+        params={}, construction="passthrough",
     )
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 0.6, "BBB": 0.6}),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
     with pytest.raises(BacktestError, match="gross"):
@@ -179,28 +185,29 @@ def test_fast_path_gross_breach_raises() -> None:
 
 
 def test_fast_path_long_only_breach_raises() -> None:
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         return pd.DataFrame(-1.0, index=adj.index, columns=adj.columns)
 
     cfg = StrategyConfig(
         name="short", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": -1.0}),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA"], seed=2)
     with pytest.raises(BacktestError, match="long-only"):
         _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
 
 
-# --- 4. fail-closed parity guard: a divergent panel fn raises (no silent fallback) ---------
+# --- 4. fail-closed parity guard: a divergent panel raises (no silent fallback) ------------
 
 
 def test_divergent_panel_raises_parity_error() -> None:
-    """A panel fn whose answer disagrees with the canonical per-bar definition must RAISE,
+    """A signal_panel whose answer disagrees with the canonical per-bar definition must RAISE,
     never silently fall back to either answer."""
 
     def good_loop(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
@@ -217,23 +224,25 @@ def test_divergent_panel_raises_parity_error() -> None:
     cfg = StrategyConfig(
         name="liar", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
-    strat = LoadedStrategy(config=cfg, fn=good_loop, panel_fn=bad_panel)
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=good_loop, signal_panel_fn=bad_panel, construct_fn=_passthrough
+    )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
     with pytest.raises(BacktestError, match="parity"):
         _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
 
 
-# --- 5. PIT mode forces the loop even when panel_fn exists ---------------------------------
+# --- 5. PIT mode forces the loop even when signal_panel_fn exists --------------------------
 
 
-def test_pit_mode_forces_loop_even_with_panel_fn() -> None:
+def test_pit_mode_forces_loop_even_with_signal_panel_fn() -> None:
     """With a universe_by_date map, the fast path must NOT run the panel fn; it falls back to
     the per-bar loop (which can reproduce as-of masking)."""
     calls = {"panel": 0}
 
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         calls["panel"] += 1
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         return pd.DataFrame(0.0, index=adj.index, columns=adj.columns)
@@ -245,9 +254,11 @@ def test_pit_mode_forces_loop_even_with_panel_fn() -> None:
     cfg = StrategyConfig(
         name="pit", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
-    strat = LoadedStrategy(config=cfg, fn=loop_fn, panel_fn=panel_fn)
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=loop_fn, signal_panel_fn=signal_panel, construct_fn=_passthrough
+    )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
     universe_by_date: dict[date, set[str]] = {ts.date(): {"AAA", "BBB"} for ts in adj.index}
     out = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=universe_by_date)
@@ -277,7 +288,7 @@ def test_simulate_applies_lag_after_fast_path() -> None:
 def test_fast_path_concentration_cap_breach_raises() -> None:
     """The single-name cap is enforced in the fast-path, identically to the loop: a panel putting
     0.9 in a name when the cap is 0.5 must raise (cap trips before gross given the bundle order)."""
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         return pd.DataFrame(0.9, index=adj.index, columns=adj.columns)
 
@@ -285,10 +296,11 @@ def test_fast_path_concentration_cap_breach_raises() -> None:
         name="conc", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                     warmup_bars=0, max_weight_per_symbol=0.5),
-        params={},
+        params={}, construction="passthrough",
     )
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 0.9, "BBB": 0.9}),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
     with pytest.raises(BacktestError, match="max_weight_per_symbol"):
@@ -296,21 +308,22 @@ def test_fast_path_concentration_cap_breach_raises() -> None:
 
 
 def test_fast_path_inf_weight_raises_non_finite() -> None:
-    """A non-finite VALUE survives the panel's reindex+fillna(0.0) (fillna only fills NaN), so the
-    fail-closed finite guard must catch an inf in the fast-path rather than let it reach a fill."""
+    """A non-finite VALUE survives the panel's reindex (dropna only drops NaN), so the fail-closed
+    finite guard in the risk walls must catch an inf in the fast-path rather than let it through."""
     import numpy as np
 
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         return pd.DataFrame(np.inf, index=adj.index, columns=adj.columns)
 
     cfg = StrategyConfig(
         name="inf", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series(dtype="float64"), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": np.inf}),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA"], seed=2)
     with pytest.raises(BacktestError, match="non-finite"):
@@ -318,11 +331,11 @@ def test_fast_path_inf_weight_raises_non_finite() -> None:
 
 
 def test_fast_path_omitted_cell_nan_stays_flat() -> None:
-    """The panel's documented NaN-as-flat convention is preserved: an omitted cell (NaN) is
-    filled to 0.0 (flat) BEFORE the finite guard, so it must NOT breach — only real values do."""
+    """An omitted score (NaN) is DROPPED before construction (missing score != 0), so it must NOT
+    breach — only real values do. BBB omitted -> flat."""
     import numpy as np
 
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         df = pd.DataFrame(0.5, index=adj.index, columns=adj.columns)
         df["BBB"] = np.nan  # BBB omitted -> flat by convention, not a breach
@@ -331,11 +344,12 @@ def test_fast_path_omitted_cell_nan_stays_flat() -> None:
     cfg = StrategyConfig(
         name="sparse", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
-        params={},
+        params={}, construction="passthrough",
     )
     # The per-bar fn must agree with the panel for the parity guard: AAA at 0.5, BBB omitted (flat).
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series({"AAA": 0.5}), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 0.5}),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
     # Runs clean: AAA at 0.5 (within cap + gross), BBB held flat. No raise is the assertion.
@@ -346,7 +360,7 @@ def test_fast_path_omitted_cell_nan_stays_flat() -> None:
 def test_fast_path_allow_short_permits_negative_panel() -> None:
     """With allow_short=True a negative panel weight passes the fast-path short policy (the cap
     still bounds |weight|); the default-False rejection is pinned by the long-only test."""
-    def panel_fn(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         return pd.DataFrame(-0.5, index=adj.index, columns=adj.columns)
 
@@ -354,11 +368,12 @@ def test_fast_path_allow_short_permits_negative_panel() -> None:
         name="shortable", universe=["AAA"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
                                     warmup_bars=0, allow_short=True),
-        params={},
+        params={}, construction="passthrough",
     )
     # The per-bar fn must agree with the panel for the parity guard: AAA short at -0.5.
     strat = LoadedStrategy(
-        config=cfg, fn=lambda v, p: pd.Series({"AAA": -0.5}), panel_fn=panel_fn
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": -0.5}),
+        signal_panel_fn=signal_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA"], seed=2)
     weights = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)

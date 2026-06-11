@@ -186,6 +186,22 @@ def test_non_live_transition_records_null_dependency_hash(repo):
     assert row["config_hash"] is None
 
 
+def test_code_hash_covers_construction_module():
+    # The construction module's source must be part of code_hash, so a policy edit invalidates a
+    # prior approval. We assert the construction module's source contributes to the closure.
+    import inspect
+
+    import algua.portfolio.construction as construction
+    from algua.registry.approvals import _merged_closure_for
+    from algua.strategies.loader import load_strategy
+
+    # After Task 5 the approvals closure is rooted from BOTH the signal module and the construction
+    # module; verify the construction module's source is present in the merged closure.
+    merged = _merged_closure_for(load_strategy("cross_sectional_momentum"))
+    assert "algua.portfolio.construction" in merged
+    assert merged["algua.portfolio.construction"] == inspect.getsource(construction)
+
+
 def test_code_hash_ignores_thirdparty_and_stdlib_changes(repo, monkeypatch):
     # The closure is bounded to algua.* modules: mutating a third-party module's source
     # must NOT change the code_hash (otherwise the hash is non-deterministic across envs).

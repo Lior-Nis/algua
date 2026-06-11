@@ -14,29 +14,30 @@ END = datetime(2023, 12, 31, tzinfo=UTC)
 
 def _momentum():
     from algua.features.indicators import momentum
+    from algua.portfolio.construction import get_construction_policy
 
     cfg = StrategyConfig(
         name="m", universe=["AAA", "BBB", "CCC"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-        params={"lookback": 40, "top_k": 1},
+        params={"lookback": 40},
+        construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
 
-    def fn(view, params):
+    def signal(view, params):
         wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
         if len(wide) <= int(params["lookback"]):
             return pd.Series(dtype="float64")
-        scores = momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
-        winners = scores.sort_values(ascending=False).head(int(params["top_k"])).index
-        if len(winners) == 0:
-            return pd.Series(dtype="float64")
-        return pd.Series(1.0 / len(winners), index=winners)
+        return momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
 
-    return LoadedStrategy(config=cfg, fn=fn)
+    return LoadedStrategy(
+        config=cfg, signal_fn=signal, construct_fn=get_construction_policy(cfg.construction)
+    )
 
 
 def test_sweep_ranks_and_counts():
     res = sweep(_momentum(), SyntheticProvider(seed=3), START, END,
-                grid={"lookback": [20, 40], "top_k": [1, 2]}, windows=4, holdout_frac=0.2)
+                grid={"lookback": [20, 40], "construction.top_k": [1, 2]}, windows=4,
+                holdout_frac=0.2)
     assert isinstance(res, SweepResult)
     d = res.to_dict()
     assert d["n_combos"] == 4
@@ -49,12 +50,14 @@ def test_sweep_ranks_and_counts():
     # window/stability ranking signal is exposed.
     assert "holdout" not in top and "stability" in top
     assert top["score"] == top["stability"]["mean_sharpe"]
-    assert set(top["params"]) == {"lookback", "top_k"}
+    assert set(top["params"]) == {"lookback", "construction.top_k"}
     assert d["code_hash"] and d["dependency_hash"]
 
 
 def test_sweep_is_deterministic():
-    kw = dict(grid={"lookback": [20, 40], "top_k": [1, 2]}, windows=4, holdout_frac=0.2)
+    kw = dict(
+        grid={"lookback": [20, 40], "construction.top_k": [1, 2]}, windows=4, holdout_frac=0.2
+    )
     a = sweep(_momentum(), SyntheticProvider(seed=3), START, END, **kw)
     b = sweep(_momentum(), SyntheticProvider(seed=3), START, END, **kw)
     assert a.to_dict() == b.to_dict()

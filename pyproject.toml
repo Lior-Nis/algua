@@ -98,6 +98,15 @@ source_modules = ["algua.features"]
 forbidden_modules = ["algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies"]
 
 [[tool.importlinter.contracts]]
+name = "portfolio construction layer is pure (no algua imports beyond contracts + features)"
+type = "forbidden"
+source_modules = ["algua.portfolio"]
+forbidden_modules = [
+    "algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies",
+    "algua.live", "algua.execution", "algua.tracking", "algua.research", "algua.knowledge",
+]
+
+[[tool.importlinter.contracts]]
 name = "backtest engine stays off cli, registry, and the data lane"
 type = "forbidden"
 source_modules = ["algua.backtest"]

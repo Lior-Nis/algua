@@ -12,12 +12,20 @@ END = datetime(2023, 12, 31, tzinfo=UTC)
 
 
 def _equal_weight():
+    from algua.portfolio.construction import get_construction_policy
+
     cfg = StrategyConfig(
         name="ew", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1), params={},
+        construction="equal_weight_positive",
     )
-    return LoadedStrategy(config=cfg, fn=lambda v, p: pd.Series(
-        1.0 / len(v["symbol"].unique()), index=sorted(v["symbol"].unique())))
+    # A flat positive score on every symbol -> equal_weight_positive holds them all equal-weight,
+    # reproducing the old direct equal-weight allocation.
+    return LoadedStrategy(
+        config=cfg,
+        signal_fn=lambda v, p: pd.Series(1.0, index=sorted(v["symbol"].unique())),
+        construct_fn=get_construction_policy(cfg.construction),
+    )
 
 
 def test_walk_forward_shape_and_stamps():
