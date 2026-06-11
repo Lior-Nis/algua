@@ -649,3 +649,19 @@ def test_activities_window_fails_closed(monkeypatch):
         {"/v2/account/activities": [_FakeResp(200, mixed_page)]}))
     with pytest.raises(BrokerError, match="malformed item"):
         _broker().account_activities_window(after="2026-01-01", until="2026-06-11")
+
+
+def test_activities_window_encodes_tz_offset(monkeypatch):
+    # The forward gate passes full ISO-8601 datetimes with '+00:00' offsets.  A raw '+' in a
+    # query string is decoded as a SPACE server-side, silently corrupting the window bound.
+    # Verify that after/until are percent-encoded so the URL never contains a literal '+'.
+    fake = _PaginatingRequests({"/v2/account/activities": [_FakeResp(200, _make_page(1))]})
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().account_activities_window(
+        after="2026-06-01T00:00:00+00:00",
+        until="2026-06-11T14:00:00+00:00",
+    )
+    url = fake.requested_urls[0]
+    # The timezone offset '+' must be encoded; no raw '+' may appear in the query string.
+    assert "%2B" in url, f"expected %2B in URL, got: {url}"
+    assert "+" not in url.split("?", 1)[1], f"raw '+' found in query string: {url}"

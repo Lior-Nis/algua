@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import requests
@@ -352,8 +352,12 @@ class _AlpacaBroker:
         account as unverifiable and FAILS, never passes, on partial history (#124)."""
         out: list[dict[str, Any]] = []
         page_token: str | None = None
+        # URL-encode after/until: ISO-8601 datetimes contain '+' (tz offset) which must not reach
+        # the server as a literal '+' (decoded as space). quote() with safe='' encodes it as %2B.
+        after_enc = quote(after, safe="")
+        until_enc = quote(until, safe="")
         while True:
-            path = (f"/v2/account/activities?after={after}&until={until}"
+            path = (f"/v2/account/activities?after={after_enc}&until={until_enc}"
                     f"&direction=asc&page_size={self._ACTIVITIES_PAGE}")
             if page_token:
                 path += f"&page_token={page_token}"
