@@ -30,6 +30,11 @@ def _advance_to_paper(repo, name):
     transition_strategy(repo, name, Stage.PAPER, Actor.AGENT)
 
 
+def _advance_to_forward_tested(repo, name):
+    _advance_to_paper(repo, name)
+    transition_strategy(repo, name, Stage.FORWARD_TESTED, Actor.HUMAN, "test setup")
+
+
 def test_live_requires_approval(repo):
     _advance_to_paper(repo, STRATEGY)
     with pytest.raises(TransitionError):
@@ -44,7 +49,7 @@ def test_live_requires_human_actor(repo):
 
 
 def test_live_succeeds_with_human_and_recorded_approval(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     rec = transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
     assert rec.stage is Stage.LIVE
@@ -58,7 +63,7 @@ def test_string_live_engages_gate(repo):
 
 
 def test_string_live_succeeds_with_approval(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     rec = transition_strategy(repo, STRATEGY, "live", Actor.HUMAN)
     assert rec.stage is Stage.LIVE
@@ -161,9 +166,9 @@ def test_legacy_null_dependency_row_never_matches(repo):
 
 
 def test_live_transition_records_full_identity_hashes(repo):
-    # Audit symmetry: a successful paper -> live transition must record the full pinned identity
-    # (code, config, AND dependency hash) in the stage_transitions history, not just code+config.
-    _advance_to_paper(repo, STRATEGY)
+    # Audit symmetry: a successful forward_tested -> live transition must record the full pinned
+    # identity (code, config, AND dependency hash) in the stage_transitions history.
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     code_hash, config_hash, dependency_hash = compute_artifact_hashes(STRATEGY)
 

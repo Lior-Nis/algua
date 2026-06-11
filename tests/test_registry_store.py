@@ -96,6 +96,8 @@ def test_transition_service_allows_injected_live_approval_verifier(repo):
     _transition(repo, "cross_sectional_momentum", Stage.BACKTESTED, Actor.AGENT)
     _transition(repo, "cross_sectional_momentum", Stage.CANDIDATE, Actor.HUMAN)
     _transition(repo, "cross_sectional_momentum", Stage.PAPER, Actor.AGENT)
+    transition_strategy(repo, "cross_sectional_momentum", Stage.FORWARD_TESTED, Actor.HUMAN,
+                        "test setup")
 
     rec = transition_strategy(
         repo,

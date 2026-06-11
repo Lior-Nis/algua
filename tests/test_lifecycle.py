@@ -44,3 +44,19 @@ def test_every_non_retired_stage_can_retire():
             assert can_transition(stage, Stage.RETIRED) is False
         else:
             assert can_transition(stage, Stage.RETIRED) is True
+
+
+def test_forward_tested_edges():
+    assert can_transition(Stage.PAPER, Stage.FORWARD_TESTED)
+    assert can_transition(Stage.FORWARD_TESTED, Stage.LIVE)
+    assert can_transition(Stage.FORWARD_TESTED, Stage.PAPER)
+    assert can_transition(Stage.FORWARD_TESTED, Stage.RETIRED)  # derived retire edge
+
+
+def test_paper_to_live_removed_for_everyone():
+    assert not can_transition(Stage.PAPER, Stage.LIVE)
+
+
+def test_live_demotion_still_lands_at_paper():
+    assert can_transition(Stage.LIVE, Stage.PAPER)
+    assert not can_transition(Stage.LIVE, Stage.FORWARD_TESTED)
