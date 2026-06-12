@@ -2,8 +2,9 @@
 
 Normalizes a canonical local form — per-symbol raw OHLC parquet + one corporate-action events
 parquet — into the bar-schema, computing `adj_close` via the #149 CA engine. NOT a parser of
-Databento's native binary format (int-scaled prices / instrument_id / ns ts); the operator conforms
-an export to this schema. See docs/superpowers/specs/2026-06-11-databento-importer-issue-150-design.md.
+Databento's native binary format (int-scaled prices / instrument_id / ns ts); the operator
+conforms an export to this schema.
+See docs/superpowers/specs/2026-06-11-databento-importer-issue-150-design.md.
 """
 from __future__ import annotations
 
@@ -29,8 +30,9 @@ def _canon_symbol(value: str) -> str:
 def parse_databento_raw(path: Path) -> pd.DataFrame:
     """Parse one canonical per-symbol raw parquet into `[ts, open, high, low, close, volume]`.
 
-    `ts` → tz-aware UTC midnight (naive localized; tz-aware non-UTC rejected; non-midnight rejected —
-    this is the 1d importer). OHLCV finite; prices > 0; volume >= 0. Raises `ValueError` otherwise.
+    `ts` → tz-aware UTC midnight (naive localized; tz-aware non-UTC rejected; non-midnight
+    rejected — this is the 1d importer). OHLCV finite; prices > 0; volume >= 0.
+    Raises `ValueError` otherwise.
     """
     frame = pd.read_parquet(path)
     frame.columns = [str(c).strip().lower() for c in frame.columns]
@@ -43,10 +45,13 @@ def parse_databento_raw(path: Path) -> pd.DataFrame:
         ts = ts.dt.tz_localize("UTC")
     elif str(ts.dt.tz) != "UTC":
         raise ValueError(
-            f"{path.name}: raw ts is tz-aware non-UTC ({ts.dt.tz}); refusing to shift the session date"
+            f"{path.name}: raw ts is tz-aware non-UTC ({ts.dt.tz});"
+            " refusing to shift the session date"
         )
     if len(ts) and not bool((ts == ts.dt.normalize()).all()):
-        raise ValueError(f"{path.name}: raw ts must be UTC midnight (1d); found a non-midnight value")
+        raise ValueError(
+            f"{path.name}: raw ts must be UTC midnight (1d); found a non-midnight value"
+        )
     out["ts"] = ts
     for col in [*_PRICE_COLUMNS, "volume"]:
         out[col] = pd.to_numeric(out[col], errors="raise").astype("float64")
@@ -71,18 +76,20 @@ def _to_utc_midnight(value: object, fname: str, i: int) -> pd.Timestamp:
     elif str(ts.tz) != "UTC":
         raise ValueError(f"{fname} row {i}: ex_date is tz-aware non-UTC ({ts.tz})")
     if ts != ts.normalize():
-        raise ValueError(f"{fname} row {i}: ex_date must be a date / UTC midnight, got {value!r}")
+        raise ValueError(
+            f"{fname} row {i}: ex_date must be a date / UTC midnight, got {value!r}"
+        )
     return ts
 
 
 def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]:
     """Parse the canonical CA-events parquet into `{symbol: [CorporateAction, ...]}`.
 
-    Row-level validation (kind in {split,dividend}; value finite > 0; ex_date → UTC midnight) with
-    messages naming the row, then source de-duplication: by `(symbol, event_id)` when the optional
-    `event_id` column is present (all rows must then carry a non-blank id; same key + differing
-    economics → raise), else by exact full row. Surviving events flow to `back_adjust`, which
-    aggregates same-date ones.
+    Row-level validation (kind in {split,dividend}; value finite > 0; ex_date → UTC midnight)
+    with messages naming the row, then source de-duplication: by `(symbol, event_id)` when the
+    optional `event_id` column is present (all rows must then carry a non-blank id; same key +
+    differing economics → raise), else by exact full row. Surviving events flow to `back_adjust`,
+    which aggregates same-date ones.
     """
     frame = pd.read_parquet(path)
     frame.columns = [str(c).strip().lower() for c in frame.columns]
@@ -99,11 +106,14 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
         symbol = _canon_symbol(rec["symbol"])
         kind = str(rec["kind"]).strip().lower()
         if kind not in _VALID_KINDS:
-            raise ValueError(f"{path.name} row {i}: unknown kind {rec['kind']!r} (expected split|dividend)")
+            raise ValueError(
+                f"{path.name} row {i}: unknown kind {rec['kind']!r} (expected split|dividend)"
+            )
         value = float(pd.to_numeric(rec["value"], errors="raise"))
         if not math.isfinite(value) or value <= 0:
             raise ValueError(
-                f"{path.name} row {i} ({symbol} {kind}): value must be finite and > 0, got {rec['value']!r}"
+                f"{path.name} row {i} ({symbol} {kind}): value must be finite and > 0,"
+                f" got {rec['value']!r}"
             )
         ex_date = _to_utc_midnight(rec["ex_date"], path.name, i)
         event_id: str | None = None
@@ -118,7 +128,8 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
     if has_event_id:
         econ_by_key: dict[tuple[str, str], tuple[pd.Timestamp, str, float]] = {}
         for symbol, ex_date, kind, value, event_id in parsed:
-            key = (symbol, event_id)  # event_id is non-None here
+            assert event_id is not None  # guaranteed by the validation loop above
+            key = (symbol, event_id)
             econ = (ex_date, kind, value)
             if key in econ_by_key:
                 if econ_by_key[key] != econ:
@@ -130,19 +141,21 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
                 econ_by_key[key] = econ
         surviving = [(sym, *econ) for (sym, _eid), econ in econ_by_key.items()]
     else:
-        seen: set[tuple[str, pd.Timestamp, str, float]] = set()
+        seen_set: set[tuple[str, pd.Timestamp, str, float]] = set()
         surviving = []
         for symbol, ex_date, kind, value, _eid in parsed:
-            key = (symbol, ex_date, kind, value)
-            if key in seen:
+            row_key = (symbol, ex_date, kind, value)
+            if row_key in seen_set:
                 continue
-            seen.add(key)
+            seen_set.add(row_key)
             surviving.append((symbol, ex_date, kind, value))
 
     events: dict[str, list[CorporateAction]] = {}
     for symbol, ex_date, kind, value in surviving:
         event: CorporateAction = (
-            Split(ex_date=ex_date, ratio=value) if kind == "split" else Dividend(ex_date=ex_date, cash=value)
+            Split(ex_date=ex_date, ratio=value)
+            if kind == "split"
+            else Dividend(ex_date=ex_date, cash=value)
         )
         events.setdefault(symbol, []).append(event)
     return events
@@ -157,7 +170,8 @@ def _discover_raw(directory: Path) -> dict[str, Path]:
         symbol = _canon_symbol(path.stem)
         if symbol in mapping:
             raise ValueError(
-                f"duplicate symbol {symbol!r} in {directory.name}: {mapping[symbol].name} and {path.name}"
+                f"duplicate symbol {symbol!r} in {directory.name}:"
+                f" {mapping[symbol].name} and {path.name}"
             )
         mapping[symbol] = path
     return mapping
