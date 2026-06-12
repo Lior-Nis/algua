@@ -86,7 +86,7 @@ An agent advances from `paper` to `forward_tested` only via `paper promote`:
 
 ```bash
 uv run algua paper promote cross_sectional_momentum
-# -> {"ok": true, "stage": "forward_tested", "passed": true, ...} on pass
+# -> {"ok": true, "passed": true, "promoted": true, ...} on pass
 # -> {"ok": false, "passed": false, ...} on fail — stage stays at paper
 ```
 
