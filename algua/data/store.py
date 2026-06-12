@@ -602,8 +602,7 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet",
         )
-        self.manifest.append(rec)
-        return rec
+        return self.manifest.append_if_absent(rec)
 
     def read_news(self, snapshot_id: str, *, symbols: list[str] | None = None) -> pd.DataFrame:
         """Read a news snapshot as a validated tidy frame. `symbols` filters in-memory.
