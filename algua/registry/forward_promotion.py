@@ -26,8 +26,16 @@ from typing import Any, Protocol
 import pandas as pd
 
 from algua.backtest.metrics import metrics_from_returns
-from algua.registry.repository import ArtifactIdentity
-from algua.research.forward_gates import ForwardEvidence
+from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
+from algua.registry.transitions import transition_strategy
+from algua.research.forward_gates import (
+    ForwardEvidence,
+    ForwardGateCriteria,
+    ForwardGateDecision,
+    evaluate_forward_gate,
+)
 from algua.risk.global_halt import is_engaged
 from algua.risk.kill_switch import is_tripped
 
@@ -332,3 +340,111 @@ def assemble_forward_evidence(
         n_concurrent_forward=int(n_concurrent_forward),
         excluded=excluded,
     )
+
+
+def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> None:
+    """Each threshold has a strict direction; an agent may only move it stricter (#124).
+    Mirrors ``guard_agent_relaxations``: the agent only ever sees the strict gate."""
+    if actor is Actor.HUMAN:
+        return
+    defaults = ForwardGateCriteria()
+    higher_is_stricter = ("min_forward_observations", "min_session_coverage",
+                          "degradation_factor", "sharpe_floor", "min_forward_vol")
+    lower_is_stricter = ("max_forward_drawdown", "max_staleness_sessions")
+    relaxed = [f for f in higher_is_stricter if getattr(criteria, f) < getattr(defaults, f)]
+    relaxed += [f for f in lower_is_stricter if getattr(criteria, f) > getattr(defaults, f)]
+    if relaxed:
+        raise ValueError(
+            "forward-gate relaxation requires --actor human: " + ", ".join(sorted(relaxed)))
+
+
+def forward_promotion_preflight(
+    repo: StrategyRepository, name: str, *, actor: Actor, criteria: ForwardGateCriteria,
+) -> StrategyRecord:
+    """Pre-work refusals (mirrors ``promotion_preflight``): actor legality, relaxation guard,
+    stage legality. FORWARD_TESTED is legal because a re-evaluation refreshes the live-wall
+    certificate without a stage change (#124)."""
+    # SYSTEM would pass as "not human" (strict) yet mint a row it can never consume.
+    if actor not in (Actor.AGENT, Actor.HUMAN):
+        raise ValueError(f"paper promote requires --actor agent or human, got {actor.value}")
+    guard_forward_relaxations(actor, criteria)
+    rec = repo.get(name)
+    if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
+        raise TransitionError(
+            f"paper promote requires stage paper or forward_tested, got {rec.stage.value}")
+    if rec.stage is Stage.PAPER:
+        validate_transition(rec.stage, Stage.FORWARD_TESTED)
+    return rec
+
+
+@dataclass
+class ForwardPromotionOutcome:
+    decision: ForwardGateDecision
+    promoted: bool
+    assembled: AssembledEvidence
+
+
+def run_forward_gate(
+    repo: StrategyRepository,
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    actor: Actor,
+    criteria: ForwardGateCriteria,
+    calendar: SessionCalendar,
+    now: datetime,
+    activities_fetch: ActivitiesFetch,
+) -> ForwardPromotionOutcome:
+    """Assemble evidence -> evaluate -> record (pass AND fail) -> on pass from PAPER transition
+    (consuming the just-minted token). At FORWARD_TESTED a passing run is the certificate
+    refresh: a new row, no stage change.
+
+    Identity is computed ONCE via ``compute_artifact_hashes`` — the SAME source the token
+    consume re-checks inside ``apply_transition`` — so the row, the evidence admissibility
+    filter, and the consume predicate can never disagree."""
+    rec = repo.get(name)
+    identity = compute_artifact_hashes(name)
+    asm = assemble_forward_evidence(
+        conn, strategy_id=rec.id, name=name, identity=identity, calendar=calendar, now=now,
+        activities_fetch=activities_fetch)
+    decision = evaluate_forward_gate(asm.evidence, criteria)
+    repo.record_forward_gate_evaluation(
+        rec.id, passed=decision.passed,
+        n_forward_observations=asm.evidence.n_return_observations,
+        min_forward_observations=criteria.min_forward_observations,
+        session_coverage=asm.evidence.session_coverage,
+        realized_sharpe=asm.evidence.realized_sharpe,
+        holdout_sharpe=asm.evidence.holdout_sharpe,
+        degradation_factor=criteria.degradation_factor,
+        sharpe_floor=criteria.sharpe_floor,
+        realized_vol=asm.evidence.realized_vol,
+        min_forward_vol=criteria.min_forward_vol,
+        realized_max_drawdown=asm.evidence.realized_max_drawdown,
+        max_forward_drawdown=criteria.max_forward_drawdown,
+        first_tick_id=asm.first_tick_id, last_tick_id=asm.last_tick_id,
+        first_tick_ts=asm.first_tick_ts, last_tick_ts=asm.last_tick_ts,
+        max_staleness_sessions=criteria.max_staleness_sessions,
+        n_reconcile_failures=asm.evidence.n_reconcile_failures,
+        n_concurrent_forward=asm.n_concurrent_forward,
+        account_id=asm.account_id,
+        code_hash=identity.code_hash, config_hash=identity.config_hash,
+        dependency_hash=identity.dependency_hash, actor=actor.value,
+        decision_json=json.dumps(decision.to_dict(), sort_keys=True))
+    promoted = False
+    if decision.passed and rec.stage is Stage.PAPER:
+        transition_strategy(repo, name, Stage.FORWARD_TESTED, actor,
+                            _forward_gate_reason(decision))
+        promoted = True
+    return ForwardPromotionOutcome(decision=decision, promoted=promoted, assembled=asm)
+
+
+def _forward_gate_reason(decision: ForwardGateDecision) -> str:
+    """Human-readable gate summary (mirrors ``promotion._gate_reason``). Metric checks render
+    value/op/threshold; boolean checks render name=pass|fail."""
+    parts: list[str] = []
+    for c in decision.checks:
+        if "value" in c and c.get("value") is not None and c.get("threshold") is not None:
+            parts.append(f"{c['name']}={c['value']:.4g}{c['op']}{c['threshold']:.4g}")
+        else:
+            parts.append(f"{c['name']}={'pass' if c['passed'] else 'fail'}")
+    return "forward gate pass: " + ", ".join(parts)

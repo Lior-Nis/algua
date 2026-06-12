@@ -14,15 +14,21 @@ import pandas as pd
 import pytest
 
 from algua.backtest.metrics import metrics_from_returns
+from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.execution.order_state import record_submitted_order, record_tick_snapshot
 from algua.registry.db import connect, migrate
 from algua.registry.forward_promotion import (
     EXTERNAL_CAPITAL_TYPES,
     AssembledEvidence,
     assemble_forward_evidence,
+    forward_promotion_preflight,
+    guard_forward_relaxations,
     qualified_holdout_sharpe,
+    run_forward_gate,
 )
 from algua.registry.repository import ArtifactIdentity
+from algua.registry.store import SqliteStrategyRepository
+from algua.research.forward_gates import FORWARD_TOKEN_TTL_DAYS, ForwardGateCriteria
 
 # Friday 2026-06-12: June 2026 weekdays are Jun 1-5 (Mon-Fri) and Jun 8-12 (Mon-Fri).
 NOW = datetime(2026, 6, 12, 21, 0, tzinfo=UTC)
@@ -602,3 +608,163 @@ def test_assemble_threads_holdout_sharpe_into_evidence(conn):
     seed_gate_row(conn, value=1.4)
     res = assemble(conn)
     assert res.evidence.holdout_sharpe == pytest.approx(1.4)
+
+
+# ---------------------------------------------------------------------------
+# Task 10: preflight + relaxation guard + run_forward_gate orchestration
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def repo(conn):
+    return SqliteStrategyRepository(conn)
+
+
+def _set_stage(conn, stage: str) -> None:
+    conn.execute("UPDATE strategies SET stage=? WHERE id=1", (stage,))
+    conn.commit()
+
+
+def test_preflight_refuses_system_actor(repo):
+    with pytest.raises(ValueError, match="agent or human"):
+        forward_promotion_preflight(repo, "s", actor=Actor.SYSTEM,
+                                    criteria=ForwardGateCriteria())
+
+
+@pytest.mark.parametrize("stage", ["candidate", "live"])
+def test_preflight_refuses_wrong_stage(conn, repo, stage):
+    _set_stage(conn, stage)
+    with pytest.raises(TransitionError, match="paper or forward_tested"):
+        forward_promotion_preflight(repo, "s", actor=Actor.AGENT,
+                                    criteria=ForwardGateCriteria())
+
+
+@pytest.mark.parametrize("stage", ["paper", "forward_tested"])
+def test_preflight_accepts_paper_and_forward_tested(conn, repo, stage):
+    _set_stage(conn, stage)
+    rec = forward_promotion_preflight(repo, "s", actor=Actor.AGENT,
+                                      criteria=ForwardGateCriteria())
+    assert rec.stage.value == stage
+
+
+@pytest.mark.parametrize(("kwargs", "fieldname"), [
+    ({"sharpe_floor": 0.2}, "sharpe_floor"),
+    ({"max_forward_drawdown": 0.30}, "max_forward_drawdown"),
+    ({"max_staleness_sessions": 6}, "max_staleness_sessions"),
+    ({"min_session_coverage": 0.8}, "min_session_coverage"),
+])
+def test_guard_refuses_agent_relaxation_naming_field(kwargs, fieldname):
+    with pytest.raises(ValueError, match=fieldname):
+        guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(**kwargs))
+
+
+def test_guard_allows_agent_tightening_and_defaults():
+    guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria())  # pure defaults
+    guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(sharpe_floor=0.5))
+    guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(max_forward_drawdown=0.20))
+    guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(max_staleness_sessions=3))
+
+
+def test_guard_human_may_relax_anything():
+    guard_forward_relaxations(Actor.HUMAN, ForwardGateCriteria(
+        min_forward_observations=1, min_session_coverage=0.1, degradation_factor=0.0,
+        sharpe_floor=0.0, min_forward_vol=0.0, max_forward_drawdown=0.9,
+        max_staleness_sessions=99))
+
+
+def _pin_identity(monkeypatch):
+    """One IDENT for BOTH the orchestrator's row and the token-consume recheck (in production
+    both call algua.registry.approvals.compute_artifact_hashes)."""
+    monkeypatch.setattr(
+        "algua.registry.forward_promotion.compute_artifact_hashes", lambda name: IDENT)
+    monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: IDENT)
+
+
+def _weekdays_ending(n: int, end: date = date(2026, 6, 12)) -> list[date]:
+    out: list[date] = []
+    d = end
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= timedelta(days=1)
+    return list(reversed(out))
+
+
+def _seed_passing_window(conn):
+    """64 consecutive sessions of admissible ticks (63 returns >= the floor) with a gently
+    rising, non-degenerate equity path, plus a qualified holdout row (bar = max(.5*1.0, .3))."""
+    eq = 100.0
+    for i, day in enumerate(_weekdays_ending(64)):
+        seed_tick(conn, day, eq)
+        eq *= 1.004 if i % 2 == 0 else 0.999
+    seed_gate_row(conn, value=1.0)
+
+
+def _run(repo, conn, *, actor=Actor.AGENT, criteria=None):
+    return run_forward_gate(
+        repo, conn, name="s", actor=actor, criteria=criteria or ForwardGateCriteria(),
+        calendar=CAL, now=NOW, activities_fetch=lambda a, u: [])
+
+
+def test_run_forward_gate_pass_from_paper_promotes_and_consumes(conn, repo, monkeypatch):
+    _pin_identity(monkeypatch)
+    _seed_passing_window(conn)
+    out = _run(repo, conn)
+    assert out.decision.passed is True
+    assert out.promoted is True
+    assert repo.get("s").stage is Stage.FORWARD_TESTED
+    row = conn.execute("SELECT * FROM forward_gate_evaluations").fetchone()
+    assert row["passed"] == 1
+    assert row["consumed"] == 1  # the just-minted token was consumed by the transition
+    assert row["actor"] == "agent"
+    for col in ("realized_sharpe", "holdout_sharpe", "first_tick_id", "last_tick_id",
+                "n_concurrent_forward", "account_id"):
+        assert row[col] is not None, col
+    assert row["account_id"] == "acct"
+    assert row["n_concurrent_forward"] == 1
+    assert row["first_tick_id"] == out.assembled.first_tick_id
+    assert row["last_tick_id"] == out.assembled.last_tick_id
+    assert json.loads(row["decision_json"]) == out.decision.to_dict()
+
+
+def test_run_forward_gate_fail_records_unconsumable_row_no_transition(conn, repo, monkeypatch):
+    _pin_identity(monkeypatch)
+    _two_admissible(conn)  # 1 return observation: window floor fails
+    seed_gate_row(conn, value=1.0)
+    out = _run(repo, conn)
+    assert out.decision.passed is False
+    assert out.promoted is False
+    assert repo.get("s").stage is Stage.PAPER
+    row = conn.execute("SELECT passed, consumed FROM forward_gate_evaluations").fetchone()
+    assert row["passed"] == 0 and row["consumed"] == 0
+    assert repo.find_consumable_forward_gate_evaluation(
+        1, "c", "g", "d", now=datetime.now(UTC).isoformat(),
+        ttl_days=FORWARD_TOKEN_TTL_DAYS) is None
+
+
+def test_run_forward_gate_reevaluation_at_forward_tested_records_new_row(
+        conn, repo, monkeypatch):
+    _pin_identity(monkeypatch)
+    _seed_passing_window(conn)
+    first = _run(repo, conn)
+    assert first.promoted is True
+    second = _run(repo, conn)  # now at forward_tested: certificate refresh, no stage change
+    assert second.decision.passed is True
+    assert second.promoted is False
+    assert repo.get("s").stage is Stage.FORWARD_TESTED
+    rows = conn.execute(
+        "SELECT passed, consumed FROM forward_gate_evaluations ORDER BY id").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["passed"] == 1 and rows[0]["consumed"] == 1  # the promotion token
+    assert rows[1]["passed"] == 1 and rows[1]["consumed"] == 0  # the fresh certificate
+
+
+def test_run_forward_gate_human_pass_from_paper(conn, repo, monkeypatch):
+    _pin_identity(monkeypatch)
+    _seed_passing_window(conn)
+    out = _run(repo, conn, actor=Actor.HUMAN)
+    assert out.promoted is True
+    assert repo.get("s").stage is Stage.FORWARD_TESTED
+    row = conn.execute("SELECT actor, passed, consumed FROM forward_gate_evaluations").fetchone()
+    assert row["actor"] == "human"
+    assert row["passed"] == 1
+    assert row["consumed"] == 0  # human path needs no token; the row is never consumable
