@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -10,7 +11,13 @@ from algua.cli._common import now_iso, ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.data.contracts import BarProvider, BarRequest, FirstRateImportRequest, ImportRequest
+from algua.data.contracts import (
+    BarProvider,
+    BarRequest,
+    DatabentoImportRequest,
+    FirstRateImportRequest,
+    ImportRequest,
+)
 from algua.data.hindsight import query_fundamentals, query_news
 from algua.data.importers import get_importer
 from algua.data.providers import get_provider
@@ -28,6 +35,14 @@ def _store() -> DataStore:
 
 def _bar_provider(name: str) -> BarProvider:
     return get_provider(name, get_settings())
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 @data_app.command("ingest")
@@ -107,6 +122,10 @@ def import_bars(
     adjusted_dir: Path = typer.Option(
         None, "--adjusted-dir", help="firstrate: dir of adjusted per-symbol files (adj_close)"
     ),
+    corp_actions: Path = typer.Option(
+        None, "--corp-actions",
+        help="databento: parquet of split/dividend events (computes adj_close)",
+    ),
     timeframe: str = typer.Option("1d", "--timeframe"),
     as_of: str = typer.Option(..., "--as-of", help="point-in-time ISO datetime"),
     adjustment: str = typer.Option(
@@ -130,6 +149,20 @@ def import_bars(
             "vendor": importer.vendor_label,
             "raw_dir": raw_dir.name,
             "adjusted_dir": adjusted_dir.name,
+        }
+    elif vendor == "databento":
+        if corp_actions is None:
+            raise ValueError("databento import requires --corp-actions")
+        request = DatabentoImportRequest(
+            raw_dir=raw_dir, corp_actions_path=corp_actions, timeframe=timeframe, as_of=as_of,
+            adjustment=adjustment, symbols=sym_tuple,
+        )
+        source_metadata = {
+            "vendor": importer.vendor_label,
+            "raw_dir": raw_dir.name,
+            "corp_actions_file": corp_actions.name,
+            "corp_actions_sha256": _sha256(corp_actions),
+            "ca_schema_version": "1",
         }
     else:
         raise ValueError(f"vendor {vendor!r} has no import-bars flag wiring")

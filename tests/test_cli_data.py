@@ -191,3 +191,69 @@ def test_data_errors_emit_json(tmp_path):
 
     assert result.exit_code == 1
     assert json.loads(result.stdout)["ok"] is False
+
+
+def _write_raw_p(path, ts, closes):
+    pd.DataFrame(
+        {
+            "ts": ts,
+            "open": closes,
+            "high": [c + 1 for c in closes],
+            "low": [c - 1 for c in closes],
+            "close": closes,
+            "volume": [100.0] * len(closes),
+        }
+    ).to_parquet(path)
+
+
+def test_cli_databento_import(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "store"))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    ca = tmp_path / "ca.parquet"
+    _write_raw_p(
+        raw / "AAPL.parquet",
+        pd.date_range("2024-01-01", periods=4, freq="D", tz="UTC"),
+        [100.0, 110.0, 50.0, 55.0],
+    )
+    pd.DataFrame(
+        [{"symbol": "AAPL", "ex_date": "2024-01-03", "kind": "split", "value": 2.0}]
+    ).to_parquet(ca)
+    res = runner.invoke(
+        app,
+        [
+            "data", "import-bars",
+            "--vendor", "databento",
+            "--raw-dir", str(raw),
+            "--corp-actions", str(ca),
+            "--as-of", "2024-06-01T00:00:00Z",
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.output)
+    assert payload["ok"] is True
+    # provenance carries the CA hash
+    snap = payload["snapshot"]
+    assert "corp_actions_sha256" in json.dumps(snap)
+
+
+def test_cli_databento_requires_corp_actions(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "store"))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    _write_raw_p(
+        raw / "AAPL.parquet",
+        pd.date_range("2024-01-01", periods=1, freq="D", tz="UTC"),
+        [100.0],
+    )
+    res = runner.invoke(
+        app,
+        [
+            "data", "import-bars",
+            "--vendor", "databento",
+            "--raw-dir", str(raw),
+            "--as-of", "2024-06-01T00:00:00Z",
+        ],
+    )
+    assert res.exit_code != 0
+    assert "corp-actions" in res.output
