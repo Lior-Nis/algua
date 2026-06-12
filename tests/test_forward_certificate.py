@@ -78,7 +78,7 @@ def seed_cert(repo, conn, strategy_id=1, *, passed=True, created_at="2026-06-10T
         first_tick_ts=None, last_tick_ts=None, max_staleness_sessions=5, n_reconcile_failures=0,
         n_concurrent_forward=2, account_id=account_id, code_hash=code_hash,
         config_hash=config_hash, dependency_hash=dependency_hash, actor="agent",
-        decision_json="{}")
+        decision_json="{}", consumable=False)
     conn.execute("UPDATE forward_gate_evaluations SET created_at=? WHERE id=?",
                  (created_at, rid))
     conn.commit()
@@ -300,8 +300,8 @@ def test_live_with_approval_but_no_certificate_fails(repo, conn, monkeypatch):
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda n: IDENT)
     repo.record_approval(rec.id, "c", "g", "d", "lior")
     # The REAL verify against the seeded DB (no forward_gate_evaluations row).
-    verifier = lambda r, name, sid: verify_forward_certificate(  # noqa: E731
-        r, conn, name=name, strategy_id=sid, identity=IDENT, calendar=CAL, now=NOW,
+    verifier = lambda r, name, sid, ident: verify_forward_certificate(  # noqa: E731
+        r, conn, name=name, strategy_id=sid, identity=ident, calendar=CAL, now=NOW,
         activities_fetch=NO_ACTS, account_id_fetch=lambda: "acct")
     with pytest.raises(TransitionError, match="forward-test certificate"):
         transition_strategy(repo, "s", Stage.LIVE, Actor.HUMAN,
@@ -312,8 +312,8 @@ def test_live_with_certificate_passes_through_to_approval(repo, conn, monkeypatc
     rec = _registered(repo, conn)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda n: IDENT)
     seed_cert(repo, conn, rec.id)
-    verifier = lambda r, name, sid: verify_forward_certificate(  # noqa: E731
-        r, conn, name=name, strategy_id=sid, identity=IDENT, calendar=CAL, now=NOW,
+    verifier = lambda r, name, sid, ident: verify_forward_certificate(  # noqa: E731
+        r, conn, name=name, strategy_id=sid, identity=ident, calendar=CAL, now=NOW,
         activities_fetch=NO_ACTS, account_id_fetch=lambda: "acct")
     # Certificate passes, so the NEXT wall (approval) is what refuses.
     with pytest.raises(TransitionError, match="no matching human approval"):
@@ -330,7 +330,7 @@ def test_non_human_actor_fails_before_the_certificate_check(repo, conn):
     _registered(repo, conn)
     calls = []
 
-    def verifier(r, name, sid):
+    def verifier(r, name, sid, ident):
         calls.append(name)
         return {}
 
@@ -340,15 +340,44 @@ def test_non_human_actor_fails_before_the_certificate_check(repo, conn):
     assert calls == []  # the actor wall fires first; the verifier is never consulted
 
 
-def test_certificate_check_runs_before_approval(repo, conn):
+def test_certificate_check_runs_before_approval(repo, conn, monkeypatch):
     _registered(repo, conn)
+    # Identity is computed (once) before either wall; pin it so the real loader never runs.
+    monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda n: IDENT)
+
     # No approval exists either — the CERTIFICATE error proves its check runs first.
-    def verifier(r, name, sid):
+    def verifier(r, name, sid, ident):
         raise TransitionError("certificate says no")
 
     with pytest.raises(TransitionError, match="certificate says no"):
         transition_strategy(repo, "s", Stage.LIVE, Actor.HUMAN,
                             forward_certificate_verifier=verifier)
+
+
+def test_live_gate_computes_identity_once_and_shares_it(repo, conn, monkeypatch):
+    """The TOCTOU fix (#124 GATE-2): ONE identity computation feeds both the certificate
+    verifier and the approval check — an injected verifier gets the same identity the approval
+    is judged against, never a second (driftable) recompute."""
+    rec = _registered(repo, conn)
+    computes = []
+
+    def _hashes(name):
+        computes.append(name)
+        return IDENT
+
+    monkeypatch.setattr("algua.registry.transitions._compute_hashes", _hashes)
+    repo.record_approval(rec.id, "c", "g", "d", "lior")
+    seen = {}
+
+    def verifier(r, name, sid, ident):
+        seen["identity"] = ident
+        return {"id": 1}
+
+    out = transition_strategy(repo, "s", Stage.LIVE, Actor.HUMAN,
+                              forward_certificate_verifier=verifier)
+    assert out.stage is Stage.LIVE
+    assert computes == ["s"]  # exactly one compute for the whole live gate
+    assert seen["identity"] is IDENT  # the verifier judged THAT identity, not its own
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +391,7 @@ def test_default_verifier_requires_sqlite_repo_or_injection():
         pass
 
     with pytest.raises(TransitionError, match="sqlite-backed repository or an injected"):
-        _default_forward_certificate_verifier()(NotSqlite(), "s", 1)
+        _default_forward_certificate_verifier()(NotSqlite(), "s", 1, IDENT)
 
 
 def test_default_verifier_missing_paper_creds_refuses(repo, conn, monkeypatch):
@@ -373,7 +402,7 @@ def test_default_verifier_missing_paper_creds_refuses(repo, conn, monkeypatch):
         update={"alpaca_api_key": None, "alpaca_api_secret": None})
     monkeypatch.setattr(settings_mod, "get_settings", lambda: stripped)
     with pytest.raises(TransitionError, match="(?s)account hygiene.*ALGUA_ALPACA_API_KEY"):
-        _default_forward_certificate_verifier()(repo, "s", 1)
+        _default_forward_certificate_verifier()(repo, "s", 1, IDENT)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +438,7 @@ def test_challenge_payload_carries_certificate_summary(cli, monkeypatch):
     assert runner.invoke(app, ["live", "allocate", name, "--capital", "1000"]).exit_code == 0
     monkeypatch.setattr(
         "algua.registry.transitions._default_forward_certificate_verifier",
-        lambda: (lambda repo, n, sid: dict(CERT_SUMMARY)))
+        lambda: (lambda repo, n, sid, ident: dict(CERT_SUMMARY)))
     r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
     assert r.exit_code == 0, r.stdout
     out = json.loads(r.stdout)
@@ -424,7 +453,7 @@ def test_no_certificate_refuses_before_issuing_a_challenge(cli, monkeypatch):
     assert runner.invoke(app, ["live", "allocate", name, "--capital", "1000"]).exit_code == 0
 
     def raising():
-        def v(repo, n, sid):
+        def v(repo, n, sid, ident):
             raise TransitionError("go-live requires a forward-test certificate")
         return v
 

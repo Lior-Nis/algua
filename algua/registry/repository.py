@@ -305,10 +305,12 @@ class StrategyRepository(Protocol):
         dependency_hash: str | None,
         actor: str,
         decision_json: str,
+        consumable: bool,
     ) -> int:
         """Persist one forward-test gate evaluation (pass or fail) and return its row id. A
-        passing AGENT row is the single-use token the paper -> forward_tested transition
-        consumes."""
+        passing AGENT row written ``consumable=True`` is the single-use token the paper ->
+        forward_tested transition consumes; ``consumable=False`` writes the row already consumed
+        — a CERTIFICATE for the live wall, never a re-entry token (#124 GATE-2)."""
         ...
 
     def find_consumable_forward_gate_evaluation(

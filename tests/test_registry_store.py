@@ -534,7 +534,7 @@ def test_list_strategies_tag_filter_tolerates_malformed_tags(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _record_forward(repo, sid, *, passed=True, actor="agent", code="c0", config="cfg0",
-                    dep="dep0"):
+                    dep="dep0", consumable=True):
     return repo.record_forward_gate_evaluation(
         sid, passed=passed, n_forward_observations=70, min_forward_observations=63,
         session_coverage=0.95, realized_sharpe=0.8, holdout_sharpe=1.2, degradation_factor=0.5,
@@ -543,7 +543,7 @@ def _record_forward(repo, sid, *, passed=True, actor="agent", code="c0", config=
         first_tick_ts="2026-01-02T00:00:00+00:00", last_tick_ts="2026-06-01T00:00:00+00:00",
         max_staleness_sessions=5, n_reconcile_failures=0, n_concurrent_forward=1,
         account_id="acct", code_hash=code, config_hash=config, dependency_hash=dep, actor=actor,
-        decision_json="{}")
+        decision_json="{}", consumable=consumable)
 
 
 def _now_iso():
@@ -577,6 +577,20 @@ def test_find_consumable_forward_matches_agent_passing_identity(repo):
     rec = repo.add("alpha")
     fid = _record_forward(repo, rec.id)
     assert _find_forward(repo, rec.id) == fid
+
+
+def test_record_forward_not_consumable_is_born_consumed_certificate(repo):
+    # consumable=False writes the row already consumed: a CERTIFICATE for the live wall, never
+    # a re-entry token a demoted strategy could bank (#124 GATE-2).
+    rec = repo.add("alpha")
+    fid = _record_forward(repo, rec.id, consumable=False)
+    row = repo._conn.execute(
+        "SELECT consumed FROM forward_gate_evaluations WHERE id=?", (fid,)).fetchone()
+    assert row["consumed"] == 1
+    assert _find_forward(repo, rec.id) is None
+    # The certificate path ignores consumed: the live wall still sees the row.
+    latest = repo.latest_forward_gate_row(rec.id, "c0", "cfg0", "dep0")
+    assert latest is not None and latest["id"] == fid
 
 
 def test_find_consumable_forward_rejects_each_disqualifier(repo):

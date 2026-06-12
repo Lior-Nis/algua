@@ -544,10 +544,12 @@ class SqliteStrategyRepository:
         dependency_hash: str | None,
         actor: str,
         decision_json: str,
+        consumable: bool,
     ) -> int:
         """Persist one forward-test gate evaluation (pass or fail) and return its row id. A
-        passing AGENT row is the single-use token the paper -> forward_tested transition
-        consumes."""
+        passing AGENT row written ``consumable=True`` is the single-use token the paper ->
+        forward_tested transition consumes; ``consumable=False`` writes the row already consumed
+        — a CERTIFICATE for the live wall, never a re-entry token (#124 GATE-2)."""
         with self._conn:
             cur = self._conn.execute(
                 "INSERT INTO forward_gate_evaluations"
@@ -558,13 +560,14 @@ class SqliteStrategyRepository:
                 " max_staleness_sessions, n_reconcile_failures, n_concurrent_forward, account_id,"
                 " code_hash, config_hash, dependency_hash, actor, decision_json,"
                 " consumed, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (strategy_id, int(passed), n_forward_observations, min_forward_observations,
                  session_coverage, realized_sharpe, holdout_sharpe, degradation_factor,
                  sharpe_floor, realized_vol, min_forward_vol, realized_max_drawdown,
                  max_forward_drawdown, first_tick_id, last_tick_id, first_tick_ts, last_tick_ts,
                  max_staleness_sessions, n_reconcile_failures, n_concurrent_forward, account_id,
-                 code_hash, config_hash, dependency_hash, actor, decision_json, _now()),
+                 code_hash, config_hash, dependency_hash, actor, decision_json,
+                 0 if consumable else 1, _now()),
             )
         rowid = cur.lastrowid
         assert rowid is not None

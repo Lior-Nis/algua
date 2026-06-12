@@ -8,8 +8,11 @@ from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_tr
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
 
 ApprovalVerifier = Callable[[StrategyRepository, int, str, str, str | None], bool]
-# (repo, name, strategy_id) -> certificate summary; raises TransitionError on any refusal.
-ForwardCertificateVerifier = Callable[[StrategyRepository, str, int], dict[str, Any]]
+# (repo, name, strategy_id, identity) -> certificate summary; raises TransitionError on any
+# refusal. ``identity`` is the live gate's ONE recomputed identity — the verifier judges against
+# it instead of recomputing, so the certificate and approval checks can never drift (#124 GATE-2).
+ForwardCertificateVerifier = Callable[
+    [StrategyRepository, str, int, ArtifactIdentity], dict[str, Any]]
 
 
 def transition_strategy(
@@ -93,9 +96,11 @@ def _validate_live_gate(
     """
     if actor is not Actor.HUMAN:
         raise TransitionError("transition to live requires a human actor")
-    (forward_certificate_verifier or _default_forward_certificate_verifier())(
-        repo, name, strategy_id)
+    # ONE identity computation feeds both walls below: a per-wall recompute would open a drift
+    # window between the certificate's identity and the approval's (#124 GATE-2).
     identity = _compute_hashes(name)
+    (forward_certificate_verifier or _default_forward_certificate_verifier())(
+        repo, name, strategy_id, identity)
     verifier = approval_verifier or _default_approval_verifier()
     if not verifier(
         repo,
@@ -164,7 +169,9 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
     (module-attribute access — also the single monkeypatch seam for tests). Every missing
     dependency FAILS CLOSED with an actionable ``TransitionError``."""
 
-    def verify(repo: StrategyRepository, name: str, strategy_id: int) -> dict[str, Any]:
+    def verify(
+        repo: StrategyRepository, name: str, strategy_id: int, identity: ArtifactIdentity,
+    ) -> dict[str, Any]:
         from algua.calendar.market_calendar import MarketCalendar
         from algua.config.settings import get_settings
         from algua.execution.alpaca_broker import AlpacaPaperBroker
@@ -185,7 +192,7 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
                                    api_secret=settings.alpaca_api_secret,
                                    base_url=settings.alpaca_paper_url)
         return verify_forward_certificate(
-            repo, conn, name=name, strategy_id=strategy_id, identity=_compute_hashes(name),
+            repo, conn, name=name, strategy_id=strategy_id, identity=identity,
             calendar=MarketCalendar(), now=datetime.now(UTC),
             activities_fetch=broker.account_activities_window,
             # Account continuity: the certificate's account_id must equal the account these

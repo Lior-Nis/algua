@@ -90,7 +90,7 @@ def _stub_passing_certificate(monkeypatch):
             "holdout_sharpe": 1.2, "n_forward_observations": 80, "n_concurrent_forward": 1}
     monkeypatch.setattr(
         "algua.registry.transitions._default_forward_certificate_verifier",
-        lambda: (lambda repo, name, sid: dict(cert)))
+        lambda: (lambda repo, name, sid, ident: dict(cert)))
 
 
 def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):

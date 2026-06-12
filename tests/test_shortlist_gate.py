@@ -104,7 +104,7 @@ def _forward_token(repo, sid, *, actor="agent"):
         first_tick_ts="2026-01-02T00:00:00+00:00", last_tick_ts="2026-06-01T00:00:00+00:00",
         max_staleness_sessions=5, n_reconcile_failures=0, n_concurrent_forward=1,
         account_id="acct", code_hash="c0", config_hash="cfg0", dependency_hash="dep0",
-        actor=actor, decision_json="{}")
+        actor=actor, decision_json="{}", consumable=True)
 
 
 def test_agent_paper_to_candidate_backstep_is_free(tmp_path):

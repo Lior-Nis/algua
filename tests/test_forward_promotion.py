@@ -28,6 +28,7 @@ from algua.registry.forward_promotion import (
 )
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import FORWARD_TOKEN_TTL_DAYS, ForwardGateCriteria
 
 # Friday 2026-06-12: June 2026 weekdays are Jun 1-5 (Mon-Fri) and Jun 8-12 (Mon-Fri).
@@ -755,7 +756,29 @@ def test_run_forward_gate_reevaluation_at_forward_tested_records_new_row(
         "SELECT passed, consumed FROM forward_gate_evaluations ORDER BY id").fetchall()
     assert len(rows) == 2
     assert rows[0]["passed"] == 1 and rows[0]["consumed"] == 1  # the promotion token
-    assert rows[1]["passed"] == 1 and rows[1]["consumed"] == 0  # the fresh certificate
+    # The refresh row is a CERTIFICATE, not a token: born consumed, so a later demotion can
+    # never bank it for re-entry (#124 GATE-2)...
+    assert rows[1]["passed"] == 1 and rows[1]["consumed"] == 1
+    assert repo.find_consumable_forward_gate_evaluation(
+        1, "c", "g", "d", now=datetime.now(UTC).isoformat(),
+        ttl_days=FORWARD_TOKEN_TTL_DAYS) is None
+    # ...while the live wall's certificate selection (which ignores consumed) still sees it.
+    latest = repo.latest_forward_gate_row(1, "c", "g", "d")
+    assert latest is not None and latest["passed"] == 1 and latest["consumed"] == 1
+
+
+def test_run_forward_gate_refresh_row_is_not_bankable_for_repromotion(
+        conn, repo, monkeypatch):
+    """The GATE-2 banking attack: pass from paper, refresh at forward_tested, demote, then try
+    to re-promote by consuming the banked refresh row. Re-entry to forward_tested from below
+    must always require a fresh full gate pass — the refresh row never satisfies it."""
+    _pin_identity(monkeypatch)
+    _seed_passing_window(conn)
+    assert _run(repo, conn).promoted is True
+    assert _run(repo, conn).decision.passed is True  # refresh at forward_tested
+    transition_strategy(repo, "s", Stage.PAPER, Actor.AGENT, "demote")  # back-step is free
+    with pytest.raises(TransitionError, match="algua paper promote"):
+        transition_strategy(repo, "s", Stage.FORWARD_TESTED, Actor.AGENT, "bank the refresh")
 
 
 def test_run_forward_gate_failing_reevaluation_at_forward_tested_no_demotion(
@@ -773,7 +796,8 @@ def test_run_forward_gate_failing_reevaluation_at_forward_tested_no_demotion(
     rows = conn.execute(
         "SELECT passed, consumed FROM forward_gate_evaluations ORDER BY id").fetchall()
     assert len(rows) == 2
-    assert rows[1]["passed"] == 0 and rows[1]["consumed"] == 0
+    # Re-evaluation rows at forward_tested are certificates: born consumed, pass OR fail.
+    assert rows[1]["passed"] == 0 and rows[1]["consumed"] == 1
     # Nothing bankable either: the promotion token is spent, the failing row never consumable.
     assert repo.find_consumable_forward_gate_evaluation(
         1, "c", "g", "d", now=datetime.now(UTC).isoformat(),

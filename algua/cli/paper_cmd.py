@@ -461,8 +461,12 @@ def flatten(
     strategy = load_strategy(name)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
-        if rec.stage is not Stage.PAPER:
-            raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
+        # A forward_tested strategy still holds paper positions while awaiting the go-live
+        # signature, so the emergency exit must reach it too (#124 GATE-2).
+        if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
+            raise ValueError(
+                f"{name} is at stage '{rec.stage.value}'; "
+                "flatten requires 'paper' or 'forward_tested'")
         broker = _alpaca_broker_from_settings()
         # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
         kill_switch.trip(conn, name, reason="flatten", actor=actor)

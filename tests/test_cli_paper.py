@@ -235,6 +235,29 @@ def test_paper_flatten_closes_and_trips(monkeypatch):
     assert show["kill_switch"]["tripped"] is True
 
 
+def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch):
+    """A certified forward_tested strategy still holds paper positions while awaiting the go-live
+    signature — emergency flatten must work there too (#124 GATE-2)."""
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = "cross_sectional_momentum"
+    _to_paper()
+    assert runner.invoke(
+        app, ["registry", "transition", name, "--to", "forward_tested",
+              "--actor", "human", "--reason", "gate passed"]
+    ).exit_code == 0
+    broker = _FlattenBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "flatten", name])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["liquidation_submitted"] is True and payload["kill_switch"] == "tripped"
+    assert broker.cancelled is True
+    assert isinstance(broker.closed_symbols, list) and broker.closed_symbols
+    show = json.loads(runner.invoke(app, ["paper", "show", name]).stdout)
+    assert show["kill_switch"]["tripped"] is True
+
+
 def test_paper_flatten_rejects_non_paper_stage(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")

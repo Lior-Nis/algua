@@ -131,10 +131,12 @@ def transition(
             # The certificate check BEFORE any challenge is issued, so the human signs with
             # the evidence in front of them (#124). Built via the same transitions helper the
             # signature-completion wall uses — no duplicate logic. Module-attribute access on
-            # purpose: it is the one monkeypatch seam shared by both paths.
-            certificate = transitions._default_forward_certificate_verifier()(
-                repo, name, rec.id)
+            # purpose: it is the one monkeypatch seam shared by both paths. ONE identity
+            # computation serves both the verifier and the challenge — no drift window
+            # between what the certificate was judged against and what gets signed (#124 GATE-2).
             identity = compute_artifact_hashes(name)
+            certificate = transitions._default_forward_certificate_verifier()(
+                repo, name, rec.id, identity)
             issued = live_gate.issue_challenge(
                 conn, rec.id, name, identity.code_hash, identity.config_hash,
                 identity.dependency_hash)

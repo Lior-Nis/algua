@@ -542,7 +542,11 @@ def run_forward_gate(
         account_id=asm.account_id,
         code_hash=identity.code_hash, config_hash=identity.config_hash,
         dependency_hash=identity.dependency_hash, actor=actor.value,
-        decision_json=json.dumps(decision.to_dict(), sort_keys=True))
+        decision_json=json.dumps(decision.to_dict(), sort_keys=True),
+        # A refresh at forward_tested must refresh the live certificate WITHOUT minting a
+        # re-entry token (#124 GATE-2): only a run FROM paper writes a consumable row, so a
+        # demote-then-re-promote can never bank a refresh — it always re-runs the full gate.
+        consumable=rec.stage is Stage.PAPER)
     promoted = False
     if decision.passed and rec.stage is Stage.PAPER:
         transition_strategy(repo, name, Stage.FORWARD_TESTED, actor,
