@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from algua.data.importers.databento import parse_databento_raw
+from algua.data.corpactions import Dividend, Split
+from algua.data.importers.databento import parse_databento_corp_actions, parse_databento_raw
 
 
 def _write_raw(path: Path, ts, closes, *, opens=None, highs=None, lows=None, vols=None) -> None:
@@ -70,3 +71,100 @@ def test_parse_raw_missing_column(tmp_path):
     pd.DataFrame({"ts": pd.date_range("2024-01-01", periods=1, tz="UTC"), "close": [100.0]}).to_parquet(p)
     with pytest.raises(ValueError, match="missing columns"):
         parse_databento_raw(p)
+
+
+def _write_ca(path: Path, rows: list[dict]) -> None:
+    pd.DataFrame(rows).to_parquet(path)
+
+
+def _utc(day: str) -> pd.Timestamp:
+    return pd.Timestamp(day, tz="UTC")
+
+
+def test_ca_parse_split_and_dividend(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [
+        {"symbol": "AAPL", "ex_date": "2024-01-03", "kind": "split", "value": 2.0},
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5},
+        {"symbol": "msft", "ex_date": "2024-01-10", "kind": "Dividend ", "value": 1.0},  # case/space
+    ])
+    ev = parse_databento_corp_actions(p)
+    assert ev["AAPL"] == [Split(ex_date=_utc("2024-01-03"), ratio=2.0),
+                          Dividend(ex_date=_utc("2024-02-01"), cash=0.5)] or \
+           sorted([type(e).__name__ for e in ev["AAPL"]]) == ["Dividend", "Split"]
+    assert ev["MSFT"] == [Dividend(ex_date=_utc("2024-01-10"), cash=1.0)]
+
+
+def test_ca_unknown_kind_and_bad_value(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [{"symbol": "AAPL", "ex_date": "2024-01-03", "kind": "merger", "value": 1.0}])
+    with pytest.raises(ValueError, match="unknown kind"):
+        parse_databento_corp_actions(p)
+    p2 = tmp_path / "ca2.parquet"
+    _write_ca(p2, [{"symbol": "AAPL", "ex_date": "2024-01-03", "kind": "dividend", "value": 0.0}])
+    with pytest.raises(ValueError, match="value"):
+        parse_databento_corp_actions(p2)
+
+
+def test_ca_non_midnight_ex_date_raises(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [{"symbol": "AAPL", "ex_date": "2024-01-03 12:00", "kind": "split", "value": 2.0}])
+    with pytest.raises(ValueError, match="midnight|UTC"):
+        parse_databento_corp_actions(p)
+
+
+def test_ca_same_date_two_dividends_both_kept(tmp_path):
+    # regular + special dividend on one ex-date with distinct event_id -> both kept (engine sums).
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "r1"},
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "s1"},
+    ])
+    assert len(parse_databento_corp_actions(p)["AAPL"]) == 2
+
+
+def test_ca_event_id_dedup_and_conflict(tmp_path):
+    # duplicate (symbol, event_id) identical economics -> one; differing economics -> raise.
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "d1"},
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "d1"},
+    ])
+    assert len(parse_databento_corp_actions(p)["AAPL"]) == 1
+
+    p2 = tmp_path / "ca2.parquet"
+    _write_ca(p2, [
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "d1"},
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.9, "event_id": "d1"},
+    ])
+    with pytest.raises(ValueError, match="differing economics"):
+        parse_databento_corp_actions(p2)
+
+
+def test_ca_event_id_blank_raises(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "d1"},
+        {"symbol": "AAPL", "ex_date": "2024-03-01", "kind": "dividend", "value": 0.5, "event_id": None},
+    ])
+    with pytest.raises(ValueError, match="event_id"):
+        parse_databento_corp_actions(p)
+
+
+def test_ca_same_event_id_across_symbols_kept(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "x"},
+        {"symbol": "MSFT", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5, "event_id": "x"},
+    ])
+    ev = parse_databento_corp_actions(p)
+    assert len(ev["AAPL"]) == 1 and len(ev["MSFT"]) == 1
+
+
+def test_ca_no_event_id_exact_dup_dropped(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5},
+        {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5},
+    ])
+    assert len(parse_databento_corp_actions(p)["AAPL"]) == 1
