@@ -31,6 +31,7 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import (
+    CERTIFICATE_FRESH_SESSIONS,
     ForwardEvidence,
     ForwardGateCriteria,
     ForwardGateDecision,
@@ -340,6 +341,87 @@ def assemble_forward_evidence(
         n_concurrent_forward=int(n_concurrent_forward),
         excluded=excluded,
     )
+
+
+def verify_forward_certificate(
+    repo: StrategyRepository,
+    conn: sqlite3.Connection,
+    *,
+    name: str,
+    strategy_id: int,
+    identity: ArtifactIdentity,
+    calendar: SessionCalendar,
+    now: datetime,
+    activities_fetch: ActivitiesFetch,
+) -> dict[str, Any]:
+    """The evidence precondition of the live wall (#124). NOT waivable in-band: there is
+    deliberately no flag; a human who must bypass owns the DB. Selection is the NEWEST row
+    pass-or-fail so a newer failed re-evaluation invalidates an older pass.
+
+    Checks, in order, each failing closed with an actionable ``TransitionError``: a certificate
+    exists for THIS strategy + the current identity; its newest verdict is a pass; it is fresh
+    (at most ``CERTIFICATE_FRESH_SESSIONS`` sessions old); the record since certification is
+    clean (no reconcile-failed paper ticks after ``last_tick_id``, no kill-switch trips after
+    ``created_at``, kill switch and global halt clear); and account hygiene re-verified over
+    ``[created_at, now]`` with the same activity-classification rules the gate itself uses.
+    Returns the certificate summary the human signs against."""
+    row = repo.latest_forward_gate_row(
+        strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
+    if row is None:
+        raise TransitionError(
+            "go-live requires a forward-test certificate for the current "
+            "code+config+dependency; run `algua paper promote`")
+    if not row["passed"]:
+        raise TransitionError(
+            f"the newest forward-gate evaluation (id={row['id']}, created_at="
+            f"{row['created_at']}) FAILED, which invalidates any prior pass; "
+            "re-run `algua paper promote`")
+    age = calendar.sessions_between(
+        datetime.fromisoformat(row["created_at"]).date(), now.date())
+    if age > CERTIFICATE_FRESH_SESSIONS:
+        raise TransitionError(
+            f"the forward-test certificate is stale: {age} sessions old, max "
+            f"{CERTIFICATE_FRESH_SESSIONS}; re-run `algua paper promote` to refresh it")
+    n_bad_ticks = conn.execute(
+        "SELECT COUNT(*) FROM tick_snapshots WHERE lane='paper' AND strategy_id=?"
+        " AND id > ? AND reconcile_ok=0",
+        (strategy_id, row["last_tick_id"] or 0),
+    ).fetchone()[0]
+    if n_bad_ticks:
+        raise TransitionError(
+            f"{n_bad_ticks} reconcile-failed paper tick(s) since certification; investigate,"
+            " then re-run `algua paper promote`")
+    n_trips = conn.execute(
+        "SELECT COUNT(*) FROM audit_log WHERE strategy=? AND action='kill_switch_trip'"
+        " AND ts >= ?",
+        (name, row["created_at"]),
+    ).fetchone()[0]
+    if n_trips:
+        raise TransitionError(
+            f"{n_trips} kill-switch trip(s) since certification; investigate, then re-run"
+            " `algua paper promote`")
+    if is_tripped(conn, name) or is_engaged(conn):
+        raise TransitionError(
+            "kill switch / global halt engaged; clear it before going live")
+    try:
+        acts = activities_fetch(row["created_at"], now.isoformat())
+    except Exception as exc:
+        raise TransitionError(
+            f"could not verify account activities since certification ({exc}); "
+            "failing closed") from exc
+    n_external, n_unattributable = _classify_activities(conn, strategy_id, acts)
+    if n_external or n_unattributable:
+        raise TransitionError(
+            f"account hygiene failed since certification: {n_external} external capital "
+            f"flow(s), {n_unattributable} unattributable fill(s); re-run `algua paper promote`")
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "realized_sharpe": row["realized_sharpe"],
+        "holdout_sharpe": row["holdout_sharpe"],
+        "n_forward_observations": row["n_forward_observations"],
+        "n_concurrent_forward": row["n_concurrent_forward"],
+    }
 
 
 def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> None:

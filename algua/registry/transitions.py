@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
 
 ApprovalVerifier = Callable[[StrategyRepository, int, str, str, str | None], bool]
+# (repo, name, strategy_id) -> certificate summary; raises TransitionError on any refusal.
+ForwardCertificateVerifier = Callable[[StrategyRepository, str, int], dict[str, Any]]
 
 
 def transition_strategy(
@@ -16,6 +19,7 @@ def transition_strategy(
     actor: Actor | str,
     reason: str | None = None,
     approval_verifier: ApprovalVerifier | None = None,
+    forward_certificate_verifier: ForwardCertificateVerifier | None = None,
 ) -> StrategyRecord:
     target = Stage(to)
     transition_actor = Actor(actor)
@@ -33,6 +37,7 @@ def transition_strategy(
             strategy_id=rec.id,
             actor=transition_actor,
             approval_verifier=approval_verifier,
+            forward_certificate_verifier=forward_certificate_verifier,
         )
         code_hash, config_hash, dependency_hash = identity
     elif (
@@ -73,8 +78,14 @@ def _validate_live_gate(
     strategy_id: int,
     actor: Actor,
     approval_verifier: ApprovalVerifier | None,
+    forward_certificate_verifier: ForwardCertificateVerifier | None,
 ) -> ArtifactIdentity:
     """Enforce the human-only live wall against the *recomputed* artifact identity.
+
+    Wall ordering (#124): actor -> forward certificate -> approval. The certificate is the
+    EVIDENCE precondition in front of the signature — a fresh, identity-matched, strategy-bound
+    passing forward-gate evaluation with a clean record since. Not waivable in-band: there is
+    deliberately no flag.
 
     Returns the identity actually pinned (recomputed from source, config, and the lockfile), so
     it lands in the transition history rather than any caller-supplied value. The gate trusts an
@@ -82,6 +93,8 @@ def _validate_live_gate(
     """
     if actor is not Actor.HUMAN:
         raise TransitionError("transition to live requires a human actor")
+    (forward_certificate_verifier or _default_forward_certificate_verifier())(
+        repo, name, strategy_id)
     identity = _compute_hashes(name)
     verifier = approval_verifier or _default_approval_verifier()
     if not verifier(
@@ -143,3 +156,37 @@ def _default_approval_verifier() -> ApprovalVerifier:
     from algua.registry.approvals import has_valid_approval
 
     return has_valid_approval
+
+
+def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
+    """Real wiring for the live wall's certificate check, built lazily (mirrors
+    ``_default_approval_verifier``). The CLI's challenge-issuance path uses this same builder
+    (module-attribute access — also the single monkeypatch seam for tests). Every missing
+    dependency FAILS CLOSED with an actionable ``TransitionError``."""
+
+    def verify(repo: StrategyRepository, name: str, strategy_id: int) -> dict[str, Any]:
+        from algua.calendar.market_calendar import MarketCalendar
+        from algua.config.settings import get_settings
+        from algua.execution.alpaca_broker import AlpacaPaperBroker
+        from algua.registry.forward_promotion import verify_forward_certificate
+
+        # The Protocol stays I/O-agnostic; only the sqlite store exposes `connection`.
+        conn = getattr(repo, "connection", None)
+        if conn is None:
+            raise TransitionError(
+                "forward-certificate verification needs a sqlite-backed repository or an "
+                "injected verifier")
+        settings = get_settings()
+        if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+            raise TransitionError(
+                "go-live re-verifies account hygiene since certification and needs Alpaca "
+                "paper credentials; set ALGUA_ALPACA_API_KEY and ALGUA_ALPACA_API_SECRET")
+        broker = AlpacaPaperBroker(api_key=settings.alpaca_api_key,
+                                   api_secret=settings.alpaca_api_secret,
+                                   base_url=settings.alpaca_paper_url)
+        return verify_forward_certificate(
+            repo, conn, name=name, strategy_id=strategy_id, identity=_compute_hashes(name),
+            calendar=MarketCalendar(), now=datetime.now(UTC),
+            activities_fetch=broker.account_activities_window)
+
+    return verify

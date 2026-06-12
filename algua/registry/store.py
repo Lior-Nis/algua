@@ -42,6 +42,14 @@ class SqliteStrategyRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """Read-only handle to the underlying sqlite connection, for protected verifiers (the
+        live wall's forward-certificate check) that read operational tables alongside the
+        repository. Deliberately NOT part of the ``StrategyRepository`` Protocol — the seam
+        stays I/O-agnostic; non-sqlite repos must inject their own verifier."""
+        return self._conn
+
     def add(
         self,
         name: str,

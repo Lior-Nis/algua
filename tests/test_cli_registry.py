@@ -82,10 +82,22 @@ def _sign_file(key, content_path):
     return content_path.parent / (content_path.name + ".sig")
 
 
+def _stub_passing_certificate(monkeypatch):
+    """Stub the live wall's forward-certificate seam (#124) so these tests keep exercising
+    their named invariant — the signed-challenge ceremony behind it. One seam covers both the
+    CLI's challenge-issuance path and transition_strategy's wall."""
+    cert = {"id": 1, "created_at": "2026-06-10T00:00:00+00:00", "realized_sharpe": 1.0,
+            "holdout_sharpe": 1.2, "n_forward_observations": 80, "n_concurrent_forward": 1}
+    monkeypatch.setattr(
+        "algua.registry.transitions._default_forward_certificate_verifier",
+        lambda: (lambda repo, name, sid: dict(cert)))
+
+
 def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
     """Two-step signed go-live: challenge then signature."""
     strategy = "cross_sectional_momentum"
     _advance_to_forward_tested(strategy)
+    _stub_passing_certificate(monkeypatch)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -133,6 +145,7 @@ def test_go_live_without_signature_stays_paper(tmp_path, monkeypatch):
     """Step-1 alone (no --signature) returns challenge and leaves stage forward_tested."""
     strategy = "cross_sectional_momentum"
     _advance_to_forward_tested(strategy)
+    _stub_passing_certificate(monkeypatch)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -158,6 +171,7 @@ def test_go_live_with_signature_but_no_pending_challenge(tmp_path, monkeypatch):
 
     strategy = "cross_sectional_momentum"
     _advance_to_forward_tested(strategy)
+    _stub_passing_certificate(monkeypatch)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -646,6 +660,7 @@ def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_pa
     _force_live(monkeypatch, tmp_path, "already")
     name = _seed_forward_tested(monkeypatch, tmp_path, "s2")
     _allocate(monkeypatch, tmp_path, name, 1000.0)
+    _stub_passing_certificate(monkeypatch)
     # patch compute_artifact_hashes so s2 (no real module) doesn't raise StrategyNotFound
     monkeypatch.setattr(
         "algua.cli.registry_cmd.compute_artifact_hashes",

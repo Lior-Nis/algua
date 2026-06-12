@@ -107,6 +107,9 @@ def test_transition_service_allows_injected_live_approval_verifier(repo):
         Stage.LIVE,
         Actor.HUMAN,
         approval_verifier=lambda *_args: True,
+        # A passing certificate stub keeps this test on its named invariant — the injected
+        # APPROVAL verifier seam — not the forward-certificate wall in front of it (#124).
+        forward_certificate_verifier=lambda *_args: {"id": 1},
     )
 
     assert rec.stage is Stage.LIVE
