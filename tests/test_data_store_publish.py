@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from algua.data.files import (
+    frame_to_parquet_bytes,
     validate_partitioned_bars_dir,
     write_bytes_snapshot,
     write_partitioned_bars,
@@ -84,6 +85,32 @@ def test_validate_partitioned_bars_dir_handles_dotted_symbols(tmp_path):
     validate_partitioned_bars_dir(
         tmp_path / "ds", expected_row_count=len(canon), expected_symbols={"BRK.B"}
     )
+
+
+def test_validate_partitioned_bars_dir_rejects_extra_parquet_in_partition(tmp_path):
+    # Regression: a pre-existing adopted dir with a foreign parquet file inside a valid
+    # symbol partition must be rejected — read_partitioned_bars would serve its rows otherwise.
+    canon = _bars_canon(["AAA"])
+    ds = tmp_path / "ds"
+    write_partitioned_bars(canon, ds)
+    extra_bytes = frame_to_parquet_bytes(_bars_canon(["AAA"], n=1))
+    (ds / "symbol=AAA" / "extra.parquet").write_bytes(extra_bytes)
+    with pytest.raises(ValueError, match="adoption"):
+        validate_partitioned_bars_dir(
+            ds, expected_row_count=len(canon), expected_symbols={"AAA"}
+        )
+
+
+def test_validate_partitioned_bars_dir_rejects_stray_file_at_root(tmp_path):
+    # Regression: a stray non-parquet file at the dataset root must be rejected.
+    canon = _bars_canon(["AAA"])
+    ds = tmp_path / "ds"
+    write_partitioned_bars(canon, ds)
+    (ds / "notes.txt").write_text("stray", encoding="utf-8")
+    with pytest.raises(ValueError, match="adoption"):
+        validate_partitioned_bars_dir(
+            ds, expected_row_count=len(canon), expected_symbols={"AAA"}
+        )
 
 
 def _ingest_bars(store: DataStore, symbols: list[str] = ["AAA"]):  # noqa: B006 — read-only default

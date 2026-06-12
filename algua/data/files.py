@@ -79,21 +79,35 @@ def validate_partitioned_bars_dir(
     target: Path, *, expected_row_count: int, expected_symbols: set[str]
 ) -> None:
     """Cheap metadata-only validation of a PRE-EXISTING bars dataset dir before adopting it
-    as a committed snapshot (#158): every part file's parquet footer must parse, the summed
-    metadata row counts must equal `expected_row_count`, and the hive `symbol=` partition set
-    must equal `expected_symbols`. This is a partial-corruption detector for dirs left by the
-    legacy direct-write ingest (not a cryptographic revalidation — content-addressing carries
+    as a committed snapshot (#158): EVERY regular file under `target` must match the expected
+    hive layout `symbol=<SYM>/part-*.parquet` (exactly a `symbol=` head directory and a
+    `part-*.parquet` basename) — any stray file (at the root or with a non-conforming name)
+    is rejected immediately. For conforming files, each parquet footer must parse, the summed
+    metadata row counts must equal `expected_row_count`, and the partition symbol set must equal
+    `expected_symbols`. This is a partial-corruption and foreign-file detector for dirs left by
+    the legacy direct-write ingest (not a cryptographic revalidation — content-addressing carries
     the rest). Mismatch => raise; the caller fails closed (never auto-deletes)."""
+    import re as _re
+
+    _PART_RE = _re.compile(r"^part-.*\.parquet$")
     total_rows = 0
     seen_symbols: set[str] = set()
-    for part in target.rglob("part-*.parquet"):
-        total_rows += pq.ParquetFile(part).metadata.num_rows  # raises on a torn footer
-        head = part.relative_to(target).parts[0]
-        if not head.startswith("symbol="):
+    for p in target.rglob("*"):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(target).parts
+        if (
+            len(rel_parts) != 2
+            or not rel_parts[0].startswith("symbol=")
+            or not _PART_RE.match(rel_parts[1])
+        ):
+            rel = p.relative_to(target)
             raise ValueError(
-                f"adoption validation failed for {target}: unexpected layout entry {head!r}"
+                f"adoption validation failed for {target}: unexpected file {rel!s}"
+                " — only symbol=<SYM>/part-*.parquet files are allowed"
             )
-        seen_symbols.add(unquote(head[len("symbol="):]))
+        total_rows += pq.ParquetFile(p).metadata.num_rows  # raises on a torn footer
+        seen_symbols.add(unquote(rel_parts[0][len("symbol="):]))
     if total_rows != expected_row_count or seen_symbols != expected_symbols:
         raise ValueError(
             f"adoption validation failed for {target}: rows {total_rows} (expected "

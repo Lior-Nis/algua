@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import queue
 from pathlib import Path
 
 from algua.data.manifest import SnapshotManifest
@@ -35,6 +36,7 @@ def _appender(manifest_path: str, worker: int, ids: list[str], barrier, errors) 
             manifest.append_if_absent(_record(snapshot_id, worker))
     except Exception as exc:  # propagate to the parent — a silent worker is a vacuous pass
         errors.put(f"worker {worker}: {exc!r}")
+        raise  # exit non-zero so the parent's assert p.exitcode == 0 catches it deterministically
 
 
 def test_concurrent_appenders_one_record_per_id(tmp_path):
@@ -52,7 +54,14 @@ def test_concurrent_appenders_one_record_per_id(tmp_path):
     for p in workers:
         p.join(timeout=60)
         assert p.exitcode == 0
-    assert errors.empty(), errors.get()
+    # Drain the errors queue deterministically — mp.Queue.empty() is documented as unreliable
+    collected: list[str] = []
+    while True:
+        try:
+            collected.append(errors.get_nowait())
+        except queue.Empty:
+            break
+    assert collected == [], "\n".join(collected)
     # exactly one committed record per id, file parses cleanly, every line newline-terminated
     raw = manifest_path.read_text(encoding="utf-8")
     assert raw.endswith("\n")
