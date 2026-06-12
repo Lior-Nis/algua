@@ -22,6 +22,18 @@ def repo(tmp_path):
     return SqliteStrategyRepository(c)
 
 
+def _passing_certificate(repo, name, strategy_id, identity):
+    """Injected stand-in for the live wall's forward-certificate check (#124), so these tests
+    keep exercising their named invariant — the APPROVAL/actor walls behind it."""
+    return {"id": 1, "created_at": "2026-06-10T00:00:00+00:00", "realized_sharpe": 1.0,
+            "holdout_sharpe": 1.2, "n_forward_observations": 80, "n_concurrent_forward": 1}
+
+
+def _to_live(repo, name, actor, to=Stage.LIVE):
+    return transition_strategy(repo, name, to, actor,
+                               forward_certificate_verifier=_passing_certificate)
+
+
 def _advance_to_paper(repo, name):
     repo.add(name)
     transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT)
@@ -30,49 +42,54 @@ def _advance_to_paper(repo, name):
     transition_strategy(repo, name, Stage.PAPER, Actor.AGENT)
 
 
+def _advance_to_forward_tested(repo, name):
+    _advance_to_paper(repo, name)
+    transition_strategy(repo, name, Stage.FORWARD_TESTED, Actor.HUMAN, "test setup")
+
+
 def test_live_requires_approval(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     with pytest.raises(TransitionError):
-        transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
+        _to_live(repo, STRATEGY, Actor.HUMAN)
 
 
 def test_live_requires_human_actor(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     with pytest.raises(TransitionError):
-        transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.AGENT)
+        _to_live(repo, STRATEGY, Actor.AGENT)
 
 
 def test_live_succeeds_with_human_and_recorded_approval(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
-    rec = transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
+    rec = _to_live(repo, STRATEGY, Actor.HUMAN)
     assert rec.stage is Stage.LIVE
 
 
 def test_string_live_engages_gate(repo):
     # Passing the raw string "live" (not Stage.LIVE) must still engage the gate.
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     with pytest.raises(TransitionError):
-        transition_strategy(repo, STRATEGY, "live", Actor.HUMAN)
+        _to_live(repo, STRATEGY, Actor.HUMAN, to="live")
 
 
 def test_string_live_succeeds_with_approval(repo):
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
-    rec = transition_strategy(repo, STRATEGY, "live", Actor.HUMAN)
+    rec = _to_live(repo, STRATEGY, Actor.HUMAN, to="live")
     assert rec.stage is Stage.LIVE
 
 
 def test_approval_binds_to_real_source_not_caller_strings(repo):
     # #79: a constant hash supplied at approve time cannot satisfy the gate, because the
     # approval stores the *recomputed* source hash and the gate recomputes it again.
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     rec = repo.get(STRATEGY)
     # An attacker manually inserts a constant-hash approval row, mimicking "approve --code-hash X".
     repo.record_approval(rec.id, "constant", "constant", "constant", "attacker")
     with pytest.raises(TransitionError):
-        transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
+        _to_live(repo, STRATEGY, Actor.HUMAN)
 
 
 def test_recorded_approval_matches_computed_hashes(repo):
@@ -132,7 +149,7 @@ def test_dependency_change_invalidates_prior_approval(repo, monkeypatch):
     # the dependency_hash source changes. We monkeypatch the SHARED dependency-hash function.
     from algua.provenance import lockfile
 
-    _advance_to_paper(repo, STRATEGY)
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     rec = repo.get(STRATEGY)
     code_hash, config_hash, dependency_hash = compute_artifact_hashes(STRATEGY)
@@ -145,7 +162,7 @@ def test_dependency_change_invalidates_prior_approval(repo, monkeypatch):
     assert new_dep == "different-locked-deps"
     assert has_valid_approval(repo, rec.id, new_code, new_config, new_dep) is False
     with pytest.raises(TransitionError):
-        transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
+        _to_live(repo, STRATEGY, Actor.HUMAN)
 
 
 def test_legacy_null_dependency_row_never_matches(repo):
@@ -161,13 +178,13 @@ def test_legacy_null_dependency_row_never_matches(repo):
 
 
 def test_live_transition_records_full_identity_hashes(repo):
-    # Audit symmetry: a successful paper -> live transition must record the full pinned identity
-    # (code, config, AND dependency hash) in the stage_transitions history, not just code+config.
-    _advance_to_paper(repo, STRATEGY)
+    # Audit symmetry: a successful forward_tested -> live transition must record the full pinned
+    # identity (code, config, AND dependency hash) in the stage_transitions history.
+    _advance_to_forward_tested(repo, STRATEGY)
     record_approval(repo, STRATEGY, "lior")
     code_hash, config_hash, dependency_hash = compute_artifact_hashes(STRATEGY)
 
-    transition_strategy(repo, STRATEGY, Stage.LIVE, Actor.HUMAN)
+    _to_live(repo, STRATEGY, Actor.HUMAN)
 
     live_row = repo.list_transitions(STRATEGY)[-1]
     assert live_row["to_stage"] == Stage.LIVE.value

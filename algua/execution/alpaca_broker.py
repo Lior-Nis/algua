@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import pandas as pd
 import requests
@@ -57,6 +57,8 @@ class AccountState:
     equity: float
     cash: float
     buying_power: float
+    # populated by account(); default preserves legacy constructions
+    account_id: str = field(default="")
 
 
 @dataclass(frozen=True)
@@ -155,10 +157,14 @@ class _AlpacaBroker:
 
     def account(self) -> AccountState:
         data = self._read(self._get("/v2/account"), "/v2/account")
+        account_id = str(data.get("id") or "") if isinstance(data, dict) else ""
+        if not account_id:
+            raise BrokerError("alpaca /v2/account: missing account id")
         return AccountState(
             equity=self._num(data, "equity", "/v2/account"),
             cash=self._num(data, "cash", "/v2/account"),
             buying_power=self._num(data, "buying_power", "/v2/account"),
+            account_id=account_id,
         )
 
     def _positions_raw(self) -> list[Any]:
@@ -328,6 +334,47 @@ class _AlpacaBroker:
         if after:
             path += f"?after={after}"
         return self._read(self._get(path), path)
+
+    def clock(self) -> str:
+        """The venue's own wall-clock timestamp (GET /v2/clock). Evidence ticks use THIS as
+        tick_ts so a skewed local clock cannot fabricate session spread (#124)."""
+        data = self._read(self._get("/v2/clock"), "/v2/clock")
+        ts = data.get("timestamp") if isinstance(data, dict) else None
+        if not ts:
+            raise BrokerError("alpaca /v2/clock: missing timestamp")
+        return str(ts)
+
+    _ACTIVITIES_PAGE = 100
+
+    def account_activities_window(self, after: str, until: str) -> list[dict[str, Any]]:
+        """ALL account activities in (after, until], oldest-first, exhaustively paginated.
+        Raises BrokerError on ANY failure or malformed page — the forward gate treats the
+        account as unverifiable and FAILS, never passes, on partial history (#124)."""
+        out: list[dict[str, Any]] = []
+        page_token: str | None = None
+        # URL-encode after/until: ISO-8601 datetimes contain '+' (tz offset) which must not reach
+        # the server as a literal '+' (decoded as space). quote() with safe='' encodes it as %2B.
+        after_enc = quote(after, safe="")
+        until_enc = quote(until, safe="")
+        while True:
+            path = (f"/v2/account/activities?after={after_enc}&until={until_enc}"
+                    f"&direction=asc&page_size={self._ACTIVITIES_PAGE}")
+            if page_token:
+                path += f"&page_token={page_token}"
+            data = self._read(self._get(path), path)
+            if not isinstance(data, list):
+                raise BrokerError(f"alpaca activities: expected list, got {type(data).__name__}")
+            for item in data:
+                if not isinstance(item, dict):
+                    raise BrokerError(f"alpaca activities: malformed item {item!r}")
+            out.extend(data)
+            if len(data) < self._ACTIVITIES_PAGE:
+                return out
+            token = str(data[-1].get("id") or "")
+            if not token:
+                raise BrokerError("alpaca activities: full page without item id; "
+                                  "cannot paginate exhaustively — failing closed")
+            page_token = token
 
 
 class AlpacaPaperBroker(_AlpacaBroker):

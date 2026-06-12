@@ -9,7 +9,7 @@ from algua.cli._common import ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.cli.paper_cmd import _breach_payload, _trip
+from algua.cli.paper_cmd import _breach_payload, _tick_clock, _trip
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization
@@ -34,6 +34,7 @@ from algua.execution.order_state import (
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.registry import allocations
 from algua.registry.allocations import AllocationError, active_allocation
+from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.live_gate import (
     ALLOWED_SIGNERS_PATH,
     LiveAuthorizationError,
@@ -109,10 +110,12 @@ def _run_strategy_tick(  # noqa: PLR0913
     from algua.strategies.base import assert_tradable_without_fundamentals
     assert_tradable_without_fundamentals(strategy)
 
-    alloc = active_allocation(conn, SqliteStrategyRepository(conn).get(name).id)
+    rec = SqliteStrategyRepository(conn).get(name)
+    alloc = active_allocation(conn, rec.id)
     if alloc is None:
         raise ValueError(f"{name} has no live allocation")
     allocation = float(alloc["capital"])
+    identity = compute_artifact_hashes(name)
     # No buying-power preflight here: min(allocation, NAV) sizing already de-risks toward what the
     # account can fund, and a coarse allocation-vs-BP check would falsely refuse a fully-invested
     # strategy that only rebalances. The proper per-order BP reservation is C2 (codex C1 review).
@@ -179,12 +182,20 @@ def _run_strategy_tick(  # noqa: PLR0913
         return {"strategy": name, "skipped": str(exc)}
     if result.peak_equity is not None:
         update_nav_peak(conn, name, result.peak_equity)
+        tick_ts, clock_source = _tick_clock(broker.clock)
+        acct = broker.account()
         record_tick_snapshot(
-            conn, name, tick_ts=datetime.now(UTC).isoformat(),
+            conn, name,
+            tick_ts=tick_ts,
             decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
             equity=result.equity, peak_equity=result.peak_equity,
             positions=result.positions_before, n_submitted=len(result.submitted),
             reconcile_ok=result.reconcile_ok,
+            lane="live", strategy_id=rec.id,
+            code_hash=identity.code_hash, config_hash=identity.config_hash,
+            dependency_hash=identity.dependency_hash,
+            account_id=acct.account_id, cash=acct.cash,
+            clock_source=clock_source,
         )
     audit_append(conn, actor="agent", action="live_trade_tick",
                  reason=f"{len(result.submitted)} live orders submitted", strategy=name)

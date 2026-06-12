@@ -39,3 +39,16 @@ class MarketCalendar:
     def sessions_in_range(self, start: date, end: date) -> list[date]:
         idx = self._cal.sessions_in_range(pd.Timestamp(start), pd.Timestamp(end))
         return [ts.date() for ts in idx]
+
+    def session_on_or_before(self, day: date) -> date:
+        """The trading session containing `day`, or the latest session before it."""
+        return self._cal.date_to_session(pd.Timestamp(day), direction="previous").date()
+
+    def sessions_between(self, a: date, b: date) -> int:
+        """Signed count of trading sessions from session-of(a) to session-of(b): 0 when both
+        map to the same session, positive when b is later. Non-session days map backward
+        (session_on_or_before) first."""
+        sa, sb = self.session_on_or_before(a), self.session_on_or_before(b)
+        lo, hi = (sa, sb) if sb >= sa else (sb, sa)
+        n = len(self._cal.sessions_in_range(pd.Timestamp(lo), pd.Timestamp(hi))) - 1
+        return n if sb >= sa else -n

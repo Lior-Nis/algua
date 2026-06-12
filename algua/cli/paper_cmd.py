@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime
 
+import pandas as pd
 import typer
 
 from algua.audit.log import append as audit_append
 from algua.backtest.engine import BacktestError
+from algua.calendar.market_calendar import MarketCalendar
 from algua.cli._common import ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Stage
+from algua.contracts.lifecycle import Actor, Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
     clear_all_nav_peaks,
@@ -33,7 +36,20 @@ from algua.execution.order_state import (
 from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
+from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
+from algua.registry.repository import StrategyRecord
 from algua.registry.store import SqliteStrategyRepository
+from algua.research.forward_gates import (
+    DEGRADATION_FACTOR,
+    MAX_FORWARD_DRAWDOWN,
+    MAX_STALENESS_SESSIONS,
+    MIN_FORWARD_OBSERVATIONS,
+    MIN_FORWARD_VOL,
+    MIN_SESSION_COVERAGE,
+    SHARPE_FLOOR,
+    ForwardGateCriteria,
+)
 from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy
@@ -54,9 +70,16 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> LoadedStrategy:
+def _load_gated_strategy(
+    conn: sqlite3.Connection, name: str, command: str,
+) -> tuple[LoadedStrategy, StrategyRecord]:
     """Load a strategy and clear the two gates every trading command shares: it must be at the
-    PAPER stage and its kill-switch must not be tripped. ``command`` only colours the error text.
+    PAPER or FORWARD_TESTED stage and its kill-switch must not be tripped. ``command`` only
+    colours the error text.
+
+    Returns ``(strategy, rec)`` so callers can read the registry record (e.g. ``rec.id``) without
+    a second DB round-trip.  A forward_tested strategy keeps accumulating evidence ticks while
+    awaiting the go-live signature, so it is treated the same as paper for trading purposes.
 
     Centralises the stage + kill-switch preamble that ``run`` and ``trade-tick`` both need (an SRP
     fix: the command bodies no longer hand-roll these checks). Commands that intentionally TRIP the
@@ -66,13 +89,29 @@ def _load_gated_strategy(conn: sqlite3.Connection, name: str, command: str) -> L
     from algua.strategies.base import assert_tradable_without_fundamentals
     assert_tradable_without_fundamentals(strategy)
     rec = SqliteStrategyRepository(conn).get(name)
-    if rec.stage is not Stage.PAPER:
-        raise ValueError(f"{name} is at stage '{rec.stage.value}'; {command} requires 'paper'")
+    if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
+        raise ValueError(
+            f"{name} is at stage '{rec.stage.value}'; "
+            f"{command} requires 'paper' or 'forward_tested'"
+        )
     if global_halt.is_engaged(conn):
         raise ValueError("global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
-    return strategy
+    return strategy, rec
+
+
+def _tick_clock(clock: Callable[[], str]) -> tuple[str, str]:
+    """``(tick_ts, clock_source)`` for the evidence-tick stamp: the venue's clock normalized to a
+    UTC ISO timestamp (``clock_source="broker"``), or the local clock (``clock_source="local"``)
+    when the venue's is unusable. ValueError/TypeError cover a malformed or tz-naive venue
+    timestamp — that is a clock failure too, and it must never kill the tick record after orders
+    already went out. Shared by the paper and live lanes so their stamping semantics cannot drift.
+    """
+    try:
+        return pd.Timestamp(clock()).tz_convert("UTC").isoformat(), "broker"
+    except (BrokerError, ValueError, TypeError):
+        return datetime.now(UTC).isoformat(), "local"
 
 
 def _breach_payload(error: str, **extra: object) -> dict:
@@ -110,7 +149,7 @@ def run(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy = _load_gated_strategy(conn, name, "paper run")
+        strategy, _rec = _load_gated_strategy(conn, name, "paper run")
         provider = _select_provider(demo, snapshot)
         try:
             result = run_paper(strategy, SimBroker(cash=cash), provider,
@@ -259,14 +298,17 @@ def trade_tick(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy = _load_gated_strategy(conn, name, "trade-tick")
+        strategy, rec = _load_gated_strategy(conn, name, "trade-tick")
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
+        identity = compute_artifact_hashes(name)
+        acct = broker.account()
 
         def _persist(record: SubmittedOrder) -> None:
             # Persist each accepted order immediately so a mid-loop death can't lose it (#18).
             record_submitted_order(conn, name, record.symbol, record.side, record.target_weight,
-                                   record.decision_ts.isoformat(), record.order_id)
+                                   record.decision_ts.isoformat(), record.order_id,
+                                   strategy_id=rec.id)
 
         hooks = TickHooks(
             client_order_id_for=client_order_id,
@@ -306,12 +348,19 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
+            tick_ts, clock_source = _tick_clock(broker.clock)
             record_tick_snapshot(
-                conn, name, tick_ts=datetime.now(UTC).isoformat(),
+                conn, name,
+                tick_ts=tick_ts,
                 decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
                 equity=result.equity, peak_equity=result.peak_equity,
                 positions=result.positions_before, n_submitted=len(result.submitted),
                 reconcile_ok=result.reconcile_ok,
+                lane="paper", strategy_id=rec.id,
+                code_hash=identity.code_hash, config_hash=identity.config_hash,
+                dependency_hash=identity.dependency_hash,
+                account_id=acct.account_id, cash=acct.cash,
+                clock_source=clock_source,
             )
         audit_append(conn, actor="agent", action="trade_tick",
                      reason=f"{len(result.submitted)} orders submitted", strategy=name)
@@ -327,6 +376,81 @@ def trade_tick(
     }))
 
 
+@paper_app.command("promote")
+@json_errors(ValueError, LookupError, BrokerError)
+def promote(
+    name: str,
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+    degradation_factor: float = typer.Option(
+        DEGRADATION_FACTOR, "--degradation-factor",
+        help="realized Sharpe must beat this fraction of the qualified holdout Sharpe "
+             "(raising it is stricter; lowering is human-only)"),
+    sharpe_floor: float = typer.Option(
+        SHARPE_FLOOR, "--sharpe-floor",
+        help="absolute realized-Sharpe floor (raising is stricter; lowering is human-only)"),
+    min_observations: int = typer.Option(
+        MIN_FORWARD_OBSERVATIONS, "--min-observations",
+        help="minimum daily return observations in the forward window "
+             "(raising is stricter; lowering is human-only)"),
+    min_coverage: float = typer.Option(
+        MIN_SESSION_COVERAGE, "--min-coverage",
+        help="minimum decided-sessions / trading-sessions coverage "
+             "(raising is stricter; lowering is human-only)"),
+    min_vol: float = typer.Option(
+        MIN_FORWARD_VOL, "--min-vol",
+        help="annualized volatility floor — a do-nothing strategy must not pass "
+             "(raising is stricter; lowering is human-only)"),
+    max_drawdown: float = typer.Option(
+        MAX_FORWARD_DRAWDOWN, "--max-drawdown",
+        help="max drawdown over the evidence series "
+             "(lowering is stricter; raising is human-only)"),
+    max_staleness: int = typer.Option(
+        MAX_STALENESS_SESSIONS, "--max-staleness",
+        help="newest admissible tick may be at most this many sessions old "
+             "(lowering is stricter; raising is human-only)"),
+) -> None:
+    """Forward-test evidence gate (#124): evaluate this strategy's wall-clock paper evidence
+    and promote paper -> forward_tested on pass. At forward_tested: re-evaluate, refreshing
+    the live-wall certificate, no stage change. The paper-side analog of `research promote`;
+    relaxing any threshold below its protected default is human-only."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching the DB
+    criteria = ForwardGateCriteria(
+        min_forward_observations=min_observations,
+        min_session_coverage=min_coverage,
+        degradation_factor=degradation_factor,
+        sharpe_floor=sharpe_floor,
+        min_forward_vol=min_vol,
+        max_forward_drawdown=max_drawdown,
+        max_staleness_sessions=max_staleness,
+    )
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        # PREFLIGHT: actor legality + relaxations-need-human + stage legality. Refuses here,
+        # before the broker is even constructed (TransitionError is a ValueError -> JSON error).
+        forward_promotion_preflight(repo, name, actor=actor_enum, criteria=criteria)
+        broker = _alpaca_broker_from_settings()
+        outcome = run_forward_gate(
+            repo, conn, name=name, actor=actor_enum, criteria=criteria,
+            calendar=MarketCalendar(), now=datetime.now(UTC),
+            activities_fetch=broker.account_activities_window)
+        audit_append(conn, actor=actor, action="paper_promote",
+                     reason="pass" if outcome.decision.passed else "fail", strategy=name)
+    payload = {
+        "strategy": name,
+        "passed": outcome.decision.passed,
+        "promoted": outcome.promoted,
+        "decision": outcome.decision.to_dict(),
+        "excluded_ticks": outcome.assembled.excluded,
+        "n_concurrent_forward": outcome.assembled.n_concurrent_forward,
+    }
+    # Pass mirrors research_cmd.promote's success envelope; a fail still emits the full
+    # decision payload (the evaluation row was recorded) but carries the repo-wide exit-1
+    # discriminator ("ok": false, see cli._common.ok) and exits non-zero.
+    emit(ok(payload) if outcome.decision.passed else {"ok": False, **payload})
+    if not outcome.decision.passed:
+        raise typer.Exit(1)
+
+
 @paper_app.command("flatten")
 @json_errors(ValueError, LookupError, BrokerError)
 def flatten(
@@ -337,8 +461,12 @@ def flatten(
     strategy = load_strategy(name)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
-        if rec.stage is not Stage.PAPER:
-            raise ValueError(f"{name} is at stage '{rec.stage.value}'; flatten requires 'paper'")
+        # A forward_tested strategy still holds paper positions while awaiting the go-live
+        # signature, so the emergency exit must reach it too (#124 GATE-2).
+        if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
+            raise ValueError(
+                f"{name} is at stage '{rec.stage.value}'; "
+                "flatten requires 'paper' or 'forward_tested'")
         broker = _alpaca_broker_from_settings()
         # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
         kill_switch.trip(conn, name, reason="flatten", actor=actor)

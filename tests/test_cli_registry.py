@@ -53,6 +53,12 @@ def _advance_to_paper(strategy: str) -> None:
                             "--to", stage, "--actor", actor])
 
 
+def _advance_to_forward_tested(strategy: str) -> None:
+    _advance_to_paper(strategy)
+    runner.invoke(app, ["registry", "transition", strategy,
+                        "--to", "forward_tested", "--actor", "human"])
+
+
 def _make_key(tmp_path, name="id"):
     import subprocess
     key = tmp_path / name
@@ -76,10 +82,22 @@ def _sign_file(key, content_path):
     return content_path.parent / (content_path.name + ".sig")
 
 
+def _stub_passing_certificate(monkeypatch):
+    """Stub the live wall's forward-certificate seam (#124) so these tests keep exercising
+    their named invariant — the signed-challenge ceremony behind it. One seam covers both the
+    CLI's challenge-issuance path and transition_strategy's wall."""
+    cert = {"id": 1, "created_at": "2026-06-10T00:00:00+00:00", "realized_sharpe": 1.0,
+            "holdout_sharpe": 1.2, "n_forward_observations": 80, "n_concurrent_forward": 1}
+    monkeypatch.setattr(
+        "algua.registry.transitions._default_forward_certificate_verifier",
+        lambda: (lambda repo, name, sid, ident: dict(cert)))
+
+
 def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
     """Two-step signed go-live: challenge then signature."""
     strategy = "cross_sectional_momentum"
-    _advance_to_paper(strategy)
+    _advance_to_forward_tested(strategy)
+    _stub_passing_certificate(monkeypatch)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -89,7 +107,7 @@ def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 100_000.0)
     assert runner.invoke(app, ["live", "allocate", strategy, "--capital", "10000"]).exit_code == 0
 
-    # Step 1: transition --to live with no --signature -> challenge issued, stage stays paper
+    # Step 1: no --signature -> challenge issued, stage stays forward_tested
     result1 = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
                                   "--actor", "human"])
     assert result1.exit_code == 0, result1.stdout
@@ -100,7 +118,8 @@ def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
 
     show_after_challenge = json.loads(
         runner.invoke(app, ["registry", "show", strategy]).stdout)
-    assert show_after_challenge["stage"] == "paper", "stage must still be paper after step-1"
+    assert show_after_challenge["stage"] == "forward_tested", \
+        "stage must still be forward_tested after step-1"
 
     # Sign the challenge value
     challenge_file = tmp_path / "challenge.txt"
@@ -123,9 +142,10 @@ def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
 
 
 def test_go_live_without_signature_stays_paper(tmp_path, monkeypatch):
-    """Step-1 alone (no --signature) returns challenge and leaves stage paper."""
+    """Step-1 alone (no --signature) returns challenge and leaves stage forward_tested."""
     strategy = "cross_sectional_momentum"
-    _advance_to_paper(strategy)
+    _advance_to_forward_tested(strategy)
+    _stub_passing_certificate(monkeypatch)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -143,14 +163,15 @@ def test_go_live_without_signature_stays_paper(tmp_path, monkeypatch):
     assert "challenge" in out
 
     show = json.loads(runner.invoke(app, ["registry", "show", strategy]).stdout)
-    assert show["stage"] == "paper"
+    assert show["stage"] == "forward_tested"
 
 
 def test_go_live_with_signature_but_no_pending_challenge(tmp_path, monkeypatch):
     """Presenting a signature without a prior challenge must fail."""
 
     strategy = "cross_sectional_momentum"
-    _advance_to_paper(strategy)
+    _advance_to_forward_tested(strategy)
+    _stub_passing_certificate(monkeypatch)
 
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers_file(tmp_path, "lior", pub)
@@ -165,7 +186,7 @@ def test_go_live_with_signature_but_no_pending_challenge(tmp_path, monkeypatch):
                                  "--actor", "human", "--signature", str(sig_file)])
     assert result.exit_code != 0 or json.loads(result.stdout).get("ok") is False
     show = json.loads(runner.invoke(app, ["registry", "show", strategy]).stdout)
-    assert show["stage"] == "paper"
+    assert show["stage"] == "forward_tested"
 
 
 def test_unknown_strategy_emits_json_error():
@@ -254,9 +275,17 @@ def test_enroll_approver_rejects_bad_principal(tmp_path, monkeypatch):
 # Go-live guard helpers (Task 5: requires allocation + ≤1 live strategy)
 # ---------------------------------------------------------------------------
 
-def _seed_paper(monkeypatch, tmp_path, name: str) -> str:
-    """Register a strategy and advance it to the paper stage; return its name."""
-    _advance_to_paper(name)
+def _seed_forward_tested(monkeypatch, tmp_path, name: str) -> str:
+    """Register a strategy and advance it to the forward_tested stage; return its name."""
+    from algua.registry.repository import ArtifactIdentity
+
+    # paper -> forward_tested now recomputes identity for audit pinning (#124); fake strategies
+    # here have no module on disk, so stub the recompute for the seeding transition.
+    monkeypatch.setattr(
+        "algua.registry.approvals.compute_artifact_hashes",
+        lambda n: ArtifactIdentity(code_hash="aabb", config_hash="ccdd", dependency_hash="eeff"),
+    )
+    _advance_to_forward_tested(name)
     return name
 
 
@@ -281,8 +310,8 @@ def _allocate(monkeypatch, tmp_path, name: str, capital: float) -> None:
 
 
 def test_go_live_requires_allocation(monkeypatch, tmp_path):
-    # a strategy at paper with NO allocation cannot be issued a go-live challenge
-    name = _seed_paper(monkeypatch, tmp_path, "s1")
+    # a strategy at forward_tested with NO allocation cannot be issued a go-live challenge
+    name = _seed_forward_tested(monkeypatch, tmp_path, "s1")
     r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
     assert r.exit_code == 1 and "allocation" in r.stdout.lower()
 
@@ -629,8 +658,9 @@ def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_pa
     # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
     from algua.registry.repository import ArtifactIdentity
     _force_live(monkeypatch, tmp_path, "already")
-    name = _seed_paper(monkeypatch, tmp_path, "s2")
+    name = _seed_forward_tested(monkeypatch, tmp_path, "s2")
     _allocate(monkeypatch, tmp_path, name, 1000.0)
+    _stub_passing_certificate(monkeypatch)
     # patch compute_artifact_hashes so s2 (no real module) doesn't raise StrategyNotFound
     monkeypatch.setattr(
         "algua.cli.registry_cmd.compute_artifact_hashes",

@@ -5,8 +5,78 @@ from algua.registry.db import SCHEMA_VERSION, connect, migrate
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
 
 
-def test_schema_version_is_20():
-    assert SCHEMA_VERSION == 20
+def test_schema_version_is_21():
+    assert SCHEMA_VERSION == 21
+
+
+def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(tick_snapshots)")}
+    assert {"lane", "code_hash", "config_hash", "dependency_hash", "strategy_id",
+            "account_id", "cash", "clock_source", "recorded_at"} <= cols
+    ocols = {r["name"] for r in conn.execute("PRAGMA table_info(paper_orders)")}
+    assert "strategy_id" in ocols
+    fcols = {r["name"] for r in conn.execute("PRAGMA table_info(forward_gate_evaluations)")}
+    assert {"strategy_id", "passed", "realized_sharpe", "holdout_sharpe", "first_tick_id",
+            "last_tick_id", "n_concurrent_forward", "consumed", "created_at"} <= fcols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 21
+
+
+def test_v21_new_columns_are_nullable_on_existing_rows(tmp_path):
+    """New tick_snapshots / paper_orders columns are nullable: pre-v21 rows survive and read back
+    with NULL for all new fields (legacy rows are fail-closed — NULL is inadmissible gate evidence;
+    no backfill is intended)."""
+    db = tmp_path / "r.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    # Create the pre-v21 tick_snapshots table shape (only the original columns).
+    conn.executescript(
+        """
+        CREATE TABLE tick_snapshots (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy     TEXT NOT NULL,
+            tick_ts      TEXT NOT NULL,
+            decision_ts  TEXT,
+            equity       REAL NOT NULL,
+            peak_equity  REAL,
+            positions    TEXT NOT NULL,
+            n_submitted  INTEGER NOT NULL,
+            reconcile_ok INTEGER NOT NULL
+        );
+        INSERT INTO tick_snapshots(strategy, tick_ts, equity, positions, n_submitted, reconcile_ok)
+            VALUES ('legacy_strat', '2026-01-01T09:30:00', 100000.0, '{}', 0, 1);
+        CREATE TABLE paper_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            target_weight REAL NOT NULL,
+            decision_ts TEXT NOT NULL,
+            submitted_ts TEXT NOT NULL,
+            status TEXT NOT NULL,
+            broker_order_id TEXT NOT NULL
+        );
+        INSERT INTO paper_orders(strategy, symbol, side, target_weight, decision_ts,
+                                 submitted_ts, status, broker_order_id)
+            VALUES ('legacy_strat', 'AAPL', 'buy', 0.1, '2026-01-01T09:30:00',
+                    '2026-01-01T09:30:01', 'filled', 'ord-001');
+        """
+    )
+    conn.commit()
+    migrate(conn)
+
+    tick_row = conn.execute(
+        "SELECT * FROM tick_snapshots WHERE strategy='legacy_strat'"
+    ).fetchone()
+    for col in ("lane", "code_hash", "config_hash", "dependency_hash",
+                "strategy_id", "account_id", "cash", "clock_source", "recorded_at"):
+        assert tick_row[col] is None, f"tick_snapshots.{col} should be NULL on legacy row"
+
+    order_row = conn.execute(
+        "SELECT * FROM paper_orders WHERE strategy='legacy_strat'"
+    ).fetchone()
+    assert order_row["strategy_id"] is None, "paper_orders.strategy_id should be NULL on legacy row"
 
 
 def test_strategies_has_metadata_columns(tmp_path):

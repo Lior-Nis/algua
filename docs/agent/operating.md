@@ -5,16 +5,20 @@ This expands `CLAUDE.md` with the why behind the rules.
 ## The live gate
 Lifecycle stage lives in the SQLite registry (`algua/registry`). State is a *record*,
 not a wall: because agents can write the registry, a bare `stage='live'` flag is not a
-security boundary. Going live is a two-step signed ceremony requiring a human actor:
+security boundary. Going live is a two-step signed ceremony requiring a human actor AND a
+valid forward-test certificate:
 
-1. Run `registry transition <name> --to live --actor human` (no `--signature`) — the CLI issues a
-   cryptographic challenge bound to the strategy's current code+config hash and returns it as JSON.
+1. Run `registry transition <name> --to live --actor human` (no `--signature`) — the CLI verifies
+   a fresh forward certificate exists (newest evaluation for current identity+strategy: PASS,
+   ≤10 sessions old, clean record + account hygiene), then issues a cryptographic challenge bound
+   to the strategy's current code+config hash and returns it as JSON (with the certificate summary).
 2. Sign the `challenge` value with your enrolled SSH key:
    `ssh-keygen -Y sign -n algua-go-live -f <key> <file>`
 3. Re-run: `registry transition <name> --to live --actor human --signature <file>.sig` — the CLI
    verifies the signature, consumes the single-use challenge, and advances the stage to `live`.
 
 The challenge is single-use and expires after 10 minutes. Trust the signature, never the flag.
+The forward certificate is not waivable in-band.
 
 ## Module boundaries
 - `contracts/` — pure types/protocols. No I/O, no other algua imports.

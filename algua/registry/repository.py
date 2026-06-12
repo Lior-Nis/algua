@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
@@ -146,8 +146,16 @@ class StrategyRepository(Protocol):
         config_hash: str | None = None,
         dependency_hash: str | None = None,
         consume_gate_id: int | None = None,
+        consume_forward_gate_id: int | None = None,
     ) -> StrategyRecord:
-        """Atomically advance ``rec`` to ``to``, append a transition row, return the new state."""
+        """Atomically advance ``rec`` to ``to``, append a transition row, return the new state.
+
+        The stage write is a compare-and-swap on ``rec.stage``: if another session moved the
+        stage since the caller read ``rec``, raise ``TransitionError`` (the whole transaction —
+        including any token consume — rolls back). At most one of ``consume_gate_id`` /
+        ``consume_forward_gate_id`` may be set (``ValueError`` otherwise); the forward consume
+        re-checks the full token predicate (identity, actor, passed, unconsumed, TTL) against the
+        caller-supplied ``code_hash``/``config_hash``/``dependency_hash`` at consume time."""
         ...
 
     def record_approval(
@@ -266,4 +274,90 @@ class StrategyRepository(Protocol):
         """Return the id of the most-recent AGENT passing unconsumed gate row whose identity matches
         the recomputed (code, config, dependency), or None. A human row and a NULL
         ``dependency_hash`` are never consumable tokens — fail-closed."""
+        ...
+
+    def record_forward_gate_evaluation(
+        self,
+        strategy_id: int,
+        *,
+        passed: bool,
+        n_forward_observations: int,
+        min_forward_observations: int,
+        session_coverage: float | None,
+        realized_sharpe: float | None,
+        holdout_sharpe: float | None,
+        degradation_factor: float,
+        sharpe_floor: float,
+        realized_vol: float | None,
+        min_forward_vol: float,
+        realized_max_drawdown: float | None,
+        max_forward_drawdown: float,
+        first_tick_id: int | None,
+        last_tick_id: int | None,
+        first_tick_ts: str | None,
+        last_tick_ts: str | None,
+        max_staleness_sessions: int,
+        n_reconcile_failures: int,
+        n_concurrent_forward: int,
+        account_id: str | None,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+        actor: str,
+        decision_json: str,
+        consumable: bool,
+    ) -> int:
+        """Persist one forward-test gate evaluation (pass or fail) and return its row id. A
+        passing AGENT row written ``consumable=True`` is the single-use token the paper ->
+        forward_tested transition consumes; ``consumable=False`` writes the row already consumed
+        — a CERTIFICATE for the live wall, never a re-entry token (#124 GATE-2)."""
+        ...
+
+    def record_forward_pass_and_promote(
+        self,
+        rec: StrategyRecord,
+        *,
+        gate_row: dict[str, Any],
+        actor: Actor,
+        reason: str | None = None,
+    ) -> tuple[int, StrategyRecord]:
+        """Record a PASSING forward-gate evaluation AND advance ``rec`` paper -> forward_tested
+        ATOMICALLY — the row insert, the compare-and-swap stage change, and the transition row
+        commit together or not at all (#124 GATE-2). ``gate_row`` carries
+        ``record_forward_gate_evaluation``'s row kwargs minus ``actor``/``consumable``.
+
+        The row is born consumed regardless of actor (born-and-spent in the one transaction): it
+        is the live wall's certificate, never a re-entry token a later demotion could bank. If
+        another session moved the stage since ``rec`` was read, ``TransitionError`` — and the
+        loser leaves NO row at all (its decision is lost; re-run the gate). Raises ``ValueError``
+        on a non-passing ``gate_row``."""
+        ...
+
+    def find_consumable_forward_gate_evaluation(
+        self,
+        strategy_id: int,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+        *,
+        now: str,
+        ttl_days: int,
+    ) -> int | None:
+        """Return the id of the most-recent AGENT passing unconsumed forward-gate row whose
+        identity matches the recomputed (code, config, dependency) and whose ``created_at`` is
+        within ``ttl_days`` of ``now`` (a stale token can never be banked), or None. A human row
+        and a NULL ``dependency_hash`` are never consumable tokens — fail-closed."""
+        ...
+
+    def latest_forward_gate_row(
+        self,
+        strategy_id: int,
+        code_hash: str,
+        config_hash: str,
+        dependency_hash: str | None,
+    ) -> dict | None:
+        """Return the newest forward-gate row (all columns, as a dict) for this strategy+identity
+        regardless of passed/consumed, or None. The live wall's certificate selection —
+        pass-or-fail on purpose: a newer failed re-evaluation must invalidate an older pass
+        (#124). A NULL ``dependency_hash`` matches nothing — fail-closed."""
         ...

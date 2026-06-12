@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.order_state import (
@@ -29,6 +30,11 @@ def _conn(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     return conn
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    return _conn(tmp_path)
 
 
 def test_persist_run_writes_orders_and_fills(tmp_path):
@@ -82,7 +88,7 @@ def test_client_order_id_deterministic_and_sanitised():
 
 def test_record_submitted_order_persists_immediately(tmp_path):
     conn = _conn(tmp_path)
-    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1", strategy_id=1)
     row = conn.execute(
         "SELECT strategy, symbol, status, broker_order_id FROM paper_orders"
     ).fetchone()
@@ -93,9 +99,9 @@ def test_record_submitted_order_persists_immediately(tmp_path):
 def test_count_orders_scoped_to_strategy(tmp_path):
     conn = _conn(tmp_path)
     assert count_orders(conn, "s") == 0
-    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")
-    record_submitted_order(conn, "s", "BBB", "buy", 1.0, T0.isoformat(), "alp-2")
-    record_submitted_order(conn, "other", "CCC", "buy", 1.0, T0.isoformat(), "alp-3")
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1", strategy_id=1)
+    record_submitted_order(conn, "s", "BBB", "buy", 1.0, T0.isoformat(), "alp-2", strategy_id=1)
+    record_submitted_order(conn, "other", "CCC", "buy", 1.0, T0.isoformat(), "alp-3", strategy_id=2)
     assert count_orders(conn, "s") == 2
     assert count_orders(conn, "other") == 1
 
@@ -104,8 +110,10 @@ def test_record_submitted_order_idempotent_on_duplicate(tmp_path):
     # #18: a crash/retry or duplicate Alpaca client_order_id path can return the SAME broker order
     # again. Re-recording it must NOT create a duplicate paper_orders row.
     conn = _conn(tmp_path)
-    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")
-    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1")  # retry
+    record_submitted_order(conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1", strategy_id=1)
+    record_submitted_order(  # retry — idempotent
+        conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1", strategy_id=1
+    )
     assert conn.execute(
         "SELECT COUNT(*) FROM paper_orders WHERE strategy='s' AND broker_order_id='alp-1'"
     ).fetchone()[0] == 1
@@ -174,15 +182,21 @@ def test_persist_run_replaces_prior_paper_state_not_accumulates(tmp_path):
     assert derive_positions(conn, "s") == {"AAA": 50.0}
 
 
+_SNAP_PROV = dict(
+    lane="paper", strategy_id=1, code_hash="c", config_hash="g",
+    dependency_hash="d", account_id="acct", cash=1.0, clock_source="broker",
+)
+
+
 def test_tick_snapshot_roundtrip_latest_wins(tmp_path):
     conn = _conn(tmp_path)
     assert latest_tick_snapshot(conn, "s") is None
     record_tick_snapshot(conn, "s", tick_ts="2023-06-01T00:00:00+00:00",
                          decision_ts="2023-05-31T00:00:00+00:00", equity=100.0, peak_equity=100.0,
-                         positions={"AAA": 10.0}, n_submitted=1, reconcile_ok=True)
+                         positions={"AAA": 10.0}, n_submitted=1, reconcile_ok=True, **_SNAP_PROV)
     record_tick_snapshot(conn, "s", tick_ts="2023-06-02T00:00:00+00:00",
                          decision_ts="2023-06-01T00:00:00+00:00", equity=120.0, peak_equity=120.0,
-                         positions={"AAA": 12.0}, n_submitted=0, reconcile_ok=False)
+                         positions={"AAA": 12.0}, n_submitted=0, reconcile_ok=False, **_SNAP_PROV)
     latest = latest_tick_snapshot(conn, "s")
     assert latest["equity"] == 120.0 and latest["positions"] == {"AAA": 12.0}
     assert latest["reconcile_ok"] is False and latest["n_submitted"] == 0
@@ -192,7 +206,7 @@ def test_recent_orders_newest_first_and_limit(tmp_path):
     conn = _conn(tmp_path)
     for i in range(3):
         record_submitted_order(conn, "s", f"SYM{i}", "buy", 1.0, "2023-06-01T00:00:00+00:00",
-                               f"o-{i}")
+                               f"o-{i}", strategy_id=1)
     rows = recent_orders(conn, "s", limit=2)
     assert [r["broker_order_id"] for r in rows] == ["o-2", "o-1"]  # newest first, limited
     assert rows[0]["symbol"] == "SYM2" and rows[0]["side"] == "buy"
@@ -216,3 +230,52 @@ def test_nav_peak_ratchets_and_clears(tmp_path):
     assert get_nav_peak(conn, "s1") == 11_000.0
     clear_nav_peak(conn, "s1")
     assert get_nav_peak(conn, "s1") is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (#124): stamped writers — provenance columns
+# ---------------------------------------------------------------------------
+
+def test_record_tick_snapshot_stamps_provenance(conn):
+    record_tick_snapshot(
+        conn, "s", tick_ts="2026-06-11T14:00:00+00:00", decision_ts=None,
+        equity=1.0, peak_equity=None, positions={}, n_submitted=0,
+        reconcile_ok=True, lane="paper", strategy_id=7, code_hash="c",
+        config_hash="g", dependency_hash="d", account_id="acct", cash=1.0,
+        clock_source="broker",
+    )
+    row = conn.execute("SELECT * FROM tick_snapshots").fetchone()
+    assert row["lane"] == "paper" and row["strategy_id"] == 7 and row["clock_source"] == "broker"
+    assert row["code_hash"] == "c" and row["config_hash"] == "g" and row["dependency_hash"] == "d"
+    assert row["account_id"] == "acct" and row["cash"] == 1.0
+    assert row["recorded_at"]
+
+
+def test_record_tick_snapshot_invalid_lane_raises(conn):
+    with pytest.raises(ValueError, match="lane"):
+        record_tick_snapshot(
+            conn, "s", tick_ts="2026-06-11T14:00:00+00:00", decision_ts=None,
+            equity=1.0, peak_equity=None, positions={}, n_submitted=0,
+            reconcile_ok=True, lane="bad_lane", strategy_id=7, code_hash="c",
+            config_hash="g", dependency_hash="d", account_id="acct", cash=1.0,
+            clock_source="broker",
+        )
+
+
+def test_record_tick_snapshot_invalid_clock_source_raises(conn):
+    with pytest.raises(ValueError, match="clock_source"):
+        record_tick_snapshot(
+            conn, "s", tick_ts="2026-06-11T14:00:00+00:00", decision_ts=None,
+            equity=1.0, peak_equity=None, positions={}, n_submitted=0,
+            reconcile_ok=True, lane="paper", strategy_id=7, code_hash="c",
+            config_hash="g", dependency_hash="d", account_id="acct", cash=1.0,
+            clock_source="bad_source",
+        )
+
+
+def test_record_submitted_order_persists_strategy_id(conn):
+    record_submitted_order(
+        conn, "s", "AAA", "buy", 1.0, T0.isoformat(), "alp-1", strategy_id=42,
+    )
+    row = conn.execute("SELECT strategy_id FROM paper_orders").fetchone()
+    assert row["strategy_id"] == 42

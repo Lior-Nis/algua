@@ -12,7 +12,7 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.knowledge.sync import sync_strategy_doc
-from algua.registry import live_gate
+from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, SignatureError
 from algua.registry.repository import StrategyRecord
@@ -128,12 +128,21 @@ def transition(
                 raise TransitionError("transition to live requires a human actor")
             rec = repo.get(name)
             validate_transition(rec.stage, Stage.LIVE)  # reject non-paper before issuing
+            # The certificate check BEFORE any challenge is issued, so the human signs with
+            # the evidence in front of them (#124). Built via the same transitions helper the
+            # signature-completion wall uses — no duplicate logic. Module-attribute access on
+            # purpose: it is the one monkeypatch seam shared by both paths. ONE identity
+            # computation serves both the verifier and the challenge — no drift window
+            # between what the certificate was judged against and what gets signed (#124 GATE-2).
             identity = compute_artifact_hashes(name)
+            certificate = transitions._default_forward_certificate_verifier()(
+                repo, name, rec.id, identity)
             issued = live_gate.issue_challenge(
                 conn, rec.id, name, identity.code_hash, identity.config_hash,
                 identity.dependency_hash)
             emit(ok({
                 "action": "go_live_challenge", "strategy": name, **issued,
+                "forward_certificate": certificate,
                 "instructions": ("sign the 'challenge' value with your enrolled key: "
                                  "ssh-keygen -Y sign -n algua-go-live -f <key> <file>; "
                                  "then re-run this command with --signature <file>.sig"),
