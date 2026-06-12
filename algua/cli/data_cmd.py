@@ -141,6 +141,8 @@ def import_bars(
     if vendor == "firstrate":
         if adjusted_dir is None:
             raise ValueError("firstrate import requires --adjusted-dir")
+        if corp_actions is not None:
+            raise ValueError("firstrate import does not use --corp-actions")
         request: ImportRequest = FirstRateImportRequest(
             raw_dir=raw_dir, adjusted_dir=adjusted_dir, timeframe=timeframe, as_of=as_of,
             adjustment=adjustment, symbols=sym_tuple,
@@ -153,6 +155,8 @@ def import_bars(
     elif vendor == "databento":
         if corp_actions is None:
             raise ValueError("databento import requires --corp-actions")
+        if adjusted_dir is not None:
+            raise ValueError("databento import does not use --adjusted-dir")
         request = DatabentoImportRequest(
             raw_dir=raw_dir, corp_actions_path=corp_actions, timeframe=timeframe, as_of=as_of,
             adjustment=adjustment, symbols=sym_tuple,

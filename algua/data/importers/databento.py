@@ -62,6 +62,8 @@ def parse_databento_raw(path: Path) -> pd.DataFrame:
         raise ValueError(f"{path.name}: raw prices must be > 0")
     if (out["volume"] < 0).to_numpy().any():
         raise ValueError(f"{path.name}: raw volume must be >= 0")
+    if out.empty:
+        raise ValueError(f"{path.name}: raw file contains no bars")
     return out
 
 
@@ -70,7 +72,14 @@ _VALID_KINDS = {"split", "dividend"}
 
 
 def _to_utc_midnight(value: object, fname: str, i: int) -> pd.Timestamp:
-    ts = pd.Timestamp(value)  # raises on unparseable
+    if pd.isna(value):
+        raise ValueError(f"{fname} row {i}: blank/null ex_date")
+    try:
+        ts = pd.Timestamp(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{fname} row {i}: unparseable ex_date {value!r}") from exc
+    if pd.isna(ts):  # pd.Timestamp("NaT") and similar parse to NaT without raising
+        raise ValueError(f"{fname} row {i}: blank/null ex_date")
     if ts.tz is None:
         ts = ts.tz_localize("UTC")
     elif str(ts.tz) != "UTC":
@@ -202,7 +211,10 @@ class DatabentoImporter:
         self, symbol: str, raw_path: Path, events: list[CorporateAction]
     ) -> ProviderBars:
         raw = parse_databento_raw(raw_path)
-        result = back_adjust(raw[["ts", "close"]], events)
+        try:
+            result = back_adjust(raw[["ts", "close"]], events)
+        except ValueError as exc:
+            raise ValueError(f"{symbol}: {exc}") from exc
         aligned = (
             len(result) == len(raw)
             and result["ts"].reset_index(drop=True).equals(raw["ts"].reset_index(drop=True))

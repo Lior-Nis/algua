@@ -126,8 +126,8 @@ if/elif for *construction*).
 
 The engine's own guards (raw `ts` strictly ascending/unique/UTC, `close` finite/positive, UTC-midnight
 ex-dates, dividend < prior close, etc.) are reused — the importer does **not** re-implement them. An
-empty (0-row) per-symbol raw file yields an empty chunk (`back_adjust` returns empty, the alignment
-check passes `0 == 0`); `ingest_bars_streamed` simply writes no partition for it — acceptable.
+empty (0-row) per-symbol raw file **fails closed** (`parse_databento_raw` raises) — silently dropping
+a present/requested symbol from the consolidated snapshot would be a data-integrity hole (GATE-2).
 
 ### CA-events → typed events (the #149-deferred adapter hygiene)
 

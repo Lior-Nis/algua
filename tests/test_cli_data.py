@@ -257,3 +257,21 @@ def test_cli_databento_requires_corp_actions(tmp_path, monkeypatch):
     )
     assert res.exit_code != 0
     assert "corp-actions" in res.output
+
+
+def test_cli_databento_rejects_adjusted_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "store"))
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    ca = tmp_path / "ca.parquet"
+    _write_raw_p(raw / "AAPL.parquet",
+                 pd.date_range("2024-01-01", periods=1, freq="D", tz="UTC"), [100.0])
+    pd.DataFrame(
+        [{"symbol": "AAPL", "ex_date": "2024-01-03", "kind": "split", "value": 2.0}]
+    ).to_parquet(ca)
+    res = runner.invoke(app, [
+        "data", "import-bars", "--vendor", "databento", "--raw-dir", str(raw),
+        "--corp-actions", str(ca), "--adjusted-dir", str(raw), "--as-of", "2024-06-01T00:00:00Z",
+    ])
+    assert res.exit_code != 0
+    assert "adjusted-dir" in res.output

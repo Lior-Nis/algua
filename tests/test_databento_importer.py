@@ -114,10 +114,11 @@ def test_ca_parse_split_and_dividend(tmp_path):
         ],
     )
     ev = parse_databento_corp_actions(p)
+    # first-seen row order is preserved (no event_id path), so the exact list is deterministic
     assert ev["AAPL"] == [
         Split(ex_date=_utc("2024-01-03"), ratio=2.0),
         Dividend(ex_date=_utc("2024-02-01"), cash=0.5),
-    ] or sorted([type(e).__name__ for e in ev["AAPL"]]) == ["Dividend", "Split"]
+    ]
     assert ev["MSFT"] == [Dividend(ex_date=_utc("2024-01-10"), cash=1.0)]
 
 
@@ -288,3 +289,45 @@ def test_importer_dup_symbol_files(tmp_path):
 
 def test_registry_has_databento():
     assert isinstance(get_importer("databento"), DatabentoImporter)
+
+
+def test_ca_null_ex_date_raises(tmp_path):
+    p = tmp_path / "ca.parquet"
+    _write_ca(p, [{"symbol": "AAPL", "ex_date": None, "kind": "split", "value": 2.0}])
+    with pytest.raises(ValueError, match="ex_date"):
+        parse_databento_corp_actions(p)
+
+
+def test_importer_empty_raw_file_raises(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    ca = tmp_path / "ca.parquet"
+    # right columns, zero rows -> fail closed (don't silently drop a symbol from the snapshot)
+    pd.DataFrame(
+        {c: pd.Series([], dtype="float64") for c in ["open", "high", "low", "close", "volume"]}
+        | {"ts": pd.Series([], dtype="datetime64[ns, UTC]")}
+    ).to_parquet(raw / "AAPL.parquet")
+    _write_ca(ca, [{"symbol": "AAPL", "ex_date": "2024-01-03", "kind": "split", "value": 2.0}])
+    with pytest.raises(ValueError, match="no bars"):
+        _run(raw, ca)
+
+
+def test_importer_ca_symbol_without_raw_file_ignored(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    ca = tmp_path / "ca.parquet"
+    _write_raw(
+        raw / "AAPL.parquet",
+        pd.date_range("2024-01-01", periods=3, freq="D", tz="UTC"),
+        [100, 110, 120],
+    )
+    # CA is a superset: it carries ZZZZ (no raw file) — that event is ignored; AAPL imports OK
+    _write_ca(
+        ca,
+        [
+            {"symbol": "AAPL", "ex_date": "2024-01-02", "kind": "split", "value": 2.0},
+            {"symbol": "ZZZZ", "ex_date": "2024-01-02", "kind": "split", "value": 2.0},
+        ],
+    )
+    [pb] = _run(raw, ca)
+    assert pb.frame["symbol"].iloc[0] == "AAPL"
