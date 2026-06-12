@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
@@ -522,3 +524,150 @@ def test_list_strategies_tag_filter_tolerates_malformed_tags(tmp_path):
     # Must not raise; malformed row must simply be absent from results.
     results = repo.list_strategies(tags=["x"])
     assert all(r.name != "malformed" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Task 8 (#124): forward-gate token store methods + CAS stage updates
+# ---------------------------------------------------------------------------
+
+def _record_forward(repo, sid, *, passed=True, actor="agent", code="c0", config="cfg0",
+                    dep="dep0"):
+    return repo.record_forward_gate_evaluation(
+        sid, passed=passed, n_forward_observations=70, min_forward_observations=63,
+        session_coverage=0.95, realized_sharpe=0.8, holdout_sharpe=1.2, degradation_factor=0.5,
+        sharpe_floor=0.3, realized_vol=0.1, min_forward_vol=0.02, realized_max_drawdown=0.05,
+        max_forward_drawdown=0.25, first_tick_id=1, last_tick_id=70,
+        first_tick_ts="2026-01-02T00:00:00+00:00", last_tick_ts="2026-06-01T00:00:00+00:00",
+        max_staleness_sessions=5, n_reconcile_failures=0, n_concurrent_forward=1,
+        account_id="acct", code_hash=code, config_hash=config, dependency_hash=dep, actor=actor,
+        decision_json="{}")
+
+
+def _now_iso():
+    return datetime.now(UTC).isoformat()
+
+
+def _find_forward(repo, sid, code="c0", config="cfg0", dep="dep0"):
+    return repo.find_consumable_forward_gate_evaluation(
+        sid, code, config, dep, now=_now_iso(), ttl_days=7)
+
+
+def _to_paper(repo, name):
+    repo.apply_transition(repo.get(name), Stage.BACKTESTED, Actor.AGENT, "bt")
+    repo.apply_transition(repo.get(name), Stage.CANDIDATE, Actor.HUMAN, "sl")
+    repo.apply_transition(repo.get(name), Stage.PAPER, Actor.AGENT, "pp")
+    return repo.get(name)
+
+
+def test_record_forward_gate_evaluation_persists_pass_and_fail(repo):
+    rec = repo.add("alpha")
+    fid_pass = _record_forward(repo, rec.id)
+    fid_fail = _record_forward(repo, rec.id, passed=False)
+    rows = repo._conn.execute(
+        "SELECT id, passed, consumed FROM forward_gate_evaluations WHERE strategy_id=?"
+        " ORDER BY id", (rec.id,)).fetchall()
+    assert [(r["id"], r["passed"], r["consumed"]) for r in rows] == [
+        (fid_pass, 1, 0), (fid_fail, 0, 0)]
+
+
+def test_find_consumable_forward_matches_agent_passing_identity(repo):
+    rec = repo.add("alpha")
+    fid = _record_forward(repo, rec.id)
+    assert _find_forward(repo, rec.id) == fid
+
+
+def test_find_consumable_forward_rejects_each_disqualifier(repo):
+    rec = repo.add("alpha")
+    _record_forward(repo, rec.id, passed=False)          # failed row is not a token
+    assert _find_forward(repo, rec.id) is None
+    _record_forward(repo, rec.id, actor="human")         # human row is not a token
+    assert _find_forward(repo, rec.id) is None
+    fid = _record_forward(repo, rec.id)                  # consumed row is not a token
+    repo._conn.execute("UPDATE forward_gate_evaluations SET consumed=1 WHERE id=?", (fid,))
+    repo._conn.commit()
+    assert _find_forward(repo, rec.id) is None
+    fid = _record_forward(repo, rec.id)                  # fresh valid token, but...
+    assert _find_forward(repo, rec.id, code="BAD") is None       # code drift
+    assert _find_forward(repo, rec.id, config="BAD") is None     # config drift
+    assert _find_forward(repo, rec.id, dep="BAD") is None        # dependency drift
+    assert _find_forward(repo, rec.id, dep=None) is None         # NULL-dep probe fails closed
+    assert _find_forward(repo, rec.id) == fid
+    # TTL: a token older than the window is stale, never bankable
+    stale = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    repo._conn.execute(
+        "UPDATE forward_gate_evaluations SET created_at=? WHERE id=?", (stale, fid))
+    repo._conn.commit()
+    assert _find_forward(repo, rec.id) is None
+
+
+def test_latest_forward_gate_row_newest_pass_or_fail(repo):
+    rec = repo.add("alpha")
+    assert repo.latest_forward_gate_row(rec.id, "c0", "cfg0", "dep0") is None
+    fid_pass = _record_forward(repo, rec.id)
+    row = repo.latest_forward_gate_row(rec.id, "c0", "cfg0", "dep0")
+    assert row["id"] == fid_pass and row["passed"] == 1
+    assert row["n_forward_observations"] == 70           # full-column dict, not just the id
+    fid_fail = _record_forward(repo, rec.id, passed=False)
+    # a newer FAILED re-evaluation beats the older pass — it must invalidate it
+    row = repo.latest_forward_gate_row(rec.id, "c0", "cfg0", "dep0")
+    assert row["id"] == fid_fail and row["passed"] == 0
+    assert repo.latest_forward_gate_row(rec.id, "BAD", "cfg0", "dep0") is None  # identity drift
+    assert repo.latest_forward_gate_row(rec.id, "c0", "cfg0", None) is None     # NULL-dep probe
+
+
+def test_apply_transition_consumes_forward_token_atomically(repo):
+    repo.add("alpha")
+    rec = _to_paper(repo, "alpha")
+    fid = _record_forward(repo, rec.id)
+    out = repo.apply_transition(
+        rec, Stage.FORWARD_TESTED, Actor.AGENT, "fw", code_hash="c0", config_hash="cfg0",
+        dependency_hash="dep0", consume_forward_gate_id=fid)
+    assert out.stage is Stage.FORWARD_TESTED
+    assert _find_forward(repo, rec.id) is None           # token consumed (single-use)
+    # a second consume of the now-spent token fails and does NOT advance the stage
+    repo.apply_transition(out, Stage.PAPER, Actor.AGENT, "back")
+    rec = repo.get("alpha")
+    with pytest.raises(TransitionError):
+        repo.apply_transition(
+            rec, Stage.FORWARD_TESTED, Actor.AGENT, "fw2", code_hash="c0", config_hash="cfg0",
+            dependency_hash="dep0", consume_forward_gate_id=fid)
+    assert repo.get("alpha").stage is Stage.PAPER
+
+
+def test_apply_transition_rejects_both_consume_params(repo):
+    rec = repo.add("alpha")
+    with pytest.raises(ValueError):
+        repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "x",
+                              consume_gate_id=1, consume_forward_gate_id=1)
+
+
+def test_forward_consume_rechecks_identity_at_consume_time(repo):
+    """The consume UPDATE re-checks the FULL predicate — a drifted identity at consume time is
+    refused even when the caller hands a real token id (no validate-then-consume gap)."""
+    repo.add("alpha")
+    rec = _to_paper(repo, "alpha")
+    fid = _record_forward(repo, rec.id)                  # token bound to c0/cfg0/dep0
+    with pytest.raises(TransitionError):
+        repo.apply_transition(
+            rec, Stage.FORWARD_TESTED, Actor.AGENT, "fw", code_hash="DIFFERENT",
+            config_hash="cfg0", dependency_hash="dep0", consume_forward_gate_id=fid)
+    assert repo.get("alpha").stage is Stage.PAPER        # stage unchanged
+    assert _find_forward(repo, rec.id) == fid            # token unconsumed
+
+
+def test_apply_transition_cas_detects_concurrent_stage_move(tmp_path):
+    db = tmp_path / "r.db"
+    c1 = connect(db)
+    migrate(c1)
+    repo1 = SqliteStrategyRepository(c1)
+    repo1.add("alpha")
+    repo2 = SqliteStrategyRepository(connect(db))
+    stale = repo1.get("alpha")                           # this session's view: stage=idea
+    repo2.apply_transition(repo2.get("alpha"), Stage.BACKTESTED, Actor.AGENT, "won the race")
+    # the loser's error names the race (stage moved underneath), not an illegal transition
+    with pytest.raises(TransitionError, match="concurrent"):
+        repo1.apply_transition(stale, Stage.BACKTESTED, Actor.AGENT, "lost the race")
+    assert repo1.get("alpha").stage is Stage.BACKTESTED
+    n = c1.execute(
+        "SELECT COUNT(*) c FROM stage_transitions WHERE to_stage='backtested'").fetchone()["c"]
+    assert n == 1                                        # exactly one transition row, not two
