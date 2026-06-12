@@ -8,7 +8,7 @@ then pinned via UPDATE (the writer stamps wall-clock time); legacy/defective row
 because the writer refuses to produce them — exactly the adversarial shapes the gate must reject.
 """
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -389,6 +389,16 @@ def test_staleness_sessions(conn):
     assert res.evidence.staleness_sessions == 3  # Jun 9 -> Jun 12 (Tue->Fri)
 
 
+def test_nonutc_aware_now_is_normalized_to_utc_date(conn):
+    # Mon Jun 15 01:00 at +05:00 is still Sun Jun 14 20:00 UTC. Keeping the +05:00 tz as-is
+    # would make `.date()` read the LOCAL Monday and measure staleness from session Jun 15
+    # (1 session); normalized to UTC the session is Fri Jun 12 (0 sessions).
+    _three_admissible(conn)  # last admissible tick: Fri Jun 12
+    local_now = datetime(2026, 6, 15, 1, 0, tzinfo=timezone(timedelta(hours=5)))
+    res = assemble(conn, now=local_now)
+    assert res.evidence.staleness_sessions == 0
+
+
 # ---------------------------------------------------------------------------
 # Single-tenant + concurrency (clauses 7-8)
 # ---------------------------------------------------------------------------
@@ -450,7 +460,9 @@ def test_external_capital_types_constant():
         {"CSD", "CSW", "TRANS", "JNLC", "JNLS", "ACATC", "ACATS"})
 
 
-def test_activities_window_is_first_admissible_tick_to_now(conn):
+def test_activities_window_starts_one_second_before_first_admissible_tick(conn):
+    # Alpaca's `after` bound is EXCLUSIVE, so the window start is widened 1s before the first
+    # admissible tick instant — otherwise a deposit stamped exactly at first_tick_ts escapes.
     _three_admissible(conn)
     seen = {}
 
@@ -459,8 +471,23 @@ def test_activities_window_is_first_admissible_tick_to_now(conn):
         return []
 
     assemble(conn, activities=fetch)
-    assert seen["after"] == _ts(date(2026, 6, 10))
+    assert seen["after"] == "2026-06-10T19:59:59+00:00"  # _ts(Jun 10) minus 1s
     assert seen["until"] == NOW.isoformat()
+
+
+def test_deposit_stamped_exactly_at_window_start_is_counted(conn):
+    # The fake mirrors the broker's EXCLUSIVE `after` filtering: with an unwidened
+    # `after == first_tick_ts` the boundary-instant deposit would be dropped server-side and
+    # the hygiene check would PASS on contaminated capital.
+    _three_admissible(conn)
+    deposit = {"activity_type": "CSD", "date": _ts(date(2026, 6, 10))}  # == first tick instant
+
+    def fetch(after, until):
+        return [a for a in [deposit] if a["date"] > after]  # broker-side exclusive `after`
+
+    res = assemble(conn, activities=fetch)
+    assert res.evidence.activities_ok is True
+    assert res.evidence.n_external_cash_flows == 1
 
 
 def test_external_cash_flow_counts(conn):

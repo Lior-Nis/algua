@@ -30,6 +30,8 @@ MIN_FORWARD_OBSERVATIONS = 63
 MIN_SESSION_COVERAGE = 0.9
 
 # Performance bar: realized_sharpe >= max(DEGRADATION_FACTOR * holdout_sharpe, SHARPE_FLOOR).
+# Direction: RAISING the factor RAISES the realized-Sharpe bar (stricter) — the name reads
+# inverted (it scales the bar; it is not an "allowed degradation" budget).
 # Both protected — NOT agent-tunable knobs.
 DEGRADATION_FACTOR = 0.5
 SHARPE_FLOOR = 0.3

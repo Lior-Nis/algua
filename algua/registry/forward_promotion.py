@@ -20,7 +20,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 import pandas as pd
@@ -197,7 +197,9 @@ def assemble_forward_evidence(
     auditing). The integrity universe is WIDER than the observation set: every paper-lane row
     for this strategy_id from the first admissible row onward, so a bad tick cannot hide by
     being inadmissible."""
-    now_utc = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    # Normalize (not just tag) to UTC: an aware non-UTC `now` kept as-is would make `.date()`
+    # session arithmetic use the LOCAL date, shifting session boundaries (e.g. staleness).
+    now_utc = now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
     now_iso = now_utc.isoformat()
 
     # 1-2. Fetch in id order; partition into admissible ticks vs per-filter exclusions.
@@ -304,8 +306,16 @@ def assemble_forward_evidence(
         last_tick_dt = _parse_dt(admissible[-1]["tick_ts"])
         assert last_tick_dt is not None  # admissibility already proved it parses
         staleness_sessions = calendar.sessions_between(last_tick_dt.date(), now_utc.date())
+        # Alpaca's activities `after` bound is EXCLUSIVE: an external deposit stamped at
+        # EXACTLY the first-tick instant would escape an `after == first_tick_ts` window, so
+        # widen the start 1s earlier. The overlap errs fail-closed — an extra pre-window
+        # capital movement can only FAIL the gate, never pass it; pre-window FILLs from this
+        # strategy's own orders remain attributable.
+        first_tick_dt = _parse_dt(admissible[0]["tick_ts"])
+        assert first_tick_dt is not None  # admissibility already proved it parses
+        window_after = (first_tick_dt - timedelta(seconds=1)).isoformat()
         try:
-            acts = activities_fetch(admissible[0]["tick_ts"], now_iso)
+            acts = activities_fetch(window_after, now_iso)
             n_external_cash_flows, n_unattributable_fills = _classify_activities(
                 conn, strategy_id, acts)
         except Exception:
@@ -369,7 +379,9 @@ def verify_forward_certificate(
     hygiene continuity unverifiable); and account hygiene re-verified over ``[created_at,
     now]`` with the same activity-classification rules the gate itself uses.
     Returns the certificate summary the human signs against."""
-    now_utc = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    # Normalize (not just tag) to UTC — same rule as assemble_forward_evidence: `.date()`
+    # freshness arithmetic must use the UTC date, not a local one.
+    now_utc = now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
     row = repo.latest_forward_gate_row(
         strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
     if row is None:
@@ -434,8 +446,14 @@ def verify_forward_certificate(
             f"the broker credentials point at account {current_account!r} but the certificate "
             f"was earned on account {row['account_id']!r}; hygiene continuity since "
             "certification is unverifiable — re-run `algua paper promote` on this account")
+    # Alpaca's activities `after` bound is EXCLUSIVE: a capital movement stamped at EXACTLY
+    # the certification instant would escape an `after == created_at` window, so widen the
+    # start 1s earlier. The overlap errs fail-closed — an extra pre-window movement can only
+    # FAIL the wall, never pass it; pre-window FILLs from this strategy's own orders remain
+    # attributable.
+    window_after = (datetime.fromisoformat(row["created_at"]) - timedelta(seconds=1)).isoformat()
     try:
-        acts = activities_fetch(row["created_at"], now_utc.isoformat())
+        acts = activities_fetch(window_after, now_utc.isoformat())
     except Exception as exc:
         raise TransitionError(
             f"could not verify account activities since certification ({exc}); "

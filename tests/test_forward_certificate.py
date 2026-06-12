@@ -237,7 +237,9 @@ def test_unattributable_fill_since_certification_fails(repo, conn):
         verify(repo, conn, activities_fetch=fetch)
 
 
-def test_activities_fetch_window_is_created_at_to_now(repo, conn):
+def test_activities_fetch_window_starts_one_second_before_created_at(repo, conn):
+    # Alpaca's `after` bound is EXCLUSIVE, so the re-check window starts 1s before the
+    # certification instant — otherwise a deposit stamped exactly at created_at escapes.
     seed_cert(repo, conn, created_at="2026-06-10T20:00:00+00:00")
     seen = {}
 
@@ -246,7 +248,22 @@ def test_activities_fetch_window_is_created_at_to_now(repo, conn):
         return []
 
     verify(repo, conn, activities_fetch=fetch)
-    assert seen["window"] == ("2026-06-10T20:00:00+00:00", NOW.isoformat())
+    assert seen["window"] == ("2026-06-10T19:59:59+00:00", NOW.isoformat())
+
+
+def test_deposit_stamped_exactly_at_certification_instant_fails(repo, conn):
+    # The fake mirrors the broker's EXCLUSIVE `after` filtering: with an unwidened
+    # `after == created_at` the boundary-instant deposit would be dropped server-side and the
+    # hygiene re-check would PASS on contaminated capital.
+    created = "2026-06-10T20:00:00+00:00"
+    seed_cert(repo, conn, created_at=created)
+    deposit = {"activity_type": "CSD", "date": created}
+
+    def fetch(after, until):
+        return [a for a in [deposit] if a["date"] > after]  # broker-side exclusive `after`
+
+    with pytest.raises(TransitionError, match="1 external capital"):
+        verify(repo, conn, activities_fetch=fetch)
 
 
 def test_account_drift_since_certification_fails(repo, conn):
@@ -269,8 +286,10 @@ def test_account_id_fetch_failure_fails_closed(repo, conn):
     def fetch():
         raise RuntimeError("alpaca down")
 
-    with pytest.raises(TransitionError, match="(?s)could not verify the broker account id.*"
-                                              "failing closed"):
+    # The message carries the underlying exception text: a down broker must be
+    # distinguishable from an account mismatch.
+    with pytest.raises(TransitionError, match=r"(?s)could not verify the broker account id "
+                                              r"\(alpaca down\); failing closed"):
         verify(repo, conn, account_id_fetch=fetch)
 
 
