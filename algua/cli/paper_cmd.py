@@ -9,12 +9,13 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.backtest.engine import BacktestError
+from algua.calendar.market_calendar import MarketCalendar
 from algua.cli._common import ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Stage
+from algua.contracts.lifecycle import Actor, Stage
 from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
     clear_all_nav_peaks,
@@ -36,8 +37,19 @@ from algua.execution.sim_broker import SimBroker
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.repository import StrategyRecord
 from algua.registry.store import SqliteStrategyRepository
+from algua.research.forward_gates import (
+    DEGRADATION_FACTOR,
+    MAX_FORWARD_DRAWDOWN,
+    MAX_STALENESS_SESSIONS,
+    MIN_FORWARD_OBSERVATIONS,
+    MIN_FORWARD_VOL,
+    MIN_SESSION_COVERAGE,
+    SHARPE_FLOOR,
+    ForwardGateCriteria,
+)
 from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy
@@ -362,6 +374,80 @@ def trade_tick(
         "reconcile_ok": result.reconcile_ok,
         "realized_gross": result.realized_gross,
     }))
+
+
+@paper_app.command("promote")
+@json_errors(ValueError, LookupError, BrokerError)
+def promote(
+    name: str,
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+    degradation_factor: float = typer.Option(
+        DEGRADATION_FACTOR, "--degradation-factor",
+        help="realized Sharpe must beat this fraction of the qualified holdout Sharpe "
+             "(raising it is stricter; lowering is human-only)"),
+    sharpe_floor: float = typer.Option(
+        SHARPE_FLOOR, "--sharpe-floor",
+        help="absolute realized-Sharpe floor (raising is stricter; lowering is human-only)"),
+    min_observations: int = typer.Option(
+        MIN_FORWARD_OBSERVATIONS, "--min-observations",
+        help="minimum daily return observations in the forward window "
+             "(raising is stricter; lowering is human-only)"),
+    min_coverage: float = typer.Option(
+        MIN_SESSION_COVERAGE, "--min-coverage",
+        help="minimum decided-sessions / trading-sessions coverage "
+             "(raising is stricter; lowering is human-only)"),
+    min_vol: float = typer.Option(
+        MIN_FORWARD_VOL, "--min-vol",
+        help="annualized volatility floor — a do-nothing strategy must not pass "
+             "(raising is stricter; lowering is human-only)"),
+    max_drawdown: float = typer.Option(
+        MAX_FORWARD_DRAWDOWN, "--max-drawdown",
+        help="max drawdown over the evidence series "
+             "(lowering is stricter; raising is human-only)"),
+    max_staleness: int = typer.Option(
+        MAX_STALENESS_SESSIONS, "--max-staleness",
+        help="newest admissible tick may be at most this many sessions old "
+             "(lowering is stricter; raising is human-only)"),
+) -> None:
+    """Forward-test evidence gate (#124): evaluate this strategy's wall-clock paper evidence
+    and promote paper -> forward_tested on pass. At forward_tested: re-evaluate, refreshing
+    the live-wall certificate, no stage change. The paper-side analog of `research promote`;
+    relaxing any threshold below its protected default is human-only."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching the DB
+    criteria = ForwardGateCriteria(
+        min_forward_observations=min_observations,
+        min_session_coverage=min_coverage,
+        degradation_factor=degradation_factor,
+        sharpe_floor=sharpe_floor,
+        min_forward_vol=min_vol,
+        max_forward_drawdown=max_drawdown,
+        max_staleness_sessions=max_staleness,
+    )
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        # PREFLIGHT: actor legality + relaxations-need-human + stage legality. Refuses here,
+        # before the broker is even constructed (TransitionError is a ValueError -> JSON error).
+        forward_promotion_preflight(repo, name, actor=actor_enum, criteria=criteria)
+        broker = _alpaca_broker_from_settings()
+        outcome = run_forward_gate(
+            repo, conn, name=name, actor=actor_enum, criteria=criteria,
+            calendar=MarketCalendar(), now=datetime.now(UTC),
+            activities_fetch=broker.account_activities_window)
+        audit_append(conn, actor=actor, action="paper_promote",
+                     reason="pass" if outcome.decision.passed else "fail", strategy=name)
+    payload = {
+        "strategy": name,
+        "passed": outcome.decision.passed,
+        "promoted": outcome.promoted,
+        "decision": outcome.decision.to_dict(),
+        "excluded_ticks": outcome.assembled.excluded,
+        "n_concurrent_forward": outcome.assembled.n_concurrent_forward,
+    }
+    # Pass mirrors research_cmd.promote's success envelope; a fail still emits the full
+    # decision payload (the evaluation row was recorded) but exits non-zero.
+    emit(ok(payload) if outcome.decision.passed else payload | {"status": "fail"})
+    if not outcome.decision.passed:
+        raise typer.Exit(1)
 
 
 @paper_app.command("flatten")

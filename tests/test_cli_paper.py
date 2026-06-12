@@ -696,3 +696,215 @@ def test_trade_tick_allowed_at_forward_tested_stage(monkeypatch):
     result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", "snap1"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# Task 12 (#124): `algua paper promote` — the forward-test evidence gate CLI
+# ---------------------------------------------------------------------------
+
+_NAME = "cross_sectional_momentum"
+_GATE_IDENT = None  # initialized lazily to avoid an import cost at collection
+
+
+def _gate_ident():
+    global _GATE_IDENT
+    if _GATE_IDENT is None:
+        from algua.registry.repository import ArtifactIdentity
+        _GATE_IDENT = ArtifactIdentity(code_hash="c", config_hash="g", dependency_hash="d")
+    return _GATE_IDENT
+
+
+class _PromoteBroker:
+    """Broker fake for the promote path: only the activities window is consulted."""
+
+    def account_activities_window(self, after, until):
+        return []
+
+
+def _wire_promote(monkeypatch):
+    """Pin identity the way tests/test_forward_promotion.py does (one IDENT for the recorded
+    row AND the token-consume recheck), swap the heavy exchange calendar for weekday
+    arithmetic, and stub the broker."""
+    from tests.test_forward_promotion import FakeCalendar
+    ident = _gate_ident()
+    monkeypatch.setattr(
+        "algua.registry.forward_promotion.compute_artifact_hashes", lambda name: ident)
+    monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: ident)
+    monkeypatch.setattr("algua.cli.paper_cmd.MarketCalendar", FakeCalendar)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _PromoteBroker)
+
+
+def _promote_conn():
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    conn = connect(get_settings().db_path)
+    migrate(conn)
+    return conn
+
+
+def _past_weekdays(n):
+    """The n weekdays strictly before today (UTC), oldest first — every seeded tick_ts is in
+    the past and the newest is at most one session stale, so the gate's now=datetime.now(UTC)
+    needs no pinning."""
+    from datetime import date, timedelta
+    out, d = [], date.today() - timedelta(days=1)
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d)
+        d -= timedelta(days=1)
+    return list(reversed(out))
+
+
+def _seed_passing_forward_window(name=_NAME, n=64):
+    """64 admissible sessions (63 returns >= the floor) through the REAL tick writer, plus a
+    qualified backtest gate row (holdout_sharpe=1.0 -> bar = max(.5*1.0, .3) = .5)."""
+    from contextlib import closing
+    from datetime import timedelta
+
+    from algua.execution.order_state import record_tick_snapshot
+    from algua.registry.store import SqliteStrategyRepository
+    days = _past_weekdays(n)
+    with closing(_promote_conn()) as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        eq = 100.0
+        for i, day in enumerate(days):
+            decision = day - timedelta(days=1)
+            while decision.weekday() >= 5:
+                decision -= timedelta(days=1)
+            record_tick_snapshot(
+                conn, name,
+                tick_ts=datetime(day.year, day.month, day.day, 20, tzinfo=UTC).isoformat(),
+                decision_ts=datetime(decision.year, decision.month, decision.day, 20,
+                                     tzinfo=UTC).isoformat(),
+                equity=eq, peak_equity=None, positions={}, n_submitted=0, reconcile_ok=True,
+                lane="paper", strategy_id=rec.id, code_hash="c", config_hash="g",
+                dependency_hash="d", account_id="acct", cash=0.0, clock_source="broker")
+            eq *= 1.004 if i % 2 == 0 else 0.999
+        conn.execute(
+            "INSERT INTO gate_evaluations(strategy_id, passed, n_funnel, own_lifetime_combos, "
+            "windowed_total_combos, funnel_window_days, breadth_provenance, pit_ok, "
+            "pit_override, holdout_n_bars, min_holdout_observations, code_hash, config_hash, "
+            "dependency_hash, data_source, snapshot_id, period_start, period_end, "
+            "holdout_frac, actor, decision_json, consumed, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.id, 1, 1, 1, 1, 90, "measured", 1, 0, 100, 63, "c", "g", "d", "snapshot",
+             None, "2026-01-01", "2026-06-01", 0.25, "agent",
+             json.dumps({"checks": [{"name": "holdout_sharpe", "value": 1.0}]}), 0,
+             "2026-06-10T00:00:00+00:00"))
+        conn.commit()
+
+
+def _stage_of(name=_NAME):
+    from contextlib import closing
+    with closing(_promote_conn()) as conn:
+        return conn.execute("SELECT stage FROM strategies WHERE name=?", (name,)).fetchone()[0]
+
+
+def test_paper_promote_happy_path_promotes(monkeypatch):
+    _to_paper()
+    _wire_promote(monkeypatch)
+    _seed_passing_forward_window()
+    result = runner.invoke(app, ["paper", "promote", _NAME])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["strategy"] == _NAME
+    assert payload["passed"] is True
+    assert payload["promoted"] is True
+    assert isinstance(payload["decision"]["checks"], list) and payload["decision"]["checks"]
+    assert isinstance(payload["excluded_ticks"], dict)
+    assert all(v == 0 for v in payload["excluded_ticks"].values())
+    assert payload["n_concurrent_forward"] == 1
+    assert _stage_of() == "forward_tested"
+    from contextlib import closing
+    with closing(_promote_conn()) as conn:
+        audit = conn.execute(
+            "SELECT reason FROM audit_log WHERE action='paper_promote' AND strategy=?",
+            (_NAME,)).fetchall()
+    assert [r["reason"] for r in audit] == ["pass"]
+
+
+def test_paper_promote_failing_gate_records_row_and_exits_1(monkeypatch):
+    _to_paper()
+    _wire_promote(monkeypatch)  # no ticks seeded: the window floor fails
+    result = runner.invoke(app, ["paper", "promote", _NAME])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is False
+    assert payload["promoted"] is False
+    assert payload["status"] == "fail"
+    assert isinstance(payload["excluded_ticks"], dict)
+    assert _stage_of() == "paper"  # not transitioned
+    from contextlib import closing
+    with closing(_promote_conn()) as conn:
+        rows = conn.execute(
+            "SELECT passed, consumed FROM forward_gate_evaluations").fetchall()
+    assert len(rows) == 1  # the failing evaluation WAS recorded
+    assert rows[0]["passed"] == 0 and rows[0]["consumed"] == 0
+
+
+def test_paper_promote_at_forward_tested_refreshes_certificate(monkeypatch):
+    _to_paper()
+    _wire_promote(monkeypatch)
+    _seed_passing_forward_window()
+    from contextlib import closing
+    with closing(_promote_conn()) as conn:
+        conn.execute("UPDATE strategies SET stage='forward_tested' WHERE name=?", (_NAME,))
+        conn.commit()
+    result = runner.invoke(app, ["paper", "promote", _NAME])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True
+    assert payload["promoted"] is False  # certificate refresh, no stage change
+    assert _stage_of() == "forward_tested"
+
+
+def test_paper_promote_agent_relaxation_refused(monkeypatch):
+    _to_paper()
+    _wire_promote(monkeypatch)
+    result = runner.invoke(app, ["paper", "promote", _NAME, "--sharpe-floor", "0.2"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "sharpe_floor" in payload["error"] and "human" in payload["error"]
+    from contextlib import closing
+    with closing(_promote_conn()) as conn:  # refused BEFORE any evaluation row is minted
+        assert conn.execute("SELECT COUNT(*) FROM forward_gate_evaluations").fetchone()[0] == 0
+
+
+def test_paper_promote_agent_tightening_accepted(monkeypatch):
+    _to_paper()
+    _wire_promote(monkeypatch)
+    _seed_passing_forward_window()
+    result = runner.invoke(app, ["paper", "promote", _NAME, "--sharpe-floor", "0.5"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["passed"] is True and payload["promoted"] is True
+
+
+def test_paper_promote_wrong_stage_refused(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    assert runner.invoke(app, ["backtest", "run", _NAME, "--demo", "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "candidate",
+                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    result = runner.invoke(app, ["paper", "promote", _NAME])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "candidate" in payload["error"]
+    assert "paper or forward_tested" in payload["error"]
+
+
+def test_paper_promote_missing_creds_json_error(monkeypatch):
+    # Empty env vars override any local .env (env > .env in pydantic-settings) — hermetic, and
+    # the same envelope discipline as trade-tick's missing-creds path.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "")
+    _to_paper()
+    result = runner.invoke(app, ["paper", "promote", _NAME])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "ALGUA_ALPACA_API_KEY" in payload["error"]
