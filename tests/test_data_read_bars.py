@@ -101,6 +101,6 @@ def test_read_bars_rejects_legacy_single_file_snapshot(tmp_path):
         data_path=Path("snapshots/bars/legacyid00000000/bars.parquet"),
         created_at="2024-07-02T00:00:00+00:00", storage_format="parquet",
     )
-    SnapshotManifest(tmp_path / "manifest.jsonl").append(legacy)
+    SnapshotManifest(tmp_path / "manifest.jsonl").append_if_absent(legacy)
     with pytest.raises(ValueError, match="legacy"):
         store.read_bars("legacyid00000000")
