@@ -263,6 +263,14 @@ def test_enroll_approver_rejects_bad_principal(tmp_path, monkeypatch):
 
 def _seed_forward_tested(monkeypatch, tmp_path, name: str) -> str:
     """Register a strategy and advance it to the forward_tested stage; return its name."""
+    from algua.registry.repository import ArtifactIdentity
+
+    # paper -> forward_tested now recomputes identity for audit pinning (#124); fake strategies
+    # here have no module on disk, so stub the recompute for the seeding transition.
+    monkeypatch.setattr(
+        "algua.registry.approvals.compute_artifact_hashes",
+        lambda n: ArtifactIdentity(code_hash="aabb", config_hash="ccdd", dependency_hash="eeff"),
+    )
     _advance_to_forward_tested(name)
     return name
 

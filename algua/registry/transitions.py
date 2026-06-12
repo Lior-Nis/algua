@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
@@ -24,6 +25,7 @@ def transition_strategy(
     config_hash: str | None = None
     dependency_hash: str | None = None
     consume_gate_id: int | None = None
+    consume_forward_gate_id: int | None = None
     if target == Stage.LIVE:
         identity = _validate_live_gate(
             repo=repo,
@@ -33,10 +35,24 @@ def transition_strategy(
             approval_verifier=approval_verifier,
         )
         code_hash, config_hash, dependency_hash = identity
-    elif target == Stage.CANDIDATE and transition_actor is not Actor.HUMAN:
-        # Wall D: an agent reaches candidate ONLY by consuming a fresh, identity-matched,
-        # single-use gate token (minted by `research promote`). Humans are exempt.
+    elif (
+        rec.stage is Stage.BACKTESTED
+        and target == Stage.CANDIDATE
+        and transition_actor is not Actor.HUMAN
+    ):
+        # Wall D, scoped to the FORWARD edge: an agent reaches candidate from below ONLY by
+        # consuming a fresh, identity-matched, single-use gate token (minted by `research
+        # promote`). Humans are exempt. The PAPER -> CANDIDATE back-step is free for any actor —
+        # re-entry to candidate from below always re-runs the research gate.
         consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
+    elif rec.stage is Stage.PAPER and target == Stage.FORWARD_TESTED:
+        # Identity is pinned for BOTH actors: the agent's token consume re-checks it inside
+        # apply_transition, and a human raw transition records it for audit (#124).
+        identity = _compute_hashes(name)
+        code_hash, config_hash, dependency_hash = identity
+        if transition_actor is not Actor.HUMAN:
+            consume_forward_gate_id = _validate_forward_gate(
+                repo=repo, strategy_id=rec.id, identity=identity)
     return repo.apply_transition(
         rec=rec,
         to=target,
@@ -46,6 +62,7 @@ def transition_strategy(
         config_hash=config_hash,
         dependency_hash=dependency_hash,
         consume_gate_id=consume_gate_id,
+        consume_forward_gate_id=consume_forward_gate_id,
     )
 
 
@@ -90,6 +107,29 @@ def _validate_shortlist_gate(*, repo: StrategyRepository, name: str, strategy_id
             "transition to candidate requires a fresh passing gate evaluation for the current "
             "code+config+dependency; run `algua research promote` (no matching gate record found)"
         )
+    return gate_id
+
+
+def _validate_forward_gate(
+    *, repo: StrategyRepository, strategy_id: int, identity: ArtifactIdentity
+) -> int:
+    """Return the id of the newest fresh passing AGENT forward token matching the current
+    identity, or raise. Consumption (with the full predicate recheck) happens inside
+    apply_transition, in one transaction with the stage change."""
+    from algua.research.forward_gates import FORWARD_TOKEN_TTL_DAYS
+
+    gate_id = repo.find_consumable_forward_gate_evaluation(
+        strategy_id,
+        identity.code_hash,
+        identity.config_hash,
+        identity.dependency_hash,
+        now=datetime.now(UTC).isoformat(),
+        ttl_days=FORWARD_TOKEN_TTL_DAYS,
+    )
+    if gate_id is None:
+        raise TransitionError(
+            "transition to forward_tested requires a fresh passing forward-gate evaluation for"
+            " the current code+config+dependency; run `algua paper promote`")
     return gate_id
 
 
