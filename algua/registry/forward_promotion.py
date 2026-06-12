@@ -29,7 +29,6 @@ from algua.backtest.metrics import metrics_from_returns
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
-from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import (
     CERTIFICATE_FRESH_SESSIONS,
     ForwardEvidence,
@@ -526,50 +525,65 @@ def run_forward_gate(
     now: datetime,
     activities_fetch: ActivitiesFetch,
 ) -> ForwardPromotionOutcome:
-    """Assemble evidence -> evaluate -> record (pass AND fail) -> on pass from PAPER transition
-    (consuming the just-minted token). At FORWARD_TESTED a passing run is the certificate
-    refresh: a new row, no stage change.
+    """Assemble evidence -> evaluate -> record (pass AND fail) -> on pass from PAPER record AND
+    promote in one transaction. At FORWARD_TESTED a passing run is the certificate refresh: a
+    new row, no stage change.
 
-    Identity is computed ONCE via ``compute_artifact_hashes`` — the SAME source the token
-    consume re-checks inside ``apply_transition`` — so the row, the evidence admissibility
-    filter, and the consume predicate can never disagree."""
+    Identity is computed ONCE via ``compute_artifact_hashes`` and feeds the evidence
+    admissibility filter, the evaluation row, AND the transition's pinned hashes — they can
+    never disagree."""
     rec = repo.get(name)
     identity = compute_artifact_hashes(name)
     asm = assemble_forward_evidence(
         conn, strategy_id=rec.id, name=name, identity=identity, calendar=calendar, now=now,
         activities_fetch=activities_fetch)
     decision = evaluate_forward_gate(asm.evidence, criteria)
-    repo.record_forward_gate_evaluation(
-        rec.id, passed=decision.passed,
-        n_forward_observations=asm.evidence.n_return_observations,
-        min_forward_observations=criteria.min_forward_observations,
-        session_coverage=asm.evidence.session_coverage,
-        realized_sharpe=asm.evidence.realized_sharpe,
-        holdout_sharpe=asm.evidence.holdout_sharpe,
-        degradation_factor=criteria.degradation_factor,
-        sharpe_floor=criteria.sharpe_floor,
-        realized_vol=asm.evidence.realized_vol,
-        min_forward_vol=criteria.min_forward_vol,
-        realized_max_drawdown=asm.evidence.realized_max_drawdown,
-        max_forward_drawdown=criteria.max_forward_drawdown,
-        first_tick_id=asm.first_tick_id, last_tick_id=asm.last_tick_id,
-        first_tick_ts=asm.first_tick_ts, last_tick_ts=asm.last_tick_ts,
-        max_staleness_sessions=criteria.max_staleness_sessions,
-        n_reconcile_failures=asm.evidence.n_reconcile_failures,
-        n_concurrent_forward=asm.n_concurrent_forward,
-        account_id=asm.account_id,
-        code_hash=identity.code_hash, config_hash=identity.config_hash,
-        dependency_hash=identity.dependency_hash, actor=actor.value,
-        decision_json=json.dumps(decision.to_dict(), sort_keys=True),
-        # A refresh at forward_tested must refresh the live certificate WITHOUT minting a
-        # re-entry token (#124 GATE-2): only a run FROM paper writes a consumable row, so a
-        # demote-then-re-promote can never bank a refresh — it always re-runs the full gate.
-        consumable=rec.stage is Stage.PAPER)
+    gate_row: dict[str, Any] = {
+        "passed": decision.passed,
+        "n_forward_observations": asm.evidence.n_return_observations,
+        "min_forward_observations": criteria.min_forward_observations,
+        "session_coverage": asm.evidence.session_coverage,
+        "realized_sharpe": asm.evidence.realized_sharpe,
+        "holdout_sharpe": asm.evidence.holdout_sharpe,
+        "degradation_factor": criteria.degradation_factor,
+        "sharpe_floor": criteria.sharpe_floor,
+        "realized_vol": asm.evidence.realized_vol,
+        "min_forward_vol": criteria.min_forward_vol,
+        "realized_max_drawdown": asm.evidence.realized_max_drawdown,
+        "max_forward_drawdown": criteria.max_forward_drawdown,
+        "first_tick_id": asm.first_tick_id, "last_tick_id": asm.last_tick_id,
+        "first_tick_ts": asm.first_tick_ts, "last_tick_ts": asm.last_tick_ts,
+        "max_staleness_sessions": criteria.max_staleness_sessions,
+        "n_reconcile_failures": asm.evidence.n_reconcile_failures,
+        "n_concurrent_forward": asm.n_concurrent_forward,
+        "account_id": asm.account_id,
+        "code_hash": identity.code_hash, "config_hash": identity.config_hash,
+        "dependency_hash": identity.dependency_hash,
+        "decision_json": json.dumps(decision.to_dict(), sort_keys=True),
+    }
     promoted = False
     if decision.passed and rec.stage is Stage.PAPER:
-        transition_strategy(repo, name, Stage.FORWARD_TESTED, actor,
-                            _forward_gate_reason(decision))
+        # "Record passing row + stage CAS + transition row" is ONE sqlite transaction (#124
+        # GATE-2): the old record-then-transition shape committed a consumable token first, so
+        # a raced/failed transition banked a consumed=0 pass an agent could spend within the
+        # TTL after a later demotion — re-entry without a fresh gate run. Going through the
+        # repository instead of ``transitions.transition_strategy`` drops exactly two policy
+        # steps, both deliberately: ``validate_transition`` (paper -> forward_tested is a
+        # statically legal edge by construction here — preflight checked it — and the CAS's
+        # from_stage=paper predicate enforces the stage atomically) and the consumable-token
+        # lookup (we promote on the very evidence row we insert, in the same transaction —
+        # there is no token to find or consume; the row is born spent). The standalone token
+        # path in ``transitions`` remains for tokens minted by earlier runs.
+        repo.record_forward_pass_and_promote(
+            rec, gate_row=gate_row, actor=actor, reason=_forward_gate_reason(decision))
         promoted = True
+    else:
+        repo.record_forward_gate_evaluation(
+            rec.id, **gate_row, actor=actor.value,
+            # A refresh at forward_tested must refresh the live certificate WITHOUT minting a
+            # re-entry token (#124 GATE-2): only a run FROM paper writes a consumable row, so a
+            # demote-then-re-promote can never bank a refresh — it always re-runs the full gate.
+            consumable=rec.stage is Stage.PAPER)
     return ForwardPromotionOutcome(decision=decision, promoted=promoted, assembled=asm)
 
 

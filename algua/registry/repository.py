@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
@@ -311,6 +311,26 @@ class StrategyRepository(Protocol):
         passing AGENT row written ``consumable=True`` is the single-use token the paper ->
         forward_tested transition consumes; ``consumable=False`` writes the row already consumed
         — a CERTIFICATE for the live wall, never a re-entry token (#124 GATE-2)."""
+        ...
+
+    def record_forward_pass_and_promote(
+        self,
+        rec: StrategyRecord,
+        *,
+        gate_row: dict[str, Any],
+        actor: Actor,
+        reason: str | None = None,
+    ) -> tuple[int, StrategyRecord]:
+        """Record a PASSING forward-gate evaluation AND advance ``rec`` paper -> forward_tested
+        ATOMICALLY — the row insert, the compare-and-swap stage change, and the transition row
+        commit together or not at all (#124 GATE-2). ``gate_row`` carries
+        ``record_forward_gate_evaluation``'s row kwargs minus ``actor``/``consumable``.
+
+        The row is born consumed regardless of actor (born-and-spent in the one transaction): it
+        is the live wall's certificate, never a re-entry token a later demotion could bank. If
+        another session moved the stage since ``rec`` was read, ``TransitionError`` — and the
+        loser leaves NO row at all (its decision is lost; re-run the gate). Raises ``ValueError``
+        on a non-passing ``gate_row``."""
         ...
 
     def find_consumable_forward_gate_evaluation(

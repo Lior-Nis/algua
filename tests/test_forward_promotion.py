@@ -742,7 +742,7 @@ def test_run_forward_gate_pass_from_paper_promotes_and_consumes(conn, repo, monk
     assert repo.get("s").stage is Stage.FORWARD_TESTED
     row = conn.execute("SELECT * FROM forward_gate_evaluations").fetchone()
     assert row["passed"] == 1
-    assert row["consumed"] == 1  # the just-minted token was consumed by the transition
+    assert row["consumed"] == 1  # born-and-spent: recorded atomically with the stage change
     assert row["actor"] == "agent"
     for col in ("realized_sharpe", "holdout_sharpe", "first_tick_id", "last_tick_id",
                 "n_concurrent_forward", "account_id"):
@@ -840,4 +840,6 @@ def test_run_forward_gate_human_pass_from_paper(conn, repo, monkeypatch):
     row = conn.execute("SELECT actor, passed, consumed FROM forward_gate_evaluations").fetchone()
     assert row["actor"] == "human"
     assert row["passed"] == 1
-    assert row["consumed"] == 0  # human path needs no token; the row is never consumable
+    # Born consumed like the agent's: the atomic record+promote spends the row at birth for
+    # EVERY actor (a human row was never consumable anyway — the actor='agent' token filter).
+    assert row["consumed"] == 1
