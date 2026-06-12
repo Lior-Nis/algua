@@ -444,8 +444,9 @@ def promote(
         "n_concurrent_forward": outcome.assembled.n_concurrent_forward,
     }
     # Pass mirrors research_cmd.promote's success envelope; a fail still emits the full
-    # decision payload (the evaluation row was recorded) but exits non-zero.
-    emit(ok(payload) if outcome.decision.passed else payload | {"status": "fail"})
+    # decision payload (the evaluation row was recorded) but carries the repo-wide exit-1
+    # discriminator ("ok": false, see cli._common.ok) and exits non-zero.
+    emit(ok(payload) if outcome.decision.passed else {"ok": False, **payload})
     if not outcome.decision.passed:
         raise typer.Exit(1)
 

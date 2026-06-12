@@ -830,17 +830,21 @@ def test_paper_promote_failing_gate_records_row_and_exits_1(monkeypatch):
     result = runner.invoke(app, ["paper", "promote", _NAME])
     assert result.exit_code == 1, result.stdout
     payload = json.loads(result.stdout)
+    assert payload["ok"] is False  # the repo-wide exit-1 discriminator
     assert payload["passed"] is False
     assert payload["promoted"] is False
-    assert payload["status"] == "fail"
     assert isinstance(payload["excluded_ticks"], dict)
     assert _stage_of() == "paper"  # not transitioned
     from contextlib import closing
     with closing(_promote_conn()) as conn:
         rows = conn.execute(
             "SELECT passed, consumed FROM forward_gate_evaluations").fetchall()
+        audit = conn.execute(
+            "SELECT reason FROM audit_log WHERE action='paper_promote' AND strategy=?",
+            (_NAME,)).fetchall()
     assert len(rows) == 1  # the failing evaluation WAS recorded
     assert rows[0]["passed"] == 0 and rows[0]["consumed"] == 0
+    assert [r["reason"] for r in audit] == ["fail"]  # audited on fail too
 
 
 def test_paper_promote_at_forward_tested_refreshes_certificate(monkeypatch):
@@ -860,8 +864,11 @@ def test_paper_promote_at_forward_tested_refreshes_certificate(monkeypatch):
 
 
 def test_paper_promote_agent_relaxation_refused(monkeypatch):
+    # Deliberately NO broker stub and NO creds: preflight must refuse a relaxation attempt
+    # BEFORE the broker is even constructed (no credentials needed to be told no).
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "")
     _to_paper()
-    _wire_promote(monkeypatch)
     result = runner.invoke(app, ["paper", "promote", _NAME, "--sharpe-floor", "0.2"])
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
