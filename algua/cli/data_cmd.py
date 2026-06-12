@@ -10,7 +10,7 @@ from algua.cli._common import now_iso, ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.data.contracts import BarProvider, BarRequest, ImportRequest
+from algua.data.contracts import BarProvider, BarRequest, FirstRateImportRequest, ImportRequest
 from algua.data.hindsight import query_fundamentals, query_news
 from algua.data.importers import get_importer
 from algua.data.providers import get_provider
@@ -105,7 +105,7 @@ def import_bars(
     vendor: str = typer.Option(..., "--vendor", help="bulk-file vendor, e.g. firstrate"),
     raw_dir: Path = typer.Option(..., "--raw-dir", help="dir of unadjusted per-symbol files"),
     adjusted_dir: Path = typer.Option(
-        ..., "--adjusted-dir", help="dir of adjusted per-symbol files (supplies adj_close)"
+        None, "--adjusted-dir", help="firstrate: dir of adjusted per-symbol files (adj_close)"
     ),
     timeframe: str = typer.Option("1d", "--timeframe"),
     as_of: str = typer.Option(..., "--as-of", help="point-in-time ISO datetime"),
@@ -118,14 +118,21 @@ def import_bars(
 ) -> None:
     """Import local vendor bar files into one consolidated, normalized bars snapshot."""
     importer = get_importer(vendor)
-    request = ImportRequest(
-        raw_dir=raw_dir,
-        adjusted_dir=adjusted_dir,
-        timeframe=timeframe,
-        as_of=as_of,
-        adjustment=adjustment,
-        symbols=tuple(normalize_symbols(symbols.split(","))) if symbols else None,
-    )
+    sym_tuple = tuple(normalize_symbols(symbols.split(","))) if symbols else None
+    if vendor == "firstrate":
+        if adjusted_dir is None:
+            raise ValueError("firstrate import requires --adjusted-dir")
+        request: ImportRequest = FirstRateImportRequest(
+            raw_dir=raw_dir, adjusted_dir=adjusted_dir, timeframe=timeframe, as_of=as_of,
+            adjustment=adjustment, symbols=sym_tuple,
+        )
+        source_metadata = {
+            "vendor": importer.vendor_label,
+            "raw_dir": raw_dir.name,
+            "adjusted_dir": adjusted_dir.name,
+        }
+    else:
+        raise ValueError(f"vendor {vendor!r} has no import-bars flag wiring")
     store = _store()
     store.clear_staging()
     chunks = importer.import_bars(request)
@@ -148,11 +155,7 @@ def import_bars(
         adjustment=adjustment,
         start=start,
         end=end,
-        source_metadata={
-            "vendor": importer.vendor_label,
-            "raw_dir": raw_dir.name,
-            "adjusted_dir": adjusted_dir.name,
-        },
+        source_metadata=source_metadata,
     )
     emit(ok({"snapshot": rec.to_dict()}))
 

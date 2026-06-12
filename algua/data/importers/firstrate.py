@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from algua.data.contracts import ImportRequest, ProviderBars
+from algua.data.contracts import FirstRateImportRequest, ImportRequest, ProviderBars
 from algua.data.store import normalize_symbols
 
 _FIRSTRATE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
@@ -118,6 +118,8 @@ class FirstRateImporter:
     vendor_label = "firstratedata"
 
     def import_bars(self, request: ImportRequest) -> Iterator[ProviderBars]:
+        if not isinstance(request, FirstRateImportRequest):
+            raise ValueError("FirstRateImporter requires a FirstRateImportRequest")
         if request.timeframe != "1d":
             raise ValueError("intraday import not yet supported (1d only)")
         raw_map = _discover(request.raw_dir)

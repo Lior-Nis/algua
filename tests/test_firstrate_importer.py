@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from algua.data.contracts import ImportRequest
+from algua.data.contracts import FirstRateImportRequest
 from algua.data.importers.firstrate import (
     FirstRateImporter,
     parse_firstrate_file,
@@ -70,7 +70,8 @@ def test_import_merges_raw_and_adjusted(tmp_path):
         ["2024-07-01,100,110,95,105,1000\n", "2024-07-02,105,120,100,115,2000\n"],
         ["2024-07-01,50,55,47,52,1000\n", "2024-07-02,52,60,50,57,2000\n"],
     )
-    chunks = list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
+    chunks = list(FirstRateImporter().import_bars(req))
     assert len(chunks) == 1
     frame = chunks[0].frame
     row = frame.set_index("ts").loc[pd.Timestamp("2024-07-01", tz="UTC")]
@@ -83,7 +84,8 @@ def test_import_yields_symbols_sorted(tmp_path):
     raw, adj = _firstrate_dirs(tmp_path)
     for sym in ["MSFT", "AAPL", "GOOG"]:
         _write_pair(raw, adj, sym, ["2024-07-01,1,1,1,1,1\n"], ["2024-07-01,1,1,1,1,1\n"])
-    chunks = list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
+    chunks = list(FirstRateImporter().import_bars(req))
     seen = [c.frame["symbol"].iloc[0] for c in chunks]
     assert seen == ["AAPL", "GOOG", "MSFT"]
 
@@ -93,7 +95,7 @@ def test_symbol_set_disagreement_errors(tmp_path):
     (raw / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     (adj / "MSFT_full_1day_adjsplitdiv.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="symbol sets differ"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_alias_collision_errors(tmp_path):
@@ -102,7 +104,7 @@ def test_alias_collision_errors(tmp_path):
     (raw / "aapl_full_1day_OTHER.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     (adj / "AAPL_full_1day_adjsplitdiv.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate symbol"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_key_disagreement_errors(tmp_path):
@@ -113,21 +115,21 @@ def test_key_disagreement_errors(tmp_path):
         ["2024-07-01,1,1,1,1,1\n"],
     )
     with pytest.raises(ValueError, match="key sets differ"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_nonpositive_price_errors(tmp_path):
     raw, adj = _firstrate_dirs(tmp_path)
     _write_pair(raw, adj, "AAPL", ["2024-07-01,0,1,1,1,1\n"], ["2024-07-01,1,1,1,1,1\n"])
     with pytest.raises(ValueError, match="nonpositive"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_symbols_filter_subset(tmp_path):
     raw, adj = _firstrate_dirs(tmp_path)
     for sym in ["AAPL", "MSFT"]:
         _write_pair(raw, adj, sym, ["2024-07-01,1,1,1,1,1\n"], ["2024-07-01,1,1,1,1,1\n"])
-    req = ImportRequest(raw_dir=raw, adjusted_dir=adj, symbols=("AAPL",))
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, symbols=("AAPL",))
     chunks = list(FirstRateImporter().import_bars(req))
     assert [c.frame["symbol"].iloc[0] for c in chunks] == ["AAPL"]
 
@@ -137,7 +139,7 @@ def test_bad_timeframe_errors(tmp_path):
     _write_pair(raw, adj, "AAPL", ["2024-07-01,1,1,1,1,1\n"], ["2024-07-01,1,1,1,1,1\n"])
     with pytest.raises(ValueError, match="intraday import not yet supported"):
         list(FirstRateImporter().import_bars(
-            ImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1h")))
+            FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1h")))
 
 
 def test_duplicate_timestamp_in_raw_errors(tmp_path):
@@ -148,7 +150,7 @@ def test_duplicate_timestamp_in_raw_errors(tmp_path):
         ["2024-07-01,1,1,1,1,1\n"],
     )
     with pytest.raises(ValueError, match="duplicate timestamps in raw file"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_nan_price_errors(tmp_path):
@@ -156,7 +158,7 @@ def test_nan_price_errors(tmp_path):
     # blank close field in raw -> NaN
     _write_pair(raw, adj, "AAPL", ["2024-07-01,1,1,1,,1\n"], ["2024-07-01,1,1,1,1,1\n"])
     with pytest.raises(ValueError, match="NaN or nonpositive"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_raw_dir_with_adjusted_files_errors(tmp_path):
@@ -165,7 +167,7 @@ def test_raw_dir_with_adjusted_files_errors(tmp_path):
     (raw / "AAPL_full_1day_adjsplitdiv.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     (adj / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="raw dir holds files that don't look unadjusted"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_adjusted_dir_with_unadjusted_file_errors(tmp_path):
@@ -174,7 +176,7 @@ def test_adjusted_dir_with_unadjusted_file_errors(tmp_path):
     (raw / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     (adj / "AAPL_full_1day_UNADJUSTED.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="adjusted dir holds unadjusted-looking files"):
-        list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+        list(FirstRateImporter().import_bars(FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
 
 
 def test_unadjusted_matched_as_token_not_substring(tmp_path):
@@ -185,7 +187,8 @@ def test_unadjusted_matched_as_token_not_substring(tmp_path):
     (adj / "AAPL_preunadjustedx_adjsplitdiv.txt").write_text(
         "2024-07-01,1,1,1,1,1\n", encoding="utf-8"
     )
-    chunks = list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
+    chunks = list(FirstRateImporter().import_bars(req))
     assert len(chunks) == 1
 
 
@@ -194,5 +197,6 @@ def test_case_insensitive_unadjusted_marker_ok(tmp_path):
     # raw uses lower-case `unadjusted`; adjusted uses `adjsplitdiv` -> import succeeds.
     (raw / "AAPL_full_1day_unadjusted.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
     (adj / "AAPL_full_1day_adjsplitdiv.txt").write_text("2024-07-01,1,1,1,1,1\n", encoding="utf-8")
-    chunks = list(FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
+    chunks = list(FirstRateImporter().import_bars(req))
     assert len(chunks) == 1

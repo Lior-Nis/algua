@@ -47,22 +47,36 @@ class BarProvider(Protocol):
     def get_bars(self, request: BarRequest) -> ProviderBars: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class ImportRequest:
-    """A request to import local vendor bar files (the `BarImporter` seam).
+    """Common fields for a local-file bulk import (the `BarImporter` seam).
 
-    Distinct from `BarRequest` (network fetch by symbol/date): the source here is local files the
-    operator already downloaded. `raw_dir` supplies unadjusted OHLC; `adjusted_dir` supplies the
-    vendor-adjusted close used as `adj_close`. `adjustment` is the operator-declared flavor of that
-    adjusted file (we never infer it). `symbols`, if set, restricts the import to that subset.
+    Vendor-specific source inputs live on the per-vendor subclasses (`FirstRateImportRequest`,
+    `DatabentoImportRequest`). `raw_dir` supplies unadjusted OHLC; `as_of` is the operator's PIT
+    stamp; `adjustment` is the operator-declared flavor recorded as-is; `symbols`, if set, restricts
+    the import. Keyword-only so a required subclass field can follow the base's defaulted ones.
     """
 
     raw_dir: Path
-    adjusted_dir: Path
     timeframe: str = "1d"
     as_of: str | None = None
     adjustment: str = "split_div"
     symbols: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class FirstRateImportRequest(ImportRequest):
+    """FirstRate import: `adjusted_dir` supplies the vendor-adjusted close taken as `adj_close`."""
+
+    adjusted_dir: Path
+
+
+@dataclass(frozen=True, kw_only=True)
+class DatabentoImportRequest(ImportRequest):
+    """Databento import: `corp_actions_path` is one parquet of split/dividend events. There is no
+    vendor adjusted column — `adj_close` is computed via the #149 CA engine."""
+
+    corp_actions_path: Path
 
 
 class BarImporter(Protocol):
@@ -73,6 +87,11 @@ class BarImporter(Protocol):
     (`ts, symbol, open, high, low, close, adj_close, volume`) so both seams converge at
     `algua.data.schema.to_bar_schema`. `vendor_label` is the provenance vendor name stamped into
     the snapshot (e.g. 'firstratedata').
+
+    Callers pair an importer with its matching `ImportRequest` subtype. The registry erases the
+    subtype, so each importer narrows via `isinstance` inside `import_bars` and raises on a mismatch
+    (the Protocol method keeps the base `ImportRequest` parameter — narrowing the signature would
+    violate parameter contravariance).
     """
 
     name: str

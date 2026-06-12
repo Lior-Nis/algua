@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from algua.data.contracts import ImportRequest
+from algua.data.contracts import FirstRateImportRequest
 from algua.data.importers import get_importer, register_importer
 from algua.data.schema import BAR_COLUMNS, validate_bars
 from algua.data.store import DataStore
@@ -29,7 +29,7 @@ def test_register_and_get_importer_roundtrip():
 
 
 def test_import_request_defaults(tmp_path):
-    req = ImportRequest(raw_dir=tmp_path / "raw", adjusted_dir=tmp_path / "adj")
+    req = FirstRateImportRequest(raw_dir=tmp_path / "raw", adjusted_dir=tmp_path / "adj")
     assert req.timeframe == "1d"
     assert req.adjustment == "split_div"
     assert req.symbols is None
