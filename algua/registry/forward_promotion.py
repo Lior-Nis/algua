@@ -353,6 +353,7 @@ def verify_forward_certificate(
     calendar: SessionCalendar,
     now: datetime,
     activities_fetch: ActivitiesFetch,
+    account_id_fetch: Callable[[], str],
 ) -> dict[str, Any]:
     """The evidence precondition of the live wall (#124). NOT waivable in-band: there is
     deliberately no flag; a human who must bypass owns the DB. Selection is the NEWEST row
@@ -361,10 +362,14 @@ def verify_forward_certificate(
     Checks, in order, each failing closed with an actionable ``TransitionError``: a certificate
     exists for THIS strategy + the current identity; its newest verdict is a pass; it is fresh
     (at most ``CERTIFICATE_FRESH_SESSIONS`` sessions old); the record since certification is
-    clean (no reconcile-failed paper ticks after ``last_tick_id``, no kill-switch trips after
-    ``created_at``, kill switch and global halt clear); and account hygiene re-verified over
-    ``[created_at, now]`` with the same activity-classification rules the gate itself uses.
+    clean (no reconcile-failed and no malformed/future-stamped paper ticks after
+    ``last_tick_id`` — the gate's own defect rule — no kill-switch trips after ``created_at``,
+    kill switch and global halt clear); the broker the live gate queries is the SAME account
+    the certificate was earned on (``account_id_fetch`` vs the row — account drift makes
+    hygiene continuity unverifiable); and account hygiene re-verified over ``[created_at,
+    now]`` with the same activity-classification rules the gate itself uses.
     Returns the certificate summary the human signs against."""
+    now_utc = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     row = repo.latest_forward_gate_row(
         strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
     if row is None:
@@ -377,20 +382,28 @@ def verify_forward_certificate(
             f"{row['created_at']}) FAILED, which invalidates any prior pass; "
             "re-run `algua paper promote`")
     age = calendar.sessions_between(
-        datetime.fromisoformat(row["created_at"]).date(), now.date())
+        datetime.fromisoformat(row["created_at"]).date(), now_utc.date())
     if age > CERTIFICATE_FRESH_SESSIONS:
         raise TransitionError(
             f"the forward-test certificate is stale: {age} sessions old, max "
             f"{CERTIFICATE_FRESH_SESSIONS}; re-run `algua paper promote` to refresh it")
-    n_bad_ticks = conn.execute(
-        "SELECT COUNT(*) FROM tick_snapshots WHERE lane='paper' AND strategy_id=?"
-        " AND id > ? AND reconcile_ok=0",
+    ticks_since = conn.execute(
+        "SELECT tick_ts, reconcile_ok FROM tick_snapshots WHERE lane='paper' AND strategy_id=?"
+        " AND id > ?",
         (strategy_id, row["last_tick_id"] or 0),
-    ).fetchone()[0]
+    ).fetchall()
+    n_bad_ticks = sum(1 for t in ticks_since if not t["reconcile_ok"])
     if n_bad_ticks:
         raise TransitionError(
             f"{n_bad_ticks} reconcile-failed paper tick(s) since certification; investigate,"
             " then re-run `algua paper promote`")
+    n_malformed = sum(
+        1 for t in ticks_since
+        if (tick_dt := _parse_dt(t["tick_ts"])) is None or tick_dt > now_utc)
+    if n_malformed:
+        raise TransitionError(
+            f"{n_malformed} malformed or future-stamped paper tick(s) since certification"
+            " (the gate's defective-tick rule); investigate, then re-run `algua paper promote`")
     n_trips = conn.execute(
         "SELECT COUNT(*) FROM audit_log WHERE strategy=? AND action='kill_switch_trip'"
         " AND ts >= ?",
@@ -403,8 +416,26 @@ def verify_forward_certificate(
     if is_tripped(conn, name) or is_engaged(conn):
         raise TransitionError(
             "kill switch / global halt engaged; clear it before going live")
+    # Account continuity: the hygiene re-check below queries whatever account the CURRENT broker
+    # credentials point at, while the certificate's evidence lives on row["account_id"]. If they
+    # differ (the operator switched paper accounts after certification), a deposit or manual fill
+    # on the certified account would be invisible here — unverifiable continuity fails closed.
+    if row["account_id"] is None:
+        raise TransitionError(
+            "the forward-test certificate records no account_id, so hygiene continuity since "
+            "certification is unverifiable; re-run `algua paper promote`")
     try:
-        acts = activities_fetch(row["created_at"], now.isoformat())
+        current_account = account_id_fetch()
+    except Exception as exc:
+        raise TransitionError(
+            f"could not verify the broker account id ({exc}); failing closed") from exc
+    if current_account != row["account_id"]:
+        raise TransitionError(
+            f"the broker credentials point at account {current_account!r} but the certificate "
+            f"was earned on account {row['account_id']!r}; hygiene continuity since "
+            "certification is unverifiable — re-run `algua paper promote` on this account")
+    try:
+        acts = activities_fetch(row["created_at"], now_utc.isoformat())
     except Exception as exc:
         raise TransitionError(
             f"could not verify account activities since certification ({exc}); "

@@ -187,6 +187,10 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
         return verify_forward_certificate(
             repo, conn, name=name, strategy_id=strategy_id, identity=_compute_hashes(name),
             calendar=MarketCalendar(), now=datetime.now(UTC),
-            activities_fetch=broker.account_activities_window)
+            activities_fetch=broker.account_activities_window,
+            # Account continuity: the certificate's account_id must equal the account these
+            # credentials resolve to NOW, or the since-certification hygiene re-check would
+            # silently inspect the wrong account (#124).
+            account_id_fetch=lambda: broker.account().account_id)
 
     return verify

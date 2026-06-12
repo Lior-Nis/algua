@@ -67,7 +67,8 @@ def repo(conn):
 
 
 def seed_cert(repo, conn, strategy_id=1, *, passed=True, created_at="2026-06-10T20:00:00+00:00",
-              last_tick_id=None, code_hash="c", config_hash="g", dependency_hash="d") -> int:
+              last_tick_id=None, account_id="acct", code_hash="c", config_hash="g",
+              dependency_hash="d") -> int:
     """Seed one forward_gate_evaluations row via the real writer, then pin created_at."""
     rid = repo.record_forward_gate_evaluation(
         strategy_id, passed=passed, n_forward_observations=80, min_forward_observations=63,
@@ -75,20 +76,22 @@ def seed_cert(repo, conn, strategy_id=1, *, passed=True, created_at="2026-06-10T
         sharpe_floor=0.3, realized_vol=0.1, min_forward_vol=0.02, realized_max_drawdown=0.1,
         max_forward_drawdown=0.25, first_tick_id=1, last_tick_id=last_tick_id,
         first_tick_ts=None, last_tick_ts=None, max_staleness_sessions=5, n_reconcile_failures=0,
-        n_concurrent_forward=2, account_id="acct", code_hash=code_hash, config_hash=config_hash,
-        dependency_hash=dependency_hash, actor="agent", decision_json="{}")
+        n_concurrent_forward=2, account_id=account_id, code_hash=code_hash,
+        config_hash=config_hash, dependency_hash=dependency_hash, actor="agent",
+        decision_json="{}")
     conn.execute("UPDATE forward_gate_evaluations SET created_at=? WHERE id=?",
                  (created_at, rid))
     conn.commit()
     return rid
 
 
-def raw_tick(conn, *, strategy_id=1, reconcile_ok=1, lane="paper") -> int:
+def raw_tick(conn, *, strategy_id=1, reconcile_ok=1, lane="paper",
+             tick_ts="2026-06-11T20:00:00+00:00") -> int:
     cur = conn.execute(
         "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, positions,"
         " n_submitted, reconcile_ok, lane, strategy_id)"
-        " VALUES ('s', '2026-06-11T20:00:00+00:00', NULL, 100.0, '{}', 0, ?, ?, ?)",
-        (reconcile_ok, lane, strategy_id))
+        " VALUES ('s', ?, NULL, 100.0, '{}', 0, ?, ?, ?)",
+        (tick_ts, reconcile_ok, lane, strategy_id))
     conn.commit()
     rowid = cur.lastrowid
     assert rowid is not None
@@ -97,7 +100,7 @@ def raw_tick(conn, *, strategy_id=1, reconcile_ok=1, lane="paper") -> int:
 
 def verify(repo, conn, **kw):
     args = dict(name="s", strategy_id=1, identity=IDENT, calendar=CAL, now=NOW,
-                activities_fetch=NO_ACTS)
+                activities_fetch=NO_ACTS, account_id_fetch=lambda: "acct")
     args.update(kw)
     return verify_forward_certificate(repo, conn, **args)
 
@@ -171,6 +174,22 @@ def test_null_last_tick_id_means_every_bad_tick_counts(repo, conn):
         verify(repo, conn)
 
 
+def test_malformed_or_future_tick_after_certification_fails(repo, conn):
+    # Same defect rule as the gate's integrity sweep: unparseable/naive ts, or a future stamp.
+    seed_cert(repo, conn)
+    raw_tick(conn, tick_ts="2026-06-11T20:00:00")  # tz-naive == raw-write fabrication
+    raw_tick(conn, tick_ts="2026-06-13T20:00:00+00:00")  # after NOW
+    with pytest.raises(TransitionError, match="2 malformed or future-stamped paper tick"):
+        verify(repo, conn)
+
+
+def test_malformed_tick_inside_certified_window_does_not_double_count(repo, conn):
+    # A defective tick AT OR BEFORE last_tick_id was already judged by the gate run itself.
+    bad = raw_tick(conn, tick_ts="garbage")
+    seed_cert(repo, conn, last_tick_id=bad)
+    assert verify(repo, conn)["n_forward_observations"] == 80
+
+
 def test_kill_trip_audit_event_after_certification_fails(repo, conn):
     seed_cert(repo, conn, created_at="2026-06-10T20:00:00+00:00")
     conn.execute("INSERT INTO audit_log(ts, actor, action, reason, strategy)"
@@ -230,6 +249,31 @@ def test_activities_fetch_window_is_created_at_to_now(repo, conn):
     assert seen["window"] == ("2026-06-10T20:00:00+00:00", NOW.isoformat())
 
 
+def test_account_drift_since_certification_fails(repo, conn):
+    # Certificate earned on account A, credentials now resolve to B: deposits on A are
+    # invisible to the hygiene re-check, so continuity is unverifiable — fail closed.
+    seed_cert(repo, conn, account_id="acct-A")
+    with pytest.raises(TransitionError, match="(?s)'acct-B'.*earned on account 'acct-A'"):
+        verify(repo, conn, account_id_fetch=lambda: "acct-B")
+
+
+def test_certificate_without_account_id_fails(repo, conn):
+    seed_cert(repo, conn, account_id=None)
+    with pytest.raises(TransitionError, match="records no account_id"):
+        verify(repo, conn)
+
+
+def test_account_id_fetch_failure_fails_closed(repo, conn):
+    seed_cert(repo, conn)
+
+    def fetch():
+        raise RuntimeError("alpaca down")
+
+    with pytest.raises(TransitionError, match="(?s)could not verify the broker account id.*"
+                                              "failing closed"):
+        verify(repo, conn, account_id_fetch=fetch)
+
+
 def test_activities_fetch_failure_fails_closed(repo, conn):
     seed_cert(repo, conn)
 
@@ -258,7 +302,7 @@ def test_live_with_approval_but_no_certificate_fails(repo, conn, monkeypatch):
     # The REAL verify against the seeded DB (no forward_gate_evaluations row).
     verifier = lambda r, name, sid: verify_forward_certificate(  # noqa: E731
         r, conn, name=name, strategy_id=sid, identity=IDENT, calendar=CAL, now=NOW,
-        activities_fetch=NO_ACTS)
+        activities_fetch=NO_ACTS, account_id_fetch=lambda: "acct")
     with pytest.raises(TransitionError, match="forward-test certificate"):
         transition_strategy(repo, "s", Stage.LIVE, Actor.HUMAN,
                             forward_certificate_verifier=verifier)
@@ -270,7 +314,7 @@ def test_live_with_certificate_passes_through_to_approval(repo, conn, monkeypatc
     seed_cert(repo, conn, rec.id)
     verifier = lambda r, name, sid: verify_forward_certificate(  # noqa: E731
         r, conn, name=name, strategy_id=sid, identity=IDENT, calendar=CAL, now=NOW,
-        activities_fetch=NO_ACTS)
+        activities_fetch=NO_ACTS, account_id_fetch=lambda: "acct")
     # Certificate passes, so the NEXT wall (approval) is what refuses.
     with pytest.raises(TransitionError, match="no matching human approval"):
         transition_strategy(repo, "s", Stage.LIVE, Actor.HUMAN,
