@@ -57,8 +57,9 @@ time, stop early — but always finish by committing your work and writing the r
 
 ## Boundaries
 
-- Operate **only** through `uv run algua ...`. Never go past `candidate` — do not attempt
-  `registry transition --to paper/live` or `registry approve`; that's the human's call.
+- Operate **only** through `uv run algua ...`. Never go past `candidate` in an autonomous research
+  session — do not attempt `registry transition --to paper/forward_tested/live` or `registry
+  approve`; advancing to paper or beyond is outside the research loop scope.
 - Never edit the human-owned safety/integrity files (see `operating-algua`).
 - Author only **new** files under `algua/strategies/<family>/` via `strategy new --family <slug>`.
 

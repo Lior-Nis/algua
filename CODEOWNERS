@@ -16,3 +16,5 @@
 /algua/registry/live_gate.py    @Lior-Nis   # the signed paper->live gate
 /algua/registry/transitions.py  @Lior-Nis   # live-gate enforcement
 /algua/registry/promotion.py    @Lior-Nis   # promotion policy (breadth/PIT/floor + shortlist gate)
+/algua/research/forward_gates.py      @Lior-Nis   # forward-test gate criteria (#124)
+/algua/registry/forward_promotion.py  @Lior-Nis   # forward-test evidence assembly + live certificate

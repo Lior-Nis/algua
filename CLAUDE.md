@@ -16,9 +16,9 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 
 ## Golden rules
 - Drive the system through `uv run algua ...`. Never reach into modules to bypass the CLI.
-- You may operate the lifecycle autonomously **up to and including paper**.
-- You may **never** put a strategy live. The `paper -> live` transition requires a
-  verified human approval and a human actor; the system enforces this.
+- You may operate the lifecycle autonomously **up to and including `forward_tested`**.
+- You may **never** put a strategy live. The `forward_tested -> live` transition requires a
+  verified human approval AND a fresh forward-test certificate; the system enforces this.
 - Keep `algua/contracts` and `algua/features` pure (no I/O, no cross-module imports
   beyond contracts). Import-linter enforces boundaries; run `uv run lint-imports`.
 
@@ -29,8 +29,18 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua registry list [--stage S]` — list strategies.
 - `uv run algua registry show <name>` — strategy + transition history.
 - `uv run algua registry transition <name> --to S --actor agent --reason "..."` — advance stage.
+- `uv run algua paper promote <name>` — gate `paper -> forward_tested` on ≥63 broker-clocked
+  daily return observations (≥90% session coverage), realized Sharpe ≥ max(0.5×holdout, 0.3),
+  vol/drawdown bounds, clean integrity + account hygiene, evidence ≤5 sessions stale; relaxation
+  flags (`--degradation-factor`, `--sharpe-floor`, `--min-observations`, `--min-coverage`,
+  `--min-vol`, `--max-drawdown`, `--max-staleness`) are human-only. A passing run is the ONLY
+  agent path to `forward_tested`; re-running at `forward_tested` refreshes the live-wall
+  certificate without changing the stage.
 - `uv run algua registry transition <name> --to live --actor human` — step 1 of go-live: prints a
-  challenge. Sign it, then re-run with `--signature <file>.sig` to complete the transition.
+  challenge (includes forward certificate summary). Sign it, then re-run with
+  `--signature <file>.sig` to complete the transition. Requires a fresh, matching forward
+  certificate (newest evaluation for current identity+strategy must be a PASS, ≤10 sessions old,
+  clean record + account hygiene since).
 - `uv run algua research promote <name> --universe NAME --start D --end D` — gate
   `backtested -> candidate` on the walk-forward holdout + stability and promote on pass. For an
   agent: `--universe` is required (PIT — non-PIT fails closed); search breadth must be MEASURED via
@@ -52,10 +62,11 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data inspect [--summary|--dataset NAME|--snapshot-id ID]` — inspect data snapshots.
 
 ## Lifecycle stages
-`idea -> backtested -> candidate -> paper -> live -> retired`
+`idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.
-For an agent, the `backtested -> candidate` edge is gated: it requires a fresh passing
-`research promote` (an identity-matched, single-use gate token), not a raw `registry transition`.
+For an agent, BOTH the `backtested -> candidate` edge (research promote) AND the
+`paper -> forward_tested` edge (paper promote) are token-gated: each requires a fresh passing
+run that mints an identity-matched, single-use gate token, not a raw `registry transition`.
 
 ## Quality gates before committing
 `uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`
