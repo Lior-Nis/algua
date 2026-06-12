@@ -1,4 +1,4 @@
-from algua.data.contracts import ImportRequest
+from algua.data.contracts import FirstRateImportRequest
 from algua.data.importers.firstrate import FirstRateImporter
 from algua.data.schema import to_bar_schema, validate_bars
 from algua.data.store import DataStore
@@ -25,7 +25,8 @@ def test_importer_output_is_bar_schema_valid(tmp_path):
     raw, adj = _dirs(tmp_path, "c")
     for sym in ["AAPL", "MSFT"]:
         _write_pair(raw, adj, sym, 100)
-    for chunk in FirstRateImporter().import_bars(ImportRequest(raw_dir=raw, adjusted_dir=adj)):
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
+    for chunk in FirstRateImporter().import_bars(req):
         # Same terminal boundary both seams must satisfy.
         validate_bars(to_bar_schema(chunk.frame))
 
@@ -40,7 +41,7 @@ def test_snapshot_id_is_discovery_order_invariant(tmp_path):
 
     def _ingest():
         chunks = (c.frame for c in FirstRateImporter().import_bars(
-            ImportRequest(raw_dir=raw, adjusted_dir=adj)))
+            FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)))
         return store.ingest_bars_streamed(
             provider="firstrate", symbols=["AAPL", "GOOG", "MSFT"],
             as_of="2024-07-03T00:00:00+00:00", source="firstratedata-import",
