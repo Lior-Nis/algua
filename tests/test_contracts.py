@@ -100,3 +100,14 @@ def test_fundamentals_provider_protocol_and_constants():
             return None
 
     assert isinstance(_P(), FundamentalsProvider)
+
+
+def test_news_column_constants():
+    from algua.contracts.types import NEWS_AS_OF_KEY, NEWS_COLUMNS, NEWS_KNOWABLE_AT
+
+    assert NEWS_COLUMNS == (
+        "source", "article_id", "symbol", "published_at", "knowable_at", "headline", "url", "body",
+    )
+    assert NEWS_AS_OF_KEY == ("source", "article_id", "symbol")
+    assert NEWS_KNOWABLE_AT == "knowable_at"
+    assert set(NEWS_AS_OF_KEY).issubset(set(NEWS_COLUMNS))
