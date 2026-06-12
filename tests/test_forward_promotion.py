@@ -758,6 +758,28 @@ def test_run_forward_gate_reevaluation_at_forward_tested_records_new_row(
     assert rows[1]["passed"] == 1 and rows[1]["consumed"] == 0  # the fresh certificate
 
 
+def test_run_forward_gate_failing_reevaluation_at_forward_tested_no_demotion(
+        conn, repo, monkeypatch):
+    """A FAILING certificate refresh records passed=0 and demotes nothing — the stale-certificate
+    consequence lives in the live wall, not here. Tightened criteria are agent-legal, so an agent
+    can produce this row without any relaxation."""
+    _pin_identity(monkeypatch)
+    _seed_passing_window(conn)
+    assert _run(repo, conn).promoted is True
+    out = _run(repo, conn, criteria=ForwardGateCriteria(sharpe_floor=20.0))  # stricter: fails
+    assert out.decision.passed is False
+    assert out.promoted is False
+    assert repo.get("s").stage is Stage.FORWARD_TESTED  # no demotion
+    rows = conn.execute(
+        "SELECT passed, consumed FROM forward_gate_evaluations ORDER BY id").fetchall()
+    assert len(rows) == 2
+    assert rows[1]["passed"] == 0 and rows[1]["consumed"] == 0
+    # Nothing bankable either: the promotion token is spent, the failing row never consumable.
+    assert repo.find_consumable_forward_gate_evaluation(
+        1, "c", "g", "d", now=datetime.now(UTC).isoformat(),
+        ttl_days=FORWARD_TOKEN_TTL_DAYS) is None
+
+
 def test_run_forward_gate_human_pass_from_paper(conn, repo, monkeypatch):
     _pin_identity(monkeypatch)
     _seed_passing_window(conn)
