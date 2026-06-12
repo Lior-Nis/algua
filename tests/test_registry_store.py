@@ -655,6 +655,49 @@ def test_forward_consume_rechecks_identity_at_consume_time(repo):
     assert _find_forward(repo, rec.id) == fid            # token unconsumed
 
 
+def test_forward_consume_refuses_human_and_foreign_token_ids(repo):
+    """A hand-held id pointing at a HUMAN row or another strategy's token is refused at consume
+    time — the WHERE re-checks actor and strategy_id, not just row existence."""
+    repo.add("alpha")
+    rec = _to_paper(repo, "alpha")
+    hid = _record_forward(repo, rec.id, actor="human")   # human row, matching identity
+    with pytest.raises(TransitionError):
+        repo.apply_transition(
+            rec, Stage.FORWARD_TESTED, Actor.AGENT, "fw", code_hash="c0", config_hash="cfg0",
+            dependency_hash="dep0", consume_forward_gate_id=hid)
+    assert repo.get("alpha").stage is Stage.PAPER
+    repo.add("beta")
+    recb = _to_paper(repo, "beta")
+    fid = _record_forward(repo, rec.id)                  # alpha's token...
+    with pytest.raises(TransitionError):
+        repo.apply_transition(                           # ...spent against beta
+            recb, Stage.FORWARD_TESTED, Actor.AGENT, "fw", code_hash="c0", config_hash="cfg0",
+            dependency_hash="dep0", consume_forward_gate_id=fid)
+    assert repo.get("beta").stage is Stage.PAPER
+    assert _find_forward(repo, rec.id) == fid            # alpha's token untouched
+
+
+def test_cas_failure_rolls_back_a_successful_token_consume(tmp_path):
+    """The token consume and the stage CAS live in ONE transaction: when another session wins the
+    stage race AFTER this session's consume UPDATE already succeeded, the rollback must un-spend
+    the token — losing a race may cost a retry, never the evidence."""
+    db = tmp_path / "r.db"
+    c1 = connect(db)
+    migrate(c1)
+    repo1 = SqliteStrategyRepository(c1)
+    repo1.add("alpha")
+    rec = _to_paper(repo1, "alpha")                      # this session's view: stage=paper
+    fid = _record_forward(repo1, rec.id)
+    repo2 = SqliteStrategyRepository(connect(db))
+    repo2.apply_transition(repo2.get("alpha"), Stage.CANDIDATE, Actor.AGENT, "won the race")
+    with pytest.raises(TransitionError, match="concurrent"):
+        repo1.apply_transition(
+            rec, Stage.FORWARD_TESTED, Actor.AGENT, "fw", code_hash="c0", config_hash="cfg0",
+            dependency_hash="dep0", consume_forward_gate_id=fid)
+    assert repo1.get("alpha").stage is Stage.CANDIDATE   # the winner's stage stands
+    assert _find_forward(repo1, rec.id) == fid           # consume rolled back with the txn
+
+
 def test_apply_transition_cas_detects_concurrent_stage_move(tmp_path):
     db = tmp_path / "r.db"
     c1 = connect(db)

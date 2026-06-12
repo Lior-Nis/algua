@@ -341,8 +341,8 @@ CREATE INDEX IF NOT EXISTS ix_ideas_status ON ideas(status);
 CREATE INDEX IF NOT EXISTS ix_ideas_family ON ideas(family);
 -- forward_gate_evaluations is the single-use AGENT-ONLY token ledger for the forward-test gate
 -- (#124): each row records one gate evaluation (pass AND fail) and — for passing agent rows — is
--- the consumable token the CANDIDATE->PAPER transition requires (mirroring gate_evaluations for
--- the BACKTESTED->CANDIDATE edge). A passing row is minted by the paper trade-tick loop once the
+-- the consumable token the PAPER->FORWARD_TESTED transition requires (mirroring gate_evaluations
+-- for the BACKTESTED->CANDIDATE edge). A passing row is minted by the forward-gate run once the
 -- strategy has accumulated enough forward-test observations; the transition consumes THAT row's id
 -- in the same transaction as the stage change. Legacy NULL tick_snapshot rows (pre-v21) are
 -- DELIBERATELY inadmissible as gate evidence — fail-closed, no backfill. FK into strategies(id).
