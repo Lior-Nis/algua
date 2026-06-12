@@ -195,6 +195,40 @@ def test_future_tick_ts_excluded(conn):
     assert res.evidence.n_return_observations == 1
 
 
+def test_naive_tick_ts_excluded_and_defective(conn):
+    # The writers always stamp an offset (tick clock normalizes to UTC; naive venue clocks fall
+    # back to clock_source='local'), so a tz-NAIVE tick_ts is raw-write fabrication: it must be
+    # rejected (not guessed as UTC) AND counted defective in the integrity universe — and the
+    # aware-vs-naive comparison against `now` must not crash the gate.
+    _two_admissible(conn)
+    raw_tick(conn, tick_ts="2026-06-11T20:00:00", decision_ts=_ts(date(2026, 6, 10)))
+    res = assemble(conn)
+    assert res.excluded["bad_tick_ts"] == 1
+    assert res.evidence.n_defective_ticks == 1
+    assert res.evidence.n_return_observations == 1
+
+
+def test_naive_decision_ts_excluded(conn):
+    _two_admissible(conn)
+    seed_tick(conn, date(2026, 6, 11), 99.0, decision_ts="2026-06-10T20:00:00")  # no offset
+    res = assemble(conn)
+    assert res.excluded["bad_decision_ts"] == 1
+    assert res.evidence.n_return_observations == 1
+
+
+def test_tick_ts_offset_normalized_to_utc_date(conn):
+    # +12:00 offset whose UTC instant is in the past but whose LOCAL date is tomorrow: the
+    # session math must use the UTC date (Jun 12), not let an exotic offset shift the tick into
+    # a not-yet-traded session (which would mask staleness / fake decision lag).
+    seed_tick(conn, date(2026, 6, 10), 100.0)
+    raw_tick(conn, tick_ts="2026-06-13T08:00:00+12:00",  # == 2026-06-12T20:00:00Z, past NOW
+             decision_ts=_ts(date(2026, 6, 11)), recorded_at=_ts(date(2026, 6, 12)))
+    res = assemble(conn)
+    assert res.excluded["bad_tick_ts"] == 0       # not future once normalized to UTC
+    assert res.evidence.n_defective_ticks == 0
+    assert res.evidence.staleness_sessions == 0   # measured from the UTC session (Jun 12)
+
+
 def test_no_decision_excluded(conn):
     _two_admissible(conn)
     seed_tick(conn, date(2026, 6, 11), 99.0, decision_ts=None)

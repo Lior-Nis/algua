@@ -74,15 +74,20 @@ class AssembledEvidence:
 
 
 def _parse_dt(value: Any) -> datetime | None:
-    """ISO-8601 -> aware-UTC datetime, or None on anything unparseable. Naive timestamps are
-    treated as UTC so a comparison can never raise (and never silently passes a bad row)."""
+    """ISO-8601 -> aware-UTC datetime, or None on anything unparseable — INCLUDING a tz-naive
+    timestamp. Every legitimate writer stamps an explicit offset (the tick clock normalizes to
+    UTC and falls back to ``clock_source='local'`` on a naive venue clock; bar-schema decision
+    timestamps are tz-aware UTC), so a naive string can only be a raw-write fabrication: it is
+    rejected fail-closed rather than guessed at, and an aware-vs-naive comparison can never
+    raise mid-gate. Aware values are normalized to UTC so ``.date()`` session arithmetic uses
+    the UTC date — an exotic offset cannot shift a tick into a not-yet-traded session."""
     if not isinstance(value, str):
         return None
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
         return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC) if dt.tzinfo is not None else None
 
 
 def _identity_matches(row: sqlite3.Row, identity: ArtifactIdentity) -> bool:
