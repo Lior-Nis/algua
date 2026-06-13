@@ -241,6 +241,24 @@ def test_reserve_snapshot_identity_precedence(repo_with_strategy):
         _reserve(repo, sid, hs="2022-09-01", he="2023-03-31", snap="snapA")
 
 
+def test_release_then_reserve_same_interval_succeeds(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+    repo.release_holdout_reservation(rid)
+    rid2, reused = _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+    assert rid2 and reused is False
+
+
+def test_allow_reuse_past_orphaned_pending_reservation(repo_with_strategy):
+    # A pending (uncommitted) reservation blocks fail-closed; allow_reuse overrides it too.
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")  # pending, never finalized (orphan)
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2023-09-01", he="2024-03-01")
+    rid, reused = _reserve(repo, sid, hs="2023-09-01", he="2024-03-01", allow_reuse=True)
+    assert rid and reused is True
+
+
 def _record_pass(repo, sid, *, actor="agent", code="c0", config="cfg0", dep="dep0"):
     return repo.record_gate_evaluation(
         sid, passed=True, n_funnel=9, own_lifetime_combos=9, windowed_total_combos=9,

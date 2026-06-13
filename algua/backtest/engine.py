@@ -424,7 +424,12 @@ def holdout_window(
     Degenerate inputs (no bars, or holdout rounds to <1 bar) return the conservative full
     grid/period: the subsequent `walk_forward` raises and the reservation is released, so the value
     is immaterial but stays fail-closed (a superset of any real tail)."""
-    bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+    if not 0.0 < holdout_frac < 1.0:
+        raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
+    try:
+        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+    except Exception as exc:
+        raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         return start.date().isoformat(), end.date().isoformat()
     idx = _adj_grid(bars).index

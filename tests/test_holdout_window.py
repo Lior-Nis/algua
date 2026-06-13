@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import holdout_window
+from algua.backtest.engine import BacktestError, holdout_window
 from algua.backtest.walkforward import walk_forward
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
@@ -62,3 +63,21 @@ def test_holdout_window_tiny_frac_rounds_to_zero_returns_full_grid():
     hs, he = holdout_window(strat, prov, START, END, holdout_frac=1e-6)
     assert hs == bars.index.min().date().isoformat()
     assert he == bars.index.max().date().isoformat()
+
+
+def test_holdout_window_rejects_out_of_range_frac():
+    strat, prov = _equal_weight(), SyntheticProvider(seed=3)
+    for bad in (0.0, 1.0, 1.5, -0.1):
+        with pytest.raises(BacktestError, match="holdout_frac"):
+            holdout_window(strat, prov, START, END, holdout_frac=bad)
+
+
+def test_holdout_window_wraps_provider_error():
+    strat = _equal_weight()
+
+    class _Boom:
+        def get_bars(self, symbols, start, end, timeframe):
+            raise RuntimeError("disk gone")
+
+    with pytest.raises(BacktestError, match="provider error"):
+        holdout_window(strat, _Boom(), START, END, holdout_frac=0.2)
