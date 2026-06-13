@@ -36,8 +36,8 @@ def test_tz_naive_published_at_raises():
 
 
 def test_knowable_before_published_raises():
-    # Construct directly, bypassing to_news_schema (which would reject), with the right
-    # columns/dtypes; set published_at AFTER knowable_at on one row.
+    # Mutate a valid frame post-construction so published_at > knowable_at (validation
+    # already passed during to_news_schema).
     bad = _good_news_frame().copy()
     bad.loc[0, "published_at"] = pd.Timestamp("2023-02-01T00:00:00Z")  # > knowable_at
     with pytest.raises(BacktestError, match="must be >= 'published_at'"):
