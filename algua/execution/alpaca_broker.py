@@ -401,3 +401,16 @@ class AlpacaLiveBroker(_AlpacaBroker):
             raise BrokerError("AlpacaLiveBroker requires a verified LiveAuthorization")
         super().__init__(api_key, api_secret, base_url)
         self.authorization = authorization
+
+
+class AlpacaLiveReadOnlyBroker(_AlpacaBroker):
+    """READ-ONLY view of the Alpaca LIVE venue for reconcile (get_positions + account_activities),
+    constructed WITHOUT a LiveAuthorization because it never places an order — both endpoints are
+    GETs. Reuses the base host allowlist (live host + https only), so it cannot be pointed at a
+    wrong endpoint. Used by `resume`/`resume-all` to confirm a live strategy is flat at the broker
+    before clearing the kill-switch. The live API keys remain the real wall (trusted env only)."""
+
+    _ALLOWED_HOSTS = frozenset({"api.alpaca.markets"})
+
+    def __init__(self, api_key: str, api_secret: str, base_url: str = _LIVE_DEFAULT_URL) -> None:
+        super().__init__(api_key, api_secret, base_url)
