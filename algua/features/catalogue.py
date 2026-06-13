@@ -1,12 +1,15 @@
 # algua/features/catalogue.py
 from __future__ import annotations
 
+import importlib
 import inspect
+import pkgutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+import algua.features as _features_pkg
 from algua.contracts.idea import DataCapability
 
 
@@ -94,3 +97,73 @@ def factor(
         return fn
 
     return decorate
+
+
+_REGISTRY: dict[str, FactorSpec] = {}
+_loaded = False
+
+
+def load_all_factors() -> dict[str, FactorSpec]:
+    """Discover every catalogued factor by scanning ``algua.features`` modules for the
+    ``__factor_spec__`` stamp. Transactional: builds a fresh dict and binds it to ``_REGISTRY`` in
+    ONE assignment only after every module imports cleanly (a failing import raises before the
+    bind, leaving the prior registry intact — no half-populated global is ever observable). Skips
+    ``_``-prefixed modules. Accepts a stamped function ONLY at its defining module
+    (``fn.__module__ == module.__name__``) so a re-export does not double-register. Idempotent:
+    re-scans the import-cached modules each call. Fails closed on a duplicate ``name``."""
+    global _REGISTRY, _loaded
+    fresh: dict[str, FactorSpec] = {}
+    for mod_info in pkgutil.iter_modules(_features_pkg.__path__):
+        if mod_info.name.startswith("_"):
+            continue
+        module = importlib.import_module(f"{_features_pkg.__name__}.{mod_info.name}")
+        for value in vars(module).values():
+            spec = getattr(value, _SPEC_ATTR, None)
+            if spec is None or getattr(value, "__module__", None) != module.__name__:
+                continue  # not a factor, or a re-export not defined here
+            if spec.name in fresh:
+                raise ValueError(
+                    f"duplicate factor name {spec.name!r}: {fresh[spec.name].import_path} "
+                    f"and {spec.import_path} (pass name= to disambiguate)"
+                )
+            fresh[spec.name] = spec
+    _REGISTRY = fresh
+    _loaded = True
+    return _REGISTRY
+
+
+def _reset_registry() -> None:
+    """Test hook: clear discovered state so the next read re-discovers."""
+    global _REGISTRY, _loaded
+    _REGISTRY = {}
+    _loaded = False
+
+
+def _ensure_loaded() -> None:
+    if not _loaded:
+        load_all_factors()
+
+
+def get_factor(name: str) -> FactorSpec:
+    _ensure_loaded()
+    try:
+        return _REGISTRY[name]
+    except KeyError:
+        raise FactorNotFound(name) from None
+
+
+def all_factors() -> list[FactorSpec]:
+    _ensure_loaded()
+    return [_REGISTRY[k] for k in sorted(_REGISTRY)]
+
+
+def filter_factors(
+    *, tag: str | None = None, kind: FactorKind | None = None
+) -> list[FactorSpec]:
+    """Catalogue factors filtered by tag and/or kind (AND-combined)."""
+    out = all_factors()
+    if tag is not None:
+        out = [f for f in out if tag in f.tags]
+    if kind is not None:
+        out = [f for f in out if f.kind is kind]
+    return out
