@@ -981,3 +981,35 @@ def test_paper_promote_missing_creds_json_error(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert "ALGUA_ALPACA_API_KEY" in payload["error"]
+
+
+def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    # the strategy holds ZZZ, a symbol no longer in its universe
+    _seed_paper_order(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
+
+    class _BreachTickBroker(_MinimalBroker):
+        def __init__(self):
+            self.closed_symbols = None
+        def cancel_open_orders(self):
+            pass
+        def close_positions(self, symbols):
+            self.closed_symbols = list(symbols)
+
+    broker = _BreachTickBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "dd")))
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "drawdown" and payload["kill_switch"] == "tripped"
+    assert "ZZZ" in payload["closed_symbols"]      # held-but-dropped symbol was flattened
+    assert "ZZZ" in broker.closed_symbols
+    # belief cleared after the successful flatten
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["positions"] == {}
