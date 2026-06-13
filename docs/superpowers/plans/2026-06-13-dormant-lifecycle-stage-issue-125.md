@@ -20,9 +20,10 @@
 - `algua/registry/store.py` — implement `revoke_allocation` in `apply_transition`/`_apply_transition_locked`. *Task 3.*
 - `algua/registry/transitions.py` — bench-reason guard (Task 2) + `live -> dormant` flat check & revoke wiring (Task 4).
 - `algua/cli/live_cmd.py` — `allocate` rejects a `dormant` strategy. *Task 5.*
-- Tests: `tests/test_lifecycle.py` (Task 1), `tests/test_transitions.py` (Tasks 2, 4), `tests/test_allocations.py` (Task 3), `tests/test_registry_store.py` (Task 3), `tests/test_cli_live.py` (Task 5), `tests/test_cli_registry.py` or `tests/test_e2e_lifecycle.py` (Task 6).
+- Tests: `tests/test_lifecycle.py` (Task 1, append), **`tests/test_transitions.py` (Tasks 2, 4 — NEW file; no `transition_strategy`-unit module exists today)**, `tests/test_allocations.py` (Task 3, append), `tests/test_registry_store.py` (Task 3, append), `tests/test_cli_live.py` (Task 5, append), `tests/test_e2e_lifecycle.py` (Task 6, append).
 
-> Before writing a new test file, check whether a sibling test module already exists for the target (e.g. `tests/test_transitions.py`, `tests/test_cli_live.py`); if so, append to it rather than creating a duplicate. Use `rg -l "transition_strategy" tests/` to confirm.
+> Confirmed via `rg -l "transition_strategy" tests/` + baseline run: unit coverage of `transition_strategy` is spread across `test_registry_store.py`/`test_cli_registry.py` with no dedicated module — Tasks 2 & 4 create a focused new `tests/test_transitions.py`. All other test files above already exist (baseline: 109 passed); append to them.
+> `live_fills` schema (for Task 4) — required NOT NULL columns: `activity_id` (UNIQUE), `symbol`, `qty` (≠0), `price` (>0), `fill_ts`; plus nullable `strategy`. Any test INSERT must supply all of them.
 
 ---
 
@@ -398,8 +399,10 @@ def _live_strategy(tmp_path):
 
 def test_live_to_dormant_rejected_when_not_flat(tmp_path):
     repo, conn = _live_strategy(tmp_path)
-    conn.execute("INSERT INTO live_fills(strategy, symbol, qty) VALUES (?,?,?)",
-                 ("s1", "AAPL", 5.0))
+    conn.execute(
+        "INSERT INTO live_fills(activity_id, strategy, symbol, qty, price, fill_ts) "
+        "VALUES (?,?,?,?,?,?)",
+        ("a1", "s1", "AAPL", 5.0, 100.0, "2026-01-01T00:00:00Z"))
     conn.commit()
     with pytest.raises(TransitionError, match="flat"):
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT, reason="bench")
