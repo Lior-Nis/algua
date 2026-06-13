@@ -915,9 +915,10 @@ def test_apply_transition_cas_detects_concurrent_stage_move(tmp_path):
 
 
 def test_apply_transition_revokes_allocation_atomically(tmp_path):
-    from algua.registry import allocations
     from algua.contracts.lifecycle import Actor, Stage
-    conn = connect(tmp_path / "reg.db"); migrate(conn)
+    from algua.registry import allocations
+    conn = connect(tmp_path / "reg.db")
+    migrate(conn)
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")
@@ -933,10 +934,11 @@ def test_apply_transition_revokes_allocation_atomically(tmp_path):
 
 
 def test_apply_transition_revoke_rolls_back_with_stage_on_cas_failure(tmp_path):
-    from algua.registry import allocations
     from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry import allocations
     from algua.registry.repository import StrategyRecord
-    conn = connect(tmp_path / "reg.db"); migrate(conn)
+    conn = connect(tmp_path / "reg.db")
+    migrate(conn)
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")

@@ -1,9 +1,10 @@
 import pytest
+
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
+from algua.registry import allocations
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
-from algua.registry import allocations
 
 
 def _paper_strategy(tmp_path):
@@ -32,7 +33,8 @@ def test_bench_to_dormant_with_reason_succeeds(tmp_path):
 
 
 def _live_strategy(tmp_path):
-    conn = connect(tmp_path / "reg.db"); migrate(conn)
+    conn = connect(tmp_path / "reg.db")
+    migrate(conn)
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")
