@@ -27,7 +27,7 @@ class _Resp:
 
 
 class _RecordingRequests:
-    """Records POST bodies; returns a 201 with an order id (no GETs — sizing is off the snapshot)."""
+    """Records POST bodies; returns a 201 with an order id (sizing is off the passed snapshot)."""
 
     def __init__(self):
         self.posted = []

@@ -335,7 +335,7 @@ def test_submit_timeout_then_retry_reuses_client_order_id(monkeypatch):
     # retried). The retried POST must re-send the SAME deterministic client_order_id so Alpaca
     # de-duplicates the order rather than double-filling. This unit test proves the CLIENT-SIDE
     # guarantee (identical body incl. client_order_id on the retry) + a single returned order id;
-    # the actual no-double-order is Alpaca's server-side dedup on client_order_id, out of unit scope.
+    # the actual no-double-order is Alpaca's server-side dedup on client_order_id (out of scope).
     monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
     fake = _TimeoutThenSucceedPost({"id": "order-1"})
     monkeypatch.setattr(ab, "requests", fake)
