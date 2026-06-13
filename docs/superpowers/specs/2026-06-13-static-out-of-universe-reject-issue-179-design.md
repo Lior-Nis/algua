@@ -87,8 +87,17 @@ fast-path validator, `_decision_weights_fast` just adds the bounded parity guard
 | `_canonical_row` (bounded parity proxy — see below) | `set(strategy.universe) & set(adj.columns)` |
 
 **Static operating universe = `strategy.universe ∩ adj.columns` (declared AND available)** — not raw
-`adj.columns`. This single intersection closes BOTH edges and makes the invariant `allowed ⊆
-strategy.universe` HOLD rather than be assumed:
+`adj.columns`. `simulate` computes it ONCE in the static branch (right after the existing
+`if bars.empty` guard) and **fails closed with `BacktestError` if it is empty while the declared
+universe is non-empty** — i.e. the provider returned bars but NONE for a declared symbol. Without
+this guard the empty-allowed set would no-op validation and run a silently-meaningless flat backtest
+over an all-undeclared price panel (an edge the intersection itself introduces). The static decision
+paths (`_decision_weights` static branch, `_fast_weights`, `_canonical_row`) recompute the same
+`set(strategy.universe) & set(columns)` locally (each already holds `strategy` + `columns`); the
+intersection is trivial and self-contained per path.
+
+This single intersection closes BOTH edges and makes the invariant `allowed ⊆ strategy.universe`
+HOLD rather than be assumed:
 - A symbol DECLARED but with no fetched price data (in `strategy.universe`, absent from
   `adj.columns`) → not in the intersection → fails-closed in backtest (it cannot be simulated
   without a price). Acceptable, stricter-in-backtest divergence vs live (which uses
@@ -118,12 +127,18 @@ Today it reindex-drops without validating. Once `_decision_weights` (the loop) r
 weights, the proxy must reject them too, or the bounded guard silently diverges from the loop for a
 strategy whose per-bar `signal` emits an out-of-universe weight while its `signal_panel` does not
 (the fast path's `construct` only ever sees in-`columns` scores, so it cannot surface this itself).
-Fix: call `check_universe_membership(w, set(strategy.universe) & set(columns), strategy.name)` in
-`_canonical_row` BEFORE the reindex, wrapping `RiskBreach → BacktestError` like the loop. This needs
-`strategy.execution`/`strategy.name` (already on the `LoadedStrategy` it receives). Only the
-membership check is added — NOT the full `validate_decision_weights` — to stay scoped to #179. The
-exhaustive promotion gate already covers this case (it runs the loop); this extends coverage to the
-ordinary-backtest bounded guard for defense-in-depth.
+Fix: call the FULL `validate_decision_weights(w, strategy.execution, strategy.name,
+allowed_symbols=set(strategy.universe) & set(columns))` in `_canonical_row` BEFORE the reindex,
+wrapping `RiskBreach → BacktestError` like the loop. Using the full rail (not just the membership
+check) makes `_canonical_row` a TRULY faithful loop-proxy with identical check ordering
+(finite → universe → short → cap → gross) — a partial subset would, for a row that is both
+non-finite and out-of-universe, report `out_of_universe` while the loop reports the finite breach
+first. This is also safe and scope-respecting: well-formed strategies pass every rail (no behavior
+change), and a strategy whose CONSTRUCT output breaks a value rail already raises in `_fast_weights`
+(engine.py ~222) BEFORE `_assert_parity`/`_canonical_row` is ever reached — so the only new rejection
+this surfaces is the per-bar-`signal` out-of-universe case #179 targets. The exhaustive promotion
+gate already covers that case (it runs the loop); this extends coverage to the ordinary-backtest
+bounded guard for defense-in-depth.
 
 ### Error flow / parity
 
@@ -146,9 +161,9 @@ ordinary-backtest bounded guard for defense-in-depth.
   gross).
 - `algua/backtest/engine.py` *(CODEOWNERS — human design call; this spec + GATE-1 serve it)* —
   `_decision_weights` (static + PIT) and `_fast_weights` validate calls gain `allowed_symbols`; the
-  inline PIT `non_members` block deleted; `_canonical_row` gains the membership check (faithful
-  loop-proxy). `verify_signal_panel_parity` is untouched — it inherits via `_decision_weights` +
-  `_fast_weights`.
+  inline PIT `non_members` block deleted; `_canonical_row` gains a full `validate_decision_weights`
+  call (faithful loop-proxy); `simulate` fails closed when the static operating universe is empty.
+  `verify_signal_panel_parity` is untouched — it inherits via `_decision_weights` + `_fast_weights`.
 - `algua/live/paper_loop.py` — `decide()` passes `allowed_symbols=strategy.universe`.
 - `tests/test_risk_limits.py` — 5 existing direct `validate_decision_weights` calls gain an
   `allowed_symbols` arg.
@@ -174,9 +189,13 @@ New tests (TDD — fail first):
    `_canonical_row` membership check (proves the bounded guard stays a faithful loop-proxy).
 5. **Live/paper** integration: `decide()` with an out-of-universe weight raises (rejected, not
    traded) against `strategy.universe`.
-6. **No regression**: existing in-universe strategies/tests unaffected; the existing PIT non-member
+6. **Empty static operating universe**: a (synthetic) provider that returns bars only for
+   undeclared symbols → `simulate` raises `BacktestError` (declared universe non-empty, intersection
+   empty) rather than running a flat backtest.
+7. **No regression**: existing in-universe strategies/tests unaffected; the existing PIT non-member
    test (`test_decision_weights_rejects_non_member_weight`, asserts `match="BBB"`) still passes via
-   the unified rail.
+   the unified rail; existing fast-path breach tests (gross/long-only/cap/inf) still raise in
+   `_fast_weights` as before.
 
 ## Acceptance
 
