@@ -566,11 +566,20 @@ def _clear_belief(tmp_path, name="cross_sectional_momentum"):
 
 
 def test_resume_refused_while_live_strategy_not_flat(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
     name = _seed_live_killed_with_position(monkeypatch, tmp_path)
+    # broker still holds AAA (non-flat): ledger has a fill, broker confirms the position
+    broker_with_position = _ReadOnlyLiveBroker(activities=[], positions={"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings",
+                        lambda: broker_with_position)
     r = runner.invoke(app, ["paper", "resume", name])
     assert r.exit_code == 1 and "not flat" in r.stdout.lower()
-    # once flat (belief cleared), resume succeeds
+    # once flat (belief cleared AND broker reports flat), resume succeeds
     _clear_belief(tmp_path, name)
+    flat_broker = _ReadOnlyLiveBroker(activities=[], positions={})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings",
+                        lambda: flat_broker)
     assert runner.invoke(app, ["paper", "resume", name]).exit_code == 0
 
 
@@ -580,8 +589,13 @@ def test_resume_clears_live_nav_peak(monkeypatch, tmp_path):
     from algua.config.settings import get_settings
     from algua.execution.order_state import get_nav_peak, update_nav_peak
     from algua.registry.db import connect, migrate
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
     name = _seed_live_killed_with_position(monkeypatch, tmp_path)
     _clear_belief(tmp_path, name)                       # make it flat so resume is allowed
+    flat_broker = _ReadOnlyLiveBroker(activities=[], positions={})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings",
+                        lambda: flat_broker)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         update_nav_peak(conn, name, 12_000.0)           # a stale pre-breach NAV peak
@@ -1013,3 +1027,63 @@ def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch
     # belief cleared after the successful flatten
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["positions"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (issue 163): resume (Stage.LIVE) — ingest + reconcile against broker truth
+# ---------------------------------------------------------------------------
+
+class _ReadOnlyLiveBroker:
+    """Fake read-only live broker: scripted activities + broker net positions for resume tests."""
+    def __init__(self, activities, positions):
+        self._activities = activities
+        self._positions = positions
+    def account_activities(self, after=None):
+        return self._activities
+    def get_positions(self):
+        import pandas as pd
+        return pd.Series(self._positions, dtype="float64")
+
+
+def _seed_live_killed(db_path, name, fills):
+    """Seed a tripped live strategy with believed fills (symbol -> qty)."""
+    from contextlib import closing
+
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name=?", (name,))
+        for i, (sym, qty) in enumerate(fills.items()):
+            conn.execute(
+                "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, "
+                "price, fill_ts) VALUES (?,?,?,?,?,?,?)",
+                (f"seed-{i}", f"bo-{i}", name, sym, qty, 100.0, "2023-01-01T00:00:00Z"),
+            )
+        kill_switch.trip(conn, name, reason="flatten", actor="system")
+        conn.commit()
+
+
+def test_resume_live_refuses_when_broker_still_holds(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
+    name = "cross_sectional_momentum"
+    _to_paper()
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    # broker still reports AAA held, no new activities -> ledger non-flat AND broker exposed
+    broker = _ReadOnlyLiveBroker(activities=[], positions={"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 1
+    assert json.loads(r.stdout)["ok"] is False
+    assert "not flat" in r.stdout.lower()
+
+
+def test_resume_live_refuses_when_creds_missing(monkeypatch, tmp_path):
+    name = "cross_sectional_momentum"
+    _to_paper()
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    # no live creds set -> cannot confirm flat -> refuse
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 1
+    assert json.loads(r.stdout)["ok"] is False

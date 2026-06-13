@@ -16,7 +16,14 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
+from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
+from algua.execution.live_ledger import (
+    believed_positions,
+    fill_cursor,
+    ingest_activities,
+    strategy_live_symbols,
+)
+from algua.execution.live_reconcile import account_expected_net
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
@@ -69,6 +76,42 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
         )
     return AlpacaPaperBroker(api_key=s.alpaca_api_key, api_secret=s.alpaca_api_secret,
                              base_url=s.alpaca_paper_url)
+
+
+_RECONCILE_TOL = 1e-6
+
+
+def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
+    s = get_settings()
+    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
+        raise ValueError(
+            "Alpaca LIVE credentials not configured; cannot confirm the strategy is flat at the "
+            "broker — set ALGUA_ALPACA_LIVE_API_KEY and ALGUA_ALPACA_LIVE_API_SECRET"
+        )
+    return AlpacaLiveReadOnlyBroker(s.alpaca_live_api_key, s.alpaca_live_api_secret,
+                                    base_url=s.alpaca_live_url)
+
+
+def _live_strategy_flat(
+    conn: sqlite3.Connection, name: str, universe: list[str], broker: object,
+) -> tuple[bool, dict]:
+    """Ingest pending broker activities, then ACCOUNT-WIDE reconcile: the strategy is flat iff its
+    own believed_positions is empty AND the broker holds no UNEXPLAINED qty (broker net minus the
+    books' expected net = Σ all live_fills) in any symbol it is responsible for. A sibling that
+    legitimately holds the same symbol explains the broker qty and does not block resume."""
+    ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))  # type: ignore[attr-defined]
+    own = believed_positions(conn, name)
+    broker_net = {s: float(q) for s, q in broker.get_positions().items()  # type: ignore[attr-defined]
+                  if float(q) != 0.0}
+    expected = account_expected_net(conn)
+    syms = set(universe) | strategy_live_symbols(conn, name)
+    unexplained = {
+        s: broker_net.get(s, 0.0) - expected.get(s, 0.0)
+        for s in syms
+        if abs(broker_net.get(s, 0.0) - expected.get(s, 0.0)) > _RECONCILE_TOL
+    }
+    is_flat = (not own) and (not unexplained)
+    return is_flat, {"believed": own, "broker_unexplained": unexplained}
 
 
 def _load_gated_strategy(
@@ -199,7 +242,6 @@ def show(name: str) -> None:
         rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
         n_orders = count_orders(conn, name)
         if rec.stage is Stage.LIVE:
-            from algua.execution.live_ledger import believed_positions
             from algua.execution.order_state import get_nav_peak
             positions = believed_positions(conn, name)
             peak = get_nav_peak(conn, name)
@@ -255,17 +297,22 @@ def kill(
 
 
 @paper_app.command("resume")
-@json_errors(ValueError)
+@json_errors(ValueError, BrokerError)
 def resume(name: str) -> None:
-    """Reset (clear) a strategy's kill-switch so paper runs may resume. Human action."""
-    from algua.execution.live_ledger import believed_positions
+    """Reset (clear) a strategy's kill-switch so paper runs may resume. For a LIVE strategy,
+    confirms the strategy is flat via broker-truth reconcile before allowing resume. Human
+    action."""
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
-        if rec.stage is Stage.LIVE and believed_positions(conn, name):
-            raise ValueError(
-                f"{name} is not flat (believed positions: {believed_positions(conn, name)}); "
-                "re-flatten before resuming a live strategy"
-            )
+        if rec.stage is Stage.LIVE:
+            strategy = load_strategy(name)
+            broker = _alpaca_live_readonly_from_settings()
+            is_flat, residual = _live_strategy_flat(conn, name, strategy.universe, broker)
+            if not is_flat:
+                raise ValueError(
+                    f"{name} is not flat after reconcile: {residual}; offset fills pending or "
+                    "liquidation incomplete — re-flatten or retry after fills land"
+                )
         was_tripped = kill_switch.is_tripped(conn, name)
         if was_tripped:
             # Audit BEFORE mutating: if a write fails the switch stays tripped (fail-safe — still
@@ -534,7 +581,6 @@ def resume_all(
 ) -> None:
     """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
     to cash). Per-strategy kill-switches are left untouched."""
-    from algua.execution.live_ledger import believed_positions
     with registry_conn() as conn:
         was_set = global_halt.is_engaged(conn)
         # Flag any LIVE strategies that still carry a ledger position (partial-fill residual): they
