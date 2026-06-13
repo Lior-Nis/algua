@@ -339,35 +339,46 @@ def verify_signal_panel_parity(
     if bars.empty:
         raise BacktestError("provider returned no bars for the signal_panel parity check")
 
-    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-    adj = adj.sort_index()
+    # A panel/construct that throws must fail the gate CLOSED rather than crash the JSON CLI
+    # with an arbitrary exception type (e.g. AssertionError/KeyError/TypeError from user code).
+    # Re-raise an existing BacktestError unchanged (divergence message preserved verbatim);
+    # convert anything else to BacktestError so @json_errors always sees a known type.
+    try:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        adj = adj.sort_index()
 
-    fast = _fast_weights(strategy, bars, adj)
-    # static: universe_by_date=None, fundamentals=None
-    loop = _decision_weights(strategy, bars, adj)
+        fast = _fast_weights(strategy, bars, adj)
+        # static: universe_by_date=None, fundamentals=None
+        loop = _decision_weights(strategy, bars, adj)
 
-    # Identical grid by construction (both built on adj.index/columns); assert it before comparing.
-    if not (fast.index.equals(loop.index) and fast.columns.equals(loop.columns)):
+        # Identical grid by construction (both built on adj.index/columns); assert before comparing.
+        if not (fast.index.equals(loop.index) and fast.columns.equals(loop.columns)):
+            raise BacktestError(
+                f"signal_panel parity check for {strategy.name!r}: fast/loop weight grids differ "
+                f"(fast {fast.shape} vs loop {loop.shape})"
+            )
+
+        # NaN-safe, every-bar comparison. Both paths zero-fill final weights so a NaN cannot
+        # survive; the isna() guard is defensive belt-and-suspenders against a future path.
+        nan_mismatch = fast.isna() != loop.isna()
+        diff = (loop - fast).abs()
+        bad = nan_mismatch | (diff > WEIGHT_TOL)
+        if bool(bad.to_numpy().any()):
+            first = next(t for t in fast.index if bool(bad.loc[t].any()))
+            offenders = sorted(bad.columns[bad.loc[first].to_numpy()])
+            raise BacktestError(
+                f"signal_panel exhaustive parity check FAILED for strategy {strategy.name!r} at "
+                f"{first}: signal_panel disagrees with the per-bar construct(signal(view), view) on "  # noqa: E501
+                f"symbol(s) {offenders} "
+                f"(per-bar={loop.loc[first, offenders].to_dict()}, "
+                f"panel={fast.loc[first, offenders].to_dict()}, tol={WEIGHT_TOL})"
+            )
+    except BacktestError:
+        raise
+    except Exception as exc:
         raise BacktestError(
-            f"signal_panel parity check for {strategy.name!r}: fast/loop weight grids differ "
-            f"(fast {fast.shape} vs loop {loop.shape})"
-        )
-
-    # NaN-safe, every-bar comparison. Both paths zero-fill final weights so a NaN cannot survive;
-    # the isna() guard is defensive belt-and-suspenders against a future path that leaves one.
-    nan_mismatch = fast.isna() != loop.isna()
-    diff = (loop - fast).abs()
-    bad = nan_mismatch | (diff > WEIGHT_TOL)
-    if bool(bad.to_numpy().any()):
-        first = next(t for t in fast.index if bool(bad.loc[t].any()))
-        offenders = sorted(bad.columns[bad.loc[first].to_numpy()])
-        raise BacktestError(
-            f"signal_panel exhaustive parity check FAILED for strategy {strategy.name!r} at "
-            f"{first}: signal_panel disagrees with the per-bar construct(signal(view), view) on "
-            f"symbol(s) {offenders} "
-            f"(per-bar={loop.loc[first, offenders].to_dict()}, "
-            f"panel={fast.loc[first, offenders].to_dict()}, tol={WEIGHT_TOL})"
-        )
+            f"signal_panel parity check for {strategy.name!r} failed to run: {exc}"
+        ) from exc
 
 
 def _fetch_symbols(

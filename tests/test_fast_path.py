@@ -436,6 +436,8 @@ def test_verifier_catches_divergence_on_unsampled_bar() -> None:
     n = len(adj.index)
     sample = set(_parity_sample_positions(0, n))
     target_ts = adj.index[next(i for i in range(0, n) if i not in sample)]
+    target_pos = list(adj.index).index(target_ts)
+    assert target_pos not in sample  # the bounded runtime guard never inspects this bar
 
     def sneaky_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
@@ -516,3 +518,22 @@ def test_verifier_raises_on_empty_provider() -> None:
     )
     with pytest.raises(BacktestError, match="no bars"):
         verify_signal_panel_parity(strat, _EmptyProvider(), START, END)
+
+
+def test_verifier_fails_closed_on_throwing_panel() -> None:
+    """A signal_panel that raises must fail the gate CLOSED as a BacktestError (not crash the
+    JSON CLI with an arbitrary exception type)."""
+    def boom_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        raise KeyError("boom")
+
+    cfg = StrategyConfig(
+        name="boom", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 1.0}),
+        signal_panel_fn=boom_panel, construct_fn=_passthrough,
+    )
+    with pytest.raises(BacktestError, match="failed to run"):
+        verify_signal_panel_parity(strat, SyntheticProvider(seed=2), START, END)
