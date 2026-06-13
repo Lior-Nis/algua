@@ -10,6 +10,7 @@ class Stage(StrEnum):
     PAPER = "paper"
     FORWARD_TESTED = "forward_tested"
     LIVE = "live"
+    DORMANT = "dormant"
     RETIRED = "retired"
 
 
@@ -26,9 +27,10 @@ _LIVE_TRANSITIONS: dict[Stage, set[Stage]] = {
     Stage.IDEA: {Stage.BACKTESTED},
     Stage.BACKTESTED: {Stage.CANDIDATE, Stage.IDEA},
     Stage.CANDIDATE: {Stage.PAPER, Stage.BACKTESTED},
-    Stage.PAPER: {Stage.FORWARD_TESTED, Stage.CANDIDATE},
+    Stage.PAPER: {Stage.FORWARD_TESTED, Stage.CANDIDATE, Stage.DORMANT},
     Stage.FORWARD_TESTED: {Stage.LIVE, Stage.PAPER},
-    Stage.LIVE: {Stage.PAPER},
+    Stage.LIVE: {Stage.PAPER, Stage.DORMANT},
+    Stage.DORMANT: {Stage.PAPER},
 }
 
 ALLOWED_TRANSITIONS: dict[Stage, set[Stage]] = {
