@@ -137,6 +137,18 @@ def run_tick(
         snap = broker.snapshot(strategy.universe)
         drawdown_equity = snap.equity
 
+    # snap.equity is the sizing denominator for the mv/equity weights below: a non-positive value
+    # ZeroDivisions (== 0) or silently flips every current weight's sign (< 0), making decide()
+    # trade against inverted holdings. Trip BEFORE drawdown/reconcile/division (#162). The
+    # live_snapshot path already fails closed in build_live_sizing_snapshot; this is the guard for
+    # the paper-broker path (broker.snapshot) and defense-in-depth for any future sizing source.
+    if snap.equity <= 0.0:
+        raise RiskBreach(
+            "non_positive_equity",
+            f"sizing equity {snap.equity:.2f} is non-positive — refusing to trade before it "
+            f"divides by zero or inverts current weights",
+        )
+
     # Drawdown against the persisted peak BEFORE trading: equity below the breaker threshold halts
     # the tick before any order goes out (#27). The peak ratchets up to this tick's drawdown basis.
     peak = (

@@ -11,6 +11,7 @@ from algua.contracts.types import OrderIntent, Side
 from algua.execution.sim_broker import Fill, SimBroker
 from algua.risk.limits import (
     WEIGHT_TOL,
+    RiskBreach,
     check_drawdown,
     validate_decision_weights,
 )
@@ -115,8 +116,14 @@ def run_paper(
             continue  # warm-up: observe only — no signal evaluation, validation, or orders
         # Equity is the sizing denominator; a non-positive value would silently treat every position
         # as weight 0 and buy against nothing. The drawdown breaker should have halted long before
-        # equity reaches zero, so equity <= 0 here is a logic error, not a market state.
-        assert equity > 0, f"run_paper requires positive equity, got {equity!r}"
+        # equity reaches zero, so equity <= 0 here is a logic error, not a market state — but a bare
+        # assert is stripped under `python -O`, so enforce it as a real fail-closed breach (#162).
+        if equity <= 0.0:
+            raise RiskBreach(
+                "non_positive_equity",
+                f"run_paper sizing equity {equity:.2f} is non-positive — refusing to size against "
+                f"a denominator that flips weight signs / divides by zero",
+            )
         positions = broker.get_positions()
         bar_closes = closes.loc[t]
         current_weights = {

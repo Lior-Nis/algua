@@ -205,6 +205,19 @@ def test_run_tick_drawdown_breach_halts_before_trading():
     assert broker.cancels == 0 and broker.submitted == []
 
 
+@pytest.mark.parametrize("equity", [0.0, -500.0])
+def test_run_tick_non_positive_equity_breaches_before_trading(equity):
+    # #162: a non-positive sizing denominator must trip BEFORE the mv/equity division. equity == 0
+    # ZeroDivisions mid-tick; equity < 0 silently flips every current weight's sign and trades
+    # against inverted holdings. Hold a position so the (dangerous) sign-flip path is exercised.
+    broker = _FakeBroker(positions={"AAA": 10.0}, equity=equity)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    assert ei.value.kind == "non_positive_equity"
+    assert broker.cancels == 0 and broker.submitted == []  # halted before any cancel/order
+
+
 def test_run_tick_reconcile_mismatch_raises():
     # #18: DB-derived positions disagreeing with the broker's pre-submit book halts the tick.
     broker = _FakeBroker(positions={"AAA": 10.0})

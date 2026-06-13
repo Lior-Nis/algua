@@ -60,6 +60,42 @@ def test_build_intents_noop_when_already_at_target():
     assert intents == []
 
 
+class _NonPositiveEquityBroker:
+    """SimBroker stand-in whose equity is non-positive — a held book that has gone past zero. Lets
+    the run_paper sizing guard be exercised directly without having to drive a real SimBroker below
+    zero (#162). Records submits so the test can assert nothing was sent."""
+
+    def __init__(self, equity_value: float) -> None:
+        self.cash = 0.0
+        self._equity = equity_value
+        self.submitted: list = []
+
+    def equity(self, closes) -> float:
+        return self._equity
+
+    def get_positions(self):
+        return pd.Series({"AAA": 10.0}, dtype="float64")
+
+    def submit(self, intent):
+        self.submitted.append(intent)
+        return "should-not-be-submitted"
+
+    def fill_pending(self, opens, fill_ts):
+        return []
+
+
+@pytest.mark.parametrize("equity_value", [0.0, -500.0])
+def test_run_paper_non_positive_equity_breaches_before_orders(equity_value):
+    # #162: replace the (python -O strippable) `assert equity > 0` with a real fail-closed breach,
+    # so a non-positive sizing denominator never reaches the mv/equity division and order phase.
+    broker = _NonPositiveEquityBroker(equity_value)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_paper(_all_in("AAA"), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    assert ei.value.kind == "non_positive_equity"
+    assert broker.submitted == []  # nothing sent
+
+
 def test_run_paper_buys_and_reconciles():
     bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
     result = run_paper(_all_in("AAA"), SimBroker(cash=10_000.0), _FakeProvider(bars),
