@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -405,7 +406,7 @@ class SqliteStrategyRepository:
         ).fetchone()
         return int(row["total"])
 
-    def record_holdout_evaluation(
+    def reserve_holdout(
         self,
         strategy_id: int,
         *,
@@ -414,49 +415,88 @@ class SqliteStrategyRepository:
         period_start: str,
         period_end: str,
         holdout_frac: float,
-        config_hash: str,
-        reused: bool,
-    ) -> int:
-        with self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO holdout_evaluations"
-                "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
-                " config_hash, reused, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,
-                 config_hash, int(reused), _now()),
-            )
-        rowid = cur.lastrowid
-        assert rowid is not None  # a successful INSERT always sets lastrowid
-        return rowid
-
-    def overlapping_holdout_evaluations(
-        self,
-        strategy_id: int,
-        *,
-        data_source: str,
-        snapshot_id: str | None,
-        period_start: str,
-        period_end: str,
-        holdout_frac: float,
-    ) -> bool:
-        # Data identity: when BOTH the probe and a stored row carry a snapshot_id, identity is the
-        # snapshot_id; otherwise fall back to data_source equality. Period overlap is the standard
-        # interval test (start1 <= end2 AND start2 <= end1). Match is on the window, never config.
+        allow_reuse: bool,
+    ) -> tuple[int, bool]:
+        # TOP-LEVEL ONLY. A manual BEGIN IMMEDIATE inside an already-open transaction raises
+        # "cannot start a transaction within a transaction", and a blanket rollback below could
+        # roll back a caller's surrounding tx. Fail loudly so the contract is enforced, not assumed.
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "reserve_holdout must be called at top level, not inside an open transaction")
+        # Data identity: snapshot_id when the probe has one (a snapshot-backed row is a DISTINCT
+        # identity from a non-snapshot probe), else data_source among rows lacking a snapshot.
+        # Period overlap is the standard interval test. Match is on the WINDOW, never config. Ported
+        # verbatim from the removed overlapping_holdout_evaluations; now matches ALL rows (pending
+        # reservation OR committed burn) — no committed_at filter — so a pending row blocks too.
         if snapshot_id is not None:
             data_match = "snapshot_id = ?"
             data_param: str = snapshot_id
         else:
-            # Probe has no snapshot -> identity is the data_source (compare only rows that also
-            # lack a snapshot, so a snapshot-backed row is a distinct identity, not a match).
             data_match = "snapshot_id IS NULL AND data_source = ?"
             data_param = data_source
-        row = self._conn.execute(
-            f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ? AND holdout_frac = ?"
-            f" AND {data_match}"
-            f" AND period_start <= ? AND ? <= period_end LIMIT 1",
-            (strategy_id, holdout_frac, data_param, period_end, period_start),
-        ).fetchone()
-        return row is not None
+        # BEGIN IMMEDIATE takes the write lock up front so the overlap SELECT + INSERT are one
+        # atomic critical section: two concurrent reserves can't both see "no overlap" and both
+        # insert. BaseException (not Exception) so a KeyboardInterrupt/SystemExit still releases the
+        # lock via rollback.
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ? AND holdout_frac = ?"
+                f" AND {data_match}"
+                f" AND period_start <= ? AND ? <= period_end LIMIT 1",
+                (strategy_id, holdout_frac, data_param, period_end, period_start),
+            ).fetchone()
+            overlap = row is not None
+            if overlap and not allow_reuse:
+                raise ValueError(
+                    "holdout already consumed: an overlapping out-of-sample window was already "
+                    "evaluated. Use fresh out-of-sample data, or --allow-holdout-reuse "
+                    "(--actor human) to override and accept the statistical cost.")
+            reused = bool(overlap)  # only reachable here with allow_reuse when overlap is True
+            # Test-only hook to widen the critical section so the barriered concurrency test can
+            # force two reserves to actually overlap. Default 0; NOT surfaced in CLI help/docs.
+            delay_ms = int(os.environ.get("ALGUA_TEST_RESERVE_DELAY_MS", "0"))
+            if delay_ms:
+                import time
+                time.sleep(delay_ms / 1000.0)
+            cur = self._conn.execute(
+                "INSERT INTO holdout_evaluations"
+                "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
+                " config_hash, reused, created_at, committed_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,NULL)",
+                (strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,
+                 "", int(reused), _now()),
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        rowid = cur.lastrowid
+        assert rowid is not None  # a successful INSERT always sets lastrowid
+        return rowid, reused
+
+    def finalize_holdout_reservation(self, reservation_id: int, *, config_hash: str) -> None:
+        with self._conn:  # UPDATE + guard commit together or roll back
+            cur = self._conn.execute(
+                "UPDATE holdout_evaluations SET committed_at = ?, config_hash = ?"
+                " WHERE id = ? AND committed_at IS NULL",
+                (_now(), config_hash, reservation_id),
+            )
+            if cur.rowcount != 1:
+                # Raise INSIDE the with so the mismatch rolls back (mirrors apply_transition's
+                # gate-consume guard). Guards a double-finalize or a vanished/released row. Raise,
+                # not assert — asserts strip under python -O.
+                raise ValueError(
+                    f"holdout reservation {reservation_id} is missing or already committed")
+
+    def release_holdout_reservation(self, reservation_id: int) -> None:
+        with self._conn:
+            # No guard: a release after a finalize/crash is a harmless no-op (rowcount 0). Never
+            # touches a committed burn (committed_at IS NULL filter).
+            self._conn.execute(
+                "DELETE FROM holdout_evaluations WHERE id = ? AND committed_at IS NULL",
+                (reservation_id,),
+            )
 
     def windowed_search_combos(self, window_days: int) -> int:
         """Sum of ``n_combos`` across ALL strategies' search_trials recorded within the trailing
