@@ -206,14 +206,19 @@ class StrategyRepository(Protocol):
         period_start: str,
         period_end: str,
         holdout_frac: float,
+        holdout_start: str,
+        holdout_end: str,
         allow_reuse: bool,
     ) -> tuple[int, bool]:
         """Atomically claim the holdout window; return ``(reservation_id, reused)``.
 
         Under ``BEGIN IMMEDIATE`` (write lock held): re-check overlap against ALL rows (pending
-        reservation OR committed burn) for this strategy + data identity + overlapping period +
-        same ``holdout_frac``, then INSERT a pending row (``committed_at=NULL``, placeholder
-        ``config_hash=''``). Match is on the WINDOW, never config.
+        reservation OR committed burn) for this strategy + data identity, matching on the OOS
+        INTERVAL ``[holdout_start, holdout_end]`` — the exact bars ``walk_forward`` burns (#192) —
+        then INSERT a pending row (``committed_at=NULL``, placeholder ``config_hash=''``). Match is
+        on the INTERVAL, never config: a different ``holdout_frac`` landing on overlapping OOS bars
+        does NOT escape the guard. A stored row with a NULL interval (legacy/old-code reservation)
+        matches UNCONDITIONALLY — fail closed. ``period_*``/``holdout_frac`` are evidence only.
 
         Raises ``ValueError`` (fail closed) if an overlapping row exists and not ``allow_reuse``.
         ``reused`` is True iff an overlapping row existed and the human override let it proceed.
