@@ -95,10 +95,24 @@ _RAW_REQUIRED = ["source", "article_id", "symbols", "published_at", NEWS_KNOWABL
 
 
 def explode_news_symbols(frame: pd.DataFrame) -> pd.DataFrame:
-    """Ingest-only pre-step: turn a per-ARTICLE input (with a `symbols` field — a list, or a
-    comma-delimited string) into one row per (article, symbol) with a canonical `symbol` column.
-    Symbols are stripped/upper-cased, blanks dropped, de-duped within an article; an article with
-    zero symbols is rejected. Optional `url`/`body` default to NA. Output carries NEWS_COLUMNS."""
+    """Ingest-only pre-step. Each input row is a FULL article REVISION — one
+    (source, article_id, knowable_at) carrying that revision's COMPLETE symbol set as-of that
+    knowable_at (full-restatement semantics: a revision republishes the authoritative set).
+    Multiple revisions of one article = multiple input rows; (source, article_id, knowable_at)
+    must be unique under the canonical identity (source strip+lower, article_id strip,
+    knowable_at as UTC).
+
+    Symbols (a list, or a comma-delimited string) are stripped/upper-cased, blanks dropped,
+    de-duped within a revision. Emits one row per (revision, symbol) with retracted=False, PLUS a
+    synthesized TOMBSTONE row (retracted=True) for each symbol present in the prior revision but
+    absent from this one — marking that (source, article_id, symbol) mention retracted at this
+    revision's knowable_at, so the as-of mask (latest revision per key) drops it. A tombstone
+    carries the dropping revision's content (published_at/headline/url/body), so the per-revision
+    invariants hold and the dropped symbol never collides with a live row in that revision.
+
+    The first revision of an article must tag >= 1 symbol; a later empty revision is a valid full
+    retraction of a non-empty prior revision (it tombstones every prior symbol). Optional
+    `url`/`body` default to NA. Output carries NEWS_COLUMNS."""
     missing = [c for c in _RAW_REQUIRED if c not in frame.columns]
     if missing:
         raise ValueError(f"news input missing columns: {missing}")
@@ -124,17 +138,40 @@ def explode_news_symbols(frame: pd.DataFrame) -> pd.DataFrame:
         return seen
 
     out["_syms"] = out["symbols"].apply(_parse)
-    if (out["_syms"].apply(len) == 0).any():
+
+    # Canonical revision identity (mirror to_news_schema) so case/whitespace/tz variants of the
+    # same revision can't bypass the duplicate guard or split the per-article walk.
+    out["_gsrc"] = out["source"].astype(str).str.strip().str.lower()
+    out["_gart"] = out["article_id"].astype(str).str.strip()
+    out["_gka"] = pd.to_datetime(out[NEWS_KNOWABLE_AT], errors="raise", utc=True)
+    if out.duplicated(subset=["_gsrc", "_gart", "_gka"]).any():
         raise ValueError(
-            "each news article must tag >= 1 symbol (symbol-less news is out of scope)"
+            "duplicate news revision: (source, article_id, knowable_at) must be unique "
+            "(each input row is one full article revision)"
         )
-    out = (
-        out.drop(columns=["symbols"])
-        .explode("_syms", ignore_index=True)
-        .rename(columns={"_syms": "symbol"})
-    )
-    out[NEWS_RETRACTED] = False
-    return out[COLUMNS]
+
+    base_cols = [c for c in COLUMNS if c not in ("symbol", NEWS_RETRACTED)]
+    rows: list[dict[str, object]] = []
+    for _, grp in out.groupby(["_gsrc", "_gart"], sort=False):
+        grp = grp.sort_values("_gka", kind="stable")
+        prev: set[str] = set()
+        first = True
+        for _, row in grp.iterrows():
+            cur = set(row["_syms"])
+            if not cur and (first or not prev):
+                raise ValueError(
+                    "each news article must tag >= 1 symbol; an empty revision is only valid as "
+                    "a later full retraction of a non-empty prior revision"
+                )
+            common = {c: row[c] for c in base_cols}
+            for sym in row["_syms"]:
+                rows.append({**common, "symbol": sym, NEWS_RETRACTED: False})
+            if not first:
+                for sym in sorted(prev - cur):
+                    rows.append({**common, "symbol": sym, NEWS_RETRACTED: True})
+            prev = cur
+            first = False
+    return pd.DataFrame(rows, columns=list(COLUMNS))
 
 
 def to_news_schema(frame: pd.DataFrame) -> pd.DataFrame:
