@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Any
 
 from algua.backtest.engine import BacktestError
-from algua.backtest.walkforward import walk_forward
+from algua.backtest.walkforward import _reject_pit_sidecar, walk_forward
 from algua.contracts.types import DataProvider
 from algua.portfolio.construction import ConstructionError, validate_construction_params
 from algua.strategies.base import LoadedStrategy
@@ -53,6 +53,7 @@ def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy
         signal_fn=strategy.signal_fn,
         signal_panel_fn=strategy.signal_panel_fn,
         fundamentals_signal_fn=strategy.fundamentals_signal_fn,
+        news_signal_fn=strategy.news_signal_fn,
     )
 
 
@@ -182,6 +183,7 @@ def sweep(
     """
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
+    _reject_pit_sidecar(strategy, "sweep")
     combos = _combos(grid)
 
     records: list[dict[str, Any]] = []
