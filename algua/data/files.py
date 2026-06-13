@@ -107,14 +107,18 @@ def write_bytes_snapshot(data: bytes, data_dir: Path, relative_path: Path) -> No
     """Atomically publish `data` at `data_dir/relative_path` via a same-dir temp +
     `os.replace` (#158): a reader never observes a partially written file, and a same-id
     concurrent re-publish is benign (content-addressed => identical bytes; readers see the
-    old or new inode, byte-identical)."""
+    old or new inode, byte-identical). Power-loss durable (#184): the temp's bytes are
+    fsynced before the rename, and the target's parent-dir chain (up to `data_dir`) after."""
     target_path = data_dir / relative_path
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_fd, temp_name = tempfile.mkstemp(dir=target_path.parent, prefix=".publish-")
     try:
         with os.fdopen(temp_fd, "wb") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(temp_name, target_path)
+        fsync_parents(target_path, stop_at=data_dir)
     finally:
         try:
             os.unlink(temp_name)

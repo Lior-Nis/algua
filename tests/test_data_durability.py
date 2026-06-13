@@ -72,3 +72,32 @@ def test_fsync_parents_walks_up_to_stop_at_inclusive(tmp_path: Path, monkeypatch
     assert str(root / "snapshots") in fsynced
     assert str(root) in fsynced
     assert str(root.parent) not in fsynced
+
+
+def test_write_bytes_snapshot_fsyncs_temp_before_replace_then_parents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    def spy_replace(src, dst):
+        events.append("replace")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    rel = Path("snapshots") / "universes" / "snap1" / "universe.parquet"
+    files.write_bytes_snapshot(b"payload-bytes", tmp_path, rel)
+
+    assert (tmp_path / rel).read_bytes() == b"payload-bytes"
+    # the temp file is fsynced BEFORE the rename; parent-chain dirs are fsynced AFTER
+    assert events[0] == "fsync"  # temp file
+    assert "replace" in events
+    assert events.index("fsync") < events.index("replace")
+    assert events.count("fsync") >= 2  # temp + at least one parent dir
+    assert events[-1] == "fsync"  # last parent-chain fsync after the replace
