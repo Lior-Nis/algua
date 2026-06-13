@@ -1,5 +1,8 @@
+from datetime import UTC, datetime
+
 import pytest
 
+from algua.backtest._sample import SyntheticProvider
 from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
@@ -40,4 +43,7 @@ def test_promotion_preflight_blocks_fundamentals(tmp_path):
             declared_combos=None,
             allow_holdout_reuse=False,
             allow_non_pit=False,
+            provider=SyntheticProvider(seed=0),
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 6, 1, tzinfo=UTC),
         )

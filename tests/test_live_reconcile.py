@@ -26,6 +26,26 @@ def test_account_expected_net_sums_all_strategies(tmp_path):
     assert R.account_expected_net(conn) == {"AAA": 15.0, "BBB": -3.0}
 
 
+def _live_strategy(conn, name):
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) "
+        "VALUES (?, 'live', ?, ?)",
+        (name, "2026-06-06T00:00:00+00:00", "2026-06-06T00:00:00+00:00"),
+    )
+    conn.commit()
+
+
+def test_attributed_live_net_excludes_orphan_and_non_live(tmp_path):
+    conn = _conn(tmp_path)
+    _live_strategy(conn, "live_a")            # a registered, currently-live strategy
+    _fill(conn, "a1", "live_a", "AAA", 5.0)   # counted (attributed + live)
+    _fill(conn, "a2", None, "AAA", 7.0)        # orphan (manual/external) — must be EXCLUDED
+    _fill(conn, "a3", "demoted", "BBB", 9.0)   # non-live strategy (no live row) — EXCLUDED
+    # account_expected_net counts everything; attributed_live_net only the live-attributed fill
+    assert R.account_expected_net(conn) == {"AAA": 12.0, "BBB": 9.0}
+    assert R.attributed_live_net(conn) == {"AAA": 5.0}
+
+
 def test_next_cycle_is_monotonic_and_persistent(tmp_path):
     conn = _conn(tmp_path)
     assert R.next_cycle(conn) == 1

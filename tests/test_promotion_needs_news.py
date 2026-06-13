@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import importlib
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 import algua.strategies.momentum as _momentum_fam
+from algua.backtest._sample import SyntheticProvider
 from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.db import connect, migrate
 from algua.registry.promotion import promotion_preflight
@@ -68,6 +70,9 @@ def test_promotion_preflight_blocks_news(tmp_path):
                 declared_combos=None,
                 allow_holdout_reuse=False,
                 allow_non_pit=False,
+                provider=SyntheticProvider(seed=0),
+                start=datetime(2024, 1, 1, tzinfo=UTC),
+                end=datetime(2024, 6, 1, tzinfo=UTC),
             )
     finally:
         path.unlink(missing_ok=True)

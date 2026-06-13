@@ -705,3 +705,17 @@ def test_activities_window_encodes_tz_offset(monkeypatch):
     # The timezone offset '+' must be encoded; no raw '+' may appear in the query string.
     assert "%2B" in url, f"expected %2B in URL, got: {url}"
     assert "+" not in url.split("?", 1)[1], f"raw '+' found in query string: {url}"
+
+
+def test_live_readonly_broker_requires_live_https_host():
+    from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, BrokerError
+
+    # accepts the live host with no LiveAuthorization
+    b = AlpacaLiveReadOnlyBroker("k", "s", base_url="https://api.alpaca.markets")
+    assert b.base_url == "https://api.alpaca.markets"
+    # refuses a non-live / non-https host (the platform invariant)
+    import pytest
+    with pytest.raises(BrokerError):
+        AlpacaLiveReadOnlyBroker("k", "s", base_url="https://paper-api.alpaca.markets")
+    with pytest.raises(BrokerError):
+        AlpacaLiveReadOnlyBroker("k", "s", base_url="http://api.alpaca.markets")

@@ -84,6 +84,77 @@ def test_full_research_lifecycle_to_shortlist_and_live_wall(capsys):
     assert _stage(capsys) == "forward_tested"
 
 
+# ---------------------------------------------------------------------------
+# Issue #125: dormant lifecycle end-to-end CLI tests
+# ---------------------------------------------------------------------------
+
+def _to_paper_e2e(capsys):
+    """Drive the strategy from idea to paper via the legal chain using CLI transitions.
+
+    Uses human actor for backtested/candidate steps (the raw shortcut route) and an
+    agent actor for the candidate->paper step, mirroring the existing e2e pattern.
+    """
+    code, payload = _run(capsys, "registry", "add", STRATEGY)
+    assert code == 0, payload
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "backtested", "--actor", "human", "--reason", "e2e setup")
+    assert code == 0, payload
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "candidate", "--actor", "human", "--reason", "e2e setup")
+    assert code == 0, payload
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "paper", "--actor", "agent", "--reason", "e2e setup")
+    assert code == 0, payload
+    assert _stage(capsys) == "paper"
+
+
+def test_e2e_paper_to_dormant_to_retired(capsys):
+    """paper -> dormant -> retired: both transitions succeed and stages are reported correctly."""
+    _to_paper_e2e(capsys)
+
+    # paper -> dormant: needs a non-empty reason; agent actor is allowed.
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "dormant", "--actor", "agent", "--reason", "seasonal")
+    assert code == 0, payload
+    assert _stage(capsys) == "dormant"
+
+    # dormant -> retired: also legal for any actor.
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "retired", "--actor", "agent", "--reason", "done")
+    assert code == 0, payload
+    assert _stage(capsys) == "retired"
+
+
+def test_e2e_paper_to_dormant_requires_reason(capsys):
+    """Transitioning to dormant without --reason must fail with a non-zero exit and an error
+    mentioning 'reason'."""
+    _to_paper_e2e(capsys)
+
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "dormant", "--actor", "agent")
+    assert code != 0, payload
+    assert payload.get("ok") is False
+    assert "reason" in payload.get("error", "").lower()
+    # Stage must be unchanged.
+    assert _stage(capsys) == "paper"
+
+
+def test_e2e_dormant_recovers_to_paper(capsys):
+    """A dormant strategy can be reactivated back to paper by any actor."""
+    _to_paper_e2e(capsys)
+
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "dormant", "--actor", "agent", "--reason", "seasonal")
+    assert code == 0, payload
+    assert _stage(capsys) == "dormant"
+
+    # dormant -> paper: the back-step edge is allowed.
+    code, payload = _run(capsys, "registry", "transition", STRATEGY,
+                         "--to", "paper", "--actor", "agent", "--reason", "revive")
+    assert code == 0, payload
+    assert _stage(capsys) == "paper"
+
+
 @pytest.mark.skipif(not ALGUA_BIN.exists(), reason="algua console script not installed")
 def test_installed_console_script_emits_json_and_exit_codes(tmp_path):
     """Smoke the real installed binary: in-process main() can't catch a broken script wiring."""

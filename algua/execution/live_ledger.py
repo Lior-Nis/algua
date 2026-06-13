@@ -99,6 +99,18 @@ def believed_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, flo
     return {r["symbol"]: float(r["q"]) for r in rows if float(r["q"]) != 0.0}
 
 
+def strategy_live_symbols(conn: sqlite3.Connection, strategy: str) -> set[str]:
+    """Every symbol a strategy is responsible for = the union of symbols in its live_orders and its
+    live_fills. Used by the resume reconcile to scope the broker-truth check to the strategy's own
+    symbols (a held-but-dropped symbol is in its fills even after it left the universe)."""
+    rows = conn.execute(
+        "SELECT symbol FROM live_orders WHERE strategy = ? "
+        "UNION SELECT symbol FROM live_fills WHERE strategy = ?",
+        (strategy, strategy),
+    ).fetchall()
+    return {r["symbol"] for r in rows}
+
+
 def _fills_for(
     conn: sqlite3.Connection, strategy: str, symbol: str
 ) -> list[tuple[float, float]]:

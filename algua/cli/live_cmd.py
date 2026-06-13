@@ -81,8 +81,12 @@ def allocate(
     """Set a strategy's live capital base (its fixed sizing denominator). Enforces that the sum of
     all live allocations does not exceed account equity."""
     with registry_conn() as conn:
-        sid = SqliteStrategyRepository(conn).get(name).id
-        allocations.allocate(conn, sid, capital=capital, actor="human",
+        rec = SqliteStrategyRepository(conn).get(name)
+        if rec.stage is Stage.DORMANT:
+            raise ValueError(
+                f"cannot allocate live capital to dormant strategy {name!r}; a recovered "
+                "strategy re-allocates only after re-climbing paper -> ... -> live")
+        allocations.allocate(conn, rec.id, capital=capital, actor="human",
                              account_equity=_live_account_equity())
     emit(ok({"strategy": name, "capital": capital}))
 

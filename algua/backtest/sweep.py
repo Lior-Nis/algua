@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import itertools
 import math
+import os
+import pickle
 from collections.abc import Collection, Mapping
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+
+from threadpoolctl import threadpool_limits
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import _reject_pit_sidecar, walk_forward
@@ -159,6 +165,111 @@ class SweepResult:
         return dataclasses.asdict(self)
 
 
+def _evaluate_combo(
+    overridden: LoadedStrategy,
+    *,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    windows: int,
+    holdout_frac: float,
+    universe_by_date: Mapping[date, Collection[str]] | None,
+    universe_name: str | None,
+    universe_snapshots: list[dict[str, str]] | None,
+    rank_by: str,
+) -> dict[str, Any]:
+    """Evaluate one already-overridden combo via walk_forward; return its rankable record + the
+    combo-independent meta. Module-level so it is picklable into a ProcessPoolExecutor worker.
+
+    Deliberately does NOT return wf.holdout_metrics: the holdout never leaves the worker process,
+    preserving sweep's single-use-holdout discipline (the holdout is revealed only in
+    `research promote`).
+    """
+    wf = walk_forward(
+        overridden, provider, start, end,
+        windows=windows, holdout_frac=holdout_frac,
+        universe_by_date=universe_by_date,
+        universe_name=universe_name, universe_snapshots=universe_snapshots,
+    )
+    return {
+        "config_hash": wf.config_hash,
+        "n_windows": wf.windows,
+        "stability": wf.stability,
+        "score": wf.stability[rank_by],
+        "meta": {
+            "data_source": wf.data_source,
+            "snapshot_id": wf.snapshot_id,
+            "timeframe": wf.timeframe,
+            "seed": wf.seed,
+            "code_hash": wf.code_hash,
+            "dependency_hash": wf.dependency_hash,
+            "period": wf.period,
+            "universe_name": wf.universe_name,
+            "universe_snapshots": wf.universe_snapshots,
+        },
+    }
+
+
+def _evaluate_combo_pooled(overridden: LoadedStrategy, **kwargs: Any) -> dict[str, Any]:
+    """Pool-worker wrapper: pin BLAS/OpenMP to ONE thread for this combo. numpy here is OpenBLAS
+    (many threads by default), so N worker processes each spawning a full BLAS pool would
+    oversubscribe the cores. The runtime `threadpool_limits` works under the default `fork` start
+    method (no env-before-import needed). The inline path deliberately does NOT call this — a lone
+    combo should use every core.
+    """
+    with threadpool_limits(limits=1):
+        return _evaluate_combo(overridden, **kwargs)
+
+
+def _run_combos(
+    overridden: list[LoadedStrategy], eval_kwargs: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Evaluate every pre-built combo strategy via walk_forward, returning records in COMBO ORDER.
+
+    A single combo (or a single-core host) runs inline — no pool overhead, full BLAS threads.
+    Otherwise a ProcessPoolExecutor fans the combos out; `executor.map` preserves input order so the
+    stable rank downstream stays reproducible.
+
+    Errors:
+      * A non-picklable strategy/provider is caught by a PARENT-side pickle preflight and raised as
+        BacktestError — a non-picklable nested fn raises AttributeError, a lambda PicklingError,
+        other cases TypeError, none of which @json_errors wraps, so the preflight keeps the JSON
+        contract intact and the message actionable.
+      * A combo's own failure (e.g. walk_forward raising BacktestError) is delivered back through
+        `map` and propagates with its OWN type — `except BacktestError: raise` keeps it unwrapped.
+      * A worker crash/OOM/kill (BrokenExecutor) is re-raised as BacktestError so the CLI's
+        @json_errors(ValueError, LookupError, BacktestError) still emits a JSON envelope. The catch
+        stays narrow (BrokenExecutor only) so a real worker bug surfacing as its own type is not
+        masked.
+      * Ordering matters: the domain re-raise MUST precede the infrastructure catch, or a worker
+        BacktestError would be double-wrapped into "parallel sweep failed".
+    """
+    n_workers = min(os.cpu_count() or 1, len(overridden))
+    if n_workers <= 1:
+        return [_evaluate_combo(ov, **eval_kwargs) for ov in overridden]
+
+    worker = functools.partial(_evaluate_combo_pooled, **eval_kwargs)
+    # Preflight the pickling in the PARENT so a non-picklable input becomes a JSON-safe
+    # BacktestError rather than a raw AttributeError/PicklingError/TypeError escaping mid-dispatch.
+    # Picklability is identical across combos (they share the strategy's fn refs + the provider
+    # bound in `worker`), so the first override is representative.
+    try:
+        pickle.dumps(worker)
+        pickle.dumps(overridden[0])
+    except (pickle.PicklingError, AttributeError, TypeError) as exc:
+        raise BacktestError(
+            "parallel sweep requires picklable strategy/provider inputs (a strategy signal must be "
+            f"a module-level function, not a closure/lambda): {exc}"
+        ) from exc
+    try:
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            return list(executor.map(worker, overridden))
+    except BacktestError:
+        raise
+    except BrokenExecutor as exc:
+        raise BacktestError(f"parallel sweep failed: {exc}") from exc
+
+
 def sweep(
     strategy: LoadedStrategy,
     provider: DataProvider,
@@ -185,39 +296,47 @@ def sweep(
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
     _reject_pit_sidecar(strategy, "sweep")
     combos = _combos(grid)
+    # Parent pre-pass: build + validate EVERY override here so a bad signal key or invalid
+    # construction param fails fast (ValueError) BEFORE any worker process spawns — exactly the
+    # parent-side behavior the sequential loop had.
+    overridden = [_override(strategy, combo) for combo in combos]
 
-    records: list[dict[str, Any]] = []
-    meta = None
-    for combo in combos:
-        wf = walk_forward(
-            _override(strategy, combo), provider, start, end,
-            windows=windows, holdout_frac=holdout_frac,
-            universe_by_date=universe_by_date,
-            universe_name=universe_name, universe_snapshots=universe_snapshots,
-        )
-        if meta is None:
-            meta = wf
-        # Note: wf.holdout_metrics is intentionally NOT copied into the record (see docstring).
-        records.append({
+    eval_kwargs: dict[str, Any] = dict(
+        provider=provider, start=start, end=end,
+        windows=windows, holdout_frac=holdout_frac,
+        universe_by_date=universe_by_date,
+        universe_name=universe_name, universe_snapshots=universe_snapshots,
+        rank_by=rank_by,
+    )
+    results = _run_combos(overridden, eval_kwargs)
+
+    # Build records in COMBO ORDER (zip with the original combos) so _rank_records' stable
+    # tie-break on equal score+std_sharpe stays reproducible regardless of worker completion order.
+    records = [
+        {
             "params": combo,
-            "config_hash": wf.config_hash,
-            "n_windows": wf.windows,
-            "stability": wf.stability,
-            "score": wf.stability[rank_by],
-        })
+            "config_hash": res["config_hash"],
+            "n_windows": res["n_windows"],
+            "stability": res["stability"],
+            "score": res["score"],
+        }
+        for combo, res in zip(combos, results, strict=True)
+    ]
+    # meta fields are combo-independent (same data + code identity for every combo); take the
+    # first for parity with the prior `meta = first wf` behavior.
+    meta = results[0]["meta"]
 
     ranked = _rank_records(records)
     best = {"params": ranked[0]["params"], "score": ranked[0]["score"]}
-    assert meta is not None  # combos is always non-empty (grid has >=1 key with >=1 value)
     return SweepResult(
         strategy=strategy.name,
-        data_source=meta.data_source,
-        snapshot_id=meta.snapshot_id,
-        timeframe=meta.timeframe,
-        seed=meta.seed,
-        code_hash=meta.code_hash,
-        dependency_hash=meta.dependency_hash,
-        period=meta.period,
+        data_source=meta["data_source"],
+        snapshot_id=meta["snapshot_id"],
+        timeframe=meta["timeframe"],
+        seed=meta["seed"],
+        code_hash=meta["code_hash"],
+        dependency_hash=meta["dependency_hash"],
+        period=meta["period"],
         windows=windows,
         holdout_frac=holdout_frac,
         grid=grid,
@@ -225,6 +344,6 @@ def sweep(
         rank_by=rank_by,
         ranked=ranked,
         best=best,
-        universe_name=meta.universe_name,
-        universe_snapshots=meta.universe_snapshots,
+        universe_name=meta["universe_name"],
+        universe_snapshots=meta["universe_snapshots"],
     )
