@@ -259,6 +259,97 @@ def test_cli_databento_requires_corp_actions(tmp_path, monkeypatch):
     assert "corp-actions" in res.output
 
 
+def test_data_verify_all_healthy_exits_zero(tmp_path):
+    source = tmp_path / "bars.csv"
+    source.write_text("ts,symbol,close\n2026-01-02,AAPL,100\n", encoding="utf-8")
+    # arrange: ingest a snapshot so the data dir is non-empty
+    _json(
+        runner.invoke(
+            app,
+            [
+                "data",
+                "ingest",
+                "daily-bars",
+                "--provider",
+                "local",
+                "--symbols",
+                "AAPL",
+                "--start",
+                "2026-01-02",
+                "--end",
+                "2026-01-02",
+                "--as-of",
+                "2026-01-03T00:00:00+00:00",
+                "--source",
+                "fixture",
+                "--from-file",
+                str(source),
+            ],
+        )
+    )
+    result = runner.invoke(app, ["data", "verify"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["failed"] == 0
+    assert payload["verified"] >= 1
+
+
+def test_data_verify_flags_damage_and_exits_nonzero(tmp_path, monkeypatch):
+    import os
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(data_dir))
+
+    source = tmp_path / "bars.csv"
+    source.write_text("ts,symbol,close\n2026-01-02,AAPL,100\n", encoding="utf-8")
+    _json(
+        runner.invoke(
+            app,
+            [
+                "data",
+                "ingest",
+                "daily-bars",
+                "--provider",
+                "local",
+                "--symbols",
+                "AAPL",
+                "--start",
+                "2026-01-02",
+                "--end",
+                "2026-01-02",
+                "--as-of",
+                "2026-01-03T00:00:00+00:00",
+                "--source",
+                "fixture",
+                "--from-file",
+                str(source),
+            ],
+        )
+    )
+    # find the payload file in data_dir and corrupt it
+    payload_files = list(data_dir.rglob("*.parquet")) + list(data_dir.rglob("*.csv"))
+    assert payload_files, "expected at least one payload file on disk"
+    target = payload_files[0]
+    with target.open("r+b") as fh:
+        fh.seek(0)
+        fh.write(b"\x00" * min(64, os.path.getsize(target)))
+
+    result = runner.invoke(app, ["data", "verify"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["failed"] == 1
+    assert any(not s["ok"] for s in payload["snapshots"])
+
+
+def test_data_verify_unknown_snapshot_id_exits_nonzero():
+    result = runner.invoke(app, ["data", "verify", "--snapshot-id", "deadbeefdeadbeef"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+
+
 def test_cli_databento_rejects_adjusted_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "store"))
     raw = tmp_path / "raw"
