@@ -1,3 +1,4 @@
+import copy
 from datetime import UTC, datetime
 
 import pytest
@@ -311,6 +312,45 @@ def test_retries_transport_error_then_raises(monkeypatch):
     with pytest.raises(BrokerError, match="after 3 attempts"):
         _broker().account()
     assert fake.attempts == 3
+
+
+class _TimeoutThenSucceedPost(_FakeRequests):
+    """POST raises a transport error (timeout) on the first attempt, then returns 201 on the
+    retry. Records EVERY attempt's body so we can assert the retried POST is byte-identical."""
+
+    def __init__(self, ok_payload):
+        super().__init__({})
+        self._ok = _FakeResp(201, ok_payload)
+        self.attempts = 0
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.attempts += 1
+        # Deep-copy so we capture the body AS SENT on each attempt — not a shared reference that
+        # would make the two-attempts-equal assertion tautological if production mutated it.
+        self.posted.append(copy.deepcopy(json))
+        if self.attempts == 1:
+            raise ab.RequestException("submit timed out")
+        return self._ok
+
+
+def test_submit_timeout_then_retry_reuses_client_order_id(monkeypatch):
+    # #166 gap 2: a submit POST that times out is retried by _request (transport errors are always
+    # retried). The retried POST must re-send the SAME deterministic client_order_id so Alpaca
+    # de-duplicates the order rather than double-filling. This unit test proves the CLIENT-SIDE
+    # guarantee (identical body incl. client_order_id on the retry) + a single returned order id;
+    # the actual no-double-order is Alpaca's server-side dedup on client_order_id (out of scope).
+    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    fake = _TimeoutThenSucceedPost({"id": "order-1"})
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+
+    oid = _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                                 client_order_id="cfg-20230102-AAA")
+
+    assert oid == "order-1"                    # one logical order, not two
+    assert fake.attempts == 2                  # first timed out, retry succeeded
+    assert len(fake.posted) == 2 and fake.posted[0] == fake.posted[1]   # byte-identical resubmit
+    assert fake.posted[0]["client_order_id"] == "cfg-20230102-AAA"
 
 
 def test_submit_sized_passes_client_order_id(monkeypatch):
