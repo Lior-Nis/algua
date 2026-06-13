@@ -9,7 +9,7 @@ import pytz
 
 from algua.data.contracts import FirstRateImportRequest, ImportRequest, ProviderBars
 from algua.data.store import normalize_symbols
-from algua.data.timeframes import is_intraday
+from algua.data.timeframes import is_intraday, validate_timeframe
 
 _FIRSTRATE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
 _PRICE_COLUMNS = ["open", "high", "low", "close"]
@@ -164,8 +164,7 @@ class FirstRateImporter:
     def import_bars(self, request: ImportRequest) -> Iterator[ProviderBars]:
         if not isinstance(request, FirstRateImportRequest):
             raise ValueError("FirstRateImporter requires a FirstRateImportRequest")
-        if request.timeframe != "1d":
-            raise ValueError("intraday import not yet supported (1d only)")
+        validate_timeframe(request.timeframe)
         raw_map = _discover(request.raw_dir)
         adj_map = _discover(request.adjusted_dir)
         _check_directory_roles(raw_map, adj_map)
@@ -184,30 +183,34 @@ class FirstRateImporter:
                 raise ValueError(f"requested symbols with no files: {missing}")
             symbols = [s for s in symbols if s in wanted]
         for symbol in symbols:
-            yield self._merge_symbol(symbol, raw_map[symbol], adj_map[symbol])
+            yield self._merge_symbol(symbol, raw_map[symbol], adj_map[symbol], request.timeframe)
 
-    def _merge_symbol(self, symbol: str, raw_path: Path, adj_path: Path) -> ProviderBars:
-        raw = parse_firstrate_file(raw_path)
-        adj = parse_firstrate_file(adj_path)[["ts", "close"]].rename(columns={"close": "adj_close"})
+    def _merge_symbol(
+        self, symbol: str, raw_path: Path, adj_path: Path, timeframe: str
+    ) -> ProviderBars:
+        raw = parse_firstrate_file(raw_path, timeframe)
+        adj = parse_firstrate_file(adj_path, timeframe)[["ts", "close"]].rename(
+            columns={"close": "adj_close"}
+        )
 
         if raw["ts"].duplicated().any():
             dupes = sorted(
-                str(d) for d in raw.loc[raw["ts"].duplicated(keep=False), "ts"].dt.date.unique()
+                str(ts) for ts in raw.loc[raw["ts"].duplicated(keep=False), "ts"].unique()
             )
             raise ValueError(f"{symbol}: duplicate timestamps in raw file: {dupes}")
         if adj["ts"].duplicated().any():
             dupes = sorted(
-                str(d) for d in adj.loc[adj["ts"].duplicated(keep=False), "ts"].dt.date.unique()
+                str(ts) for ts in adj.loc[adj["ts"].duplicated(keep=False), "ts"].unique()
             )
             raise ValueError(f"{symbol}: duplicate timestamps in adjusted file: {dupes}")
 
         raw_keys = set(raw["ts"])
         adj_keys = set(adj["ts"])
         if raw_keys != adj_keys:
-            unmatched = sorted(str(ts.date()) for ts in raw_keys.symmetric_difference(adj_keys))
+            unmatched = sorted(str(ts) for ts in raw_keys.symmetric_difference(adj_keys))
             raise ValueError(
                 f"{symbol}: raw and adjusted key sets differ; refusing partial merge. "
-                f"unmatched dates: {unmatched}"
+                f"unmatched timestamps: {unmatched}"
             )
 
         merged = raw.merge(adj, on="ts", how="inner")

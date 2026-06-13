@@ -206,12 +206,64 @@ def test_symbols_filter_subset(tmp_path):
     assert [c.frame["symbol"].iloc[0] for c in chunks] == ["AAPL"]
 
 
-def test_bad_timeframe_errors(tmp_path):
+def test_unknown_timeframe_errors(tmp_path):
     raw, adj = _firstrate_dirs(tmp_path)
     _write_pair(raw, adj, "AAPL", ["2024-07-01,1,1,1,1,1\n"], ["2024-07-01,1,1,1,1,1\n"])
-    with pytest.raises(ValueError, match="intraday import not yet supported"):
+    with pytest.raises(ValueError, match="unknown timeframe"):
         list(FirstRateImporter().import_bars(
-            FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1h")))
+            FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="5min")))
+
+
+def _write_intraday_pair(raw, adj, symbol, raw_rows, adj_rows):
+    (raw / f"{symbol}_full_1min_UNADJUSTED.txt").write_text("".join(raw_rows), encoding="utf-8")
+    (adj / f"{symbol}_full_1min_adjsplitdiv.txt").write_text("".join(adj_rows), encoding="utf-8")
+
+
+def test_intraday_import_merges_and_localizes(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    _write_intraday_pair(
+        raw, adj, "AAPL",
+        ["2024-07-01 09:30:00,100,110,95,105,1000\n", "2024-07-01 09:31:00,105,120,100,115,2000\n"],
+        ["2024-07-01 09:30:00,50,55,47,52,1000\n", "2024-07-01 09:31:00,52,60,50,57,2000\n"],
+    )
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1m")
+    chunks = list(FirstRateImporter().import_bars(req))
+    assert len(chunks) == 1
+    frame = chunks[0].frame
+    row = frame.set_index("ts").loc[pd.Timestamp("2024-07-01 13:30:00", tz="UTC")]
+    assert row["close"] == 105.0
+    assert row["adj_close"] == 52.0
+    validate_bars(to_bar_schema(frame))
+
+
+def test_intraday_import_30m(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    (raw / "AAPL_full_30min_UNADJUSTED.txt").write_text(
+        "2024-07-01 09:30:00,1,1,1,1,1\n2024-07-01 10:00:00,1,1,1,1,1\n", encoding="utf-8")
+    (adj / "AAPL_full_30min_adjsplitdiv.txt").write_text(
+        "2024-07-01 09:30:00,1,1,1,1,1\n2024-07-01 10:00:00,1,1,1,1,1\n", encoding="utf-8")
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="30m")
+    chunks = list(FirstRateImporter().import_bars(req))
+    frame = chunks[0].frame
+    assert frame["ts"].tolist() == [
+        pd.Timestamp("2024-07-01 13:30:00", tz="UTC"),
+        pd.Timestamp("2024-07-01 14:00:00", tz="UTC"),
+    ]
+    validate_bars(to_bar_schema(frame))
+
+
+def test_intraday_duplicate_message_shows_full_timestamp(tmp_path):
+    raw, adj = _firstrate_dirs(tmp_path)
+    _write_intraday_pair(
+        raw, adj, "AAPL",
+        ["2024-07-01 09:30:00,1,1,1,1,1\n", "2024-07-01 09:30:00,2,2,2,2,2\n"],  # dup intraday ts
+        ["2024-07-01 09:30:00,1,1,1,1,1\n"],
+    )
+    # 09:30 ET -> 13:30 UTC; the message renders the full UTC instant (time-of-day intact),
+    # not a date-collapsed value.
+    with pytest.raises(ValueError, match="duplicate timestamps in raw file.*13:30:00"):
+        list(FirstRateImporter().import_bars(
+            FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1m")))
 
 
 def test_duplicate_timestamp_in_raw_errors(tmp_path):
