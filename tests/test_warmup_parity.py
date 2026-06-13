@@ -26,14 +26,19 @@ START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 4, 1, tzinfo=UTC)
 
 
-def _momentum_strategy(warmup_bars: int) -> LoadedStrategy:
-    """Long-only, path-dependent 5-bar momentum (same shape as the pairwise parity tests)."""
+def _momentum_strategy(warmup_bars: int, lookback: int) -> LoadedStrategy:
+    """Long-only, path-dependent momentum (same shape as the pairwise parity tests).
+
+    `lookback <= warmup_bars` is deliberate: the signal is READY at the warm-up boundary (session
+    index N has N+1 > lookback bars), so the boundary decision is genuinely NON-FLAT. That lets the
+    test prove the boundary is actually EVALUATED — not merely that the strategy happens to be flat
+    there — and that warm-up forces flatness even when the signal could already fire."""
     cfg = StrategyConfig(
         name="momo", universe=["AAA", "BBB", "CCC"],
         execution=ExecutionContract(
             rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=warmup_bars
         ),
-        params={"lookback": 5},
+        params={"lookback": lookback},
         construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
 
@@ -77,7 +82,7 @@ class _FlatBroker:
 
 def test_backtest_paper_live_share_one_warmup_boundary() -> None:
     warmup = 4
-    strat = _momentum_strategy(warmup_bars=warmup)
+    strat = _momentum_strategy(warmup_bars=warmup, lookback=3)  # lookback<=warmup: boundary fires
     provider = SyntheticProvider(seed=0)
 
     bars = provider.get_bars(strat.universe, START, END, "1d")
@@ -85,18 +90,21 @@ def test_backtest_paper_live_share_one_warmup_boundary() -> None:
     sessions = list(adj.sort_index().index)
     boundary = sessions[warmup]   # session index N — the shared first-decision bar
 
-    # --- Backtest: the first N sessions are forced flat. ---
+    # --- Backtest: the first N sessions are forced flat (even though the signal is ready by index
+    # `lookback < N`), and the boundary IS evaluated — a non-flat decision, not a skipped bar. ---
     bt_weights = _decision_weights(strat, bars, adj.sort_index())
     for t in sessions[:warmup]:
         assert (bt_weights.loc[t] == 0.0).all(), f"backtest not flat during warm-up at {t}"
+    assert bt_weights.loc[boundary].abs().sum() > 0.0, "backtest did not decide at the boundary"
 
-    # --- Paper: never decides during warm-up; first decision is exactly the boundary. ---
+    # --- Paper: never decides during warm-up; first decision is exactly the boundary, non-flat. ---
     recorder: dict[datetime, pd.Series] = {}
     run_paper(strat, SimBroker(cash=1_000_000.0), provider, START, END,
               on_decision=_record_into(recorder))
     for t in sessions[:warmup]:
         assert t not in recorder, f"paper decided during warm-up at {t}"
     assert sorted(recorder)[0] == boundary
+    assert recorder[boundary].abs().sum() > 0.0, "paper did not decide at the boundary"
 
     # --- Live: N closed sessions => warm-up not met; N+1 => first decides on the boundary. ---
     # now = sessions[N] makes sessions[0..N-1] (N sessions) the only fully-closed bars.
@@ -110,3 +118,4 @@ def test_backtest_paper_live_share_one_warmup_boundary() -> None:
                    now=sessions[warmup + 1].to_pydatetime())
     assert met.decision_ts == boundary
     assert broker.snapshots == 1   # warm-up satisfied: a sizing snapshot was taken
+    assert sum(abs(w) for w in met.target_weights.values()) > 0.0, "live did not decide at boundary"

@@ -1,12 +1,7 @@
-from datetime import UTC, datetime
-
 import pandas as pd
 import pytest
 
-from algua.contracts.types import OrderIntent, Side
-from algua.execution import alpaca_broker as ab
 from algua.execution import live_sizing as S
-from algua.execution.alpaca_broker import AlpacaPaperBroker
 from algua.registry.db import connect, migrate
 
 
@@ -14,27 +9,6 @@ def _conn(tmp_path):
     conn = connect(tmp_path / "s.db")
     migrate(conn)
     return conn
-
-
-class _Resp:
-    def __init__(self, code, payload):
-        self.status_code = code
-        self._payload = payload
-        self.text = ""
-
-    def json(self):
-        return self._payload
-
-
-class _RecordingRequests:
-    """Records POST bodies; returns a 201 with an order id (sizing is off the passed snapshot)."""
-
-    def __init__(self):
-        self.posted = []
-
-    def post(self, url, headers=None, json=None, timeout=None):
-        self.posted.append(json)
-        return _Resp(201, {"id": "o1"})
 
 
 def _fill(conn, aid, strategy, symbol, qty, price):
@@ -94,29 +68,6 @@ def test_held_symbol_missing_mark_fails_closed(tmp_path):
     bars = _bars({"AAA": [100.0]})
     with pytest.raises(S.LiveSizingError, match="mark"):
         S.build_live_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars, universe=["AAA"])
-
-
-def test_derealized_equity_flows_into_order_sizing_downstream(tmp_path, monkeypatch):
-    # #166 gap 4: the derealized sizing equity (min(allocation, NAV)) must actually reach order
-    # SIZING downstream, not just appear on the snapshot. allocation=10k but a loss-making held
-    # position derisks NAV to 8k -> a fresh buy must be sized off 8k, not the 10k allocation.
-    conn = _conn(tmp_path)
-    # Hold 100 BBB @100 (cost 10k), now marked at 80 -> unrealized -2000 -> NAV 8000.
-    _fill(conn, "a1", "s1", "BBB", 100.0, 100.0)
-    bars = _bars({"AAA": [100.0], "BBB": [80.0]})
-    snap, nav = S.build_live_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars,
-                                             universe=["AAA", "BBB"])
-    assert nav == 8_000.0 and snap.equity == 8_000.0   # snapshot is derealized
-
-    fake = _RecordingRequests()
-    monkeypatch.setattr(ab, "requests", fake)
-    broker = AlpacaPaperBroker(api_key="k", api_secret="s")
-    # Size a FRESH AAA buy (flat) to target weight 0.5 off the derealized snapshot.
-    oid = broker.submit_sized(OrderIntent("AAA", Side.BUY, 0.5, datetime(2026, 6, 1, tzinfo=UTC)),
-                              snap)
-    assert oid == "o1"
-    # 0.5 * 8000 (derealized) = 4000.00 — NOT 0.5 * 10000 allocation = 5000.00.
-    assert fake.posted[0]["notional"] == "4000.00"
 
 
 def test_nav_collapse_fails_closed(tmp_path):

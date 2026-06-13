@@ -150,23 +150,28 @@ def test_run_tick_warmup_boundary_matches_backtest_paper_semantic():
 
 
 class _DedupBroker(_FakeBroker):
-    """Mimics Alpaca's client_order_id de-dup: a resubmit carrying the SAME client_order_id maps
-    back to the SAME broker_order_id (one logical order), as it does after a transient retry or a
-    full tick replay. A fresh coid gets a fresh id."""
+    """Mimics Alpaca's client_order_id de-dup: a resubmit carrying the SAME (non-None)
+    client_order_id maps back to the SAME broker_order_id (one logical order), as it does after a
+    transient retry or a full tick replay. A MISSING client_order_id gets a FRESH broker id every
+    time (no dedup) — exactly as Alpaca would, so the test fails if the deterministic id ever stops
+    being threaded through the loop."""
 
     def __init__(self, **kw):
         super().__init__(**kw)
         self._by_coid = {}
+        self._counter = 0
 
     def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
         if intent.symbol not in snap.qtys:
             raise BrokerError(f"{intent.symbol} not in universe")
-        if client_order_id in self._by_coid:
-            return self._by_coid[client_order_id]      # dedup: same order, same broker id
-        oid = f"order-{len(self._by_coid) + 1}"
-        self._by_coid[client_order_id] = oid
-        self.submitted.append(intent)
         self.client_order_ids.append(client_order_id)
+        if client_order_id is not None and client_order_id in self._by_coid:
+            return self._by_coid[client_order_id]      # dedup: same order, same broker id
+        self._counter += 1
+        oid = f"order-{self._counter}"
+        if client_order_id is not None:                # None -> no mapping stored -> never dedups
+            self._by_coid[client_order_id] = oid
+        self.submitted.append(intent)
         return oid
 
 
@@ -192,10 +197,60 @@ def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
     for _ in range(2):  # run the SAME tick twice (replay)
         run_tick(strat, broker, _FakeProvider(bars), DATES[0], DATES[-1], now=now, hooks=hooks)
 
+    # The deterministic id was threaded on BOTH runs — the precondition for Alpaca's dedup. If the
+    # loop ever stopped sending it, _DedupBroker would mint two distinct ids -> two rows -> failure.
+    assert broker.client_order_ids == ["cfg-AAA", "cfg-AAA"]
     rows = conn.execute(
         "SELECT broker_order_id FROM paper_orders WHERE strategy = ?", (strat.name,)
     ).fetchall()
     assert len(rows) == 1 and rows[0]["broker_order_id"] == "order-1"  # one row, not duplicated
+
+
+def test_run_tick_live_snapshot_equity_flows_into_order_notional(monkeypatch):
+    # #166 gap 4: the ledger-backed sizing equity supplied via live_snapshot must reach order
+    # SIZING in the loop, not just the snapshot/drawdown checks. A buy is sized off the derealized
+    # 8k equity, and the account-equity path (broker.snapshot) is NOT consulted. Uses the REAL
+    # AlpacaPaperBroker sizing path so the notional is genuinely computed, not stubbed.
+    from algua.execution import alpaca_broker as ab
+    from algua.execution.alpaca_broker import AlpacaPaperBroker
+
+    class _Resp:
+        def __init__(self, code, payload):
+            self.status_code = code
+            self._payload = payload
+            self.text = ""
+
+        def json(self):
+            return self._payload
+
+    class _RecordingRequests:
+        def __init__(self):
+            self.posted = []
+
+        def get(self, url, headers=None, timeout=None):
+            return _Resp(200, [])
+
+        def post(self, url, headers=None, json=None, timeout=None):
+            self.posted.append(json)
+            return _Resp(201, {"id": "o1"})
+
+        def delete(self, url, headers=None, timeout=None):
+            return _Resp(200, [])
+
+    fake = _RecordingRequests()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = AlpacaPaperBroker(api_key="k", api_secret="s")
+    # Guard: the live path must size off the hook's snapshot, never fall back to account equity.
+    monkeypatch.setattr(broker, "snapshot", lambda universe: (_ for _ in ()).throw(
+        AssertionError("run_tick must use live_snapshot, not broker.snapshot()")))
+
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    # Derealized ledger snapshot: equity 8k (e.g. min(10k allocation, 8k NAV)), flat book.
+    sizing_snap = TickSnapshot(equity=8_000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    hooks = TickHooks(live_snapshot=lambda b: (sizing_snap, 8_000.0))
+    run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(bars), DATES[0], DATES[-1], hooks=hooks)
+    # 0.5 * 8000 derealized = 4000.00 — NOT sized off any 10k allocation / account equity.
+    assert fake.posted[0]["notional"] == "4000.00"
 
 
 def test_run_tick_gross_breach_raises():

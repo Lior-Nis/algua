@@ -1,3 +1,4 @@
+import copy
 from datetime import UTC, datetime
 
 import pytest
@@ -324,7 +325,9 @@ class _TimeoutThenSucceedPost(_FakeRequests):
 
     def post(self, url, headers=None, json=None, timeout=None):
         self.attempts += 1
-        self.posted.append(json)               # record the body on EVERY attempt, fail or success
+        # Deep-copy so we capture the body AS SENT on each attempt — not a shared reference that
+        # would make the two-attempts-equal assertion tautological if production mutated it.
+        self.posted.append(copy.deepcopy(json))
         if self.attempts == 1:
             raise ab.RequestException("submit timed out")
         return self._ok
