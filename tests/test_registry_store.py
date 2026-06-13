@@ -211,6 +211,36 @@ def test_reserve_inside_open_transaction_raises(repo_with_strategy):
         repo._conn.rollback()
 
 
+def test_finalize_twice_raises(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
+    repo.finalize_holdout_reservation(rid, config_hash="h1")
+    with pytest.raises(ValueError):
+        repo.finalize_holdout_reservation(rid, config_hash="h2")
+
+
+def test_release_after_finalize_is_noop(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
+    repo.finalize_holdout_reservation(rid, config_hash="h1")
+    repo.release_holdout_reservation(rid)  # no-op, no raise
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
+
+
+def test_reserve_snapshot_identity_precedence(repo_with_strategy):
+    # A burn recorded with snapshot_id="snapA" does NOT block a non-snapshot probe over the SAME
+    # overlapping interval (distinct identities). The snapshot probe IS blocked by a second
+    # attempt on an overlapping interval under that same snapshot identity.
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap="snapA")
+    # Non-snapshot probe over the same interval: different identity bucket — must succeed.
+    _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap=None)
+    # Second snapshot probe on an overlapping interval: same snapA identity — must block.
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2022-09-01", he="2023-03-31", snap="snapA")
+
+
 def _record_pass(repo, sid, *, actor="agent", code="c0", config="cfg0", dep="dep0"):
     return repo.record_gate_evaluation(
         sid, passed=True, n_funnel=9, own_lifetime_combos=9, windowed_total_combos=9,
