@@ -27,6 +27,8 @@ _HOLDOUT_REUSE_OVERRIDE = "override"
 
 
 @research_app.command("promote")
+# sqlite3.OperationalError keeps lock-contention ("database is locked") from reserve_holdout's
+# BEGIN IMMEDIATE inside the JSON envelope, not a leaked traceback (CLI JSON-output contract).
 @json_errors(ValueError, LookupError, BacktestError, sqlite3.OperationalError)
 def promote(
     name: str,
