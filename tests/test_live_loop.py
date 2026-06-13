@@ -5,7 +5,9 @@ import pytest
 
 from algua.contracts.types import ExecutionContract
 from algua.execution.alpaca_broker import BrokerError, TickSnapshot
+from algua.execution.order_state import record_submitted_order
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.registry.db import connect, migrate
 from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
@@ -145,6 +147,55 @@ def test_run_tick_warmup_boundary_matches_backtest_paper_semantic():
                       dates_n1[0], dates_n1[-1], now=after)
     assert result.decision_ts == dates_n1[N]  # session index N (0-based)
     assert len(result.submitted) == 1 and result.submitted[0]["symbol"] == "AAA"
+
+
+class _DedupBroker(_FakeBroker):
+    """Mimics Alpaca's client_order_id de-dup: a resubmit carrying the SAME client_order_id maps
+    back to the SAME broker_order_id (one logical order), as it does after a transient retry or a
+    full tick replay. A fresh coid gets a fresh id."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._by_coid = {}
+
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
+        if intent.symbol not in snap.qtys:
+            raise BrokerError(f"{intent.symbol} not in universe")
+        if client_order_id in self._by_coid:
+            return self._by_coid[client_order_id]      # dedup: same order, same broker id
+        oid = f"order-{len(self._by_coid) + 1}"
+        self._by_coid[client_order_id] = oid
+        self.submitted.append(intent)
+        self.client_order_ids.append(client_order_id)
+        return oid
+
+
+def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
+    # #166 gap 3: the LIVE replay equivalent of order_state idempotency. A crash/retry replays the
+    # same tick: the deterministic client_order_id makes Alpaca return the SAME broker_order_id, and
+    # on_submitted -> record_submitted_order must INSERT OR IGNORE so the replay leaves exactly one
+    # paper_orders row (not a duplicate). Covers the live loop wiring, not just the bare DB writer.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    broker = _DedupBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    strat = _strategy({"AAA": 1.0})
+    now = datetime(2023, 1, 5, tzinfo=UTC)   # all three sessions fully closed -> stable decision_ts
+    hooks = TickHooks(
+        client_order_id_for=lambda s, ts, sym: f"{s}-{sym}",  # deterministic across the replay
+        on_submitted=lambda o: record_submitted_order(
+            conn, strat.name, o.symbol, o.side, o.target_weight,
+            o.decision_ts.isoformat(), o.order_id, strategy_id=1,
+        ),
+    )
+
+    for _ in range(2):  # run the SAME tick twice (replay)
+        run_tick(strat, broker, _FakeProvider(bars), DATES[0], DATES[-1], now=now, hooks=hooks)
+
+    rows = conn.execute(
+        "SELECT broker_order_id FROM paper_orders WHERE strategy = ?", (strat.name,)
+    ).fetchall()
+    assert len(rows) == 1 and rows[0]["broker_order_id"] == "order-1"  # one row, not duplicated
 
 
 def test_run_tick_gross_breach_raises():
