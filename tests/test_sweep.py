@@ -127,3 +127,14 @@ def test_run_combos_pool_preserves_order():
     # Order preserved (map) and reproducible across runs (determinism under the pool).
     assert [r["config_hash"] for r in a] == [r["config_hash"] for r in b]
     assert len(a) == 3
+
+
+def test_sweep_combo_error_surfaces_as_backtest_error():
+    from algua.backtest.engine import BacktestError
+
+    # >1 combo so this runs through the pool; `windows` far too large for the period forces
+    # walk_forward to raise BacktestError ("not enough bars"). It must come back as BacktestError
+    # (CLI-wrappable), not a BrokenProcessPool and not a partial result.
+    with pytest.raises(BacktestError):
+        sweep(_momentum(), SyntheticProvider(seed=3), START, END,
+              grid={"lookback": [20, 40]}, windows=500, holdout_frac=0.2)
