@@ -276,3 +276,90 @@ def test_parquet_dataset_row_count_sums_all_partitions(tmp_path: Path) -> None:
     rec = _ingest_bars(store)
     target = (tmp_path / "store") / rec.data_path
     assert files.parquet_dataset_row_count(target) == rec.row_count  # 4
+
+
+def test_verify_snapshot_healthy_bars(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = _ingest_bars(store)
+    store.verify_snapshot(rec)  # must not raise
+
+
+def test_verify_snapshot_detects_corrupt_part_file(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = _ingest_bars(store)
+    part = next(((tmp_path / "store") / rec.data_path).rglob("*.parquet"))
+    part.write_bytes(part.read_bytes()[:8])  # corrupt the body
+    with pytest.raises(Exception):  # noqa: B017
+        store.verify_snapshot(rec)
+
+
+def test_verify_snapshot_detects_missing_partition(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = _ingest_bars(store)
+    target = (tmp_path / "store") / rec.data_path
+    sym_dir = next(p for p in target.iterdir() if p.is_dir())
+    import shutil as _sh
+    _sh.rmtree(sym_dir)  # drop one whole symbol partition
+    with pytest.raises(ValueError):  # row count now short
+        store.verify_snapshot(rec)
+
+
+def test_verify_snapshot_healthy_single_file_parquet(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = store.ingest_universe(
+        universe="sp100", symbols=["AAPL", "MSFT"], effective_date="2026-01-02",
+        as_of="2026-01-03T00:00:00+00:00", source="fixture",
+    )
+    store.verify_snapshot(rec)  # must not raise
+
+
+def test_verify_snapshot_detects_truncated_single_file(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = store.ingest_universe(
+        universe="sp100", symbols=["AAPL", "MSFT"], effective_date="2026-01-02",
+        as_of="2026-01-03T00:00:00+00:00", source="fixture",
+    )
+    p = (tmp_path / "store") / rec.data_path
+    p.write_bytes(p.read_bytes()[:8])
+    with pytest.raises(Exception):  # noqa: B017
+        store.verify_snapshot(rec)
+
+
+def test_verify_snapshot_byte_hash_branch_detects_tamper(tmp_path: Path) -> None:
+    src = tmp_path / "src.csv"
+    pd.DataFrame({"a": [1, 2, 3]}).to_csv(src, index=False)
+    store = DataStore(tmp_path / "store")
+    rec = store.ingest_file(
+        file_path=src, dataset="custom", provider="local", symbols=["AAPL"],
+        start="2026-01-02", end="2026-01-02", as_of="2026-01-03T00:00:00+00:00",
+        source="fixture", kind="custom",
+    )
+    p = (tmp_path / "store") / rec.data_path
+    p.write_text("a\n9\n9\n9\n")  # same row count, different bytes
+    with pytest.raises(ValueError):
+        store.verify_snapshot(rec)
+
+
+def test_verify_snapshot_missing_payload_path_fails_closed(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = _ingest_bars(store)
+    import shutil as _sh
+    _sh.rmtree((tmp_path / "store") / rec.data_path)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        store.verify_snapshot(rec)
+
+
+def test_verify_snapshots_aggregates_and_flags_failures(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    good = _ingest_bars(store)
+    bad = store.ingest_universe(
+        universe="sp100", symbols=["AAPL"], effective_date="2026-01-02",
+        as_of="2026-01-03T00:00:00+00:00", source="fixture",
+    )
+    p = (tmp_path / "store") / bad.data_path
+    p.write_bytes(p.read_bytes()[:8])
+    results = store.verify_snapshots()
+    by_id = {r["snapshot_id"]: r for r in results}
+    assert by_id[good.snapshot_id]["ok"] is True
+    assert by_id[bad.snapshot_id]["ok"] is False
+    assert by_id[bad.snapshot_id]["error"]

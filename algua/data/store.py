@@ -23,6 +23,8 @@ from algua.data.files import (
     fsync_parents,
     fsync_tree,
     logical_bars_hash,
+    parquet_dataset_row_count,
+    parquet_file_row_count,
     read_partitioned_bars,
     sha256_bytes,
     sha256_file,
@@ -449,6 +451,71 @@ class DataStore:
         if rec is None:
             raise SnapshotNotFound(snapshot_id)
         return rec
+
+    def verify_snapshot(self, rec: SnapshotRecord) -> None:
+        """Power-loss read-back of one snapshot's payload (#184). Reads the bytes back to prove
+        they are durable and decompressible, and checks the row count against the record. Raises
+        on any damage (the caller decides how to surface it). Dispatch by `storage_format`:
+
+        - ``parquet_dataset`` (bars): full read of every partition; summed rows == ``row_count``.
+        - ``parquet`` (universe/fundamentals/news, or a ``.parquet`` via ``ingest_file``): full
+          read of the single file; ``num_rows == row_count``. Readability check, NOT a
+          content-hash recompute.
+        - anything else (``ingest_file`` csv/generic): ``sha256_file == content_hash`` (a full
+          read). Fails closed: a record whose ``content_hash`` is not a byte hash would report a
+          (false) failure rather than a false pass — that signals the dispatch needs extending.
+        """
+        target = self.data_dir / rec.data_path
+        fmt = rec.storage_format
+        if fmt == "parquet_dataset":
+            if not target.is_dir():
+                raise ValueError(f"snapshot {rec.snapshot_id}: payload dir missing at {target}")
+            rows = parquet_dataset_row_count(target)
+            if rec.row_count is not None and rows != rec.row_count:
+                raise ValueError(
+                    f"snapshot {rec.snapshot_id}: read {rows} rows, expected {rec.row_count}"
+                )
+        elif fmt == "parquet":
+            if not target.is_file():
+                raise ValueError(f"snapshot {rec.snapshot_id}: payload file missing at {target}")
+            rows = parquet_file_row_count(target)
+            if rec.row_count is not None and rows != rec.row_count:
+                raise ValueError(
+                    f"snapshot {rec.snapshot_id}: read {rows} rows, expected {rec.row_count}"
+                )
+        else:
+            if not target.is_file():
+                raise ValueError(f"snapshot {rec.snapshot_id}: payload file missing at {target}")
+            actual = sha256_file(target)
+            if actual != rec.content_hash:
+                raise ValueError(
+                    f"snapshot {rec.snapshot_id}: content hash {actual} != {rec.content_hash}"
+                )
+
+    def verify_snapshots(self, snapshot_id: str | None = None) -> list[dict[str, Any]]:
+        """Verify one snapshot (`snapshot_id`) or all committed snapshots. Returns one result
+        row per snapshot: ``{snapshot_id, dataset, storage_format, ok, error}``. Never raises for
+        a damaged payload — the damage is captured in the row (`ok=False`); the caller decides
+        the exit code. A missing `snapshot_id` itself raises `SnapshotNotFound`."""
+        records = (
+            [self.get_snapshot(snapshot_id)] if snapshot_id is not None else self.list_snapshots()
+        )
+        results: list[dict[str, Any]] = []
+        for rec in records:
+            row: dict[str, Any] = {
+                "snapshot_id": rec.snapshot_id,
+                "dataset": rec.dataset,
+                "storage_format": rec.storage_format,
+                "ok": True,
+                "error": None,
+            }
+            try:
+                self.verify_snapshot(rec)
+            except Exception as exc:  # noqa: BLE001 - any read-back failure is a verify failure
+                row["ok"] = False
+                row["error"] = str(exc)
+            results.append(row)
+        return results
 
     def read_bars(
         self,
