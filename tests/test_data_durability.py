@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from algua.data import files
@@ -252,3 +254,25 @@ def test_commit_bars_adoption_fsyncs_before_manifest_append(tmp_path: Path, monk
     tree_events = [e for e in events if e.startswith("tree:")]
     assert tree_events
     assert events.index(tree_events[0]) < events.index("append")
+
+
+def test_parquet_file_row_count_reads_back_and_counts(tmp_path: Path) -> None:
+    p = tmp_path / "x.parquet"
+    pq.write_table(pa.table({"a": [1, 2, 3, 4]}), p)
+    assert files.parquet_file_row_count(p) == 4
+
+
+def test_parquet_file_row_count_raises_on_truncated_file(tmp_path: Path) -> None:
+    p = tmp_path / "x.parquet"
+    pq.write_table(pa.table({"a": list(range(1000))}), p)
+    data = p.read_bytes()
+    p.write_bytes(data[: len(data) // 2])  # lop off the tail (footer + pages)
+    with pytest.raises(Exception):  # noqa: B017 — pyarrow raises on an unreadable/torn file
+        files.parquet_file_row_count(p)
+
+
+def test_parquet_dataset_row_count_sums_all_partitions(tmp_path: Path) -> None:
+    store = DataStore(tmp_path / "store")
+    rec = _ingest_bars(store)
+    target = (tmp_path / "store") / rec.data_path
+    assert files.parquet_dataset_row_count(target) == rec.row_count  # 4
