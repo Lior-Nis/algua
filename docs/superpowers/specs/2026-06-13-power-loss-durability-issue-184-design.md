@@ -148,10 +148,12 @@ uv run algua data verify [--snapshot-id ID]
   payload path exists and is the expected type (dir for `parquet_dataset`, file otherwise);
   a missing path or type mismatch is itself a failure (not a crash).
 
-### Validation dispatch (full read-back, by `storage_format` — explicit + closed)
+### Validation dispatch (full read-back, by `storage_format`)
 
-The dispatch is a **closed** match on `storage_format`; an unrecognized value fails with
-`"unsupported verify format: <fmt>"` rather than silently assuming byte-hash semantics.
+Dispatch is on `storage_format`: the two parquet forms get a read-back, everything else gets
+the byte-hash check. The byte-hash branch **fails closed** — if a record's `content_hash` is
+not a byte hash of the file, the check reports the snapshot as failed (never a false *pass*),
+so an un-extended future format degrades to a loud false-failure, not silent acceptance.
 
 | `storage_format` | Check | Catches |
 |---|---|---|
@@ -167,9 +169,10 @@ produces a non-`parquet`/non-`parquet_dataset` `storage_format` is `ingest_file`
 `content_hash` is a byte hash (`sha256_file`) by construction. So `sha256_file == content_hash`
 is always correct on this branch *today*. The implementation documents this as a load-bearing
 invariant: **any future ingest path that introduces a new non-parquet `storage_format` with a
-logical (non-byte) hash MUST extend this dispatch** — the byte-hash branch is not a safe
-default for a logical-hash format. (A `content_hash_kind` provenance column was considered
-and declined: no such format exists, and it is a schema bump for a low-urgency feature.)
+logical (non-byte) hash MUST extend this dispatch** — the byte-hash branch would then report
+that record as a (false) failure until extended, which is loud and fail-closed but wrong. (A
+`content_hash_kind` provenance column was considered and declined: no such format exists, and
+it is a schema bump for a low-urgency feature.)
 
 `sha256_file` already exists. The parquet read-back uses `pyarrow`/`pq` reads we already
 depend on. **Implementation constraint (load-bearing):** the read-back must force every data
@@ -245,8 +248,6 @@ atomicity/idempotence behavior is unchanged)
 15. `verify --snapshot-id` on an unknown id → `SnapshotNotFound` surfaced as an error
     (non-zero exit), not a crash; a payload path that is missing or the wrong type (dir vs
     file) → fails closed with a clear error, not a traceback.
-16. A record with an unknown `storage_format` → `"unsupported verify format"` failure (the
-    closed dispatch), not a silent byte-hash assumption.
 
 ## Files touched
 
