@@ -11,7 +11,7 @@ from algua.contracts.types import NEWS_AS_OF_KEY, NEWS_COLUMNS, NEWS_KNOWABLE_AT
 COLUMNS = list(NEWS_COLUMNS)
 STRING_COLUMNS = ["source", "article_id", "symbol", "headline"]  # non-null strings
 NULLABLE_STRING_COLUMNS = ["url", "body"]
-BOOL_COLUMNS = [NEWS_RETRACTED]
+BOOL_COLUMNS = [NEWS_RETRACTED]  # non-nullable bool
 TS_COLUMNS = ["published_at", NEWS_KNOWABLE_AT]
 UNIQUE_KEY = [*NEWS_AS_OF_KEY, NEWS_KNOWABLE_AT]  # (source, article_id, symbol, knowable_at)
 _SORT = ["symbol", "source", "article_id", NEWS_KNOWABLE_AT]
@@ -172,6 +172,8 @@ def to_news_schema(frame: pd.DataFrame) -> pd.DataFrame:
         if not bool(aware.all()):
             raise ValueError(f"news {col!r} must be tz-aware (UTC); naive timestamps are rejected")
         out[col] = pd.to_datetime(col_vals, errors="raise", utc=True)
+    if out[NEWS_RETRACTED].isna().any():
+        raise ValueError("news 'retracted' must be non-null (got null in input)")
     out[NEWS_RETRACTED] = out[NEWS_RETRACTED].astype("bool")
     out = out.drop_duplicates().sort_values(_SORT).reset_index(drop=True)
     return validate_news(out)

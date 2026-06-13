@@ -317,3 +317,13 @@ def test_hash_changes_with_retracted():
     flipped = out.copy()
     flipped["retracted"] = True
     assert logical_news_hash(out) != logical_news_hash(flipped)
+
+
+def test_to_news_schema_rejects_null_retracted():
+    raw = explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")]))
+    bad = raw.copy()
+    bad["retracted"] = bad["retracted"].astype("object")
+    bad.loc[bad.index[0], "retracted"] = np.nan
+    with pytest.raises(ValueError, match="retracted"):
+        to_news_schema(bad)
