@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
+from algua.backtest.engine import verify_signal_panel_parity
 from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.contracts.types import DataProvider
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.repository import StrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -72,11 +74,16 @@ def promotion_preflight(
     declared_combos: int | None,
     allow_holdout_reuse: bool,
     allow_non_pit: bool,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
 ) -> BreadthContext:
     """Pre-peek phase — runs BEFORE walk_forward, so every hard refusal happens before the holdout
     is touched and before any gate row is minted: (1) relaxations-need-human; (2) stage legality
     (BACKTESTED -> CANDIDATE must be legal — never mint a passing token for an illegal source
-    stage); (3) breadth resolution (refuse "no measured breadth" here)."""
+    stage); (3) fundamentals-lane guard; (4) exhaustive signal_panel parity gate (raises
+    BacktestError on divergence, no-op when no signal_panel); (5) breadth resolution (refuse "no
+    measured breadth" here)."""
     # FIRST check, before any holdout-affecting work and before the relaxation guard: only an agent
     # or a human may promote. SYSTEM is not a valid promote actor — it would pass as "not human"
     # (strict), burn the holdout, mint a gate_evaluations row it can NEVER consume (consumable rows
@@ -108,6 +115,12 @@ def promotion_preflight(
             f"strategy {name!r} declares needs_fundamentals; it cannot be promoted past "
             f"backtested until the paper/live fundamentals lane is built (#132)"
         )
+    # Exhaustive signal_panel parity gate (#178): a panel that diverges from its per-bar signal on
+    # ANY bar cannot pass promotion. Runs on the already-loaded strategy, in static mode over the
+    # promotion window, BEFORE the holdout is touched. No-op when the strategy has no signal_panel.
+    # Raises BacktestError on divergence (caught by the `promote` CLI's @json_errors).
+    if _loaded is not None:
+        verify_signal_panel_parity(_loaded, provider, start, end)
     measured = repo.total_search_combos(name)
     windowed_total = repo.windowed_search_combos(FUNNEL_WINDOW_DAYS)
     if measured > 0:

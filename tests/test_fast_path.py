@@ -18,9 +18,13 @@ import algua.strategies.momentum as momentum_pkg
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import (
     BacktestError,
+    _assert_parity,
     _decision_weights,
     _decision_weights_fast_or_loop,
+    _fast_weights,
+    _parity_sample_positions,
     simulate,
+    verify_signal_panel_parity,
 )
 from algua.contracts.types import ExecutionContract
 from algua.risk.limits import WEIGHT_TOL
@@ -378,3 +382,158 @@ def test_fast_path_allow_short_permits_negative_panel() -> None:
     bars, adj = _bars_adj(["AAA"], seed=2)
     weights = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
     assert (weights["AAA"] == -0.5).all()
+
+
+def test_fast_weights_skips_bounded_guard() -> None:
+    """`_fast_weights` returns the fast-path matrix WITHOUT the bounded parity guard, so a panel
+    that diverges only where the bounded sample does not look does NOT raise here — the guard is
+    `_decision_weights_fast`'s job, decoupled so the exhaustive verifier owns its own comparison."""
+    def good_loop(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(0.5, index=syms)
+
+    bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    n = len(adj.index)
+    sample = set(_parity_sample_positions(0, n))
+    target = next(i for i in range(0, n) if i not in sample)  # an UNSAMPLED evaluated bar
+    target_ts = adj.index[target]
+
+    def sneaky_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        out = pd.DataFrame(0.5, index=a.index, columns=a.columns)
+        out.loc[target_ts, "AAA"] = 1.0  # diverge from equal-weight only here
+        out.loc[target_ts, "BBB"] = 0.0
+        return out
+
+    cfg = StrategyConfig(
+        name="sneaky", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=good_loop, signal_panel_fn=sneaky_panel, construct_fn=_passthrough
+    )
+    # `_fast_weights` does NOT raise (no bounded guard); it returns the divergent matrix as-is.
+    fast = _fast_weights(strat, bars, adj)
+    assert fast.loc[target_ts, "AAA"] == 1.0
+    # The bounded guard at the unsampled bar also passes (documents the gap the verifier closes).
+    bars_sorted = bars.sort_index()
+    end_pos = bars_sorted.index.searchsorted(adj.index, side="right")
+    _assert_parity(strat, bars_sorted, end_pos, fast, 0)  # no raise — sample misses target
+
+
+# --- exhaustive parity gate (#178): every-bar panel-vs-loop check for promotion ---------------
+
+
+def test_verifier_catches_divergence_on_unsampled_bar() -> None:
+    """The crux: a panel diverging on a bar the bounded sample never inspects passes the runtime
+    guard but MUST be caught by the exhaustive verifier."""
+    def good_loop(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(0.5, index=syms)
+
+    _, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    n = len(adj.index)
+    sample = set(_parity_sample_positions(0, n))
+    target_ts = adj.index[next(i for i in range(0, n) if i not in sample)]
+    target_pos = list(adj.index).index(target_ts)
+    assert target_pos not in sample  # the bounded runtime guard never inspects this bar
+
+    def sneaky_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        out = pd.DataFrame(0.5, index=a.index, columns=a.columns)
+        out.loc[target_ts, "AAA"] = 1.0
+        out.loc[target_ts, "BBB"] = 0.0
+        return out
+
+    cfg = StrategyConfig(
+        name="sneaky", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=good_loop, signal_panel_fn=sneaky_panel, construct_fn=_passthrough
+    )
+    with pytest.raises(BacktestError, match="parity"):
+        verify_signal_panel_parity(strat, SyntheticProvider(seed=2), START, END)
+
+
+def test_verifier_passes_for_faithful_panel() -> None:
+    """A panel equal to its per-bar twin everywhere passes (returns None, no raise)."""
+    def equal_loop(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(0.5, index=syms)
+
+    def faithful_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(0.5, index=a.index, columns=a.columns)
+
+    cfg = StrategyConfig(
+        name="faithful", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=equal_loop, signal_panel_fn=faithful_panel, construct_fn=_passthrough
+    )
+    assert verify_signal_panel_parity(strat, SyntheticProvider(seed=2), START, END) is None
+
+
+def test_verifier_noop_when_no_signal_panel_fn() -> None:
+    """No signal_panel_fn -> nothing to verify; returns WITHOUT touching the provider."""
+    class _BoomProvider:
+        def get_bars(self, *a: Any, **k: Any) -> pd.DataFrame:
+            raise AssertionError("provider must not be called when there is no signal_panel_fn")
+
+    cfg = StrategyConfig(
+        name="nopanel", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 1.0}),
+        signal_panel_fn=None, construct_fn=_passthrough,
+    )
+    assert verify_signal_panel_parity(strat, _BoomProvider(), START, END) is None
+
+
+def test_verifier_raises_on_empty_provider() -> None:
+    """A provider with no bars for a panel strategy fails the gate (mirrors simulate's guard)."""
+    class _EmptyProvider:
+        def get_bars(self, *a: Any, **k: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    def faithful_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(0.5, index=a.index, columns=a.columns)
+
+    cfg = StrategyConfig(
+        name="empty", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 1.0}),
+        signal_panel_fn=faithful_panel, construct_fn=_passthrough,
+    )
+    with pytest.raises(BacktestError, match="no bars"):
+        verify_signal_panel_parity(strat, _EmptyProvider(), START, END)
+
+
+def test_verifier_fails_closed_on_throwing_panel() -> None:
+    """A signal_panel that raises must fail the gate CLOSED as a BacktestError (not crash the
+    JSON CLI with an arbitrary exception type)."""
+    def boom_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        raise KeyError("boom")
+
+    cfg = StrategyConfig(
+        name="boom", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 1.0}),
+        signal_panel_fn=boom_panel, construct_fn=_passthrough,
+    )
+    with pytest.raises(BacktestError, match="failed to run"):
+        verify_signal_panel_parity(strat, SyntheticProvider(seed=2), START, END)
