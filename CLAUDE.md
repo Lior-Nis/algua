@@ -60,6 +60,9 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   the bar-schema as one consolidated snapshot. Streamed (bounded RAM); `adj_close` from the adjusted
   file (no corporate-action math yet).
 - `uv run algua data inspect [--summary|--dataset NAME|--snapshot-id ID]` — inspect data snapshots.
+- `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
+  payload back from disk (full read-back) and check it against its record; emits per-snapshot
+  JSON and exits non-zero if any snapshot is damaged.
 
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
