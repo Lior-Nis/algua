@@ -88,3 +88,15 @@ def test_get_bars_naive_datetimes_are_treated_as_utc(tmp_path):
     )
     validate_bars(out)
     assert out.index.max() == pd.Timestamp("2024-07-01", tz="UTC")
+
+
+def test_get_bars_rejects_unknown_timeframe(tmp_path):
+    # #151: an unknown REQUESTED token fails closed at the serve chokepoint, before the
+    # snapshot-timeframe-mismatch check (which would otherwise report a misleading message).
+    store = DataStore(tmp_path)
+    rec = _ingest(store)
+    provider = StoreBackedProvider(store, rec.snapshot_id)
+    with pytest.raises(ValueError, match="unknown timeframe"):
+        provider.get_bars(
+            ["AAA"], datetime(2024, 7, 1, tzinfo=UTC), datetime(2024, 7, 2, tzinfo=UTC), "15m"
+        )

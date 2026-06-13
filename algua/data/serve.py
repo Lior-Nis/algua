@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 
 from algua.data.store import DataStore
+from algua.data.timeframes import validate_timeframe
 
 
 class StoreBackedFundamentalsProvider:
@@ -44,6 +45,7 @@ class StoreBackedProvider:
     def get_bars(
         self, symbols: list[str], start: datetime, end: datetime, timeframe: str
     ) -> pd.DataFrame:
+        validate_timeframe(timeframe)
         rec = self.store.get_snapshot(self.snapshot_id)
         if timeframe != rec.metadata.timeframe:
             raise ValueError(
