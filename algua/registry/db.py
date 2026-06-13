@@ -149,8 +149,7 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
     period_start TEXT NOT NULL,
     period_end TEXT NOT NULL,
     holdout_frac REAL NOT NULL,
-    config_hash TEXT NOT NULL,   -- '' while a reservation is in-flight (placeholder); the real
-                                 -- evidentiary hash is written at finalize. Never a real empty.
+    config_hash TEXT NOT NULL,   -- '' while in-flight (placeholder); real hash written at finalize.
     reused INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     committed_at TEXT            -- NULL = in-flight reservation (or a legacy burn predating this

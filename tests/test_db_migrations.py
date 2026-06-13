@@ -79,4 +79,4 @@ def test_v21_db_gains_committed_at_on_migrate(tmp_path):
     assert "committed_at" in cols
     row = conn.execute("SELECT committed_at FROM holdout_evaluations").fetchone()
     assert row["committed_at"] is None
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 22
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
