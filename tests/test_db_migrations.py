@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from algua.registry.db import _add_missing_columns
 
 
@@ -33,3 +35,13 @@ def test_add_missing_columns_tolerates_lost_alter_race(tmp_path):
     # and hit 'duplicate column name'. It must NOT raise.
     _add_missing_columns(stale, "t", {"c": "TEXT"})  # no exception == pass
     assert {r["name"] for r in conn.execute("PRAGMA table_info(t)")} == {"id", "c"}
+
+
+def test_add_missing_columns_reraises_non_duplicate_errors(tmp_path):
+    """A non-duplicate OperationalError (here: ALTER on a missing table) must propagate, so a
+    future over-broad except can't silently swallow real migration failures."""
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.row_factory = sqlite3.Row
+    # No table 't' exists -> the ALTER raises 'no such table', which must NOT be swallowed.
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        _add_missing_columns(conn, "t", {"c": "TEXT"})
