@@ -230,11 +230,16 @@ def _run_combos(
     stable rank downstream stays reproducible.
 
     Errors:
+      * A non-picklable strategy/provider is caught by a PARENT-side pickle preflight and raised as
+        BacktestError — a non-picklable nested fn raises AttributeError, a lambda PicklingError,
+        other cases TypeError, none of which @json_errors wraps, so the preflight keeps the JSON
+        contract intact and the message actionable.
       * A combo's own failure (e.g. walk_forward raising BacktestError) is delivered back through
         `map` and propagates with its OWN type — `except BacktestError: raise` keeps it unwrapped.
-      * Pool/pickle INFRASTRUCTURE failures (a worker segfault/OOM -> BrokenExecutor; a
-        non-picklable arg -> pickle.PicklingError) are re-raised as BacktestError so the CLI's
-        @json_errors(ValueError, LookupError, BacktestError) still emits a JSON envelope.
+      * A worker crash/OOM/kill (BrokenExecutor) is re-raised as BacktestError so the CLI's
+        @json_errors(ValueError, LookupError, BacktestError) still emits a JSON envelope. The catch
+        stays narrow (BrokenExecutor only) so a real worker bug surfacing as its own type is not
+        masked.
       * Ordering matters: the domain re-raise MUST precede the infrastructure catch, or a worker
         BacktestError would be double-wrapped into "parallel sweep failed".
     """
@@ -243,12 +248,24 @@ def _run_combos(
         return [_evaluate_combo(ov, **eval_kwargs) for ov in overridden]
 
     worker = functools.partial(_evaluate_combo_pooled, **eval_kwargs)
+    # Preflight the pickling in the PARENT so a non-picklable input becomes a JSON-safe
+    # BacktestError rather than a raw AttributeError/PicklingError/TypeError escaping mid-dispatch.
+    # Picklability is identical across combos (they share the strategy's fn refs + the provider
+    # bound in `worker`), so the first override is representative.
+    try:
+        pickle.dumps(worker)
+        pickle.dumps(overridden[0])
+    except (pickle.PicklingError, AttributeError, TypeError) as exc:
+        raise BacktestError(
+            "parallel sweep requires picklable strategy/provider inputs (a strategy signal must be "
+            f"a module-level function, not a closure/lambda): {exc}"
+        ) from exc
     try:
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
             return list(executor.map(worker, overridden))
     except BacktestError:
         raise
-    except (BrokenExecutor, pickle.PicklingError) as exc:
+    except BrokenExecutor as exc:
         raise BacktestError(f"parallel sweep failed: {exc}") from exc
 
 

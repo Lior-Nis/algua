@@ -117,23 +117,64 @@ def test_run_combos_inline_single_combo():
     assert results[0]["score"] == results[0]["stability"]["mean_sharpe"]
 
 
-def test_run_combos_pool_preserves_order():
-    from algua.backtest.sweep import _override, _run_combos
+def _force_pool(monkeypatch):
+    # The pool path only engages when n_workers > 1. On a single-core CI host os.cpu_count() == 1
+    # would silently route these "pool" tests through the inline branch, so pin it to 2 to actually
+    # exercise ProcessPoolExecutor.
+    from algua.backtest import sweep as sweep_mod
+    monkeypatch.setattr(sweep_mod.os, "cpu_count", lambda: 2)
 
+
+def test_run_combos_pool_preserves_order(monkeypatch):
+    from algua.backtest.sweep import _evaluate_combo, _override, _run_combos
+
+    _force_pool(monkeypatch)
     combos = [{"lookback": 20}, {"lookback": 30}, {"lookback": 40}]  # >1 -> pool path
     overridden = [_override(_momentum(), c) for c in combos]
-    a = _run_combos(overridden, _run_kwargs())
-    b = _run_combos(overridden, _run_kwargs())
-    # Order preserved (map) and reproducible across runs (determinism under the pool).
-    assert [r["config_hash"] for r in a] == [r["config_hash"] for r in b]
-    assert len(a) == 3
+    pooled = _run_combos(overridden, _run_kwargs())
+    # Ground truth: sequential evaluation in combo order. The pool MUST match it position-for-
+    # position — proving the result is combo-ordered, not completion-ordered or reversed (comparing
+    # two pooled runs to each other would pass even for a consistently-wrong ordering).
+    sequential = [_evaluate_combo(ov, **_run_kwargs()) for ov in overridden]
+    assert [r["config_hash"] for r in pooled] == [r["config_hash"] for r in sequential]
+    assert [r["score"] for r in pooled] == [r["score"] for r in sequential]
+    assert len(pooled) == 3
 
 
-def test_sweep_combo_error_surfaces_as_backtest_error():
+def test_run_combos_non_picklable_strategy_raises_backtest_error(monkeypatch):
+    from algua.backtest.engine import BacktestError
+    from algua.backtest.sweep import _override, _run_combos
+    from algua.portfolio.construction import get_construction_policy
+
+    _force_pool(monkeypatch)
+
+    # A signal defined inside this test is a LOCAL object -> pickle raises AttributeError (not
+    # PicklingError). The parent-side preflight must convert that into a JSON-safe BacktestError,
+    # never let the raw AttributeError escape past the CLI's @json_errors.
+    def _closure_signal(view, params):
+        return pd.Series(dtype="float64")
+
+    cfg = StrategyConfig(
+        name="closure", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={"lookback": 5},
+        construction="top_k_equal_weight", construction_params={"top_k": 1},
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=_closure_signal,
+        construct_fn=get_construction_policy(cfg.construction),
+    )
+    overridden = [_override(strat, {"lookback": 5}), _override(strat, {"lookback": 6})]
+    with pytest.raises(BacktestError, match="picklable"):
+        _run_combos(overridden, _run_kwargs())
+
+
+def test_sweep_combo_error_surfaces_as_backtest_error(monkeypatch):
     from algua.backtest.engine import BacktestError
 
-    # >1 combo so this runs through the pool; `windows` far too large for the period forces
-    # walk_forward to raise BacktestError ("not enough bars"). It must come back as BacktestError
+    _force_pool(monkeypatch)
+    # >1 combo through the pool; `windows` far too large for the period forces walk_forward to raise
+    # BacktestError ("not enough bars") inside a worker. It must come back as BacktestError
     # (CLI-wrappable), not a BrokenProcessPool and not a partial result.
     with pytest.raises(BacktestError):
         sweep(_momentum(), SyntheticProvider(seed=3), START, END,
