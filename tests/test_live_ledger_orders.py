@@ -98,3 +98,24 @@ def test_owned_open_order_ids_filters_to_strategy(tmp_path):
                     {"id": "o3", "client_order_id": "unknown"}]  # not ours
 
     assert L.owned_open_order_ids(conn, _B(), "s1") == ["o1"]
+
+
+def test_strategy_live_symbols_unions_orders_and_fills(tmp_path):
+    from contextlib import closing
+
+    from algua.execution.live_ledger import record_live_order, strategy_live_symbols
+    from algua.registry.db import connect, migrate
+    with closing(connect(tmp_path / "p.db")) as conn:
+        migrate(conn)
+        record_live_order(conn, "alpha", "AAA", "buy", None, "coid-aaa")
+        # a fill in a symbol with no surviving order row (e.g. dropped from the universe)
+        conn.execute(
+            "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, price, "
+            "fill_ts) VALUES (?,?,?,?,?,?,?)",
+            ("act-zzz", "bo-zzz", "alpha", "ZZZ", 3.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        conn.commit()
+        record_live_order(conn, "beta", "BBB", "buy", None, "coid-bbb")
+
+        assert strategy_live_symbols(conn, "alpha") == {"AAA", "ZZZ"}
+        assert strategy_live_symbols(conn, "beta") == {"BBB"}
