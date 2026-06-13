@@ -87,12 +87,14 @@ FUNDAMENTALS_KNOWABLE_AT = "knowable_at"
 # identity because an article id is only unique WITHIN a source. Hindsight-only this slice (no
 # engine consumer), but the names live here beside the fundamentals constants for symmetry.
 NEWS_COLUMNS: tuple[str, ...] = (
-    "source", "article_id", "symbol", "published_at", "knowable_at", "headline", "url", "body",
+    "source", "article_id", "symbol", "published_at", "knowable_at",
+    "headline", "url", "body", "retracted",
 )
 # Identity of an article-mention across revisions: a correction is a new row sharing this key with
 # a later knowable_at. `source` scopes the (source-local) article_id.
 NEWS_AS_OF_KEY: tuple[str, ...] = ("source", "article_id", "symbol")
 NEWS_KNOWABLE_AT = "knowable_at"
+NEWS_RETRACTED = "retracted"  # True = a symbol-mention retracted by a later article revision
 
 
 @runtime_checkable

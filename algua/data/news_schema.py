@@ -6,11 +6,12 @@ import struct
 import numpy as np
 import pandas as pd
 
-from algua.contracts.types import NEWS_AS_OF_KEY, NEWS_COLUMNS, NEWS_KNOWABLE_AT
+from algua.contracts.types import NEWS_AS_OF_KEY, NEWS_COLUMNS, NEWS_KNOWABLE_AT, NEWS_RETRACTED
 
 COLUMNS = list(NEWS_COLUMNS)
 STRING_COLUMNS = ["source", "article_id", "symbol", "headline"]  # non-null strings
 NULLABLE_STRING_COLUMNS = ["url", "body"]
+BOOL_COLUMNS = [NEWS_RETRACTED]
 TS_COLUMNS = ["published_at", NEWS_KNOWABLE_AT]
 UNIQUE_KEY = [*NEWS_AS_OF_KEY, NEWS_KNOWABLE_AT]  # (source, article_id, symbol, knowable_at)
 _SORT = ["symbol", "source", "article_id", NEWS_KNOWABLE_AT]
@@ -38,6 +39,11 @@ def validate_news(df: pd.DataFrame) -> pd.DataFrame:
     for col in NULLABLE_STRING_COLUMNS:
         if not all(_is_na(v) or isinstance(v, str) for v in df[col]):
             raise ValueError(f"news {col!r} must be strings or null")
+    for col in BOOL_COLUMNS:
+        if df[col].dtype != np.dtype("bool"):
+            raise ValueError(
+                f"news {col!r} must be non-nullable bool dtype (got {df[col].dtype})"
+            )
     for col in TS_COLUMNS:
         ts = df[col]
         if not isinstance(ts.dtype, pd.DatetimeTZDtype) or str(ts.dt.tz) != "UTC":
@@ -77,6 +83,7 @@ def empty_news() -> pd.DataFrame:
         "headline": pd.Series([], dtype="object"),
         "url": pd.Series([], dtype="object"),
         "body": pd.Series([], dtype="object"),
+        "retracted": pd.Series([], dtype="bool"),
     }
     return validate_news(pd.DataFrame(data)[COLUMNS])
 
@@ -126,6 +133,7 @@ def explode_news_symbols(frame: pd.DataFrame) -> pd.DataFrame:
         .explode("_syms", ignore_index=True)
         .rename(columns={"_syms": "symbol"})
     )
+    out[NEWS_RETRACTED] = False
     return out[COLUMNS]
 
 
@@ -164,6 +172,7 @@ def to_news_schema(frame: pd.DataFrame) -> pd.DataFrame:
         if not bool(aware.all()):
             raise ValueError(f"news {col!r} must be tz-aware (UTC); naive timestamps are rejected")
         out[col] = pd.to_datetime(col_vals, errors="raise", utc=True)
+    out[NEWS_RETRACTED] = out[NEWS_RETRACTED].astype("bool")
     out = out.drop_duplicates().sort_values(_SORT).reset_index(drop=True)
     return validate_news(out)
 
@@ -194,4 +203,7 @@ def logical_news_hash(df: pd.DataFrame) -> str:
         naive = ordered[col].dt.tz_convert("UTC").dt.tz_localize(None)
         ns = naive.to_numpy(dtype="datetime64[ns]").view("int64").astype("<i8")
         digest.update(ns.tobytes())
+    for col in BOOL_COLUMNS:
+        flags = np.array([bool(v) for v in ordered[col]], dtype="u1")
+        digest.update(flags.tobytes())
     return digest.hexdigest()

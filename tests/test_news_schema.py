@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -21,6 +22,7 @@ def _row(**over):
         "headline": "Apple ships",
         "url": "http://x/1",
         "body": "body text",
+        "retracted": False,
     }
     base.update(over)
     return base
@@ -273,3 +275,45 @@ def test_to_news_schema_normalizes_mixed_tz_offsets():
     canon = to_news_schema(raw)
     assert str(canon["knowable_at"].dtype) == "datetime64[ns, UTC]"
     assert (canon["knowable_at"].dt.hour == 13).all()  # the -05:00 row normalizes to 13:00Z
+
+
+# ── retracted column (issue #132, signal-lane slice) ─────────────────────────
+
+
+def _raw(source, article_id, symbols, ka, headline="h", pub=None):
+    return {
+        "source": source, "article_id": article_id, "symbols": symbols,
+        "published_at": pub or ka, "knowable_at": ka, "headline": headline,
+    }
+
+
+def test_empty_news_has_retracted_bool_column():
+    e = empty_news()
+    assert "retracted" in e.columns
+    assert e["retracted"].dtype == np.dtype("bool")
+
+
+def test_explode_emits_retracted_false_for_normal_rows():
+    raw = pd.DataFrame([_raw("Reuters", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z")])
+    out = to_news_schema(explode_news_symbols(raw))
+    assert set(out["symbol"]) == {"AAPL", "MSFT"}
+    assert out["retracted"].dtype == np.dtype("bool")
+    assert not out["retracted"].any()
+
+
+def test_validate_rejects_non_bool_retracted():
+    out = to_news_schema(explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")])))
+    bad = out.copy()
+    bad["retracted"] = bad["retracted"].astype("object")
+    bad.loc[bad.index[0], "retracted"] = "false"
+    with pytest.raises(ValueError, match="retracted"):
+        validate_news(bad)
+
+
+def test_hash_changes_with_retracted():
+    out = to_news_schema(explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")])))
+    flipped = out.copy()
+    flipped["retracted"] = True
+    assert logical_news_hash(out) != logical_news_hash(flipped)
