@@ -106,6 +106,15 @@ def test_parse_intraday_tz_aware_input_raises(tmp_path):
         parse_firstrate_file(f, timeframe="1m")
 
 
+def test_parse_mixed_tz_offsets_raises_valueerror_not_attributeerror(tmp_path):
+    # Rows with differing UTC offsets make pd.to_datetime return an object-dtype Series (no .dt).
+    # Must surface as a clean ValueError (json_errors-catchable), never an AttributeError.
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-07-01 09:30:00-04:00,1,1,1,1,1\n", "2024-11-03 09:30:00-05:00,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="mixed timezone offsets"):
+        parse_firstrate_file(f, timeframe="1m")
+
+
 def test_parse_intraday_local_midnight_rejected(tmp_path):
     # A date-only / local-midnight value under an intraday timeframe = daily file misfed.
     f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"

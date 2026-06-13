@@ -47,6 +47,14 @@ def _localize_timestamps(parsed: pd.Series, timeframe: str, fname: str) -> pd.Se
     US-equity intraday bar -> a date-only/daily file was misfed). Otherwise localize to
     `America/New_York` (DST-ambiguous/nonexistent -> ValueError naming the time) and convert to UTC.
     """
+    # Mixed UTC offsets (e.g. one row `-04:00`, another `-05:00`) make pd.to_datetime return an
+    # object-dtype Series with no `.dt` accessor. Reject it cleanly here (a ValueError that
+    # `import-bars`' json_errors() catches) rather than letting `.dt` raise AttributeError below.
+    if not pd.api.types.is_datetime64_any_dtype(parsed):
+        raise ValueError(
+            f"{fname}: timestamps did not parse to a single datetime dtype (mixed timezone "
+            "offsets?); FirstRate timestamps must be naive wall-clock US/Eastern"
+        )
     if not is_intraday(timeframe):
         utc = parsed.dt.tz_localize("UTC") if parsed.dt.tz is None else parsed.dt.tz_convert("UTC")
         if len(utc) and not bool((utc == utc.dt.normalize()).all()):
