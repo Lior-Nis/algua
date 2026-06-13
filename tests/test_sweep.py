@@ -97,3 +97,33 @@ def test_evaluate_combo_returns_record_without_holdout():
         "data_source", "snapshot_id", "timeframe", "seed", "code_hash",
         "dependency_hash", "period", "universe_name", "universe_snapshots",
     }
+
+
+def _run_kwargs():
+    return dict(
+        provider=SyntheticProvider(seed=3), start=START, end=END,
+        windows=4, holdout_frac=0.2,
+        universe_by_date=None, universe_name=None, universe_snapshots=None,
+        rank_by="mean_sharpe",
+    )
+
+
+def test_run_combos_inline_single_combo():
+    from algua.backtest.sweep import _override, _run_combos
+
+    overridden = [_override(_momentum(), {"lookback": 20})]  # len==1 -> inline path
+    results = _run_combos(overridden, _run_kwargs())
+    assert len(results) == 1
+    assert results[0]["score"] == results[0]["stability"]["mean_sharpe"]
+
+
+def test_run_combos_pool_preserves_order():
+    from algua.backtest.sweep import _override, _run_combos
+
+    combos = [{"lookback": 20}, {"lookback": 30}, {"lookback": 40}]  # >1 -> pool path
+    overridden = [_override(_momentum(), c) for c in combos]
+    a = _run_combos(overridden, _run_kwargs())
+    b = _run_combos(overridden, _run_kwargs())
+    # Order preserved (map) and reproducible across runs (determinism under the pool).
+    assert [r["config_hash"] for r in a] == [r["config_hash"] for r in b]
+    assert len(a) == 3

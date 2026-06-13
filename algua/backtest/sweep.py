@@ -220,6 +220,38 @@ def _evaluate_combo_pooled(overridden: LoadedStrategy, **kwargs: Any) -> dict[st
         return _evaluate_combo(overridden, **kwargs)
 
 
+def _run_combos(
+    overridden: list[LoadedStrategy], eval_kwargs: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Evaluate every pre-built combo strategy via walk_forward, returning records in COMBO ORDER.
+
+    A single combo (or a single-core host) runs inline — no pool overhead, full BLAS threads.
+    Otherwise a ProcessPoolExecutor fans the combos out; `executor.map` preserves input order so the
+    stable rank downstream stays reproducible.
+
+    Errors:
+      * A combo's own failure (e.g. walk_forward raising BacktestError) is delivered back through
+        `map` and propagates with its OWN type — `except BacktestError: raise` keeps it unwrapped.
+      * Pool/pickle INFRASTRUCTURE failures (a worker segfault/OOM -> BrokenExecutor; a
+        non-picklable arg -> pickle.PicklingError) are re-raised as BacktestError so the CLI's
+        @json_errors(ValueError, LookupError, BacktestError) still emits a JSON envelope.
+      * Ordering matters: the domain re-raise MUST precede the infrastructure catch, or a worker
+        BacktestError would be double-wrapped into "parallel sweep failed".
+    """
+    n_workers = min(os.cpu_count() or 1, len(overridden))
+    if n_workers <= 1:
+        return [_evaluate_combo(ov, **eval_kwargs) for ov in overridden]
+
+    worker = functools.partial(_evaluate_combo_pooled, **eval_kwargs)
+    try:
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            return list(executor.map(worker, overridden))
+    except BacktestError:
+        raise
+    except (BrokenExecutor, pickle.PicklingError) as exc:
+        raise BacktestError(f"parallel sweep failed: {exc}") from exc
+
+
 def sweep(
     strategy: LoadedStrategy,
     provider: DataProvider,
