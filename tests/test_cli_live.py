@@ -209,7 +209,11 @@ def test_live_allocate_rejects_dormant(monkeypatch):
     from algua.registry.store import SqliteStrategyRepository
     from algua.registry.transitions import transition_strategy
 
-    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 50_000.0)
+    # Make the equity/broker call blow up: the dormant guard must reject BEFORE it is reached,
+    # so this must never fire (proves the stage check precedes the network call).
+    def _boom() -> float:
+        raise AssertionError("_live_account_equity must not be called for a dormant strategy")
+    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", _boom)
     # register a strategy and drive it to paper via the legal chain
     assert runner.invoke(app, ["registry", "add", "s1"]).exit_code == 0
     for to, actor in (("backtested", "human"), ("candidate", "human"), ("paper", "agent")):
