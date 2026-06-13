@@ -19,6 +19,8 @@ from algua.data.files import (
     compose_bars_symbol_hash,
     count_tabular_rows,
     frame_to_parquet_bytes,
+    fsync_file,
+    fsync_parents,
     logical_bars_hash,
     read_partitioned_bars,
     sha256_bytes,
@@ -126,7 +128,9 @@ class DataStore:
             )
             target = self.data_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
+            fsync_file(staged)  # copy2 does not fsync; make the bytes durable before publish
             os.replace(staged, target)
+            fsync_parents(target, stop_at=self.data_dir)  # rename entry + new ancestors durable
 
             rec = SnapshotRecord(
                 snapshot_id=snapshot_id,

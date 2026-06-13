@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from algua.data import files
+from algua.data.store import DataStore
 
 
 def test_fsync_file_and_dir_run_on_real_paths(tmp_path: Path) -> None:
@@ -101,3 +103,29 @@ def test_write_bytes_snapshot_fsyncs_temp_before_replace_then_parents(
     assert events.index("fsync") < events.index("replace")
     assert events.count("fsync") >= 2  # temp + at least one parent dir
     assert events[-1] == "fsync"  # last parent-chain fsync after the replace
+
+
+def test_ingest_file_fsyncs_staged_before_replace_then_parents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    src = tmp_path / "src.csv"
+    pd.DataFrame({"a": [1, 2, 3]}).to_csv(src, index=False)
+    store = DataStore(tmp_path / "store")
+
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (events.append("fsync"), real_fsync(fd))[1])
+    monkeypatch.setattr(
+        os, "replace", lambda s, d: (events.append("replace"), real_replace(s, d))[1]
+    )
+
+    store.ingest_file(
+        file_path=src, dataset="custom", provider="local", symbols=["AAPL"],
+        start="2026-01-02", end="2026-01-02", as_of="2026-01-03T00:00:00+00:00",
+        source="fixture", kind="custom",
+    )
+    # a payload fsync precedes its replace; parent-chain fsyncs follow it
+    assert "fsync" in events and "replace" in events
+    first_replace = events.index("replace")
+    assert events.index("fsync") < first_replace
+    assert events[first_replace + 1 :].count("fsync") >= 1
