@@ -53,3 +53,15 @@ def test_deallocate_requires_flat(tmp_path):
     allocations.allocate(conn, sid, capital=10_000.0, actor="human", account_equity=50_000.0)
     with pytest.raises(allocations.AllocationError, match="flat"):
         allocations.deallocate(conn, sid, actor="human", is_flat=False)
+
+
+def test_revoke_active_locked_no_commit_is_idempotent(tmp_path):
+    conn = _conn(tmp_path)
+    repo = SqliteStrategyRepository(conn)
+    repo.add(name="s1")
+    sid = repo.get("s1").id
+    allocations.allocate(conn, sid, capital=10_000.0, actor="human", account_equity=50_000.0)
+    allocations.revoke_active_locked(conn, sid)
+    assert allocations.active_allocation(conn, sid) is None
+    allocations.revoke_active_locked(conn, sid)  # idempotent: no-op, no error
+    assert allocations.active_allocation(conn, sid) is None

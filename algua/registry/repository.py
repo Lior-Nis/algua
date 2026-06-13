@@ -147,6 +147,7 @@ class StrategyRepository(Protocol):
         dependency_hash: str | None = None,
         consume_gate_id: int | None = None,
         consume_forward_gate_id: int | None = None,
+        revoke_allocation: bool = False,
     ) -> StrategyRecord:
         """Atomically advance ``rec`` to ``to``, append a transition row, return the new state.
 
@@ -155,7 +156,10 @@ class StrategyRepository(Protocol):
         including any token consume — rolls back). At most one of ``consume_gate_id`` /
         ``consume_forward_gate_id`` may be set (``ValueError`` otherwise); the forward consume
         re-checks the full token predicate (identity, actor, passed, unconsumed, TTL) against the
-        caller-supplied ``code_hash``/``config_hash``/``dependency_hash`` at consume time."""
+        caller-supplied ``code_hash``/``config_hash``/``dependency_hash`` at consume time.
+
+        When ``revoke_allocation`` is set, the strategy's active live allocation is revoked in the
+        SAME transaction as the stage change (used by the live -> dormant bench edge)."""
         ...
 
     def record_approval(

@@ -912,3 +912,43 @@ def test_apply_transition_cas_detects_concurrent_stage_move(tmp_path):
     n = c1.execute(
         "SELECT COUNT(*) c FROM stage_transitions WHERE to_stage='backtested'").fetchone()["c"]
     assert n == 1                                        # exactly one transition row, not two
+
+
+def test_apply_transition_revokes_allocation_atomically(tmp_path):
+    from algua.registry import allocations
+    from algua.contracts.lifecycle import Actor, Stage
+    conn = connect(tmp_path / "reg.db"); migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add(name="s1")
+    rec = repo.get("s1")
+    for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
+               Stage.FORWARD_TESTED, Stage.LIVE):
+        rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
+    allocations.allocate(conn, rec.id, capital=10_000.0, actor="human", account_equity=50_000.0)
+    assert allocations.active_allocation(conn, rec.id) is not None
+    rec = repo.apply_transition(rec, Stage.DORMANT, Actor.AGENT, reason="bench",
+                                revoke_allocation=True)
+    assert rec.stage is Stage.DORMANT
+    assert allocations.active_allocation(conn, rec.id) is None
+
+
+def test_apply_transition_revoke_rolls_back_with_stage_on_cas_failure(tmp_path):
+    from algua.registry import allocations
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.repository import StrategyRecord
+    conn = connect(tmp_path / "reg.db"); migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    repo.add(name="s1")
+    rec = repo.get("s1")
+    for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
+               Stage.FORWARD_TESTED, Stage.LIVE):
+        rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
+    allocations.allocate(conn, rec.id, capital=10_000.0, actor="human", account_equity=50_000.0)
+    # Force the stage CAS to fail by passing a stale from-stage (rec says PAPER, DB says LIVE)
+    stale = StrategyRecord(id=rec.id, name=rec.name, stage=Stage.PAPER,
+                           created_at=rec.created_at, updated_at=rec.updated_at)
+    with pytest.raises(TransitionError):
+        repo.apply_transition(stale, Stage.DORMANT, Actor.AGENT, reason="bench",
+                              revoke_allocation=True)
+    assert allocations.active_allocation(conn, rec.id) is not None
+    assert repo.get("s1").stage is Stage.LIVE
