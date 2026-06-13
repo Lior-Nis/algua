@@ -427,8 +427,16 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
     # launch BOTH back-to-back against the same DB so they genuinely race the reservation
     p1 = _launch()
     p2 = _launch()
-    out1, err1 = p1.communicate(timeout=180)
-    out2, err2 = p2.communicate(timeout=180)
+    procs_raw = [p1, p2]
+    try:
+        out1, err1 = p1.communicate(timeout=180)
+        out2, err2 = p2.communicate(timeout=180)
+    except subprocess.TimeoutExpired:
+        for p in procs_raw:
+            if p.poll() is None:
+                p.kill()
+                p.communicate()
+        pytest.fail("e2e promote processes timed out after 180s")
 
     procs = [(p1, out1, err1), (p2, out2, err2)]
     winners = [(p, out, err) for p, out, err in procs if p.returncode == 0]
