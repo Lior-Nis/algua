@@ -28,6 +28,8 @@ def transition_strategy(
     transition_actor = Actor(actor)
     rec = repo.get(name)
     validate_transition(rec.stage, target)
+    if target is Stage.DORMANT and not (reason and reason.strip()):
+        raise TransitionError("transition to dormant requires a non-empty reason")
     code_hash: str | None = None
     config_hash: str | None = None
     dependency_hash: str | None = None
