@@ -193,7 +193,7 @@ def _rec(snapshot_id: str) -> SnapshotRecord:
     )
 
 
-def test_append_fsyncs_parent_only_on_first_creation(tmp_path: Path, monkeypatch) -> None:
+def test_append_fsyncs_parent_on_every_append(tmp_path: Path, monkeypatch) -> None:
     import algua.data.manifest as man_mod
     manifest = SnapshotManifest(tmp_path / "manifest.jsonl")
 
@@ -202,11 +202,11 @@ def test_append_fsyncs_parent_only_on_first_creation(tmp_path: Path, monkeypatch
     monkeypatch.setattr(man_mod, "fsync_dir", lambda p: (dir_fsyncs.append(str(p)), real(p))[1])
 
     manifest.append_if_absent(_rec("aaaaaaaaaaaaaaaa"))  # first creation
-    assert str(tmp_path) in dir_fsyncs  # parent dir fsynced on create
+    assert str(tmp_path) in dir_fsyncs  # parent dir fsynced
 
     dir_fsyncs.clear()
     manifest.append_if_absent(_rec("bbbbbbbbbbbbbbbb"))  # append to existing file
-    assert str(tmp_path) not in dir_fsyncs  # NOT fsynced on a plain append
+    assert str(tmp_path) in dir_fsyncs  # parent dir fsynced unconditionally (commit-point safety)
 
 
 def test_repair_fsyncs_parent_after_rename(tmp_path: Path, monkeypatch) -> None:
@@ -236,10 +236,18 @@ def test_commit_bars_adoption_fsyncs_before_manifest_append(tmp_path: Path, monk
     import algua.data.store as store_mod
     events: list[str] = []
     real_tree = store_mod.fsync_tree
+    real_parents = store_mod.fsync_parents
     monkeypatch.setattr(
         store_mod,
         "fsync_tree",
         lambda p: (events.append(f"tree:{p.name}"), real_tree(p))[1],
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "fsync_parents",
+        lambda p, *, stop_at: (
+            events.append(f"parents:{p.name}"), real_parents(p, stop_at=stop_at)
+        )[1],
     )
     orig_append = store.manifest.append_if_absent
     monkeypatch.setattr(
@@ -250,10 +258,13 @@ def test_commit_bars_adoption_fsyncs_before_manifest_append(tmp_path: Path, monk
 
     again = _ingest_bars(store)
     assert again.snapshot_id == rec.snapshot_id
-    # the adoption barrier fsync_tree(target) ran BEFORE the manifest append
-    tree_events = [e for e in events if e.startswith("tree:")]
-    assert tree_events
-    assert events.index(tree_events[0]) < events.index("append")
+    # the ADOPTION barrier fsync_tree(target) + fsync_parents(target) ran BEFORE the manifest
+    # append (identified by the snapshot-id dir name, not the staging uuid)
+    sid = rec.snapshot_id
+    assert f"tree:{sid}" in events
+    assert f"parents:{sid}" in events
+    assert events.index(f"tree:{sid}") < events.index("append")
+    assert events.index(f"parents:{sid}") < events.index("append")
 
 
 def test_parquet_file_row_count_reads_back_and_counts(tmp_path: Path) -> None:
@@ -267,7 +278,7 @@ def test_parquet_file_row_count_raises_on_truncated_file(tmp_path: Path) -> None
     pq.write_table(pa.table({"a": list(range(1000))}), p)
     data = p.read_bytes()
     p.write_bytes(data[: len(data) // 2])  # lop off the tail (footer + pages)
-    with pytest.raises(Exception):  # noqa: B017 — pyarrow raises on an unreadable/torn file
+    with pytest.raises((OSError, ValueError)):
         files.parquet_file_row_count(p)
 
 
@@ -289,7 +300,7 @@ def test_verify_snapshot_detects_corrupt_part_file(tmp_path: Path) -> None:
     rec = _ingest_bars(store)
     part = next(((tmp_path / "store") / rec.data_path).rglob("*.parquet"))
     part.write_bytes(part.read_bytes()[:8])  # corrupt the body
-    with pytest.raises(Exception):  # noqa: B017
+    with pytest.raises((OSError, ValueError)):
         store.verify_snapshot(rec)
 
 
@@ -321,7 +332,7 @@ def test_verify_snapshot_detects_truncated_single_file(tmp_path: Path) -> None:
     )
     p = (tmp_path / "store") / rec.data_path
     p.write_bytes(p.read_bytes()[:8])
-    with pytest.raises(Exception):  # noqa: B017
+    with pytest.raises((OSError, ValueError)):
         store.verify_snapshot(rec)
 
 

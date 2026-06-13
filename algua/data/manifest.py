@@ -53,15 +53,18 @@ class SnapshotManifest:
         committed record (the caller's `rec`, or the concurrent winner's). Repairs any
         uncommitted tail (crash residue) before appending. The ONLY manifest write path.
 
-        Power-loss durable (#184): the appended bytes are fsynced (existing), and on the FIRST
-        creation of the manifest file its new parent-directory entry is fsynced too. Plain
-        appends to an existing inode do not change the parent dir, so they skip the dir fsync.
-        A `_repair` rewrite makes its own parent fsync (see `_repair`)."""
+        Power-loss durable (#184): the appended bytes are fsynced, and the parent directory is
+        fsynced after every append so the manifest's directory entry is always durable. A
+        conditional first-create-only dir fsync had a crash-between-fsyncs hole: if the first
+        writer crashed after the content fsync but before the dir fsync, a later append sees
+        the file exists and would skip the dir fsync, so a subsequent power loss could lose the
+        manifest's directory entry entirely — and the manifest is the single commit point for
+        ALL snapshots. One extra dir fsync per commit is negligible on this flock-serialized
+        path. A `_repair` rewrite makes its own parent fsync (see `_repair`)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = self._acquire_lock()
         try:
-            manifest_existed = self.path.exists()
-            raw = self.path.read_bytes() if manifest_existed else b""
+            raw = self.path.read_bytes() if self.path.exists() else b""
             committed = self._committed_prefix(raw)
             for existing in self._parse_committed(committed.decode("utf-8")):
                 if existing.snapshot_id == rec.snapshot_id:
@@ -73,8 +76,7 @@ class SnapshotManifest:
                 fh.write(json.dumps(rec.to_dict(), sort_keys=True) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
-            if not manifest_existed:
-                fsync_dir(self.path.parent)
+            fsync_dir(self.path.parent)
             return rec
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)

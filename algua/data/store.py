@@ -460,7 +460,10 @@ class DataStore:
         - ``parquet_dataset`` (bars): full read of every partition; summed rows == ``row_count``.
         - ``parquet`` (universe/fundamentals/news, or a ``.parquet`` via ``ingest_file``): full
           read of the single file; ``num_rows == row_count``. Readability check, NOT a
-          content-hash recompute.
+          content-hash recompute. For a ``.parquet`` ingested via ``ingest_file`` (byte-hash
+          ``content_hash``) this is a strictly weaker check than the ``else`` branch's
+          ``sha256_file`` comparison — by design, since verify targets power-loss readability,
+          not tampering.
         - anything else (``ingest_file`` csv/generic): ``sha256_file == content_hash`` (a full
           read). Fails closed: a record whose ``content_hash`` is not a byte hash would report a
           (false) failure rather than a false pass — that signals the dispatch needs extending.
@@ -511,7 +514,7 @@ class DataStore:
             }
             try:
                 self.verify_snapshot(rec)
-            except Exception as exc:  # noqa: BLE001 - any read-back failure is a verify failure
+            except (OSError, ValueError) as exc:  # read-back/integrity failures; bugs propagate
                 row["ok"] = False
                 row["error"] = str(exc)
             results.append(row)

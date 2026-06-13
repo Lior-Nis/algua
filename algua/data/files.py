@@ -37,6 +37,8 @@ def fsync_file(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
     try:
         os.fsync(fd)
+    except OSError as exc:
+        raise OSError(f"fsync_file({path}) failed: {exc}") from exc
     finally:
         os.close(fd)
 
@@ -48,6 +50,8 @@ def fsync_dir(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         os.fsync(fd)
+    except OSError as exc:
+        raise OSError(f"fsync_dir({path}) failed: {exc}") from exc
     finally:
         os.close(fd)
 
@@ -56,12 +60,19 @@ def fsync_parents(path: Path, *, stop_at: Path) -> None:
     """fsync every directory from `path.parent` up to and including `stop_at` (the durable
     store root). Covers ancestor directories newly created by `mkdir(parents=True)`: fsyncing
     only the leaf parent leaves a freshly-created intermediate dir's own name un-durable in
-    *its* parent. `path` must be at or under `stop_at`."""
+    *its* parent. `path` must be at or under `stop_at` (a `ValueError` is raised otherwise so a
+    miswired call fails loudly instead of silently fsyncing up to the filesystem root)."""
     stop_at = stop_at.resolve()
-    current = path.resolve().parent
+    resolved = path.resolve()
+    if resolved == stop_at:
+        fsync_dir(stop_at)
+        return
+    if stop_at not in resolved.parents:
+        raise ValueError(f"{path} is not under stop_at {stop_at}")
+    current = resolved.parent
     while True:
         fsync_dir(current)
-        if current == stop_at or current == current.parent:
+        if current == stop_at:
             break
         current = current.parent
 
@@ -70,7 +81,9 @@ def fsync_tree(root: Path) -> None:
     """Bottom-up fsync of every regular file, then every subdirectory, then `root` itself
     (`os.walk(topdown=False)`), so child durability precedes the parent's. For partitioned
     trees whose part-files pyarrow wrote without exposing a handle, we reopen+fsync each."""
-    for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+    def _raise(exc: OSError) -> None:
+        raise exc
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False, onerror=_raise):
         d = Path(dirpath)
         for name in filenames:
             fsync_file(d / name)
