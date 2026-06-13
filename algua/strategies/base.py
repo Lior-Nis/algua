@@ -26,6 +26,10 @@ SignalPanelFn = Callable[[pd.DataFrame, dict[str, Any]], pd.DataFrame]
 # the 2-arg and 3-arg forms never silently overload.
 FundamentalsSignalFn = Callable[[pd.DataFrame, dict[str, Any], pd.DataFrame], pd.Series]
 
+# OPT-IN news signal (issue #132): `signal(view, params, news)`. Distinct type so the news 3-arg
+# form never silently overloads the 2-arg or fundamentals 3-arg forms.
+NewsSignalFn = Callable[[pd.DataFrame, dict[str, Any], pd.DataFrame], pd.Series]
+
 
 class StrategyConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
@@ -40,6 +44,8 @@ class StrategyConfig(BaseModel):
     # Opt into the as-of fundamentals lane (issue #132). When True the loader binds the 3-arg
     # signal as `fundamentals_signal_fn` and the engine injects the PIT-correct frame per bar.
     needs_fundamentals: bool = False
+    # Opt into the as-of news lane (issue #132). Mutually exclusive with needs_fundamentals.
+    needs_news: bool = False
 
 
 @dataclass
@@ -59,15 +65,32 @@ class LoadedStrategy:
     signal_fn: SignalFn | None = None
     signal_panel_fn: SignalPanelFn | None = None
     fundamentals_signal_fn: FundamentalsSignalFn | None = None
+    news_signal_fn: NewsSignalFn | None = None
 
     def __post_init__(self) -> None:
-        if self.config.needs_fundamentals:
-            if self.fundamentals_signal_fn is None:
-                raise ValueError(
-                    "needs_fundamentals=True requires a 3-arg signal (fundamentals_signal_fn)"
-                )
-        elif self.signal_fn is None:
-            raise ValueError("needs_fundamentals=False requires a 2-arg signal (signal_fn)")
+        cfg = self.config
+        if cfg.needs_fundamentals and cfg.needs_news:
+            raise ValueError(
+                "needs_fundamentals and needs_news cannot both be True "
+                "(a strategy using both is not supported yet — #132 follow-up)"
+            )
+        decision_fns = {
+            "signal_fn": self.signal_fn,
+            "fundamentals_signal_fn": self.fundamentals_signal_fn,
+            "news_signal_fn": self.news_signal_fn,
+        }
+        active = [k for k, v in decision_fns.items() if v is not None]
+        expected = (
+            "fundamentals_signal_fn" if cfg.needs_fundamentals
+            else "news_signal_fn" if cfg.needs_news
+            else "signal_fn"
+        )
+        if active != [expected]:
+            raise ValueError(
+                f"config requires exactly {expected!r} to be set "
+                f"(needs_fundamentals={cfg.needs_fundamentals}, needs_news={cfg.needs_news}); "
+                f"got {active}"
+            )
 
     @property
     def name(self) -> str:
@@ -86,22 +109,48 @@ class LoadedStrategy:
         return self.config.params
 
     @property
-    def authored_signal(self) -> SignalFn | FundamentalsSignalFn:
+    def authored_signal(self) -> SignalFn | FundamentalsSignalFn | NewsSignalFn:
         """The active authored signal fn — used wherever code needs the strategy's source module
-        (e.g. code_hash), since `signal_fn` is None for a needs_fundamentals strategy."""
-        fn = self.fundamentals_signal_fn if self.config.needs_fundamentals else self.signal_fn
-        assert fn is not None  # __post_init__ guarantees the active fn is set
-        return fn
+        (e.g. code_hash), since signal_fn is None for a needs_fundamentals/needs_news strategy."""
+        if self.config.needs_fundamentals:
+            assert self.fundamentals_signal_fn is not None
+            return self.fundamentals_signal_fn
+        if self.config.needs_news:
+            assert self.news_signal_fn is not None
+            return self.news_signal_fn
+        assert self.signal_fn is not None
+        return self.signal_fn
 
-    def signal(self, view: pd.DataFrame, fundamentals: pd.DataFrame | None = None) -> pd.Series:
+    def signal(
+        self,
+        view: pd.DataFrame,
+        fundamentals: pd.DataFrame | None = None,
+        news: pd.DataFrame | None = None,
+    ) -> pd.Series:
         if self.config.needs_fundamentals:
             if fundamentals is None:
                 raise ValueError(
                     f"strategy {self.name!r} needs fundamentals but signal was called without a "
                     f"fundamentals frame (fail closed)"
                 )
+            if news is not None:
+                raise ValueError(f"strategy {self.name!r} was passed a news frame it does not use")
             assert self.fundamentals_signal_fn is not None
             return self.fundamentals_signal_fn(view, self.config.params, fundamentals)
+        if self.config.needs_news:
+            if news is None:
+                raise ValueError(
+                    f"strategy {self.name!r} needs news but signal was called without a news "
+                    f"frame (fail closed)"
+                )
+            if fundamentals is not None:
+                raise ValueError(
+                    f"strategy {self.name!r} was passed a fundamentals frame it does not use"
+                )
+            assert self.news_signal_fn is not None
+            return self.news_signal_fn(view, self.config.params, news)
+        if fundamentals is not None or news is not None:
+            raise ValueError(f"strategy {self.name!r} takes no PIT sidecar but one was passed")
         assert self.signal_fn is not None
         return self.signal_fn(view, self.config.params)
 
@@ -114,9 +163,12 @@ class LoadedStrategy:
         return self.construct_fn(scores, view, self.config.construction_params)
 
     def target_weights(
-        self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
+        self,
+        features: pd.DataFrame,
+        fundamentals: pd.DataFrame | None = None,
+        news: pd.DataFrame | None = None,
     ) -> pd.Series:
-        return self.construct(self.signal(features, fundamentals), features)
+        return self.construct(self.signal(features, fundamentals, news), features)
 
 
 def assert_tradable_without_fundamentals(strategy: LoadedStrategy) -> None:
@@ -127,6 +179,16 @@ def assert_tradable_without_fundamentals(strategy: LoadedStrategy) -> None:
         raise ValueError(
             f"strategy {strategy.name!r} declares needs_fundamentals; paper/live fundamentals "
             f"wiring is not built yet (#132 follow-up) — refusing to trade it blind"
+        )
+
+
+def assert_tradable_without_news(strategy: LoadedStrategy) -> None:
+    """Fail closed: a needs_news strategy must NOT run paper/live yet — the as-of news lane is
+    wired only into the backtest engine (issue #132). Called at every trading load point."""
+    if strategy.config.needs_news:
+        raise ValueError(
+            f"strategy {strategy.name!r} declares needs_news; paper/live news wiring is not built "
+            f"yet (#132 follow-up) — refusing to trade it blind"
         )
 
 
@@ -152,6 +214,7 @@ def config_hash(strategy: LoadedStrategy) -> str:
             "construction": strategy.config.construction,
             "construction_params": strategy.config.construction_params,
             "needs_fundamentals": strategy.config.needs_fundamentals,
+            "needs_news": strategy.config.needs_news,
         },
         sort_keys=True,
         allow_nan=False,
