@@ -332,8 +332,44 @@ def test_breach_flatten_resume_end_to_end(monkeypatch):
 
 
 def test_resume_sibling_holds_same_symbol_does_not_block(monkeypatch):
-    """Strategy A is flat after ingest; sibling B legitimately holds AAA. The account-wide reconcile
-    explains the broker's AAA via B's ledger, so resuming A is NOT blocked."""
+    """Strategy A is flat; sibling B (a registered LIVE strategy) legitimately holds AAPL — a symbol
+    in A's OWN universe, so the explains-path is actually exercised. The account-wide reconcile
+    attributes the broker's AAPL to B's live ledger, so resuming A is NOT blocked."""
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    # a REAL live sibling: only a currently-live, attributed strategy may explain broker exposure
+    assert runner.invoke(app, ["registry", "add", "sibling_live"]).exit_code == 0
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name='sibling_live'")
+        # sibling B holds AAPL (5) in its own ledger; A holds nothing. AAPL is in A's universe.
+        conn.execute(
+            "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, price, "
+            "fill_ts) VALUES (?,?,?,?,?,?,?)",
+            ("sib-aapl", "bo-sib", "sibling_live", "AAPL", 5.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        kill_switch.trip(conn, name, reason="manual", actor="system")
+        conn.commit()
+
+    # broker shows AAPL+5 (B's), no activities; A's own ledger is empty
+    broker = _ScriptedReadOnlyBroker(activities=[], positions={"AAPL": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
+
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 0, r.stdout
+    assert json.loads(r.stdout)["kill_switch"] == "reset"
+
+
+def test_resume_refuses_when_broker_holds_orphan_position(monkeypatch):
+    """Fail-closed (GATE-2 CRITICAL): the broker holds AAPL (in A's universe) but NO live strategy's
+    ledger explains it. An orphan fill (strategy NULL — a manual/external trade ingested but never
+    mapped to an order) must NOT cancel out the broker exposure. A's own ledger is empty, yet resume
+    must REFUSE because the broker position is unattributed."""
     name = "cross_sectional_momentum"
     _to_live(name)
     from contextlib import closing
@@ -343,19 +379,20 @@ def test_resume_sibling_holds_same_symbol_does_not_block(monkeypatch):
     from algua.risk import kill_switch
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        # sibling B holds AAA (5) in its own ledger; A holds nothing
+        # orphan fill: ingested from a manual/external trade, never attributed to a strategy
         conn.execute(
             "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, price, "
             "fill_ts) VALUES (?,?,?,?,?,?,?)",
-            ("sib-aaa", "bo-sib", "sibling_live", "AAA", 5.0, 100.0, "2023-01-01T00:00:00Z"),
+            ("orphan-aapl", "bo-orphan", None, "AAPL", 5.0, 100.0, "2023-01-01T00:00:00Z"),
         )
         kill_switch.trip(conn, name, reason="manual", actor="system")
         conn.commit()
 
-    # broker shows AAA+5 (B's), no activities; A's own ledger is empty
-    broker = _ScriptedReadOnlyBroker(activities=[], positions={"AAA": 5.0})
+    broker = _ScriptedReadOnlyBroker(activities=[], positions={"AAPL": 5.0})
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
 
     r = runner.invoke(app, ["paper", "resume", name])
-    assert r.exit_code == 0, r.stdout
-    assert json.loads(r.stdout)["kill_switch"] == "reset"
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False and "not flat" in r.stdout.lower()
+    assert "AAPL" in str(payload)            # the unexplained broker residual is surfaced

@@ -23,7 +23,7 @@ from algua.execution.live_ledger import (
     ingest_activities,
     strategy_live_symbols,
 )
-from algua.execution.live_reconcile import account_expected_net
+from algua.execution.live_reconcile import attributed_live_net
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
@@ -107,13 +107,14 @@ def _live_strategy_flat(
 ) -> tuple[bool, dict]:
     """Ingest pending broker activities, then ACCOUNT-WIDE reconcile: the strategy is flat iff its
     own believed_positions is empty AND the broker holds no UNEXPLAINED qty (broker net minus the
-    books' expected net = Σ all live_fills) in any symbol it is responsible for. A sibling that
-    legitimately holds the same symbol explains the broker qty and does not block resume."""
+    books' LIVE-attributed net) in any symbol it is responsible for. A sibling LIVE strategy that
+    legitimately holds the same symbol explains the broker qty and does not block resume; an orphan
+    (unattributed/manual) or non-live holding does NOT explain it, so it fails closed (refuse)."""
     ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))  # type: ignore[attr-defined]
     own = believed_positions(conn, name)
     broker_net = {s: float(q) for s, q in broker.get_positions().items()  # type: ignore[attr-defined]
                   if float(q) != 0.0}
-    expected = account_expected_net(conn)
+    expected = attributed_live_net(conn)
     syms = set(universe) | strategy_live_symbols(conn, name)
     unexplained = {
         s: broker_net.get(s, 0.0) - expected.get(s, 0.0)
@@ -533,7 +534,8 @@ def flatten(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
-    """Emergency: close this strategy's live positions (its universe) and trip its kill-switch."""
+    """Emergency: close this strategy's paper positions (its own held + universe symbols) and trip
+    its kill-switch."""
     strategy = load_strategy(name)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)

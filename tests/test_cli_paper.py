@@ -1083,7 +1083,9 @@ def test_resume_live_refuses_when_creds_missing(monkeypatch, tmp_path):
     name = "cross_sectional_momentum"
     _to_paper()
     _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
-    # no live creds set -> cannot confirm flat -> refuse
+    # explicitly clear any ambient live creds -> cannot confirm flat -> refuse
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_API_KEY", raising=False)
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_API_SECRET", raising=False)
     r = runner.invoke(app, ["paper", "resume", name])
     assert r.exit_code == 1
     assert json.loads(r.stdout)["ok"] is False

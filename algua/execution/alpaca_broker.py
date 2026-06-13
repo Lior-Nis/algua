@@ -414,3 +414,9 @@ class AlpacaLiveReadOnlyBroker(_AlpacaBroker):
 
     def __init__(self, api_key: str, api_secret: str, base_url: str = _LIVE_DEFAULT_URL) -> None:
         super().__init__(api_key, api_secret, base_url)
+
+    def _post(self, path: str, body: dict[str, Any]) -> requests.Response:
+        raise BrokerError("AlpacaLiveReadOnlyBroker is read-only: refusing POST")
+
+    def _delete(self, path: str) -> requests.Response:
+        raise BrokerError("AlpacaLiveReadOnlyBroker is read-only: refusing DELETE")
