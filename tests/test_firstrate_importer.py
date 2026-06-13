@@ -50,6 +50,78 @@ def test_parse_missing_columns_raises(tmp_path):
         parse_firstrate_file(f)
 
 
+def test_parse_intraday_summer_edt_to_utc(tmp_path):
+    # 09:30 ET in July is EDT (UTC-4) -> 13:30 UTC.
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-07-01 09:30:00,10.0,11.0,9.5,10.5,1000\n"])
+    out = parse_firstrate_file(f, timeframe="1m")
+    assert out["ts"].iloc[0] == pd.Timestamp("2024-07-01 13:30:00", tz="UTC")
+    assert str(out["ts"].dt.tz) == "UTC"
+
+
+def test_parse_intraday_winter_est_to_utc(tmp_path):
+    # 09:30 ET in January is EST (UTC-5) -> 14:30 UTC.
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-01-02 09:30:00,10.0,11.0,9.5,10.5,1000\n"])
+    out = parse_firstrate_file(f, timeframe="1m")
+    assert out["ts"].iloc[0] == pd.Timestamp("2024-01-02 14:30:00", tz="UTC")
+
+
+def test_parse_intraday_dst_adjacent_valid(tmp_path):
+    # 03:00 ET on spring-forward day (just after the gap) -> 07:00 UTC (EDT).
+    # 00:30 ET on fall-back day (occurs once, unambiguous) -> 04:30 UTC (still EDT).
+    f1 = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f1, ["2024-03-10 03:00:00,1,1,1,1,1\n"])
+    assert parse_firstrate_file(f1, timeframe="1m")["ts"].iloc[0] == pd.Timestamp(
+        "2024-03-10 07:00:00", tz="UTC"
+    )
+    f2 = tmp_path / "MSFT_full_1min_UNADJUSTED.txt"
+    _write(f2, ["2024-11-03 00:30:00,1,1,1,1,1\n"])
+    assert parse_firstrate_file(f2, timeframe="1m")["ts"].iloc[0] == pd.Timestamp(
+        "2024-11-03 04:30:00", tz="UTC"
+    )
+
+
+def test_parse_intraday_nonexistent_dst_time_raises(tmp_path):
+    # 02:30 ET on 2024-03-10 does not exist (spring-forward gap).
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-03-10 02:30:00,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="DST-ambiguous or nonexistent"):
+        parse_firstrate_file(f, timeframe="1m")
+
+
+def test_parse_intraday_ambiguous_dst_time_raises(tmp_path):
+    # 01:30 ET on 2024-11-03 occurs twice (fall-back) -> ambiguous.
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-11-03 01:30:00,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="DST-ambiguous or nonexistent"):
+        parse_firstrate_file(f, timeframe="1m")
+
+
+def test_parse_intraday_tz_aware_input_raises(tmp_path):
+    # A wall-clock with an explicit offset is tz-aware -> rejected (wall-clock tz unknowable).
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-07-01 09:30:00-04:00,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="must be naive"):
+        parse_firstrate_file(f, timeframe="1m")
+
+
+def test_parse_intraday_local_midnight_rejected(tmp_path):
+    # A date-only / local-midnight value under an intraday timeframe = daily file misfed.
+    f = tmp_path / "AAPL_full_1min_UNADJUSTED.txt"
+    _write(f, ["2024-07-01,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="local-midnight"):
+        parse_firstrate_file(f, timeframe="1m")
+
+
+def test_parse_daily_nonmidnight_rejected(tmp_path):
+    # An intraday-shaped value under timeframe=1d -> non-midnight 1d bar = contract violation.
+    f = tmp_path / "AAPL_full_1day_UNADJUSTED.txt"
+    _write(f, ["2024-07-01 09:30:00,1,1,1,1,1\n"])
+    with pytest.raises(ValueError, match="non-midnight"):
+        parse_firstrate_file(f, timeframe="1d")
+
+
 def _firstrate_dirs(tmp_path):
     raw = tmp_path / "raw"
     adj = tmp_path / "adj"
