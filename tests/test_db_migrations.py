@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from algua.registry.db import _add_missing_columns
+from algua.registry.db import SCHEMA_VERSION, _add_missing_columns, connect, migrate
 
 
 def test_add_missing_columns_tolerates_lost_alter_race(tmp_path):
@@ -45,3 +45,38 @@ def test_add_missing_columns_reraises_non_duplicate_errors(tmp_path):
     # No table 't' exists -> the ALTER raises 'no such table', which must NOT be swallowed.
     with pytest.raises(sqlite3.OperationalError, match="no such table"):
         _add_missing_columns(conn, "t", {"c": "TEXT"})
+
+
+def test_fresh_db_has_committed_at_column(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(holdout_evaluations)")}
+    assert "committed_at" in cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v21_db_gains_committed_at_on_migrate(tmp_path):
+    """A holdout_evaluations table created WITHOUT committed_at (pre-v22) gains it via migrate,
+    legacy rows keep committed_at NULL, and user_version stamps to the new version."""
+    conn = connect(tmp_path / "r.db")
+    conn.execute(
+        "CREATE TABLE holdout_evaluations ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, strategy_id INTEGER NOT NULL,"
+        " data_source TEXT NOT NULL, snapshot_id TEXT, period_start TEXT NOT NULL,"
+        " period_end TEXT NOT NULL, holdout_frac REAL NOT NULL, config_hash TEXT NOT NULL,"
+        " reused INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
+    )
+    conn.execute("PRAGMA user_version=21")
+    conn.execute(
+        "INSERT INTO holdout_evaluations"
+        "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
+        " config_hash, reused, created_at) VALUES (1,'demo',NULL,'2022-01-01','2022-12-31',"
+        " 0.2,'abc',0,'2022-01-01')"
+    )
+    conn.commit()
+    migrate(conn)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(holdout_evaluations)")}
+    assert "committed_at" in cols
+    row = conn.execute("SELECT committed_at FROM holdout_evaluations").fetchone()
+    assert row["committed_at"] is None
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 22

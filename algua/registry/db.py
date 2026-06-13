@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -149,9 +149,15 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
     period_start TEXT NOT NULL,
     period_end TEXT NOT NULL,
     holdout_frac REAL NOT NULL,
-    config_hash TEXT NOT NULL,
+    config_hash TEXT NOT NULL,   -- '' while a reservation is in-flight (placeholder); the real
+                                 -- evidentiary hash is written at finalize. Never a real empty.
     reused INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    committed_at TEXT            -- NULL = in-flight reservation (or a legacy burn predating this
+                                 -- column); non-NULL = committed burn. Either way an overlapping
+                                 -- row blocks fail-closed. Orphaned reservations (pending rows from
+                                 -- a crashed run) are listable via WHERE committed_at IS NULL and
+                                 -- are cleared only by a deliberate human --allow-holdout-reuse.
 );
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
@@ -443,6 +449,11 @@ def migrate(conn: sqlite3.Connection) -> None:
     # v21 (#124): link paper_orders to strategies(id) for forward-gate tick↔order attribution.
     # Legacy NULL rows are inadmissible gate evidence (fail-closed, no backfill).
     _add_missing_columns(conn, "paper_orders", {"strategy_id": "INTEGER"})
+    # v22 (#161): committed_at distinguishes an in-flight holdout reservation (NULL) from a
+    # committed burn (non-NULL). NO backfill: a legacy row that predates this column keeps
+    # committed_at=NULL and is treated as a permanent reservation (blocks fail-closed). Backfilling
+    # would introduce a migration race that could clobber a genuine concurrent reservation.
+    _add_missing_columns(conn, "holdout_evaluations", {"committed_at": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
