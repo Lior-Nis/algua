@@ -14,6 +14,7 @@ from algua.features.catalogue import (
     FactorSpec,
     all_factors,
     factor,
+    filter_factors,
     get_factor,
     load_all_factors,
 )
@@ -171,3 +172,21 @@ def test_transactional_failed_import_preserves_prior_registry():
 def test_get_factor_unknown_raises():
     with pytest.raises(FactorNotFound):
         get_factor("does_not_exist_factor")
+
+
+def test_seeded_factors_present_and_filterable():
+    reg = load_all_factors()
+    assert {"momentum", "zscore"} <= set(reg)
+
+    mom = reg["momentum"]
+    assert mom.kind is FactorKind.MOMENTUM
+    assert "momentum" in mom.tags
+    assert mom.import_path == "algua.features.indicators:momentum"
+    assert mom.data_needs == (DataCapability.OHLCV,)
+
+    only_momentum = filter_factors(kind=FactorKind.MOMENTUM)
+    assert "momentum" in {f.name for f in only_momentum}
+    assert "zscore" not in {f.name for f in only_momentum}
+
+    tagged = filter_factors(tag="cross-sectional")
+    assert {"momentum", "zscore"} <= {f.name for f in tagged}

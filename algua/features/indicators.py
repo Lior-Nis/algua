@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 
+from algua.features.catalogue import FactorKind, factor
 
+
+@factor(
+    summary="Trailing simple return per symbol over `lookback` periods.",
+    kind=FactorKind.MOMENTUM,
+    tags=["momentum", "cross-sectional"],
+)
 def momentum[PandasObj: (pd.Series, pd.DataFrame)](prices: PandasObj, lookback: int) -> PandasObj:
     """Trailing simple return over `lookback` periods: price_t / price_{t-lookback} - 1.
 
@@ -12,6 +19,11 @@ def momentum[PandasObj: (pd.Series, pd.DataFrame)](prices: PandasObj, lookback: 
     return prices / prices.shift(lookback) - 1.0
 
 
+@factor(
+    summary="Cross-sectional z-score (population std; all-NaN on a degenerate cross-section).",
+    kind=FactorKind.OTHER,
+    tags=["normalization", "cross-sectional"],
+)
 def zscore(values: pd.Series) -> pd.Series:
     """Cross-sectional/sample z-score. Std uses population (ddof=0) to stay defined for n>=1.
 
