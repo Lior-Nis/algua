@@ -6,31 +6,33 @@ import pytest
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.sweep import SweepResult, sweep
 from algua.contracts.types import ExecutionContract
+from algua.features.indicators import momentum
+from algua.portfolio.construction import get_construction_policy
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 START = datetime(2022, 1, 1, tzinfo=UTC)
 END = datetime(2023, 12, 31, tzinfo=UTC)
 
 
-def _momentum():
-    from algua.features.indicators import momentum
-    from algua.portfolio.construction import get_construction_policy
+def _momentum_signal(view, params):
+    # Module-level (not a closure) so the strategy pickles to a ProcessPoolExecutor worker,
+    # exactly like a real loaded strategy (the loader binds a module-level `signal`).
+    wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    if len(wide) <= int(params["lookback"]):
+        return pd.Series(dtype="float64")
+    return momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
 
+
+def _momentum():
     cfg = StrategyConfig(
         name="m", universe=["AAA", "BBB", "CCC"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
         params={"lookback": 40},
         construction="top_k_equal_weight", construction_params={"top_k": 1},
     )
-
-    def signal(view, params):
-        wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-        if len(wide) <= int(params["lookback"]):
-            return pd.Series(dtype="float64")
-        return momentum(wide, lookback=int(params["lookback"])).iloc[-1].dropna()
-
     return LoadedStrategy(
-        config=cfg, signal_fn=signal, construct_fn=get_construction_policy(cfg.construction)
+        config=cfg, signal_fn=_momentum_signal,
+        construct_fn=get_construction_policy(cfg.construction),
     )
 
 
