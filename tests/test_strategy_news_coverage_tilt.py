@@ -74,6 +74,12 @@ def test_signal_empty_news_returns_empty():
     assert scores.empty
 
 
+def test_signal_empty_view_returns_empty():
+    news = _news_asof()
+    scores = news_coverage_tilt.signal(pd.DataFrame(), {"window_days": 5}, news)
+    assert scores.empty
+
+
 def _toy_bars():
     idx = pd.date_range("2025-01-01", periods=9, freq="D", tz="UTC")
     rows = []

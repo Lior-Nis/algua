@@ -27,8 +27,7 @@ def signal(view: pd.DataFrame, params: dict[str, Any], news: pd.DataFrame) -> pd
     if news.empty or view.empty:
         return pd.Series(dtype="float64")
     window = int(params["window_days"])
-    asof = pd.Timestamp(view.index.max())
-    cutoff = asof.tz_convert("UTC") - pd.Timedelta(days=window)
+    cutoff = view.index.max() - pd.Timedelta(days=window)
     recent = news[news["published_at"] >= cutoff]
     if recent.empty:
         return pd.Series(dtype="float64")
