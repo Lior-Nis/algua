@@ -7,6 +7,8 @@ import pandas as pd
 import pytest
 
 from algua.data import files
+from algua.data.manifest import SnapshotManifest
+from algua.data.models import SnapshotMetadata, SnapshotRecord
 from algua.data.store import DataStore
 
 
@@ -174,6 +176,51 @@ def test_commit_bars_publish_fsyncs_tree_before_replace_then_parents(
 
     _ingest_bars(store)
     assert events[:3] == ["tree", "replace", "parents"]
+
+
+def _rec(snapshot_id: str) -> SnapshotRecord:
+    return SnapshotRecord(
+        snapshot_id=snapshot_id,
+        metadata=SnapshotMetadata(
+            dataset="bars", provider="p", symbols=["AAPL"], start="2026-01-02",
+            end="2026-01-02", as_of="2026-01-03T00:00:00+00:00", source="s", kind="bars",
+        ),
+        row_count=1, content_hash="h",
+        data_path=Path("snapshots/bars") / snapshot_id, created_at="2026-01-03T00:00:00+00:00",
+        storage_format="parquet_dataset",
+    )
+
+
+def test_append_fsyncs_parent_only_on_first_creation(tmp_path: Path, monkeypatch) -> None:
+    import algua.data.manifest as man_mod
+    manifest = SnapshotManifest(tmp_path / "manifest.jsonl")
+
+    dir_fsyncs: list[str] = []
+    real = man_mod.fsync_dir
+    monkeypatch.setattr(man_mod, "fsync_dir", lambda p: (dir_fsyncs.append(str(p)), real(p))[1])
+
+    manifest.append_if_absent(_rec("aaaaaaaaaaaaaaaa"))  # first creation
+    assert str(tmp_path) in dir_fsyncs  # parent dir fsynced on create
+
+    dir_fsyncs.clear()
+    manifest.append_if_absent(_rec("bbbbbbbbbbbbbbbb"))  # append to existing file
+    assert str(tmp_path) not in dir_fsyncs  # NOT fsynced on a plain append
+
+
+def test_repair_fsyncs_parent_after_rename(tmp_path: Path, monkeypatch) -> None:
+    import algua.data.manifest as man_mod
+    path = tmp_path / "manifest.jsonl"
+    good = '{"x": 1}\n'  # _repair just rewrites the committed prefix bytes verbatim
+    manifest = SnapshotManifest(path)
+    path.write_text(good + "uncommitted-no-newline")
+
+    dir_fsyncs: list[str] = []
+    real = man_mod.fsync_dir
+    monkeypatch.setattr(man_mod, "fsync_dir", lambda p: (dir_fsyncs.append(str(p)), real(p))[1])
+
+    manifest._repair(good.encode("utf-8"))
+    assert path.read_text() == good
+    assert str(tmp_path) in dir_fsyncs
 
 
 def test_commit_bars_adoption_fsyncs_before_manifest_append(tmp_path: Path, monkeypatch) -> None:

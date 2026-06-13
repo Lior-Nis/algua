@@ -6,6 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from algua.data.files import fsync_dir
 from algua.data.models import SnapshotRecord
 
 
@@ -50,11 +51,17 @@ class SnapshotManifest:
     def append_if_absent(self, rec: SnapshotRecord) -> SnapshotRecord:
         """Append `rec` unless a record with its snapshot_id is already committed; return the
         committed record (the caller's `rec`, or the concurrent winner's). Repairs any
-        uncommitted tail (crash residue) before appending. The ONLY manifest write path."""
+        uncommitted tail (crash residue) before appending. The ONLY manifest write path.
+
+        Power-loss durable (#184): the appended bytes are fsynced (existing), and on the FIRST
+        creation of the manifest file its new parent-directory entry is fsynced too. Plain
+        appends to an existing inode do not change the parent dir, so they skip the dir fsync.
+        A `_repair` rewrite makes its own parent fsync (see `_repair`)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_fd = self._acquire_lock()
         try:
-            raw = self.path.read_bytes() if self.path.exists() else b""
+            manifest_existed = self.path.exists()
+            raw = self.path.read_bytes() if manifest_existed else b""
             committed = self._committed_prefix(raw)
             for existing in self._parse_committed(committed.decode("utf-8")):
                 if existing.snapshot_id == rec.snapshot_id:
@@ -66,6 +73,8 @@ class SnapshotManifest:
                 fh.write(json.dumps(rec.to_dict(), sort_keys=True) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
+            if not manifest_existed:
+                fsync_dir(self.path.parent)
             return rec
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -103,7 +112,9 @@ class SnapshotManifest:
         """Replace the manifest with its committed prefix via temp + atomic rename. Never
         truncate in place: a lock-free reader mid-read on a shrinking inode could splice
         old+new bytes into a malformed non-final line; the rename keeps the old inode
-        complete, so a reader sees the whole old or whole new file."""
+        complete, so a reader sees the whole old or whole new file. Power-loss durable (#184):
+        the temp is fsynced (existing) and the parent dir is fsynced after the rename so the
+        replaced dir entry is durable."""
         temp_fd, temp_name = tempfile.mkstemp(
             dir=self.path.parent, prefix=f"{self.path.name}{_REPAIR_TEMP_SUFFIX}", suffix=".tmp"
         )
@@ -113,6 +124,7 @@ class SnapshotManifest:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(temp_name, self.path)
+            fsync_dir(self.path.parent)
         finally:
             try:
                 os.unlink(temp_name)
