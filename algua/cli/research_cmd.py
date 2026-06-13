@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 import typer
@@ -26,7 +27,9 @@ _HOLDOUT_REUSE_OVERRIDE = "override"
 
 
 @research_app.command("promote")
-@json_errors(ValueError, LookupError, BacktestError)
+# sqlite3.OperationalError keeps lock-contention ("database is locked") from reserve_holdout's
+# BEGIN IMMEDIATE inside the JSON envelope, not a leaked traceback (CLI JSON-output contract).
+@json_errors(ValueError, LookupError, BacktestError, sqlite3.OperationalError)
 def promote(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
@@ -100,26 +103,31 @@ def promote(
         breadth = promotion_preflight(
             repo, name, actor=actor_enum, declared_combos=n_combos,
             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit)
-        # Holdout-reuse pre-check — BEFORE walk_forward (the match identity is the data window and
-        # deliberately EXCLUDES the universe: the same OOS data window is burned regardless of
-        # which universe it was evaluated under, conservative).
-        overlap = repo.overlapping_holdout_evaluations(
-            repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
-            period_start=period_start, period_end=period_end, holdout_frac=holdout_frac)
-        if overlap and not allow_holdout_reuse:
-            raise ValueError(
-                f"holdout already consumed for {name!r}: an overlapping out-of-sample window was "
-                f"already evaluated. Use fresh out-of-sample data, or --allow-holdout-reuse "
-                f"(--actor human) to override and accept the statistical cost."
-            )
-        reused = bool(overlap and allow_holdout_reuse)
-        wf = walk_forward(strategy, provider, start_dt, end_dt, windows=windows,
-                          holdout_frac=holdout_frac, universe_by_date=universe_by_date,
-                          universe_name=universe, universe_snapshots=universe_prov)
-        repo.record_holdout_evaluation(
+        # Atomic holdout reservation (#161): claim the window under the write lock (fast SELECT +
+        # INSERT a pending row), run walk_forward with NO lock held, then finalize on success /
+        # release on a clean failure. The match identity is the data window and deliberately
+        # EXCLUDES the universe (the same OOS window is burned regardless of universe). A pending
+        # reservation blocks a concurrent run exactly like a committed burn (fail closed).
+        reservation_id, reused = repo.reserve_holdout(
             repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
-            config_hash=wf.config_hash, reused=reused)
+            allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
+        try:
+            wf = walk_forward(strategy, provider, start_dt, end_dt, windows=windows,
+                              holdout_frac=holdout_frac, universe_by_date=universe_by_date,
+                              universe_name=universe, universe_snapshots=universe_prov)
+        except BaseException:
+            # Best-effort release on a clean failure (frees the window). If release ITSELF raises,
+            # swallow it: the pending row simply stays (fail-closed, window blocked) and the
+            # original walk_forward error must not be masked by a secondary release failure.
+            try:
+                repo.release_holdout_reservation(reservation_id)
+            except Exception:
+                pass
+            raise
+        # Burn-on-peek: walk_forward has now computed holdout metrics, so commit the reservation
+        # into a burn BEFORE the gate (mirrors today's record-before-gate ordering).
+        repo.finalize_holdout_reservation(reservation_id, config_hash=wf.config_hash)
         outcome = run_gate(
             repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
             universe_name=universe, universe_snapshots=universe_prov,
