@@ -408,3 +408,31 @@ def test_duplicate_revision_rejected_on_canonical_identity():
     ])
     with pytest.raises(ValueError, match="duplicate news revision"):
         explode_news_symbols(raw)
+
+
+def test_two_sources_same_article_id_do_not_merge():
+    # Same article_id from different sources must stay independent: no spurious tombstone.
+    raw = pd.DataFrame([
+        _raw("reuters", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z"),
+        _raw("bloomberg", "a1", ["AAPL"], "2023-01-01T00:00:00Z"),
+    ])
+    out = to_news_schema(explode_news_symbols(raw))
+    # bloomberg/a1 only ever mentioned AAPL -> no MSFT tombstone for it
+    assert out[(out["source"] == "bloomberg") & (out["symbol"] == "MSFT")].empty
+    # reuters/a1 mentioned both, single revision -> no tombstone either
+    assert not out[out["source"] == "reuters"]["retracted"].any()
+
+
+def test_input_row_order_does_not_affect_tombstones():
+    # The walk sorts by knowable_at, so scrambled input order yields identical tombstones.
+    pub = "2023-01-01T00:00:00Z"
+    rows = [
+        _raw("r", "a1", ["AAPL"], "2023-01-03T00:00:00Z", headline="h3", pub=pub),
+        _raw("r", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z", headline="h1", pub=pub),
+        _raw("r", "a1", ["AAPL"], "2023-01-02T00:00:00Z", headline="h2", pub=pub),
+    ]
+    out_scrambled = to_news_schema(explode_news_symbols(pd.DataFrame(rows)))
+    out_ordered = to_news_schema(explode_news_symbols(pd.DataFrame([rows[1], rows[2], rows[0]])))
+    assert out_scrambled.equals(out_ordered)
+    # MSFT dropped at the 2nd revision (Jan 02)
+    assert _key(out_scrambled, "MSFT", "2023-01-02T00:00:00Z") is True
