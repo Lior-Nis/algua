@@ -51,6 +51,37 @@ def test_paper_run_rejects_non_paper_stage():
 
 
 
+def test_dormant_strategy_not_run_by_paper_lane():
+    """A dormant strategy is rejected by `paper run` with a non-zero exit.
+
+    The stage guard in _load_gated_strategy fires before any heavy work: it checks that the
+    strategy is at Stage.PAPER or Stage.FORWARD_TESTED. A dormant strategy is neither, so the
+    command exits 1 with {"ok": false} containing a stage/eligibility message.
+    """
+    # Register and drive to paper, then bench to dormant.
+    assert runner.invoke(app, ["backtest", "run", "cross_sectional_momentum", "--demo",
+                               "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
+                               "--to", "candidate", "--actor", "human",
+                               "--reason", "ok"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
+                               "--to", "paper", "--actor", "agent",
+                               "--reason", "paper"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
+                               "--to", "dormant", "--actor", "agent",
+                               "--reason", "seasonal"]).exit_code == 0
+
+    # paper run must reject the dormant strategy before any data/provider work.
+    result = runner.invoke(app, ["paper", "run", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    # The guard message names the stage and the required stages.
+    assert "dormant" in payload.get("error", "").lower()
+
+
 def test_manual_kill_blocks_run_then_resume_allows(monkeypatch):
     _to_paper()
     assert runner.invoke(app, ["paper", "kill", "cross_sectional_momentum",

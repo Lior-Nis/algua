@@ -60,3 +60,24 @@ def test_paper_to_live_removed_for_everyone():
 def test_live_demotion_still_lands_at_paper():
     assert can_transition(Stage.LIVE, Stage.PAPER)
     assert not can_transition(Stage.LIVE, Stage.FORWARD_TESTED)
+
+
+def test_dormant_entry_only_from_live_and_paper():
+    assert can_transition(Stage.LIVE, Stage.DORMANT)
+    assert can_transition(Stage.PAPER, Stage.DORMANT)
+    # never entered from below paper — nothing pre-validation can "rest"
+    for frm in (Stage.IDEA, Stage.BACKTESTED, Stage.CANDIDATE,
+                Stage.FORWARD_TESTED, Stage.RETIRED):
+        assert not can_transition(frm, Stage.DORMANT)
+
+
+def test_dormant_is_non_terminal_and_recovers_to_paper():
+    assert can_transition(Stage.DORMANT, Stage.PAPER)
+    assert can_transition(Stage.DORMANT, Stage.RETIRED)  # derived give-up edge
+    assert ALLOWED_TRANSITIONS[Stage.DORMANT]  # non-empty => non-terminal
+
+
+def test_dormant_cannot_jump_to_live_or_forward():
+    assert not can_transition(Stage.DORMANT, Stage.LIVE)
+    assert not can_transition(Stage.DORMANT, Stage.FORWARD_TESTED)
+    assert not can_transition(Stage.DORMANT, Stage.CANDIDATE)
