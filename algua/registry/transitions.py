@@ -35,6 +35,7 @@ def transition_strategy(
     dependency_hash: str | None = None
     consume_gate_id: int | None = None
     consume_forward_gate_id: int | None = None
+    revoke_allocation = False
     if target == Stage.LIVE:
         identity = _validate_live_gate(
             repo=repo,
@@ -55,6 +56,20 @@ def transition_strategy(
         # promote`). Humans are exempt. The PAPER -> CANDIDATE back-step is free for any actor —
         # re-entry to candidate from below always re-runs the research gate.
         consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
+    elif rec.stage is Stage.LIVE and target is Stage.DORMANT:
+        # Bench wind-down wall (#125): a live strategy must be flat before resting, else its open
+        # positions are orphaned (run-all only iterates Stage.LIVE). The check is on this single
+        # policy path so it cannot be bypassed; the revoke happens atomically in apply_transition.
+        # believed_positions is imported lazily — same registry->execution pattern the live
+        # certificate verifier already uses in this module.
+        from algua.execution.live_ledger import believed_positions
+        conn = getattr(repo, "connection", None)
+        if conn is None:
+            raise TransitionError("benching a live strategy needs a sqlite-backed repository")
+        if believed_positions(conn, name):
+            raise TransitionError(
+                f"{name} is not flat (open live positions); flatten before benching to dormant")
+        revoke_allocation = True
     elif rec.stage is Stage.PAPER and target == Stage.FORWARD_TESTED:
         # Identity is pinned for BOTH actors: the agent's token consume re-checks it inside
         # apply_transition, and a human raw transition records it for audit (#124).
@@ -73,6 +88,7 @@ def transition_strategy(
         dependency_hash=dependency_hash,
         consume_gate_id=consume_gate_id,
         consume_forward_gate_id=consume_forward_gate_id,
+        revoke_allocation=revoke_allocation,
     )
 
 
