@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import itertools
 import math
+import os
+import pickle
 from collections.abc import Collection, Mapping
+from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+
+from threadpoolctl import threadpool_limits
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import walk_forward
@@ -156,6 +162,62 @@ class SweepResult:
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
+
+
+def _evaluate_combo(
+    overridden: LoadedStrategy,
+    *,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    windows: int,
+    holdout_frac: float,
+    universe_by_date: Mapping[date, Collection[str]] | None,
+    universe_name: str | None,
+    universe_snapshots: list[dict[str, str]] | None,
+    rank_by: str,
+) -> dict[str, Any]:
+    """Evaluate one already-overridden combo via walk_forward; return its rankable record + the
+    combo-independent meta. Module-level so it is picklable into a ProcessPoolExecutor worker.
+
+    Deliberately does NOT return wf.holdout_metrics: the holdout never leaves the worker process,
+    preserving sweep's single-use-holdout discipline (the holdout is revealed only in
+    `research promote`).
+    """
+    wf = walk_forward(
+        overridden, provider, start, end,
+        windows=windows, holdout_frac=holdout_frac,
+        universe_by_date=universe_by_date,
+        universe_name=universe_name, universe_snapshots=universe_snapshots,
+    )
+    return {
+        "config_hash": wf.config_hash,
+        "n_windows": wf.windows,
+        "stability": wf.stability,
+        "score": wf.stability[rank_by],
+        "meta": {
+            "data_source": wf.data_source,
+            "snapshot_id": wf.snapshot_id,
+            "timeframe": wf.timeframe,
+            "seed": wf.seed,
+            "code_hash": wf.code_hash,
+            "dependency_hash": wf.dependency_hash,
+            "period": wf.period,
+            "universe_name": wf.universe_name,
+            "universe_snapshots": wf.universe_snapshots,
+        },
+    }
+
+
+def _evaluate_combo_pooled(overridden: LoadedStrategy, **kwargs: Any) -> dict[str, Any]:
+    """Pool-worker wrapper: pin BLAS/OpenMP to ONE thread for this combo. numpy here is OpenBLAS
+    (many threads by default), so N worker processes each spawning a full BLAS pool would
+    oversubscribe the cores. The runtime `threadpool_limits` works under the default `fork` start
+    method (no env-before-import needed). The inline path deliberately does NOT call this — a lone
+    combo should use every core.
+    """
+    with threadpool_limits(limits=1):
+        return _evaluate_combo(overridden, **kwargs)
 
 
 def sweep(

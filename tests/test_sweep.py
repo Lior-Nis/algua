@@ -77,3 +77,23 @@ def test_sweep_records_windows_and_holdout_frac():
     d = res.to_dict()
     assert d["windows"] == 3
     assert d["holdout_frac"] == 0.25
+
+
+def test_evaluate_combo_returns_record_without_holdout():
+    from algua.backtest.sweep import _evaluate_combo, _override
+
+    ov = _override(_momentum(), {"lookback": 20})
+    rec = _evaluate_combo(
+        ov, provider=SyntheticProvider(seed=3), start=START, end=END,
+        windows=4, holdout_frac=0.2,
+        universe_by_date=None, universe_name=None, universe_snapshots=None,
+        rank_by="mean_sharpe",
+    )
+    # The rankable fields are present; the holdout never leaves the worker.
+    assert set(rec) == {"config_hash", "n_windows", "stability", "score", "meta"}
+    assert "holdout_metrics" not in rec and "holdout" not in rec
+    assert rec["score"] == rec["stability"]["mean_sharpe"]
+    assert set(rec["meta"]) == {
+        "data_source", "snapshot_id", "timeframe", "seed", "code_hash",
+        "dependency_hash", "period", "universe_name", "universe_snapshots",
+    }
