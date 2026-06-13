@@ -114,21 +114,26 @@ def promote(
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
         try:
-            wf = walk_forward(strategy, provider, start_dt, end_dt, windows=windows,
-                              holdout_frac=holdout_frac, universe_by_date=universe_by_date,
-                              universe_name=universe, universe_snapshots=universe_prov)
+            wf = walk_forward(
+                strategy, provider, start_dt, end_dt, windows=windows,
+                holdout_frac=holdout_frac, universe_by_date=universe_by_date,
+                universe_name=universe, universe_snapshots=universe_prov,
+                # Burn-on-peek: commit the reservation into a burn the instant BEFORE walk_forward
+                # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
+                # committed row, the except-release below is then correct for EVERY post-peek
+                # failure (incl. KeyboardInterrupt) — a computed holdout can never be released.
+                on_peek=lambda cfg: repo.finalize_holdout_reservation(
+                    reservation_id, config_hash=cfg),
+            )
         except BaseException:
-            # Best-effort release on a clean failure (frees the window). If release ITSELF raises,
-            # swallow it: the pending row simply stays (fail-closed, window blocked) and the
-            # original walk_forward error must not be masked by a secondary release failure.
+            # Pre-peek failure: the row is still pending, so release frees the window. Post-peek
+            # failure: on_peek already committed, so this DELETE matches 0 rows (harmless no-op) and
+            # the burn survives. Swallow a release error so it never masks the original failure.
             try:
                 repo.release_holdout_reservation(reservation_id)
             except Exception:
                 pass
             raise
-        # Burn-on-peek: walk_forward has now computed holdout metrics, so commit the reservation
-        # into a burn BEFORE the gate (mirrors today's record-before-gate ordering).
-        repo.finalize_holdout_reservation(reservation_id, config_hash=wf.config_hash)
         outcome = run_gate(
             repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
             universe_name=universe, universe_snapshots=universe_prov,

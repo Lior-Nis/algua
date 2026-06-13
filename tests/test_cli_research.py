@@ -543,3 +543,68 @@ def test_promote_with_universe_refuses_with_no_breadth_before_walkforward(tmp_pa
     assert "search breadth" in payload["error"]
     # No holdout row written: refusal happened before walk_forward burned anything.
     assert len(_holdout_rows(tmp_path)) == 0
+
+
+def _holdout_committed(tmp_path):
+    """(id, committed_at) for every holdout_evaluations row — committed_at is None while pending."""
+    import sqlite3
+    conn = sqlite3.connect(tmp_path / "r.db")
+    try:
+        return conn.execute(
+            "SELECT id, committed_at FROM holdout_evaluations ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+
+def test_pre_burn_failure_frees_window(tmp_path, monkeypatch):
+    # A failure BEFORE the burn boundary (provenance runs before on_peek) must release the
+    # reservation, so the window is reusable: no row left behind, and a clean retry succeeds.
+    assert _backtest_to_backtested().exit_code == 0
+    import algua.backtest.walkforward as wfmod
+    with monkeypatch.context() as m:
+        m.setattr(wfmod, "provenance",
+                  lambda *a, **k: (_ for _ in ()).throw(ValueError("provenance boom")))
+        bad = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    assert bad.exit_code == 1, bad.stdout
+    assert json.loads(bad.stdout)["ok"] is False
+    assert _holdout_committed(tmp_path) == []  # reservation released, window free
+    assert _stage() == "backtested"
+
+    # After the context exits the fault is undone; the same window now promotes cleanly
+    # (proves it was genuinely freed).
+    good = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                               "--start", "2022-01-01", "--end", "2023-12-31",
+                               *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    assert good.exit_code == 0, good.stdout
+    assert json.loads(good.stdout)["promoted"] is True
+    assert _stage() == "candidate"
+
+
+def test_post_peek_failure_keeps_burn(tmp_path, monkeypatch):
+    # A failure AFTER the burn boundary (WalkForwardResult construction raises, post on_peek) must
+    # KEEP the burn: the row stays committed and the same window is refused on retry (#193).
+    assert _backtest_to_backtested().exit_code == 0
+    import algua.backtest.walkforward as wfmod
+
+    def boom(*a, **k):
+        raise ValueError("post-peek boom")
+
+    with monkeypatch.context() as m:
+        m.setattr(wfmod, "WalkForwardResult", boom)
+        bad = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    assert bad.exit_code == 1, bad.stdout
+    assert json.loads(bad.stdout)["ok"] is False
+    rows = _holdout_committed(tmp_path)
+    assert len(rows) == 1 and rows[0][1] is not None  # one row, COMMITTED (burn survived)
+    assert _stage() == "backtested"
+
+    # The burned window is refused on retry (single-use holdout held).
+    retry = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    assert retry.exit_code == 1, retry.stdout
+    assert "already consumed" in json.loads(retry.stdout)["error"]
