@@ -1,4 +1,5 @@
 from algua.execution import live_ledger as L
+from algua.execution import live_reconcile as R
 from algua.registry.db import connect, migrate
 
 
@@ -33,6 +34,40 @@ def test_backfill_broker_order_id(tmp_path):
     row = conn.execute("SELECT broker_order_id FROM live_orders WHERE client_order_id='coid-1'"
                        ).fetchone()
     assert row["broker_order_id"] == "broker-9"
+
+
+def test_backfill_back_attributes_fill_ingested_before_order_mapping(tmp_path):
+    # #166 gap 1: a FILL can land (via the activities feed) BEFORE its order's broker_order_id
+    # mapping exists — e.g. a submit timed out after Alpaca accepted it, so the fill arrives while
+    # live_orders.broker_order_id is still NULL. The fill is then ingested with strategy=NULL
+    # (no live_orders row maps the broker order id), and the strategy must attach once the mapping
+    # lands via backfill_broker_order_id — never orphaned. Reconcile must then show zero drift.
+    conn = _conn(tmp_path)
+    # 1. The fill arrives first, attributed to no strategy (the mapping does not exist yet).
+    L.ingest_activities(conn, [{
+        "id": "act-1", "activity_type": "FILL", "side": "buy", "qty": "10", "price": "100",
+        "order_id": "broker-9", "symbol": "AAA", "transaction_time": "2026-06-06T00:00:00+00:00",
+    }])
+    pre = conn.execute(
+        "SELECT strategy FROM live_fills WHERE broker_order_id='broker-9'"
+    ).fetchone()
+    assert pre["strategy"] is None                    # orphaned: no strategy maps it yet
+    assert L.believed_positions(conn, "s1") == {}     # s1's books don't see the orphan fill
+
+    # 2. The order record lands late (submit recorded its client_order_id), then the broker id
+    #    is backfilled — which must back-attribute the already-ingested fill to s1.
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-1")
+    L.backfill_broker_order_id(conn, "coid-1", "broker-9")
+
+    post = conn.execute(
+        "SELECT strategy FROM live_fills WHERE broker_order_id='broker-9'"
+    ).fetchone()
+    assert post["strategy"] == "s1"                    # attribution attached, fill not orphaned
+    assert L.believed_positions(conn, "s1") == {"AAA": 10.0}
+
+    # 3. Reconcile against the broker's matching net shows zero drift (clean, no halt).
+    result = R.reconcile(conn, broker_net={"AAA": 10.0}, cycle=1)
+    assert result.clean is True and result.halt is False and result.mismatches == []
 
 
 def test_believed_positions_sums_signed_fills(tmp_path):
