@@ -457,6 +457,10 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
         "SELECT COUNT(*) c FROM holdout_evaluations WHERE committed_at IS NOT NULL"
     ).fetchone()["c"]
     assert n_burn == 1, f"expected exactly one committed holdout burn, found {n_burn}"
+    n_total = check.execute(
+        "SELECT COUNT(*) c FROM holdout_evaluations WHERE strategy_id="
+        "(SELECT id FROM strategies WHERE name=?)", (STRATEGY_E2E,)).fetchone()["c"]
+    assert n_total == 1, f"expected exactly one holdout row total, found {n_total}"
     stage = check.execute(
         "SELECT stage FROM strategies WHERE name=?", (STRATEGY_E2E,)
     ).fetchone()["stage"]

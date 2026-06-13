@@ -117,7 +117,13 @@ def promote(
                               holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                               universe_name=universe, universe_snapshots=universe_prov)
         except BaseException:
-            repo.release_holdout_reservation(reservation_id)  # clean failure frees the window
+            # Best-effort release on a clean failure (frees the window). If release ITSELF raises,
+            # swallow it: the pending row simply stays (fail-closed, window blocked) and the
+            # original walk_forward error must not be masked by a secondary release failure.
+            try:
+                repo.release_holdout_reservation(reservation_id)
+            except Exception:
+                pass
             raise
         # Burn-on-peek: walk_forward has now computed holdout metrics, so commit the reservation
         # into a burn BEFORE the gate (mirrors today's record-before-gate ordering).
