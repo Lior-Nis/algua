@@ -1087,3 +1087,41 @@ def test_resume_live_refuses_when_creds_missing(monkeypatch, tmp_path):
     r = runner.invoke(app, ["paper", "resume", name])
     assert r.exit_code == 1
     assert json.loads(r.stdout)["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (issue 163): resume-all ingests live activities before not_flat check
+# ---------------------------------------------------------------------------
+
+def test_resume_all_ingests_before_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
+    from algua.risk import global_halt
+    name = "cross_sectional_momentum"
+    _to_paper()
+    # one live strategy holding AAA; an ingest delivers the offsetting fill so it nets flat
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.live_ledger import backfill_broker_order_id, record_live_order
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        # record the order so the ingested offset fill attributes back to the strategy
+        record_live_order(conn, name, "AAA", "sell", None, "coid-off")
+        backfill_broker_order_id(conn, "coid-off", "bo-off")
+        global_halt.engage(conn, reason="halt-all", actor="agent")
+
+    offset_fill = [{"id": "act-off", "activity_type": "FILL", "side": "sell", "qty": "5",
+                    "price": "100", "symbol": "AAA", "order_id": "bo-off",
+                    "transaction_time": "2023-01-02T00:00:00Z"}]
+    broker = _ReadOnlyLiveBroker(activities=offset_fill, positions={})
+    monkeypatch.setattr("algua.cli.paper_cmd._maybe_live_readonly", lambda: broker)
+
+    r = runner.invoke(app, ["paper", "resume-all"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["global_halt"] == "reset"
+    # after ingest the offset fill landed -> strategy is flat -> NOT listed as not_flat
+    assert "live_not_flat" not in payload

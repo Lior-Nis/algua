@@ -92,6 +92,16 @@ def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
                                     base_url=s.alpaca_live_url)
 
 
+def _maybe_live_readonly() -> AlpacaLiveReadOnlyBroker | None:
+    """A read-only live client if live creds are configured, else None (resume-all stays lenient:
+    with no creds it just computes not_flat from the current belief)."""
+    s = get_settings()
+    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
+        return None
+    return AlpacaLiveReadOnlyBroker(s.alpaca_live_api_key, s.alpaca_live_api_secret,
+                                    base_url=s.alpaca_live_url)
+
+
 def _live_strategy_flat(
     conn: sqlite3.Connection, name: str, universe: list[str], broker: object,
 ) -> tuple[bool, dict]:
@@ -575,7 +585,7 @@ def halt_all(
 
 
 @paper_app.command("resume-all")
-@json_errors(ValueError)
+@json_errors(ValueError, BrokerError)
 def resume_all(
     actor: str = typer.Option("human", "--actor", help="human | agent"),
 ) -> None:
@@ -589,6 +599,11 @@ def resume_all(
         live_rows = conn.execute(
             "SELECT name FROM strategies WHERE stage = 'live'"
         ).fetchall()
+        if live_rows:
+            broker = _maybe_live_readonly()
+            if broker is not None:
+                # account-wide ingest so not_flat reflects post-ingest belief (landed offset fills)
+                ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))
         not_flat = [
             r["name"] for r in live_rows if believed_positions(conn, r["name"])
         ]
