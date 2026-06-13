@@ -61,15 +61,19 @@ def run(
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError(
+            "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
+        )
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError(
+            "--news-snapshot was given but the strategy does not declare needs_news"
+        )
     fundamentals_provider = (
         StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
         if fundamentals_snapshot
         else None
     )
-    if news_snapshot and not strategy.config.needs_news:
-        raise ValueError(
-            "--news-snapshot was given but the strategy does not declare needs_news"
-        )
     news_provider = (
         StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
         if news_snapshot

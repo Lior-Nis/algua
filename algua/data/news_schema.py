@@ -211,6 +211,11 @@ def to_news_schema(frame: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_datetime(col_vals, errors="raise", utc=True)
     if out[NEWS_RETRACTED].isna().any():
         raise ValueError("news 'retracted' must be non-null (got null in input)")
+    # Reject non-bool BEFORE .astype("bool") — otherwise "false"/any non-empty string -> True,
+    # ints -> bool, silently flipping live<->tombstone past validate_news (whose dtype check runs
+    # after the cast). Mirrors the STRING_COLUMNS "None"/"nan" coercion defense (GATE-2).
+    if not all(isinstance(v, (bool, np.bool_)) for v in out[NEWS_RETRACTED]):
+        raise ValueError("news 'retracted' must be bool values (no coercion of non-bool input)")
     out[NEWS_RETRACTED] = out[NEWS_RETRACTED].astype("bool")
     out = out.drop_duplicates().sort_values(_SORT).reset_index(drop=True)
     return validate_news(out)

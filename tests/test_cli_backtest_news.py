@@ -73,3 +73,14 @@ def test_news_snapshot_on_non_news_strategy_errors(tmp_path, monkeypatch):
                               "--start", "2025-01-01", "--end", "2025-01-10"])
     assert res.exit_code != 0
     assert "needs_news" in res.output
+
+
+def test_fundamentals_snapshot_on_non_fundamentals_strategy_errors(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    bid, nid = _seed(tmp_path)  # reuse the news seed; we only need a bars snapshot id here
+    res = runner.invoke(app, ["backtest", "run", "cross_sectional_momentum",
+                              "--snapshot", bid, "--fundamentals-snapshot", nid,
+                              "--start", "2025-01-01", "--end", "2025-01-10"])
+    assert res.exit_code != 0
+    assert "needs_fundamentals" in res.output

@@ -311,6 +311,16 @@ def test_validate_rejects_non_bool_retracted():
         validate_news(bad)
 
 
+def test_to_news_schema_rejects_nonbool_retracted_string():
+    raw = explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")]))
+    bad = raw.copy()
+    bad["retracted"] = bad["retracted"].astype("object")
+    bad.loc[bad.index[0], "retracted"] = "false"
+    with pytest.raises(ValueError, match="retracted"):
+        to_news_schema(bad)
+
+
 def test_hash_changes_with_retracted():
     out = to_news_schema(explode_news_symbols(
         pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")])))
