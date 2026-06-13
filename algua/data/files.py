@@ -30,6 +30,53 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def fsync_file(path: Path) -> None:
+    """fsync a regular file's data to stable storage. Linux-only: a read-only fd still
+    flushes the inode's dirty data pages. (Threat model is a single local Linux FS;
+    macOS/NFS fsync semantics differ and are out of scope.)"""
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """fsync a directory so a rename/creation entry within it becomes durable. O_DIRECTORY
+    makes a non-directory path fail loudly (ENOTDIR) instead of silently fsyncing the wrong
+    object. Linux-only (see `fsync_file`)."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_parents(path: Path, *, stop_at: Path) -> None:
+    """fsync every directory from `path.parent` up to and including `stop_at` (the durable
+    store root). Covers ancestor directories newly created by `mkdir(parents=True)`: fsyncing
+    only the leaf parent leaves a freshly-created intermediate dir's own name un-durable in
+    *its* parent. `path` must be at or under `stop_at`."""
+    stop_at = stop_at.resolve()
+    current = path.resolve().parent
+    while True:
+        fsync_dir(current)
+        if current == stop_at or current == current.parent:
+            break
+        current = current.parent
+
+
+def fsync_tree(root: Path) -> None:
+    """Bottom-up fsync of every regular file, then every subdirectory, then `root` itself
+    (`os.walk(topdown=False)`), so child durability precedes the parent's. For partitioned
+    trees whose part-files pyarrow wrote without exposing a handle, we reopen+fsync each."""
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+        d = Path(dirpath)
+        for name in filenames:
+            fsync_file(d / name)
+        fsync_dir(d)
+
+
 def count_tabular_rows(path: Path) -> int | None:
     suffix = path.suffix.lower()
     if suffix == ".csv":
