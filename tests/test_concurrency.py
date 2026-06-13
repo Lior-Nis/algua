@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -21,6 +22,10 @@ from algua.registry.db import connect, migrate
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOIN_TIMEOUT = 30.0
 POLL = 0.005
+
+# The console script the `[project.scripts]` wiring installs sits next to the venv's python.
+ALGUA_BIN = Path(sys.executable).parent / "algua"
+STRATEGY_E2E = "cross_sectional_momentum"
 
 
 def test_connect_sets_busy_timeout(tmp_path):
@@ -337,3 +342,121 @@ def test_apply_transition_rolls_back_on_failure(tmp_path):
         "SELECT COUNT(*) c FROM stage_transitions WHERE strategy_id=? AND to_stage='candidate'",
         (rec.id,)).fetchone()["c"]
     assert n == 0
+
+
+def test_concurrent_reserve_holdout_single_burn(tmp_path):
+    """Two processes reserve the SAME holdout window under forced contention: exactly one wins,
+    the other fails closed with the consumed ValueError (not a lock error), and the DB holds
+    exactly ONE reservation row for the window. Proves the BEGIN IMMEDIATE re-check+insert is
+    atomic — the regression guard for the #161 TOCTOU."""
+    db = tmp_path / "r.db"
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    _seed_strategy(db, "s")
+
+    with _worker_group(barrier) as spawn:
+        holder = spawn("lock-hold", db, "h")
+        w1 = spawn("reserve-holdout", db, "w1", "s", "2022-01-01", "2022-12-31", "0.2")
+        w2 = spawn("reserve-holdout", db, "w2", "s", "2022-01-01", "2022-12-31", "0.2")
+
+        _release_after_contention(barrier, [w1, w2], ["w1", "w2"])
+
+        r1, r2, rh = _collect(w1), _collect(w2), _collect(holder)
+        assert rh["ok"] is True
+
+        outcomes = [r1, r2]
+        # exactly one wins; the loser failed closed with the consumed error, NOT a lock error
+        assert sum(1 for r in outcomes if r["ok"]) == 1, outcomes
+        loser = next(r for r in outcomes if not r["ok"])
+        assert loser["error"] == "ValueError", loser
+        assert "holdout already consumed" in loser["msg"], loser
+
+    # invariant: exactly one row for the window (the winner's reservation)
+    check = connect(db)
+    n = check.execute(
+        "SELECT COUNT(*) c FROM holdout_evaluations WHERE strategy_id="
+        "(SELECT id FROM strategies WHERE name='s')").fetchone()["c"]
+    assert n == 1, f"expected exactly one reservation row, found {n}"
+
+
+def test_sequential_reserve_blocks_second_claim(tmp_path):
+    """A committed reservation row blocks a second overlapping reserve from a DISTINCT connection
+    — fast deterministic guard independent of subprocess timing."""
+    from algua.registry.store import SqliteStrategyRepository
+    db = tmp_path / "r.db"
+    _seed_strategy(db, "s")
+    c1 = connect(db)
+    sid = c1.execute("SELECT id FROM strategies WHERE name='s'").fetchone()["id"]
+    SqliteStrategyRepository(c1).reserve_holdout(
+        sid, data_source="demo", snapshot_id=None,
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
+    c2 = connect(db)
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        SqliteStrategyRepository(c2).reserve_holdout(
+            sid, data_source="demo", snapshot_id=None,
+            period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2, allow_reuse=False)
+
+
+@pytest.mark.skipif(not ALGUA_BIN.exists(), reason="algua console script not installed")
+def test_concurrent_research_promote_single_burn_e2e(tmp_path):
+    """The issue's literal ask: two real `algua research promote` processes race the SAME
+    strategy+window. Exactly one exits 0 (PASS, transitions to candidate), the other fails closed;
+    the DB holds exactly ONE committed holdout burn for the window. Robust to interleaving — the
+    loser may fail at reserve (holdout already consumed) or at the stage/preflight check if the
+    winner fully transitioned first; both are valid fail-closed outcomes."""
+    db = tmp_path / "e2e.db"
+    env = {**os.environ, "ALGUA_DB_PATH": str(db), "ALGUA_DATA_DIR": str(tmp_path)}
+
+    # idea -> backtested: a single backtest run that also registers the strategy.
+    seed = subprocess.run(
+        [str(ALGUA_BIN), "backtest", "run", STRATEGY_E2E, "--demo",
+         "--start", "2022-01-01", "--end", "2023-12-31", "--register"],
+        cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+    assert seed.returncode == 0, f"backtest seed failed:\n{seed.stderr}\n{seed.stdout}"
+
+    promote_args = [str(ALGUA_BIN), "research", "promote", STRATEGY_E2E, "--demo",
+                    "--start", "2022-01-01", "--end", "2023-12-31",
+                    "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+                    "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+                    "--n-combos", "9", "--allow-non-pit", "--actor", "human"]
+
+    def _launch():
+        return subprocess.Popen(promote_args, cwd=REPO_ROOT, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=env)
+
+    # launch BOTH back-to-back against the same DB so they genuinely race the reservation
+    p1 = _launch()
+    p2 = _launch()
+    out1, err1 = p1.communicate(timeout=180)
+    out2, err2 = p2.communicate(timeout=180)
+
+    procs = [(p1, out1, err1), (p2, out2, err2)]
+    winners = [(p, out, err) for p, out, err in procs if p.returncode == 0]
+    losers = [(p, out, err) for p, out, err in procs if p.returncode != 0]
+    assert len(winners) == 1, (
+        f"expected exactly one winner, got {len(winners)}; "
+        f"rc={[p.returncode for p, _, _ in procs]}\n"
+        f"out1={out1}\nerr1={err1}\nout2={out2}\nerr2={err2}")
+
+    # the winner promoted; final stage is candidate. Each command emits one (pretty-printed)
+    # JSON document on stdout, so parse the whole stream, not a single line.
+    _, win_out, _ = winners[0]
+    win_payload = json.loads(win_out)
+    assert win_payload["promoted"] is True, win_payload
+
+    check = connect(db)
+    n_burn = check.execute(
+        "SELECT COUNT(*) c FROM holdout_evaluations WHERE committed_at IS NOT NULL"
+    ).fetchone()["c"]
+    assert n_burn == 1, f"expected exactly one committed holdout burn, found {n_burn}"
+    stage = check.execute(
+        "SELECT stage FROM strategies WHERE name=?", (STRATEGY_E2E,)
+    ).fetchone()["stage"]
+    assert stage == "candidate", stage
+
+    # best-effort: loser emitted parseable fail-closed JSON (don't gate flakiness on the message)
+    _, lose_out, _ = losers[0]
+    if lose_out.strip():
+        with contextlib.suppress(json.JSONDecodeError):
+            lose_payload = json.loads(lose_out)
+            assert lose_payload.get("ok") is False, lose_payload

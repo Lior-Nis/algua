@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -453,12 +452,6 @@ class SqliteStrategyRepository:
                     "evaluated. Use fresh out-of-sample data, or --allow-holdout-reuse "
                     "(--actor human) to override and accept the statistical cost.")
             reused = bool(overlap)  # only reachable here with allow_reuse when overlap is True
-            # Test-only hook to widen the critical section so the barriered concurrency test can
-            # force two reserves to actually overlap. Default 0; NOT surfaced in CLI help/docs.
-            delay_ms = int(os.environ.get("ALGUA_TEST_RESERVE_DELAY_MS", "0"))
-            if delay_ms:
-                import time
-                time.sleep(delay_ms / 1000.0)
             cur = self._conn.execute(
                 "INSERT INTO holdout_evaluations"
                 "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
