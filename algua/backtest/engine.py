@@ -493,5 +493,9 @@ def run(
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
         fundamentals_snapshot=getattr(fundamentals_provider, "snapshot_id", None),
+        news_snapshot=(
+            getattr(news_provider, "snapshot_id", None)
+            if strategy.config.needs_news else None
+        ),
         **prov,
     )
