@@ -317,6 +317,59 @@ def _decision_weights_fast_or_loop(
     return _decision_weights_fast(strategy, bars, adj)
 
 
+def verify_signal_panel_parity(
+    strategy: LoadedStrategy, provider: DataProvider, start: datetime, end: datetime
+) -> None:
+    """EXHAUSTIVE fail-closed parity gate for promotion: assert `signal_panel` agrees with its
+    per-bar `signal` twin on EVERY evaluated bar (not the bounded runtime sample).
+
+    Verifies a CODE property — that the vectorized fast path equals the canonical per-bar
+    `construct(signal(view), view)` — in STATIC mode over the strategy's declared universe. The
+    agent promote backtest runs under PIT (which forces the loop and never exercises the panel) or,
+    if `--universe` is omitted, may run the fast path; either way the panel must be checked here
+    directly, where the fast path is the thing under test. No-op when `signal_panel_fn is None`.
+    Raises `BacktestError` naming the first divergent bar + offending symbol(s)."""
+    if strategy.signal_panel_fn is None:
+        return  # nothing to verify
+
+    try:
+        bars = provider.get_bars(strategy.universe, start, end, "1d")
+    except Exception as exc:
+        raise BacktestError(f"provider error during parity check: {exc}") from exc
+    if bars.empty:
+        raise BacktestError("provider returned no bars for the signal_panel parity check")
+
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    adj = adj.sort_index()
+
+    fast = _fast_weights(strategy, bars, adj)
+    # static: universe_by_date=None, fundamentals=None
+    loop = _decision_weights(strategy, bars, adj)
+
+    # Identical grid by construction (both built on adj.index/columns); assert it before comparing.
+    if not (fast.index.equals(loop.index) and fast.columns.equals(loop.columns)):
+        raise BacktestError(
+            f"signal_panel parity check for {strategy.name!r}: fast/loop weight grids differ "
+            f"(fast {fast.shape} vs loop {loop.shape})"
+        )
+
+    # NaN-safe, every-bar comparison. Both paths zero-fill final weights so a NaN cannot survive;
+    # the isna() guard is defensive belt-and-suspenders against a future path that leaves one.
+    nan_mismatch = fast.isna() != loop.isna()
+    diff = (loop - fast).abs()
+    bad = nan_mismatch | (diff > WEIGHT_TOL)
+    if bool(bad.to_numpy().any()):
+        first = next(t for t in fast.index if bool(bad.loc[t].any()))
+        offenders = sorted(bad.columns[bad.loc[first].to_numpy()])
+        raise BacktestError(
+            f"signal_panel exhaustive parity check FAILED for strategy {strategy.name!r} at "
+            f"{first}: signal_panel disagrees with the per-bar construct(signal(view), view) on "
+            f"symbol(s) {offenders} "
+            f"(per-bar={loop.loc[first, offenders].to_dict()}, "
+            f"panel={fast.loc[first, offenders].to_dict()}, tol={WEIGHT_TOL})"
+        )
+
+
 def _fetch_symbols(
     strategy: LoadedStrategy, universe_by_date: Mapping[date, Collection[str]] | None
 ) -> list[str]:
