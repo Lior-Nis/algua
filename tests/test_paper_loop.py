@@ -84,10 +84,11 @@ class _NonPositiveEquityBroker:
         return []
 
 
-@pytest.mark.parametrize("equity_value", [0.0, -500.0])
+@pytest.mark.parametrize("equity_value", [0.0, -500.0, float("nan")])
 def test_run_paper_non_positive_equity_breaches_before_orders(equity_value):
     # #162: replace the (python -O strippable) `assert equity > 0` with a real fail-closed breach,
-    # so a non-positive sizing denominator never reaches the mv/equity division and order phase.
+    # so a non-usable sizing denominator (zero, negative, or NaN) never reaches the mv/equity
+    # division and order phase. NaN slips a bare `<= 0` guard, so it's covered explicitly.
     broker = _NonPositiveEquityBroker(equity_value)
     bars = _bars({"AAA": [100.0, 100.0, 100.0, 100.0]})
     with pytest.raises(RiskBreach) as ei:

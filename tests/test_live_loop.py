@@ -205,11 +205,12 @@ def test_run_tick_drawdown_breach_halts_before_trading():
     assert broker.cancels == 0 and broker.submitted == []
 
 
-@pytest.mark.parametrize("equity", [0.0, -500.0])
+@pytest.mark.parametrize("equity", [0.0, -500.0, float("nan")])
 def test_run_tick_non_positive_equity_breaches_before_trading(equity):
-    # #162: a non-positive sizing denominator must trip BEFORE the mv/equity division. equity == 0
+    # #162: a non-usable sizing denominator must trip BEFORE the mv/equity division. equity == 0
     # ZeroDivisions mid-tick; equity < 0 silently flips every current weight's sign and trades
-    # against inverted holdings. Hold a position so the (dangerous) sign-flip path is exercised.
+    # against inverted holdings; NaN (e.g. a bad mark) poisons every weight to a silent no-op and
+    # slips a bare `<= 0` guard. Hold a position so the (dangerous) sign-flip path is exercised.
     broker = _FakeBroker(positions={"AAA": 10.0}, equity=equity)
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     with pytest.raises(RiskBreach) as ei:

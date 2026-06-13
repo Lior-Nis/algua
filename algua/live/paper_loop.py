@@ -114,15 +114,16 @@ def run_paper(
         # loop's `if i < warmup: continue` (#1: reconcile the historical off-by-one).
         if bars_seen <= warmup:
             continue  # warm-up: observe only — no signal evaluation, validation, or orders
-        # Equity is the sizing denominator; a non-positive value would silently treat every position
-        # as weight 0 and buy against nothing. The drawdown breaker should have halted long before
-        # equity reaches zero, so equity <= 0 here is a logic error, not a market state — but a bare
-        # assert is stripped under `python -O`, so enforce it as a real fail-closed breach (#162).
-        if equity <= 0.0:
+        # Equity is the sizing denominator; a value that is not a positive finite number would
+        # ZeroDivision (== 0), flip every weight's sign (< 0), or NaN-poison every weight to a
+        # silent no-op (NaN). The drawdown breaker should have halted long before, so this is a
+        # logic error, not a market state — but a bare assert is stripped under `python -O`, so
+        # enforce a real fail-closed breach (#162). `not (x > 0.0)` rejects NaN, `x <= 0.0` doesn't.
+        if not (equity > 0.0):
             raise RiskBreach(
                 "non_positive_equity",
-                f"run_paper sizing equity {equity:.2f} is non-positive — refusing to size against "
-                f"a denominator that flips weight signs / divides by zero",
+                f"run_paper sizing equity {equity} is not a usable (positive, finite) "
+                f"denominator — refusing to size against it (sign-flip / divide-by-zero / NaN)",
             )
         positions = broker.get_positions()
         bar_closes = closes.loc[t]
