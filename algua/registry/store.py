@@ -262,6 +262,7 @@ class SqliteStrategyRepository:
         dependency_hash: str | None = None,
         consume_gate_id: int | None = None,
         consume_forward_gate_id: int | None = None,
+        revoke_allocation: bool = False,
     ) -> StrategyRecord:
         if consume_gate_id is not None and consume_forward_gate_id is not None:
             raise ValueError(
@@ -270,7 +271,8 @@ class SqliteStrategyRepository:
         with self._conn:  # consume + UPDATE + INSERT commit together or not at all
             return self._apply_transition_locked(
                 rec, to, actor, reason, code_hash, config_hash, dependency_hash,
-                consume_gate_id, consume_forward_gate_id, _now())
+                consume_gate_id, consume_forward_gate_id, _now(),
+                revoke_allocation=revoke_allocation)
 
     def _apply_transition_locked(
         self,
@@ -284,6 +286,8 @@ class SqliteStrategyRepository:
         consume_gate_id: int | None,
         consume_forward_gate_id: int | None,
         now: str,
+        *,
+        revoke_allocation: bool = False,
     ) -> StrategyRecord:
         """``apply_transition``'s body, WITHOUT opening a transaction: the caller owns the
         ``with self._conn:`` scope, so a composite write (e.g.
@@ -327,6 +331,11 @@ class SqliteStrategyRepository:
                     f"forward gate evaluation {consume_forward_gate_id} is not a consumable"
                     " agent token for this strategy+identity (already consumed, missing,"
                     " identity-drifted, or expired)")
+        if revoke_allocation:
+            # Bench wind-down (#125): revoke the live capital reservation in the SAME transaction
+            # as the stage CAS below, so a raced/failed transition leaves the allocation intact.
+            from algua.registry import allocations
+            allocations.revoke_active_locked(self._conn, rec.id)
         # Compare-and-swap on the stage the caller read: two sessions sharing this DB must not
         # silently overwrite each other's transitions. Inside the txn, so a raced transition
         # rolls back the token consume above too.

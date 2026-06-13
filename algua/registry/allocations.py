@@ -60,14 +60,20 @@ def allocate(conn: sqlite3.Connection, strategy_id: int, capital: float, actor: 
         raise
 
 
-def deallocate(conn: sqlite3.Connection, strategy_id: int, actor: str, is_flat: bool) -> None:
-    """Revoke a strategy's active allocation. Requires the strategy flat with no open orders
-    (the caller computes `is_flat` from the ledger + broker)."""
-    if not is_flat:
-        raise AllocationError("cannot deallocate a strategy that is not flat / has open orders")
+def revoke_active_locked(conn: sqlite3.Connection, strategy_id: int) -> None:
+    """Revoke a strategy's active allocation WITHOUT committing — the caller owns the transaction
+    (e.g. the stage-change txn in `_apply_transition_locked`). No-op if nothing is active."""
     existing = active_allocation(conn, strategy_id)
     if existing is None:
         return
     conn.execute("UPDATE strategy_allocations SET revoked_ts = ? WHERE id = ?",
                  (datetime.now(UTC).isoformat(), existing["id"]))
+
+
+def deallocate(conn: sqlite3.Connection, strategy_id: int, actor: str, is_flat: bool) -> None:
+    """Revoke a strategy's active allocation. Requires the strategy flat with no open orders
+    (the caller computes `is_flat` from the ledger + broker)."""
+    if not is_flat:
+        raise AllocationError("cannot deallocate a strategy that is not flat / has open orders")
+    revoke_active_locked(conn, strategy_id)
     conn.commit()
