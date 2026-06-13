@@ -21,6 +21,7 @@ from algua.data.files import (
     frame_to_parquet_bytes,
     fsync_file,
     fsync_parents,
+    fsync_tree,
     logical_bars_hash,
     read_partitioned_bars,
     sha256_bytes,
@@ -208,11 +209,19 @@ class DataStore:
         already committed, return that record; otherwise VALIDATE the existing dir (legacy
         direct-write ingest could have left a partial dir) and adopt it. Fails closed on
         validation mismatch — never deletes the suspect dir. The caller owns `staging_dir`
-        creation and `finally`-cleanup."""
+        creation and `finally`-cleanup.
+
+        Power-loss durable (#184): on the publish branch the staging tree is fsynced before
+        the rename and the target's parent chain after; on the adoption branch the same
+        barrier (tree + parent chain) runs before the manifest append, since a concurrent or
+        prior writer may have renamed the dir into place without fsyncing it and we are about
+        to commit it."""
         target = self.data_dir / rec.data_path
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
+            fsync_tree(staging_dir)  # all part-files + dir entries durable before publish
             os.replace(staging_dir, target)
+            fsync_parents(target, stop_at=self.data_dir)
         except OSError as exc:
             # Adopt ONLY the expected "target dir already exists and is non-empty" failure.
             # Re-raise anything else (permission, I/O, cross-device).
@@ -226,6 +235,9 @@ class DataStore:
                 expected_row_count=rec.row_count or 0,
                 expected_symbols=expected_symbols,
             )
+            # Independent durability barrier: the adopter is about to commit the manifest.
+            fsync_tree(target)
+            fsync_parents(target, stop_at=self.data_dir)
         return self.manifest.append_if_absent(rec)
 
     def ingest_universe(

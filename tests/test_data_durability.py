@@ -129,3 +129,79 @@ def test_ingest_file_fsyncs_staged_before_replace_then_parents(
     first_replace = events.index("replace")
     assert events.index("fsync") < first_replace
     assert events[first_replace + 1 :].count("fsync") >= 1
+
+
+def _bars_frame() -> pd.DataFrame:
+    idx = pd.to_datetime(["2026-01-02", "2026-01-05"], utc=True)
+    return pd.DataFrame(
+        {
+            "timestamp": list(idx) + list(idx),
+            "symbol": ["AAPL", "AAPL", "MSFT", "MSFT"],
+            "open": [1.0, 1.1, 2.0, 2.1], "high": [1.0, 1.1, 2.0, 2.1],
+            "low": [1.0, 1.1, 2.0, 2.1], "close": [1.0, 1.1, 2.0, 2.1],
+            "adj_close": [1.0, 1.1, 2.0, 2.1], "volume": [10.0, 11.0, 20.0, 21.0],
+        }
+    )
+
+
+def _ingest_bars(store: DataStore):
+    return store.ingest_bars(
+        provider="fixture", symbols=["AAPL", "MSFT"], start="2026-01-02", end="2026-01-05",
+        as_of="2026-01-06T00:00:00+00:00", source="fixture", frame=_bars_frame(),
+    )
+
+
+def test_commit_bars_publish_fsyncs_tree_before_replace_then_parents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = DataStore(tmp_path / "store")
+    events: list[str] = []
+    import algua.data.store as store_mod
+    real_replace = os.replace
+    real_tree = store_mod.fsync_tree
+    real_parents = store_mod.fsync_parents
+    monkeypatch.setattr(
+        store_mod, "fsync_tree", lambda p: (events.append("tree"), real_tree(p))[1]
+    )
+    monkeypatch.setattr(
+        os, "replace", lambda s, d: (events.append("replace"), real_replace(s, d))[1]
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "fsync_parents",
+        lambda p, *, stop_at: (events.append("parents"), real_parents(p, stop_at=stop_at))[1],
+    )
+
+    _ingest_bars(store)
+    assert events[:3] == ["tree", "replace", "parents"]
+
+
+def test_commit_bars_adoption_fsyncs_before_manifest_append(tmp_path: Path, monkeypatch) -> None:
+    # First ingest publishes the dir. Blank the manifest so a second ingest of the SAME id
+    # re-enters _commit_bars_dir, hits ENOTEMPTY (target exists), and ADOPTS it.
+    store = DataStore(tmp_path / "store")
+    rec = _ingest_bars(store)
+    manifest_path = (tmp_path / "store" / "manifest.jsonl")
+    manifest_path.write_text("")  # drop the committed record, keep the payload dir
+
+    import algua.data.store as store_mod
+    events: list[str] = []
+    real_tree = store_mod.fsync_tree
+    monkeypatch.setattr(
+        store_mod,
+        "fsync_tree",
+        lambda p: (events.append(f"tree:{p.name}"), real_tree(p))[1],
+    )
+    orig_append = store.manifest.append_if_absent
+    monkeypatch.setattr(
+        store.manifest,
+        "append_if_absent",
+        lambda r: (events.append("append"), orig_append(r))[1],
+    )
+
+    again = _ingest_bars(store)
+    assert again.snapshot_id == rec.snapshot_id
+    # the adoption barrier fsync_tree(target) ran BEFORE the manifest append
+    tree_events = [e for e in events if e.startswith("tree:")]
+    assert tree_events
+    assert events.index(tree_events[0]) < events.index("append")
