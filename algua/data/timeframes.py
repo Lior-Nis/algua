@@ -1,4 +1,3 @@
-# algua/data/timeframes.py
 """Canonical timeframe vocabulary for the data layer (issue #151).
 
 Single source of truth for the closed set of bar timeframes the system accepts, plus the
