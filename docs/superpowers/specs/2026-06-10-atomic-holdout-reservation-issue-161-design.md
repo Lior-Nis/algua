@@ -328,6 +328,28 @@ sentinel (the `committed_at` NULL is the authoritative discriminator).
 **Noted, out of scope:** OpenCode found a real pre-existing TOCTOU in `allocations.deallocate`
 (read-then-UPDATE without `BEGIN IMMEDIATE`). Not fixed here — candidate for a follow-up issue.
 
+## Implementation deviations (2026-06-13, during build)
+
+Two changes made during implementation vs. the design above, both improvements:
+
+1. **Concurrency test harness — reused the #164 lock-holder harness instead of `threading.Barrier`.**
+   The repo already has a deterministic multi-process harness (`tests/_concurrency_worker.py` +
+   `tests/test_concurrency.py`): a `lock-hold` worker holds `BEGIN IMMEDIATE` open and
+   `_release_after_contention` proves each contender genuinely blocked on the lock (asserts they're
+   still alive just before release). This is strictly more rigorous than the planned threads+sleep
+   barrier (the "serialize by luck" failure mode the design itself flagged). The race proof is now a
+   `reserve-holdout` worker op + `test_concurrent_reserve_holdout_single_burn` (asserts exactly ONE
+   row — the invariant), plus a sequential cross-connection guard and the real-process e2e promote race.
+
+2. **Dropped the `ALGUA_TEST_RESERVE_DELAY_MS` env seam.** Because the lock-holder harness provides
+   deterministic contention externally, there is no need to widen `reserve_holdout`'s own critical
+   section from inside. The test-only env hook (and its `import os`) were removed from `store.py` — no
+   test-only seam is left in production. (Section 3 and "Testing" above still describe the original
+   hook-based approach; this note supersedes them.)
+
+Also: `SCHEMA_VERSION` landed at **22** (not 20 — the repo was already at 21); `busy_timeout=5000`
+was already present in `connect` (added by #164), so §2 was a no-op.
+
 ## Out of scope
 
 - Moving promote orchestration out of the CLI into `promotion.py` (#165).
