@@ -309,14 +309,30 @@ def parquet_file_row_count(path: Path) -> int:
     """Full read-back of a single-file parquet: materialize the entire table (all columns,
     all row groups) so every data page is decompressed — power-loss truncation in the
     interior raises here — and return the row count. NOT a footer-only `metadata.num_rows`
-    peek: that would report a count without touching the data pages (#184)."""
-    return pq.read_table(path).num_rows
+    peek: that would report a count without touching the data pages (#184).
+
+    Any pyarrow read failure (torn footer, unreadable page, etc.) is normalized to `ValueError`
+    so the verify caller can treat every read-back failure uniformly as damage (a real
+    programming bug still surfaces as its own exception type)."""
+    try:
+        return pq.read_table(path).num_rows
+    except pa.ArrowException as exc:
+        raise ValueError(f"unreadable parquet file {path}: {exc}") from exc
 
 
 def parquet_dataset_row_count(dest_dir: Path) -> int:
     """Full read-back of a hive-partitioned bars dataset: read every partition's every column
     (`to_table(columns=None)`), forcing decompression of all data pages, and return the total
     row count. Must NOT use `count_rows()`/footer metadata/pruned-column reads — those skip the
-    data pages this check exists to validate (#184)."""
+    data pages this check exists to validate (#184).
+
+    Any pyarrow read failure is normalized to `ValueError` (see `parquet_file_row_count`)."""
+    try:
+        return _parquet_dataset_row_count(dest_dir)
+    except pa.ArrowException as exc:
+        raise ValueError(f"unreadable parquet dataset {dest_dir}: {exc}") from exc
+
+
+def _parquet_dataset_row_count(dest_dir: Path) -> int:
     dataset = pads.dataset(dest_dir, format="parquet", partitioning=_BARS_PARTITIONING)
     return dataset.to_table(columns=None).num_rows

@@ -374,3 +374,20 @@ def test_verify_snapshots_aggregates_and_flags_failures(tmp_path: Path) -> None:
     assert by_id[good.snapshot_id]["ok"] is True
     assert by_id[bad.snapshot_id]["ok"] is False
     assert by_id[bad.snapshot_id]["error"]
+
+
+def test_parquet_row_count_normalizes_arrow_exception_to_valueerror(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A pyarrow ArrowException outside the ValueError/OSError hierarchy (e.g. ArrowCapacityError)
+    # must still surface as ValueError so verify_snapshots' (OSError, ValueError) catch treats it
+    # as damage rather than crashing the whole verify run.
+    p = tmp_path / "x.parquet"
+    pq.write_table(pa.table({"a": [1, 2, 3]}), p)
+
+    def boom(*_a, **_k):
+        raise pa.lib.ArrowCapacityError("simulated arrow failure")
+
+    monkeypatch.setattr(pq, "read_table", boom)
+    with pytest.raises(ValueError):
+        files.parquet_file_row_count(p)
