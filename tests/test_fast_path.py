@@ -18,8 +18,11 @@ import algua.strategies.momentum as momentum_pkg
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import (
     BacktestError,
+    _assert_parity,
     _decision_weights,
     _decision_weights_fast_or_loop,
+    _fast_weights,
+    _parity_sample_positions,
     simulate,
 )
 from algua.contracts.types import ExecutionContract
@@ -378,3 +381,41 @@ def test_fast_path_allow_short_permits_negative_panel() -> None:
     bars, adj = _bars_adj(["AAA"], seed=2)
     weights = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
     assert (weights["AAA"] == -0.5).all()
+
+
+def test_fast_weights_skips_bounded_guard() -> None:
+    """`_fast_weights` returns the fast-path matrix WITHOUT the bounded parity guard, so a panel
+    that diverges only where the bounded sample does not look does NOT raise here — the guard is
+    `_decision_weights_fast`'s job, decoupled so the exhaustive verifier owns its own comparison."""
+    def good_loop(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(0.5, index=syms)
+
+    bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    n = len(adj.index)
+    sample = set(_parity_sample_positions(0, n))
+    target = next(i for i in range(0, n) if i not in sample)  # an UNSAMPLED evaluated bar
+    target_ts = adj.index[target]
+
+    def sneaky_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        out = pd.DataFrame(0.5, index=a.index, columns=a.columns)
+        out.loc[target_ts, "AAA"] = 1.0  # diverge from equal-weight only here
+        out.loc[target_ts, "BBB"] = 0.0
+        return out
+
+    cfg = StrategyConfig(
+        name="sneaky", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=good_loop, signal_panel_fn=sneaky_panel, construct_fn=_passthrough
+    )
+    # `_fast_weights` does NOT raise (no bounded guard); it returns the divergent matrix as-is.
+    fast = _fast_weights(strat, bars, adj)
+    assert fast.loc[target_ts, "AAA"] == 1.0
+    # The bounded guard at the unsampled bar also passes (documents the gap the verifier closes).
+    bars_sorted = bars.sort_index()
+    end_pos = bars_sorted.index.searchsorted(adj.index, side="right")
+    _assert_parity(strat, bars_sorted, end_pos, fast, 0)  # no raise — sample misses target

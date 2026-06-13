@@ -181,20 +181,19 @@ def _canonical_row(
     return w.reindex(columns).fillna(0.0)
 
 
-def _decision_weights_fast(
+def _fast_weights(
     strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
 ) -> pd.DataFrame:
-    """Vectorized fast path: call the strategy's `signal_panel` ONCE for the whole period to get the
-    SCORES matrix, then apply the construction policy PER BAR (with the same expanding `view_t` the
-    loop uses) + the shared risk walls. A fail-closed WEIGHT-level parity guard then confirms the
-    result equals the canonical per-bar `construct(signal(view), view)` on a bounded sample. Static
+    """Vectorized fast-path WEIGHTS, without the bounded runtime parity guard. Calls the strategy's
+    `signal_panel` ONCE for the whole period to get the SCORES matrix, then applies the construction
+    policy PER BAR (with the same expanding `view_t` the loop uses) + the shared risk walls. Static
     universe only; pre-lag, like the loop.
 
-    The speedup is computing the signal once instead of recomputing it on the expanding view each
-    bar; construction stays per-bar (cheap for the view-independent starter policies). The scores
-    matrix is NOT NaN-filled before construction — a missing score means 'no opinion' and the policy
-    drops it; only the FINAL weights are zero-filled to flat.
-    """
+    The scores matrix is NOT NaN-filled before construction — a missing score means 'no opinion' and
+    the policy drops it; only the FINAL weights are zero-filled to flat. The parity guard is applied
+    by the caller (`_decision_weights_fast` for the bounded runtime check;
+    `verify_signal_panel_parity` for the exhaustive promotion gate), so this function never falls
+    back silently."""
     panel = strategy.signal_panel(bars)
     assert panel is not None  # caller guarantees signal_panel_fn is set
     if not isinstance(panel, pd.DataFrame):
@@ -225,8 +224,20 @@ def _decision_weights_fast(
             raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
         weights.loc[t, row.index] = row.to_numpy()
+    return weights
 
-    _assert_parity(strategy, bars_sorted, end_pos, weights, warmup)
+
+def _decision_weights_fast(
+    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+) -> pd.DataFrame:
+    """Vectorized fast path used by ordinary backtests: `_fast_weights` followed by the fail-closed
+    WEIGHT-level parity guard on a bounded deterministic sample (`_assert_parity`). The fast path is
+    never trusted without that guard and never silently falls back. The promotion gate uses
+    `verify_signal_panel_parity` instead, which checks EVERY bar."""
+    weights = _fast_weights(strategy, bars, adj)
+    bars_sorted = bars.sort_index()
+    end_pos = bars_sorted.index.searchsorted(adj.index, side="right")
+    _assert_parity(strategy, bars_sorted, end_pos, weights, strategy.execution.warmup_bars)
     return weights
 
 
