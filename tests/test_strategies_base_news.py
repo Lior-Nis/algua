@@ -69,3 +69,21 @@ def test_assert_tradable_without_news_raises():
     s = LoadedStrategy(config=_cfg(needs_news=True), news_signal_fn=_news_fn, construct_fn=_pol())
     with pytest.raises(ValueError, match="needs_news"):
         assert_tradable_without_news(s)
+
+
+def test_fundamentals_strategy_rejects_news_sidecar():
+    def _fund_fn(view, params, fundamentals):
+        return pd.Series(dtype="float64")
+    s = LoadedStrategy(config=_cfg(needs_fundamentals=True), fundamentals_signal_fn=_fund_fn,
+                       construct_fn=_pol())
+    with pytest.raises(ValueError):
+        s.signal(pd.DataFrame(), news=pd.DataFrame())
+
+
+def test_plain_strategy_rejects_any_sidecar():
+    s = LoadedStrategy(config=_cfg(), signal_fn=lambda v, p: pd.Series(dtype="float64"),
+                       construct_fn=_pol())
+    with pytest.raises(ValueError):
+        s.signal(pd.DataFrame(), news=pd.DataFrame())
+    with pytest.raises(ValueError):
+        s.signal(pd.DataFrame(), fundamentals=pd.DataFrame())

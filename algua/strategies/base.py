@@ -51,9 +51,10 @@ class StrategyConfig(BaseModel):
 @dataclass
 class LoadedStrategy:
     """Binds a StrategyConfig + the authored signal fn(s) + the RESOLVED construction policy into an
-    object satisfying the Strategy protocol. Exactly one of (`signal_fn`, `fundamentals_signal_fn`)
-    is active, selected by `config.needs_fundamentals`. The adapter is the ONLY place the
-    protocol-level `target_weights` exists; it composes construct(signal(view), view).
+    object satisfying the Strategy protocol. Exactly one of (`signal_fn`, `fundamentals_signal_fn`,
+    `news_signal_fn`) is active, selected by the `needs_fundamentals`/`needs_news` flags (mutually
+    exclusive). The adapter is the ONLY place the protocol-level `target_weights` exists; it
+    composes construct(signal(view), view).
 
     `construct_fn` is the RAW policy callable (never a params-bound partial): `construct` reads
     `config.construction_params` at call time, so a sweep that rebuilds the config takes effect and
