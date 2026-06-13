@@ -468,6 +468,49 @@ def test_show_reflects_global_halt():
     assert payload["kill_switch"]["global_halt"] is True
 
 
+def _seed_paper_order(db_path, strategy, symbol):
+    from contextlib import closing
+
+    from algua.registry.db import connect, migrate
+    with closing(connect(db_path)) as conn:
+        migrate(conn)
+        cur = conn.execute(
+            "INSERT INTO paper_orders(strategy, symbol, side, target_weight, decision_ts, "
+            "submitted_ts, status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
+            (strategy, symbol, "buy", 0.5, "2023-01-01T00:00:00Z", "2023-01-01T00:00:00Z",
+             "filled", f"bo-{strategy}-{symbol}"),
+        )
+        conn.execute(
+            "INSERT INTO paper_fills(order_id, symbol, qty, price, fill_ts) VALUES (?,?,?,?,?)",
+            (cur.lastrowid, symbol, 5.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+
+def test_paper_flatten_closes_dropped_symbol_not_siblings(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    db = tmp_path / "p.db"
+    # the strategy holds ZZZ (a symbol no longer in its universe); a SIBLING strategy holds SIB
+    _seed_paper_order(db, "cross_sectional_momentum", "ZZZ")
+    _seed_paper_order(db, "sibling_strat", "SIB")
+
+    broker = _FlattenBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
+    assert result.exit_code == 0, result.stdout
+
+    closed = set(broker.closed_symbols)
+    assert "ZZZ" in closed                     # held-but-dropped symbol IS closed
+    assert "SIB" not in closed                 # sibling's symbol is NOT closed
+    assert "ZZZ" in json.loads(result.stdout)["closed_symbols"]
+
+    # the strategy's derived belief is reset to flat after the close
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["positions"] == {}
+
+
 # ---------------------------------------------------------------------------
 # Task 6: ledger-flat resume gate
 # ---------------------------------------------------------------------------
@@ -523,11 +566,20 @@ def _clear_belief(tmp_path, name="cross_sectional_momentum"):
 
 
 def test_resume_refused_while_live_strategy_not_flat(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
     name = _seed_live_killed_with_position(monkeypatch, tmp_path)
+    # broker still holds AAA (non-flat): ledger has a fill, broker confirms the position
+    broker_with_position = _ReadOnlyLiveBroker(activities=[], positions={"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings",
+                        lambda: broker_with_position)
     r = runner.invoke(app, ["paper", "resume", name])
     assert r.exit_code == 1 and "not flat" in r.stdout.lower()
-    # once flat (belief cleared), resume succeeds
+    # once flat (belief cleared AND broker reports flat), resume succeeds
     _clear_belief(tmp_path, name)
+    flat_broker = _ReadOnlyLiveBroker(activities=[], positions={})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings",
+                        lambda: flat_broker)
     assert runner.invoke(app, ["paper", "resume", name]).exit_code == 0
 
 
@@ -537,8 +589,13 @@ def test_resume_clears_live_nav_peak(monkeypatch, tmp_path):
     from algua.config.settings import get_settings
     from algua.execution.order_state import get_nav_peak, update_nav_peak
     from algua.registry.db import connect, migrate
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
     name = _seed_live_killed_with_position(monkeypatch, tmp_path)
     _clear_belief(tmp_path, name)                       # make it flat so resume is allowed
+    flat_broker = _ReadOnlyLiveBroker(activities=[], positions={})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings",
+                        lambda: flat_broker)
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         update_nav_peak(conn, name, 12_000.0)           # a stale pre-breach NAV peak
@@ -938,3 +995,135 @@ def test_paper_promote_missing_creds_json_error(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert "ALGUA_ALPACA_API_KEY" in payload["error"]
+
+
+def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    # the strategy holds ZZZ, a symbol no longer in its universe
+    _seed_paper_order(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
+
+    class _BreachTickBroker(_MinimalBroker):
+        def __init__(self):
+            self.closed_symbols = None
+        def cancel_open_orders(self):
+            pass
+        def close_positions(self, symbols):
+            self.closed_symbols = list(symbols)
+
+    broker = _BreachTickBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "dd")))
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["kind"] == "drawdown" and payload["kill_switch"] == "tripped"
+    assert "ZZZ" in payload["closed_symbols"]      # held-but-dropped symbol was flattened
+    assert "ZZZ" in broker.closed_symbols
+    # belief cleared after the successful flatten
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["positions"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (issue 163): resume (Stage.LIVE) — ingest + reconcile against broker truth
+# ---------------------------------------------------------------------------
+
+class _ReadOnlyLiveBroker:
+    """Fake read-only live broker: scripted activities + broker net positions for resume tests."""
+    def __init__(self, activities, positions):
+        self._activities = activities
+        self._positions = positions
+    def account_activities(self, after=None):
+        return self._activities
+    def get_positions(self):
+        import pandas as pd
+        return pd.Series(self._positions, dtype="float64")
+
+
+def _seed_live_killed(db_path, name, fills):
+    """Seed a tripped live strategy with believed fills (symbol -> qty)."""
+    from contextlib import closing
+
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name=?", (name,))
+        for i, (sym, qty) in enumerate(fills.items()):
+            conn.execute(
+                "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, "
+                "price, fill_ts) VALUES (?,?,?,?,?,?,?)",
+                (f"seed-{i}", f"bo-{i}", name, sym, qty, 100.0, "2023-01-01T00:00:00Z"),
+            )
+        kill_switch.trip(conn, name, reason="flatten", actor="system")
+        conn.commit()
+
+
+def test_resume_live_refuses_when_broker_still_holds(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
+    name = "cross_sectional_momentum"
+    _to_paper()
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    # broker still reports AAA held, no new activities -> ledger non-flat AND broker exposed
+    broker = _ReadOnlyLiveBroker(activities=[], positions={"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 1
+    assert json.loads(r.stdout)["ok"] is False
+    assert "not flat" in r.stdout.lower()
+
+
+def test_resume_live_refuses_when_creds_missing(monkeypatch, tmp_path):
+    name = "cross_sectional_momentum"
+    _to_paper()
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    # explicitly clear any ambient live creds -> cannot confirm flat -> refuse
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_API_KEY", raising=False)
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_API_SECRET", raising=False)
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 1
+    assert json.loads(r.stdout)["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 6 (issue 163): resume-all ingests live activities before not_flat check
+# ---------------------------------------------------------------------------
+
+def test_resume_all_ingests_before_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
+    from algua.risk import global_halt
+    name = "cross_sectional_momentum"
+    _to_paper()
+    # one live strategy holding AAA; an ingest delivers the offsetting fill so it nets flat
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.live_ledger import backfill_broker_order_id, record_live_order
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        # record the order so the ingested offset fill attributes back to the strategy
+        record_live_order(conn, name, "AAA", "sell", None, "coid-off")
+        backfill_broker_order_id(conn, "coid-off", "bo-off")
+        global_halt.engage(conn, reason="halt-all", actor="agent")
+
+    offset_fill = [{"id": "act-off", "activity_type": "FILL", "side": "sell", "qty": "5",
+                    "price": "100", "symbol": "AAA", "order_id": "bo-off",
+                    "transaction_time": "2023-01-02T00:00:00Z"}]
+    broker = _ReadOnlyLiveBroker(activities=offset_fill, positions={})
+    monkeypatch.setattr("algua.cli.paper_cmd._maybe_live_readonly", lambda: broker)
+
+    r = runner.invoke(app, ["paper", "resume-all"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["global_halt"] == "reset"
+    # after ingest the offset fill landed -> strategy is flat -> NOT listed as not_flat
+    assert "live_not_flat" not in payload
