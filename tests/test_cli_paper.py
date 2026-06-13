@@ -468,6 +468,49 @@ def test_show_reflects_global_halt():
     assert payload["kill_switch"]["global_halt"] is True
 
 
+def _seed_paper_order(db_path, strategy, symbol):
+    from contextlib import closing
+
+    from algua.registry.db import connect, migrate
+    with closing(connect(db_path)) as conn:
+        migrate(conn)
+        cur = conn.execute(
+            "INSERT INTO paper_orders(strategy, symbol, side, target_weight, decision_ts, "
+            "submitted_ts, status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
+            (strategy, symbol, "buy", 0.5, "2023-01-01T00:00:00Z", "2023-01-01T00:00:00Z",
+             "filled", f"bo-{strategy}-{symbol}"),
+        )
+        conn.execute(
+            "INSERT INTO paper_fills(order_id, symbol, qty, price, fill_ts) VALUES (?,?,?,?,?)",
+            (cur.lastrowid, symbol, 5.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+
+def test_paper_flatten_closes_dropped_symbol_not_siblings(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    db = tmp_path / "p.db"
+    # the strategy holds ZZZ (a symbol no longer in its universe); a SIBLING strategy holds SIB
+    _seed_paper_order(db, "cross_sectional_momentum", "ZZZ")
+    _seed_paper_order(db, "sibling_strat", "SIB")
+
+    broker = _FlattenBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
+    assert result.exit_code == 0, result.stdout
+
+    closed = set(broker.closed_symbols)
+    assert "ZZZ" in closed                     # held-but-dropped symbol IS closed
+    assert "SIB" not in closed                 # sibling's symbol is NOT closed
+    assert "ZZZ" in json.loads(result.stdout)["closed_symbols"]
+
+    # the strategy's derived belief is reset to flat after the close
+    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert show["positions"] == {}
+
+
 # ---------------------------------------------------------------------------
 # Task 6: ledger-flat resume gate
 # ---------------------------------------------------------------------------

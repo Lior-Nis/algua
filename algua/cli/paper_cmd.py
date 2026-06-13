@@ -20,6 +20,7 @@ from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
+    clear_derived_positions,
     clear_nav_peak,
     clear_peak_equity,
     client_order_id,
@@ -129,6 +130,19 @@ def _trip(conn: sqlite3.Connection, name: str, exc: RiskBreach) -> None:
     kill_switch.trip(conn, name, reason=exc.detail, actor="system")
     audit_append(conn, actor="system", action="kill_switch_trip",
                  reason=f"{exc.kind}: {exc.detail}", strategy=name)
+
+
+def _strategy_held_symbols(
+    conn: sqlite3.Connection, strategy: str, universe: list[str]
+) -> list[str]:
+    """Universe ∪ every symbol THIS strategy has submitted a paper order for — so a held-but-dropped
+    symbol (traded before its universe changed) is still exited, WITHOUT closing a sibling's
+    positions on a shared paper account. Closing a flat name is a 404 no-op, so over-including
+    never-filled names is harmless."""
+    rows = conn.execute(
+        "SELECT DISTINCT symbol FROM paper_orders WHERE strategy = ?", (strategy,)
+    ).fetchall()
+    return sorted(set(universe) | {r["symbol"] for r in rows})
 
 
 @paper_app.command("run")
@@ -332,16 +346,21 @@ def trade_tick(
             _trip(conn, name, exc)
             liquidation_submitted = True
             flatten_error = None
+            symbols = _strategy_held_symbols(conn, name, strategy.universe)
             try:
                 broker.cancel_open_orders()
-                broker.close_positions(strategy.universe)
+                broker.close_positions(symbols)
             except BrokerError as fexc:
                 liquidation_submitted = False
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
+            else:
+                # Close succeeded: reset the derived belief so the next reconcile starts flat.
+                clear_derived_positions(conn, name)
             payload = _breach_payload(exc.detail, kind=exc.kind,
-                                      liquidation_submitted=liquidation_submitted)
+                                      liquidation_submitted=liquidation_submitted,
+                                      closed_symbols=symbols)
             if flatten_error is not None:
                 payload["flatten_error"] = flatten_error
             emit(payload)
@@ -471,14 +490,18 @@ def flatten(
         # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
         kill_switch.trip(conn, name, reason="flatten", actor=actor)
         audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
+        symbols = _strategy_held_symbols(conn, name, strategy.universe)
         try:
             broker.cancel_open_orders()
-            broker.close_positions(strategy.universe)
+            broker.close_positions(symbols)
         except BrokerError as exc:
             emit(_breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
+        # Close succeeded: reset the derived belief so a later trade-tick reconcile starts flat.
+        clear_derived_positions(conn, name)
     # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
-    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))
+    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True,
+             "closed_symbols": symbols}))
 
 
 @paper_app.command("halt-all")
