@@ -24,6 +24,23 @@ class StoreBackedFundamentalsProvider:
         return frame[frame["knowable_at"] < end_ts].reset_index(drop=True)
 
 
+class StoreBackedNewsProvider:
+    """Serves one news snapshot through the as-of `NewsProvider` seam. Returns the FULL bitemporal
+    history (including tombstones) with knowable_at < end (no lower bound — the first decision bar
+    needs prior news). The engine applies the per-bar knowable_at <= t mask; this provider never
+    sees `t`."""
+
+    def __init__(self, store: DataStore, snapshot_id: str) -> None:
+        self.store = store
+        self.snapshot_id = snapshot_id
+
+    def get_news(self, symbols: list[str], end: datetime) -> pd.DataFrame:
+        frame = self.store.read_news(self.snapshot_id, symbols=symbols)
+        end_ts = pd.Timestamp(end)
+        end_ts = end_ts.tz_localize("UTC") if end_ts.tzinfo is None else end_ts.tz_convert("UTC")
+        return frame[frame["knowable_at"] < end_ts].reset_index(drop=True)
+
+
 class StoreBackedProvider:
     """Serves a single ingested bars snapshot through the serving `DataProvider` protocol
     (`algua.contracts.types`) — distinct from the ingestion `BarProvider` seam.

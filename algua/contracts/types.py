@@ -66,7 +66,10 @@ class Strategy(Protocol):
     execution: ExecutionContract
 
     def target_weights(
-        self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
+        self,
+        features: pd.DataFrame,
+        fundamentals: pd.DataFrame | None = None,
+        news: pd.DataFrame | None = None,
     ) -> pd.Series: ...
 
 
@@ -107,6 +110,18 @@ class FundamentalsProvider(Protocol):
     snapshot_id: str
 
     def get_fundamentals(self, symbols: list[str], end: datetime) -> pd.DataFrame: ...
+
+
+@runtime_checkable
+class NewsProvider(Protocol):
+    """As-of consumption seam for point-in-time news (issue #132). Returns the FULL bitemporal
+    history (including retraction tombstones) for `symbols` with knowable_at < end — no lower
+    bound. The engine owns decision `t` and masks knowable_at <= t per bar; the provider never
+    sees `t`."""
+
+    snapshot_id: str
+
+    def get_news(self, symbols: list[str], end: datetime) -> pd.DataFrame: ...
 
 
 @runtime_checkable
