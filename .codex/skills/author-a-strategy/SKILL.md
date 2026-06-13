@@ -1,21 +1,33 @@
 ---
 name: author-a-strategy
-description: How to author a new algua strategy module — the CONFIG + compute_weights contract, the bar schema the function receives, available features, where the file goes, and the GENERATED_BY/additions-only discipline. Use when writing a strategy.
+description: How to author a new algua strategy module — the CONFIG + signal + construction contract (signal scores, named construction policy), the bar schema the function receives, available features, where the file goes, and the GENERATED_BY/additions-only discipline. Use when writing a strategy.
 ---
 
 # Authoring an algua strategy
 
 A strategy is a **single Python module** at `algua/strategies/<family>/<name>.py` (created via
 `uv run algua strategy new <name> --family <slug>`) that exposes two names: `CONFIG` and
-`compute_weights`. The loader imports it by bare name (`load_strategy("<name>")`), so the filename
+`signal`. The loader imports it by bare name (`load_strategy("<name>")`), so the filename
 stem **is** the strategy name and must match `CONFIG.name`. Family slugs may contain hyphens
 (`mean-reversion`), which map to underscores on disk (`mean_reversion/`). Each family directory
 must keep an **empty, side-effect-free `__init__.py`** — a family `__init__` must never import its
 member strategies, because the loader relies on that for the single-import contract.
 
-`compute_weights(view, params)` is the **authored signal**. The loader wraps it in a
-`LoadedStrategy` adapter that exposes the protocol-level `Strategy.target_weights(features)`
-(1-arg) by injecting `params` — so authored modules never define `target_weights` themselves.
+## signal → construction: the two halves
+
+A strategy is split into two layers (issue #141):
+
+1. **`signal(view, params)`** — the **authored** half. It returns a `pd.Series` of cross-sectional
+   **scores** (higher = more attractive), NOT weights. This is your alpha.
+2. **construction** — a **named, library-provided policy** (declared in `CONFIG.construction`) that
+   maps scores → target weights under a risk convention. You pick a policy; you don't write
+   weight math in the strategy.
+
+The loader wraps both into a `LoadedStrategy` adapter that composes `construct(signal(view), view)`
+and exposes the protocol-level `Strategy.target_weights(features)` — so authored modules never
+define `target_weights` (or any weight logic) themselves. After construction, the **#135 hard risk
+walls** (gross-exposure, concentration, short bounds — `algua/risk/limits.py::validate_decision_weights`)
+run **centrally**; you neither re-implement nor weaken them.
 
 ## The contract
 
@@ -36,32 +48,69 @@ CONFIG = StrategyConfig(
     name="momentum_lb40",                                   # MUST equal the filename stem
     universe=["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"],
     execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
-    params={"lookback": 40, "top_k": 3},
+    params={"lookback": 40},                                # signal params
+    construction="top_k_equal_weight",                      # a policy id (see list below)
+    construction_params={"top_k": 3},                       # validated per-policy at load
 )
 
 
-def compute_weights(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
     """Pure, cross-sectional, per-bar. Given the point-in-time view of bars UP TO the
-    current bar, return target weights indexed by symbol. The engine applies the
-    t→t+1 decision lag centrally — do NOT shift or peek ahead yourself."""
-    ...
+    current bar, return a SCORE per symbol (higher = more attractive — NOT a weight). The
+    construction policy named in CONFIG turns these scores into target weights, and the engine
+    applies the t→t+1 decision lag centrally — do NOT shift or peek ahead yourself."""
+    lookback = int(params["lookback"])
+    wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    if len(wide) <= lookback:
+        return pd.Series(dtype="float64")
+    return (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
 ```
 
 Rules that matter:
-- `compute_weights` is **pure** (no I/O, no network, no global state) and **cross-sectional**: it
-  returns a `pd.Series` of weights indexed by symbol for the current bar. Return an empty
+- `signal` is **pure** (no I/O, no network, no global state) and **cross-sectional**: it returns a
+  `pd.Series` of **scores** indexed by symbol for the current bar. Return an empty
   `pd.Series(dtype="float64")` when you can't form a view (e.g. not enough history yet).
+- **Scores are not weights.** Don't normalize, clip, or size — that's the construction policy's job.
+  A missing or non-finite score means **"no opinion — not selectable"**: construction *drops* it
+  (it is never coerced to `0.0`, so a real `0.0` score stays distinct from "no score").
+- **Match the score to the policy.** `top_k_equal_weight` only *ranks* (the sign and scale of a
+  score are irrelevant — only the order matters), whereas `equal_weight_positive` and
+  `score_proportional_long` select on **sign** (only strictly-positive scores get weight) and the
+  latter weights by **magnitude**. Produce scores whose sign/scale carry the meaning the policy reads.
 - **Never look ahead.** The `view` contains bars only up to the current timestamp, and the engine
   enforces the `t→t+1` execution lag (`decision_lag_bars=1`). Do not re-implement or weaken this.
 - `rebalance_frequency` is `"1d"` (daily) for now.
-- Keep weights sane (they're target portfolio weights; the engine handles gross-exposure limits).
 - **Read the methodology AND the risk conventions before authoring.**
   `kb/principles/research-methodology.md` covers the leakage vectors no wall catches — full-sample
   fitting, target leakage inside a custom feature, `adj_close`/provenance leaks, and the
-  `compute_weights_panel` parity-vs-validity trap. `kb/principles/risk-conventions.md` covers
-  weight-space risk — inverse-vol sizing, drawdown-based weight decay, conviction sizing, and the
-  "R:R is the wrong yardstick" point — the judgment that sits above the #135 walls. The rules here are
-  the floor, not the whole job.
+  `signal_panel` parity-vs-validity trap. `kb/principles/risk-conventions.md` covers weight-space
+  risk — inverse-vol sizing, drawdown-based weight decay, conviction sizing, and the "R:R is the
+  wrong yardstick" point. Note **where** that risk now lives: judgment that shapes the *score* (e.g.
+  conviction sizing, slow-moving signals) stays in `signal`; judgment that shapes *weights from
+  scores* (selection, weighting scheme, gross normalization) belongs in the **construction policy**.
+  The rules here are the floor, not the whole job.
+
+## Construction policies
+
+The policy id in `CONFIG.construction` is resolved at load against `algua/portfolio/construction.py`.
+The starter library (`construction.py::CONSTRUCTION_POLICIES`):
+
+| Policy id | `construction_params` | What it does |
+|---|---|---|
+| `top_k_equal_weight` | `{"top_k": <positive int>}` | Hold the top-`top_k` names by score, equal weight `1/k`. Pure ranking — score sign/scale ignored. |
+| `equal_weight_positive` | *(none)* | Equal-weight every name with a strictly-positive score. |
+| `score_proportional_long` | *(none)* | Clip negatives to zero, weight the positives proportionally, normalized to gross `1.0`. |
+
+`construction_params` are validated per-policy at load time — an unknown policy id, an unknown
+param key, a missing required param (`top_k`), or a non-finite value all fail closed.
+
+**Bespoke construction = add a named policy, not inline math.** If no library policy fits, add a new
+`ConstructFn` to `algua/portfolio/construction.py` and register it in `_POLICIES` (additions-only;
+don't edit an existing policy) — then reference it by id from your `CONFIG`. Keeping construction in
+the library (not inside the strategy) is what lets the identity hash, the per-policy validation, and
+the sweep `construction.<key>` namespace see it. A policy receives `(scores, view, params)`; `view`
+is the same PIT bar-schema frame the signal saw (passed so a future vol-targeting policy can size
+off prices with no contract change — the starter policies ignore it).
 
 ## The bars you receive
 
@@ -81,46 +130,73 @@ imports nothing beyond contracts).
 
 ## Reuse vs. new logic
 
-- **Parameter variant** of an existing idea: import its function and define a new `CONFIG` —
-  `from algua.strategies.momentum.cross_sectional_momentum import compute_weights`.
-- **New signal**: write a new `compute_weights`. Look at
-  `algua/strategies/momentum/cross_sectional_momentum.py` as the reference implementation.
+- **Parameter variant** of an existing idea: import its `signal` and define a new `CONFIG` —
+  `from algua.strategies.momentum.cross_sectional_momentum import signal`. Vary `params`,
+  `construction`, or `construction_params`.
+- **New signal**: write a new `signal`. Look at
+  `algua/strategies/momentum/cross_sectional_momentum.py` as the reference implementation (it pairs
+  a trailing-return `signal` with `top_k_equal_weight`).
 
-## Optional: `compute_weights_panel` (advanced acceleration hook)
+## Tuning construction in a sweep
 
-`compute_weights` is the **canonical signal** — paper, live, and the backtest all run it per bar.
-For the common "stateless" case (weights at `t` are a pure function of the trailing window ending
-at `t`), the per-bar Python loop is slow. A module **MAY** additionally define a module-level:
+`backtest sweep` tunes signal `params` and construction params through one grid. A grid key prefixed
+**`construction.`** tunes `construction_params` (re-validated by the policy); any other key tunes a
+signal `param` and **must already exist** in the base `params` (a typo'd key is rejected, never a
+silent no-op). So `construction.top_k` sweeps the policy's `top_k`, while `lookback` sweeps the signal.
+
+## Optional: `signal_panel` (advanced acceleration hook)
+
+`signal` is the **canonical** definition — paper and live call it per bar, and every backtest path
+must reproduce its per-bar output (a static-universe backtest may instead compute the whole scores
+matrix via `signal_panel`, but only behind the parity guard below — never trusted blindly). For the
+common "stateless" case (scores at `t` are a pure function of the trailing window ending at `t`), the
+per-bar Python loop is slow. A module **MAY** additionally define a module-level:
 
 ```python
-def compute_weights_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
-    """Decision-time (PRE-lag) weights for the WHOLE period at once, indexed timestamp × symbol."""
+def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    """Decision-time (PRE-lag) SCORES for the WHOLE period at once, indexed timestamp × symbol."""
 ```
 
-The loader detects it and binds it as `LoadedStrategy.panel_fn`; the backtest engine then computes
-the whole weights matrix in one vectorized shot instead of looping. Rules:
+The loader detects it and binds it as `LoadedStrategy.signal_panel_fn`; the backtest engine then
+computes the whole **scores** matrix in one vectorized shot, then applies the construction policy
+per bar. Rules:
 
-- It is **NOT a second signal.** It MUST produce results **identical** to running `compute_weights`
-  on the expanding view at each bar. The engine enforces this with a **fail-closed parity guard**:
-  on every run it re-checks the panel output against the per-bar `compute_weights` on a bounded
-  deterministic sample of bars, and **raises** on any disagreement (it never silently falls back).
-- Same purity rules as `compute_weights`: pure, pandas-only, no I/O, no look-ahead. Return PRE-lag
-  decision weights (the engine applies the `t→t+1` shift centrally — do not shift yourself).
-- Rows without enough history must be flat, exactly as the per-bar function returns empty there.
+- It is **NOT a second signal.** It MUST produce scores that, once constructed, yield weights
+  **identical** to running per-bar `construct(signal(view), view)` on the expanding view at each bar.
+  The engine enforces this with a **fail-closed WEIGHT-level parity guard**: on every run it
+  re-checks the panel path against the per-bar path on a bounded deterministic sample of bars, and
+  **raises** on any disagreement (it never silently falls back).
+- Same purity rules as `signal`: pure, pandas-only, no I/O, no look-ahead. Return PRE-lag decision
+  scores (the engine applies the `t→t+1` shift centrally — do not shift yourself).
+- Rows without enough history must be all-NaN, exactly as the per-bar `signal` returns empty there —
+  construction drops NaN scores, so those bars are flat.
 - It is **optional and advanced** — only add it when the per-bar loop is a measured bottleneck. Most
-  strategies should ship `compute_weights` alone. If you add a panel fn, you **must** add a parity
-  test (`pd.testing.assert_frame_equal(..., check_exact=False, atol=WEIGHT_TOL, rtol=0)`) proving
-  the two paths agree, mirroring `tests/test_fast_path.py`.
+  strategies should ship `signal` alone. If you add a panel fn, you **must** add a parity test
+  (`pd.testing.assert_frame_equal(..., check_exact=False, atol=WEIGHT_TOL, rtol=0)`) proving the two
+  paths agree, mirroring `tests/test_fast_path.py`.
 - **PIT (point-in-time universe) runs always use the per-bar loop**, even when a panel fn exists —
   the as-of masking can't be reproduced by a whole-period panel fn. The fast path is static-universe
   only. See `algua/strategies/momentum/cross_sectional_momentum.py` for a worked example.
+
+## Optional: the fundamentals lane
+
+To read point-in-time fundamentals, set `needs_fundamentals=True` in `CONFIG` and author the **3-arg**
+form `signal(view, params, fundamentals) -> pd.Series` (the loader binds it as the active signal and
+the engine injects the PIT-correct fundamentals frame per bar). Wiring today is **narrow**: only
+`backtest run --fundamentals-snapshot <id>` supplies a fundamentals provider. **Everything else fails
+closed** on a `needs_fundamentals` strategy — paper, live, and (critically) `walk-forward` and
+`sweep`, which means a fundamentals strategy **cannot be promoted via `research promote` yet** (the
+trading- and research-lane wiring is a #132 follow-up). Construction composes exactly the same — the
+third arg only feeds the score.
 
 ## Discipline
 
 - **Additions only.** Create a NEW file under `algua/strategies/<family>/` via
   `uv run algua strategy new <name> --family <slug>`. Do **not** edit or overwrite an existing
-  strategy (especially the curated `cross_sectional_momentum.py`).
+  strategy (especially the curated `cross_sectional_momentum.py`). Bespoke construction is also
+  additions-only — a new policy in `construction.py`, never an edit to an existing one.
 - Include a module-level `GENERATED_BY = "agent"` (after the imports) so machine-authored
   strategies are identifiable. Do not place it before `from __future__ import annotations`.
 - After authoring, verify it loads and runs: `uv run algua backtest run <name> --demo` should emit
-  metrics JSON, not an error.
+  metrics JSON, not an error. (A `needs_fundamentals` strategy needs a snapshot to run — verify it
+  with `uv run algua backtest run <name> --demo --fundamentals-snapshot <id>` instead.)

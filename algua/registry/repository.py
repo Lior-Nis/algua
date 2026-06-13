@@ -193,7 +193,7 @@ class StrategyRepository(Protocol):
         the cumulative count of parameter combinations searched in this family (0 if none)."""
         ...
 
-    def record_holdout_evaluation(
+    def reserve_holdout(
         self,
         strategy_id: int,
         *,
@@ -202,32 +202,31 @@ class StrategyRepository(Protocol):
         period_start: str,
         period_end: str,
         holdout_frac: float,
-        config_hash: str,
-        reused: bool,
-    ) -> int:
-        """Persist that a walk-forward holdout window was consumed (looked at); return its row id.
+        allow_reuse: bool,
+    ) -> tuple[int, bool]:
+        """Atomically claim the holdout window; return ``(reservation_id, reused)``.
 
-        Recorded after the holdout is evaluated, on BOTH pass and fail — looking at the
-        out-of-sample window burns it regardless of outcome. ``reused=True`` flags an audited
-        ``--allow-holdout-reuse`` override of a prior overlapping evaluation."""
+        Under ``BEGIN IMMEDIATE`` (write lock held): re-check overlap against ALL rows (pending
+        reservation OR committed burn) for this strategy + data identity + overlapping period +
+        same ``holdout_frac``, then INSERT a pending row (``committed_at=NULL``, placeholder
+        ``config_hash=''``). Match is on the WINDOW, never config.
+
+        Raises ``ValueError`` (fail closed) if an overlapping row exists and not ``allow_reuse``.
+        ``reused`` is True iff an overlapping row existed and the human override let it proceed.
+
+        TOP-LEVEL ONLY: must not be called inside an open transaction / ``with self._conn:`` block
+        (raises ``RuntimeError`` if ``self._conn.in_transaction``)."""
         ...
 
-    def overlapping_holdout_evaluations(
-        self,
-        strategy_id: int,
-        *,
-        data_source: str,
-        snapshot_id: str | None,
-        period_start: str,
-        period_end: str,
-        holdout_frac: float,
-    ) -> bool:
-        """True iff a prior holdout evaluation for this strategy collides with the given window.
+    def finalize_holdout_reservation(self, reservation_id: int, *, config_hash: str) -> None:
+        """Commit a reservation into a burn: set ``committed_at`` + the real evidentiary
+        ``config_hash``. Raises if the row is missing or already committed (guards double-finalize).
+        """
+        ...
 
-        Collision rule (matches on the WINDOW, never on config): SAME data identity
-        (``snapshot_id`` equal when both have one, else ``data_source`` equal) AND OVERLAPPING
-        period (``period_start <= other.period_end AND other.period_start <= period_end``) AND
-        SAME ``holdout_frac``."""
+    def release_holdout_reservation(self, reservation_id: int) -> None:
+        """Free a still-pending reservation (clean walk_forward failure). Never touches a committed
+        burn; a release after finalize/crash is a harmless no-op."""
         ...
 
     def windowed_search_combos(self, window_days: int) -> int:

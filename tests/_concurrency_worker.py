@@ -145,6 +145,26 @@ def op_gate_consume(db_path, barrier, wid, name, gate_id):
         _emit({"ok": False, "wid": wid, "error": type(exc).__name__, "msg": str(exc)})
 
 
+def op_reserve_holdout(db_path, barrier, wid, name, period_start, period_end, holdout_frac):
+    """Race the atomic holdout reservation (BEGIN IMMEDIATE re-check + insert)."""
+    conn = connect(Path(db_path))
+    repo = SqliteStrategyRepository(conn)
+    sid = _strategy_id(conn, name)
+    touch(barrier, f"ready-{wid}")
+    wait_for(barrier, "go")
+    touch(barrier, f"attempting-{wid}")
+    try:
+        rid, reused = repo.reserve_holdout(
+            sid, data_source="demo", snapshot_id=None,
+            period_start=period_start, period_end=period_end,
+            holdout_frac=float(holdout_frac), allow_reuse=False)
+        _emit({"ok": True, "wid": wid, "rid": rid, "reused": reused})
+    except ValueError as exc:
+        _emit({"ok": False, "wid": wid, "error": "ValueError", "msg": str(exc)})
+    except Exception as exc:
+        _emit({"ok": False, "wid": wid, "error": type(exc).__name__, "msg": str(exc)})
+
+
 _OPS = {
     "lock-hold": op_lock_hold,
     "write-hold": op_write_hold,
@@ -152,6 +172,7 @@ _OPS = {
     "transition": op_transition,
     "allocate": op_allocate,
     "gate-consume": op_gate_consume,
+    "reserve-holdout": op_reserve_holdout,
 }
 
 
