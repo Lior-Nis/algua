@@ -108,6 +108,11 @@ def promotion_preflight(
             f"strategy {name!r} declares needs_fundamentals; it cannot be promoted past "
             f"backtested until the paper/live fundamentals lane is built (#132)"
         )
+    if _loaded is not None and _loaded.config.needs_news:
+        raise ValueError(
+            f"strategy {name!r} declares needs_news; it cannot be promoted past "
+            f"backtested until the paper/live news lane is built (#132)"
+        )
     measured = repo.total_search_combos(name)
     windowed_total = repo.windowed_search_combos(FUNNEL_WINDOW_DAYS)
     if measured > 0:
