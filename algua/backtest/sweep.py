@@ -277,39 +277,47 @@ def sweep(
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
     combos = _combos(grid)
+    # Parent pre-pass: build + validate EVERY override here so a bad signal key or invalid
+    # construction param fails fast (ValueError) BEFORE any worker process spawns — exactly the
+    # parent-side behavior the sequential loop had.
+    overridden = [_override(strategy, combo) for combo in combos]
 
-    records: list[dict[str, Any]] = []
-    meta = None
-    for combo in combos:
-        wf = walk_forward(
-            _override(strategy, combo), provider, start, end,
-            windows=windows, holdout_frac=holdout_frac,
-            universe_by_date=universe_by_date,
-            universe_name=universe_name, universe_snapshots=universe_snapshots,
-        )
-        if meta is None:
-            meta = wf
-        # Note: wf.holdout_metrics is intentionally NOT copied into the record (see docstring).
-        records.append({
+    eval_kwargs: dict[str, Any] = dict(
+        provider=provider, start=start, end=end,
+        windows=windows, holdout_frac=holdout_frac,
+        universe_by_date=universe_by_date,
+        universe_name=universe_name, universe_snapshots=universe_snapshots,
+        rank_by=rank_by,
+    )
+    results = _run_combos(overridden, eval_kwargs)
+
+    # Build records in COMBO ORDER (zip with the original combos) so _rank_records' stable
+    # tie-break on equal score+std_sharpe stays reproducible regardless of worker completion order.
+    records = [
+        {
             "params": combo,
-            "config_hash": wf.config_hash,
-            "n_windows": wf.windows,
-            "stability": wf.stability,
-            "score": wf.stability[rank_by],
-        })
+            "config_hash": res["config_hash"],
+            "n_windows": res["n_windows"],
+            "stability": res["stability"],
+            "score": res["score"],
+        }
+        for combo, res in zip(combos, results, strict=True)
+    ]
+    # meta fields are combo-independent (same data + code identity for every combo); take the
+    # first for parity with the prior `meta = first wf` behavior.
+    meta = results[0]["meta"]
 
     ranked = _rank_records(records)
     best = {"params": ranked[0]["params"], "score": ranked[0]["score"]}
-    assert meta is not None  # combos is always non-empty (grid has >=1 key with >=1 value)
     return SweepResult(
         strategy=strategy.name,
-        data_source=meta.data_source,
-        snapshot_id=meta.snapshot_id,
-        timeframe=meta.timeframe,
-        seed=meta.seed,
-        code_hash=meta.code_hash,
-        dependency_hash=meta.dependency_hash,
-        period=meta.period,
+        data_source=meta["data_source"],
+        snapshot_id=meta["snapshot_id"],
+        timeframe=meta["timeframe"],
+        seed=meta["seed"],
+        code_hash=meta["code_hash"],
+        dependency_hash=meta["dependency_hash"],
+        period=meta["period"],
         windows=windows,
         holdout_frac=holdout_frac,
         grid=grid,
@@ -317,6 +325,6 @@ def sweep(
         rank_by=rank_by,
         ranked=ranked,
         best=best,
-        universe_name=meta.universe_name,
-        universe_snapshots=meta.universe_snapshots,
+        universe_name=meta["universe_name"],
+        universe_snapshots=meta["universe_snapshots"],
     )
