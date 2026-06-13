@@ -68,9 +68,20 @@ raw Alpaca pull may include the `end` bar. Adapters do not re-clip at ingestion 
 guards against look-ahead is the serving read path above.
 
 ### `timeframe` vocabulary
-- `"1d"` — daily session bars. **Required first; the research lane targets `"1d"` initially.**
-- `"1h"`, `"15m"`, `"1m"` — intraday, UTC-aligned bar boundaries (reserved; build later).
-- Any other value → `ValueError`.
+- `"1d"` — daily session bars. The research lane targets `"1d"` initially.
+- `"1m"`, `"5m"`, `"30m"`, `"1h"` — intraday bars. The timestamp preserves the **exchange/vendor bar
+  label converted to a UTC instant**; it is NOT required to fall on a UTC-clock-aligned boundary
+  (e.g. an 09:30 US/Eastern open is `13:30Z` in EDT, `14:30Z` in EST). Look-ahead safety comes from
+  the half-open serving window plus the engine `t→t+1` shift, not from clock alignment.
+- The vocabulary is closed: `algua/data/timeframes.py::validate_timeframe` is the single source of
+  truth, enforced at both bars-ingest chokepoints (`DataStore.ingest_bars` /
+  `ingest_bars_streamed`) and at the serving seam (`StoreBackedProvider.get_bars`). Any other value
+  → `ValueError`.
+- The declared timeframe is operator-asserted metadata, recorded as-is (like the `adjustment`
+  flavor): the system does not infer bar granularity from the data, so importing `1m` bars under
+  `--timeframe 5m` is operator error, not a detected condition. What IS guarded fail-closed is the
+  daily↔intraday confusion that would corrupt timestamps (non-midnight `1d`, or a local-midnight
+  intraday bar).
 
 ### Adjustment semantics (the one judgment call — flag if you disagree)
 `close` is **raw**; `adj_close` is **split + dividend adjusted**. Backtests compute returns from
