@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -102,12 +102,17 @@ def walk_forward(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
+    on_peek: Callable[[str], None] | None = None,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout.
 
     The returned ``holdout_metrics`` are SENSITIVE: callers that emit this result to operators
     (CLI output, MLflow artifacts, API responses, etc.) MUST withhold the ``holdout_metrics``
     field. Only ``research promote`` may reveal it — and doing so burns the holdout (single-use).
+
+    ``on_peek`` (if given) is called exactly once, with the strategy ``config_hash``, immediately
+    BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
+    that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
     pf, _weights = build_portfolio(strategy, provider, start, end,
                                    universe_by_date=universe_by_date)
@@ -117,7 +122,6 @@ def walk_forward(
     window_metrics = [
         {"index": i, **_segment_record(returns, s, e)} for i, (s, e) in enumerate(bounds)
     ]
-    holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
 
     sharpes = [w["sharpe"] for w in window_metrics]
     positive = sum(1 for w in window_metrics if w["total_return"] > 0)
@@ -129,10 +133,18 @@ def walk_forward(
     }
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
+    cfg_hash = config_hash(strategy)
+
+    # Burn-on-peek boundary: the holdout metric is evaluated on the NEXT line, so any single-use
+    # burn the caller commits in on_peek is durable before the peek. Nothing fallible-and-releasing
+    # may be added between on_peek and the holdout evaluation.
+    if on_peek is not None:
+        on_peek(cfg_hash)
+    holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
 
     return WalkForwardResult(
         strategy=strategy.name,
-        config_hash=config_hash(strategy),
+        config_hash=cfg_hash,
         timeframe="1d",
         code_hash=stamps["code_hash"],
         dependency_hash=stamps["dependency_hash"],
