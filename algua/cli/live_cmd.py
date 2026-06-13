@@ -107,8 +107,12 @@ def _run_strategy_tick(  # noqa: PLR0913
     an emitted breach/halt payload on TickHalted/RiskBreach (same behaviour as the single-strategy
     command)."""
     strategy = load_strategy(name)
-    from algua.strategies.base import assert_tradable_without_fundamentals
+    from algua.strategies.base import (
+        assert_tradable_without_fundamentals,
+        assert_tradable_without_news,
+    )
     assert_tradable_without_fundamentals(strategy)
+    assert_tradable_without_news(strategy)
 
     rec = SqliteStrategyRepository(conn).get(name)
     alloc = active_allocation(conn, rec.id)
