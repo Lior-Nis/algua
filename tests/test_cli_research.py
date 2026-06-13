@@ -584,7 +584,9 @@ def test_pre_burn_failure_frees_window(tmp_path, monkeypatch):
 
 def test_post_peek_failure_keeps_burn(tmp_path, monkeypatch):
     # A failure AFTER the burn boundary (WalkForwardResult construction raises, post on_peek) must
-    # KEEP the burn: the row stays committed and the same window is refused on retry (#193).
+    # KEEP the burn: the row stays committed and the same window is refused on retry (#193). This
+    # case uses a ValueError (in promote's @json_errors set) so the JSON envelope is also exercised;
+    # test_post_peek_unhandled_failure_keeps_burn proves burn-survival does NOT depend on that.
     assert _backtest_to_backtested().exit_code == 0
     import algua.backtest.walkforward as wfmod
 
@@ -608,3 +610,55 @@ def test_post_peek_failure_keeps_burn(tmp_path, monkeypatch):
                                 *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
     assert retry.exit_code == 1, retry.stdout
     assert "already consumed" in json.loads(retry.stdout)["error"]
+
+
+def test_post_peek_unhandled_failure_keeps_burn(tmp_path, monkeypatch):
+    # The burn must survive a post-peek failure REGARDLESS of exception type — including one NOT in
+    # promote's @json_errors set (RuntimeError), which propagates raw past the JSON envelope. This
+    # is the real motivating class for #193 (a KeyboardInterrupt, or a TypeError from `**prov`
+    # construction): the `except BaseException` release is a no-op on the already-committed row, so
+    # burn-survival is independent of whether the error is JSON-wrapped.
+    assert _backtest_to_backtested().exit_code == 0
+    import algua.backtest.walkforward as wfmod
+
+    def boom(*a, **k):
+        raise RuntimeError("unhandled post-peek boom")
+
+    with monkeypatch.context() as m:
+        m.setattr(wfmod, "WalkForwardResult", boom)
+        bad = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    # RuntimeError is unhandled: it propagates raw (no JSON envelope, nonzero exit) — yet the burn,
+    # committed by on_peek before the failure, must remain committed.
+    assert bad.exit_code != 0
+    assert isinstance(bad.exception, RuntimeError)
+    rows = _holdout_committed(tmp_path)
+    assert len(rows) == 1 and rows[0][1] is not None  # burn survived the unhandled failure
+    assert _stage() == "backtested"
+
+
+def test_post_peek_holdout_eval_failure_keeps_burn(tmp_path, monkeypatch):
+    # The TIGHTEST post-peek failure: the holdout `_segment_record` evaluation itself raises, after
+    # on_peek already committed the burn. The burn (committed on entry to the peek) must survive —
+    # the conservative over-burn direction of "no computed holdout metric is ever released".
+    assert _backtest_to_backtested().exit_code == 0
+    import algua.backtest.walkforward as wfmod
+    orig = wfmod._segment_record
+
+    def failing(returns, s, e):
+        # The holdout slice is the only segment ending at the last bar (e == len(returns)); the
+        # in-sample windows all end at or before train_n. Fail exactly on the holdout evaluation.
+        if e == len(returns):
+            raise RuntimeError("holdout eval boom")
+        return orig(returns, s, e)
+
+    with monkeypatch.context() as m:
+        m.setattr(wfmod, "_segment_record", failing)
+        bad = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                  "--start", "2022-01-01", "--end", "2023-12-31",
+                                  *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
+    assert bad.exit_code != 0
+    rows = _holdout_committed(tmp_path)
+    assert len(rows) == 1 and rows[0][1] is not None  # burn committed before the failing peek
+    assert _stage() == "backtested"
