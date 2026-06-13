@@ -141,6 +141,26 @@ def test_reserve_blocks_overlapping_window(repo):
             allow_reuse=False)
 
 
+def test_reserve_then_finalize_row_state_contract(repo):
+    """Reserve writes a placeholder (committed_at NULL, config_hash ''); finalize writes the real
+    evidentiary config_hash and a non-NULL committed_at on that same row."""
+    sid = _strategy_id(repo)
+    rid, _ = repo.reserve_holdout(
+        sid, data_source="demo", snapshot_id=None,
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
+    row = repo._conn.execute(
+        "SELECT committed_at, config_hash FROM holdout_evaluations WHERE id = ?", (rid,)
+    ).fetchone()
+    assert row["committed_at"] is None
+    assert row["config_hash"] == ""
+    repo.finalize_holdout_reservation(rid, config_hash="real-evidence-hash")
+    row = repo._conn.execute(
+        "SELECT committed_at, config_hash FROM holdout_evaluations WHERE id = ?", (rid,)
+    ).fetchone()
+    assert row["committed_at"] is not None
+    assert row["config_hash"] == "real-evidence-hash"
+
+
 def test_reserve_allows_disjoint_frac_and_source(repo):
     sid = _strategy_id(repo)
     repo.reserve_holdout(
