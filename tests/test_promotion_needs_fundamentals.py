@@ -1,8 +1,9 @@
-"""Promotion-preflight guard for needs_news strategies (issue #132, Task 3).
+"""Promotion-preflight guard for needs_fundamentals strategies (issue #132, Task 3).
 
-Uses a temp module written into the momentum family dir (same mechanism as test_loader_news.py)
-because there is no bundled needs_news strategy yet. After #132 slice 4 the PIT block is
-removed, so preflight now proceeds past needs_news and fails on missing measured breadth.
+Uses a temp module written into the momentum family dir (same mechanism as
+test_promotion_needs_news.py) because this tests a temp needs_fundamentals=True strategy.
+After #132 slice 4 the PIT block is removed, so preflight now proceeds past needs_fundamentals
+and fails on missing measured breadth.
 """
 from __future__ import annotations
 
@@ -40,18 +41,18 @@ def _clear_cache(dotted: str) -> None:
     sys.modules.pop(dotted, None)
 
 
-def test_promotion_preflight_passes_news_pit_check(tmp_path):
-    name = "tmp_news_promote"
+def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
+    name = "tmp_fundamentals_promote"
     dotted = f"algua.strategies.momentum.{name}"
     body = (
         "import pandas as pd\n"
         "from algua.contracts.types import ExecutionContract\n"
         "from algua.strategies.base import StrategyConfig\n"
-        f"CONFIG = StrategyConfig(name='{name}', universe=['AAPL'],\n"
-        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
-        "    construction='equal_weight_positive', needs_news=True)\n"
-        "def signal(view, params, news):\n"
-        "    return pd.Series(dtype='float64')\n"
+        f"CONFIG = StrategyConfig(name=\'{name}\', universe=[\'AAPL\'],\n"
+        "    execution=ExecutionContract(rebalance_frequency=\'1d\'),\n"
+        "    construction=\'equal_weight_positive\', needs_fundamentals=True)\n"
+        "def signal(view, params, fundamentals):\n"
+        "    return pd.Series(dtype=\'float64\')\n"
     )
     path = _write_module(name, body)
     _clear_cache(dotted)
@@ -62,9 +63,9 @@ def test_promotion_preflight_passes_news_pit_check(tmp_path):
         repo.add(name)
         # Advance to backtested with HUMAN actor (skips the gate-token requirement)
         transition_strategy(repo, name, Stage.BACKTESTED, Actor.HUMAN, "seed")
-        # After #132 slice 4: needs_news no longer blocks promotion. Preflight proceeds past the
-        # (removed) PIT block and fails LATER on missing measured breadth — proving the PIT block
-        # is gone.
+        # After #132 slice 4: needs_fundamentals no longer blocks promotion. Preflight proceeds
+        # past the (removed) PIT block and fails LATER on missing measured breadth — proving the
+        # PIT block is gone.
         with pytest.raises(ValueError, match="no recorded search breadth"):
             promotion_preflight(
                 repo,

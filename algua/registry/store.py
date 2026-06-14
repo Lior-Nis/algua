@@ -543,6 +543,8 @@ class SqliteStrategyRepository:
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        fundamentals_snapshot: str | None = None,
+        news_snapshot: str | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
         the single-use token the shortlist transition consumes."""
@@ -553,13 +555,13 @@ class SqliteStrategyRepository:
                 " funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
                 " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
-                " consumed, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+                " fundamentals_snapshot, news_snapshot, consumed, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
                 (strategy_id, int(passed), n_funnel, own_lifetime_combos, windowed_total_combos,
                  funnel_window_days, breadth_provenance, int(pit_ok), int(pit_override),
                  holdout_n_bars, min_holdout_observations, code_hash, config_hash, dependency_hash,
                  data_source, snapshot_id, period_start, period_end, holdout_frac, actor,
-                 decision_json, _now()),
+                 decision_json, fundamentals_snapshot, news_snapshot, _now()),
             )
         rowid = cur.lastrowid
         assert rowid is not None

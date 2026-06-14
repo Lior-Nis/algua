@@ -81,7 +81,7 @@ def promotion_preflight(
     """Pre-peek phase — runs BEFORE walk_forward, so every hard refusal happens before the holdout
     is touched and before any gate row is minted: (1) relaxations-need-human; (2) stage legality
     (BACKTESTED -> CANDIDATE must be legal — never mint a passing token for an illegal source
-    stage); (3) fundamentals-lane guard; (4) exhaustive signal_panel parity gate (raises
+    stage); (3) exhaustive signal_panel parity gate (raises
     BacktestError on divergence, no-op when no signal_panel); (5) breadth resolution (refuse "no
     measured breadth" here)."""
     # FIRST check, before any holdout-affecting work and before the relaxation guard: only an agent
@@ -101,8 +101,7 @@ def promotion_preflight(
         raise TransitionError(
             f"research promote requires stage backtested, got {rec.stage.value}")
     validate_transition(rec.stage, Stage.CANDIDATE)  # TransitionError (a ValueError) if illegal
-    # Fundamentals strategies cannot be promoted past backtested until the paper/live fundamentals
-    # lane exists (#132): block the agent's only path to candidate early, with a clear message.
+    # Load the strategy module for parity-check and breadth resolution below.
     # Silently skip if the strategy is not a bundled module (e.g. tests using synthetic names).
     from algua.strategies.loader import StrategyNotFound, load_strategy
 
@@ -110,16 +109,6 @@ def promotion_preflight(
         _loaded = load_strategy(name)
     except StrategyNotFound:
         _loaded = None
-    if _loaded is not None and _loaded.config.needs_fundamentals:
-        raise ValueError(
-            f"strategy {name!r} declares needs_fundamentals; it cannot be promoted past "
-            f"backtested until the paper/live fundamentals lane is built (#132)"
-        )
-    if _loaded is not None and _loaded.config.needs_news:
-        raise ValueError(
-            f"strategy {name!r} declares needs_news; it cannot be promoted past "
-            f"backtested until the paper/live news lane is built (#132)"
-        )
     # Exhaustive signal_panel parity gate (#178): a panel that diverges from its per-bar signal on
     # ANY bar cannot pass promotion. Runs on the already-loaded strategy, in static mode over the
     # promotion window, BEFORE the holdout is touched. No-op when the strategy has no signal_panel.
@@ -189,6 +178,7 @@ def run_gate(
         period_start=period_start.isoformat(), period_end=period_end.isoformat(),
         holdout_frac=holdout_frac, actor=actor.value,
         decision_json=json.dumps(decision.to_dict(), sort_keys=True),
+        fundamentals_snapshot=wf.fundamentals_snapshot, news_snapshot=wf.news_snapshot,
     )
     promoted = False
     if decision.passed:

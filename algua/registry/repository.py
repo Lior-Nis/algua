@@ -267,6 +267,8 @@ class StrategyRepository(Protocol):
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        fundamentals_snapshot: str | None = None,
+        news_snapshot: str | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
         the single-use token the shortlist transition consumes."""
