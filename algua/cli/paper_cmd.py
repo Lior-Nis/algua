@@ -141,8 +141,12 @@ def _load_gated_strategy(
     switch (kill/flatten) do their own, narrower gating instead.
     """
     strategy = load_strategy(name)
-    from algua.strategies.base import assert_tradable_without_fundamentals
+    from algua.strategies.base import (
+        assert_tradable_without_fundamentals,
+        assert_tradable_without_news,
+    )
     assert_tradable_without_fundamentals(strategy)
+    assert_tradable_without_news(strategy)
     rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
         raise ValueError(

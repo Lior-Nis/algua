@@ -5,7 +5,7 @@ from typing import Any
 
 import typer
 
-from algua.backtest.engine import BacktestError
+from algua.backtest.engine import BacktestError, holdout_window
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
@@ -109,9 +109,16 @@ def promote(
         # release on a clean failure. The match identity is the data window and deliberately
         # EXCLUDES the universe (the same OOS window is burned regardless of universe). A pending
         # reservation blocks a concurrent run exactly like a committed burn (fail closed).
+        # Compute the EXACT OOS interval walk_forward will burn (from the bar date-index, without
+        # running the strategy) so the single-use guard matches on the actual bars, not the full
+        # period + holdout_frac (#192).
+        holdout_start, holdout_end = holdout_window(
+            strategy, provider, start_dt, end_dt,
+            holdout_frac=holdout_frac, universe_by_date=universe_by_date)
         reservation_id, reused = repo.reserve_holdout(
             repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
+            holdout_start=holdout_start, holdout_end=holdout_end,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
         try:
             wf = walk_forward(strategy, provider, start_dt, end_dt, windows=windows,

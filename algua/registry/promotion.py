@@ -115,6 +115,11 @@ def promotion_preflight(
             f"strategy {name!r} declares needs_fundamentals; it cannot be promoted past "
             f"backtested until the paper/live fundamentals lane is built (#132)"
         )
+    if _loaded is not None and _loaded.config.needs_news:
+        raise ValueError(
+            f"strategy {name!r} declares needs_news; it cannot be promoted past "
+            f"backtested until the paper/live news lane is built (#132)"
+        )
     # Exhaustive signal_panel parity gate (#178): a panel that diverges from its per-bar signal on
     # ANY bar cannot pass promotion. Runs on the already-loaded strategy, in static mode over the
     # promotion window, BEFORE the holdout is touched. No-op when the strategy has no signal_panel.

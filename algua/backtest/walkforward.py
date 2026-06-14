@@ -19,6 +19,18 @@ from algua.strategies.base import LoadedStrategy
 _MIN_WINDOW_BARS = 5
 
 
+def _reject_pit_sidecar(strategy: LoadedStrategy, where: str) -> None:
+    """Fail closed (clearly) when a PIT-sidecar strategy reaches walk_forward/sweep: their provider
+    threading is deferred (#132), so without this they'd hit a confusing deep BacktestError. Covers
+    BOTH lanes — fundamentals (pre-existing rough edge) and news."""
+    if strategy.config.needs_fundamentals or strategy.config.needs_news:
+        kind = "needs_fundamentals" if strategy.config.needs_fundamentals else "needs_news"
+        raise BacktestError(
+            f"{kind} strategies are not supported in {where} yet (#132 follow-up): "
+            f"provider threading through {where} is deferred"
+        )
+
+
 def _segment_bounds(
     n: int, windows: int, holdout_frac: float
 ) -> tuple[list[tuple[int, int]], tuple[int, int]]:
@@ -109,6 +121,7 @@ def walk_forward(
     (CLI output, MLflow artifacts, API responses, etc.) MUST withhold the ``holdout_metrics``
     field. Only ``research promote`` may reveal it — and doing so burns the holdout (single-use).
     """
+    _reject_pit_sidecar(strategy, "walk-forward")
     pf, _weights = build_portfolio(strategy, provider, start, end,
                                    universe_by_date=universe_by_date)
     returns = pf.returns()

@@ -423,6 +423,8 @@ class SqliteStrategyRepository:
         period_start: str,
         period_end: str,
         holdout_frac: float,
+        holdout_start: str,
+        holdout_end: str,
         allow_reuse: bool,
     ) -> tuple[int, bool]:
         # TOP-LEVEL ONLY. A manual BEGIN IMMEDIATE inside an already-open transaction raises
@@ -433,15 +435,20 @@ class SqliteStrategyRepository:
                 "reserve_holdout must be called at top level, not inside an open transaction")
         # Data identity: snapshot_id when the probe has one (a snapshot-backed row is a DISTINCT
         # identity from a non-snapshot probe), else data_source among rows lacking a snapshot.
-        # Period overlap is the standard interval test. Match is on the WINDOW, never config. Ported
-        # verbatim from the removed overlapping_holdout_evaluations; now matches ALL rows (pending
-        # reservation OR committed burn) — no committed_at filter — so a pending row blocks too.
         if snapshot_id is not None:
             data_match = "snapshot_id = ?"
             data_param: str = snapshot_id
         else:
             data_match = "snapshot_id IS NULL AND data_source = ?"
             data_param = data_source
+        # Match identity is the OOS INTERVAL [holdout_start, holdout_end] — the exact bars
+        # walk_forward burns (#192), NOT (full-period overlap, holdout_frac): a different
+        # --holdout-frac that lands on overlapping OOS bars must NOT escape the guard. The standard
+        # interval-overlap test (a.start <= b.end AND b.start <= a.end). A row with a NULL interval
+        # (legacy/old-code reservation, before this column existed) matches UNCONDITIONALLY — fail
+        # closed. period_*/holdout_frac are persisted as EVIDENCE only, never matched on. Matches
+        # ALL rows (pending reservation OR committed burn) — no committed_at filter — so a pending
+        # row blocks too.
         # BEGIN IMMEDIATE takes the write lock up front so the overlap SELECT + INSERT are one
         # atomic critical section: two concurrent reserves can't both see "no overlap" and both
         # insert. BaseException (not Exception) so a KeyboardInterrupt/SystemExit still releases the
@@ -449,10 +456,11 @@ class SqliteStrategyRepository:
         try:
             self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
-                f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ? AND holdout_frac = ?"
+                f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ?"
                 f" AND {data_match}"
-                f" AND period_start <= ? AND ? <= period_end LIMIT 1",
-                (strategy_id, holdout_frac, data_param, period_end, period_start),
+                f" AND (holdout_start IS NULL OR holdout_end IS NULL"
+                f"      OR (holdout_start <= ? AND ? <= holdout_end)) LIMIT 1",
+                (strategy_id, data_param, holdout_end, holdout_start),
             ).fetchone()
             overlap = row is not None
             if overlap and not allow_reuse:
@@ -464,10 +472,10 @@ class SqliteStrategyRepository:
             cur = self._conn.execute(
                 "INSERT INTO holdout_evaluations"
                 "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
-                " config_hash, reused, created_at, committed_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,NULL)",
+                " config_hash, reused, created_at, committed_at, holdout_start, holdout_end)"
+                " VALUES (?,?,?,?,?,?,?,?,?,NULL,?,?)",
                 (strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,
-                 "", int(reused), _now()),
+                 "", int(reused), _now(), holdout_start, holdout_end),
             )
             self._conn.commit()
         except BaseException:

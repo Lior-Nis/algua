@@ -80,3 +80,45 @@ def test_v21_db_gains_committed_at_on_migrate(tmp_path):
     row = conn.execute("SELECT committed_at FROM holdout_evaluations").fetchone()
     assert row["committed_at"] is None
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_pre_v23_holdout_rows_backfill_to_full_period(tmp_path):
+    """A holdout_evaluations row created WITHOUT holdout_start/holdout_end (pre-v23) gains them via
+    migrate, backfilled to the conservative full period [period_start, period_end]."""
+    from algua.registry.db import connect, migrate
+
+    db = tmp_path / "r.db"
+    conn = connect(db)
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS strategies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);"
+        "INSERT INTO strategies(id, name) VALUES (1, 's');"
+        "CREATE TABLE holdout_evaluations ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT, strategy_id INTEGER NOT NULL,"
+        " data_source TEXT NOT NULL, snapshot_id TEXT, period_start TEXT NOT NULL,"
+        " period_end TEXT NOT NULL, holdout_frac REAL NOT NULL, config_hash TEXT NOT NULL,"
+        " reused INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, committed_at TEXT);"
+    )
+    conn.execute(
+        "INSERT INTO holdout_evaluations"
+        "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
+        " config_hash, reused, created_at, committed_at)"
+        " VALUES (1,'demo',NULL,'2022-01-01','2023-12-31',0.2,'h',0,'2022-01-01T00:00:00+00:00',"
+        " '2022-02-01T00:00:00+00:00')",
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(holdout_evaluations)")}
+    assert {"holdout_start", "holdout_end"} <= cols
+    row = conn.execute(
+        "SELECT holdout_start, holdout_end FROM holdout_evaluations"
+    ).fetchone()
+    assert (row["holdout_start"], row["holdout_end"]) == ("2022-01-01", "2023-12-31")
+    n_null = conn.execute(
+        "SELECT COUNT(*) AS c FROM holdout_evaluations"
+        " WHERE holdout_start IS NULL OR holdout_end IS NULL"
+    ).fetchone()["c"]
+    assert n_null == 0
+    migrate(conn)  # idempotent
+    conn.close()

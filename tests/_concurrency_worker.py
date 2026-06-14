@@ -145,7 +145,8 @@ def op_gate_consume(db_path, barrier, wid, name, gate_id):
         _emit({"ok": False, "wid": wid, "error": type(exc).__name__, "msg": str(exc)})
 
 
-def op_reserve_holdout(db_path, barrier, wid, name, period_start, period_end, holdout_frac):
+def op_reserve_holdout(db_path, barrier, wid, name, period_start, period_end, holdout_frac,
+                       holdout_start, holdout_end):
     """Race the atomic holdout reservation (BEGIN IMMEDIATE re-check + insert)."""
     conn = connect(Path(db_path))
     repo = SqliteStrategyRepository(conn)
@@ -157,7 +158,8 @@ def op_reserve_holdout(db_path, barrier, wid, name, period_start, period_end, ho
         rid, reused = repo.reserve_holdout(
             sid, data_source="demo", snapshot_id=None,
             period_start=period_start, period_end=period_end,
-            holdout_frac=float(holdout_frac), allow_reuse=False)
+            holdout_frac=float(holdout_frac),
+            holdout_start=holdout_start, holdout_end=holdout_end, allow_reuse=False)
         _emit({"ok": True, "wid": wid, "rid": rid, "reused": reused})
     except ValueError as exc:
         _emit({"ok": False, "wid": wid, "error": "ValueError", "msg": str(exc)})

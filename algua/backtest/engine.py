@@ -14,8 +14,13 @@ from algua.contracts.types import (
     FUNDAMENTALS_AS_OF_KEY,
     FUNDAMENTALS_COLUMNS,
     FUNDAMENTALS_KNOWABLE_AT,
+    NEWS_AS_OF_KEY,
+    NEWS_COLUMNS,
+    NEWS_KNOWABLE_AT,
+    NEWS_RETRACTED,
     DataProvider,
     FundamentalsProvider,
+    NewsProvider,
 )
 from algua.risk.limits import WEIGHT_TOL, RiskBreach, validate_decision_weights
 from algua.strategies.base import LoadedStrategy
@@ -88,6 +93,44 @@ def _fundamentals_as_of(frame: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
     return latest.reset_index(drop=True)
 
 
+def _assert_news_shape(frame: pd.DataFrame) -> None:
+    """Structural defense at the engine seam (no algua.data import): a foreign NewsProvider must
+    hand back contract-shaped, UTC, unique-keyed data. Store-backed reads already validate; this
+    fails closed for any other provider (spec §5)."""
+    missing = [c for c in NEWS_COLUMNS if c not in frame.columns]
+    if missing:
+        raise BacktestError(f"news frame missing columns {missing}")
+    for col in (NEWS_KNOWABLE_AT, "published_at"):
+        ts = frame[col]
+        if not isinstance(ts.dtype, pd.DatetimeTZDtype) or str(ts.dt.tz) != "UTC":
+            raise BacktestError(f"news {col!r} must be tz-aware UTC")
+        if ts.isna().any():
+            raise BacktestError(f"news {col!r} must not be null")
+    if (frame[NEWS_KNOWABLE_AT].to_numpy() < frame["published_at"].to_numpy()).any():
+        raise BacktestError("news 'knowable_at' must be >= 'published_at'")
+    if str(frame[NEWS_RETRACTED].dtype) != "bool":
+        raise BacktestError("news 'retracted' must be non-nullable bool")
+    key = [*NEWS_AS_OF_KEY, NEWS_KNOWABLE_AT]
+    if frame[key].duplicated().any():
+        raise BacktestError("news has duplicate (source, article_id, symbol, knowable_at) rows")
+
+
+def _news_as_of(frame: pd.DataFrame, t: pd.Timestamp) -> pd.DataFrame:
+    """As-of-t news: of the rows with knowable_at <= t, keep for each (source, article_id, symbol)
+    the latest revision (greatest knowable_at), then DROP retraction tombstones. knowable_at is
+    unique per key within a snapshot, so the pick is deterministic. Uses only knowable_at <= t ->
+    no look-ahead. Empty-in/empty-out returns a 0-row slice (preserves dtypes)."""
+    if t.tz is None:
+        raise BacktestError("news as-of mask requires a tz-aware (UTC) timestamp t")
+    visible = frame[frame[NEWS_KNOWABLE_AT] <= t]
+    if visible.empty:
+        return frame.iloc[0:0].copy()
+    ordered = visible.sort_values(NEWS_KNOWABLE_AT, kind="stable")
+    latest = ordered.drop_duplicates(subset=list(NEWS_AS_OF_KEY), keep="last")
+    live = latest[~latest[NEWS_RETRACTED]]
+    return live.reset_index(drop=True)
+
+
 def _decision_weights(
     strategy: LoadedStrategy,
     bars: pd.DataFrame,
@@ -95,6 +138,7 @@ def _decision_weights(
     *,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     fundamentals: pd.DataFrame | None = None,
+    news: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Run the per-bar decision loop and return raw target weights (pre-lag).
 
@@ -142,7 +186,12 @@ def _decision_weights(
             f_asof = _fundamentals_as_of(fundamentals, t)
             allowed = members if universe_by_date is not None else set(columns)
             f_asof = f_asof[f_asof["symbol"].isin(allowed)]
-            w = strategy.target_weights(view, f_asof)
+            w = strategy.target_weights(view, fundamentals=f_asof)
+        elif news is not None:
+            n_asof = _news_as_of(news, t)
+            allowed = members if universe_by_date is not None else set(columns)
+            n_asof = n_asof[n_asof["symbol"].isin(allowed)]
+            w = strategy.target_weights(view, news=n_asof)
         else:
             w = strategy.target_weights(view)
         if len(w) == 0:
@@ -295,6 +344,7 @@ def _decision_weights_fast_or_loop(
     *,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     fundamentals: pd.DataFrame | None = None,
+    news: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Selector for the decision step. Returns the same pre-lag weights matrix the loop returns.
 
@@ -304,15 +354,19 @@ def _decision_weights_fast_or_loop(
       attempt a vectorized PIT mask here (deferred). The fast path is for the static-universe case.
     - Fundamentals (`fundamentals is not None`) -> FORCE the loop. No vectorized fundamentals fast
       path yet (issue #132).
+    - News (`news is not None`) -> FORCE the loop. The per-bar as-of news mask (latest revision
+      <= t, tombstones dropped) is path-dependent on t; no vectorized news fast path (issue #132).
     - Otherwise -> the vectorized fast path, gated by the fail-closed parity guard.
     """
     if (
         strategy.signal_panel_fn is None
         or universe_by_date is not None
         or fundamentals is not None
+        or news is not None
     ):
         return _decision_weights(
-            strategy, bars, adj, universe_by_date=universe_by_date, fundamentals=fundamentals
+            strategy, bars, adj,
+            universe_by_date=universe_by_date, fundamentals=fundamentals, news=news,
         )
     return _decision_weights_fast(strategy, bars, adj)
 
@@ -344,8 +398,7 @@ def verify_signal_panel_parity(
     # Re-raise an existing BacktestError unchanged (divergence message preserved verbatim);
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
-        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-        adj = adj.sort_index()
+        adj = _adj_grid(bars)
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None
@@ -399,6 +452,49 @@ def _fetch_symbols(
     return sorted(union)
 
 
+def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
+    """The simulation grid: adj_close pivoted to (timestamp index x symbol columns), sorted by
+    time. This index IS the bar date-index `vectorbt` simulates on and `pf.returns()` carries, so
+    it is the single source of truth for both `build_portfolio` and `holdout_window`."""
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    return adj.sort_index()
+
+
+def holdout_window(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    holdout_frac: float,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+) -> tuple[str, str]:
+    """The exact OOS holdout interval [start, end] (ISO dates) `walk_forward` would carve as the
+    last `holdout_frac` of the simulation grid — computed from the bar date-index WITHOUT running
+    the strategy. Reproduces `build_portfolio`'s grid (identical `n`), so the boundary is identical
+    to `walk_forward`'s `holdout_metrics`. Computed at reserve time so the single-use guard can
+    match on the bars that will actually be burned (issue #192).
+
+    Degenerate inputs (no bars, or holdout rounds to <1 bar) return the conservative full
+    grid/period: the subsequent `walk_forward` raises and the reservation is released, so the value
+    is immaterial but stays fail-closed (a superset of any real tail)."""
+    if not 0.0 < holdout_frac < 1.0:
+        raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
+    try:
+        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+    except Exception as exc:
+        raise BacktestError(f"provider error: {exc}") from exc
+    if bars.empty:
+        return start.date().isoformat(), end.date().isoformat()
+    idx = _adj_grid(bars).index
+    n = len(idx)
+    holdout_n = int(n * holdout_frac)
+    if holdout_n < 1:
+        return idx[0].date().isoformat(), idx[-1].date().isoformat()
+    train_n = n - holdout_n
+    return idx[train_n].date().isoformat(), idx[-1].date().isoformat()
+
+
 def simulate(
     strategy: LoadedStrategy,
     provider: DataProvider,
@@ -407,6 +503,7 @@ def simulate(
     *,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
 ) -> tuple[vbt.Portfolio, pd.DataFrame]:
     """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
     the strategy exposes a parity-guarded `signal_panel_fn` — see `_decision_weights_fast_or_loop`),
@@ -433,8 +530,7 @@ def simulate(
     if bars.empty:
         raise BacktestError("provider returned no bars for the universe/period")
 
-    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-    adj = adj.sort_index()
+    adj = _adj_grid(bars)
 
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:
@@ -448,8 +544,19 @@ def simulate(
         )
         _assert_fundamentals_shape(fundamentals)
 
+    news: pd.DataFrame | None = None
+    if strategy.config.needs_news:
+        if news_provider is None:
+            raise BacktestError(
+                f"strategy {strategy.name!r} declares needs_news but no news_provider was "
+                f"supplied (fail closed)"
+            )
+        news = news_provider.get_news(_fetch_symbols(strategy, universe_by_date), end)
+        _assert_news_shape(news)
+
     weights = _decision_weights_fast_or_loop(
-        strategy, bars, adj, universe_by_date=universe_by_date, fundamentals=fundamentals
+        strategy, bars, adj,
+        universe_by_date=universe_by_date, fundamentals=fundamentals, news=news,
     )
 
     lag = strategy.execution.decision_lag_bars
@@ -481,10 +588,12 @@ def run(
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
 ) -> BacktestResult:
     pf, weights_eff = simulate(
         strategy, provider, start, end,
         universe_by_date=universe_by_date, fundamentals_provider=fundamentals_provider,
+        news_provider=news_provider,
     )
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
@@ -500,5 +609,9 @@ def run(
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
         fundamentals_snapshot=getattr(fundamentals_provider, "snapshot_id", None),
+        news_snapshot=(
+            getattr(news_provider, "snapshot_id", None)
+            if strategy.config.needs_news else None
+        ),
         **prov,
     )

@@ -58,6 +58,47 @@ def test_import_bars_unknown_vendor_errors(tmp_path):
     assert json.loads(result.stdout)["ok"] is False
 
 
+def test_import_bars_intraday_roundtrip(tmp_path):
+    raw = tmp_path / "raw"
+    adj = tmp_path / "adj"
+    raw.mkdir()
+    adj.mkdir()
+    (raw / "AAPL_full_1min_UNADJUSTED.txt").write_text(
+        "2024-07-01 09:30:00,100,110,95,105,10\n2024-07-01 09:31:00,105,120,100,115,20\n",
+        encoding="utf-8")
+    (adj / "AAPL_full_1min_adjsplitdiv.txt").write_text(
+        "2024-07-01 09:30:00,50,55,47,52,10\n2024-07-01 09:31:00,52,60,50,57,20\n",
+        encoding="utf-8")
+    result = runner.invoke(app, [
+        "data", "import-bars", "--vendor", "firstrate",
+        "--raw-dir", str(raw), "--adjusted-dir", str(adj),
+        "--timeframe", "1m", "--as-of", "2024-07-02T00:00:00+00:00",
+        "--adjustment", "split_div",
+    ])
+    assert result.exit_code == 0, result.stdout
+    snap = json.loads(result.stdout)["snapshot"]
+    assert snap["timeframe"] == "1m"
+    assert snap["row_count"] == 2
+
+    # Read it back through the serving seam: time-of-day preserved, half-open [start, end).
+    import os
+    from datetime import datetime
+    from pathlib import Path
+
+    from algua.data.serve import StoreBackedProvider
+    from algua.data.store import DataStore
+
+    store = DataStore(Path(os.environ["ALGUA_DATA_DIR"]))
+    provider = StoreBackedProvider(store, snap["snapshot_id"])
+    bars = provider.get_bars(
+        ["AAPL"], datetime(2024, 7, 1), datetime(2024, 7, 1, 13, 31), "1m"
+    )
+    # 09:30 ET -> 13:30 UTC is included; 09:31 ET -> 13:31 UTC is excluded by the half-open end.
+    assert [str(ts) for ts in bars.index] == ["2024-07-01 13:30:00+00:00"]
+    assert bars["close"].iloc[0] == 105.0
+    assert bars["adj_close"].iloc[0] == 52.0
+
+
 def test_import_bars_symbols_filter(tmp_path):
     raw, adj = _firstrate_dirs(tmp_path)
     result = runner.invoke(app, [
