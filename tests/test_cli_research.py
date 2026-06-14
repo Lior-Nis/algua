@@ -652,9 +652,10 @@ def test_dormant_sweep_never_reveals_holdout():
 
 def test_dormant_sweep_has_no_side_effects():
     _to_dormant()
-    from contextlib import closing
     import os
+    from contextlib import closing
     from pathlib import Path
+
     from algua.registry.db import connect
 
     def _counts():
@@ -710,5 +711,6 @@ def test_dormant_sweep_ignores_non_dormant_strategies():
     assert r.exit_code == 0, r.stdout
     p = json.loads(r.stdout)
     assert p["total_dormant"] == 0
-    names = [x["strategy"] for x in p["passed"] + p["failed"]] + [s["strategy"] for s in p["skipped"]]
+    names = [x["strategy"] for x in p["passed"] + p["failed"]]
+    names += [s["strategy"] for s in p["skipped"]]
     assert "cross_sectional_momentum" not in names

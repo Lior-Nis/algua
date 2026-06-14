@@ -50,6 +50,11 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   reaches `candidate` — there is no raw `registry transition --to candidate` shortcut for an
   agent (`--allow-non-pit`, `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition
   are all human-only).
+- `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the
+  `dormant` pool: re-runs walk-forward per dormant strategy and reports which ones' window/stability
+  metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger
+  rows, and transitions nothing. A pass is a prioritization signal for re-auditioning (`registry
+  transition --to paper`), NOT a gate and NOT a guarantee of re-promotion/forward-gate clearance.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
@@ -64,6 +69,10 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.
+`dormant` is a NON-terminal rest state for validated-but-resting strategies (entered only from
+`live`/`paper`; recovers via `dormant -> paper`; gives up via `dormant -> retired`). Benching to
+`dormant` needs a reason; `live -> dormant` requires the strategy be flat and atomically releases
+its allocation. Unlike `retired` (the terminal tombstone), a `dormant` strategy can climb back out.
 For an agent, BOTH the `backtested -> candidate` edge (research promote) AND the
 `paper -> forward_tested` edge (paper promote) are token-gated: each requires a fresh passing
 run that mints an identity-matched, single-use gate token, not a raw `registry transition`.
