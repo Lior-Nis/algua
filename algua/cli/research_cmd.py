@@ -18,10 +18,10 @@ from algua.cli._common import (
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.contracts.lifecycle import Actor, Stage
-from algua.strategies.loader import load_strategy
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.gates import GateCriteria
+from algua.strategies.loader import load_strategy
 
 research_app = typer.Typer(help="Research workflow: gates and promotion", no_args_is_help=True)
 app.add_typer(research_app, name="research")
@@ -241,8 +241,8 @@ def dormant_sweep(
     if top is not None:
         passed, failed = passed[:top], failed[:top]
     emit(ok({
-        "note": ("advisory stability screen over walk-forward windows; NOT the holdout gate. A pass "
-                 "means the strategy's windows look healthy again - worth re-auditioning via "
+        "note": ("advisory stability screen over walk-forward windows; NOT the holdout gate. A "
+                 "pass means the strategy's windows look healthy again - worth re-auditioning via "
                  "`registry transition --to paper` - it does NOT guarantee it will clear "
                  "re-promotion (which burns a fresh holdout) or the #124 forward gate. Residual "
                  "multiple-testing risk: acting on top-ranked names is a human judgement."),
