@@ -27,7 +27,7 @@ from algua.backtest.engine import (
     verify_signal_panel_parity,
 )
 from algua.contracts.types import ExecutionContract
-from algua.risk.limits import WEIGHT_TOL
+from algua.risk.limits import WEIGHT_TOL, RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 from algua.strategies.loader import load_strategy
 
@@ -45,6 +45,15 @@ def _bars_adj(symbols: list[str], seed: int = 0) -> tuple[pd.DataFrame, pd.DataF
     bars = SyntheticProvider(seed=seed).get_bars(symbols, START, END, "1d")
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     return bars, adj.sort_index()
+
+
+def _riskbreach_kind(exc: BaseException) -> str | None:
+    """Walk the __cause__ chain to the underlying RiskBreach and return its kind (None if absent).
+    The fast-path/guard wraps RiskBreach in BacktestError, so callers can't assert it directly."""
+    cur: BaseException | None = exc
+    while cur is not None and not isinstance(cur, RiskBreach):
+        cur = cur.__cause__
+    return cur.kind if isinstance(cur, RiskBreach) else None
 
 
 # --- 1. loader detection -------------------------------------------------------------------
@@ -520,6 +529,31 @@ def test_verifier_raises_on_empty_provider() -> None:
         verify_signal_panel_parity(strat, _EmptyProvider(), START, END)
 
 
+def test_verifier_raises_on_empty_operating_universe() -> None:
+    """A provider returning bars only for UNDECLARED symbols leaves an empty declared∩available
+    universe; the verifier fails closed with the clear `no fetched price data` cause (mirroring
+    simulate's guard) rather than a confusing out-of-universe `(allowed: [])` breach."""
+    class _WrongSymbolProvider:
+        def get_bars(self, *a: Any, **k: Any) -> pd.DataFrame:
+            return SyntheticProvider(seed=0).get_bars(["ZZZ"], START, END, "1d")
+
+    def faithful_panel(bars_: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        a = bars_.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(0.5, index=a.index, columns=a.columns)
+
+    cfg = StrategyConfig(
+        name="disjoint", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 1.0}),
+        signal_panel_fn=faithful_panel, construct_fn=_passthrough,
+    )
+    with pytest.raises(BacktestError, match="no fetched price data for any symbol"):
+        verify_signal_panel_parity(strat, _WrongSymbolProvider(), START, END)
+
+
 def test_verifier_fails_closed_on_throwing_panel() -> None:
     """A signal_panel that raises must fail the gate CLOSED as a BacktestError (not crash the
     JSON CLI with an arbitrary exception type)."""
@@ -559,8 +593,9 @@ def test_fast_weights_rejects_out_of_universe_construct_output() -> None:
         signal_panel_fn=signal_panel, construct_fn=bad_construct,
     )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
-    with pytest.raises(BacktestError, match="out-of-universe"):
+    with pytest.raises(BacktestError, match="out-of-universe") as ei:
         _fast_weights(strat, bars, adj)
+    assert _riskbreach_kind(ei.value) == "out_of_universe"  # the breach survives in the cause chain
 
 
 def test_canonical_row_rejects_per_bar_signal_out_of_universe() -> None:
@@ -584,5 +619,7 @@ def test_canonical_row_rejects_per_bar_signal_out_of_universe() -> None:
         signal_panel_fn=good_panel, construct_fn=_passthrough,
     )
     bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
-    with pytest.raises(BacktestError, match="out-of-universe"):
+    with pytest.raises(BacktestError, match="out-of-universe") as ei:
         _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
+    # `_assert_parity` re-wraps with ` at {t}` but chains from the underlying RiskBreach directly.
+    assert _riskbreach_kind(ei.value) == "out_of_universe"

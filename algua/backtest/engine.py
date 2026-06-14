@@ -341,10 +341,13 @@ def _assert_parity(
         stop = int(end_pos[i])
         # A rail breach raised inside the proxy (e.g. an out-of-universe per-bar weight) carries no
         # bar context; append ` at {t}` here so its message matches the loop / non-guard fast path.
+        # Chain from the underlying RiskBreach (not the proxy's BacktestError) so `__cause__`
+        # stays a direct RiskBreach, matching the loop / fast-path convention.
         try:
             canonical = _canonical_row(strategy, bars_sorted, stop, columns)
         except BacktestError as exc:
-            raise BacktestError(f"{exc} at {t}") from exc
+            cause = exc.__cause__ if isinstance(exc.__cause__, RiskBreach) else exc
+            raise BacktestError(f"{exc} at {t}") from cause
         fast = pd.Series(weights.iloc[i].to_numpy(), index=columns)
         diff = (canonical - fast).abs()
         if bool((diff > WEIGHT_TOL).any()):
@@ -420,6 +423,14 @@ def verify_signal_panel_parity(
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
         adj = _adj_grid(bars)
+        # Same fail-closed guard as simulate(): an empty declared∩available universe would otherwise
+        # surface as a confusing out-of-universe `(allowed: [])` breach instead of this clear cause.
+        if strategy.universe and not (set(strategy.universe) & set(adj.columns)):
+            raise BacktestError(
+                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+                f"universe {sorted(strategy.universe)} (fetched columns: "
+                f"{sorted(map(str, adj.columns))})"
+            )
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None
