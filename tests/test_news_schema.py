@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -21,6 +22,7 @@ def _row(**over):
         "headline": "Apple ships",
         "url": "http://x/1",
         "body": "body text",
+        "retracted": False,
     }
     base.update(over)
     return base
@@ -273,3 +275,174 @@ def test_to_news_schema_normalizes_mixed_tz_offsets():
     canon = to_news_schema(raw)
     assert str(canon["knowable_at"].dtype) == "datetime64[ns, UTC]"
     assert (canon["knowable_at"].dt.hour == 13).all()  # the -05:00 row normalizes to 13:00Z
+
+
+# ── retracted column (issue #132, signal-lane slice) ─────────────────────────
+
+
+def _raw(source, article_id, symbols, ka, headline="h", pub=None):
+    return {
+        "source": source, "article_id": article_id, "symbols": symbols,
+        "published_at": pub or ka, "knowable_at": ka, "headline": headline,
+    }
+
+
+def test_empty_news_has_retracted_bool_column():
+    e = empty_news()
+    assert "retracted" in e.columns
+    assert e["retracted"].dtype == np.dtype("bool")
+
+
+def test_explode_emits_retracted_false_for_normal_rows():
+    raw = pd.DataFrame([_raw("Reuters", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z")])
+    out = to_news_schema(explode_news_symbols(raw))
+    assert set(out["symbol"]) == {"AAPL", "MSFT"}
+    assert out["retracted"].dtype == np.dtype("bool")
+    assert not out["retracted"].any()
+
+
+def test_validate_rejects_non_bool_retracted():
+    out = to_news_schema(explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")])))
+    bad = out.copy()
+    bad["retracted"] = bad["retracted"].astype("object")
+    bad.loc[bad.index[0], "retracted"] = "false"
+    with pytest.raises(ValueError, match="retracted"):
+        validate_news(bad)
+
+
+def test_to_news_schema_rejects_nonbool_retracted_string():
+    raw = explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")]))
+    bad = raw.copy()
+    bad["retracted"] = bad["retracted"].astype("object")
+    bad.loc[bad.index[0], "retracted"] = "false"
+    with pytest.raises(ValueError, match="retracted"):
+        to_news_schema(bad)
+
+
+def test_hash_changes_with_retracted():
+    out = to_news_schema(explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")])))
+    flipped = out.copy()
+    flipped["retracted"] = True
+    assert logical_news_hash(out) != logical_news_hash(flipped)
+
+
+def test_to_news_schema_rejects_null_retracted():
+    raw = explode_news_symbols(
+        pd.DataFrame([_raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z")]))
+    bad = raw.copy()
+    bad["retracted"] = bad["retracted"].astype("object")
+    bad.loc[bad.index[0], "retracted"] = np.nan
+    with pytest.raises(ValueError, match="retracted"):
+        to_news_schema(bad)
+
+
+# ── symbol-set-revision tombstones (issue #132, Task 2) ──────────────────────
+
+
+def _key(out, sym, ka):
+    m = out[(out["symbol"] == sym) & (out["knowable_at"] == pd.Timestamp(ka, tz="UTC"))]
+    return None if m.empty else bool(m["retracted"].iloc[0])
+
+
+def test_dropped_symbol_gets_a_tombstone_at_the_dropping_revision():
+    # published_at is an article-identity attribute (invariant per article); revisions differ
+    # only in knowable_at.
+    pub = "2023-01-01T00:00:00Z"
+    raw = pd.DataFrame([
+        _raw("r", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z", pub=pub, headline="h1"),
+        _raw("r", "a1", ["AAPL"], "2023-01-02T00:00:00Z", pub=pub, headline="h2"),
+    ])
+    out = to_news_schema(explode_news_symbols(raw))
+    assert _key(out, "MSFT", "2023-01-01T00:00:00Z") is False
+    assert _key(out, "MSFT", "2023-01-02T00:00:00Z") is True
+    assert _key(out, "AAPL", "2023-01-02T00:00:00Z") is False
+
+
+def test_tombstone_carries_article_published_at_not_knowable_at():
+    raw = pd.DataFrame([
+        _raw("r", "a1", ["AAPL", "MSFT"], "2023-01-05T00:00:00Z",
+             pub="2023-01-01T00:00:00Z", headline="h1"),
+        _raw("r", "a1", ["AAPL"], "2023-01-06T00:00:00Z",
+             pub="2023-01-01T00:00:00Z", headline="h2"),
+    ])
+    out = to_news_schema(explode_news_symbols(raw))
+    tomb = out[(out["symbol"] == "MSFT") & out["retracted"]]
+    assert tomb["published_at"].iloc[0] == pd.Timestamp("2023-01-01T00:00:00Z")
+
+
+def test_full_retraction_empty_later_revision_tombstones_all_prior():
+    pub = "2023-01-01T00:00:00Z"
+    raw = pd.DataFrame([
+        _raw("r", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z", pub=pub, headline="h1"),
+        _raw("r", "a1", [], "2023-01-02T00:00:00Z", pub=pub, headline="h2"),
+    ])
+    out = to_news_schema(explode_news_symbols(raw))
+    assert _key(out, "AAPL", "2023-01-02T00:00:00Z") is True
+    assert _key(out, "MSFT", "2023-01-02T00:00:00Z") is True
+
+
+def test_drop_then_readd():
+    pub = "2023-01-01T00:00:00Z"
+    raw = pd.DataFrame([
+        _raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z", pub=pub, headline="h1"),
+        _raw("r", "a1", [], "2023-01-02T00:00:00Z", pub=pub, headline="h2"),
+        _raw("r", "a1", ["AAPL"], "2023-01-03T00:00:00Z", pub=pub, headline="h3"),
+    ])
+    out = to_news_schema(explode_news_symbols(raw))
+    assert _key(out, "AAPL", "2023-01-02T00:00:00Z") is True
+    assert _key(out, "AAPL", "2023-01-03T00:00:00Z") is False
+
+
+def test_zero_symbol_first_revision_rejected():
+    with pytest.raises(ValueError, match="empty revision is only valid"):
+        explode_news_symbols(pd.DataFrame([_raw("r", "a1", [], "2023-01-01T00:00:00Z")]))
+
+
+def test_empty_after_empty_rejected():
+    raw = pd.DataFrame([
+        _raw("r", "a1", ["AAPL"], "2023-01-01T00:00:00Z"),
+        _raw("r", "a1", [], "2023-01-02T00:00:00Z"),
+        _raw("r", "a1", [], "2023-01-03T00:00:00Z"),
+    ])
+    with pytest.raises(ValueError, match="empty revision is only valid"):
+        explode_news_symbols(raw)
+
+
+def test_duplicate_revision_rejected_on_canonical_identity():
+    raw = pd.DataFrame([
+        _raw("Reuters", "a1", ["AAPL"], "2023-01-01T00:00:00Z"),
+        _raw(" reuters ", "a1", ["MSFT"], "2023-01-01T00:00:00Z"),
+    ])
+    with pytest.raises(ValueError, match="duplicate news revision"):
+        explode_news_symbols(raw)
+
+
+def test_two_sources_same_article_id_do_not_merge():
+    # Same article_id from different sources must stay independent: no spurious tombstone.
+    raw = pd.DataFrame([
+        _raw("reuters", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z"),
+        _raw("bloomberg", "a1", ["AAPL"], "2023-01-01T00:00:00Z"),
+    ])
+    out = to_news_schema(explode_news_symbols(raw))
+    # bloomberg/a1 only ever mentioned AAPL -> no MSFT tombstone for it
+    assert out[(out["source"] == "bloomberg") & (out["symbol"] == "MSFT")].empty
+    # reuters/a1 mentioned both, single revision -> no tombstone either
+    assert not out[out["source"] == "reuters"]["retracted"].any()
+
+
+def test_input_row_order_does_not_affect_tombstones():
+    # The walk sorts by knowable_at, so scrambled input order yields identical tombstones.
+    pub = "2023-01-01T00:00:00Z"
+    rows = [
+        _raw("r", "a1", ["AAPL"], "2023-01-03T00:00:00Z", headline="h3", pub=pub),
+        _raw("r", "a1", ["AAPL", "MSFT"], "2023-01-01T00:00:00Z", headline="h1", pub=pub),
+        _raw("r", "a1", ["AAPL"], "2023-01-02T00:00:00Z", headline="h2", pub=pub),
+    ]
+    out_scrambled = to_news_schema(explode_news_symbols(pd.DataFrame(rows)))
+    out_ordered = to_news_schema(explode_news_symbols(pd.DataFrame([rows[1], rows[2], rows[0]])))
+    assert out_scrambled.equals(out_ordered)
+    # MSFT dropped at the 2nd revision (Jan 02)
+    assert _key(out_scrambled, "MSFT", "2023-01-02T00:00:00Z") is True

@@ -66,7 +66,10 @@ class Strategy(Protocol):
     execution: ExecutionContract
 
     def target_weights(
-        self, features: pd.DataFrame, fundamentals: pd.DataFrame | None = None
+        self,
+        features: pd.DataFrame,
+        fundamentals: pd.DataFrame | None = None,
+        news: pd.DataFrame | None = None,
     ) -> pd.Series: ...
 
 
@@ -87,12 +90,14 @@ FUNDAMENTALS_KNOWABLE_AT = "knowable_at"
 # identity because an article id is only unique WITHIN a source. Hindsight-only this slice (no
 # engine consumer), but the names live here beside the fundamentals constants for symmetry.
 NEWS_COLUMNS: tuple[str, ...] = (
-    "source", "article_id", "symbol", "published_at", "knowable_at", "headline", "url", "body",
+    "source", "article_id", "symbol", "published_at", "knowable_at",
+    "headline", "url", "body", "retracted",
 )
 # Identity of an article-mention across revisions: a correction is a new row sharing this key with
 # a later knowable_at. `source` scopes the (source-local) article_id.
 NEWS_AS_OF_KEY: tuple[str, ...] = ("source", "article_id", "symbol")
 NEWS_KNOWABLE_AT = "knowable_at"
+NEWS_RETRACTED = "retracted"  # True = a symbol-mention retracted by a later article revision
 
 
 @runtime_checkable
@@ -105,6 +110,18 @@ class FundamentalsProvider(Protocol):
     snapshot_id: str
 
     def get_fundamentals(self, symbols: list[str], end: datetime) -> pd.DataFrame: ...
+
+
+@runtime_checkable
+class NewsProvider(Protocol):
+    """As-of consumption seam for point-in-time news (issue #132). Returns the FULL bitemporal
+    history (including retraction tombstones) for `symbols` with knowable_at < end — no lower
+    bound. The engine owns decision `t` and masks knowable_at <= t per bar; the provider never
+    sees `t`."""
+
+    snapshot_id: str
+
+    def get_news(self, symbols: list[str], end: datetime) -> pd.DataFrame: ...
 
 
 @runtime_checkable

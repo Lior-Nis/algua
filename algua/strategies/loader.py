@@ -74,6 +74,7 @@ def load_strategy(name: str) -> LoadedStrategy:
         )
 
     needs_fundamentals = bool(getattr(config, "needs_fundamentals", False))
+    needs_news = bool(getattr(config, "needs_news", False))
     n_params = len(inspect.signature(module.signal).parameters)
     if needs_fundamentals:
         if panel_fn is not None:
@@ -88,6 +89,21 @@ def load_strategy(name: str) -> LoadedStrategy:
             )
         return LoadedStrategy(
             config=config, fundamentals_signal_fn=module.signal, construct_fn=construct_fn
+        )
+
+    if needs_news:
+        if panel_fn is not None:
+            raise StrategyNotFound(
+                f"{name}: signal_panel is not supported with needs_news "
+                f"(no vectorized news fast path yet)"
+            )
+        if n_params != 3:
+            raise StrategyNotFound(
+                f"{name}: needs_news=True requires signal(view, params, news); "
+                f"got {n_params} params"
+            )
+        return LoadedStrategy(
+            config=config, news_signal_fn=module.signal, construct_fn=construct_fn
         )
 
     if n_params != 2:

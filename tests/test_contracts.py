@@ -103,11 +103,18 @@ def test_fundamentals_provider_protocol_and_constants():
 
 
 def test_news_column_constants():
-    from algua.contracts.types import NEWS_AS_OF_KEY, NEWS_COLUMNS, NEWS_KNOWABLE_AT
+    from algua.contracts.types import (
+        NEWS_AS_OF_KEY,
+        NEWS_COLUMNS,
+        NEWS_KNOWABLE_AT,
+        NEWS_RETRACTED,
+    )
 
     assert NEWS_COLUMNS == (
-        "source", "article_id", "symbol", "published_at", "knowable_at", "headline", "url", "body",
+        "source", "article_id", "symbol", "published_at", "knowable_at",
+        "headline", "url", "body", "retracted",
     )
     assert NEWS_AS_OF_KEY == ("source", "article_id", "symbol")
     assert NEWS_KNOWABLE_AT == "knowable_at"
+    assert NEWS_RETRACTED == "retracted"
     assert set(NEWS_AS_OF_KEY).issubset(set(NEWS_COLUMNS))
