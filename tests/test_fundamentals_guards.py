@@ -26,8 +26,10 @@ def test_helper_allows_plain_strategy():
     assert_tradable_without_fundamentals(load_strategy("cross_sectional_momentum"))  # no raise
 
 
-def test_promotion_preflight_blocks_fundamentals(tmp_path):
-    # build a registry with a fundamentals strategy at stage backtested, then preflight must refuse
+def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
+    # After #132 slice 4: the needs_fundamentals block is removed from promotion_preflight.
+    # Preflight now proceeds past the PIT check and fails on missing measured breadth instead.
+    # The paper/live guards (assert_tradable_without_fundamentals) are tested separately above.
     from algua.registry.promotion import promotion_preflight
     from algua.registry.transitions import transition_strategy
 
@@ -35,7 +37,8 @@ def test_promotion_preflight_blocks_fundamentals(tmp_path):
     repo.add("fundamentals_earnings_tilt")
     # advance to backtested (HUMAN actor to skip any gate-token requirement)
     transition_strategy(repo, "fundamentals_earnings_tilt", Stage.BACKTESTED, Actor.HUMAN, "seed")
-    with pytest.raises(ValueError, match="fundamentals"):
+    # Preflight no longer refuses on needs_fundamentals; it fails later on missing measured breadth.
+    with pytest.raises(ValueError, match="no recorded search breadth"):
         promotion_preflight(
             repo,
             "fundamentals_earnings_tilt",
