@@ -398,8 +398,7 @@ def verify_signal_panel_parity(
     # Re-raise an existing BacktestError unchanged (divergence message preserved verbatim);
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
-        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-        adj = adj.sort_index()
+        adj = _adj_grid(bars)
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None
@@ -453,6 +452,49 @@ def _fetch_symbols(
     return sorted(union)
 
 
+def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
+    """The simulation grid: adj_close pivoted to (timestamp index x symbol columns), sorted by
+    time. This index IS the bar date-index `vectorbt` simulates on and `pf.returns()` carries, so
+    it is the single source of truth for both `build_portfolio` and `holdout_window`."""
+    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    return adj.sort_index()
+
+
+def holdout_window(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    holdout_frac: float,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+) -> tuple[str, str]:
+    """The exact OOS holdout interval [start, end] (ISO dates) `walk_forward` would carve as the
+    last `holdout_frac` of the simulation grid — computed from the bar date-index WITHOUT running
+    the strategy. Reproduces `build_portfolio`'s grid (identical `n`), so the boundary is identical
+    to `walk_forward`'s `holdout_metrics`. Computed at reserve time so the single-use guard can
+    match on the bars that will actually be burned (issue #192).
+
+    Degenerate inputs (no bars, or holdout rounds to <1 bar) return the conservative full
+    grid/period: the subsequent `walk_forward` raises and the reservation is released, so the value
+    is immaterial but stays fail-closed (a superset of any real tail)."""
+    if not 0.0 < holdout_frac < 1.0:
+        raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
+    try:
+        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+    except Exception as exc:
+        raise BacktestError(f"provider error: {exc}") from exc
+    if bars.empty:
+        return start.date().isoformat(), end.date().isoformat()
+    idx = _adj_grid(bars).index
+    n = len(idx)
+    holdout_n = int(n * holdout_frac)
+    if holdout_n < 1:
+        return idx[0].date().isoformat(), idx[-1].date().isoformat()
+    train_n = n - holdout_n
+    return idx[train_n].date().isoformat(), idx[-1].date().isoformat()
+
+
 def simulate(
     strategy: LoadedStrategy,
     provider: DataProvider,
@@ -488,8 +530,7 @@ def simulate(
     if bars.empty:
         raise BacktestError("provider returned no bars for the universe/period")
 
-    adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
-    adj = adj.sort_index()
+    adj = _adj_grid(bars)
 
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:

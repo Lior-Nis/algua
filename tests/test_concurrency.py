@@ -356,8 +356,10 @@ def test_concurrent_reserve_holdout_single_burn(tmp_path):
 
     with _worker_group(barrier) as spawn:
         holder = spawn("lock-hold", db, "h")
-        w1 = spawn("reserve-holdout", db, "w1", "s", "2022-01-01", "2022-12-31", "0.2")
-        w2 = spawn("reserve-holdout", db, "w2", "s", "2022-01-01", "2022-12-31", "0.2")
+        w1 = spawn("reserve-holdout", db, "w1", "s", "2022-01-01", "2022-12-31", "0.2",
+                   "2023-06-01", "2023-12-31")
+        w2 = spawn("reserve-holdout", db, "w2", "s", "2022-01-01", "2022-12-31", "0.2",
+                   "2023-06-01", "2023-12-31")
 
         _release_after_contention(barrier, [w1, w2], ["w1", "w2"])
 
@@ -389,12 +391,14 @@ def test_sequential_reserve_blocks_second_claim(tmp_path):
     sid = c1.execute("SELECT id FROM strategies WHERE name='s'").fetchone()["id"]
     SqliteStrategyRepository(c1).reserve_holdout(
         sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
+        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
+        holdout_start="2022-10-01", holdout_end="2022-12-31", allow_reuse=False)
     c2 = connect(db)
     with pytest.raises(ValueError, match="holdout already consumed"):
         SqliteStrategyRepository(c2).reserve_holdout(
             sid, data_source="demo", snapshot_id=None,
-            period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2, allow_reuse=False)
+            period_start="2022-06-01", period_end="2023-06-01", holdout_frac=0.2,
+            holdout_start="2022-12-01", holdout_end="2023-03-01", allow_reuse=False)
 
 
 @pytest.mark.skipif(not ALGUA_BIN.exists(), reason="algua console script not installed")

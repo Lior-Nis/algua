@@ -123,164 +123,140 @@ def test_list_filters_by_stage(repo):
     assert [r.name for r in ideas] == ["alpha"]
 
 
-# --- holdout reservation lifecycle ------------------------------------------
+# --- holdout reservation: interval matching (#192) --------------------------
 
-def _strategy_id(repo):
-    return repo.add("h").id
+@pytest.fixture()
+def repo_with_strategy(repo):
+    return repo, repo.add("h").id
 
 
-def test_reserve_blocks_overlapping_window(repo):
-    sid = _strategy_id(repo)
-    repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2023-12-31", holdout_frac=0.2, allow_reuse=False)
+def _reserve(repo, sid, *, hs, he, frac=0.2, ps="2022-01-01", pe="2023-12-31",
+             ds="demo", snap=None, allow_reuse=False):
+    return repo.reserve_holdout(
+        sid, data_source=ds, snapshot_id=snap, period_start=ps, period_end=pe,
+        holdout_frac=frac, holdout_start=hs, holdout_end=he, allow_reuse=allow_reuse)
+
+
+def test_overlapping_interval_blocks(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
     with pytest.raises(ValueError, match="holdout already consumed"):
-        repo.reserve_holdout(
-            sid, data_source="demo", snapshot_id=None,
-            period_start="2023-06-01", period_end="2024-06-01", holdout_frac=0.2,
-            allow_reuse=False)
+        _reserve(repo, sid, hs="2023-09-01", he="2024-03-01")
 
 
-def test_reserve_then_finalize_row_state_contract(repo):
-    """Reserve writes a placeholder (committed_at NULL, config_hash ''); finalize writes the real
-    evidentiary config_hash and a non-NULL committed_at on that same row."""
-    sid = _strategy_id(repo)
-    rid, _ = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    row = repo._conn.execute(
-        "SELECT committed_at, config_hash FROM holdout_evaluations WHERE id = ?", (rid,)
-    ).fetchone()
-    assert row["committed_at"] is None
-    assert row["config_hash"] == ""
+def test_different_holdout_frac_same_interval_still_blocks(repo_with_strategy):
+    # The #192 exploit: a different --holdout-frac must NOT escape the guard when the OOS bars
+    # overlap. Identity is the interval, not the frac.
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2023-06-01", he="2023-12-31", frac=0.2)
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2023-06-01", he="2023-12-31", frac=0.4)
+
+
+def test_non_overlapping_interval_allowed(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2021-06-01", he="2021-12-31", ps="2020-01-01", pe="2021-12-31")
+    rid, reused = _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+    assert rid and reused is False
+
+
+def test_allow_reuse_overrides_overlap(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+    rid, reused = _reserve(repo, sid, hs="2023-06-01", he="2023-12-31", allow_reuse=True)
+    assert rid and reused is True
+
+
+def test_null_interval_row_fails_closed(repo_with_strategy):
+    # An old-code/legacy row with a NULL interval must match unconditionally (fail closed).
+    repo, sid = repo_with_strategy
+    repo._conn.execute(
+        "INSERT INTO holdout_evaluations"
+        "(strategy_id, data_source, snapshot_id, period_start, period_end, holdout_frac,"
+        " config_hash, reused, created_at, committed_at, holdout_start, holdout_end)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, "demo", None, "2022-01-01", "2023-12-31", 0.2, "h", 0,
+         "2022-01-01T00:00:00+00:00", "2022-02-01T00:00:00+00:00", None, None),
+    )
+    repo._conn.commit()
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+
+
+def test_finalize_and_release_unchanged(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
     repo.finalize_holdout_reservation(rid, config_hash="real-evidence-hash")
     row = repo._conn.execute(
         "SELECT committed_at, config_hash FROM holdout_evaluations WHERE id = ?", (rid,)
     ).fetchone()
-    assert row["committed_at"] is not None
-    assert row["config_hash"] == "real-evidence-hash"
+    assert row["committed_at"] and row["config_hash"] == "real-evidence-hash"
+
+    rid2, _ = _reserve(repo, sid, hs="2024-06-01", he="2024-12-31",
+                       ps="2024-01-01", pe="2024-12-31")
+    repo.release_holdout_reservation(rid2)
+    gone = repo._conn.execute(
+        "SELECT 1 FROM holdout_evaluations WHERE id = ?", (rid2,)
+    ).fetchone()
+    assert gone is None
 
 
-def test_reserve_allows_disjoint_frac_and_source(repo):
-    sid = _strategy_id(repo)
-    repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    rid, reused = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2023-01-01", period_end="2023-12-31", holdout_frac=0.2, allow_reuse=False)
-    assert reused is False and isinstance(rid, int)
-    repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.3, allow_reuse=False)
-    repo.reserve_holdout(
-        sid, data_source="other", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
+def test_reserve_inside_open_transaction_raises(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    repo._conn.execute("BEGIN")  # simulate a caller holding an open transaction
+    try:
+        with pytest.raises(RuntimeError, match="open transaction"):
+            _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
+    finally:
+        repo._conn.rollback()
 
 
-def test_reserve_snapshot_identity_precedence(repo):
-    sid = _strategy_id(repo)
-    repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id="snapA",
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    with pytest.raises(ValueError, match="holdout already consumed"):
-        repo.reserve_holdout(
-            sid, data_source="demo", snapshot_id="snapA",
-            period_start="2022-06-01", period_end="2022-09-30", holdout_frac=0.2,
-            allow_reuse=False)
-
-
-def test_lifecycle_release_then_reserve_ok(repo):
-    sid = _strategy_id(repo)
-    rid, _ = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    repo.release_holdout_reservation(rid)
-    rid2, reused = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    assert reused is False and rid2 != rid
-
-
-def test_lifecycle_finalize_then_reserve_blocked(repo):
-    sid = _strategy_id(repo)
-    rid, _ = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    repo.finalize_holdout_reservation(rid, config_hash="real-hash")
-    with pytest.raises(ValueError, match="holdout already consumed"):
-        repo.reserve_holdout(
-            sid, data_source="demo", snapshot_id=None,
-            period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
-            allow_reuse=False)
-
-
-def test_orphaned_reservation_blocks(repo):
-    sid = _strategy_id(repo)
-    repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    with pytest.raises(ValueError, match="holdout already consumed"):
-        repo.reserve_holdout(
-            sid, data_source="demo", snapshot_id=None,
-            period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
-            allow_reuse=False)
-
-
-def test_allow_reuse_proceeds_past_burn_and_orphan(repo):
-    sid = _strategy_id(repo)
-    rid, _ = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
-    repo.finalize_holdout_reservation(rid, config_hash="real-hash")
-    rid2, reused = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=True)
-    assert reused is True and rid2 != rid
-    rid3, reused3 = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=True)
-    assert reused3 is True and rid3 != rid2
-
-
-def test_finalize_twice_raises(repo):
-    sid = _strategy_id(repo)
-    rid, _ = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
+def test_finalize_twice_raises(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
     repo.finalize_holdout_reservation(rid, config_hash="h1")
     with pytest.raises(ValueError):
         repo.finalize_holdout_reservation(rid, config_hash="h2")
 
 
-def test_release_after_finalize_is_noop(repo):
-    sid = _strategy_id(repo)
-    rid, _ = repo.reserve_holdout(
-        sid, data_source="demo", snapshot_id=None,
-        period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2, allow_reuse=False)
+def test_release_after_finalize_is_noop(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
     repo.finalize_holdout_reservation(rid, config_hash="h1")
     repo.release_holdout_reservation(rid)  # no-op, no raise
     with pytest.raises(ValueError, match="holdout already consumed"):
-        repo.reserve_holdout(
-            sid, data_source="demo", snapshot_id=None,
-            period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
-            allow_reuse=False)
+        _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
 
 
-def test_reserve_inside_open_transaction_raises(repo):
-    sid = _strategy_id(repo)
-    repo._conn.execute("BEGIN")  # simulate a caller holding an open transaction
-    try:
-        with pytest.raises(RuntimeError, match="open transaction"):
-            repo.reserve_holdout(
-                sid, data_source="demo", snapshot_id=None,
-                period_start="2022-01-01", period_end="2022-12-31", holdout_frac=0.2,
-                allow_reuse=False)
-    finally:
-        repo._conn.rollback()
+def test_reserve_snapshot_identity_precedence(repo_with_strategy):
+    # A burn recorded with snapshot_id="snapA" does NOT block a non-snapshot probe over the SAME
+    # overlapping interval (distinct identities). The snapshot probe IS blocked by a second
+    # attempt on an overlapping interval under that same snapshot identity.
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap="snapA")
+    # Non-snapshot probe over the same interval: different identity bucket — must succeed.
+    _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap=None)
+    # Second snapshot probe on an overlapping interval: same snapA identity — must block.
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2022-09-01", he="2023-03-31", snap="snapA")
+
+
+def test_release_then_reserve_same_interval_succeeds(repo_with_strategy):
+    repo, sid = repo_with_strategy
+    rid, _ = _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+    repo.release_holdout_reservation(rid)
+    rid2, reused = _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")
+    assert rid2 and reused is False
+
+
+def test_allow_reuse_past_orphaned_pending_reservation(repo_with_strategy):
+    # A pending (uncommitted) reservation blocks fail-closed; allow_reuse overrides it too.
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2023-06-01", he="2023-12-31")  # pending, never finalized (orphan)
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2023-09-01", he="2024-03-01")
+    rid, reused = _reserve(repo, sid, hs="2023-09-01", he="2024-03-01", allow_reuse=True)
+    assert rid and reused is True
 
 
 def _record_pass(repo, sid, *, actor="agent", code="c0", config="cfg0", dep="dep0"):
