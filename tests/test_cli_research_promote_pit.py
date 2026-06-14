@@ -126,10 +126,31 @@ def test_news_lane_reaches_candidate(tmp_path):
     assert r.exit_code == 0, r.stdout
     payload = json.loads(r.stdout)
     assert payload["promoted"] is True
+    # Fix 1 (#132 GATE-2): the emitted JSON payload carries the PIT snapshot ids.
+    assert payload["news_snapshot"] == nid
+    assert payload["fundamentals_snapshot"] is None
     assert _stage("news_coverage_tilt") == "candidate"
     fund_snap, news_snap = _latest_gate_snapshots(tmp_path)
     assert news_snap == nid
     assert fund_snap is None
+
+
+def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
+    """A wrong-kind PIT snapshot (a FUNDAMENTALS id passed to --news-snapshot of a needs_news
+    strategy) must fail closed BEFORE the holdout reservation, so a deterministic operator typo
+    can never strand a pending reservation row (#132 GATE-2 Fix 2)."""
+    bid, _nid, fid = _seed(tmp_path)
+    assert _backtest_to_backtested(
+        "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", _nid).exit_code == 0
+    r = runner.invoke(app, ["research", "promote", "news_coverage_tilt",
+                            "--snapshot", bid, "--news-snapshot", fid,  # wrong kind
+                            *_WINDOW, *_RELAX])
+    assert r.exit_code != 0, r.stdout
+    # The explicit pre-reservation guard (names the CLI flag), NOT the downstream read_news error.
+    assert "--news-snapshot" in r.stdout
+    assert "not 'news'" in r.stdout
+    # The fail-closed must precede any holdout reservation: zero rows.
+    assert _holdout_count(tmp_path) == 0
 
 
 def test_fundamentals_lane_reaches_candidate(tmp_path):

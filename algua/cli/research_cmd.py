@@ -19,6 +19,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.registry.promotion import promotion_preflight, run_gate
@@ -114,6 +115,20 @@ def promote(
     news_provider = (
         StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
         if news_snapshot else None)
+    # Fail fast on a missing/wrong-kind PIT snapshot BEFORE any holdout reservation, so a typo'd
+    # snapshot id can never strand a pending reservation (#132 GATE-2). get_snapshot raises
+    # SnapshotNotFound (LookupError) on a missing id; the dataset-kind check adds the wrong-kind
+    # case. Both surface as JSON via @json_errors and both precede reserve_holdout.
+    if news_provider is not None:
+        rec = news_provider.store.get_snapshot(news_provider.snapshot_id)
+        if rec.dataset != Dataset.NEWS.value:
+            raise ValueError(f"--news-snapshot {news_provider.snapshot_id!r} is dataset "
+                             f"{rec.dataset!r}, not {Dataset.NEWS.value!r}")
+    if fundamentals_provider is not None:
+        rec = fundamentals_provider.store.get_snapshot(fundamentals_provider.snapshot_id)
+        if rec.dataset != Dataset.FUNDAMENTALS.value:
+            raise ValueError(f"--fundamentals-snapshot {fundamentals_provider.snapshot_id!r} is "
+                             f"dataset {rec.dataset!r}, not {Dataset.FUNDAMENTALS.value!r}")
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     data_source = type(provider).__name__
     snapshot_id = getattr(provider, "snapshot_id", None)
@@ -190,6 +205,8 @@ def promote(
         "stability": wf.stability,
         "universe_name": wf.universe_name,
         "universe_snapshots": wf.universe_snapshots,
+        "fundamentals_snapshot": wf.fundamentals_snapshot,
+        "news_snapshot": wf.news_snapshot,
     }
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
