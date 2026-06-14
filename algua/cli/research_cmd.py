@@ -12,10 +12,13 @@ from algua.cli._common import (
     registry_conn,
     resolve_eval_inputs,
     resolve_universe_inputs,
+    select_provider,
+    utc,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.contracts.lifecycle import Actor
+from algua.contracts.lifecycle import Actor, Stage
+from algua.strategies.loader import load_strategy
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.gates import GateCriteria
@@ -159,3 +162,94 @@ def promote(
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
     emit(ok(payload))
+
+
+@research_app.command("dormant-sweep")
+@json_errors(ValueError, LookupError, BacktestError, sqlite3.OperationalError)
+def dormant_sweep(
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str = typer.Option("2023-12-31", "--end"),
+    demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
+    snapshot: str = typer.Option(None, "--snapshot", help="screen an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe",
+        help="optional single point-in-time universe applied to ALL dormant strategies; "
+             "omit to use each strategy's own static universe"),
+    windows: int = typer.Option(4, "--windows", help="walk-forward windows"),
+    holdout_frac: float = typer.Option(
+        0.2, "--holdout-frac",
+        help="walk-forward holdout fraction (shapes the windows; the holdout is NOT revealed)"),
+    min_window_sharpe: float = typer.Option(
+        0.0, "--min-window-sharpe", help="screen threshold on MEAN walk-forward window Sharpe"),
+    min_pct_positive: float = typer.Option(
+        0.6, "--min-pct-positive",
+        help="screen threshold on the fraction of positive walk-forward windows"),
+    top: int = typer.Option(
+        None, "--top", help="cap passed/failed lists to the top N by mean window Sharpe"),
+) -> None:
+    """Advisory STABILITY screen over the dormant pool. For each dormant strategy, re-run
+    walk-forward on a common window and report whether its WINDOW/stability metrics look healthy
+    again. This is NOT a gate: it never reads, reveals, or burns the single-use holdout, writes no
+    ledger rows, and transitions nothing. A pass is a prioritization signal (re-audition via
+    `registry transition --to paper`), not a guarantee of re-promotion or forward-gate clearance."""
+    if not 0.0 <= min_pct_positive <= 1.0:
+        raise ValueError("--min-pct-positive must be in [0, 1]")
+    start_dt, end_dt = utc(start), utc(end)
+    provider = select_provider(demo, snapshot)
+    data_source = type(provider).__name__
+    snapshot_id = getattr(provider, "snapshot_id", None)
+    universe_by_date, universe_prov = (
+        resolve_universe_inputs(universe, start_dt, end_dt) if universe else (None, None))
+
+    with registry_conn() as conn:
+        dormant = SqliteStrategyRepository(conn).list_strategies(Stage.DORMANT)
+
+    passed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for rec in dormant:
+        try:
+            strategy = load_strategy(rec.name)
+            if getattr(strategy.config, "needs_fundamentals", False):
+                skipped.append({"strategy": rec.name,
+                                "reason": "needs_fundamentals: walk-forward lane not wired"})
+                continue
+            wf = walk_forward(
+                strategy, provider, start_dt, end_dt, windows=windows,
+                holdout_frac=holdout_frac, universe_by_date=universe_by_date,
+                universe_name=universe, universe_snapshots=universe_prov)
+            stability = wf.stability
+            screen_passed = (stability["mean_sharpe"] >= min_window_sharpe
+                             and stability["pct_positive_windows"] >= min_pct_positive)
+            result = {
+                "strategy": rec.name, "screen_passed": screen_passed,
+                "stability": stability, "windows": wf.window_metrics,
+                "config_hash": wf.config_hash, "universe_name": wf.universe_name,
+                "universe_snapshots": wf.universe_snapshots,
+                "pit": universe_prov is not None,
+            }
+            (passed if screen_passed else failed).append(result)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as e:  # noqa: BLE001 - per-strategy isolation: one bad strategy must not abort the sweep
+            errors.append({"strategy": rec.name, "error": f"{type(e).__name__}: {e}"})
+
+    evaluated = len(passed) + len(failed)
+    passed.sort(key=lambda r: r["stability"]["mean_sharpe"], reverse=True)
+    failed.sort(key=lambda r: r["stability"]["mean_sharpe"], reverse=True)
+    if top is not None:
+        passed, failed = passed[:top], failed[:top]
+    emit(ok({
+        "note": ("advisory stability screen over walk-forward windows; NOT the holdout gate. A pass "
+                 "means the strategy's windows look healthy again - worth re-auditioning via "
+                 "`registry transition --to paper` - it does NOT guarantee it will clear "
+                 "re-promotion (which burns a fresh holdout) or the #124 forward gate. Residual "
+                 "multiple-testing risk: acting on top-ranked names is a human judgement."),
+        "period": {"start": start_dt.date().isoformat(), "end": end_dt.date().isoformat()},
+        "data_source": data_source, "snapshot_id": snapshot_id,
+        "thresholds": {"min_window_sharpe": min_window_sharpe,
+                       "min_pct_positive": min_pct_positive},
+        "total_dormant": len(dormant), "evaluated": evaluated,
+        "passed": passed, "failed": failed, "skipped": skipped, "errors": errors,
+    }))

@@ -582,3 +582,55 @@ def test_promote_different_holdout_frac_is_refused_as_reburn(tmp_path):
     assert "holdout already consumed" in payload["error"]
     # No second holdout row written; still only the one from the first promote.
     assert len(_holdout_rows(tmp_path)) == 1
+
+
+# --- dormant-sweep -----------------------------------------------------------
+
+
+def _to_dormant(name="cross_sectional_momentum"):
+    """Register `name` and drive it idea->backtested->candidate->paper->dormant via the CLI.
+    Human actor is exempt from the agent token gates up to paper; paper->dormant is any-actor but
+    requires a reason."""
+    assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
+    chain = [("backtested", "human"), ("candidate", "human"),
+             ("paper", "human"), ("dormant", "agent")]
+    for to, actor in chain:
+        r = runner.invoke(app, ["registry", "transition", name, "--to", to,
+                                "--actor", actor, "--reason", "test"])
+        assert r.exit_code == 0, r.stdout
+
+
+def test_dormant_sweep_empty_pool():
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["ok"] is True
+    assert p["total_dormant"] == 0
+    assert p["passed"] == [] and p["failed"] == [] and p["skipped"] == [] and p["errors"] == []
+
+
+def test_dormant_sweep_routes_pass():
+    _to_dormant()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["total_dormant"] == 1 and p["evaluated"] == 1
+    assert [x["strategy"] for x in p["passed"]] == ["cross_sectional_momentum"]
+    assert p["failed"] == []
+    assert p["passed"][0]["screen_passed"] is True
+    assert "stability" in p["passed"][0]
+
+
+def test_dormant_sweep_routes_fail():
+    _to_dormant()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "100", "--min-pct-positive", "1.0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["evaluated"] == 1
+    assert [x["strategy"] for x in p["failed"]] == ["cross_sectional_momentum"]
+    assert p["passed"] == []
