@@ -245,14 +245,20 @@ def dormant_sweep(
     for rec in dormant:
         try:
             strategy = load_strategy(rec.name)
-            # walk_forward rejects PIT sidecars (fundamentals/news) that its lane can't thread yet —
-            # skip those strategies with a named reason rather than letting them land in errors[].
+            # walk_forward CAN thread PIT sidecars now (#132), but dormant-sweep takes a single
+            # --snapshot and cannot carry a per-strategy fundamentals/news snapshot across a
+            # heterogeneous pool — so skip PIT strategies here with an accurate reason rather than
+            # letting them land in errors[]. Re-audition them individually instead.
             sidecar = next(
                 (flag for flag in ("needs_fundamentals", "needs_news")
                  if getattr(strategy.config, flag, False)), None)
             if sidecar is not None:
-                skipped.append({"strategy": rec.name,
-                                "reason": f"{sidecar}: walk-forward lane not wired"})
+                snap_flag = "fundamentals" if sidecar == "needs_fundamentals" else "news"
+                skipped.append({
+                    "strategy": rec.name,
+                    "reason": f"{sidecar}: dormant-sweep takes no per-strategy PIT snapshot — "
+                              f"re-audition individually via "
+                              f"backtest walk-forward/research promote --{snap_flag}-snapshot"})
                 continue
             wf = walk_forward(
                 strategy, provider, start_dt, end_dt, windows=windows,
