@@ -25,6 +25,7 @@ def _news_strategy() -> LoadedStrategy:
             name="n",
             universe=["AAPL"],
             execution=ExecutionContract(rebalance_frequency="1d"),
+            params={"window_days": 5},
             construction="equal_weight_positive",
             needs_news=True,
         ),
@@ -39,6 +40,7 @@ def _fund_strategy() -> LoadedStrategy:
             name="f",
             universe=["AAPL"],
             execution=ExecutionContract(rebalance_frequency="1d"),
+            params={"window_days": 5},
             construction="equal_weight_positive",
             needs_fundamentals=True,
         ),
@@ -57,17 +59,26 @@ def test_walk_forward_without_provider_fails_closed_needs_fundamentals():
         walk_forward(_fund_strategy(), SyntheticProvider(seed=3), START, END)
 
 
-def test_sweep_rejects_needs_news():
-    with pytest.raises(BacktestError, match="not supported in sweep"):
-        sweep(_news_strategy(), SyntheticProvider(seed=3), START, END, grid={"x": [1]})
+def test_sweep_needs_news_without_provider_fails_closed():
+    # Single-combo grid runs inline (no worker pickling), so the deep build_portfolio fail-closed
+    # is the error that surfaces — not the parallel pickle preflight.
+    with pytest.raises(BacktestError, match="needs_news"):
+        sweep(_news_strategy(), SyntheticProvider(seed=3), START, END, grid={"window_days": [5]})
 
 
-def test_sweep_rejects_needs_fundamentals():
-    with pytest.raises(BacktestError, match="not supported in sweep"):
-        sweep(_fund_strategy(), SyntheticProvider(seed=3), START, END, grid={"x": [1]})
+def test_sweep_needs_fundamentals_without_provider_fails_closed():
+    with pytest.raises(BacktestError, match="needs_fundamentals"):
+        sweep(_fund_strategy(), SyntheticProvider(seed=3), START, END,
+              grid={"window_days": [5]})
 
 
 def test_override_preserves_news_signal_fn():
     s = _news_strategy()
     out = _override(s, {})
     assert out.news_signal_fn is s.news_signal_fn
+
+
+def test_override_preserves_fundamentals_signal_fn():
+    s = _fund_strategy()
+    out = _override(s, {})
+    assert out.fundamentals_signal_fn is s.fundamentals_signal_fn

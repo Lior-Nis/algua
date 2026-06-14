@@ -15,8 +15,8 @@ from typing import Any
 from threadpoolctl import threadpool_limits
 
 from algua.backtest.engine import BacktestError
-from algua.backtest.walkforward import _reject_pit_sidecar, walk_forward
-from algua.contracts.types import DataProvider
+from algua.backtest.walkforward import walk_forward
+from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
 from algua.portfolio.construction import ConstructionError, validate_construction_params
 from algua.strategies.base import LoadedStrategy
 
@@ -160,6 +160,8 @@ class SweepResult:
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
     universe_name: str | None = None
     universe_snapshots: list[dict[str, str]] | None = None
+    fundamentals_snapshot: str | None = None
+    news_snapshot: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -177,6 +179,8 @@ def _evaluate_combo(
     universe_name: str | None,
     universe_snapshots: list[dict[str, str]] | None,
     rank_by: str,
+    fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
 ) -> dict[str, Any]:
     """Evaluate one already-overridden combo via walk_forward; return its rankable record + the
     combo-independent meta. Module-level so it is picklable into a ProcessPoolExecutor worker.
@@ -190,6 +194,8 @@ def _evaluate_combo(
         windows=windows, holdout_frac=holdout_frac,
         universe_by_date=universe_by_date,
         universe_name=universe_name, universe_snapshots=universe_snapshots,
+        fundamentals_provider=fundamentals_provider,
+        news_provider=news_provider,
     )
     return {
         "config_hash": wf.config_hash,
@@ -206,6 +212,8 @@ def _evaluate_combo(
             "period": wf.period,
             "universe_name": wf.universe_name,
             "universe_snapshots": wf.universe_snapshots,
+            "fundamentals_snapshot": wf.fundamentals_snapshot,
+            "news_snapshot": wf.news_snapshot,
         },
     }
 
@@ -283,6 +291,8 @@ def sweep(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
+    fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
 ) -> SweepResult:
     """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
 
@@ -294,7 +304,6 @@ def sweep(
     """
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
-    _reject_pit_sidecar(strategy, "sweep")
     combos = _combos(grid)
     # Parent pre-pass: build + validate EVERY override here so a bad signal key or invalid
     # construction param fails fast (ValueError) BEFORE any worker process spawns — exactly the
@@ -307,6 +316,7 @@ def sweep(
         universe_by_date=universe_by_date,
         universe_name=universe_name, universe_snapshots=universe_snapshots,
         rank_by=rank_by,
+        fundamentals_provider=fundamentals_provider, news_provider=news_provider,
     )
     results = _run_combos(overridden, eval_kwargs)
 
@@ -346,4 +356,6 @@ def sweep(
         best=best,
         universe_name=meta["universe_name"],
         universe_snapshots=meta["universe_snapshots"],
+        fundamentals_snapshot=meta["fundamentals_snapshot"],
+        news_snapshot=meta["news_snapshot"],
     )
