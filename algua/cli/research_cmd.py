@@ -17,7 +17,10 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
+from algua.data.store import DataStore
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.gates import GateCriteria
@@ -39,6 +42,12 @@ def promote(
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    fundamentals_snapshot: str = typer.Option(
+        None, "--fundamentals-snapshot",
+        help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
+    news_snapshot: str = typer.Option(
+        None, "--news-snapshot",
+        help="ingested news snapshot id (required for a needs_news strategy)"),
     universe: str = typer.Option(
         None, "--universe",
         help="point-in-time universe name (opt into survivorship-bias-free membership)"),
@@ -88,6 +97,23 @@ def promote(
     # part of the holdout-burn identity below (conservative: the same OOS data window is burned
     # regardless of universe).
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    # PIT sidecar guards (misuse + early fail-closed) BEFORE any holdout reservation/peek: a
+    # needs_X strategy without its snapshot must refuse before reserve_holdout touches the window.
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError("--fundamentals-snapshot was given but the strategy does not declare "
+                         "needs_fundamentals")
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError("--news-snapshot was given but the strategy does not declare needs_news")
+    if strategy.config.needs_fundamentals and not fundamentals_snapshot:
+        raise ValueError("strategy declares needs_fundamentals; pass --fundamentals-snapshot")
+    if strategy.config.needs_news and not news_snapshot:
+        raise ValueError("strategy declares needs_news; pass --news-snapshot")
+    fundamentals_provider = (
+        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
+        if fundamentals_snapshot else None)
+    news_provider = (
+        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
+        if news_snapshot else None)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     data_source = type(provider).__name__
     snapshot_id = getattr(provider, "snapshot_id", None)
@@ -128,6 +154,7 @@ def promote(
                 strategy, provider, start_dt, end_dt, windows=windows,
                 holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                 universe_name=universe, universe_snapshots=universe_prov,
+                fundamentals_provider=fundamentals_provider, news_provider=news_provider,
                 # Burn-on-peek: commit the reservation into a burn the instant BEFORE walk_forward
                 # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
                 # committed row, the except-release below is then correct for EVERY post-peek
