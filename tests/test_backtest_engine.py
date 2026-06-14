@@ -94,6 +94,23 @@ def test_t_plus_1_blocks_same_bar_fill():
     assert res.metrics["n_rebalances"] >= 1
 
 
+def test_static_operating_universe_empty_raises() -> None:
+    """A misbehaving provider that returns bars only for UNDECLARED symbols yields an empty
+    strategy.universe & adj.columns intersection -> fail closed rather than run a flat backtest."""
+    class _WrongSymbolProvider:
+        def get_bars(self, symbols, start, end, timeframe):  # noqa: ANN001
+            return SyntheticProvider(seed=0).get_bars(["ZZZ"], start, end, timeframe)
+
+    cfg = StrategyConfig(
+        name="wrongdata", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={}, construction="passthrough",
+    )
+    strat = _strategy(cfg, lambda v, p: pd.Series(dtype="float64"))
+    with pytest.raises(BacktestError, match="no fetched price data for any symbol"):
+        run(strat, _WrongSymbolProvider(), START, END)
+
+
 def test_empty_universe_data_raises() -> None:
     cfg = StrategyConfig(
         name="x",

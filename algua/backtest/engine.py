@@ -553,6 +553,15 @@ def simulate(
 
     adj = _adj_grid(bars)
 
+    if universe_by_date is None:
+        operating_universe = set(strategy.universe) & set(adj.columns)
+        if strategy.universe and not operating_universe:
+            raise BacktestError(
+                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+                f"universe {sorted(strategy.universe)} (fetched columns: "
+                f"{sorted(map(str, adj.columns))})"
+            )
+
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:
         if fundamentals_provider is None:
