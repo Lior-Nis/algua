@@ -1,7 +1,9 @@
 from datetime import UTC, datetime
 
 import pandas as pd
+import pytest
 
+import algua.backtest.walkforward as wfmod
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.walkforward import WalkForwardResult, walk_forward
 from algua.contracts.types import ExecutionContract
@@ -62,3 +64,42 @@ def test_walk_forward_carries_timeframe_and_seed():
     d = res.to_dict()
     assert d["timeframe"] == "1d"
     assert d["seed"] == 3
+
+
+def test_on_peek_fires_before_holdout_eval(monkeypatch):
+    # Spy on _segment_record to count holdout-metric evaluations.
+    calls = []
+    orig = wfmod._segment_record
+
+    def spy(returns, s, e):
+        calls.append((s, e))
+        return orig(returns, s, e)
+
+    monkeypatch.setattr(wfmod, "_segment_record", spy)
+
+    def boom(_cfg_hash):
+        raise RuntimeError("burn failed")
+
+    with pytest.raises(RuntimeError, match="burn failed"):
+        walk_forward(_equal_weight(), SyntheticProvider(seed=3), START, END,
+                     windows=4, holdout_frac=0.2, on_peek=boom)
+
+    # on_peek raised before the holdout was evaluated: only the 4 in-sample windows were recorded,
+    # NOT a 5th (holdout) evaluation. Proves the burn point is strictly before the peek.
+    assert len(calls) == 4
+
+
+def test_on_peek_receives_config_hash_and_completes(monkeypatch):
+    seen = []
+    res = walk_forward(_equal_weight(), SyntheticProvider(seed=3), START, END,
+                       windows=4, holdout_frac=0.2, on_peek=lambda cfg: seen.append(cfg))
+    # Fired exactly once, with the same config_hash that lands in the result, and the run completed.
+    assert seen == [res.config_hash]
+    assert res.holdout_metrics  # the peek still happened on the success path
+
+
+def test_walk_forward_without_on_peek_unchanged():
+    # Default (on_peek=None) path is byte-identical to a second run.
+    a = walk_forward(_equal_weight(), SyntheticProvider(seed=3), START, END)
+    b = walk_forward(_equal_weight(), SyntheticProvider(seed=3), START, END, on_peek=None)
+    assert a.to_dict() == b.to_dict()
