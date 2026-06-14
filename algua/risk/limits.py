@@ -148,12 +148,18 @@ def check_drawdown(equity: float, peak: float, max_drawdown: float | None) -> No
 
 
 def validate_decision_weights(
-    weights: pd.Series, contract: ExecutionContract, strategy_name: str
+    weights: pd.Series,
+    contract: ExecutionContract,
+    strategy_name: str,
+    allowed_symbols: Collection[str],
 ) -> None:
     """The ONE decision-weight validation every path calls (paper/live decide + backtest loop +
     fast-path), so the rails can never drift between research and live. Order: finite (fail-closed)
-    -> short policy -> per-symbol cap -> gross exposure (#135)."""
+    -> universe membership -> short policy -> per-symbol cap -> gross exposure (#135, #179).
+    `allowed_symbols` is the path's operating universe (live: strategy.universe; static backtest:
+    strategy.universe & adj.columns; PIT: as-of members at t)."""
     check_finite_weights(weights, strategy_name)
+    check_universe_membership(weights, allowed_symbols, strategy_name)
     check_short_policy(weights, contract.allow_short, strategy_name)
     check_max_weight_per_symbol(weights, contract.max_weight_per_symbol)
     check_gross_exposure(weights, contract.max_gross_exposure)

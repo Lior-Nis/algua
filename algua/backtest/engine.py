@@ -164,6 +164,10 @@ def _decision_weights(
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
+    # Static operating universe = declared AND available: a declared symbol with no fetched price
+    # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
+    # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    static_universe = set(strategy.universe) & set(columns)
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
     # Sort the raw bars by timestamp ONCE and precompute, per session, the integer end of the
@@ -196,17 +200,13 @@ def _decision_weights(
             w = strategy.target_weights(view)
         if len(w) == 0:
             continue
-        if universe_by_date is not None:
-            non_members = [s for s in w.index[w != 0.0] if s not in members]
-            if non_members:
-                raise BacktestError(
-                    f"strategy {strategy.name!r} returned weight for non-member symbol(s) "
-                    f"{sorted(non_members)} at {t} (as-of members: {sorted(members)})"
-                )
         # The shared checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error
         # contract while preserving the breach (and its `.kind`) as the cause.
         try:
-            validate_decision_weights(w, strategy.execution, strategy.name)
+            decision_universe = members if universe_by_date is not None else static_universe
+            validate_decision_weights(
+                w, strategy.execution, strategy.name, allowed_symbols=decision_universe
+            )
         except RiskBreach as breach:
             raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
@@ -252,6 +252,10 @@ def _fast_weights(
         )
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
+    # Static operating universe = declared AND available: a declared symbol with no fetched price
+    # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
+    # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    static_universe = set(strategy.universe) & set(columns)
     # Reindex the SCORES onto the simulation grid WITHOUT filling NaN (missing score != 0 score).
     scores = panel.reindex(index=adj.index, columns=columns)
 
@@ -268,7 +272,9 @@ def _fast_weights(
         if len(w) == 0:
             continue
         try:
-            validate_decision_weights(w, strategy.execution, strategy.name)
+            validate_decision_weights(
+                w, strategy.execution, strategy.name, allowed_symbols=static_universe
+            )
         except RiskBreach as breach:
             raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)

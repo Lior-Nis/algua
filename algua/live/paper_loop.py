@@ -70,7 +70,9 @@ def decide(
     market-value weights. Broker mechanics (sim fill_pending vs Alpaca submit) stay in each loop;
     only this weights->risk->intents step is shared (#25)."""
     weights = strategy.target_weights(view)
-    validate_decision_weights(weights, strategy.execution, strategy.name)
+    validate_decision_weights(
+        weights, strategy.execution, strategy.name, allowed_symbols=strategy.universe
+    )
     intents = build_intents(weights, current_weights, decision_ts)
     return weights, intents
 
