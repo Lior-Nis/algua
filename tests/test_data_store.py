@@ -433,3 +433,38 @@ def test_manifest_raises_on_corrupt_nonfinal_line(tmp_path):
     manifest_path.write_text('not-json\n{"also": "bad"}\n', encoding="utf-8")
     with pytest.raises((ValueError, KeyError)):
         SnapshotManifest(manifest_path).list_records()
+
+
+def test_ingest_bars_rejects_unknown_timeframe(tmp_path):
+    # #151: the closed timeframe vocabulary is enforced fail-closed at the ingest chokepoint —
+    # an unknown token never reaches the snapshot write.
+    store = DataStore(tmp_path / "data")
+    frame = _bars_frame(["2024-07-01T00:00:00+00:00"])
+    with pytest.raises(ValueError, match="unknown timeframe"):
+        store.ingest_bars(
+            provider="firstrate",
+            symbols=["AAPL"],
+            start="2024-07-01",
+            end="2024-07-01",
+            as_of="2024-07-02T00:00:00+00:00",
+            source="fixture",
+            frame=frame,
+            timeframe="15m",
+        )
+    assert store.list_snapshots() == []
+
+
+def test_ingest_bars_streamed_rejects_unknown_timeframe(tmp_path):
+    # #151: same closed-vocabulary guard at the streamed-ingest chokepoint.
+    store = DataStore(tmp_path / "data")
+    frame = _bars_frame(["2024-07-01T00:00:00+00:00"])
+    with pytest.raises(ValueError, match="unknown timeframe"):
+        store.ingest_bars_streamed(
+            provider="firstrate",
+            symbols=["AAPL"],
+            as_of="2024-07-02T00:00:00+00:00",
+            source="fixture",
+            chunks=iter([frame]),
+            timeframe="15m",
+        )
+    assert store.list_snapshots() == []

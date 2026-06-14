@@ -47,6 +47,7 @@ from algua.data.news_schema import (
     to_news_schema,
 )
 from algua.data.schema import empty_bars, to_bar_schema
+from algua.data.timeframes import validate_timeframe
 
 
 class SnapshotNotFound(LookupError):
@@ -155,6 +156,7 @@ class DataStore:
         adjustment: str = "none",
         source_metadata: dict[str, str] | None = None,
     ) -> SnapshotRecord:
+        validate_timeframe(timeframe)
         metadata = _metadata(
             dataset=Dataset.BARS.value,
             provider=provider,
@@ -339,6 +341,7 @@ class DataStore:
         Note: when `start`/`end` are given, the coverage check is span-only (observed range covers
         the requested endpoints); it does not detect interior gaps.
         """
+        validate_timeframe(timeframe)
         staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
         staging_dir.mkdir(parents=True, exist_ok=True)
         row_count = 0
