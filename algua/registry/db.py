@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -134,13 +134,13 @@ CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_n
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
 -- holdout that was looked at (regardless of gate pass/fail — looking consumes it). A later promote
--- whose (strategy, data identity, OVERLAPPING period, same holdout_frac) collides with a recorded
--- row is REFUSED unless the operator passes --allow-holdout-reuse, which writes a row with
--- reused=1 to make the statistical compromise auditable. Matching is on the WINDOW, not on
--- config_hash: re-gating the same out-of-sample window with a tweaked config is exactly the leak
--- being closed (config_hash is recorded as evidence only). Data identity = snapshot_id when both
--- sides have one, else data_source. FK into strategies(id) — relational state, not an audit
--- snapshot, so it should not outlive its strategy.
+-- is REFUSED if its OOS interval [holdout_start, holdout_end] — the exact bars walk_forward burns
+-- (#192) — overlaps a recorded row's interval for the same strategy+data identity, unless the
+-- operator passes --allow-holdout-reuse (writes reused=1, auditable). A NULL interval matches
+-- unconditionally (fail closed). period_* and holdout_frac are recorded as evidence only; matching
+-- is on the INTERVAL, not on config_hash (re-gating the same OOS window with a tweaked config is
+-- exactly the leak being closed). Data identity = snapshot_id when both sides have one, else
+-- data_source. FK into strategies(id) — relational state, not an audit snapshot.
 CREATE TABLE IF NOT EXISTS holdout_evaluations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),
@@ -152,11 +152,13 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
     config_hash TEXT NOT NULL,   -- '' while in-flight (placeholder); real hash written at finalize.
     reused INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    committed_at TEXT            -- NULL = in-flight reservation (or a legacy burn predating this
+    committed_at TEXT,           -- NULL = in-flight reservation (or a legacy burn predating this
                                  -- column); non-NULL = committed burn. Either way an overlapping
                                  -- row blocks fail-closed. Orphaned reservations (pending rows from
                                  -- a crashed run) are listable via WHERE committed_at IS NULL and
                                  -- are cleared only by a deliberate human --allow-holdout-reuse.
+    holdout_start TEXT,          -- ISO date; OOS tail start (the matched single-use window, #192)
+    holdout_end TEXT             -- ISO date; OOS tail end (last actual bar date)
 );
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
@@ -452,7 +454,15 @@ def migrate(conn: sqlite3.Connection) -> None:
     # committed burn (non-NULL). NO backfill: a legacy row that predates this column keeps
     # committed_at=NULL and is treated as a permanent reservation (blocks fail-closed). Backfilling
     # would introduce a migration race that could clobber a genuine concurrent reservation.
-    _add_missing_columns(conn, "holdout_evaluations", {"committed_at": "TEXT"})
+    # v23 (#192): holdout_start/holdout_end are the OOS interval matched by the single-use guard.
+    # Legacy rows (pre-v23) are backfilled to the conservative full period [period_start,
+    # period_end] — a guaranteed superset of any real OOS tail, so the guard fails closed.
+    _add_missing_columns(
+        conn,
+        "holdout_evaluations",
+        {"committed_at": "TEXT", "holdout_start": "TEXT", "holdout_end": "TEXT"},
+    )
+    _backfill_holdout_intervals(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
@@ -527,6 +537,27 @@ def _rekey_search_trials_to_name(conn: sqlite3.Connection) -> None:
         DROP TABLE _search_trials_old;
         """
     )
+
+
+def _backfill_holdout_intervals(conn: sqlite3.Connection) -> None:
+    """Backfill v23 holdout_start/holdout_end on legacy rows to the CONSERVATIVE full period
+    [period_start, period_end]. The exact OOS tail cannot be recomputed at migration time (no data
+    provider here), and the full period is a guaranteed superset of any real tail -> fail closed
+    (may over-block a new run overlapping a legacy burn's period, the acceptable direction). Only
+    touches rows missing an interval, so a row written by the new reserve path (interval already
+    set) is never overwritten; deterministic, so concurrent/repeat runs converge. Idempotent."""
+    conn.execute(
+        "UPDATE holdout_evaluations SET holdout_start = period_start, holdout_end = period_end"
+        " WHERE holdout_start IS NULL OR holdout_end IS NULL"
+    )
+    leftover = conn.execute(
+        "SELECT COUNT(*) AS c FROM holdout_evaluations"
+        " WHERE holdout_start IS NULL OR holdout_end IS NULL"
+    ).fetchone()["c"]
+    if leftover:
+        raise RuntimeError(
+            f"holdout interval backfill left {leftover} NULL-interval row(s); refusing to stamp v23"
+        )
 
 
 def _add_missing_columns(

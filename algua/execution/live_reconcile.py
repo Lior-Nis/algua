@@ -26,6 +26,21 @@ def account_expected_net(conn: sqlite3.Connection) -> dict[str, float]:
     return {r["symbol"]: float(r["q"]) for r in rows if float(r["q"]) != 0.0}
 
 
+def attributed_live_net(conn: sqlite3.Connection) -> dict[str, float]:
+    """The books' expected net per symbol counting ONLY fills attributed to a CURRENTLY-LIVE
+    strategy. Orphan fills (``strategy IS NULL`` — e.g. a manual/external Alpaca fill the books
+    never mapped to an order) and fills attributed to a non-live strategy are EXCLUDED, so they
+    can never 'explain' a broker position. Used by the resume reconcile: an unattributed broker
+    holding therefore leaves an UNexplained residual and fails closed (resume refuses) rather than
+    being silently cancelled out by an orphan fill of the same symbol. Zero nets are omitted."""
+    rows = conn.execute(
+        "SELECT f.symbol AS symbol, SUM(f.qty) AS q FROM live_fills f "
+        "JOIN strategies s ON s.name = f.strategy AND s.stage = 'live' "
+        "GROUP BY f.symbol"
+    ).fetchall()
+    return {r["symbol"]: float(r["q"]) for r in rows if float(r["q"]) != 0.0}
+
+
 def next_cycle(conn: sqlite3.Connection) -> int:
     """Monotonic, persisted cycle counter (survives restarts so the grace window is stable)."""
     conn.execute(

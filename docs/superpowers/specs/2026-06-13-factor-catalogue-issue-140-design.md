@@ -1,6 +1,6 @@
 # Composable factor catalogue + derived lineage (#140, slices A+C)
 
-**Status:** design (GATE-1 round 2 folded) · **Date:** 2026-06-13 · **Issue:** #140
+**Status:** design (GATE-1 approved — 3 rounds folded) · **Date:** 2026-06-13 · **Issue:** #140
 
 ## Problem
 
@@ -94,13 +94,18 @@ Inside `algua.features` (import-linter forbids it from `cli`/`registry`/`data`/`
 - **Transactional discovery** — `load_all_factors() -> dict[str, FactorSpec]` `pkgutil`-walks
   `algua.features.*` (skipping `_`-prefixed modules, mirroring the loader), imports each, then scans
   each module's members for callables carrying `__factor_spec__`, collecting into a **fresh local
-  dict** (duplicate `name` → fail closed; `import_path` is always unique, so `name=` resolves a
-  genuine collision). It then assigns that dict to the module global `_REGISTRY` in **one reference
-  binding** (atomic in CPython — no half-populated global is ever observable; a failing module
-  import raises before the swap, leaving the prior `_REGISTRY` intact). Idempotent: every call
-  rebuilds from a fresh scan of the (import-cached) modules, so it never goes stale and re-runs
-  cleanly after `_reset_registry()`. This scan-the-stamp model is what makes "transactional" actually
-  hold — the decorator can't write a temp registry, but the *scan* can.
+  dict**. The scan accepts a stamped function **only when it is defined in the module being scanned**
+  (`fn.__module__ == module.__name__`); this filters re-exports — a module doing `from
+  algua.features.indicators import momentum` re-exposes `momentum`'s stamp, which must NOT count as a
+  second registration (otherwise the duplicate-name guard would falsely break the whole catalogue).
+  With that filter each factor is discovered exactly once at its defining module, so `import_path` is
+  unique and a genuine cross-module `name` clash → fail closed (`name=` resolves it). It then assigns
+  the dict to the module global `_REGISTRY` in **one reference binding** (atomic in CPython — no
+  half-populated global is ever observable; a failing module import raises before the swap, leaving
+  the prior `_REGISTRY` intact). Idempotent: every call rebuilds from a fresh scan of the
+  (import-cached) modules, so it never goes stale and re-runs cleanly after `_reset_registry()`. This
+  scan-the-stamp model is what makes "transactional" actually hold — the decorator can't write a temp
+  registry, but the *scan* can.
 - Read API: `get_factor(name)` (raises `FactorNotFound`), `all_factors()` (sorted), `filter_factors
   (*, tag=None, kind=None)` (AND-combined). Each ensures the registry is loaded.
 
@@ -132,8 +137,9 @@ its **own** module — `compute_artifact_hashes` does not import the catalogue.
   (loaded))` (the keys). This adds a consumer; it does not alter the hash payload.
 - `factors_used_by(strategy_name) -> list[FactorSpec]` — load the catalogue + the strategy, return
   catalogue factors whose `.module` is in `closure_module_names(loaded)`.
-- `dependents_of(factor_name) -> Dependents` — validate the factor exists, then iterate the
-  **registry's** strategies (`StrategyRepository`, not just filesystem-discoverable modules, so a
+- `dependents_of(repo: StrategyRepository, factor_name) -> Dependents` — the repository is an
+  **explicit injected seam** (no hidden default-DB access). Validate the factor exists, then iterate
+  the **registry's** strategies (`repo`, not just filesystem-discoverable modules, so a
   registered strategy can't silently vanish from blast radius). For each, attempt to load + compute
   the closure; include it if the factor's module is present. Returns
   `{factor, dependents: [name…], unloadable: [{name, error}…]}` — strategies that fail to load are
@@ -197,7 +203,9 @@ the human-readable companion to the closure's top-level-import requirement.
   fields are tuples.
 - **load_all_factors():** discovers seeded factors; skips `_`-prefixed; idempotent; **transactional**
   — a deliberately-failing temp module leaves the prior `_REGISTRY` intact and observable; re-runs
-  after `_reset_registry()`.
+  after `_reset_registry()`; **re-export filter** — a feature module that does `from
+  algua.features.indicators import momentum` while defining its own factor registers only its own
+  (no false duplicate from the re-exported stamp).
 - **closure / hash gates:** (a) refactor-only no-op — adding `closure_module_names` and computing it
   from the source closure does NOT change `compute_artifact_hashes` output; (b) a strategy with
   `from algua.features.indicators import momentum` has `algua.features.indicators` in

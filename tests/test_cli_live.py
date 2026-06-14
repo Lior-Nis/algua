@@ -252,3 +252,178 @@ def test_run_all_forwards_start_end_to_tick(monkeypatch):
                             "--end", "2021-12-31"])
     assert r.exit_code == 0
     assert captured == {"start": "2021-01-01", "end": "2021-12-31"}
+
+
+class _BreachThenFlatBroker:
+    """Fake live broker for the full breach->flatten->resume chain. Before the offsets are
+    submitted it reports the seeded holdings (AAA+5, ZZZ+3) and no new activities; once the breach
+    handler submits the offsets it flips to flat and its activity feed returns the offset FILLs."""
+    def __init__(self):
+        self.offsets = []
+        self._closed = False
+    def account_activities(self, after=None):
+        if not self._closed:
+            return []
+        return [
+            {"id": f"act-off-{sym}", "activity_type": "FILL", "side": "sell",
+             "qty": str(abs(qty)), "price": "100", "symbol": sym, "order_id": f"off-{sym}",
+             "transaction_time": "2023-01-02T00:00:00Z"}
+            for sym, qty in self.offsets
+        ]
+    def get_positions(self):
+        import pandas as pd
+        if self._closed:
+            return pd.Series(dtype="float64")
+        return pd.Series({"AAA": 5.0, "ZZZ": 3.0})
+    def list_open_orders(self):
+        return []
+    def cancel_order(self, oid):
+        pass
+    def submit_offset(self, symbol, qty, coid):
+        self.offsets.append((symbol, qty))
+        self._closed = True
+        return f"off-{symbol}"
+    def account(self):
+        from algua.execution.alpaca_broker import AccountState
+        return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0)
+
+
+class _ScriptedReadOnlyBroker:
+    """Read-only live broker stub: fixed activities + broker net positions (for resume)."""
+    def __init__(self, activities, positions):
+        self._activities = activities
+        self._positions = positions
+    def account_activities(self, after=None):
+        return self._activities
+    def get_positions(self):
+        import pandas as pd
+        return pd.Series(self._positions, dtype="float64")
+
+
+def _seed_live_fills(name, fills):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        for sym, qty in fills.items():
+            conn.execute(
+                "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, "
+                "price, fill_ts) VALUES (?,?,?,?,?,?,?)",
+                (f"seed-{sym}", f"bo-seed-{sym}", name, sym, qty, 100.0,
+                 "2023-01-01T00:00:00Z"),
+            )
+        conn.commit()
+
+
+def test_breach_flatten_resume_end_to_end(monkeypatch):
+    from algua.live.live_loop import RiskBreach
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    # strategy believes it holds AAA (5) and ZZZ (3); ZZZ is held-but-dropped (not in universe)
+    _seed_live_fills(name, {"AAA": 5.0, "ZZZ": 3.0})
+
+    broker = _BreachThenFlatBroker()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
+                        lambda conn, sid: {"capital": 10_000.0})
+    monkeypatch.setattr("algua.cli.live_cmd.run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "dd")))
+    # resume reads the SAME fake broker (read-only path)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
+
+    # 1) run-all breaches -> kill-switch trips, offsets submitted over BOTH believed symbols
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    assert sorted(broker.offsets) == [("AAA", 5.0), ("ZZZ", 3.0)]  # held-but-dropped ZZZ included
+
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.live_ledger import believed_positions
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert kill_switch.is_tripped(conn, name)
+        # operator-trap: offset fills have NOT been ingested yet -> belief still non-flat
+        assert believed_positions(conn, name) == {"AAA": 5.0, "ZZZ": 3.0}
+
+    # 2) resume ingests the offset fills, reconciles to flat, clears the kill-switch (zero drift)
+    r2 = runner.invoke(app, ["paper", "resume", name])
+    assert r2.exit_code == 0, r2.stdout
+    assert json.loads(r2.stdout)["kill_switch"] == "reset"
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert not kill_switch.is_tripped(conn, name)
+        assert believed_positions(conn, name) == {}   # ledger flat after resume
+
+
+def test_resume_sibling_holds_same_symbol_does_not_block(monkeypatch):
+    """Strategy A is flat; sibling B (a registered LIVE strategy) legitimately holds AAPL — a symbol
+    in A's OWN universe, so the explains-path is actually exercised. The account-wide reconcile
+    attributes the broker's AAPL to B's live ledger, so resuming A is NOT blocked."""
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    # a REAL live sibling: only a currently-live, attributed strategy may explain broker exposure
+    assert runner.invoke(app, ["registry", "add", "sibling_live"]).exit_code == 0
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name='sibling_live'")
+        # sibling B holds AAPL (5) in its own ledger; A holds nothing. AAPL is in A's universe.
+        conn.execute(
+            "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, price, "
+            "fill_ts) VALUES (?,?,?,?,?,?,?)",
+            ("sib-aapl", "bo-sib", "sibling_live", "AAPL", 5.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        kill_switch.trip(conn, name, reason="manual", actor="system")
+        conn.commit()
+
+    # broker shows AAPL+5 (B's), no activities; A's own ledger is empty
+    broker = _ScriptedReadOnlyBroker(activities=[], positions={"AAPL": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
+
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 0, r.stdout
+    assert json.loads(r.stdout)["kill_switch"] == "reset"
+
+
+def test_resume_refuses_when_broker_holds_orphan_position(monkeypatch):
+    """Fail-closed (GATE-2 CRITICAL): the broker holds AAPL (in A's universe) but NO live strategy's
+    ledger explains it. An orphan fill (strategy NULL — a manual/external trade ingested but never
+    mapped to an order) must NOT cancel out the broker exposure. A's own ledger is empty, yet resume
+    must REFUSE because the broker position is unattributed."""
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        # orphan fill: ingested from a manual/external trade, never attributed to a strategy
+        conn.execute(
+            "INSERT INTO live_fills(activity_id, broker_order_id, strategy, symbol, qty, price, "
+            "fill_ts) VALUES (?,?,?,?,?,?,?)",
+            ("orphan-aapl", "bo-orphan", None, "AAPL", 5.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        kill_switch.trip(conn, name, reason="manual", actor="system")
+        conn.commit()
+
+    broker = _ScriptedReadOnlyBroker(activities=[], positions={"AAPL": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_live_readonly_from_settings", lambda: broker)
+
+    r = runner.invoke(app, ["paper", "resume", name])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False and "not flat" in r.stdout.lower()
+    assert "AAPL" in str(payload)            # the unexplained broker residual is surfaced

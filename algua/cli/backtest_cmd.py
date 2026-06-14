@@ -19,7 +19,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.data.serve import StoreBackedFundamentalsProvider
+from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -52,15 +52,31 @@ def run(
     fundamentals_snapshot: str = typer.Option(
         None, "--fundamentals-snapshot",
         help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
+    news_snapshot: str = typer.Option(
+        None, "--news-snapshot",
+        help="ingested news snapshot id (required for a needs_news strategy)"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError(
+            "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
+        )
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError(
+            "--news-snapshot was given but the strategy does not declare needs_news"
+        )
     fundamentals_provider = (
         StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
         if fundamentals_snapshot
+        else None
+    )
+    news_provider = (
+        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
+        if news_snapshot
         else None
     )
     result = run_backtest(
@@ -68,6 +84,7 @@ def run(
         universe_by_date=universe_by_date,
         universe_name=universe, universe_snapshots=universe_prov,
         fundamentals_provider=fundamentals_provider,
+        news_provider=news_provider,
     )
 
     if register:

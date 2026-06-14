@@ -662,3 +662,42 @@ def test_post_peek_holdout_eval_failure_keeps_burn(tmp_path, monkeypatch):
     rows = _holdout_committed(tmp_path)
     assert len(rows) == 1 and rows[0][1] is not None  # burn committed before the failing peek
     assert _stage() == "backtested"
+
+
+def test_promote_different_holdout_frac_is_refused_as_reburn(tmp_path):
+    """A second `research promote` on the same date window with a DIFFERENT --holdout-frac must be
+    refused as a holdout re-burn: the OOS tails overlap, so the interval-based guard fires.
+
+    First promote uses --holdout-frac 0.2 (burns the last 20% as OOS).  Second uses --holdout-frac
+    0.4 (the last 40% overlaps the first OOS tail).  The second must be refused even though the
+    holdout_frac parameter differs — the guard matches on the ACTUAL bar interval, not the fraction.
+    """
+    assert _backtest_to_backtested().exit_code == 0
+    # First promote: impossible Sharpe bar -> gate fails, strategy stays `backtested`.
+    # But the holdout IS peeked (walk_forward ran), so the burn is committed before the gate check.
+    first = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                "--holdout-frac", "0.2",
+                                "--min-holdout-sharpe", "999", "--n-combos", "1",
+                                "--allow-non-pit", "--actor", "human"])
+    assert first.exit_code == 0, first.stdout
+    first_payload = json.loads(first.stdout)
+    # The first call must NOT itself be a "holdout already consumed" refusal.
+    first_error = first_payload.get("error", "")
+    assert first_payload.get("ok") is not False or "holdout already consumed" not in first_error
+    # Holdout is burned — exactly one row committed.
+    assert len(_holdout_rows(tmp_path)) == 1
+
+    # Second promote: same date window, DIFFERENT holdout_frac (0.4 > 0.2 -> larger OOS tail that
+    # overlaps the first burn). Must be refused as a holdout re-burn.
+    second = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31",
+                                 "--holdout-frac", "0.4",
+                                 *_PASS, "--n-combos", "1",
+                                 "--allow-non-pit", "--actor", "human"])
+    assert second.exit_code == 1, second.stdout
+    payload = json.loads(second.stdout)
+    assert payload["ok"] is False
+    assert "holdout already consumed" in payload["error"]
+    # No second holdout row written; still only the one from the first promote.
+    assert len(_holdout_rows(tmp_path)) == 1
