@@ -164,6 +164,10 @@ def _decision_weights(
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
+    # Static operating universe = declared AND available: a declared symbol with no fetched price
+    # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
+    # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    static_universe = set(strategy.universe) & set(columns)
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
     # Sort the raw bars by timestamp ONCE and precompute, per session, the integer end of the
@@ -196,17 +200,13 @@ def _decision_weights(
             w = strategy.target_weights(view)
         if len(w) == 0:
             continue
-        if universe_by_date is not None:
-            non_members = [s for s in w.index[w != 0.0] if s not in members]
-            if non_members:
-                raise BacktestError(
-                    f"strategy {strategy.name!r} returned weight for non-member symbol(s) "
-                    f"{sorted(non_members)} at {t} (as-of members: {sorted(members)})"
-                )
         # The shared checks raise RiskBreach; re-raise as BacktestError for the backtest CLI/error
         # contract while preserving the breach (and its `.kind`) as the cause.
         try:
-            validate_decision_weights(w, strategy.execution, strategy.name)
+            decision_universe = members if universe_by_date is not None else static_universe
+            validate_decision_weights(
+                w, strategy.execution, strategy.name, allowed_symbols=decision_universe
+            )
         except RiskBreach as breach:
             raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
@@ -221,12 +221,22 @@ def _canonical_row(
 ) -> pd.Series:
     """The canonical per-bar weights = construct(signal(view), view) over the expanding history
     slice ending at (and including) that bar, reindexed onto `columns` and zero-filled. This is the
-    SAME computation the loop performs per bar — reused by the fast-path parity guard so the guard
-    compares the fast path against the loop's own definition, not a re-derivation."""
+    SAME computation the loop performs per bar — INCLUDING the shared risk rails — so the fast-path
+    parity guard compares against the loop's own definition, not a re-derivation. Running the full
+    `validate_decision_weights` here (not just one check) keeps the proxy a FAITHFUL loop-twin with
+    identical check ordering, so e.g. an out-of-universe per-bar weight fails closed instead of
+    being silently reindex-dropped before the comparison."""
     view = bars_sorted.iloc[:stop]
     w = strategy.target_weights(view)
     if len(w) == 0:
         return pd.Series(0.0, index=columns)
+    try:
+        validate_decision_weights(
+            w, strategy.execution, strategy.name,
+            allowed_symbols=set(strategy.universe) & set(columns),
+        )
+    except RiskBreach as breach:
+        raise BacktestError(breach.detail) from breach
     return w.reindex(columns).fillna(0.0)
 
 
@@ -252,6 +262,10 @@ def _fast_weights(
         )
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
+    # Static operating universe = declared AND available: a declared symbol with no fetched price
+    # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
+    # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    static_universe = set(strategy.universe) & set(columns)
     # Reindex the SCORES onto the simulation grid WITHOUT filling NaN (missing score != 0 score).
     scores = panel.reindex(index=adj.index, columns=columns)
 
@@ -268,7 +282,9 @@ def _fast_weights(
         if len(w) == 0:
             continue
         try:
-            validate_decision_weights(w, strategy.execution, strategy.name)
+            validate_decision_weights(
+                w, strategy.execution, strategy.name, allowed_symbols=static_universe
+            )
         except RiskBreach as breach:
             raise BacktestError(f"{breach.detail} at {t}") from breach
         row = w.reindex(columns).fillna(0.0)
@@ -323,7 +339,15 @@ def _assert_parity(
     for i in _parity_sample_positions(warmup, n):
         t = weights.index[i]
         stop = int(end_pos[i])
-        canonical = _canonical_row(strategy, bars_sorted, stop, columns)
+        # A rail breach raised inside the proxy (e.g. an out-of-universe per-bar weight) carries no
+        # bar context; append ` at {t}` here so its message matches the loop / non-guard fast path.
+        # Chain from the underlying RiskBreach (not the proxy's BacktestError) so `__cause__`
+        # stays a direct RiskBreach, matching the loop / fast-path convention.
+        try:
+            canonical = _canonical_row(strategy, bars_sorted, stop, columns)
+        except BacktestError as exc:
+            cause = exc.__cause__ if isinstance(exc.__cause__, RiskBreach) else exc
+            raise BacktestError(f"{exc} at {t}") from cause
         fast = pd.Series(weights.iloc[i].to_numpy(), index=columns)
         diff = (canonical - fast).abs()
         if bool((diff > WEIGHT_TOL).any()):
@@ -399,6 +423,14 @@ def verify_signal_panel_parity(
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
         adj = _adj_grid(bars)
+        # Same fail-closed guard as simulate(): an empty declared∩available universe would otherwise
+        # surface as a confusing out-of-universe `(allowed: [])` breach instead of this clear cause.
+        if strategy.universe and not (set(strategy.universe) & set(adj.columns)):
+            raise BacktestError(
+                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+                f"universe {sorted(strategy.universe)} (fetched columns: "
+                f"{sorted(map(str, adj.columns))})"
+            )
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None
@@ -531,6 +563,15 @@ def simulate(
         raise BacktestError("provider returned no bars for the universe/period")
 
     adj = _adj_grid(bars)
+
+    if universe_by_date is None:
+        operating_universe = set(strategy.universe) & set(adj.columns)
+        if strategy.universe and not operating_universe:
+            raise BacktestError(
+                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+                f"universe {sorted(strategy.universe)} (fetched columns: "
+                f"{sorted(map(str, adj.columns))})"
+            )
 
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:

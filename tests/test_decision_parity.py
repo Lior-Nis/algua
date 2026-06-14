@@ -240,3 +240,23 @@ def test_named_symbol_nan_breaches_both_paths() -> None:
     with pytest.raises(RiskBreach) as ei_paper:
         run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
     assert ei_paper.value.kind == "non_finite_weight"
+
+
+def test_out_of_universe_weight_breaches_both_paths() -> None:
+    """A weight for a symbol OUTSIDE the declared universe must hard-fail backtest (silently dropped
+    before #179) and be rejected in paper (silently traded before #179) — identical rejection."""
+    cfg = StrategyConfig(
+        name="cheat", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"ZZZ": 1.0}), construct_fn=_identity,
+    )
+    with pytest.raises(BacktestError) as ei:
+        run(strat, SyntheticProvider(seed=0), START, END)
+    assert isinstance(ei.value.__cause__, RiskBreach)
+    assert ei.value.__cause__.kind == "out_of_universe"
+    with pytest.raises(RiskBreach) as ei_paper:
+        run_paper(strat, SimBroker(cash=1_000_000.0), SyntheticProvider(seed=0), START, END)
+    assert ei_paper.value.kind == "out_of_universe"

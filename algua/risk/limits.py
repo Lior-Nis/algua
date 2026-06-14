@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
     from algua.contracts.types import ExecutionContract
 
 # Single tolerance for "is this weight materially different from another / from a limit".
@@ -75,6 +77,34 @@ def check_finite_weights(weights: pd.Series, strategy_name: str) -> None:
         )
 
 
+def check_universe_membership(
+    weights: pd.Series, allowed_symbols: Collection[str], strategy_name: str
+) -> None:
+    """Reject any NONZERO target weight for a symbol outside the operating universe — the
+    structural twin of the value checks. Mirrors the PIT loop's `w != 0.0` 'nonzero' semantics
+    exactly: any nonzero weight for a non-member is a strategy bug (if numeric noise ever makes
+    this too strict it can move to WEIGHT_TOL without changing the architecture).
+    Offenders/allowed are rendered with `key=str` so a non-string symbol label cannot raise a
+    bare TypeError that escapes the RiskBreach -> BacktestError / live-kill-switch contract.
+    Empty `allowed_symbols` + any nonzero weight => every nonzero weight breaches (no allowed
+    universe); a caller meaning "flat" must skip the call (as the PIT loop does via
+    `if not members: continue`).
+
+    Precondition: `check_finite_weights` runs first in `validate_decision_weights`, so NaN weights
+    are already rejected as `non_finite_weight` before they could surface here as `out_of_universe`
+    (NaN `!= 0.0` is True in pandas)."""
+    if len(weights) == 0:
+        return
+    allowed = set(allowed_symbols)
+    offenders = [s for s in weights.index[weights != 0.0] if s not in allowed]
+    if offenders:
+        raise RiskBreach(
+            "out_of_universe",
+            f"strategy '{strategy_name}' returned nonzero target weight(s) for out-of-universe "
+            f"symbol(s) {sorted(offenders, key=str)} (allowed: {sorted(allowed, key=str)})",
+        )
+
+
 def check_max_weight_per_symbol(weights: pd.Series, max_per_symbol: float) -> None:
     """Single-name concentration cap: reject any |weight| above the per-symbol limit. Caps the
     LARGEST position, where gross caps the sum — an agent can pass gross with 100% in one name, so
@@ -118,12 +148,18 @@ def check_drawdown(equity: float, peak: float, max_drawdown: float | None) -> No
 
 
 def validate_decision_weights(
-    weights: pd.Series, contract: ExecutionContract, strategy_name: str
+    weights: pd.Series,
+    contract: ExecutionContract,
+    strategy_name: str,
+    allowed_symbols: Collection[str],
 ) -> None:
     """The ONE decision-weight validation every path calls (paper/live decide + backtest loop +
     fast-path), so the rails can never drift between research and live. Order: finite (fail-closed)
-    -> short policy -> per-symbol cap -> gross exposure (#135)."""
+    -> universe membership -> short policy -> per-symbol cap -> gross exposure (#135, #179).
+    `allowed_symbols` is the path's operating universe (live: strategy.universe; static backtest:
+    strategy.universe & adj.columns; PIT: as-of members at t)."""
     check_finite_weights(weights, strategy_name)
+    check_universe_membership(weights, allowed_symbols, strategy_name)
     check_short_policy(weights, contract.allow_short, strategy_name)
     check_max_weight_per_symbol(weights, contract.max_weight_per_symbol)
     check_gross_exposure(weights, contract.max_gross_exposure)

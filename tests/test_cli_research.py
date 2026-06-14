@@ -701,3 +701,157 @@ def test_promote_different_holdout_frac_is_refused_as_reburn(tmp_path):
     assert "holdout already consumed" in payload["error"]
     # No second holdout row written; still only the one from the first promote.
     assert len(_holdout_rows(tmp_path)) == 1
+
+
+# --- dormant-sweep -----------------------------------------------------------
+
+
+def _to_dormant(name="cross_sectional_momentum"):
+    """Register `name` and drive it idea->backtested->candidate->paper->dormant via the CLI.
+    Human actor is exempt from the agent token gates up to paper; paper->dormant is any-actor but
+    requires a reason."""
+    assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
+    chain = [("backtested", "human"), ("candidate", "human"),
+             ("paper", "human"), ("dormant", "agent")]
+    for to, actor in chain:
+        r = runner.invoke(app, ["registry", "transition", name, "--to", to,
+                                "--actor", actor, "--reason", "test"])
+        assert r.exit_code == 0, r.stdout
+
+
+def test_dormant_sweep_empty_pool():
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["ok"] is True
+    assert p["total_dormant"] == 0
+    assert p["passed"] == [] and p["failed"] == [] and p["skipped"] == [] and p["errors"] == []
+
+
+def test_dormant_sweep_routes_pass():
+    _to_dormant()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["total_dormant"] == 1 and p["evaluated"] == 1
+    assert [x["strategy"] for x in p["passed"]] == ["cross_sectional_momentum"]
+    assert p["failed"] == []
+    assert p["passed"][0]["screen_passed"] is True
+    assert "stability" in p["passed"][0]
+
+
+def test_dormant_sweep_routes_fail():
+    _to_dormant()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "100", "--min-pct-positive", "1.0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["evaluated"] == 1
+    assert [x["strategy"] for x in p["failed"]] == ["cross_sectional_momentum"]
+    assert p["passed"] == []
+
+
+def _has_holdout_key(obj) -> bool:
+    """Recursively True if any dict key anywhere contains 'holdout' (case-insensitive)."""
+    if isinstance(obj, dict):
+        return (any("holdout" in str(k).lower() for k in obj)
+                or any(_has_holdout_key(v) for v in obj.values()))
+    if isinstance(obj, list):
+        return any(_has_holdout_key(v) for v in obj)
+    return False
+
+
+def test_dormant_sweep_never_reveals_holdout():
+    _to_dormant()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    # No holdout data may leak anywhere in the result lists — recursively, at any nesting depth.
+    # (The advisory `note` string mentions "holdout" by design; it is excluded from this scan.)
+    for bucket in ("passed", "failed", "skipped", "errors"):
+        assert not _has_holdout_key(p[bucket]), f"{bucket} leaks a holdout key: {p[bucket]}"
+
+
+def test_dormant_sweep_has_no_side_effects():
+    _to_dormant()
+    import os
+    from contextlib import closing
+    from pathlib import Path
+
+    from algua.registry.db import connect
+
+    def _counts():
+        with closing(connect(Path(os.environ["ALGUA_DB_PATH"]))) as conn:
+            ge = conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0]
+            ho = conn.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0]
+            stage = conn.execute(
+                "SELECT stage FROM strategies WHERE name='cross_sectional_momentum'"
+            ).fetchone()[0]
+        return ge, ho, stage
+
+    before = _counts()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    after = _counts()
+    assert after == before
+    assert after[2] == "dormant"
+
+
+def test_dormant_sweep_is_repeatable():
+    _to_dormant()
+    args = ["research", "dormant-sweep", "--demo", "--start", "2022-01-01", "--end", "2023-12-31",
+            "--min-window-sharpe", "-100", "--min-pct-positive", "0"]
+    p1 = json.loads(runner.invoke(app, args).stdout)
+    p2 = json.loads(runner.invoke(app, args).stdout)
+    assert [x["strategy"] for x in p1["passed"]] == [x["strategy"] for x in p2["passed"]]
+    assert p1["evaluated"] == p2["evaluated"] == 1
+
+
+def test_dormant_sweep_skips_fundamentals_and_evaluates_others_in_one_run():
+    _to_dormant("cross_sectional_momentum")
+    _to_dormant("fundamentals_earnings_tilt")
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["total_dormant"] == 2
+    assert [s["strategy"] for s in p["skipped"]] == ["fundamentals_earnings_tilt"]
+    assert "needs_fundamentals" in p["skipped"][0]["reason"]
+    evaluated_names = [x["strategy"] for x in p["passed"]] + [x["strategy"] for x in p["failed"]]
+    assert "cross_sectional_momentum" in evaluated_names
+
+
+def test_dormant_sweep_skips_news_sidecar():
+    # walk_forward can't thread the news PIT sidecar either; such a strategy must be SKIPPED
+    # (named reason), not land in errors[].
+    _to_dormant("news_coverage_tilt")
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert [s["strategy"] for s in p["skipped"]] == ["news_coverage_tilt"]
+    assert "needs_news" in p["skipped"][0]["reason"]
+    assert p["errors"] == []
+
+
+def test_dormant_sweep_ignores_non_dormant_strategies():
+    assert runner.invoke(app, ["registry", "add", "cross_sectional_momentum"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
+                               "--to", "backtested", "--actor", "human",
+                               "--reason", "x"]).exit_code == 0
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["total_dormant"] == 0
+    names = [x["strategy"] for x in p["passed"] + p["failed"]]
+    names += [s["strategy"] for s in p["skipped"]]
+    assert "cross_sectional_momentum" not in names
