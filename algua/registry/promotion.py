@@ -178,6 +178,7 @@ def run_gate(
         period_start=period_start.isoformat(), period_end=period_end.isoformat(),
         holdout_frac=holdout_frac, actor=actor.value,
         decision_json=json.dumps(decision.to_dict(), sort_keys=True),
+        fundamentals_snapshot=wf.fundamentals_snapshot, news_snapshot=wf.news_snapshot,
     )
     promoted = False
     if decision.passed:
