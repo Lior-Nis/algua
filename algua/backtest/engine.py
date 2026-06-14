@@ -221,12 +221,22 @@ def _canonical_row(
 ) -> pd.Series:
     """The canonical per-bar weights = construct(signal(view), view) over the expanding history
     slice ending at (and including) that bar, reindexed onto `columns` and zero-filled. This is the
-    SAME computation the loop performs per bar — reused by the fast-path parity guard so the guard
-    compares the fast path against the loop's own definition, not a re-derivation."""
+    SAME computation the loop performs per bar — INCLUDING the shared risk rails — so the fast-path
+    parity guard compares against the loop's own definition, not a re-derivation. Running the full
+    `validate_decision_weights` here (not just one check) keeps the proxy a FAITHFUL loop-twin with
+    identical check ordering, so e.g. an out-of-universe per-bar weight fails closed instead of
+    being silently reindex-dropped before the comparison."""
     view = bars_sorted.iloc[:stop]
     w = strategy.target_weights(view)
     if len(w) == 0:
         return pd.Series(0.0, index=columns)
+    try:
+        validate_decision_weights(
+            w, strategy.execution, strategy.name,
+            allowed_symbols=set(strategy.universe) & set(columns),
+        )
+    except RiskBreach as breach:
+        raise BacktestError(breach.detail) from breach
     return w.reindex(columns).fillna(0.0)
 
 
@@ -329,7 +339,12 @@ def _assert_parity(
     for i in _parity_sample_positions(warmup, n):
         t = weights.index[i]
         stop = int(end_pos[i])
-        canonical = _canonical_row(strategy, bars_sorted, stop, columns)
+        # A rail breach raised inside the proxy (e.g. an out-of-universe per-bar weight) carries no
+        # bar context; append ` at {t}` here so its message matches the loop / non-guard fast path.
+        try:
+            canonical = _canonical_row(strategy, bars_sorted, stop, columns)
+        except BacktestError as exc:
+            raise BacktestError(f"{exc} at {t}") from exc
         fast = pd.Series(weights.iloc[i].to_numpy(), index=columns)
         diff = (canonical - fast).abs()
         if bool((diff > WEIGHT_TOL).any()):

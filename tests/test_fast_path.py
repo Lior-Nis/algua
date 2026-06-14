@@ -537,3 +537,52 @@ def test_verifier_fails_closed_on_throwing_panel() -> None:
     )
     with pytest.raises(BacktestError, match="failed to run"):
         verify_signal_panel_parity(strat, SyntheticProvider(seed=2), START, END)
+
+
+def test_fast_weights_rejects_out_of_universe_construct_output() -> None:
+    """_fast_weights validates the CONSTRUCT output against the static operating universe: a
+    construct that emits an out-of-universe symbol hard-fails the fast path."""
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(0.5, index=adj.index, columns=adj.columns)
+
+    def bad_construct(scores: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        return pd.Series({"ZZZ": 1.0})  # out of the declared universe
+
+    cfg = StrategyConfig(
+        name="oob_construct", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"AAA": 0.5, "BBB": 0.5}),
+        signal_panel_fn=signal_panel, construct_fn=bad_construct,
+    )
+    bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    with pytest.raises(BacktestError, match="out-of-universe"):
+        _fast_weights(strat, bars, adj)
+
+
+def test_canonical_row_rejects_per_bar_signal_out_of_universe() -> None:
+    """The bounded parity guard's canonical proxy must reject what the loop rejects: a per-bar
+    `signal` emitting an out-of-universe weight (with a clean panel) fails the fast-path run via
+    _canonical_row, rather than slipping through as a mere parity mismatch."""
+    def good_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        out = pd.DataFrame(0.0, index=adj.index, columns=adj.columns)
+        out["AAA"] = 0.5
+        out["BBB"] = 0.5
+        return out
+
+    cfg = StrategyConfig(
+        name="oob_signal", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series({"ZZZ": 1.0}),
+        signal_panel_fn=good_panel, construct_fn=_passthrough,
+    )
+    bars, adj = _bars_adj(["AAA", "BBB"], seed=2)
+    with pytest.raises(BacktestError, match="out-of-universe"):
+        _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
