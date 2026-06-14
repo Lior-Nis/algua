@@ -88,6 +88,40 @@ def test_short_policy_allows_negatives_when_allow_short():
     check_short_policy(pd.Series({"AAA": -0.5, "BBB": 0.5}), allow_short=True, strategy_name="s")
 
 
+def test_universe_membership_passes_in_universe_and_zeros():
+    from algua.risk.limits import check_universe_membership
+    # in-universe nonzero weights pass
+    check_universe_membership(pd.Series({"AAA": 0.6, "BBB": 0.4}), {"AAA", "BBB"}, "s")
+    # a ZERO weight for an out-of-universe symbol passes (mirrors `!= 0.0`)
+    check_universe_membership(pd.Series({"AAA": 0.5, "ZZZ": 0.0}), {"AAA"}, "s")
+    # empty weights pass
+    check_universe_membership(pd.Series(dtype="float64"), set(), "s")
+
+
+def test_universe_membership_breaches_on_out_of_universe_nonzero():
+    from algua.risk.limits import RiskBreach, check_universe_membership
+    with pytest.raises(RiskBreach) as ei:
+        check_universe_membership(pd.Series({"AAA": 0.5, "ZZZ": 0.5}), {"AAA", "BBB"}, "s")
+    assert ei.value.kind == "out_of_universe"
+    assert "ZZZ" in ei.value.detail and "s" in ei.value.detail
+
+
+def test_universe_membership_empty_allowed_breaches_any_nonzero():
+    from algua.risk.limits import RiskBreach, check_universe_membership
+    with pytest.raises(RiskBreach) as ei:
+        check_universe_membership(pd.Series({"AAA": 0.5}), set(), "s")
+    assert ei.value.kind == "out_of_universe"
+
+
+def test_universe_membership_non_string_label_does_not_raise_typeerror():
+    from algua.risk.limits import RiskBreach, check_universe_membership
+    # mixed/non-string offender labels must render via key=str, not raise a bare TypeError
+    with pytest.raises(RiskBreach) as ei:
+        check_universe_membership(pd.Series([0.5, 0.5], index=["AAA", 7]), {"AAA"}, "s")
+    assert ei.value.kind == "out_of_universe"
+    assert "7" in ei.value.detail  # confirms key=str rendered the int label, not just no TypeError
+
+
 def _contract(**kw):
     from algua.contracts.types import ExecutionContract
     return ExecutionContract(rebalance_frequency="1d", **kw)
