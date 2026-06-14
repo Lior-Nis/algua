@@ -47,13 +47,13 @@ def _fund_strategy() -> LoadedStrategy:
     )
 
 
-def test_walk_forward_rejects_needs_news():
-    with pytest.raises(BacktestError, match="not supported in walk-forward"):
+def test_walk_forward_without_provider_fails_closed_needs_news():
+    with pytest.raises(BacktestError, match="needs_news"):
         walk_forward(_news_strategy(), SyntheticProvider(seed=3), START, END)
 
 
-def test_walk_forward_rejects_needs_fundamentals():
-    with pytest.raises(BacktestError, match="not supported in walk-forward"):
+def test_walk_forward_without_provider_fails_closed_needs_fundamentals():
+    with pytest.raises(BacktestError, match="needs_fundamentals"):
         walk_forward(_fund_strategy(), SyntheticProvider(seed=3), START, END)
 
 

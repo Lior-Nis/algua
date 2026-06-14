@@ -13,7 +13,7 @@ from algua.backtest.engine import BacktestError, build_portfolio
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
-from algua.contracts.types import DataProvider
+from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
 from algua.strategies.base import LoadedStrategy
 
 _MIN_WINDOW_BARS = 5
@@ -86,6 +86,9 @@ class WalkForwardResult:
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
     universe_name: str | None = None
     universe_snapshots: list[dict[str, str]] | None = None
+    # PIT sidecar snapshot provenance (issue #132); None unless the strategy is needs_*.
+    fundamentals_snapshot: str | None = None
+    news_snapshot: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -115,6 +118,8 @@ def walk_forward(
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
     on_peek: Callable[[str], None] | None = None,
+    fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout.
 
@@ -126,9 +131,10 @@ def walk_forward(
     BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
-    _reject_pit_sidecar(strategy, "walk-forward")
     pf, _weights = build_portfolio(strategy, provider, start, end,
-                                   universe_by_date=universe_by_date)
+                                   universe_by_date=universe_by_date,
+                                   fundamentals_provider=fundamentals_provider,
+                                   news_provider=news_provider)
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 
@@ -169,5 +175,11 @@ def walk_forward(
         stability=stability,
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
+        fundamentals_snapshot=(
+            getattr(fundamentals_provider, "snapshot_id", None)
+            if strategy.config.needs_fundamentals else None),
+        news_snapshot=(
+            getattr(news_provider, "snapshot_id", None)
+            if strategy.config.needs_news else None),
         **prov,
     )
