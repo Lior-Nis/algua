@@ -30,6 +30,66 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def fsync_file(path: Path) -> None:
+    """fsync a regular file's data to stable storage. Linux-only: a read-only fd still
+    flushes the inode's dirty data pages. (Threat model is a single local Linux FS;
+    macOS/NFS fsync semantics differ and are out of scope.)"""
+    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise OSError(f"fsync_file({path}) failed: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """fsync a directory so a rename/creation entry within it becomes durable. O_DIRECTORY
+    makes a non-directory path fail loudly (ENOTDIR) instead of silently fsyncing the wrong
+    object. Linux-only (see `fsync_file`)."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        raise OSError(f"fsync_dir({path}) failed: {exc}") from exc
+    finally:
+        os.close(fd)
+
+
+def fsync_parents(path: Path, *, stop_at: Path) -> None:
+    """fsync every directory from `path.parent` up to and including `stop_at` (the durable
+    store root). Covers ancestor directories newly created by `mkdir(parents=True)`: fsyncing
+    only the leaf parent leaves a freshly-created intermediate dir's own name un-durable in
+    *its* parent. `path` must be at or under `stop_at` (a `ValueError` is raised otherwise so a
+    miswired call fails loudly instead of silently fsyncing up to the filesystem root)."""
+    stop_at = stop_at.resolve()
+    resolved = path.resolve()
+    if resolved == stop_at:
+        fsync_dir(stop_at)
+        return
+    if stop_at not in resolved.parents:
+        raise ValueError(f"{path} is not under stop_at {stop_at}")
+    current = resolved.parent
+    while True:
+        fsync_dir(current)
+        if current == stop_at:
+            break
+        current = current.parent
+
+
+def fsync_tree(root: Path) -> None:
+    """Bottom-up fsync of every regular file, then every subdirectory, then `root` itself
+    (`os.walk(topdown=False)`), so child durability precedes the parent's. For partitioned
+    trees whose part-files pyarrow wrote without exposing a handle, we reopen+fsync each."""
+    def _raise(exc: OSError) -> None:
+        raise exc
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False, onerror=_raise):
+        d = Path(dirpath)
+        for name in filenames:
+            fsync_file(d / name)
+        fsync_dir(d)
+
+
 def count_tabular_rows(path: Path) -> int | None:
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -60,14 +120,18 @@ def write_bytes_snapshot(data: bytes, data_dir: Path, relative_path: Path) -> No
     """Atomically publish `data` at `data_dir/relative_path` via a same-dir temp +
     `os.replace` (#158): a reader never observes a partially written file, and a same-id
     concurrent re-publish is benign (content-addressed => identical bytes; readers see the
-    old or new inode, byte-identical)."""
+    old or new inode, byte-identical). Power-loss durable (#184): the temp's bytes are
+    fsynced before the rename, and the target's parent-dir chain (up to `data_dir`) after."""
     target_path = data_dir / relative_path
     target_path.parent.mkdir(parents=True, exist_ok=True)
     temp_fd, temp_name = tempfile.mkstemp(dir=target_path.parent, prefix=".publish-")
     try:
         with os.fdopen(temp_fd, "wb") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(temp_name, target_path)
+        fsync_parents(target_path, stop_at=data_dir)
     finally:
         try:
             os.unlink(temp_name)
@@ -239,3 +303,36 @@ def logical_bars_hash(canon: pd.DataFrame) -> str:
         values = ordered[col].to_numpy(dtype="<f8") + 0.0  # +0.0 maps -0.0 -> +0.0
         digest.update(values.astype("<f8").tobytes())
     return digest.hexdigest()
+
+
+def parquet_file_row_count(path: Path) -> int:
+    """Full read-back of a single-file parquet: materialize the entire table (all columns,
+    all row groups) so every data page is decompressed — power-loss truncation in the
+    interior raises here — and return the row count. NOT a footer-only `metadata.num_rows`
+    peek: that would report a count without touching the data pages (#184).
+
+    Any pyarrow read failure (torn footer, unreadable page, etc.) is normalized to `ValueError`
+    so the verify caller can treat every read-back failure uniformly as damage (a real
+    programming bug still surfaces as its own exception type)."""
+    try:
+        return pq.read_table(path).num_rows
+    except pa.ArrowException as exc:
+        raise ValueError(f"unreadable parquet file {path}: {exc}") from exc
+
+
+def parquet_dataset_row_count(dest_dir: Path) -> int:
+    """Full read-back of a hive-partitioned bars dataset: read every partition's every column
+    (`to_table(columns=None)`), forcing decompression of all data pages, and return the total
+    row count. Must NOT use `count_rows()`/footer metadata/pruned-column reads — those skip the
+    data pages this check exists to validate (#184).
+
+    Any pyarrow read failure is normalized to `ValueError` (see `parquet_file_row_count`)."""
+    try:
+        return _parquet_dataset_row_count(dest_dir)
+    except pa.ArrowException as exc:
+        raise ValueError(f"unreadable parquet dataset {dest_dir}: {exc}") from exc
+
+
+def _parquet_dataset_row_count(dest_dir: Path) -> int:
+    dataset = pads.dataset(dest_dir, format="parquet", partitioning=_BARS_PARTITIONING)
+    return dataset.to_table(columns=None).num_rows

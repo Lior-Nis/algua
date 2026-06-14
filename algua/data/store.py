@@ -19,7 +19,12 @@ from algua.data.files import (
     compose_bars_symbol_hash,
     count_tabular_rows,
     frame_to_parquet_bytes,
+    fsync_file,
+    fsync_parents,
+    fsync_tree,
     logical_bars_hash,
+    parquet_dataset_row_count,
+    parquet_file_row_count,
     read_partitioned_bars,
     sha256_bytes,
     sha256_file,
@@ -127,7 +132,9 @@ class DataStore:
             )
             target = self.data_dir / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
+            fsync_file(staged)  # copy2 does not fsync; make the bytes durable before publish
             os.replace(staged, target)
+            fsync_parents(target, stop_at=self.data_dir)  # rename entry + new ancestors durable
 
             rec = SnapshotRecord(
                 snapshot_id=snapshot_id,
@@ -206,11 +213,19 @@ class DataStore:
         already committed, return that record; otherwise VALIDATE the existing dir (legacy
         direct-write ingest could have left a partial dir) and adopt it. Fails closed on
         validation mismatch — never deletes the suspect dir. The caller owns `staging_dir`
-        creation and `finally`-cleanup."""
+        creation and `finally`-cleanup.
+
+        Power-loss durable (#184): on the publish branch the staging tree is fsynced before
+        the rename and the target's parent chain after; on the adoption branch the same
+        barrier (tree + parent chain) runs before the manifest append, since a concurrent or
+        prior writer may have renamed the dir into place without fsyncing it and we are about
+        to commit it."""
         target = self.data_dir / rec.data_path
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
+            fsync_tree(staging_dir)  # all part-files + dir entries durable before publish
             os.replace(staging_dir, target)
+            fsync_parents(target, stop_at=self.data_dir)
         except OSError as exc:
             # Adopt ONLY the expected "target dir already exists and is non-empty" failure.
             # Re-raise anything else (permission, I/O, cross-device).
@@ -224,6 +239,9 @@ class DataStore:
                 expected_row_count=rec.row_count or 0,
                 expected_symbols=expected_symbols,
             )
+            # Independent durability barrier: the adopter is about to commit the manifest.
+            fsync_tree(target)
+            fsync_parents(target, stop_at=self.data_dir)
         return self.manifest.append_if_absent(rec)
 
     def ingest_universe(
@@ -436,6 +454,74 @@ class DataStore:
         if rec is None:
             raise SnapshotNotFound(snapshot_id)
         return rec
+
+    def verify_snapshot(self, rec: SnapshotRecord) -> None:
+        """Power-loss read-back of one snapshot's payload (#184). Reads the bytes back to prove
+        they are durable and decompressible, and checks the row count against the record. Raises
+        on any damage (the caller decides how to surface it). Dispatch by `storage_format`:
+
+        - ``parquet_dataset`` (bars): full read of every partition; summed rows == ``row_count``.
+        - ``parquet`` (universe/fundamentals/news, or a ``.parquet`` via ``ingest_file``): full
+          read of the single file; ``num_rows == row_count``. Readability check, NOT a
+          content-hash recompute. For a ``.parquet`` ingested via ``ingest_file`` (byte-hash
+          ``content_hash``) this is a strictly weaker check than the ``else`` branch's
+          ``sha256_file`` comparison — by design, since verify targets power-loss readability,
+          not tampering.
+        - anything else (``ingest_file`` csv/generic): ``sha256_file == content_hash`` (a full
+          read). Fails closed: a record whose ``content_hash`` is not a byte hash would report a
+          (false) failure rather than a false pass — that signals the dispatch needs extending.
+        """
+        target = self.data_dir / rec.data_path
+        fmt = rec.storage_format
+        if fmt == "parquet_dataset":
+            if not target.is_dir():
+                raise ValueError(f"snapshot {rec.snapshot_id}: payload dir missing at {target}")
+            rows = parquet_dataset_row_count(target)
+            if rec.row_count is not None and rows != rec.row_count:
+                raise ValueError(
+                    f"snapshot {rec.snapshot_id}: read {rows} rows, expected {rec.row_count}"
+                )
+        elif fmt == "parquet":
+            if not target.is_file():
+                raise ValueError(f"snapshot {rec.snapshot_id}: payload file missing at {target}")
+            rows = parquet_file_row_count(target)
+            if rec.row_count is not None and rows != rec.row_count:
+                raise ValueError(
+                    f"snapshot {rec.snapshot_id}: read {rows} rows, expected {rec.row_count}"
+                )
+        else:
+            if not target.is_file():
+                raise ValueError(f"snapshot {rec.snapshot_id}: payload file missing at {target}")
+            actual = sha256_file(target)
+            if actual != rec.content_hash:
+                raise ValueError(
+                    f"snapshot {rec.snapshot_id}: content hash {actual} != {rec.content_hash}"
+                )
+
+    def verify_snapshots(self, snapshot_id: str | None = None) -> list[dict[str, Any]]:
+        """Verify one snapshot (`snapshot_id`) or all committed snapshots. Returns one result
+        row per snapshot: ``{snapshot_id, dataset, storage_format, ok, error}``. Never raises for
+        a damaged payload — the damage is captured in the row (`ok=False`); the caller decides
+        the exit code. A missing `snapshot_id` itself raises `SnapshotNotFound`."""
+        records = (
+            [self.get_snapshot(snapshot_id)] if snapshot_id is not None else self.list_snapshots()
+        )
+        results: list[dict[str, Any]] = []
+        for rec in records:
+            row: dict[str, Any] = {
+                "snapshot_id": rec.snapshot_id,
+                "dataset": rec.dataset,
+                "storage_format": rec.storage_format,
+                "ok": True,
+                "error": None,
+            }
+            try:
+                self.verify_snapshot(rec)
+            except (OSError, ValueError) as exc:  # read-back/integrity failures; bugs propagate
+                row["ok"] = False
+                row["error"] = str(exc)
+            results.append(row)
+        return results
 
     def read_bars(
         self,

@@ -305,6 +305,26 @@ def query_news_cmd(
     emit(records)
 
 
+@data_app.command("verify")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def verify(
+    snapshot_id: str = typer.Option(None, "--snapshot-id", help="verify one snapshot"),
+) -> None:
+    """Power-loss backstop (#184): read each snapshot's payload back from disk and check it
+    against its record. Reports one row per snapshot and exits non-zero if any failed."""
+    results = _store().verify_snapshots(snapshot_id)
+    failed = sum(1 for r in results if not r["ok"])
+    emit(
+        {
+            "ok": failed == 0,
+            "verified": len(results),
+            "failed": failed,
+            "snapshots": results,
+        }
+    )
+    raise typer.Exit(code=0 if failed == 0 else 1)
+
+
 @data_app.command("inspect")
 @json_errors(ValueError, LookupError, FileNotFoundError)
 def inspect(
