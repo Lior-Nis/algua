@@ -1,9 +1,13 @@
 import inspect
+from pathlib import Path
 
 import pytest
 
+import algua.strategies.momentum as _momfam
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry.approvals import (
+    _merged_closure_for,
+    closure_module_names,
     compute_artifact_hashes,
     has_valid_approval,
     record_approval,
@@ -11,6 +15,7 @@ from algua.registry.approvals import (
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+from algua.strategies.loader import load_strategy
 
 STRATEGY = "cross_sectional_momentum"  # a real, loadable strategy module
 
@@ -237,3 +242,39 @@ def test_code_hash_ignores_thirdparty_and_stdlib_changes(repo, monkeypatch):
     unchanged, _, _ = compute_artifact_hashes(STRATEGY)
 
     assert unchanged == baseline
+
+
+def _write_factor_using_strategy(stem: str) -> Path:
+    path = Path(_momfam.__path__[0]) / f"{stem}.py"
+    path.write_text(
+        "from typing import Any\n"
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.features.indicators import momentum\n"
+        f"CONFIG = StrategyConfig(name='{stem}', universe=['AAPL'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:\n"
+        "    wide = view.reset_index().pivot(index='timestamp', columns='symbol',\n"
+        "        values='adj_close')\n"
+        "    return momentum(wide.iloc[-1], 1).dropna()\n"
+    )
+    return path
+
+
+def test_closure_module_names_equals_source_closure_keys():
+    path = _write_factor_using_strategy("tmp_closure_strat")
+    try:
+        loaded = load_strategy("tmp_closure_strat")
+        names = closure_module_names(loaded)
+        assert names == frozenset(_merged_closure_for(loaded))
+        # a top-level-imported factor's module is reached by the closure
+        assert "algua.features.indicators" in names
+        # compute_artifact_hashes still works (smoke)
+        ident = compute_artifact_hashes("tmp_closure_strat")
+        assert isinstance(ident.code_hash, str) and ident.code_hash
+    finally:
+        path.unlink(missing_ok=True)
+        import sys
+        sys.modules.pop("algua.strategies.momentum.tmp_closure_strat", None)
