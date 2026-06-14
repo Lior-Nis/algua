@@ -636,6 +636,16 @@ def test_dormant_sweep_routes_fail():
     assert p["passed"] == []
 
 
+def _has_holdout_key(obj) -> bool:
+    """Recursively True if any dict key anywhere contains 'holdout' (case-insensitive)."""
+    if isinstance(obj, dict):
+        return (any("holdout" in str(k).lower() for k in obj)
+                or any(_has_holdout_key(v) for v in obj.values()))
+    if isinstance(obj, list):
+        return any(_has_holdout_key(v) for v in obj)
+    return False
+
+
 def test_dormant_sweep_never_reveals_holdout():
     _to_dormant()
     r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
@@ -643,11 +653,10 @@ def test_dormant_sweep_never_reveals_holdout():
                             "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
     assert r.exit_code == 0, r.stdout
     p = json.loads(r.stdout)
-    # The per-strategy entries must contain ONLY window/stability data, never a "holdout" key.
-    for entry in p["passed"] + p["failed"]:
-        assert "holdout" not in entry, (
-            f"strategy entry for {entry.get('strategy')} leaks a 'holdout' key: {list(entry)}"
-        )
+    # No holdout data may leak anywhere in the result lists — recursively, at any nesting depth.
+    # (The advisory `note` string mentions "holdout" by design; it is excluded from this scan.)
+    for bucket in ("passed", "failed", "skipped", "errors"):
+        assert not _has_holdout_key(p[bucket]), f"{bucket} leaks a holdout key: {p[bucket]}"
 
 
 def test_dormant_sweep_has_no_side_effects():
@@ -699,6 +708,19 @@ def test_dormant_sweep_skips_fundamentals_and_evaluates_others_in_one_run():
     assert "needs_fundamentals" in p["skipped"][0]["reason"]
     evaluated_names = [x["strategy"] for x in p["passed"]] + [x["strategy"] for x in p["failed"]]
     assert "cross_sectional_momentum" in evaluated_names
+
+
+def test_dormant_sweep_skips_news_sidecar():
+    # walk_forward can't thread the news PIT sidecar either; such a strategy must be SKIPPED
+    # (named reason), not land in errors[].
+    _to_dormant("news_coverage_tilt")
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert [s["strategy"] for s in p["skipped"]] == ["news_coverage_tilt"]
+    assert "needs_news" in p["skipped"][0]["reason"]
+    assert p["errors"] == []
 
 
 def test_dormant_sweep_ignores_non_dormant_strategies():

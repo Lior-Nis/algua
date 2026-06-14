@@ -194,6 +194,8 @@ def dormant_sweep(
     `registry transition --to paper`), not a guarantee of re-promotion or forward-gate clearance."""
     if not 0.0 <= min_pct_positive <= 1.0:
         raise ValueError("--min-pct-positive must be in [0, 1]")
+    if top is not None and top < 1:
+        raise ValueError("--top must be >= 1 when provided")
     start_dt, end_dt = utc(start), utc(end)
     provider = select_provider(demo, snapshot)
     data_source = type(provider).__name__
@@ -211,9 +213,14 @@ def dormant_sweep(
     for rec in dormant:
         try:
             strategy = load_strategy(rec.name)
-            if getattr(strategy.config, "needs_fundamentals", False):
+            # walk_forward rejects PIT sidecars (fundamentals/news) that its lane can't thread yet —
+            # skip those strategies with a named reason rather than letting them land in errors[].
+            sidecar = next(
+                (flag for flag in ("needs_fundamentals", "needs_news")
+                 if getattr(strategy.config, flag, False)), None)
+            if sidecar is not None:
                 skipped.append({"strategy": rec.name,
-                                "reason": "needs_fundamentals: walk-forward lane not wired"})
+                                "reason": f"{sidecar}: walk-forward lane not wired"})
                 continue
             wf = walk_forward(
                 strategy, provider, start_dt, end_dt, windows=windows,
