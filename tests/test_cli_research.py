@@ -634,3 +634,81 @@ def test_dormant_sweep_routes_fail():
     assert p["evaluated"] == 1
     assert [x["strategy"] for x in p["failed"]] == ["cross_sectional_momentum"]
     assert p["passed"] == []
+
+
+def test_dormant_sweep_never_reveals_holdout():
+    _to_dormant()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    # The per-strategy entries must contain ONLY window/stability data, never a "holdout" key.
+    for entry in p["passed"] + p["failed"]:
+        assert "holdout" not in entry, (
+            f"strategy entry for {entry.get('strategy')} leaks a 'holdout' key: {list(entry)}"
+        )
+
+
+def test_dormant_sweep_has_no_side_effects():
+    _to_dormant()
+    from contextlib import closing
+    import os
+    from pathlib import Path
+    from algua.registry.db import connect
+
+    def _counts():
+        with closing(connect(Path(os.environ["ALGUA_DB_PATH"]))) as conn:
+            ge = conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0]
+            ho = conn.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0]
+            stage = conn.execute(
+                "SELECT stage FROM strategies WHERE name='cross_sectional_momentum'"
+            ).fetchone()[0]
+        return ge, ho, stage
+
+    before = _counts()
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    after = _counts()
+    assert after == before
+    assert after[2] == "dormant"
+
+
+def test_dormant_sweep_is_repeatable():
+    _to_dormant()
+    args = ["research", "dormant-sweep", "--demo", "--start", "2022-01-01", "--end", "2023-12-31",
+            "--min-window-sharpe", "-100", "--min-pct-positive", "0"]
+    p1 = json.loads(runner.invoke(app, args).stdout)
+    p2 = json.loads(runner.invoke(app, args).stdout)
+    assert [x["strategy"] for x in p1["passed"]] == [x["strategy"] for x in p2["passed"]]
+    assert p1["evaluated"] == p2["evaluated"] == 1
+
+
+def test_dormant_sweep_skips_fundamentals_and_evaluates_others_in_one_run():
+    _to_dormant("cross_sectional_momentum")
+    _to_dormant("fundamentals_earnings_tilt")
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31",
+                            "--min-window-sharpe", "-100", "--min-pct-positive", "0"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["total_dormant"] == 2
+    assert [s["strategy"] for s in p["skipped"]] == ["fundamentals_earnings_tilt"]
+    assert "needs_fundamentals" in p["skipped"][0]["reason"]
+    evaluated_names = [x["strategy"] for x in p["passed"]] + [x["strategy"] for x in p["failed"]]
+    assert "cross_sectional_momentum" in evaluated_names
+
+
+def test_dormant_sweep_ignores_non_dormant_strategies():
+    assert runner.invoke(app, ["registry", "add", "cross_sectional_momentum"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
+                               "--to", "backtested", "--actor", "human",
+                               "--reason", "x"]).exit_code == 0
+    r = runner.invoke(app, ["research", "dormant-sweep", "--demo",
+                            "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert r.exit_code == 0, r.stdout
+    p = json.loads(r.stdout)
+    assert p["total_dormant"] == 0
+    names = [x["strategy"] for x in p["passed"] + p["failed"]] + [s["strategy"] for s in p["skipped"]]
+    assert "cross_sectional_momentum" not in names
