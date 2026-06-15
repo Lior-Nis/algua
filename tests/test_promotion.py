@@ -94,6 +94,63 @@ def test_preflight_refuses_system_actor_before_any_holdout_or_gate_row(tmp_path)
     assert repo._conn.execute("SELECT COUNT(*) c FROM holdout_evaluations").fetchone()["c"] == 0
 
 
+class _NonReproducibleProvider:
+    """Neither snapshot_id nor a reproducible marker; get_bars must NOT be reached (the guard fires
+    before any provider read)."""
+
+    def get_bars(self, symbols, start, end, timeframe):
+        raise AssertionError("provider must not be read: reproducible guard should fire first")
+
+
+def test_agent_refused_non_reproducible_source(tmp_path):
+    repo = _repo(tmp_path)
+    repo.add("alpha")
+    with pytest.raises(ValueError, match="reproducible data source"):
+        promotion_preflight(repo, "alpha", actor=Actor.AGENT, declared_combos=None,
+                            allow_holdout_reuse=False, allow_non_pit=False,
+                            provider=_NonReproducibleProvider(), start=_START, end=_END)
+
+
+def test_reproducible_guard_skipped_for_synthetic_agent_and_any_human(tmp_path):
+    # SyntheticProvider is reproducible -> the guard does NOT fire for an agent (a later stage check
+    # raises instead, since "alpha" is at stage idea). A human is exempt even for a non-reproducible
+    # provider (get_bars is never reached because the stage check short-circuits first).
+    repo = _repo(tmp_path)
+    repo.add("alpha")
+    with pytest.raises(Exception) as agent_ei:
+        promotion_preflight(repo, "alpha", actor=Actor.AGENT, declared_combos=None,
+                            allow_holdout_reuse=False, allow_non_pit=False,
+                            provider=SyntheticProvider(seed=0), start=_START, end=_END)
+    assert "reproducible data source" not in str(agent_ei.value)
+    with pytest.raises(Exception) as human_ei:
+        promotion_preflight(repo, "alpha", actor=Actor.HUMAN, declared_combos=None,
+                            allow_holdout_reuse=False, allow_non_pit=False,
+                            provider=_NonReproducibleProvider(), start=_START, end=_END)
+    assert "reproducible data source" not in str(human_ei.value)
+
+
+class _NonReproducibleWorkingProvider(SyntheticProvider):
+    """A working (deterministic) provider that deliberately does NOT advertise reproducibility —
+    stands in for a future mutable/live provider for the human-exemption test."""
+
+    reproducible = False
+
+
+def test_human_exempt_from_reproducible_guard_through_preflight(tmp_path):
+    # A human may promote off a non-reproducible source: the guard is agent-only, so preflight runs
+    # to COMPLETION (breadth resolved) rather than refusing — proving the exemption holds all the
+    # way through, not just that it doesn't raise at the guard. ("alpha" is not a bundled module, so
+    # signal-panel parity step is skipped and the provider is never read.)
+    repo = _repo(tmp_path)
+    rec = repo.add("alpha")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.HUMAN, "bt")
+    repo.record_search_trial("alpha", 4, "{}")
+    ctx = promotion_preflight(repo, "alpha", actor=Actor.HUMAN, declared_combos=None,
+                              allow_holdout_reuse=False, allow_non_pit=False,
+                              provider=_NonReproducibleWorkingProvider(), start=_START, end=_END)
+    assert ctx.own == 4 and ctx.provenance == "measured"
+
+
 def test_preflight_refuses_agent_without_measured_breadth(tmp_path):
     repo = _repo(tmp_path)
     rec = repo.add("alpha")

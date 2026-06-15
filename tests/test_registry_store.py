@@ -228,17 +228,33 @@ def test_release_after_finalize_is_noop(repo_with_strategy):
         _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
 
 
-def test_reserve_snapshot_identity_precedence(repo_with_strategy):
-    # A burn recorded with snapshot_id="snapA" does NOT block a non-snapshot probe over the SAME
-    # overlapping interval (distinct identities). The snapshot probe IS blocked by a second
-    # attempt on an overlapping interval under that same snapshot identity.
+def test_reserve_is_provenance_independent(repo_with_strategy):
+    # #205: the OOS calendar window is the single-use unit REGARDLESS of provenance. A snapshot
+    # burn now blocks a non-snapshot probe over the same interval (was: distinct provenance bucket).
     repo, sid = repo_with_strategy
     _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap="snapA")
-    # Non-snapshot probe over the same interval: different identity bucket — must succeed.
-    _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap=None)
-    # Second snapshot probe on an overlapping interval: same snapA identity — must block.
     with pytest.raises(ValueError, match="holdout already consumed"):
-        _reserve(repo, sid, hs="2022-09-01", he="2023-03-31", snap="snapA")
+        _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap=None)
+    # A DIFFERENT snapshot of an overlapping window is also blocked.
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2022-09-01", he="2023-03-31", snap="snapB")
+
+
+def test_partial_overlap_cross_provenance_blocks(repo_with_strategy):
+    # GATE-1 CRITICAL: a burn over snapshot S blocks a PARTIALLY-overlapping probe via a different
+    # source. Whole-window content hashing could not catch this; the interval-overlap test does.
+    repo, sid = repo_with_strategy
+    _reserve(repo, sid, hs="2023-01-01", he="2023-12-31", snap="snapS")
+    with pytest.raises(ValueError, match="holdout already consumed"):
+        _reserve(repo, sid, hs="2023-06-01", he="2024-06-30", snap=None, ds="yfinance")
+
+
+def test_inverted_interval_rejected(repo_with_strategy):
+    # Defensive (GATE-1 r2): an inverted incoming interval would slip both the NULL branch and the
+    # overlap test and fail OPEN. reserve_holdout rejects start > end.
+    repo, sid = repo_with_strategy
+    with pytest.raises(ValueError, match="invalid holdout interval"):
+        _reserve(repo, sid, hs="2023-12-31", he="2023-01-01")
 
 
 def test_release_then_reserve_same_interval_succeeds(repo_with_strategy):

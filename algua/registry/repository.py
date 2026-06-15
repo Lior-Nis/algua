@@ -213,12 +213,17 @@ class StrategyRepository(Protocol):
         """Atomically claim the holdout window; return ``(reservation_id, reused)``.
 
         Under ``BEGIN IMMEDIATE`` (write lock held): re-check overlap against ALL rows (pending
-        reservation OR committed burn) for this strategy + data identity, matching on the OOS
-        INTERVAL ``[holdout_start, holdout_end]`` — the exact bars ``walk_forward`` burns (#192) —
-        then INSERT a pending row (``committed_at=NULL``, placeholder ``config_hash=''``). Match is
-        on the INTERVAL, never config: a different ``holdout_frac`` landing on overlapping OOS bars
-        does NOT escape the guard. A stored row with a NULL interval (legacy/old-code reservation)
-        matches UNCONDITIONALLY — fail closed. ``period_*``/``holdout_frac`` are evidence only.
+        reservation OR committed burn) for this strategy, matching on the OOS INTERVAL
+        ``[holdout_start, holdout_end]`` — the exact bars ``walk_forward`` burns (#192). The match
+        is PROVENANCE-INDEPENDENT (#205): ``data_source``/``snapshot_id`` are stored as evidence
+        only, never matched on, so the same OOS window is burn-once regardless of how the bars were
+        reached (snapshot S, snapshot S2, or provider P). Then INSERT a pending row
+        (``committed_at=NULL``, placeholder ``config_hash=''``). Match is on the INTERVAL, never
+        config: a different ``holdout_frac`` landing on overlapping OOS bars does NOT escape the
+        guard. A stored row with a NULL interval (legacy/old-code reservation) matches
+        UNCONDITIONALLY — fail closed. An
+        inverted incoming interval (start > end) is rejected (fail closed). ``period_*``/
+        ``holdout_frac`` are evidence only.
 
         Raises ``ValueError`` (fail closed) if an overlapping row exists and not ``allow_reuse``.
         ``reused`` is True iff an overlapping row existed and the human override let it proceed.

@@ -133,14 +133,15 @@ CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_n
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
--- holdout that was looked at (regardless of gate pass/fail — looking consumes it). A later promote
--- is REFUSED if its OOS interval [holdout_start, holdout_end] — the exact bars walk_forward burns
--- (#192) — overlaps a recorded row's interval for the same strategy+data identity, unless the
--- operator passes --allow-holdout-reuse (writes reused=1, auditable). A NULL interval matches
--- unconditionally (fail closed). period_* and holdout_frac are recorded as evidence only; matching
--- is on the INTERVAL, not on config_hash (re-gating the same OOS window with a tweaked config is
--- exactly the leak being closed). Data identity = snapshot_id when both sides have one, else
--- data_source. FK into strategies(id) — relational state, not an audit snapshot.
+-- holdout that was looked at (regardless of gate pass/fail — looking consumes it).
+-- Single-use key: (strategy_id, OOS interval [holdout_start, holdout_end]) — PROVENANCE-INDEPENDENT
+-- (#205). data_source/snapshot_id are recorded as EVIDENCE only, never matched on. A row is REFUSED
+-- if its OOS interval overlaps a prior reservation/burn for the strategy (the exact bars, #192),
+-- regardless of how the bars were reached, unless the operator passes --allow-holdout-reuse (writes
+-- reused=1, auditable). A NULL interval matches unconditionally (fail closed). period_* and
+-- holdout_frac are recorded as evidence only; matching is on the INTERVAL, not on config_hash
+-- (re-gating the same OOS window with a tweaked config is exactly the leak being closed). FK into
+-- strategies(id) — relational state, not an audit snapshot.
 CREATE TABLE IF NOT EXISTS holdout_evaluations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),
