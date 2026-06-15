@@ -433,14 +433,17 @@ class SqliteStrategyRepository:
         if self._conn.in_transaction:
             raise RuntimeError(
                 "reserve_holdout must be called at top level, not inside an open transaction")
-        # Data identity: snapshot_id when the probe has one (a snapshot-backed row is a DISTINCT
-        # identity from a non-snapshot probe), else data_source among rows lacking a snapshot.
-        if snapshot_id is not None:
-            data_match = "snapshot_id = ?"
-            data_param: str = snapshot_id
-        else:
-            data_match = "snapshot_id IS NULL AND data_source = ?"
-            data_param = data_source
+        # Single-use identity is the OOS INTERVAL [holdout_start, holdout_end] for the strategy,
+        # PROVENANCE-INDEPENDENT (#205): the same OOS calendar window is burn-once regardless of how
+        # the bars were reached (snapshot S, a different snapshot S2, or a provider P). data_source/
+        # snapshot_id are persisted as EVIDENCE only, never matched on (was: a per-provenance
+        # bucket, which let the same physical window be burned twice across provenance — #205).
+        # Defensive (GATE-1): an inverted incoming interval (start > end) would slip both the NULL
+        # branch and the overlap test below and fail OPEN, so reject it. holdout_window yields a
+        # well-formed interval (idx[train_n] <= idx[-1]); this guards the primitive vs. a caller.
+        if holdout_start > holdout_end:
+            raise ValueError(
+                f"invalid holdout interval: start {holdout_start!r} > end {holdout_end!r}")
         # Match identity is the OOS INTERVAL [holdout_start, holdout_end] — the exact bars
         # walk_forward burns (#192), NOT (full-period overlap, holdout_frac): a different
         # --holdout-frac that lands on overlapping OOS bars must NOT escape the guard. The standard
@@ -456,11 +459,10 @@ class SqliteStrategyRepository:
         try:
             self._conn.execute("BEGIN IMMEDIATE")
             row = self._conn.execute(
-                f"SELECT 1 FROM holdout_evaluations WHERE strategy_id = ?"
-                f" AND {data_match}"
-                f" AND (holdout_start IS NULL OR holdout_end IS NULL"
-                f"      OR (holdout_start <= ? AND ? <= holdout_end)) LIMIT 1",
-                (strategy_id, data_param, holdout_end, holdout_start),
+                "SELECT 1 FROM holdout_evaluations WHERE strategy_id = ?"
+                " AND (holdout_start IS NULL OR holdout_end IS NULL"
+                "      OR (holdout_start <= ? AND ? <= holdout_end)) LIMIT 1",
+                (strategy_id, holdout_end, holdout_start),
             ).fetchone()
             overlap = row is not None
             if overlap and not allow_reuse:
