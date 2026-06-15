@@ -1,12 +1,17 @@
 import math
 
+import pytest
+
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
+    DSR_ALPHA,
+    EULER_MASCHERONI,
     FUNNEL_WINDOW_DAYS,
     MIN_HOLDOUT_OBSERVATIONS,
     GateCriteria,
     GateDecision,
+    dsr_confidence,
     effective_funnel_breadth,
     evaluate_gate,
     sharpe_haircut,
@@ -243,3 +248,44 @@ def test_pit_ok_passes_clean():
     d = evaluate_gate(_wf(), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
     pit = next(c for c in d.checks if c["name"] == "pit_required")
     assert pit["passed"] is True and d.pit_ok is True and d.pit_override is False
+
+
+def test_dsr_constants():
+    assert EULER_MASCHERONI == pytest.approx(0.5772156649015329)
+    assert DSR_ALPHA == 0.05
+
+
+def test_dsr_n1_collapses_to_psr_against_zero():
+    # N<=1 -> SR*=0; PSR for SR_pp=0.1, T=252, normal moments.
+    # z = 0.1*sqrt(251)/sqrt(1+0.5*0.1**2) ~= 1.580 -> Phi ~= 0.9429
+    c = dsr_confidence(0.1, 252, 0.0, 3.0, 1, 0.04)
+    assert c == pytest.approx(0.9429, abs=2e-3)
+
+
+def test_dsr_high_benchmark_rejects():
+    # N=10 with sizeable trial dispersion lifts SR* well above SR_obs -> low confidence
+    c = dsr_confidence(0.1, 252, 0.0, 3.0, 10, 0.04)
+    assert c is not None and c < 0.5
+
+
+def test_dsr_monotonic_in_n_and_sharpe():
+    base = dsr_confidence(0.15, 252, 0.0, 3.0, 5, 0.04)
+    assert dsr_confidence(0.15, 252, 0.0, 3.0, 50, 0.04) < base   # more trials -> stricter
+    assert dsr_confidence(0.25, 252, 0.0, 3.0, 5, 0.04) > base    # higher SR -> higher conf
+
+
+def test_dsr_fail_closed_guards():
+    assert dsr_confidence(0.1, 1, 0.0, 3.0, 5, 0.04) is None       # T<=1
+    assert dsr_confidence(0.1, 252, 0.0, 3.0, 0, 0.04) is None     # N<1
+    assert dsr_confidence(0.1, 252, 0.0, 3.0, 5, -0.01) is None    # negative variance
+    assert dsr_confidence(float("nan"), 252, 0.0, 3.0, 5, 0.04) is None
+    # denominator <= 0: large positive skew vs SR drives 1 - skew*SR + (k-1)/4*SR^2 negative
+    # (1 - 3.0*1.0 + (3.0-1)/4*1.0^2 = 1 - 3 + 0.5 = -1.5); note -skew*SR is +ve for negative skew,
+    # which would INCREASE the term, so the trigger requires positive skew.
+    assert dsr_confidence(1.0, 252, 3.0, 3.0, 1, 0.0) is None
+
+
+def test_dsr_zero_variance_is_psr():
+    # trial_sr_var=0 -> SR*=0 -> equals the N=1 PSR value
+    assert dsr_confidence(0.1, 252, 0.0, 3.0, 9, 0.0) == pytest.approx(
+        dsr_confidence(0.1, 252, 0.0, 3.0, 1, 0.04), abs=1e-9)

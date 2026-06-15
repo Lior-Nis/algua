@@ -5,6 +5,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from scipy.stats import norm as _norm
+
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 
@@ -16,6 +18,10 @@ FUNNEL_WINDOW_DAYS = 90
 # Minimum holdout sample (Wall C). A holdout with fewer observations is underpowered and fails
 # closed — complements the 1/sqrt(T) haircut, which is ZERO at N=1. ~one trading quarter. Protected.
 MIN_HOLDOUT_OBSERVATIONS = 63
+
+# DSR evidence layer (#211, Phase 1). Protected constants — relaxing them weakens the gate.
+DSR_ALPHA = 0.05  # require >= 95% confidence the true Sharpe beats the selection-inflated benchmark
+EULER_MASCHERONI = 0.5772156649015329  # gamma_E, the DSR expected-max weight (NOT e^-1)
 
 
 @dataclass
@@ -64,6 +70,56 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
     if n_bars <= 0:
         return math.inf
     return math.sqrt(2.0 * math.log(n)) * math.sqrt(ANN) / math.sqrt(n_bars)
+
+
+def dsr_confidence(
+    sr_obs_per_period: float,
+    t: int,
+    skew: float,
+    raw_kurtosis: float,
+    n_trials: int,
+    trial_sr_var_per_period: float,
+) -> float | None:
+    """Deflated-Sharpe-Ratio confidence (Bailey & López de Prado): the probability — in [0,1],
+    NOT a p-value — that the true (per-period) Sharpe exceeds the expected maximum Sharpe of
+    ``n_trials`` selections.
+
+        SR* = sqrt(var) * [ (1-gamma_E)*Z^-1(1-1/N) + gamma_E*Z^-1(1-1/(N*e)) ]   for N > 1
+        SR* = 0                                                                    for N <= 1
+        DSR = Phi( (SR_obs - SR*) * sqrt(T-1) / sqrt(1 - skew*SR_obs + (kurt-1)/4 * SR_obs^2) )
+
+    ``raw_kurtosis`` is Pearson kurtosis (=3 for Gaussian), so the variance term reduces to the
+    Lo/Mertens 1 + SR^2/2 for a normal series. Inputs are PER-PERIOD; the caller converts from the
+    system's annualized Sharpes. Returns None (fail closed) on any degenerate input."""
+    n = int(n_trials)
+    if n < 1:                      # invalid breadth
+        return None
+    if t <= 1:                     # PSR needs sqrt(T-1) > 0; underpowered holdout
+        return None
+    if not math.isfinite(sr_obs_per_period) or not math.isfinite(skew) \
+            or not math.isfinite(raw_kurtosis):
+        return None
+    if not math.isfinite(trial_sr_var_per_period) or trial_sr_var_per_period < 0.0:
+        return None
+
+    sr = sr_obs_per_period
+    if n <= 1:
+        sr_star = 0.0
+    else:
+        # E[max] of n trial Sharpes (Gaussian approximation), scaled by the trial-SR spread.
+        sr_star = math.sqrt(trial_sr_var_per_period) * (
+            (1.0 - EULER_MASCHERONI) * float(_norm.ppf(1.0 - 1.0 / n))
+            + EULER_MASCHERONI * float(_norm.ppf(1.0 - 1.0 / (n * math.e)))
+        )
+    if not math.isfinite(sr_star):
+        return None
+
+    var_term = 1.0 - skew * sr + ((raw_kurtosis - 1.0) / 4.0) * sr * sr
+    if not math.isfinite(var_term) or var_term <= 0.0:
+        return None
+    z = (sr - sr_star) * math.sqrt(t - 1) / math.sqrt(var_term)
+    conf = float(_norm.cdf(z))
+    return conf if math.isfinite(conf) else None
 
 
 def effective_funnel_breadth(own_lifetime: int, windowed_total: int) -> int:
