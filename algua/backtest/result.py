@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from algua.contracts.types import DataProvider
@@ -46,6 +46,9 @@ class BacktestResult:
     fundamentals_snapshot: str | None = None
     # News snapshot used by a needs_news strategy (issue #132); None otherwise.
     news_snapshot: str | None = None
+    # Delisting provenance (issue #212): snapshot name + forced exits applied during simulate().
+    delisting_snapshot: str | None = None
+    forced_exits: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

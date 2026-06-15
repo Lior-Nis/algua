@@ -699,14 +699,13 @@ def run(
     delisting_snapshot: str | None = None,  # accepted but unused; surfaced in Task 6
     assume_terminal_last_close: bool = False,
 ) -> BacktestResult:
-    pf, weights_eff, _forced_exits = simulate(
+    pf, weights_eff, forced_exits = simulate(
         strategy, provider, start, end,
         universe_by_date=universe_by_date, fundamentals_provider=fundamentals_provider,
         news_provider=news_provider,
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
     )
-    _ = delisting_snapshot  # accepted for future provenance wiring (Task 6)
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
@@ -725,5 +724,7 @@ def run(
             getattr(news_provider, "snapshot_id", None)
             if strategy.config.needs_news else None
         ),
+        delisting_snapshot=delisting_snapshot,
+        forced_exits=forced_exits,
         **prov,
     )
