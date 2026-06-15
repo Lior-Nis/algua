@@ -127,8 +127,8 @@ def walk_forward(
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
     _reject_pit_sidecar(strategy, "walk-forward")
-    pf, _weights = build_portfolio(strategy, provider, start, end,
-                                   universe_by_date=universe_by_date)
+    pf, _weights, _forced = build_portfolio(strategy, provider, start, end,
+                                            universe_by_date=universe_by_date)
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 
