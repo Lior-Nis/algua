@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from algua.backtest.delisting import DelistingRecord
 from algua.backtest.engine import BacktestError, build_portfolio
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
@@ -115,6 +116,8 @@ def walk_forward(
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
     on_peek: Callable[[str], None] | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout.
 
@@ -127,8 +130,12 @@ def walk_forward(
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
     _reject_pit_sidecar(strategy, "walk-forward")
-    pf, _weights, _forced = build_portfolio(strategy, provider, start, end,
-                                            universe_by_date=universe_by_date)
+    pf, _weights, _forced = build_portfolio(
+        strategy, provider, start, end,
+        universe_by_date=universe_by_date,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
+    )
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 

@@ -88,6 +88,7 @@ def test_evaluate_combo_returns_record_without_holdout():
         windows=4, holdout_frac=0.2,
         universe_by_date=None, universe_name=None, universe_snapshots=None,
         rank_by="mean_sharpe",
+        delisting_records=None, assume_terminal_last_close=False,
     )
     # The rankable fields are present; the holdout never leaves the worker.
     assert set(rec) == {"config_hash", "n_windows", "stability", "score", "meta"}
@@ -105,6 +106,7 @@ def _run_kwargs():
         windows=4, holdout_frac=0.2,
         universe_by_date=None, universe_name=None, universe_snapshots=None,
         rank_by="mean_sharpe",
+        delisting_records=None, assume_terminal_last_close=False,
     )
 
 
