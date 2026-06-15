@@ -12,6 +12,8 @@ import pandas as pd
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.engine import run, verify_signal_panel_parity
 from algua.contracts.types import ExecutionContract
+from algua.data.fundamentals_schema import to_fundamentals_schema
+from algua.data.news_schema import to_news_schema
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
@@ -116,3 +118,95 @@ def test_verify_signal_panel_parity_panel_excludes_undeclared_symbol() -> None:
     assert panel.seen, "signal_panel was never invoked"
     assert "ZZZ" not in panel.seen
     assert panel.seen <= {"AAA", "BBB"}
+
+
+class _FundRecorder:
+    """A 3-arg fundamentals signal that records the symbols present in the as-of fundamentals frame
+    it is handed, and returns FLAT weights."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    def __call__(
+        self, view: pd.DataFrame, params: dict[str, Any], fundamentals: pd.DataFrame
+    ) -> pd.Series:
+        self.seen.update(fundamentals["symbol"].unique())
+        return pd.Series(dtype="float64")
+
+
+class _ExtraFundamentalsProvider:
+    """Returns fundamentals for the requested symbols PLUS the undeclared `extra` (misbehaving)."""
+
+    def __init__(self, extra: str = "ZZZ") -> None:
+        self.extra = extra
+
+    def get_fundamentals(self, symbols, end):  # noqa: ANN001
+        rows = [
+            [s, "2023-12-31", "eps_diluted", 1.0, "2023-12-31T00:00:00Z", "v"]
+            for s in list(symbols) + [self.extra]
+        ]
+        raw = pd.DataFrame(rows, columns=[
+            "symbol", "fiscal_period_end", "metric", "value", "knowable_at", "source",
+        ])
+        return to_fundamentals_schema(raw)
+
+
+def test_fundamentals_sidecar_excludes_undeclared_symbol() -> None:
+    recorder = _FundRecorder()
+    cfg = StrategyConfig(
+        name="obs_funds", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough", needs_fundamentals=True,
+    )
+    strat = LoadedStrategy(config=cfg, fundamentals_signal_fn=recorder, construct_fn=_passthrough)
+    # Bars provider returns ZZZ too: without #208 projection, adj.columns would include ZZZ, so the
+    # loop's `allowed = set(columns)` would NOT mask ZZZ out of the fundamentals frame.
+    run(
+        strat, _ExtraSymbolProvider(extra="ZZZ", seed=3), START, END,
+        fundamentals_provider=_ExtraFundamentalsProvider(extra="ZZZ"),
+    )
+    assert recorder.seen, "fundamentals signal was never invoked"
+    assert "ZZZ" not in recorder.seen
+
+
+class _NewsRecorder:
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    def __call__(
+        self, view: pd.DataFrame, params: dict[str, Any], news: pd.DataFrame
+    ) -> pd.Series:
+        self.seen.update(news["symbol"].unique())
+        return pd.Series(dtype="float64")
+
+
+class _ExtraNewsProvider:
+    def __init__(self, extra: str = "ZZZ") -> None:
+        self.extra = extra
+
+    def get_news(self, symbols, end):  # noqa: ANN001
+        raw = pd.DataFrame([
+            {
+                "source": "src", "article_id": "art-" + s, "symbol": s,
+                "published_at": "2023-01-01T00:00:00Z", "knowable_at": "2023-01-01T00:00:00Z",
+                "headline": "headline", "url": None, "body": None, "retracted": False,
+            }
+            for s in list(symbols) + [self.extra]
+        ])
+        return to_news_schema(raw)
+
+
+def test_news_sidecar_excludes_undeclared_symbol() -> None:
+    recorder = _NewsRecorder()
+    cfg = StrategyConfig(
+        name="obs_news", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough", needs_news=True,
+    )
+    strat = LoadedStrategy(config=cfg, news_signal_fn=recorder, construct_fn=_passthrough)
+    run(
+        strat, _ExtraSymbolProvider(extra="ZZZ", seed=3), START, END,
+        news_provider=_ExtraNewsProvider(extra="ZZZ"),
+    )
+    assert recorder.seen, "news signal was never invoked"
+    assert "ZZZ" not in recorder.seen
