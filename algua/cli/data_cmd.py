@@ -280,6 +280,20 @@ def ingest_news(
     emit(ok({"snapshot": rec.to_dict()}))
 
 
+@data_app.command("import-delistings")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def import_delistings(
+    file: Path = typer.Option(..., "--file", help="CSV: symbol,delisting_date,delisting_value"),
+    as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
+    source: str = typer.Option("vendor", "--source"),
+) -> None:
+    """Import a delistings CSV (delisting_value = per-share terminal price in adj_close units,
+    strictly > 0) as one point-in-time delistings snapshot."""
+    frame = pd.read_csv(file.expanduser())
+    rec = _store().ingest_delistings(frame=frame, as_of=as_of or now_iso(), source=source)
+    emit(ok({"snapshot": rec.to_dict()}))
+
+
 @data_app.command("query-news")
 @json_errors(ValueError, LookupError, FileNotFoundError)
 def query_news_cmd(
