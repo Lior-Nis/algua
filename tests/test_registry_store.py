@@ -946,3 +946,48 @@ def test_apply_transition_revoke_rolls_back_with_stage_on_cas_failure(tmp_path):
                               revoke_allocation=True)
     assert allocations.active_allocation(conn, rec.id) is not None
     assert repo.get("s1").stage is Stage.LIVE
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (#211): record_search_trial stats + pooled_trial_sharpe_var
+# ---------------------------------------------------------------------------
+
+import math as _math
+
+
+def test_search_trials_records_and_pools_variance(repo):
+    # two sweeps with different means -> pooled variance must exceed the mean of within-sweep vars
+    repo.record_search_trial("s", 3, "{}", trial_sharpe_count=3,
+                             trial_sharpe_mean=0.2, trial_sharpe_var_ann=0.04)
+    repo.record_search_trial("s", 2, "{}", trial_sharpe_count=2,
+                             trial_sharpe_mean=1.2, trial_sharpe_var_ann=0.04)
+    pooled = repo.pooled_trial_sharpe_var("s")
+    # exact pooled sample variance:
+    # M = (3*0.2 + 2*1.2)/5 = 0.6
+    # SSE = (2*0.04 + 3*(0.2-0.6)^2) + (1*0.04 + 2*(1.2-0.6)^2)
+    #     = (0.08 + 0.48) + (0.04 + 0.72) = 1.32
+    # pooled = 1.32/4 = 0.33
+    assert pooled is not None
+    assert abs(pooled - 0.33) < 1e-9
+
+
+def test_pooled_variance_equal_means_matches_naive(repo):
+    repo.record_search_trial("s", 3, "{}", trial_sharpe_count=3,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    repo.record_search_trial("s", 2, "{}", trial_sharpe_count=2,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.10)
+    # equal means -> between-sweep term zero -> pooled = ((3-1)*0.04+(2-1)*0.10)/(5-1) = 0.045
+    pooled = repo.pooled_trial_sharpe_var("s")
+    assert pooled is not None
+    assert abs(pooled - 0.045) < 1e-9
+
+
+def test_pooled_variance_none_when_any_stat_missing(repo):
+    repo.record_search_trial("s", 3, "{}", trial_sharpe_count=3,
+                             trial_sharpe_mean=0.2, trial_sharpe_var_ann=0.04)
+    repo.record_search_trial("s", 2, "{}")  # old-style row: NULL stats
+    assert repo.pooled_trial_sharpe_var("s") is None
+
+
+def test_pooled_variance_none_when_no_rows(repo):
+    assert repo.pooled_trial_sharpe_var("nope") is None
