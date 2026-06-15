@@ -696,7 +696,7 @@ def run(
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
     delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
-    delisting_snapshot: str | None = None,  # accepted but unused; surfaced in Task 6
+    delisting_snapshot: str | None = None,  # surfaced in BacktestResult provenance (#212)
     assume_terminal_last_close: bool = False,
 ) -> BacktestResult:
     pf, weights_eff, forced_exits = simulate(
