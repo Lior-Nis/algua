@@ -12,6 +12,7 @@ dependencies = [
     "yfinance>=1.4.1",
     "pyarrow>=15,<24",
     "vectorbt>=0.26",
+    "scipy>=1.11",  # #211 DSR evidence: norm.cdf/ppf in research.gates + skew/kurtosis in metrics
     "mlflow>=3.1",
     "threadpoolctl>=3,<4",
 ]

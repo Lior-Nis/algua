@@ -952,8 +952,6 @@ def test_apply_transition_revoke_rolls_back_with_stage_on_cas_failure(tmp_path):
 # Task 5 (#211): record_search_trial stats + pooled_trial_sharpe_var
 # ---------------------------------------------------------------------------
 
-import math as _math
-
 
 def test_search_trials_records_and_pools_variance(repo):
     # two sweeps with different means -> pooled variance must exceed the mean of within-sweep vars
