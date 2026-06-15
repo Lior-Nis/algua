@@ -117,3 +117,14 @@ def test_vendor_date_one_day_past_last_trade_resolves_to_terminal_bar():
     assert forced == [{"symbol": "B", "bar": T.isoformat(),
                        "terminal_price": 5.0, "source": "vendor"}]
     assert adj_x.loc[T, "B"] == 5.0 and (w_x.loc[T:, "B"] == 0.0).all()
+
+
+def test_phantom_post_delisting_weight_is_suppressed():
+    # Strategy goes flat on B at its last bar (T=index1) but targets B AGAIN after it delists
+    # (index2,3). Those post-T weights must be forced to 0 (can't trade a delisted name).
+    adj = _grid({"A": [10, 11, 12, 13], "B": [10, 11, np.nan, np.nan]})
+    w = _grid({"A": [0.5, 0.5, 0.5, 0.5], "B": [0.0, 0.0, 0.7, 0.7]})
+    adj_x, w_x, forced = apply_delisting_exits(adj, w, None)  # no record needed: not held at T
+    T = adj.index[1]
+    assert (w_x.loc[adj_x.index > T, "B"] == 0.0).all()   # phantom weights suppressed
+    assert forced == []                                    # nothing realized (wasn't held at T)

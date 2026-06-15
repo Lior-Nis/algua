@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.data.store import DataStore
 
 runner = CliRunner()
 
@@ -45,6 +46,25 @@ def test_backtest_run_accepts_delistings_flag(tmp_path):
     ])
     assert res.exit_code == 0, res.output
     assert json.loads(res.output)["ok"] is True
+
+
+def test_backtest_run_delisting_snapshot_is_actual_snapshot_id(tmp_path):
+    """delisting_snapshot in the result JSON must be the real snapshot_id, not the user label."""
+    _seed_delistings(tmp_path)
+    # Discover the actual snapshot_id from the store
+    store = DataStore(tmp_path)
+    real_snapshot_id = store.latest_delistings_snapshot_id()
+    assert real_snapshot_id is not None, "seed should have written a delistings snapshot"
+
+    res = runner.invoke(app, [
+        "backtest", "run", STRATEGY, "--demo",
+        "--start", "2020-01-01", "--end", "2020-03-01", "--delistings", "ANY",
+    ])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.output)
+    # Must be the actual snapshot_id, not the user-supplied label "ANY"
+    assert payload.get("delisting_snapshot") == real_snapshot_id
+    assert payload.get("delisting_snapshot") != "ANY"
 
 
 def test_backtest_run_accepts_assume_terminal_last_close(tmp_path):

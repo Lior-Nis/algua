@@ -81,22 +81,25 @@ def resolve_eval_inputs(
 
 def resolve_delisting_inputs(
     delistings_name: str | None, end_dt: datetime
-) -> tuple[Mapping[str, list] | None, list[dict[str, str]] | None]:
+) -> tuple[Mapping[str, list] | None, str | None]:
     """Resolve opt-in delisting records as-of end_dt (mirror of resolve_universe_inputs).
 
     ``delistings_name is None`` (no ``--delistings``) => ``(None, None)``.
+    Returns ``(records, snapshot_id)`` where ``snapshot_id`` is the ACTUAL snapshot selected
+    (not the user-supplied name label) for truthful provenance stamping.
     Raises ``ValueError`` if no delistings snapshot is effective on or before ``end_dt``.
     """
     if delistings_name is None:
         return None, None
-    records = DataStore(get_settings().data_dir).read_delistings(as_of=end_dt.isoformat())
+    store = DataStore(get_settings().data_dir)
+    records = store.read_delistings(as_of=end_dt.isoformat())
     if not records:
         raise ValueError(
             f"--delistings {delistings_name!r}: no delistings snapshot effective on or before "
             f"{end_dt.date().isoformat()}"
         )
-    provenance = [{"name": delistings_name, "symbols": str(len(records))}]
-    return records, provenance
+    snapshot_id = store.latest_delistings_snapshot_id(as_of=end_dt.isoformat())
+    return records, snapshot_id
 
 
 def resolve_universe_inputs(

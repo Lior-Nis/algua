@@ -236,14 +236,17 @@ def import_universe(
     intervals = parse_constituents_rows(rows)
     timeline = constituents_to_snapshots(intervals)
     stamp = as_of or now_iso()
-    store = _store()
-    symbols_seen: set[str] = set()
+    # Pre-scan: check for empty membership BEFORE any writes so the import is atomic —
+    # no partial timeline is written if any change-date has empty membership.
     for effective_date, members in timeline:
         if not members:
             raise ValueError(
                 f"universe {universe!r}: membership is empty on {effective_date.isoformat()} "
                 "— empty-membership snapshots are a deferred limitation"
             )
+    store = _store()
+    symbols_seen: set[str] = set()
+    for effective_date, members in timeline:
         symbols_seen.update(members)
         store.ingest_universe(
             universe=universe,

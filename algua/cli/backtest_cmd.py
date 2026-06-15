@@ -68,7 +68,7 @@ def run(
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
-    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
+    delisting_records, delisting_snapshot_id = resolve_delisting_inputs(delistings, end_dt)
     if fundamentals_snapshot and not strategy.config.needs_fundamentals:
         raise ValueError(
             "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
@@ -94,7 +94,7 @@ def run(
         fundamentals_provider=fundamentals_provider,
         news_provider=news_provider,
         delisting_records=delisting_records,
-        delisting_snapshot=delistings,
+        delisting_snapshot=delisting_snapshot_id,
         assume_terminal_last_close=assume_terminal_last_close,
     )
 

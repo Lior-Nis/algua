@@ -14,6 +14,10 @@ from datetime import date
 
 import pandas as pd
 
+# Float-noise tolerance for held-position detection. Kept independent of the engine's
+# POSITION_EPS to preserve the pure-module / no-engine-import property of this module.
+_WEIGHT_EPS = 1e-12
+
 
 @dataclass(frozen=True)
 class DelistingRecord:
@@ -36,9 +40,16 @@ def _resolve_bar(index: pd.DatetimeIndex, d: date) -> pd.Timestamp | None:
     """Greatest bar in `index` whose date is <= d (as-of). None if d precedes the first bar.
     Calendar-free. Callers pass the SYMBOL's own traded bars (not the union panel index) so a
     vendor delisting_date that lands a day past the last trade — on a date present in the union
-    index only because another symbol traded then — still resolves to this symbol's terminal bar."""
-    eligible = [ts for ts in index if ts.date() <= d]
-    return eligible[-1] if eligible else None
+    index only because another symbol traded then — still resolves to this symbol's terminal bar.
+    `index` is sorted; binary search makes this O(log n)."""
+    # bars are daily UTC timestamps; compare against end-of-day d to include a same-date bar.
+    # +1 day cutoff with side="left" includes any timestamp strictly before (d+1) 00:00,
+    # i.e. all of day d. Handle both tz-aware and tz-naive indexes.
+    tz = index.tz
+    base = pd.Timestamp(d, tz=tz) if tz is not None else pd.Timestamp(d)
+    cutoff = base + pd.Timedelta(days=1)
+    pos = index.searchsorted(cutoff, side="left")
+    return index[pos - 1] if pos > 0 else None
 
 
 def apply_delisting_exits(
@@ -95,7 +106,7 @@ def apply_delisting_exits(
                 f"{T.date().isoformat()} (ambiguous terminal valuation)"
             )
         record = candidates[0] if candidates else None
-        held = bool(weights_eff.loc[T, c] != 0)
+        held = bool(abs(weights_eff.loc[T, c]) > _WEIGHT_EPS)
         ends_early = T < panel_end
 
         if record is not None and held:
@@ -125,9 +136,15 @@ def apply_delisting_exits(
                 }
             )
 
-        # NaN-poison kill (whenever the column has a dead tail). adj_exec.loc[T, c] is the
-        # realized price (overridden above when a record applied), inert at a 0 position.
+        # NaN-poison kill + phantom-weight suppression (whenever the column has a dead tail).
+        # Zero post-T weights unconditionally: a delisted symbol cannot be traded after its
+        # last bar, regardless of held/record/relaxation status. The held-at-T branches above
+        # already set weights_exec.loc[T:, c] = 0.0 (which overlaps harmlessly). adj_exec.loc[T, c]
+        # is the realized price (overridden above when a record applied), inert at a 0 position.
         if ends_early:
-            adj_exec.loc[adj_exec.index > T, c] = adj_exec.loc[T, c]
+            after_t = adj_exec.index > T
+            # No trading a delisted symbol after its last bar.
+            weights_exec.loc[after_t, c] = 0.0
+            adj_exec.loc[after_t, c] = adj_exec.loc[T, c]  # NaN-poison kill
 
     return adj_exec, weights_exec, forced_exits

@@ -341,6 +341,18 @@ class DataStore:
             metadata=metadata, frame=clean.reset_index(drop=True), filename="delistings.parquet"
         )
 
+    def _latest_delistings_record(self, as_of: str | None) -> SnapshotRecord | None:
+        """Return the newest DELISTINGS snapshot record as-of `as_of` (or overall if None)."""
+        records = self.manifest.list_records(Dataset.DELISTINGS.value)
+        if as_of is not None:
+            records = [r for r in records if r.metadata.as_of <= as_of]
+        return max(records, key=lambda r: r.metadata.as_of) if records else None
+
+    def latest_delistings_snapshot_id(self, as_of: str | None = None) -> str | None:
+        """Return the snapshot_id of the newest DELISTINGS snapshot as-of `as_of`, or None."""
+        rec = self._latest_delistings_record(as_of)
+        return rec.snapshot_id if rec is not None else None
+
     def read_delistings(self, as_of: str | None = None) -> dict[str, list[DelistingRecord]]:
         """Point-in-time delistings read: the latest DELISTINGS snapshot with metadata.as_of <=
         `as_of` (or the latest overall when `as_of is None`). Returns
@@ -349,12 +361,9 @@ class DataStore:
             DelistingRecord,
         )
 
-        records = self.manifest.list_records(Dataset.DELISTINGS.value)
-        if as_of is not None:
-            records = [r for r in records if r.metadata.as_of <= as_of]
-        if not records:
+        latest = self._latest_delistings_record(as_of)
+        if latest is None:
             return {}
-        latest = max(records, key=lambda r: r.metadata.as_of)
         frame = pd.read_parquet(self.data_dir / latest.data_path)
         out: dict[str, list[DelistingRecord]] = {}
         for row in frame.itertuples(index=False):

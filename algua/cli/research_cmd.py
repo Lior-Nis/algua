@@ -149,9 +149,7 @@ def promote(
                 holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                 universe_name=universe, universe_snapshots=universe_prov,
                 delisting_records=delisting_records,
-                # NOTE: assume_terminal_last_close is NOT threaded here — it is human-only and
-                # rejected for the agent path by the guard above. An agent that reaches this point
-                # has already been refused if the flag was set.
+                assume_terminal_last_close=assume_terminal_last_close,
                 # Burn-on-peek: commit the reservation into a burn the instant BEFORE walk_forward
                 # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
                 # committed row, the except-release below is then correct for EVERY post-peek
