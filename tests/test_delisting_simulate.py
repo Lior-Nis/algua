@@ -9,11 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from algua.backtest.engine import BacktestError, simulate
 from algua.backtest.delisting import DelistingRecord
+from algua.backtest.engine import BacktestError, simulate
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers
