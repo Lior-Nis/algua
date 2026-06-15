@@ -60,9 +60,11 @@ def test_show_unknown_uses_error_envelope():
     assert json.loads(result.stdout)["ok"] is False
 
 
-def test_uses_reports_no_catalogued_factor_for_bundled():
+def test_uses_reports_composed_factor_for_bundled():
+    # After composition (issue #140) the bundled strategy delegates to xs_trailing_return, whose
+    # module imports indicators.py — so module-granular lineage reports all three.
     out = _json(runner.invoke(app, ["factor", "uses", "cross_sectional_momentum"]))
-    assert out["factors"] == []
+    assert {"xs_trailing_return", "momentum", "zscore"} <= set(out["factors"])
 
 
 def _write_dep_strategy(stem: str) -> Path:
