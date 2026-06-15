@@ -185,10 +185,17 @@ def run_gate(
     matches against (NOT wf.code_hash, which is git-HEAD-based and would never match)."""
     pit_ok = resolve_pit_ok(universe_name, universe_snapshots, period_start)
     holdout_n_bars = int(wf.holdout_metrics["n_bars"])
+    # DSR evidence (#211): the binding decision is actor-INDEPENDENT — DSR binds iff breadth is
+    # MEASURED (a real sweep ran). Then fetch the pooled trial-Sharpe dispersion; if it is None
+    # (old search_trials rows lacking the (count, mean, var) stats) the binding `dsr_evidence`
+    # check fails CLOSED inside evaluate_gate. Declared breadth (human, no sweep) omits DSR.
+    dsr_binding = breadth.provenance == "measured"
+    dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
     decision = evaluate_gate(
         wf, criteria, n_combos=breadth.n_funnel, breadth_provenance=breadth.provenance,
         pit_ok=pit_ok, allow_non_pit=allow_non_pit, own_lifetime_combos=breadth.own,
         windowed_total_combos=breadth.windowed_total, funnel_window_days=FUNNEL_WINDOW_DAYS,
+        dsr_binding=dsr_binding, dsr_trial_var_ann=dsr_trial_var_ann,
     )
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
