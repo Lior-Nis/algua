@@ -104,3 +104,38 @@ def factor_ic(
         "t_stat": t_stat,
         "hit_rate": float((arr > 0).mean()),
     }
+
+
+def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
+    """adj_close pivoted to (sorted unique timestamp index x symbol columns) — the decision grid."""
+    return (
+        bars.reset_index()
+        .pivot(index="timestamp", columns="symbol", values="adj_close")
+        .sort_index()
+    )
+
+
+def score_panel(strategy: LoadedStrategy, bars: pd.DataFrame) -> pd.DataFrame:
+    """The factor's cross-sectional scores at every decision bar, PIT (data <= t only).
+
+    For each timestamp t on the grid, calls the factor over the expanding window ending at t (the
+    same expanding `view` the engine's per-bar loop uses), so a score at t can never see a bar
+    after t. Returns a (timestamp x symbol) frame; bars before the factor has enough history
+    contribute an all-NaN row."""
+    bars_sorted = bars.sort_index()
+    grid = _adj_grid(bars_sorted).index
+    end_pos = bars_sorted.index.searchsorted(grid, side="right")
+    rows: dict[pd.Timestamp, pd.Series] = {}
+    for t, stop in zip(grid, end_pos, strict=True):
+        rows[t] = strategy.signal(bars_sorted.iloc[:stop])
+    panel = pd.DataFrame.from_dict(rows, orient="index")
+    return panel.reindex(columns=_adj_grid(bars_sorted).columns)
+
+
+def forward_returns(adj: pd.DataFrame, *, lag: int, horizon: int) -> pd.DataFrame:
+    """Per-symbol forward return realized AFTER the decision lag: a score known at t is tradable at
+    t+lag, so the label is adj_{t+lag+horizon} / adj_{t+lag} - 1. The trailing (lag+horizon) rows
+    have no future bar and are NaN (skipped by the IC cross-section filter)."""
+    entry = adj.shift(-lag)
+    exit_ = adj.shift(-(lag + horizon))
+    return exit_ / entry - 1.0
