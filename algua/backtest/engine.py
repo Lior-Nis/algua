@@ -157,16 +157,21 @@ def _decision_weights(
 
     Point-in-time universe (`universe_by_date`): when provided, the strategy only ever sees the
     symbols that were as-of-t members (the snapshot with the greatest effective_date <= t),
-    eliminating survivorship bias. `None` reproduces the original static behavior exactly (the
-    full fetched panel is visible every bar). Empty as-of membership => that bar is flat. A weight
-    returned for a non-member is a strategy bug and raises `BacktestError`. As-of membership at t
-    uses only snapshots dated <= t, so the masking introduces no look-ahead.
+    eliminating survivorship bias. `None` is static mode: the operating universe (declared AND
+    available) is visible every bar — `simulate` projects `bars`/`adj` to it via
+    `_static_operating_view` before this loop, so an undeclared symbol can't enter the view (#208).
+    Empty as-of membership => that bar is flat. A weight returned for a non-member is a strategy bug
+    and raises `BacktestError`. As-of membership at t uses only snapshots dated <= t, so the masking
+    introduces no look-ahead.
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
     # Static operating universe = declared AND available: a declared symbol with no fetched price
     # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
     # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
+    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
@@ -265,6 +270,9 @@ def _fast_weights(
     # Static operating universe = declared AND available: a declared symbol with no fetched price
     # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
     # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
+    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
     # Reindex the SCORES onto the simulation grid WITHOUT filling NaN (missing score != 0 score).
     scores = panel.reindex(index=adj.index, columns=columns)
@@ -423,14 +431,10 @@ def verify_signal_panel_parity(
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
         adj = _adj_grid(bars)
-        # Same fail-closed guard as simulate(): an empty declared∩available universe would otherwise
-        # surface as a confusing out-of-universe `(allowed: [])` breach instead of this clear cause.
-        if strategy.universe and not (set(strategy.universe) & set(adj.columns)):
-            raise BacktestError(
-                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
-                f"universe {sorted(strategy.universe)} (fetched columns: "
-                f"{sorted(map(str, adj.columns))})"
-            )
+        # Project to the operating universe identically to simulate()'s static path so the panel
+        # under test sees exactly what the runtime fast path sees (observation parity, #208). Also
+        # absorbs the empty-universe fail-closed guard.
+        bars, adj = _static_operating_view(strategy, bars, adj)
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None
@@ -490,6 +494,31 @@ def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     it is the single source of truth for both `build_portfolio` and `holdout_window`."""
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     return adj.sort_index()
+
+
+def _static_operating_view(
+    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Project the strategy-visible STATIC view to the operating universe (declared AND available)
+    so a misbehaving provider's undeclared symbols never reach the loop view, the fast-path
+    signal_panel, the weights/grid, or the fundamentals/news sidecars (observation parity, #208).
+
+    Fails closed when no declared symbol has fetched price data (empty operating universe) — this
+    absorbs #179's empty-intersection guard AND the empty-declared-universe case. The projection on
+    `adj` is COLUMN-ONLY (adj.index is untouched), so holdout_window's grid and the #192 single-use
+    holdout identity are unaffected. No-op for a compliant provider (adj.columns within universe).
+    """
+    universe = set(strategy.universe)
+    # Order-preserving intersection: keep adj's existing column order so a compliant provider is a
+    # STRICT no-op (no reorder, no NaN/reindex-fill since operating is a subset of adj.columns).
+    operating = [c for c in adj.columns if c in universe]
+    if not operating:
+        raise BacktestError(
+            f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+            f"universe {sorted(strategy.universe)} (fetched columns: "
+            f"{sorted(map(str, adj.columns))})"
+        )
+    return bars[bars["symbol"].isin(operating)], adj.loc[:, operating]
 
 
 def holdout_window(
@@ -565,13 +594,10 @@ def simulate(
     adj = _adj_grid(bars)
 
     if universe_by_date is None:
-        operating_universe = set(strategy.universe) & set(adj.columns)
-        if strategy.universe and not operating_universe:
-            raise BacktestError(
-                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
-                f"universe {sorted(strategy.universe)} (fetched columns: "
-                f"{sorted(map(str, adj.columns))})"
-            )
+        # Static mode: project the strategy-visible view + grid to the operating universe so an
+        # undeclared symbol a misbehaving provider returned cannot influence in-universe decisions
+        # (observation parity, #208). PIT keeps its per-bar as-of mask instead.
+        bars, adj = _static_operating_view(strategy, bars, adj)
 
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:
