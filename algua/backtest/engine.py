@@ -580,7 +580,7 @@ def simulate(
     executable ones.
 
     This is the public simulation step: bars -> (portfolio, executed weights, forced exits).
-    Metrics are computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+    Metrics are computed separately (see algua.backtest.metrics). Shared by run()/walk_forward().
 
     Delisting-aware exit (`delisting_records`): a position held past a symbol's last bar is realized
     at the record's terminal price and removed (see `apply_delisting_exits`); a held-into-gap symbol
