@@ -31,7 +31,8 @@ def test_import_universe_builds_timeline(tmp_path, monkeypatch):
 def test_import_universe_same_name_correction_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
     c1 = _csv(tmp_path / "a.csv", "symbol,add_date,drop_date\nAAPL,2000-01-01,\n")
-    assert CliRunner().invoke(app, ["data", "import-universe", "U", "--file", str(c1)]).exit_code == 0
+    first = CliRunner().invoke(app, ["data", "import-universe", "U", "--file", str(c1)])
+    assert first.exit_code == 0
     c2 = _csv(tmp_path / "b.csv", "symbol,add_date,drop_date\nMSFT,2000-01-01,\n")
     res = CliRunner().invoke(app, ["data", "import-universe", "U", "--file", str(c2)])
     assert res.exit_code != 0
