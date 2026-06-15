@@ -42,12 +42,13 @@ def _static_operating_view(
     so a misbehaving provider's undeclared symbols never enter the loop view, the fast-path
     signal_panel, the weights/grid, or the fundamentals/news sidecars (observation parity, #208).
 
-    Fails closed when a declared universe has no available column (existing #179 behavior). No-op
-    when the strategy declares no universe (already forced flat — every weight rejected with
-    allowed=empty) or for a compliant provider (adj.columns subset of strategy.universe)."""
-    if not strategy.universe:
-        return bars, adj
-    operating = sorted(set(strategy.universe) & set(adj.columns))
+    Fails closed when there is no available declared symbol (empty operating universe) — this
+    absorbs the existing #179 empty-intersection guard AND the empty-declared-universe case. No-op
+    for a compliant provider (adj.columns ⊆ strategy.universe)."""
+    # Order-preserving intersection: keep adj's existing column order so a compliant provider is a
+    # STRICT no-op (no reorder). Column-only projection on adj => adj.index is untouched.
+    universe = set(strategy.universe)
+    operating = [c for c in adj.columns if c in universe]
     if not operating:
         raise BacktestError(
             f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
@@ -57,10 +58,18 @@ def _static_operating_view(
     return bars[bars["symbol"].isin(operating)], adj.loc[:, operating]
 ```
 
-- `adj.loc[:, operating]` — label column-select, order-stable, preserves `columns.name`;
-  `operating ⊆ adj.columns` by construction so no NaN is introduced and no reindex fill occurs.
+- `adj.loc[:, operating]` — label column-select, **column-only** (rows/`adj.index` untouched),
+  order-stable, preserves `columns.name`; `operating ⊆ adj.columns` so no NaN/reindex-fill.
 - `bars` is long-format (a `symbol` column); filter by membership.
-- `operating` is non-empty whenever we project, so the projected `bars` is non-empty.
+- `operating` is non-empty whenever we return normally, so the projected `bars` is non-empty.
+- **Empty declared universe** (`universe == []`) now yields `operating == []` → fails closed.
+  This reverses an earlier "don't project" lean, per GATE-1: "don't project" would leave the full
+  panel observable (an observation leak), and forced-flat closes only the *trade* path, not what
+  the strategy *sees*. The change is a no-op for every reachable case — `universe == []` makes
+  `_fetch_symbols` return `[]`, a compliant `get_bars([])` returns empty, and `simulate` already
+  raises "provider returned no bars" *before* this helper (covered by `test_empty_universe_data_raises`).
+  The only case this newly fails-closed is a provider returning data for an empty request — a
+  contract violation that should fail closed, not show a full panel.
 
 ### Call sites (static mode only)
 
@@ -86,12 +95,30 @@ def _static_operating_view(
 
 - **Static mode only.** PIT (`universe_by_date is not None`) already masks per-bar to as-of
   members; live only feeds `strategy.universe`. No change to either.
-- **Empty intersection** still fails closed (unchanged message).
-- **Empty declared universe** (`universe == []`) is NOT projected — preserves today's behavior
-  (full panel visible but every nonzero weight already rejected with `allowed=∅`, i.e. a
-  forced-flat strategy). Matches the existing guard condition `if strategy.universe and not ...`.
-- **Compliant provider** (`adj.columns ⊆ strategy.universe`) → `operating == adj.columns` → pure
-  no-op (acceptance criterion).
+- **Empty intersection / empty declared universe** both fail closed via the single
+  `if not operating` guard (see helper note above).
+- **Compliant provider** (`adj.columns ⊆ strategy.universe`) → `operating == adj.columns` (same
+  order) → pure no-op (acceptance criterion).
+
+### GATE-1 decisions on declined findings (recorded for the reviewer)
+
+- **`holdout_window` grid consistency (declined — Codex + OpenCode flagged MEDIUM).** The
+  projection is **column-only** on `adj`; it never drops index rows. `holdout_window` reproduces
+  the grid via index **length** (`len(_adj_grid(bars).index)`), which column-selection leaves
+  unchanged. So `simulate`'s grid and `holdout_window`'s grid stay identical (same `n`, same
+  boundary), the "reproduces build_portfolio's grid" invariant holds, and the #192 single-use
+  holdout identity is unaffected. No `holdout_window` change. (Both reviewers assumed the
+  projection dropped timestamp rows; it does not.)
+- **Phantom undeclared-only timestamps (declined — OpenCode LOW, out of scope).** If a provider
+  returns an undeclared symbol trading on dates no declared symbol has, `adj.index` retains those
+  dates (all-NaN for operating columns). This is pre-existing (the grid is built from full bars
+  today) and is NOT an observation leak — the row-filtered `view` shows only declared history.
+  Cleaning it (project bars *before* the pivot) would change the grid index and force a matching
+  `holdout_window` change — higher risk to the #192 identity for a doubly-pathological corner.
+  Out of scope; possible follow-up.
+- **`static_universe` redundancy (kept — defense-in-depth).** After projection,
+  `set(strategy.universe) & set(columns) == set(columns)` inside `_decision_weights`/`_fast_weights`.
+  Keep it (with a comment): it still fails closed if those private fns are ever called unprojected.
 
 ## Behavior change
 
