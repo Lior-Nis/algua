@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -54,6 +54,9 @@ from algua.data.news_schema import (
 )
 from algua.data.schema import empty_bars, to_bar_schema
 from algua.data.timeframes import validate_timeframe
+
+if TYPE_CHECKING:
+    from algua.backtest.delisting import DelistingRecord
 
 
 class SnapshotNotFound(LookupError):
@@ -338,7 +341,7 @@ class DataStore:
             metadata=metadata, frame=clean.reset_index(drop=True), filename="delistings.parquet"
         )
 
-    def read_delistings(self, as_of: str | None = None) -> dict[str, list]:
+    def read_delistings(self, as_of: str | None = None) -> dict[str, list[DelistingRecord]]:
         """Point-in-time delistings read: the latest DELISTINGS snapshot with metadata.as_of <=
         `as_of` (or the latest overall when `as_of is None`). Returns
         {symbol: list[DelistingRecord]} (multiple events per symbol allowed). Empty dict if none."""
@@ -353,7 +356,7 @@ class DataStore:
             return {}
         latest = max(records, key=lambda r: r.metadata.as_of)
         frame = pd.read_parquet(self.data_dir / latest.data_path)
-        out: dict[str, list] = {}
+        out: dict[str, list[DelistingRecord]] = {}
         for row in frame.itertuples(index=False):
             out.setdefault(str(row.symbol), []).append(
                 DelistingRecord(
