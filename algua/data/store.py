@@ -7,7 +7,7 @@ import os
 import shutil
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -254,6 +254,7 @@ class DataStore:
         source: str,
         provider: str = "local",
         source_metadata: dict[str, str] | None = None,
+        require_immutable: bool = False,
     ) -> SnapshotRecord:
         clean_symbols = normalize_symbols(symbols)
         frame = pd.DataFrame(
@@ -271,12 +272,34 @@ class DataStore:
             universe=universe,
             source_metadata=source_metadata,
         )
+
+        conflict_check = None
+        if require_immutable:
+            def conflict_check(committed, rec):  # noqa: E306
+                for other in committed:
+                    if (
+                        other.dataset == Dataset.UNIVERSES.value
+                        and other.metadata.universe == universe
+                        and other.metadata.start == effective_date
+                        and other.content_hash != rec.content_hash
+                    ):
+                        raise ValueError(
+                            f"universe {universe!r} already has a DIFFERENT membership on "
+                            f"{effective_date} (immutable; corrections require a new name)"
+                        )
+
         return self._ingest_parquet(
-            metadata=metadata, frame=frame, filename="universe.parquet"
+            metadata=metadata, frame=frame, filename="universe.parquet",
+            conflict_check=conflict_check,
         )
 
     def _ingest_parquet(
-        self, *, metadata: SnapshotMetadata, frame: pd.DataFrame, filename: str
+        self,
+        *,
+        metadata: SnapshotMetadata,
+        frame: pd.DataFrame,
+        filename: str,
+        conflict_check: Callable[[list[SnapshotRecord], SnapshotRecord], None] | None = None,
     ) -> SnapshotRecord:
         """Hash a frame to parquet, dedup on snapshot id, write it, and append the manifest record.
 
@@ -303,7 +326,7 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet",
         )
-        return self.manifest.append_if_absent(rec)
+        return self.manifest.append_if_absent(rec, conflict_check=conflict_check)
 
     def clear_staging(self, *, max_age_seconds: float = 3600.0) -> None:
         """Remove stale streamed-import staging dirs (crash residue) older than `max_age_seconds`.
