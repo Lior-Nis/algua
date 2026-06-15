@@ -78,6 +78,12 @@ SELECT 1 FROM holdout_evaluations
   critical section (#161 atomicity); a **pending** reservation blocks exactly like a committed burn
   (no `committed_at` filter); `release`/`finalize` semantics (#193) are untouched.
 - **No schema change, no new columns, no hashing.** `SCHEMA_VERSION` stays 23.
+- **Inverted-interval fail-closed (GATE-1 round 2, Codex):** the overlap predicate only fires for a
+  well-formed interval; a malformed non-NULL row with `holdout_start > holdout_end` would slip both
+  the NULL branch and the overlap test and fail *open*. `reserve_holdout` validates
+  `holdout_start <= holdout_end` on the incoming reservation (reject otherwise) — `holdout_window`
+  already produces a well-formed interval by construction (`idx[train_n] <= idx[-1]`), so this is a
+  defensive guard on the primitive, not a behavior change on the happy path.
 
 **Intended behavior change (documented, not a bug):** re-evaluating a strategy over an *overlapping*
 OOS calendar window now requires the human-only `--allow-holdout-reuse` **even when the data source
@@ -143,6 +149,11 @@ enforcing in `promotion_preflight` covers every burn path.
   `select_provider`.
 - **Live/mutable-provider promote path** — the reproducible-source guard fail-closes it; wiring such
   a provider is separate work.
+- **Declined at GATE-1 round 2:** an *agent-accessible* "corrected-snapshot" re-evaluation override
+  (Gemini) — that would reopen the multiple-testing defense #137 deliberately made human-only; the
+  human `--allow-holdout-reuse` is the intended escape. A composite
+  `(strategy_id, holdout_start, holdout_end)` index (Gemini/Codex LOW) — the deep reviewer judged the
+  existing `strategy_id` index adequate at current scale; revisit if the table grows.
 
 ## Testing
 
