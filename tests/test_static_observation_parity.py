@@ -8,9 +8,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
+import pytest
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import run, verify_signal_panel_parity
+from algua.backtest.engine import BacktestError, run, simulate, verify_signal_panel_parity
 from algua.contracts.types import ExecutionContract
 from algua.data.fundamentals_schema import to_fundamentals_schema
 from algua.data.news_schema import to_news_schema
@@ -210,3 +211,62 @@ def test_news_sidecar_excludes_undeclared_symbol() -> None:
     )
     assert recorder.seen, "news signal was never invoked"
     assert "ZZZ" not in recorder.seen
+
+
+def test_compliant_provider_is_a_noop() -> None:
+    """A compliant provider (returns exactly the declared universe) runs cleanly through the
+    projection and produces the standard metric keys (no projection-induced break)."""
+
+    def ew(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(1.0 / len(syms), index=syms) if syms else pd.Series(dtype="float64")
+
+    strat = _loop_strategy(ew)
+    res = run(strat, SyntheticProvider(seed=3), START, END)
+    for key in ["total_return", "sharpe", "n_rebalances", "avg_gross_exposure"]:
+        assert key in res.metrics
+
+
+def test_compliant_provider_preserves_weight_columns_and_order() -> None:
+    """Projection is order-preserving and a strict no-op for a compliant provider: the effective
+    weights cover exactly the declared universe, in adj-column order."""
+
+    def ew(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(1.0 / len(syms), index=syms) if syms else pd.Series(dtype="float64")
+
+    strat = _loop_strategy(ew)
+    _pf, weights_eff = simulate(strat, SyntheticProvider(seed=3), START, END)
+    assert list(weights_eff.columns) == ["AAA", "BBB"]
+
+
+def test_provider_returns_only_undeclared_fails_closed() -> None:
+    """All declared symbols missing (provider returns only an undeclared symbol) → fail closed."""
+
+    class _OnlyWrongProvider:
+        def get_bars(self, symbols, start, end, timeframe):  # noqa: ANN001
+            return SyntheticProvider(seed=0).get_bars(["ZZZ"], start, end, timeframe)
+
+    strat = _loop_strategy(_ViewRecorder())
+    with pytest.raises(BacktestError, match="no fetched price data for any symbol"):
+        run(strat, _OnlyWrongProvider(), START, END)
+
+
+def test_empty_declared_universe_fails_closed_if_provider_returns_data() -> None:
+    """Empty declared universe + a (contract-violating) provider that returns data for an empty
+    request → fail closed (operating universe is empty). #208 reversed the prior 'show full panel'
+    behavior; this is a no-op for compliant providers (empty request → no bars → earlier guard)."""
+
+    class _DataForEmptyRequestProvider:
+        def get_bars(self, symbols, start, end, timeframe):  # noqa: ANN001
+            # Ignore the (empty) request and return data anyway — a double contract violation.
+            return SyntheticProvider(seed=0).get_bars(["AAA", "BBB"], start, end, timeframe)
+
+    cfg = StrategyConfig(
+        name="obs_empty", universe=[],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={}, construction="passthrough",
+    )
+    strat = LoadedStrategy(config=cfg, signal_fn=_ViewRecorder(), construct_fn=_passthrough)
+    with pytest.raises(BacktestError, match="no fetched price data for any symbol"):
+        run(strat, _DataForEmptyRequestProvider(), START, END)
