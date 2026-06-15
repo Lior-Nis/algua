@@ -198,3 +198,33 @@ def test_sweep_single_combo_var_zero():
                 grid={"lookback": [40]}, windows=4, holdout_frac=0.2)
     assert res.trial_sharpe_count == 1
     assert res.trial_sharpe_var_ann == 0.0
+
+
+def _rec(mean_sharpe: float) -> dict:
+    return {"stability": {"mean_sharpe": mean_sharpe}}
+
+
+def test_trial_sharpe_stats_uses_mean_sharpe_not_ranking_score():
+    from algua.backtest.sweep import _trial_sharpe_stats
+
+    # Canonical dispersion is over stability["mean_sharpe"], independent of the ranking `score`.
+    count, mean, var = _trial_sharpe_stats([_rec(0.2), _rec(0.4), _rec(0.6)])
+    assert count == 3
+    assert mean == pytest.approx(0.4)
+    assert var == pytest.approx(0.04)  # var([0.2,0.4,0.6], ddof=1)
+
+
+def test_trial_sharpe_stats_single_combo_var_zero():
+    from algua.backtest.sweep import _trial_sharpe_stats
+
+    assert _trial_sharpe_stats([_rec(0.5)]) == (1, 0.5, 0.0)
+
+
+def test_trial_sharpe_stats_fails_closed_on_any_nonfinite():
+    from algua.backtest.sweep import _trial_sharpe_stats
+
+    # A degenerate sweep (most combos NaN, one finite) must NOT record a tiny dispersion that
+    # would weaken the DSR — it fails closed so the pooled accessor returns None downstream.
+    degenerate = [_rec(0.5), _rec(float("nan")), _rec(float("inf"))]
+    assert _trial_sharpe_stats(degenerate) == (0, None, None)
+    assert _trial_sharpe_stats([]) == (0, None, None)

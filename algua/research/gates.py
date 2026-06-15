@@ -148,7 +148,6 @@ class GateDecision:
     dsr_binding: bool = False
     dsr_confidence: float | None = None
     dsr_skip_reason: str | None = None
-    dsr_sr_star: float | None = None
     dsr_n_trials: int | None = None
     dsr_trial_sr_var_ann: float | None = None
     dsr_t: int | None = None
@@ -180,7 +179,6 @@ class GateDecision:
             "dsr_binding": self.dsr_binding,
             "dsr_confidence": _f(self.dsr_confidence),
             "dsr_skip_reason": self.dsr_skip_reason,
-            "dsr_sr_star": _f(self.dsr_sr_star),
             "dsr_n_trials": self.dsr_n_trials,
             "dsr_trial_sr_var_ann": _f(self.dsr_trial_sr_var_ann),
             "dsr_t": self.dsr_t,
@@ -291,7 +289,6 @@ def evaluate_gate(
     # dispersion is available). When not binding it is omitted entirely so `passed` is unchanged.
     # Unit conversion lives here: holdout Sharpe and trial variance are ANNUALIZED; DSR per-period.
     dsr_conf: float | None = None
-    dsr_sr_star: float | None = None
     dsr_skip_reason: str | None = None
     n_for_dsr = n_combos if n_combos is not None else 1
     t_hold = int(wf.holdout_metrics["n_bars"])
@@ -327,7 +324,6 @@ def evaluate_gate(
         dsr_binding=bool(dsr_binding),
         dsr_confidence=dsr_conf,
         dsr_skip_reason=dsr_skip_reason,
-        dsr_sr_star=dsr_sr_star,
         dsr_n_trials=(n_for_dsr if dsr_binding else None),
         dsr_trial_sr_var_ann=(dsr_trial_var_ann if dsr_binding else None),
         dsr_t=(t_hold if dsr_binding else None),

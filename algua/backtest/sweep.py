@@ -139,6 +139,31 @@ def _rank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=_key, reverse=True)
 
 
+def _trial_sharpe_stats(
+    records: list[dict[str, Any]],
+) -> tuple[int, float | None, float | None]:
+    """Per-combo trial-Sharpe ``(count, mean, sample-variance)`` for the DSR evidence layer (#211).
+
+    Uses each combo's CANONICAL per-combo Sharpe — the mean-window Sharpe
+    (``stability["mean_sharpe"]``) — NOT the ranking ``score``: ``score`` is ``rank_by``-dependent
+    (it is ``min_sharpe`` when ranking by worst window), a different statistic from the holdout
+    Sharpe the DSR compares against, which would mis-calibrate the benchmark.
+
+    FAILS CLOSED — returns ``(0, None, None)`` — when the sweep is degenerate (no combos, or ANY
+    non-finite per-combo Sharpe). Silently dropping non-finite combos would make the recorded count
+    undercount the trials the DSR's N still counts, shrinking the dispersion and WEAKENING the gate;
+    None stats instead make the pooled accessor return None so the binding DSR check fails closed.
+    Variance is sample variance (``ddof=1``) for count ≥ 2, and ``0.0`` for a single combo.
+    """
+    combo_sharpes = [r["stability"]["mean_sharpe"] for r in records]
+    if not combo_sharpes or not all(math.isfinite(s) for s in combo_sharpes):
+        return 0, None, None
+    count = len(combo_sharpes)
+    mean = float(np.mean(combo_sharpes))
+    var = float(np.var(combo_sharpes, ddof=1)) if count >= 2 else 0.0
+    return count, mean, var
+
+
 _RANK_KEYS = {"mean_sharpe", "min_sharpe"}
 
 
@@ -342,17 +367,7 @@ def sweep(
     ranked = _rank_records(records)
     best = {"params": ranked[0]["params"], "score": ranked[0]["score"]}
 
-    # Trial-Sharpe dispersion for the DSR evidence layer (#211): variance of the per-combo
-    # ranking Sharpes (annualized), in COMBO order. Finite scores only; ddof=1 for count>=2.
-    finite_scores = [r["score"] for r in records if math.isfinite(r["score"])]
-    t_count = len(finite_scores)
-    if t_count >= 2:
-        t_mean = float(np.mean(finite_scores))
-        t_var = float(np.var(finite_scores, ddof=1))
-    elif t_count == 1:
-        t_mean, t_var = float(finite_scores[0]), 0.0
-    else:
-        t_mean, t_var = None, None
+    t_count, t_mean, t_var = _trial_sharpe_stats(records)
 
     return SweepResult(
         strategy=strategy.name,
