@@ -178,6 +178,24 @@ def all_factors() -> list[FactorSpec]:
     return [_REGISTRY[k] for k in sorted(_REGISTRY)]
 
 
+def load_factor_callable(spec: FactorSpec) -> Callable[..., Any]:
+    """Resolve a FactorSpec back to its function object via ``import_path`` ("module:qualname").
+    The catalogue scan already imported the module, so this is import-safe. Fails closed
+    (``FactorNotFound``) if the resolved object is not the matching stamped factor — guarding
+    against a spec whose import_path drifted off its function."""
+    module_name, _, qualname = spec.import_path.partition(":")
+    obj: Any = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        try:
+            obj = getattr(obj, part)
+        except AttributeError:
+            raise FactorNotFound(spec.name) from None
+    resolved = getattr(obj, _SPEC_ATTR, None)
+    if resolved is None or resolved.name != spec.name:
+        raise FactorNotFound(spec.name)
+    return obj
+
+
 def filter_factors(
     *, tag: str | None = None, kind: FactorKind | None = None
 ) -> list[FactorSpec]:
