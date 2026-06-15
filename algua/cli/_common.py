@@ -79,6 +79,26 @@ def resolve_eval_inputs(
     return strategy, provider, utc(start), utc(end)
 
 
+def resolve_delisting_inputs(
+    delistings_name: str | None, end_dt: datetime
+) -> tuple[Mapping[str, list] | None, list[dict[str, str]] | None]:
+    """Resolve opt-in delisting records as-of end_dt (mirror of resolve_universe_inputs).
+
+    ``delistings_name is None`` (no ``--delistings``) => ``(None, None)``.
+    Raises ``ValueError`` if no delistings snapshot is effective on or before ``end_dt``.
+    """
+    if delistings_name is None:
+        return None, None
+    records = DataStore(get_settings().data_dir).read_delistings(as_of=end_dt.isoformat())
+    if not records:
+        raise ValueError(
+            f"--delistings {delistings_name!r}: no delistings snapshot effective on or before "
+            f"{end_dt.date().isoformat()}"
+        )
+    provenance = [{"name": delistings_name, "symbols": str(len(records))}]
+    return records, provenance
+
+
 def resolve_universe_inputs(
     universe_name: str | None, start_dt: datetime, end_dt: datetime
 ) -> tuple[Mapping[date, Collection[str]] | None, list[dict[str, str]] | None]:
