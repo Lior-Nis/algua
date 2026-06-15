@@ -99,9 +99,10 @@ def promotion_preflight(
     # provider for an agent BEFORE any provider read (verify_signal_panel_parity below reads bars).
     # Humans are exempt (they accept the cost, mirroring --allow-non-pit). select_provider exposes
     # only demo/snapshot today; this fail-closes a future mutable/live provider. Duck-typed getattr
-    # avoids a registry->data import-boundary violation.
+    # avoids a registry->data import-boundary violation; `is not True` (not just falsy) so a future
+    # provider with a truthy-but-not-True `reproducible` cannot slip the guard (fail closed).
     if (actor is Actor.AGENT and getattr(provider, "snapshot_id", None) is None
-            and not getattr(provider, "reproducible", False)):
+            and getattr(provider, "reproducible", False) is not True):
         raise ValueError(
             "agent research promote requires a reproducible data source: an ingested snapshot "
             "(--snapshot) or a deterministic provider. A non-reproducible/live provider's bars may "
