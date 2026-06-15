@@ -5,12 +5,16 @@ the synthetic name uses the reserved `__factor__:` prefix and nothing here touch
 from __future__ import annotations
 
 import math
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from algua.contracts.types import ExecutionContract
+from algua.backtest.engine import run as run_backtest
+from algua.contracts.types import DataProvider, ExecutionContract
 from algua.features.catalogue import FactorSpec, load_factor_callable
 from algua.portfolio.construction import get_construction_policy, validate_construction_params
 from algua.strategies.base import LoadedStrategy, StrategyConfig
@@ -139,3 +143,75 @@ def forward_returns(adj: pd.DataFrame, *, lag: int, horizon: int) -> pd.DataFram
     entry = adj.shift(-lag)
     exit_ = adj.shift(-(lag + horizon))
     return exit_ / entry - 1.0
+
+
+@dataclass
+class FactorEvalResult:
+    factor: str
+    standalone: bool
+    params: dict[str, Any]
+    construction: str
+    construction_params: dict[str, Any]
+    horizon: int
+    backtest: dict[str, Any]
+    ic: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "factor": self.factor,
+            "standalone": self.standalone,
+            "params": self.params,
+            "construction": self.construction,
+            "construction_params": self.construction_params,
+            "horizon": self.horizon,
+            "backtest": self.backtest,
+            "ic": self.ic,
+        }
+
+
+def evaluate_factor(
+    spec: FactorSpec,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    symbols: list[str],
+    params: dict[str, Any],
+    construction: str,
+    construction_params: dict[str, Any],
+    horizon: int = 1,
+    execution: ExecutionContract | None = None,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
+) -> FactorEvalResult:
+    """Evaluate one standalone factor: a real PIT backtest (existing engine) + rank IC/IR over the
+    same fetched bars. IC is computed over the declared `symbols` (static); the backtest block
+    honors `--universe` PIT membership via the engine. Touches no registry/holdout/gate."""
+    if horizon < 1:
+        raise ValueError(f"horizon must be >= 1, got {horizon}")
+    strategy = build_factor_strategy(
+        spec, symbols=symbols, params=params, construction=construction,
+        construction_params=construction_params, execution=execution,
+    )
+    bt = run_backtest(
+        strategy, provider, start, end,
+        universe_by_date=universe_by_date, universe_name=universe_name,
+        universe_snapshots=universe_snapshots,
+    )
+    bars = provider.get_bars(sorted(set(symbols)), start, end, "1d")
+    panel = score_panel(strategy, bars)
+    fwd = forward_returns(
+        _adj_grid(bars), lag=strategy.execution.decision_lag_bars, horizon=horizon
+    )
+    ic = factor_ic(panel, fwd)
+    return FactorEvalResult(
+        factor=spec.name,
+        standalone=spec.standalone,
+        params=params,
+        construction=construction,
+        construction_params=construction_params,
+        horizon=horizon,
+        backtest=bt.to_dict(),
+        ic=ic,
+    )
