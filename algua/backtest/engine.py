@@ -157,10 +157,12 @@ def _decision_weights(
 
     Point-in-time universe (`universe_by_date`): when provided, the strategy only ever sees the
     symbols that were as-of-t members (the snapshot with the greatest effective_date <= t),
-    eliminating survivorship bias. `None` reproduces the original static behavior exactly (the
-    full fetched panel is visible every bar). Empty as-of membership => that bar is flat. A weight
-    returned for a non-member is a strategy bug and raises `BacktestError`. As-of membership at t
-    uses only snapshots dated <= t, so the masking introduces no look-ahead.
+    eliminating survivorship bias. `None` is static mode: the operating universe (declared AND
+    available) is visible every bar — `simulate` projects `bars`/`adj` to it via
+    `_static_operating_view` before this loop, so an undeclared symbol can't enter the view (#208).
+    Empty as-of membership => that bar is flat. A weight returned for a non-member is a strategy bug
+    and raises `BacktestError`. As-of membership at t uses only snapshots dated <= t, so the masking
+    introduces no look-ahead.
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars

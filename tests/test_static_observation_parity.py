@@ -84,7 +84,20 @@ class _PanelRecorder:
         return pd.DataFrame(0.0, index=adj.index, columns=adj.columns)
 
 
-def _fast_strategy(panel: _PanelRecorder) -> LoadedStrategy:
+class _ConstructViewRecorder:
+    """An identity construction policy that ALSO records the symbols present in the per-bar
+    construction view (`view_t`). Used to pin that the fast-path construct step never sees an
+    undeclared symbol either (not just signal_panel)."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    def __call__(self, scores: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        self.seen.update(view["symbol"].unique())
+        return scores
+
+
+def _fast_strategy(panel: _PanelRecorder, construct=None) -> LoadedStrategy:  # noqa: ANN001
     cfg = StrategyConfig(
         name="obs_fast", universe=["AAA", "BBB"],
         execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
@@ -97,18 +110,24 @@ def _fast_strategy(panel: _PanelRecorder) -> LoadedStrategy:
         return pd.Series(0.0, index=syms) if syms else pd.Series(dtype="float64")
 
     return LoadedStrategy(
-        config=cfg, signal_fn=flat_loop, signal_panel_fn=panel, construct_fn=_passthrough
+        config=cfg, signal_fn=flat_loop, signal_panel_fn=panel,
+        construct_fn=construct if construct is not None else _passthrough,
     )
 
 
 def test_fast_path_panel_excludes_undeclared_symbol() -> None:
     panel = _PanelRecorder()
-    strat = _fast_strategy(panel)
+    construct = _ConstructViewRecorder()
+    strat = _fast_strategy(panel, construct=construct)
     # run() drives simulate(), which selects the fast path (signal_panel_fn set, static mode).
     run(strat, _ExtraSymbolProvider(extra="ZZZ", seed=3), START, END)
     assert panel.seen, "signal_panel was never invoked"
     assert "ZZZ" not in panel.seen
     assert panel.seen <= {"AAA", "BBB"}
+    # The per-bar construct view (view_t) is also projected — undeclared symbol never reaches it.
+    assert construct.seen, "construct was never invoked"
+    assert "ZZZ" not in construct.seen
+    assert construct.seen <= {"AAA", "BBB"}
 
 
 def test_verify_signal_panel_parity_panel_excludes_undeclared_symbol() -> None:
