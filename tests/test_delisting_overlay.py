@@ -103,3 +103,17 @@ def test_symbol_never_traded_skipped():
     w = _grid({"A": [1.0] * 4, "B": [0.0] * 4})
     adj_x, w_x, forced = apply_delisting_exits(adj, w, None)
     assert forced == []
+
+
+def test_vendor_date_one_day_past_last_trade_resolves_to_terminal_bar():
+    # B's last TRADED bar is index 1 (Jan 2); the union panel index has a Jan 3 row only because
+    # A traded then (B is NaN there). A vendor delisting_date of Jan 3 must resolve to B's own
+    # terminal bar (Jan 2) and apply there — not fail closed with a misleading "no record".
+    adj = _grid({"A": [10, 11, 12, 13], "B": [10, 11, np.nan, np.nan]})
+    w = _grid({"A": [0.5] * 4, "B": [0.5, 0.5, 0.0, 0.0]})
+    recs = {"B": [DelistingRecord(date(2020, 1, 3), 5.0, "vendor")]}
+    adj_x, w_x, forced = apply_delisting_exits(adj, w, recs)
+    T = adj.index[1]
+    assert forced == [{"symbol": "B", "bar": T.isoformat(),
+                       "terminal_price": 5.0, "source": "vendor"}]
+    assert adj_x.loc[T, "B"] == 5.0 and (w_x.loc[T:, "B"] == 0.0).all()

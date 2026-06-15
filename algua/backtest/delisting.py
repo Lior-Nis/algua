@@ -33,8 +33,10 @@ class DelistingExitError(Exception):
 
 
 def _resolve_bar(index: pd.DatetimeIndex, d: date) -> pd.Timestamp | None:
-    """Greatest bar whose date is <= d (as-of in the panel's own index). None if d precedes
-    the first bar. Calendar-free — uses only the panel index."""
+    """Greatest bar in `index` whose date is <= d (as-of). None if d precedes the first bar.
+    Calendar-free. Callers pass the SYMBOL's own traded bars (not the union panel index) so a
+    vendor delisting_date that lands a day past the last trade — on a date present in the union
+    index only because another symbol traded then — still resolves to this symbol's terminal bar."""
     eligible = [ts for ts in index if ts.date() <= d]
     return eligible[-1] if eligible else None
 
@@ -63,28 +65,29 @@ def apply_delisting_exits(
         if T is None:
             continue  # never traded in this panel
         first_bar = col.first_valid_index()
+        sym_index = col.dropna().index  # this symbol's OWN traded bars (T == sym_index[-1])
         sym_records = list(records.get(c, []))
 
-        # Integrity: any record dated within the panel whose resolved bar has REAL bars after it.
+        # Integrity: a record dated within the panel that resolves (against this symbol's own
+        # bars) to a bar BEFORE its terminal bar means the symbol kept trading past the stated
+        # delisting — a data inconsistency. Fail closed.
         for r in sym_records:
             if r.delisting_date > panel_end_date:
                 continue
-            d_bar = _resolve_bar(adj.index, r.delisting_date)
-            if d_bar is None:
-                continue
-            later = col.loc[col.index > d_bar]
-            if bool(later.notna().any()):
+            d_bar = _resolve_bar(sym_index, r.delisting_date)
+            if d_bar is not None and d_bar != T:
                 raise DelistingExitError(
                     f"{c}: bars exist after stated delisting {r.delisting_date.isoformat()} "
-                    f"(resolved bar {d_bar.date().isoformat()})"
+                    f"(resolved bar {d_bar.date().isoformat()}, last bar {T.date().isoformat()})"
                 )
 
-        # Applicable record: in [first_bar, panel_end] and resolving exactly to T.
+        # Applicable record: in [first_bar, panel_end] and resolving (against this symbol's own
+        # bars) exactly to its terminal bar T.
         candidates = [
             r
             for r in sym_records
             if first_bar.date() <= r.delisting_date <= panel_end_date
-            and _resolve_bar(adj.index, r.delisting_date) == T
+            and _resolve_bar(sym_index, r.delisting_date) == T
         ]
         if len(candidates) >= 2:
             raise DelistingExitError(
