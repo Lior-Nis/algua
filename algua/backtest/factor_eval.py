@@ -4,7 +4,11 @@ compute construction-free rank IC/IR. Factors are NEVER registered, gate-tokened
 the synthetic name uses the reserved `__factor__:` prefix and nothing here touches the registry."""
 from __future__ import annotations
 
+import math
 from typing import Any
+
+import numpy as np
+import pandas as pd
 
 from algua.contracts.types import ExecutionContract
 from algua.features.catalogue import FactorSpec, load_factor_callable
@@ -48,3 +52,55 @@ def build_factor_strategy(
         construct_fn=get_construction_policy(construction),
         signal_fn=fn,
     )
+
+
+def factor_ic(
+    score_panel: pd.DataFrame,
+    forward_returns: pd.DataFrame,
+    *,
+    min_cross_section: int = 3,
+) -> dict[str, Any]:
+    """Cross-sectional rank (Spearman) Information Coefficient summary.
+
+    Per timestamp: Spearman correlation between the factor scores and the forward returns over the
+    symbols finite in both. Bars with a cross-section narrower than `min_cross_section`, or a
+    degenerate (zero-variance -> NaN) correlation, are skipped. Aggregates: mean IC, sample IC std
+    (ddof=1), IR = mean/std, t-stat = IR*sqrt(n), hit rate (share of IC>0), n_obs. A run with
+    < 2 usable bars (or zero IC variance) returns explicit None rather than a misleading number.
+
+    NOT multiple-testing corrected — the t-stat is raw (FDR accounting is #140 slice E)."""
+    ics: list[float] = []
+    common = score_panel.index.intersection(forward_returns.index)
+    for t in common:
+        pair = pd.DataFrame(
+            {"s": score_panel.loc[t], "r": forward_returns.loc[t]}
+        )
+        pair = pair[np.isfinite(pair["s"]) & np.isfinite(pair["r"])]
+        if len(pair) < min_cross_section:
+            continue
+        ic = pair["s"].corr(pair["r"], method="spearman")
+        if pd.notna(ic):
+            ics.append(float(ic))
+    n = len(ics)
+    base: dict[str, Any] = {
+        "method": "spearman",
+        "n_obs": n,
+        "min_cross_section": min_cross_section,
+        "fdr_corrected": False,
+    }
+    if n < 2:
+        return {**base, "mean_ic": None, "ic_std": None, "ir": None,
+                "t_stat": None, "hit_rate": None}
+    arr = np.array(ics, dtype=float)
+    mean_ic = float(arr.mean())
+    ic_std = float(arr.std(ddof=1))
+    ir = mean_ic / ic_std if ic_std > 0 else None
+    t_stat = ir * math.sqrt(n) if ir is not None else None
+    return {
+        **base,
+        "mean_ic": mean_ic,
+        "ic_std": ic_std,
+        "ir": ir,
+        "t_stat": t_stat,
+        "hit_rate": float((arr > 0).mean()),
+    }
