@@ -92,13 +92,14 @@ def resolve_delisting_inputs(
     if delistings_name is None:
         return None, None
     store = DataStore(get_settings().data_dir)
-    records = store.read_delistings(as_of=end_dt.isoformat())
+    # Single manifest read: records and snapshot_id come from the SAME selected snapshot, so a
+    # concurrent ingest can never make the stamped provenance disagree with the loaded records.
+    records, snapshot_id = store.read_delistings_with_snapshot(as_of=end_dt.isoformat())
     if not records:
         raise ValueError(
             f"--delistings {delistings_name!r}: no delistings snapshot effective on or before "
             f"{end_dt.date().isoformat()}"
         )
-    snapshot_id = store.latest_delistings_snapshot_id(as_of=end_dt.isoformat())
     return records, snapshot_id
 
 

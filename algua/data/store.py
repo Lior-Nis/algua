@@ -353,28 +353,40 @@ class DataStore:
         rec = self._latest_delistings_record(as_of)
         return rec.snapshot_id if rec is not None else None
 
-    def read_delistings(self, as_of: str | None = None) -> dict[str, list[DelistingRecord]]:
-        """Point-in-time delistings read: the latest DELISTINGS snapshot with metadata.as_of <=
-        `as_of` (or the latest overall when `as_of is None`). Returns
-        {symbol: list[DelistingRecord]} (multiple events per symbol allowed). Empty dict if none."""
+    def _parse_delistings(self, rec: SnapshotRecord) -> dict[str, list[DelistingRecord]]:
         from algua.backtest.delisting import (  # lazy: keep algua.data off algua.backtest
             DelistingRecord,
         )
 
-        latest = self._latest_delistings_record(as_of)
-        if latest is None:
-            return {}
-        frame = pd.read_parquet(self.data_dir / latest.data_path)
+        frame = pd.read_parquet(self.data_dir / rec.data_path)
         out: dict[str, list[DelistingRecord]] = {}
         for row in frame.itertuples(index=False):
             out.setdefault(str(row.symbol), []).append(
                 DelistingRecord(
                     delisting_date=date.fromisoformat(str(row.delisting_date)),
                     terminal_price=float(row.delisting_value),
-                    source=str(latest.metadata.source),
+                    source=str(rec.metadata.source),
                 )
             )
         return out
+
+    def read_delistings(self, as_of: str | None = None) -> dict[str, list[DelistingRecord]]:
+        """Point-in-time delistings read: the latest DELISTINGS snapshot with metadata.as_of <=
+        `as_of` (or the latest overall when `as_of is None`). Returns
+        {symbol: list[DelistingRecord]} (multiple events per symbol allowed). Empty dict if none."""
+        latest = self._latest_delistings_record(as_of)
+        return self._parse_delistings(latest) if latest is not None else {}
+
+    def read_delistings_with_snapshot(
+        self, as_of: str | None = None
+    ) -> tuple[dict[str, list[DelistingRecord]], str | None]:
+        """Like `read_delistings` but returns the records AND the snapshot_id they came from,
+        selected from a SINGLE manifest read so the two can never disagree under a concurrent
+        ingest (the records and the stamped provenance id are guaranteed consistent)."""
+        latest = self._latest_delistings_record(as_of)
+        if latest is None:
+            return {}, None
+        return self._parse_delistings(latest), latest.snapshot_id
 
     def _ingest_parquet(
         self,
