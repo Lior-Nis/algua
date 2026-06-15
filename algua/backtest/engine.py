@@ -429,14 +429,10 @@ def verify_signal_panel_parity(
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
         adj = _adj_grid(bars)
-        # Same fail-closed guard as simulate(): an empty declared∩available universe would otherwise
-        # surface as a confusing out-of-universe `(allowed: [])` breach instead of this clear cause.
-        if strategy.universe and not (set(strategy.universe) & set(adj.columns)):
-            raise BacktestError(
-                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
-                f"universe {sorted(strategy.universe)} (fetched columns: "
-                f"{sorted(map(str, adj.columns))})"
-            )
+        # Project to the operating universe identically to simulate()'s static path so the panel
+        # under test sees exactly what the runtime fast path sees (observation parity, #208). Also
+        # absorbs the empty-universe fail-closed guard.
+        bars, adj = _static_operating_view(strategy, bars, adj)
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None

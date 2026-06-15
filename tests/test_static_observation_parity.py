@@ -10,7 +10,7 @@ from typing import Any
 import pandas as pd
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import run
+from algua.backtest.engine import run, verify_signal_panel_parity
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
@@ -103,6 +103,16 @@ def test_fast_path_panel_excludes_undeclared_symbol() -> None:
     strat = _fast_strategy(panel)
     # run() drives simulate(), which selects the fast path (signal_panel_fn set, static mode).
     run(strat, _ExtraSymbolProvider(extra="ZZZ", seed=3), START, END)
+    assert panel.seen, "signal_panel was never invoked"
+    assert "ZZZ" not in panel.seen
+    assert panel.seen <= {"AAA", "BBB"}
+
+
+def test_verify_signal_panel_parity_panel_excludes_undeclared_symbol() -> None:
+    panel = _PanelRecorder()
+    strat = _fast_strategy(panel)
+    # verify_signal_panel_parity fetches its own bars and runs both the panel and the loop.
+    verify_signal_panel_parity(strat, _ExtraSymbolProvider(extra="ZZZ", seed=3), START, END)
     assert panel.seen, "signal_panel was never invoked"
     assert "ZZZ" not in panel.seen
     assert panel.seen <= {"AAA", "BBB"}
