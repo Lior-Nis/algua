@@ -231,7 +231,7 @@ def import_universe(
     date; add inclusive, drop exclusive, multiple rows/symbol for re-additions). Universes are
     IMMUTABLE: a same-date membership conflict aborts before any write (corrections need a new
     name). Empty-membership change dates are rejected (deferred limitation)."""
-    with file.expanduser().open(newline="") as fh:
+    with file.expanduser().open(newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
     intervals = parse_constituents_rows(rows)
     timeline = constituents_to_snapshots(intervals)
