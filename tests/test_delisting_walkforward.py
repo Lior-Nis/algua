@@ -10,7 +10,7 @@ import pandas as pd
 
 from algua.backtest.delisting import DelistingRecord
 from algua.backtest.walkforward import walk_forward
-from tests.test_delisting_simulate import _FakeProvider, _equal_weight_ab_strategy
+from tests.test_delisting_simulate import _equal_weight_ab_strategy, _FakeProvider
 
 
 def _long_bars() -> pd.DataFrame:
