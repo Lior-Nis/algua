@@ -93,6 +93,19 @@ def promotion_preflight(
             f"research promote requires --actor agent or human, got {actor.value}")
     guard_agent_relaxations(actor, declared_combos=declared_combos,
                             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit)
+    # Reproducible-source guard (#205): an agent's holdout burn must be over reproducible bars — an
+    # immutable snapshot (snapshot_id set) or a deterministic provider (reproducible marker) — so the
+    # OOS truth it spends is identical on a re-run. Refuse a non-snapshot, non-reproducible provider
+    # for an agent BEFORE any provider read (verify_signal_panel_parity below fetches bars). Humans
+    # are exempt (they accept the cost, mirroring --allow-non-pit). select_provider exposes only
+    # demo/snapshot today; this fail-closes a future mutable/live provider. Duck-typed getattr avoids
+    # a registry->data import-boundary violation.
+    if (actor is Actor.AGENT and getattr(provider, "snapshot_id", None) is None
+            and not getattr(provider, "reproducible", False)):
+        raise ValueError(
+            "agent research promote requires a reproducible data source: an ingested snapshot "
+            "(--snapshot) or a deterministic provider. A non-reproducible/live provider's bars may "
+            "revise between runs; promote with --actor human to accept the cost.")
     rec = repo.get(name)
     # Source stage MUST be exactly BACKTESTED. validate_transition alone is too permissive here:
     # PAPER -> CANDIDATE is a legal back-step, so promoting from `paper` would otherwise pass
