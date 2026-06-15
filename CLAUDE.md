@@ -60,6 +60,18 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   historical bars into a parquet snapshot.
 - `uv run algua data ingest-universe NAME --symbols AAPL,MSFT --effective-date D` — record
   point-in-time universe membership.
+- `uv run algua data import-universe NAME --file constituents.csv` — bulk-import a PIT constituents
+  CSV (`symbol,add_date,drop_date`; add inclusive, drop exclusive; multiple rows/symbol for
+  re-additions, including delisted tickers) into the universe-snapshot timeline (one snapshot per
+  change date). Universes are IMMUTABLE — a same-date membership conflict aborts before any write
+  (corrections need a new name); an empty-membership change date is rejected (deferred limitation).
+- `uv run algua data import-delistings --file delistings.csv` — import per-symbol terminal prices
+  (`symbol,delisting_date,delisting_value`; value = per-share terminal proceeds in adj_close units,
+  strictly > 0) as a point-in-time delistings snapshot. Backtests opt in with `--delistings NAME`: a
+  held name whose bars end mid-backtest is realized at its terminal price and removed (no silent
+  survivorship drop); a held-into-gap name WITHOUT a record fails closed. `--assume-terminal-last-close`
+  realizes such a name at its last close instead, but is HUMAN-ONLY (rejected on the agent
+  `research promote` path).
 - `uv run algua data import-bars --vendor firstrate --raw-dir DIR --adjusted-dir DIR --as-of TS` —
   bulk-import local vendor files (FirstRateData: per-symbol unadjusted + adjusted), normalized to
   the bar-schema as one consolidated snapshot. Streamed (bounded RAM); `adj_close` from the adjusted
