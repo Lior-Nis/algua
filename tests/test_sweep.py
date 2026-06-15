@@ -181,3 +181,20 @@ def test_sweep_combo_error_surfaces_as_backtest_error(monkeypatch):
     with pytest.raises(BacktestError):
         sweep(_momentum(), SyntheticProvider(seed=3), START, END,
               grid={"lookback": [20, 40]}, windows=500, holdout_frac=0.2)
+
+
+def test_sweep_records_trial_sharpe_triple():
+    # Three-combo grid: count == 3, mean is not None, var >= 0.
+    res = sweep(_momentum(), SyntheticProvider(seed=3), START, END,
+                grid={"lookback": [20, 40, 60]}, windows=4, holdout_frac=0.2)
+    assert res.trial_sharpe_count == 3
+    assert res.trial_sharpe_mean is not None
+    assert res.trial_sharpe_var_ann is not None and res.trial_sharpe_var_ann >= 0.0
+
+
+def test_sweep_single_combo_var_zero():
+    # Single-combo grid: count == 1, var == 0.0 (ddof=1 undefined → 0.0 by spec).
+    res = sweep(_momentum(), SyntheticProvider(seed=3), START, END,
+                grid={"lookback": [40]}, windows=4, holdout_frac=0.2)
+    assert res.trial_sharpe_count == 1
+    assert res.trial_sharpe_var_ann == 0.0

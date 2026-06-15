@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 from threadpoolctl import threadpool_limits
 
 from algua.backtest.delisting import DelistingRecord
@@ -156,6 +157,9 @@ class SweepResult:
     rank_by: str
     ranked: list[dict[str, Any]]
     best: dict[str, Any] | None
+    trial_sharpe_count: int = 0
+    trial_sharpe_mean: float | None = None
+    trial_sharpe_var_ann: float | None = None
     code_hash: str | None = None
     dependency_hash: str | None = None
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
@@ -337,6 +341,19 @@ def sweep(
 
     ranked = _rank_records(records)
     best = {"params": ranked[0]["params"], "score": ranked[0]["score"]}
+
+    # Trial-Sharpe dispersion for the DSR evidence layer (#211): variance of the per-combo
+    # ranking Sharpes (annualized), in COMBO order. Finite scores only; ddof=1 for count>=2.
+    finite_scores = [r["score"] for r in records if math.isfinite(r["score"])]
+    t_count = len(finite_scores)
+    if t_count >= 2:
+        t_mean = float(np.mean(finite_scores))
+        t_var = float(np.var(finite_scores, ddof=1))
+    elif t_count == 1:
+        t_mean, t_var = float(finite_scores[0]), 0.0
+    else:
+        t_mean, t_var = None, None
+
     return SweepResult(
         strategy=strategy.name,
         data_source=meta["data_source"],
@@ -353,6 +370,9 @@ def sweep(
         rank_by=rank_by,
         ranked=ranked,
         best=best,
+        trial_sharpe_count=t_count,
+        trial_sharpe_mean=t_mean,
+        trial_sharpe_var_ann=t_var,
         universe_name=meta["universe_name"],
         universe_snapshots=meta["universe_snapshots"],
     )
