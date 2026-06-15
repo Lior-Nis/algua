@@ -105,3 +105,37 @@ def test_dependents_nonzero_exit_on_unloadable_without_allow_partial():
     # with --allow-partial it exits 0 but still reports
     ok_result = runner.invoke(app, ["factor", "dependents", "momentum", "--allow-partial"])
     assert ok_result.exit_code == 0
+
+
+def test_factor_eval_emits_backtest_and_ic():
+    payload = _json(runner.invoke(app, [
+        "factor", "eval", "xs_trailing_return",
+        "--demo", "--start", "2023-01-01", "--end", "2023-06-30",
+        "--symbols", "AAA,BBB,CCC",
+        "--construction", "top_k_equal_weight", "--construction-param", "top_k=1",
+        "--param", "lookback=10",
+    ]))
+    assert payload["ok"] is True
+    assert payload["factor"] == "xs_trailing_return"
+    assert payload["ic"]["method"] == "spearman"
+    assert payload["ic"]["fdr_corrected"] is False
+    assert "metrics" in payload["backtest"]
+
+
+def test_factor_eval_requires_construction():
+    result = runner.invoke(app, [
+        "factor", "eval", "xs_trailing_return", "--demo",
+        "--symbols", "AAA,BBB", "--param", "lookback=10",
+    ])
+    assert result.exit_code != 0  # typer: missing required --construction
+
+
+def test_factor_eval_rejects_non_standalone_factor():
+    result = runner.invoke(app, [
+        "factor", "eval", "momentum", "--demo", "--symbols", "AAA,BBB",
+        "--construction", "equal_weight_positive",
+    ])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "standalone" in payload["error"].lower()
