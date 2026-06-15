@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import shutil
 import time
@@ -292,6 +293,76 @@ class DataStore:
             metadata=metadata, frame=frame, filename="universe.parquet",
             conflict_check=conflict_check,
         )
+
+    def ingest_delistings(
+        self,
+        *,
+        frame: pd.DataFrame,
+        as_of: str,
+        source: str,
+        provider: str = "local",
+    ) -> SnapshotRecord:
+        """Persist a point-in-time delistings snapshot: columns symbol, delisting_date,
+        delisting_value (per-share terminal price in adj_close units, strictly > 0).
+
+        Fails closed on value <= 0 / non-finite (zero-proceeds write-off deferred) and on a
+        duplicate (symbol, delisting_date) event."""
+        required = {"symbol", "delisting_date", "delisting_value"}
+        if not required.issubset(frame.columns):
+            raise ValueError(f"delistings frame must have columns {sorted(required)}")
+        clean = frame.copy()
+        clean["symbol"] = [s.strip().upper() for s in clean["symbol"].astype(str)]
+        clean["delisting_date"] = [
+            date.fromisoformat(str(d).strip()).isoformat() for d in clean["delisting_date"]
+        ]
+        clean["delisting_value"] = clean["delisting_value"].astype(float)
+        for v in clean["delisting_value"]:
+            if not (v > 0) or not math.isfinite(v):
+                raise ValueError(
+                    "delisting_value must be finite and > 0 (zero-proceeds write-off deferred)"
+                )
+        if bool(clean.duplicated(subset=["symbol", "delisting_date"]).any()):
+            raise ValueError("duplicate (symbol, delisting_date) delisting event")
+        symbols = normalize_symbols(list(clean["symbol"]))
+        metadata = _metadata(
+            dataset=Dataset.DELISTINGS.value,
+            provider=provider,
+            symbols=symbols,
+            start=min(clean["delisting_date"]),
+            end=max(clean["delisting_date"]),
+            as_of=as_of,
+            source=source,
+            kind=Kind.DELISTING.value,
+        )
+        return self._ingest_parquet(
+            metadata=metadata, frame=clean.reset_index(drop=True), filename="delistings.parquet"
+        )
+
+    def read_delistings(self, as_of: str | None = None) -> dict[str, list]:
+        """Point-in-time delistings read: the latest DELISTINGS snapshot with metadata.as_of <=
+        `as_of` (or the latest overall when `as_of is None`). Returns
+        {symbol: list[DelistingRecord]} (multiple events per symbol allowed). Empty dict if none."""
+        from algua.backtest.delisting import (  # lazy: keep algua.data off algua.backtest
+            DelistingRecord,
+        )
+
+        records = self.manifest.list_records(Dataset.DELISTINGS.value)
+        if as_of is not None:
+            records = [r for r in records if r.metadata.as_of <= as_of]
+        if not records:
+            return {}
+        latest = max(records, key=lambda r: r.metadata.as_of)
+        frame = pd.read_parquet(self.data_dir / latest.data_path)
+        out: dict[str, list] = {}
+        for row in frame.itertuples(index=False):
+            out.setdefault(str(row.symbol), []).append(
+                DelistingRecord(
+                    delisting_date=date.fromisoformat(str(row.delisting_date)),
+                    terminal_price=float(row.delisting_value),
+                    source=str(latest.metadata.source),
+                )
+            )
+        return out
 
     def _ingest_parquet(
         self,
