@@ -65,3 +65,44 @@ def test_loop_view_excludes_undeclared_symbol() -> None:
     assert recorder.seen, "signal was never invoked"
     assert "ZZZ" not in recorder.seen
     assert recorder.seen <= {"AAA", "BBB"}
+
+
+class _PanelRecorder:
+    """A signal_panel that records the symbols it is handed and returns a FLAT (all-zero) scores
+    matrix. Paired with a flat 2-arg signal so the fast-path parity guard (which compares the panel
+    against the per-bar loop) holds."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    def __call__(self, bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        self.seen.update(bars["symbol"].unique())
+        adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        return pd.DataFrame(0.0, index=adj.index, columns=adj.columns)
+
+
+def _fast_strategy(panel: _PanelRecorder) -> LoadedStrategy:
+    cfg = StrategyConfig(
+        name="obs_fast", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=0),
+        params={}, construction="passthrough",
+    )
+
+    # Flat loop twin so the fast path's parity guard agrees with the panel (both produce 0.0).
+    def flat_loop(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        syms = sorted(view["symbol"].unique())
+        return pd.Series(0.0, index=syms) if syms else pd.Series(dtype="float64")
+
+    return LoadedStrategy(
+        config=cfg, signal_fn=flat_loop, signal_panel_fn=panel, construct_fn=_passthrough
+    )
+
+
+def test_fast_path_panel_excludes_undeclared_symbol() -> None:
+    panel = _PanelRecorder()
+    strat = _fast_strategy(panel)
+    # run() drives simulate(), which selects the fast path (signal_panel_fn set, static mode).
+    run(strat, _ExtraSymbolProvider(extra="ZZZ", seed=3), START, END)
+    assert panel.seen, "signal_panel was never invoked"
+    assert "ZZZ" not in panel.seen
+    assert panel.seen <= {"AAA", "BBB"}
