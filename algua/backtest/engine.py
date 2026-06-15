@@ -167,6 +167,9 @@ def _decision_weights(
     # Static operating universe = declared AND available: a declared symbol with no fetched price
     # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
     # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
+    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
@@ -265,6 +268,9 @@ def _fast_weights(
     # Static operating universe = declared AND available: a declared symbol with no fetched price
     # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
     # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
+    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
     # Reindex the SCORES onto the simulation grid WITHOUT filling NaN (missing score != 0 score).
     scores = panel.reindex(index=adj.index, columns=columns)
@@ -492,6 +498,31 @@ def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     return adj.sort_index()
 
 
+def _static_operating_view(
+    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Project the strategy-visible STATIC view to the operating universe (declared AND available)
+    so a misbehaving provider's undeclared symbols never reach the loop view, the fast-path
+    signal_panel, the weights/grid, or the fundamentals/news sidecars (observation parity, #208).
+
+    Fails closed when no declared symbol has fetched price data (empty operating universe) — this
+    absorbs #179's empty-intersection guard AND the empty-declared-universe case. The projection on
+    `adj` is COLUMN-ONLY (adj.index is untouched), so holdout_window's grid and the #192 single-use
+    holdout identity are unaffected. No-op for a compliant provider (adj.columns within universe).
+    """
+    universe = set(strategy.universe)
+    # Order-preserving intersection: keep adj's existing column order so a compliant provider is a
+    # STRICT no-op (no reorder, no NaN/reindex-fill since operating is a subset of adj.columns).
+    operating = [c for c in adj.columns if c in universe]
+    if not operating:
+        raise BacktestError(
+            f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+            f"universe {sorted(strategy.universe)} (fetched columns: "
+            f"{sorted(map(str, adj.columns))})"
+        )
+    return bars[bars["symbol"].isin(operating)], adj.loc[:, operating]
+
+
 def holdout_window(
     strategy: LoadedStrategy,
     provider: DataProvider,
@@ -565,13 +596,10 @@ def simulate(
     adj = _adj_grid(bars)
 
     if universe_by_date is None:
-        operating_universe = set(strategy.universe) & set(adj.columns)
-        if strategy.universe and not operating_universe:
-            raise BacktestError(
-                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
-                f"universe {sorted(strategy.universe)} (fetched columns: "
-                f"{sorted(map(str, adj.columns))})"
-            )
+        # Static mode: project the strategy-visible view + grid to the operating universe so an
+        # undeclared symbol a misbehaving provider returned cannot influence in-universe decisions
+        # (observation parity, #208). PIT keeps its per-bar as-of mask instead.
+        bars, adj = _static_operating_view(strategy, bars, adj)
 
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:
