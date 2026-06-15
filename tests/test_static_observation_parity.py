@@ -255,7 +255,7 @@ def test_compliant_provider_preserves_weight_columns_and_order() -> None:
         return pd.Series(1.0 / len(syms), index=syms) if syms else pd.Series(dtype="float64")
 
     strat = _loop_strategy(ew)
-    _pf, weights_eff = simulate(strat, SyntheticProvider(seed=3), START, END)
+    _pf, weights_eff, _forced = simulate(strat, SyntheticProvider(seed=3), START, END)
     assert list(weights_eff.columns) == ["AAA", "BBB"]
 
 
