@@ -67,6 +67,15 @@ def test_overlapping_intervals_rejected():
         constituents_to_snapshots(ivs)
 
 
+def test_open_interval_followed_by_another_rejected():
+    ivs = [
+        ConstituentInterval("A", date(2000, 1, 1), None),
+        ConstituentInterval("A", date(2010, 1, 1), None),
+    ]
+    with pytest.raises(ValueError, match="overlap"):
+        constituents_to_snapshots(ivs)
+
+
 def test_add_after_drop_rejected():
     with pytest.raises(ValueError, match="add_date.*<=.*drop_date|add_date must be"):
         parse_constituents_rows(
@@ -95,3 +104,5 @@ def test_malformed_row_rejected():
         parse_constituents_rows([{"symbol": "", "add_date": "1998-01-02", "drop_date": ""}])
     with pytest.raises(ValueError):
         parse_constituents_rows([{"symbol": "A", "add_date": "not-a-date", "drop_date": ""}])
+    with pytest.raises(ValueError):
+        parse_constituents_rows([{"symbol": "A", "add_date": "2005-01-01", "drop_date": "bad"}])
