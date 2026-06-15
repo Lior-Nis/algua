@@ -436,11 +436,11 @@ class SqliteStrategyRepository:
         # Single-use identity is the OOS INTERVAL [holdout_start, holdout_end] for the strategy,
         # PROVENANCE-INDEPENDENT (#205): the same OOS calendar window is burn-once regardless of how
         # the bars were reached (snapshot S, a different snapshot S2, or a provider P). data_source/
-        # snapshot_id are persisted as EVIDENCE only, never matched on (was: a per-provenance bucket,
-        # which let the same physical window be burned twice across provenance — the #205 hole).
+        # snapshot_id are persisted as EVIDENCE only, never matched on (was: a per-provenance
+        # bucket, which let the same physical window be burned twice across provenance — #205).
         # Defensive (GATE-1): an inverted incoming interval (start > end) would slip both the NULL
         # branch and the overlap test below and fail OPEN, so reject it. holdout_window yields a
-        # well-formed interval (idx[train_n] <= idx[-1]); this guards the primitive against a caller.
+        # well-formed interval (idx[train_n] <= idx[-1]); this guards the primitive vs. a caller.
         if holdout_start > holdout_end:
             raise ValueError(
                 f"invalid holdout interval: start {holdout_start!r} > end {holdout_end!r}")

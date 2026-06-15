@@ -229,8 +229,8 @@ def test_release_after_finalize_is_noop(repo_with_strategy):
 
 
 def test_reserve_is_provenance_independent(repo_with_strategy):
-    # #205: the OOS calendar window is the single-use unit REGARDLESS of provenance. A snapshot-backed
-    # burn now blocks a non-snapshot probe over the same interval (was: distinct provenance buckets).
+    # #205: the OOS calendar window is the single-use unit REGARDLESS of provenance. A snapshot
+    # burn now blocks a non-snapshot probe over the same interval (was: distinct provenance bucket).
     repo, sid = repo_with_strategy
     _reserve(repo, sid, hs="2022-06-01", he="2022-12-31", snap="snapA")
     with pytest.raises(ValueError, match="holdout already consumed"):

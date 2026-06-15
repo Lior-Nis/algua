@@ -18,7 +18,7 @@ _SUPPORTED = {"1d"}
 
 class SyntheticProvider:
     # Deterministic (fixed seed) -> a reproducible data source for the agent promote guard (#205):
-    # the OOS bars are identical on a re-run, so a burned holdout is reproducible without a snapshot.
+    # the OOS bars are identical on a re-run, so a burned holdout is reproducible w/o a snapshot.
     reproducible = True
 
     def __init__(self, seed: int = 0) -> None:
