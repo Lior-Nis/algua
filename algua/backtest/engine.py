@@ -574,12 +574,17 @@ def simulate(
 ) -> tuple[vbt.Portfolio, pd.DataFrame, list[dict]]:
     """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
     the strategy exposes a parity-guarded `signal_panel_fn` — see `_decision_weights_fast_or_loop`),
-    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift and
-    simulate. Returns (portfolio, effective-weights). The shift lives ONLY here — the panel fn (like
-    the loop) returns DECISION-time weights, never executable ones.
+    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift, the
+    delisting-aware exit overlay, and simulate. Returns (portfolio, executed-weights, forced-exits).
+    The shift lives ONLY here — the panel fn (like the loop) returns DECISION-time weights, never
+    executable ones.
 
-    This is the public simulation step: bars -> (portfolio, effective weights). Metrics are
-    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+    This is the public simulation step: bars -> (portfolio, executed weights, forced exits).
+    Metrics are computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+
+    Delisting-aware exit (`delisting_records`): a position held past a symbol's last bar is realized
+    at the record's terminal price and removed (see `apply_delisting_exits`); a held-into-gap symbol
+    with no record fails closed unless `assume_terminal_last_close` (human-only).
 
     Point-in-time universe (`universe_by_date`): when provided, bars are fetched for the UNION of
     all ever-effective members and the per-bar decision is masked to as-of-t membership (see
