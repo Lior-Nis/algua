@@ -384,3 +384,31 @@ def test_family_lifetime_combos_deduped_on_diamond() -> None:
 
     # strat_a counted once — membership row in family A only
     assert repo.family_lifetime_combos(d) == 100
+
+
+def test_family_lifetime_combos_no_double_count_on_strategy_move() -> None:
+    """A strategy moved between two ancestor families must be counted once, not twice.
+
+    Setup: child family C with parents A and B.
+    strat_x starts in A (100 combos recorded), then is reassigned to B.
+    Both A and B are ancestors of C, so strat_x now has TWO family_members rows:
+    one in A (removed_at set) and one in B (active).  The old JOIN-based query would
+    match strat_x twice and return 200; the DISTINCT subquery must return 100.
+    """
+    repo = _make_repo()
+    fam_a = repo.create_family("fam_a", actor="human")
+    fam_b = repo.create_family("fam_b", actor="human")
+    fam_c = repo.create_family("fam_c", actor="human")
+    repo.add_parent_edge(fam_c, fam_a)
+    repo.add_parent_edge(fam_c, fam_b)
+
+    # Assign strat_x to family A and record trials
+    _assign(repo, "strat_x", fam_a, actor="human", verdict="MERGE", similarity_score=1.0)
+    repo.record_search_trial("strat_x", n_combos=100, grid_json="{}")
+
+    # Reassign strat_x to family B — creates second family_members row for strat_x
+    _assign(repo, "strat_x", fam_b, actor="human", verdict="MERGE", similarity_score=1.0)
+
+    # Both A and B are ancestors of C; strat_x has rows in both families.
+    # Must count 100 (once), not 200 (double-counted).
+    assert repo.family_lifetime_combos(fam_c) == 100

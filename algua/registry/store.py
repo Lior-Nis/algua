@@ -1243,13 +1243,20 @@ class SqliteStrategyRepository:
             raise
 
     def family_lifetime_combos(self, family_id: int) -> int:
-        """Lifetime search combos across this family + all transitive ancestors."""
+        """Lifetime search combos across this family + all transitive ancestors.
+
+        Uses a DISTINCT subquery so a strategy that was reassigned between two ancestor
+        families (leaving a removed_at row in one and an active row in another) is counted
+        exactly once — not once per matching family_members row.
+        """
         ancestor_ids = [family_id] + self.family_ancestry(family_id)
         placeholders = ",".join("?" * len(ancestor_ids))
         row = self._conn.execute(
             f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
-            f" JOIN family_members fm ON fm.strategy_name = st.strategy_name"
-            f" WHERE fm.family_id IN ({placeholders})",
+            f" WHERE st.strategy_name IN ("
+            f"  SELECT DISTINCT fm.strategy_name FROM family_members fm"
+            f"  WHERE fm.family_id IN ({placeholders})"
+            f")",
             ancestor_ids,
         ).fetchone()
         return int(row[0])
