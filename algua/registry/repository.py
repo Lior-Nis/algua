@@ -387,3 +387,64 @@ class StrategyRepository(Protocol):
         pass-or-fail on purpose: a newer failed re-evaluation must invalidate an older pass
         (#124). A NULL ``dependency_hash`` matches nothing — fail-closed."""
         ...
+
+    # -------------------------------------------------------------------------
+    # Factor-evaluation ledger (#219, slice E of #140)
+    # -------------------------------------------------------------------------
+
+    def record_factor_evaluation(
+        self,
+        *,
+        factor_name: str,
+        import_path: str,
+        code_hash: str,
+        hypothesis_hash: str,
+        period_start: str,
+        period_end: str,
+        horizon: int,
+        params_json: str,
+        construction: str,
+        construction_params_json: str,
+        n_obs: int | None,
+        mean_ic: float | None,
+        ic_ir: float | None,
+        t_stat: float | None,
+        ic_skew: float | None,
+        ic_kurtosis: float | None,
+        n_dependents: int,
+        data_source: str,
+        snapshot_id: str | None,
+        actor: str,
+        created_at: str,
+    ) -> int:
+        """Persist a factor evaluation row (correction cols NULL until finalize). Returns row id."""
+        ...
+
+    def factor_hypothesis_breadth(
+        self, factor_name: str, window_days: int
+    ) -> tuple[int, int]:
+        """Return ``(own_lifetime, windowed_total)`` distinct hypothesis counts.
+
+        ``own_lifetime``: COUNT(DISTINCT hypothesis_hash) for this factor, all time.
+        ``windowed_total``: COUNT(DISTINCT hypothesis_hash) across ALL factors within the
+        trailing ``window_days`` (funnel-wide, analogous to windowed_search_combos).
+        """
+        ...
+
+    def windowed_factor_irs(self, window_days: int) -> list[float]:
+        """Latest finite ic_ir per distinct hypothesis_hash within the trailing window.
+
+        Deduplicates to the most-recent row per hypothesis_hash, then filters to finite
+        ic_ir values. Used to estimate pooled IR dispersion for the DSR layer.
+        """
+        ...
+
+    def finalize_factor_evaluation(
+        self,
+        row_id: int,
+        n_hypotheses: int,
+        dsr_confidence: float | None,
+        significant: bool,
+    ) -> None:
+        """Write the correction columns (n_hypotheses, dsr_confidence, significant) to the row."""
+        ...

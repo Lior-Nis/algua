@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -391,6 +391,46 @@ CREATE TABLE IF NOT EXISTS forward_gate_evaluations (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_forward_gate_strategy ON forward_gate_evaluations(strategy_id);
+
+-- v25 (#219): factor-evaluation ledger for funnel-FDR accounting (slice E of #140).
+-- Records each `factor eval` invocation as a hypothesis test. Correction columns
+-- (n_hypotheses, dsr_confidence, significant) are NULL until finalize_factor_evaluation()
+-- writes them after the breadth + DSR pass — fail-closed: a NULL significant is never
+-- treated as a pass. hypothesis_hash deduplicates identical reruns (same factor identity
+-- + params + window), so breadth counts are honest across repeated runs.
+CREATE TABLE IF NOT EXISTS factor_evaluations (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    factor_name               TEXT    NOT NULL,
+    import_path               TEXT    NOT NULL,
+    code_hash                 TEXT    NOT NULL,
+    hypothesis_hash           TEXT    NOT NULL,
+    period_start              TEXT    NOT NULL,
+    period_end                TEXT    NOT NULL,
+    horizon                   INTEGER NOT NULL,
+    params_json               TEXT    NOT NULL DEFAULT '{}',
+    construction              TEXT    NOT NULL,
+    construction_params_json  TEXT    NOT NULL DEFAULT '{}',
+    n_obs                     INTEGER,
+    mean_ic                   REAL,
+    ic_ir                     REAL,
+    t_stat                    REAL,
+    ic_skew                   REAL,
+    ic_kurtosis               REAL,
+    n_dependents              INTEGER NOT NULL DEFAULT 0,
+    data_source               TEXT    NOT NULL,
+    snapshot_id               TEXT,
+    actor                     TEXT    NOT NULL DEFAULT 'agent',
+    created_at                TEXT    NOT NULL,
+    n_hypotheses              INTEGER,
+    dsr_confidence            REAL,
+    significant               INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_factor_evaluations_factor
+    ON factor_evaluations (factor_name);
+CREATE INDEX IF NOT EXISTS ix_factor_evaluations_created
+    ON factor_evaluations (created_at);
+CREATE INDEX IF NOT EXISTS ix_factor_evaluations_hypothesis
+    ON factor_evaluations (hypothesis_hash, created_at);
 """
 
 
@@ -474,6 +514,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         "trial_sharpe_mean": "REAL",
         "trial_sharpe_var_ann": "REAL",
     })
+    # v25 (#219): factor_evaluations is a brand-new table — `executescript(_SCHEMA)` above
+    # creates it via `CREATE TABLE IF NOT EXISTS`. No _add_missing_columns needed.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

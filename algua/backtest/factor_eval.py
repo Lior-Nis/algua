@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy import stats as _stats
 
 from algua.backtest.engine import run as run_backtest
 from algua.contracts.types import DataProvider, ExecutionContract
@@ -94,12 +95,19 @@ def factor_ic(
     }
     if n < 2:
         return {**base, "mean_ic": None, "ic_std": None, "ir": None,
-                "t_stat": None, "hit_rate": None}
+                "t_stat": None, "hit_rate": None, "ic_skew": None, "ic_kurtosis": None}
     arr = np.array(ics, dtype=float)
     mean_ic = float(arr.mean())
     ic_std = float(arr.std(ddof=1))
     ir = mean_ic / ic_std if ic_std > 0 else None
     t_stat = ir * math.sqrt(n) if ir is not None else None
+    # Higher moments for DSR non-normality adjustment (#219 slice E).
+    # Raw (Pearson) kurtosis (fisher=False): Gaussian series gives ≈3.
+    # Non-finite results coerced to 0.0 (same convention as metrics.py:87-88).
+    raw_skew = float(_stats.skew(arr))
+    raw_kurt = float(_stats.kurtosis(arr, fisher=False))
+    ic_skew = raw_skew if math.isfinite(raw_skew) else 0.0
+    ic_kurtosis = raw_kurt if math.isfinite(raw_kurt) else 0.0
     return {
         **base,
         "mean_ic": mean_ic,
@@ -107,6 +115,8 @@ def factor_ic(
         "ir": ir,
         "t_stat": t_stat,
         "hit_rate": float((arr > 0).mean()),
+        "ic_skew": ic_skew,
+        "ic_kurtosis": ic_kurtosis,
     }
 
 
