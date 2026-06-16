@@ -431,6 +431,51 @@ CREATE INDEX IF NOT EXISTS ix_factor_evaluations_created
     ON factor_evaluations (created_at);
 CREATE INDEX IF NOT EXISTS ix_factor_evaluations_hypothesis
     ON factor_evaluations (hypothesis_hash, created_at);
+-- v26 (#222): family registry tables.
+-- families: canonical family registry
+CREATE TABLE IF NOT EXISTS families (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL UNIQUE,
+    created_at       TEXT NOT NULL,
+    created_by_actor TEXT NOT NULL,
+    created_by_strategy TEXT
+);
+-- family_members: APPEND-ONLY (removed_at SET never DELETE; breadth never decreases)
+CREATE TABLE IF NOT EXISTS family_members (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    family_id       INTEGER NOT NULL REFERENCES families(id),
+    strategy_name   TEXT NOT NULL,
+    joined_at       TEXT NOT NULL,
+    joined_by_actor TEXT NOT NULL,
+    removed_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy_family
+    ON family_members(strategy_name, family_id);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_active
+    ON family_members(strategy_name) WHERE removed_at IS NULL;
+-- family_parents: parentage DAG (multi-parent; cycle-guarded at write time)
+CREATE TABLE IF NOT EXISTS family_parents (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    child_family_id  INTEGER NOT NULL REFERENCES families(id),
+    parent_family_id INTEGER NOT NULL REFERENCES families(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_parents
+    ON family_parents(child_family_id, parent_family_id);
+-- family_events: governance audit log
+CREATE TABLE IF NOT EXISTS family_events (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type              TEXT NOT NULL,
+    family_id               INTEGER REFERENCES families(id),
+    strategy_name           TEXT,
+    actor                   TEXT NOT NULL,
+    clustering_verdict      TEXT,
+    similarity_score        REAL,
+    clustering_version      TEXT,
+    clustering_config_json  TEXT,
+    axis_json               TEXT,
+    matched_family_id       INTEGER REFERENCES families(id),
+    created_at              TEXT NOT NULL
+);
 """
 
 
@@ -531,6 +576,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_index"
         " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1"
     )
+    # v26 (#222): family registry tables (families/family_members/family_parents/family_events).
+    # All brand-new tables; executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
+    # No _add_missing_columns needed for new tables.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

@@ -523,3 +523,36 @@ class StrategyRepository(Protocol):
     ) -> None:
         """Write the correction columns (n_hypotheses, dsr_confidence, significant) to the row."""
         ...
+
+    # -------------------------------------------------------------------------
+    # Family registry + parentage DAG (#222)
+    # -------------------------------------------------------------------------
+
+    def create_family(self, name: str, actor: str, created_by_strategy: str | None = None) -> int:
+        """Create a new family and record the family_created event. Return the new family id."""
+        ...
+
+    def assign_strategy_to_family(
+        self, strategy_name: str, family_id: int, actor: str, *,
+        verdict: str, similarity_score: float, clustering_version: str,
+        clustering_config_json: str, axis_json: str,
+        matched_family_id: int | None = None,
+    ) -> None:
+        """Assign a strategy to a family (append-only: old row gets removed_at set)."""
+        ...
+
+    def strategy_family(self, strategy_name: str) -> int | None:
+        """Return the current (active) family_id for the strategy, or None."""
+        ...
+
+    def family_ancestry(self, family_id: int) -> list[int]:
+        """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
+        ...
+
+    def add_parent_edge(self, child_family_id: int, parent_family_id: int) -> None:
+        """Atomically add a parent edge (cycle-guarded, BEGIN IMMEDIATE, top-level-only)."""
+        ...
+
+    def family_lifetime_combos(self, family_id: int) -> int:
+        """Lifetime search combos across this family + all transitive ancestors."""
+        ...

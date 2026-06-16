@@ -1095,3 +1095,161 @@ class SqliteStrategyRepository:
                 " WHERE id=?",
                 (n_hypotheses, dsr_confidence, int(significant), row_id),
             )
+
+    # -------------------------------------------------------------------------
+    # Family registry + parentage DAG (#222)
+    # -------------------------------------------------------------------------
+
+    def create_family(
+        self, name: str, actor: str, created_by_strategy: str | None = None
+    ) -> int:
+        """Create a new family and record the family_created event. Return the new family id."""
+        now = _now()
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO families(name, created_at, created_by_actor, created_by_strategy)"
+                " VALUES (?,?,?,?)",
+                (name, now, actor, created_by_strategy),
+            )
+            family_id = cur.lastrowid
+            assert family_id is not None
+            self._conn.execute(
+                "INSERT INTO family_events(event_type, family_id, actor, created_at)"
+                " VALUES (?,?,?,?)",
+                ("family_created", family_id, actor, now),
+            )
+        return int(family_id)
+
+    def assign_strategy_to_family(
+        self,
+        strategy_name: str,
+        family_id: int,
+        actor: str,
+        *,
+        verdict: str,
+        similarity_score: float,
+        clustering_version: str,
+        clustering_config_json: str,
+        axis_json: str,
+        matched_family_id: int | None = None,
+    ) -> None:
+        """Assign a strategy to a family (append-only: old row gets removed_at set)."""
+        now = _now()
+        event_type = "strategy_merged" if verdict == "MERGE" else "strategy_assigned"
+        with self._conn:
+            # If an active membership row exists, soft-delete it first.
+            self._conn.execute(
+                "UPDATE family_members SET removed_at=?"
+                " WHERE strategy_name=? AND removed_at IS NULL",
+                (now, strategy_name),
+            )
+            self._conn.execute(
+                "INSERT INTO family_members"
+                "(family_id, strategy_name, joined_at, joined_by_actor, removed_at)"
+                " VALUES (?,?,?,?,NULL)",
+                (family_id, strategy_name, now, actor),
+            )
+            self._conn.execute(
+                "INSERT INTO family_events"
+                "(event_type, family_id, strategy_name, actor,"
+                " clustering_verdict, similarity_score, clustering_version,"
+                " clustering_config_json, axis_json, matched_family_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (event_type, family_id, strategy_name, actor,
+                 verdict, similarity_score, clustering_version,
+                 clustering_config_json, axis_json, matched_family_id, now),
+            )
+
+    def strategy_family(self, strategy_name: str) -> int | None:
+        """Return the current (active) family_id for the strategy, or None."""
+        row = self._conn.execute(
+            "SELECT family_id FROM family_members WHERE strategy_name=? AND removed_at IS NULL",
+            (strategy_name,),
+        ).fetchone()
+        return int(row["family_id"]) if row is not None else None
+
+    def family_ancestry(self, family_id: int) -> list[int]:
+        """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
+        visited: set[int] = set()
+        queue: list[int] = [family_id]
+        ancestors: list[int] = []
+        while queue:
+            current = queue.pop(0)
+            rows = self._conn.execute(
+                "SELECT parent_family_id FROM family_parents WHERE child_family_id=?",
+                (current,),
+            ).fetchall()
+            for row in rows:
+                pid = int(row[0])
+                if pid not in visited:
+                    visited.add(pid)
+                    ancestors.append(pid)
+                    queue.append(pid)
+        return ancestors
+
+    def add_parent_edge(self, child_family_id: int, parent_family_id: int) -> None:
+        """Atomically add a parent edge (cycle-guarded, BEGIN IMMEDIATE, top-level-only)."""
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "add_parent_edge must be called at top level, not inside an open transaction"
+            )
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            # Cycle guard: adding edge (child, parent) creates a cycle iff parent_family_id is
+            # already an ancestor of child_family_id, OR parent == child (self-edge).
+            # Cycle means: following PARENT edges from parent_family_id upward reaches
+            # child_family_id (closing a loop: child -> parent -> ... -> child).
+            # Equivalently: child_family_id must not already be an ancestor-or-self of
+            # parent_family_id when we add child as parent's ancestor.
+            # Correct check: BFS from parent_family_id following PARENT links (going up the
+            # ancestry). If child_family_id appears, the new edge would form a cycle.
+            if parent_family_id == child_family_id:
+                raise ValueError(
+                    f"cycle detected: cannot add self-edge {child_family_id} -> {parent_family_id}"
+                )
+            visited: set[int] = set()
+            queue: list[int] = [parent_family_id]
+            while queue:
+                current = queue.pop(0)
+                rows = self._conn.execute(
+                    "SELECT parent_family_id FROM family_parents WHERE child_family_id=?",
+                    (current,),
+                ).fetchall()
+                for row in rows:
+                    pid = int(row[0])
+                    if pid not in visited:
+                        visited.add(pid)
+                        queue.append(pid)
+            if child_family_id in visited:
+                raise ValueError(
+                    f"cycle detected: adding edge {child_family_id} -> {parent_family_id}"
+                    f" would create a cycle"
+                )
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO family_parents(child_family_id, parent_family_id)"
+                " VALUES (?,?)",
+                (child_family_id, parent_family_id),
+            )
+            self._conn.execute(
+                "INSERT INTO family_events"
+                "(event_type, family_id, actor, created_at)"
+                " VALUES (?,?,?,?)",
+                ("parent_edge_added", child_family_id, "system", now),
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def family_lifetime_combos(self, family_id: int) -> int:
+        """Lifetime search combos across this family + all transitive ancestors."""
+        ancestor_ids = [family_id] + self.family_ancestry(family_id)
+        placeholders = ",".join("?" * len(ancestor_ids))
+        row = self._conn.execute(
+            f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
+            f" JOIN family_members fm ON fm.strategy_name = st.strategy_name"
+            f" WHERE fm.family_id IN ({placeholders})",
+            ancestor_ids,
+        ).fetchone()
+        return int(row[0])
