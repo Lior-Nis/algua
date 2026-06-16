@@ -42,16 +42,21 @@ CREATE TABLE IF NOT EXISTS families (
     created_by_strategy TEXT           -- strategy that triggered creation (if any)
 );
 
--- family_members: many-many, strategy→family assignment (current assignment is the latest row)
+-- family_members: APPEND-ONLY (R2-F2: breadth never decreases; removed rows still counted)
 CREATE TABLE IF NOT EXISTS family_members (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    family_id    INTEGER NOT NULL REFERENCES families(id),
-    strategy_name TEXT NOT NULL,
-    joined_at    TEXT NOT NULL,
-    joined_by_actor TEXT NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    family_id       INTEGER NOT NULL REFERENCES families(id),
+    strategy_name   TEXT NOT NULL,
+    joined_at       TEXT NOT NULL,
+    joined_by_actor TEXT NOT NULL,
+    removed_at      TEXT  -- NULL = still active; SET (not deleted) when reassigned away
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy
-    ON family_members(strategy_name);  -- one family per strategy at a time
+-- Each strategy in each family at most once across all time
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy_family
+    ON family_members(strategy_name, family_id);
+-- Exactly one active family per strategy
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_active
+    ON family_members(strategy_name) WHERE removed_at IS NULL;
 
 -- family_parents: parentage DAG (multi-parent allowed; cycle-guarded)
 CREATE TABLE IF NOT EXISTS family_parents (
@@ -71,10 +76,11 @@ CREATE TABLE IF NOT EXISTS family_events (
     actor                TEXT NOT NULL,
     clustering_verdict   TEXT,           -- 'MERGE'|'PARENTAGE'|'NOVEL'|NULL (non-clustering events)
     similarity_score     REAL,
-    clustering_version   TEXT,           -- sha256[:16] of weights+thresholds+axis_availability
-    axis_json            TEXT,           -- JSON of per-axis scores
-    matched_family_id    INTEGER REFERENCES families(id),  -- incumbent matched against
-    created_at           TEXT NOT NULL
+    clustering_version      TEXT,  -- sha256[:32] of json.dumps(config, sort_keys=True) [R2-F6]
+    clustering_config_json  TEXT,  -- full config snapshot for auditor reconstruction [R2-F6]
+    axis_json               TEXT,  -- JSON of per-axis scores
+    matched_family_id       INTEGER REFERENCES families(id),
+    created_at              TEXT NOT NULL
 );
 ```
 
@@ -111,10 +117,11 @@ pre-assignment trials and require backfill; JOIN through `family_members` is cor
 def test_create_family_roundtrips():
     # create_family("momentum") -> id; name unique; family_events row with event_type='family_created'
 
-def test_assign_strategy_upserts():
+def test_assign_strategy_updates_active_and_keeps_old_row():
     # assign_strategy_to_family("strat_a", family_id=1, ...) -> strategy_family("strat_a") == 1
-    # reassigning to family 2 -> strategy_family("strat_a") == 2 (UPSERT)
-    # family_events has 2 rows for strat_a
+    # reassigning to family 2 -> strategy_family("strat_a") == 2
+    # family_members has 2 rows for strat_a: id=1 (family=1, removed_at=<now>), id=2 (family=2, removed_at=NULL)
+    # family_events has 2 rows for strat_a (R2-F2: old row preserved for breadth accounting)
 
 def test_family_ancestry_linear():
     # A -> B -> C; family_ancestry(C) == [B, A]
@@ -140,6 +147,11 @@ def test_family_lifetime_combos_empty():
 
 def test_family_lifetime_combos_own_only():
     # strat_a in family F; record_search_trial("strat_a", n_combos=50) -> family_lifetime_combos(F) == 50
+
+def test_family_lifetime_combos_includes_removed_members():
+    # strat_a was in family F (removed_at set); strat_a has 80 combos
+    # strat_b is in family F (active); strat_b has 20 combos
+    # family_lifetime_combos(F) == 100  (removed strat_a still counted — R2-F2 tighten-only)
 
 def test_family_lifetime_combos_with_ancestors():
     # parent family P has strat_p (100 combos); child family C has strat_c (30 combos)
@@ -287,13 +299,17 @@ if verdict == SimVerdict.MERGE:
     repo.assign_strategy_to_family(name, matched_family_id, actor, ...)
 elif verdict == SimVerdict.PARENTAGE:
     if actor == Actor.AGENT:
-        # F1 fix: agent cannot mint a child family; resolve to MERGE toward parent
-        repo.assign_strategy_to_family(name, matched_family_id, actor, ...)  # parent family
+        # F1 fix: agent cannot mint a child family; resolve to MERGE toward best parent
+        # Deterministic tie-breaking: highest similarity → highest family_lifetime_combos → lowest id
+        repo.assign_strategy_to_family(name, matched_family_id, actor, ...)  # best parent
     else:
-        # human: create child family + parent edge
-        new_fam_id = repo.create_family(f"{name}_derived", actor=actor.value, ...)
-        repo.add_parent_edge(new_fam_id, matched_family_id)
-        repo.assign_strategy_to_family(name, new_fam_id, actor, ...)
+        # human: create child family + parent edge + assignment — ONE atomic composite operation
+        # (R2-F3: add_parent_edge is top-level-only; _create_child_with_parent_edge runs one txn)
+        new_fam_id = repo._create_child_with_parent_edge(
+            child_name=f"{name}_derived", parent_family_id=matched_family_id,
+            strategy_name=name, actor=actor.value,
+            verdict=verdict.value, score=score, clustering_version=cv, axis_json=axis_json,
+        )
 elif verdict == SimVerdict.NOVEL:
     if actor == Actor.AGENT:
         raise ValueError(
@@ -304,8 +320,9 @@ elif verdict == SimVerdict.NOVEL:
         new_fam_id = repo.create_family(new_family_slug, actor=actor.value, ...)
         repo.assign_strategy_to_family(name, new_fam_id, actor, ...)
 
-# family_id is now set on the strategy; record in BreadthContext for run_gate
+# family_id now set; pass as expected_family_id to run_gate for CAS (R2-F5)
 ctx.family_id = repo.strategy_family(name)
+ctx.expected_family_id = ctx.family_id  # run_gate will CAS-verify before evaluate_gate
 ```
 
 ### Tests
@@ -525,7 +542,8 @@ from typing import Protocol
 class FamilyBudgetLedger(Protocol):
     """Stratum B: partition of global LORD++ alpha wealth across families.
     Real implementation deferred to Phase 2 (#220). p = 1 - dsr_confidence (Phase 1 convention).
-    reserve() is called in run_gate AFTER evaluate_gate computes DSR; NOT in promotion_preflight."""
+    reserve() is called in run_gate AFTER evaluate_gate computes DSR; NOT in promotion_preflight.
+    gate_eval_id is NOT in the signature (R2-F1: the gate row doesn't exist at reserve() time)."""
 
     def global_cap(self) -> float:
         """Total alpha wealth W_global."""
@@ -533,14 +551,12 @@ class FamilyBudgetLedger(Protocol):
     def family_wealth(self, family_id: int) -> float:
         """Current unallocated alpha wealth for family_id (α_f · W_global remaining)."""
 
-    def reserve(
-        self, family_id: int, gate_eval_id: int, p_value: float, actor: str
-    ) -> bool:
-        """Allocate p_value of alpha from family_id's budget for gate_eval_id.
-        Returns True if budget allows; False if exhausted (promotion blocked)."""
+    def reserve(self, family_id: int, p_value: float, actor: str) -> bool:
+        """Allocate p_value of alpha from family_id's budget. Returns True if budget allows;
+        False if exhausted (promotion blocked). Only called when dsr_confidence is not None."""
 
-    def settle(self, family_id: int, gate_eval_id: int, final_p: float) -> None:
-        """Release or adjust the reservation after strategy is retired/dormant."""
+    def settle(self, family_id: int, reservation_key: str) -> None:
+        """Release the reservation (strategy retired/dormant); return alpha wealth to family."""
 
 
 class InMemoryFamilyBudgetLedger:
@@ -548,7 +564,8 @@ class InMemoryFamilyBudgetLedger:
 
     def __init__(self, global_cap: float = 1.0) -> None:
         self._cap = global_cap
-        self._reservations: dict[int, float] = {}  # gate_eval_id -> p_value
+        self._counter = 0
+        self._reservations: dict[str, float] = {}  # internal key -> p_value
 
     def global_cap(self) -> float:
         return self._cap
@@ -557,16 +574,16 @@ class InMemoryFamilyBudgetLedger:
         allocated = sum(self._reservations.values())
         return max(0.0, self._cap - allocated)
 
-    def reserve(self, family_id: int, gate_eval_id: int, p_value: float, actor: str) -> bool:
+    def reserve(self, family_id: int, p_value: float, actor: str) -> bool:
         allocated = sum(self._reservations.values())
         if allocated + p_value > self._cap + 1e-10:
             return False
-        self._reservations[gate_eval_id] = p_value
+        self._counter += 1
+        self._reservations[str(self._counter)] = p_value
         return True
 
-    def settle(self, family_id: int, gate_eval_id: int, final_p: float) -> None:
-        if gate_eval_id in self._reservations:
-            del self._reservations[gate_eval_id]
+    def settle(self, family_id: int, reservation_key: str) -> None:
+        self._reservations.pop(reservation_key, None)
 ```
 
 ### Tests
@@ -574,26 +591,26 @@ class InMemoryFamilyBudgetLedger:
 ```python
 def test_reserve_within_cap():
     ledger = InMemoryFamilyBudgetLedger(global_cap=1.0)
-    assert ledger.reserve(1, 101, p_value=0.3, actor="agent") is True
+    assert ledger.reserve(1, p_value=0.3, actor="agent") is True  # no gate_eval_id (R2-F1)
     assert ledger.family_wealth(1) == pytest.approx(0.7)
 
 def test_reserve_exhausts_budget():
     ledger = InMemoryFamilyBudgetLedger(global_cap=0.2)
-    ledger.reserve(1, 101, p_value=0.15, actor="agent")
-    assert ledger.reserve(1, 102, p_value=0.10, actor="agent") is False  # 0.25 > 0.20
+    ledger.reserve(1, p_value=0.15, actor="agent")
+    assert ledger.reserve(1, p_value=0.10, actor="agent") is False  # 0.25 > 0.20
 
 def test_settle_releases_wealth():
     ledger = InMemoryFamilyBudgetLedger(global_cap=1.0)
-    ledger.reserve(1, 101, p_value=0.5, actor="agent")
-    ledger.settle(1, 101, final_p=0.5)
+    ledger.reserve(1, p_value=0.5, actor="agent")
+    ledger.settle(1, reservation_key="1")
     assert ledger.family_wealth(1) == pytest.approx(1.0)
 
 def test_sum_alpha_never_exceeds_cap():
     # 5 concurrent reserves summing to exactly cap -> all succeed; one more fails
     ledger = InMemoryFamilyBudgetLedger(global_cap=1.0)
-    for i in range(5):
-        ledger.reserve(1, i, p_value=0.2, actor="agent")
-    assert ledger.reserve(1, 99, p_value=0.01, actor="agent") is False
+    for _ in range(5):
+        ledger.reserve(1, p_value=0.2, actor="agent")
+    assert ledger.reserve(1, p_value=0.01, actor="agent") is False
 
 def test_protocol_structural_conformance():
     # InMemoryFamilyBudgetLedger satisfies FamilyBudgetLedger Protocol
@@ -612,7 +629,9 @@ def test_protocol_structural_conformance():
 uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports
 ```
 
-All four green. Check that `clustering.py` appears in `.github/CODEOWNERS` alongside `gates.py`.
+All four green. Check that `clustering.py` appears in root `CODEOWNERS` (NOT `.github/CODEOWNERS` —
+the repo uses root-level CODEOWNERS; R2-F7): add `/algua/research/clustering.py @Lior-Nis`
+alongside the existing `/algua/research/gates.py` entry.
 
 ### Umbrella spec update
 
@@ -629,13 +648,16 @@ of `research promote`.
 ## Self-Review Checklist
 
 - [ ] `effective_funnel_breadth` has `family_lifetime_effective: int = 0` default; all 2-arg callers unchanged
-- [ ] `add_parent_edge` uses `BEGIN IMMEDIATE`; unique index on `(child_family_id, parent_family_id)`
+- [ ] `add_parent_edge` uses `BEGIN IMMEDIATE` + `in_transaction` guard (top-level-only like `reserve_holdout`)
+- [ ] Human PARENTAGE uses `_create_child_with_parent_edge` composite (not nested `add_parent_edge`)
 - [ ] No `family_id` column added to `search_trials`; `family_lifetime_combos` JOINs through `family_members`
-- [ ] Agent + NOVEL → `ValueError`; agent + PARENTAGE → MERGE-to-parent; human + NOVEL → new family
+- [ ] `family_members` is append-only (`removed_at` SET, never DELETE); `family_lifetime_combos` counts ALL rows
+- [ ] Agent + NOVEL → `ValueError`; agent + PARENTAGE → MERGE-to-best-parent; human + NOVEL → new family
 - [ ] `family_lifetime_effective` computed in `run_gate` (not carried stale from preflight)
-- [ ] `FamilyBudgetLedger.reserve()` called in `run_gate` AFTER `evaluate_gate`, never in preflight
-- [ ] `clustering.py` in CODEOWNERS
-- [ ] `family_events` has `clustering_version`, `axis_json`, `actor`, `similarity_score`
+- [ ] `expected_family_id` carried from preflight; CAS-checked in `run_gate` before `evaluate_gate`
+- [ ] `FamilyBudgetLedger.reserve()` called in `run_gate` AFTER `evaluate_gate`, never in preflight; no `gate_eval_id` in signature
+- [ ] `clustering.py` in root `CODEOWNERS` (not `.github/CODEOWNERS`)
+- [ ] `family_events` has `clustering_version` (sha256[:32], json.dumps sorted), `clustering_config_json`, `axis_json`, `actor`, `similarity_score`
 - [ ] SCHEMA_VERSION = 26 (25 was feat(219) factor_evaluations); migration idempotent
 - [ ] All 4 quality checks green
 
@@ -643,12 +665,18 @@ of `research promote`.
 
 ## GATE-1 findings summary (for reviewer context)
 
-GATE-1 panel: Codex (GPT-5-codex) + OpenCode (GLM-5.1), 2026-06-16. All findings folded into
-this plan. See the design spec for the full triage table and rationale for each decision.
+GATE-1 panel: Codex (GPT-5-codex) + OpenCode (GLM-5.1), rounds 1+2, 2026-06-16. All 18 findings
+folded into this plan. See the design spec for the full triage tables and rationale.
 
-Major pre-review-to-post-review changes: switched from windowed to lifetime combos for family
-breadth (resolves anti-reset decay AND windowed_family dead-term problem); removed `family_id`
-from `search_trials` (JOIN through `family_members` instead); made `add_parent_edge` atomic with
-`BEGIN IMMEDIATE`; moved agent PARENTAGE to MERGE-to-parent (can't mint); added `family_lifetime_effective=0`
-default to `effective_funnel_breadth` (preserves factor-FDR caller); moved `FamilyBudgetLedger.reserve()`
-call to `run_gate` post-DSR; added `clustering.py` to CODEOWNERS; specified `family_events` schema.
+Round 1 key changes: switched from windowed to lifetime combos; removed `family_id` from
+`search_trials` (JOIN through `family_members`); `add_parent_edge` atomic with `BEGIN IMMEDIATE`;
+agent PARENTAGE → MERGE-to-best-parent (no mint); `family_lifetime_effective=0` default on
+`effective_funnel_breadth`; `FamilyBudgetLedger.reserve()` in `run_gate` post-DSR; `clustering.py`
+to CODEOWNERS; `family_events` schema specified.
+
+Round 2 key changes: `family_members` append-only (tighten-only on breadth — removed members
+still counted); `add_parent_edge` needs `in_transaction` guard; composite helper for human
+PARENTAGE; `gate_eval_id` removed from `reserve()` Protocol (row doesn't exist at reserve time);
+`expected_family_id` CAS in `run_gate` for concurrent-preflight safety; `clustering_version`
+uses `json.dumps(sort_keys=True)` + sha256[:32] + full `clustering_config_json`; CODEOWNERS
+path is root-level (not `.github/`).

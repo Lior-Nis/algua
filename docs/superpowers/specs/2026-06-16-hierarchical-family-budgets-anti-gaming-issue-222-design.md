@@ -1,7 +1,7 @@
 # Phase 4: Hierarchical Family Alpha-Budgets + Anti-Gaming Clustering — Issue #222
 
 **Part of:** `docs/superpowers/specs/2026-06-15-streaming-funnel-multiple-testing-issue-211-design.md`
-**Status:** GATE-1 reviewed (Codex+OpenCode/GLM-5.1, round 1); findings folded in below.
+**Status:** GATE-1 reviewed (Codex+OpenCode/GLM-5.1, rounds 1+2); all findings folded in below.
 
 ---
 
@@ -44,27 +44,42 @@ Four new tables in `db.py`:
 
 ```sql
 families           (id, name, created_at, created_by_actor, created_by_strategy)
-family_members     (id, family_id FK, strategy_name, joined_at, joined_by_actor)
+family_members     (id, family_id FK, strategy_name, joined_at, joined_by_actor,
+                    removed_at TEXT -- NULL = active; SET when strategy reassigned away)
+                   -- UNIQUE (strategy_name, family_id): each strategy in each family at most once
+                   -- PARTIAL UNIQUE (strategy_name) WHERE removed_at IS NULL: one active family
 family_parents     (id, child_family_id FK, parent_family_id FK)
                    -- UNIQUE constraint on (child_family_id, parent_family_id)
 family_events      (id, event_type, family_id FK, strategy_name,
-                    actor, clustering_verdict, similarity_score, clustering_version,
+                    actor, clustering_verdict, similarity_score,
+                    clustering_version TEXT,      -- sha256[:32] of json.dumps(config, sort_keys=True)
+                    clustering_config_json TEXT,  -- full config snapshot (human-readable audit)
                     axis_json, matched_family_id, created_at)
 ```
 
+**Append-only membership (R2 fix — tighten-only on breadth):** `family_members` is append-only.
+When a strategy moves from family X to family Y, the X row gains `removed_at` (it is NOT
+deleted) and a new row is inserted for Y. `family_lifetime_combos` counts ALL rows (including
+removed), so family X's breadth NEVER decreases when a member leaves. A strategy's trials count
+permanently toward every family they've ever been in (conservative — families only accumulate).
+
 `family_events` is the governance ledger: every family-creation, member-assignment, and
 parent-edge event is written here with its full clustering context (verdict, similarity score,
-`clustering_version` hash of active weights/thresholds/axis_availability, matched family id,
-axis breakdowns). This is how human review can reconstruct why a strategy ended up in a family.
+`clustering_version` sha256[:32] hash of `json.dumps(config, sort_keys=True)` for stable
+serialization, plus the full `clustering_config_json` for auditor reconstruction after threshold
+changes). This is how human review can reconstruct exactly which weights and thresholds were
+active at decision time.
 
-#### Atomic cycle guard — `add_parent_edge` (CRITICAL fix, F2)
+#### Atomic cycle guard — `add_parent_edge` (CRITICAL fix, F2 + R2-F3)
 
 The cycle-check + INSERT **must be atomic**. A Python-side BFS before INSERT is insufficient:
 two concurrent sessions can each see no cycle and insert A→B and B→A, corrupting the DAG.
 
-`add_parent_edge` uses `BEGIN IMMEDIATE` (same pattern as `reserve_holdout`):
+`add_parent_edge` uses `BEGIN IMMEDIATE` (same pattern as `reserve_holdout`) and carries the
+same **top-level-only contract** — it raises `RuntimeError` if called inside an open transaction:
 
 ```
+if conn.in_transaction: raise RuntimeError("add_parent_edge must be top-level")
 BEGIN IMMEDIATE
   BFS from proposed child → reject if parent is reachable from child
   INSERT INTO family_parents (child_family_id, parent_family_id)
@@ -73,6 +88,13 @@ COMMIT
 
 `UNIQUE (child_family_id, parent_family_id)` is a second-line guard; `family_ancestry()`
 traversal always uses a visited-set to defend against any future inconsistency.
+
+**Composite human-PARENTAGE operation (R2-F3):** Human parentage requires `create_family →
+add_parent_edge → assign_strategy` atomically. Since `add_parent_edge` is top-level-only, a
+private `_create_child_with_parent_edge(child_name, parent_family_id, strategy_name, actor,
+verdict, score, clustering_version, axis_json)` helper runs the whole sequence under one
+`BEGIN IMMEDIATE`, using internal `_insert_*` primitives that don't check `in_transaction`.
+Public callers never call `add_parent_edge` from within an existing txn.
 
 Schema bump: **SCHEMA_VERSION 25 → 26** (feat(219) already used 24→25).
 
@@ -94,9 +116,12 @@ function analogous to `dsr_confidence`. Three verdicts:
 - `MERGE_THRESHOLD`, `PARENTAGE_THRESHOLD`, per-axis weights
 - Pin reference-value tests exactly (same discipline as `dsr_confidence`)
 
-**Clustering version (F10):** `clustering_version = sha256(repr(thresholds+weights+axis_availability))[:16]`,
-recorded in every `family_events` row. Thresholds may ONLY be tightened (MERGE_THRESHOLD ↓ →
-more strategies merge → stricter gate). No retroactive re-evaluation on threshold change.
+**Clustering version (R2-F6):** `clustering_version = sha256(json.dumps(config, sort_keys=True))[:32]`
+(32 hex chars = 128 bits; sorted keys for stable serialization; no brittle `repr` of sets).
+The full `clustering_config_json` (weights, thresholds, axis_availability) is stored in every
+`family_events` row so auditors can reconstruct the exact config after future changes. Thresholds
+may ONLY be tightened (MERGE_THRESHOLD ↓ → more strategies merge → stricter gate). No retroactive
+re-evaluation on threshold change.
 
 ### 3. Family-lifetime breadth (core anti-gaming mechanism, F3+F4)
 
@@ -112,19 +137,21 @@ family_lifetime_effective(family_id) = Σ SUM(n_combos) of search_trials
                                        FOR ALL strategies IN (BFS over family + ancestor families)
 ```
 
-**Crucially: no `family_id` column on `search_trials`** (F4). Instead, compute via JOIN:
+**Crucially: no `family_id` column on `search_trials`** (F4). Instead, compute via JOIN through
+the append-only `family_members` — **all rows, including removed** (R2-F2):
 
 ```sql
 SELECT COALESCE(SUM(st.n_combos), 0)
 FROM search_trials st
-WHERE st.strategy_name IN (
-    SELECT fm.strategy_name FROM family_members fm
-    WHERE fm.family_id IN (<set of family_id + ancestor_family_ids>)
-)
+JOIN family_members fm ON fm.strategy_name = st.strategy_name
+-- no removed_at filter: include ALL ever-charged strategies
+WHERE fm.family_id IN (<set of family_id + ancestor_family_ids>)
 ```
 
-This means ALL of a strategy's trials count toward its current family at query time, regardless
-of when they were recorded. No backfill, no denormalized column to keep in sync.
+Because `family_members` is append-only, a strategy's trials count permanently toward every
+family they've ever been in. Family breadth is monotonically non-decreasing: reassigning a
+member away does not remove their historical contributions from the old family. This is
+conservative (families only accumulate) and closes the R2-F2 tighten-only gap.
 
 **New 3-way max in `effective_funnel_breadth` (F5):**
 
@@ -160,11 +187,24 @@ The policy for agent actor and each clustering verdict:
 
 **F1 fix (CRITICAL):** Agents can only MERGE (assign to an existing family). Both PARENTAGE and
 NOVEL are human-only paths. For an agent facing a PARENTAGE verdict, the system assigns the
-strategy to the *closest ancestor family* — the stricter direction (more breadth inherited) rather
+strategy to the *matched parent family* — the stricter direction (more breadth inherited) rather
 than letting the agent start a new family with lower initial breadth.
+
+**Deterministic tie-breaking when multiple families are PARENTAGE-level matches (R2-F4):**
+`family_similarity` is called against each existing family and returns a ranked list. For agent
+PARENTAGE, the system picks deterministically: (1) highest similarity score; (2) on tie, highest
+`family_lifetime_combos` (most conservative — largest breadth); (3) on tie, lowest family id
+(stable). For human PARENTAGE, the human chooses, and all above-PARENTAGE-threshold families
+are offered as parent-edge candidates.
 
 This mirrors `guard_agent_relaxations` in `promotion.py`. The human `--new-family` flag creates a
 `family_events` row with `event_type='family_created'`, `actor='human'`, verdict, and score.
+
+**Concurrent preflight race guard (R2-F5):** The `expected_family_id` determined at preflight is
+passed to `run_gate`. Immediately before `evaluate_gate`, `run_gate` CAS-checks that the strategy's
+current `family_id` still matches `expected_family_id`. If a concurrent session reclassified the
+strategy, the gate fails closed with a retryable error (not a permanent FAIL). This prevents
+audit-record mismatches where gate_evaluations records one family but family_events shows another.
 
 **Orphan families (OpenCode M1):** A family created in preflight (before gate evaluation) persists
 even if the gate fails — the clustering verdict represents thesis similarity, which is independent
@@ -214,23 +254,27 @@ enabling retroactive audit.
 
 ```python
 class FamilyBudgetLedger(Protocol):
-    def global_cap(self) -> float: ...       # total alpha wealth (global LORD++ W)
-    def family_wealth(self, family_id: int) -> float: ...   # α_f · W
-    def reserve(self, family_id: int, gate_eval_id: int, p_value: float,
-                actor: str) -> bool: ...     # returns False if budget exhausted
-    def settle(self, family_id: int, gate_eval_id: int, final_p: float) -> None: ...
+    def global_cap(self) -> float: ...        # total alpha wealth (global LORD++ W)
+    def family_wealth(self, family_id: int) -> float: ...   # α_f · W remaining
+    def reserve(self, family_id: int, p_value: float,
+                actor: str) -> bool: ...      # returns False if budget exhausted
+    def settle(self, family_id: int, reservation_key: str) -> None: ...
 ```
 
-**Reservation sequencing (F6 — Codex/OpenCode HIGH):** `reserve()` is called in `run_gate`
-AFTER `evaluate_gate` returns DSR confidence. `p = 1 − dsr_confidence` is known only at that
-point. Sequence:
+**Reservation sequencing (F6 + R2-F1):** `gate_eval_id` does NOT exist at `reserve()` call time
+(the gate row is recorded after the budget check). Protocol therefore does NOT take `gate_eval_id`.
+The `InMemoryFamilyBudgetLedger` uses an internal counter. Correct sequence in `run_gate`:
 
 1. Preflight: no ledger mutation
 2. Walk-forward + holdout evaluation
-3. `evaluate_gate` → compute DSR → know `dsr_confidence`
-4. If all non-ledger checks pass → call `reserve(family_id, gate_eval_id, 1-dsr_confidence, actor)`
-5. If reservation fails → gate FAIL (append `budget_ledger` check = FAIL)
-6. If gate passes + reservation succeeds → record `gate_evaluations` row + transition
+3. `evaluate_gate` → compute all non-ledger checks + `dsr_confidence`
+4. If non-ledger checks all pass AND `dsr_confidence is not None`:
+   - `p = 1 − dsr_confidence`
+   - call `reserve(family_id, p, actor)` → True/False
+   - Final gate result = non_ledger_pass AND budget_ok
+5. If `dsr_confidence is None` (non-binding): skip reserve (budget Stratum B is interface-only)
+6. Record `gate_evaluations` row with the final pass/fail (includes `budget_ledger_ok` bool)
+7. If gate PASS → transition
 
 `settle()` is called when a strategy is retired/dormant (alpha wealth released back to the family).
 `InMemoryFamilyBudgetLedger` fake (no persistence) is the only implementation until Phase 2.
@@ -313,9 +357,11 @@ All four must pass before merge. Protected walls require human review on PR.
 
 ---
 
-## GATE 1 panel findings summary (Codex + OpenCode/GLM-5.1, 2026-06-16)
+## GATE 1 panel findings summary (Codex + OpenCode/GLM-5.1, rounds 1+2, 2026-06-16)
 
-All findings folded into this design. Key changes from the pre-review draft:
+All findings folded into this design.
+
+**Round 1 (11 findings):**
 
 | Finding | Severity | Resolution |
 |---------|----------|------------|
@@ -331,3 +377,15 @@ All findings folded into this design. Key changes from the pre-review draft:
 | `family_events` schema unspecified | MEDIUM | Explicit columns specified above |
 | Threshold miscalibration / no versioning | MEDIUM | Forward-only threshold policy; `clustering_version` in all `family_events` rows |
 | Schema 24→25 stale (already 25 from feat(219)) | LOW | Phase 4 bumps **25→26** |
+
+**Round 2 (7 findings, Codex re-review on updated spec):**
+
+| Finding | Severity | Resolution |
+|---------|----------|------------|
+| `gate_eval_id` in `reserve()` doesn't exist yet (gate row not written) | IMPORTANT | Removed `gate_eval_id` from Protocol; sequence: evaluate→reserve→record_row |
+| Family breadth can DECREASE when member reassigns (tighten-only violation) | IMPORTANT | `family_members` is append-only; lifetime_combos counts all-ever-charged; breadth only accumulates |
+| `add_parent_edge` needs top-level-only guard (same as `reserve_holdout`) | IMPORTANT | `in_transaction` guard added; composite `_create_child_with_parent_edge` for human PARENTAGE |
+| "Closest ancestor" underspecified when multiple PARENTAGE candidates | IMPORTANT | Deterministic tie-breaking: highest similarity → highest `family_lifetime_combos` → lowest id |
+| Concurrent preflights can reclassify same strategy between classify+gate | IMPORTANT | `expected_family_id` carried from preflight; CAS in `run_gate` → retryable error |
+| `clustering_version` hash brittle (`repr` of set) + only 16 hex chars | MINOR | `json.dumps(sort_keys=True)` + sha256[:32] (128 bits) + store full `clustering_config_json` |
+| CODEOWNERS path wrong (plan said `.github/CODEOWNERS`; correct is root `CODEOWNERS`) | MINOR | Fixed in plan Task 9 |
