@@ -53,6 +53,23 @@ a better hypothesis) — that's the gate doing its job.
 - **The judgment layer.** `kb/principles/research-methodology.md` explains *why* these walls exist,
   the leakage vectors no wall catches, and how to read an in-sample↔holdout gap honestly.
 
+## Reading `algua factor eval` IC (issue #140 slice B)
+
+`algua factor eval <factor>` evaluates a single catalogued factor on its own: a PIT backtest (via
+a 1-factor→weights adapter) plus a construction-free **IC** block. In the `ic` block:
+
+- `mean_ic` — average per-bar cross-sectional rank (Spearman) correlation between the factor's
+  score and the forward return. ~0 means no monotone cross-sectional predictiveness.
+- `ir = mean_ic / ic_std`; `t_stat = ir * sqrt(n_obs)`; `hit_rate` — share of bars with IC > 0.
+- `n_obs` — usable bars. A stable small-but-positive IC over many observations is more credible
+  than a large IC over few bars — always check `n_obs` (a `None` mean_ic means too few usable bars).
+
+**Caveat — `fdr_corrected: false`.** The t-stat is RAW: it is NOT corrected for the multiple-
+testing surface created by evaluating many factors. A factor that looks good on its own is a prior
+worth investigating, NOT evidence of edge. Funnel-wide FDR accounting for factor hypotheses is
+#140 slice E. And a factor never goes live — only a *strategy* that composes it does, through the
+normal walk-forward/holdout gates above.
+
 ## Your recommendation
 
 When delegated a results set, return a clear **promote** or **discard** with one or two sentences
