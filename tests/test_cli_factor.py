@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 import algua.strategies.momentum as _momfam
+from algua.backtest.engine import BacktestError
 from algua.cli.main import app
 
 runner = CliRunner()
@@ -60,9 +61,11 @@ def test_show_unknown_uses_error_envelope():
     assert json.loads(result.stdout)["ok"] is False
 
 
-def test_uses_reports_no_catalogued_factor_for_bundled():
+def test_uses_reports_composed_factor_for_bundled():
+    # After composition (issue #140) the bundled strategy delegates to xs_trailing_return, whose
+    # module imports indicators.py — so module-granular lineage reports all three.
     out = _json(runner.invoke(app, ["factor", "uses", "cross_sectional_momentum"]))
-    assert out["factors"] == []
+    assert {"xs_trailing_return", "momentum", "zscore"} <= set(out["factors"])
 
 
 def _write_dep_strategy(stem: str) -> Path:
@@ -105,3 +108,56 @@ def test_dependents_nonzero_exit_on_unloadable_without_allow_partial():
     # with --allow-partial it exits 0 but still reports
     ok_result = runner.invoke(app, ["factor", "dependents", "momentum", "--allow-partial"])
     assert ok_result.exit_code == 0
+
+
+def test_factor_eval_emits_backtest_and_ic():
+    payload = _json(runner.invoke(app, [
+        "factor", "eval", "xs_trailing_return",
+        "--demo", "--start", "2023-01-01", "--end", "2023-06-30",
+        "--symbols", "AAA,BBB,CCC",
+        "--construction", "top_k_equal_weight", "--construction-param", "top_k=1",
+        "--param", "lookback=10",
+    ]))
+    assert payload["ok"] is True
+    assert payload["factor"] == "xs_trailing_return"
+    assert payload["ic"]["method"] == "spearman"
+    assert payload["ic"]["fdr_corrected"] is False
+    assert "metrics" in payload["backtest"]
+
+
+def test_factor_eval_requires_construction():
+    result = runner.invoke(app, [
+        "factor", "eval", "xs_trailing_return", "--demo",
+        "--symbols", "AAA,BBB", "--param", "lookback=10",
+    ])
+    assert result.exit_code != 0  # typer: missing required --construction
+
+
+def test_factor_eval_rejects_non_standalone_factor():
+    result = runner.invoke(app, [
+        "factor", "eval", "momentum", "--demo", "--symbols", "AAA,BBB",
+        "--construction", "equal_weight_positive",
+    ])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "standalone" in payload["error"].lower()
+
+
+def test_factor_eval_renders_backtest_error_as_json(monkeypatch):
+    # evaluate_factor runs the backtest engine, which raises BacktestError on ordinary operational
+    # failures (empty data, risk breach, ...). The command must keep those inside the JSON contract.
+    import algua.cli.factor_cmd as fc
+
+    def _boom(*a, **k):
+        raise BacktestError("no bars in window")
+
+    monkeypatch.setattr(fc, "evaluate_factor", _boom)
+    result = runner.invoke(app, [
+        "factor", "eval", "xs_trailing_return", "--demo", "--symbols", "AAA,BBB",
+        "--construction", "equal_weight_positive", "--param", "lookback=5",
+    ])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "no bars in window" in payload["error"]
