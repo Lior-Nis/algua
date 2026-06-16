@@ -1,12 +1,18 @@
+import itertools
 import math
+
+import pytest
 
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
+    DSR_ALPHA,
+    EULER_MASCHERONI,
     FUNNEL_WINDOW_DAYS,
     MIN_HOLDOUT_OBSERVATIONS,
     GateCriteria,
     GateDecision,
+    dsr_confidence,
     effective_funnel_breadth,
     evaluate_gate,
     sharpe_haircut,
@@ -243,3 +249,102 @@ def test_pit_ok_passes_clean():
     d = evaluate_gate(_wf(), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
     pit = next(c for c in d.checks if c["name"] == "pit_required")
     assert pit["passed"] is True and d.pit_ok is True and d.pit_override is False
+
+
+def test_dsr_constants():
+    assert EULER_MASCHERONI == pytest.approx(0.5772156649015329)
+    assert DSR_ALPHA == 0.05
+
+
+def test_dsr_n1_collapses_to_psr_against_zero():
+    # N<=1 -> SR*=0; PSR for SR_pp=0.1, T=252, normal moments.
+    # z = 0.1*sqrt(251)/sqrt(1+0.5*0.1**2) ~= 1.580 -> Phi ~= 0.9429
+    c = dsr_confidence(0.1, 252, 0.0, 3.0, 1, 0.04)
+    assert c == pytest.approx(0.9429, abs=2e-3)
+
+
+def test_dsr_high_benchmark_rejects():
+    # N=10 with sizeable trial dispersion lifts SR* well above SR_obs -> low confidence
+    c = dsr_confidence(0.1, 252, 0.0, 3.0, 10, 0.04)
+    assert c is not None and c < 0.5
+
+
+def test_dsr_monotonic_in_n_and_sharpe():
+    base = dsr_confidence(0.15, 252, 0.0, 3.0, 5, 0.04)
+    assert dsr_confidence(0.15, 252, 0.0, 3.0, 50, 0.04) < base   # more trials -> stricter
+    assert dsr_confidence(0.25, 252, 0.0, 3.0, 5, 0.04) > base    # higher SR -> higher conf
+
+
+def test_dsr_fail_closed_guards():
+    assert dsr_confidence(0.1, 1, 0.0, 3.0, 5, 0.04) is None       # T<=1
+    assert dsr_confidence(0.1, 252, 0.0, 3.0, 0, 0.04) is None     # N<1
+    assert dsr_confidence(0.1, 252, 0.0, 3.0, 5, -0.01) is None    # negative variance
+    assert dsr_confidence(float("nan"), 252, 0.0, 3.0, 5, 0.04) is None
+    # denominator <= 0: large positive skew vs SR drives 1 - skew*SR + (k-1)/4*SR^2 negative
+    # (1 - 3.0*1.0 + (3.0-1)/4*1.0^2 = 1 - 3 + 0.5 = -1.5); note -skew*SR is +ve for negative skew,
+    # which would INCREASE the term, so the trigger requires positive skew.
+    assert dsr_confidence(1.0, 252, 3.0, 3.0, 1, 0.0) is None
+
+
+def test_dsr_zero_variance_is_psr():
+    # trial_sr_var=0 -> SR*=0 -> equals the N=1 PSR value
+    assert dsr_confidence(0.1, 252, 0.0, 3.0, 9, 0.0) == pytest.approx(
+        dsr_confidence(0.1, 252, 0.0, 3.0, 1, 0.04), abs=1e-9)
+
+
+def _wf_with(holdout, stability):
+    from algua.backtest.walkforward import WalkForwardResult
+    return WalkForwardResult(
+        strategy="s", config_hash="c", data_source="d", snapshot_id=None, timeframe="1d",
+        seed=None, period={"start": "2020-01-01", "end": "2021-01-01"}, windows=4,
+        holdout_frac=0.2, window_metrics=[], holdout_metrics=holdout, stability=stability)
+
+
+# a passing-on-everything-but-DSR walk-forward. Sharpe is set high enough to clear the
+# search-breadth-deflated holdout-Sharpe bar at the n_combos these tests use (n=500 -> bar ~4.03),
+# so the only check that can flip `passed` is the DSR check under test.
+_GOOD_HOLDOUT = {
+    "sharpe": 7.0, "total_return": 0.2, "n_bars": 252, "skewness": 0.0, "kurtosis": 3.0}
+_GOOD_STAB = {"pct_positive_windows": 0.8, "min_sharpe": 0.1}
+
+
+def test_dsr_omitted_when_not_binding_does_not_change_passed():
+    wf = _wf_with(_GOOD_HOLDOUT, _GOOD_STAB)
+    d = evaluate_gate(wf, GateCriteria(), n_combos=10, pit_ok=True, dsr_binding=False)
+    assert d.passed is True
+    assert all(c["name"] != "dsr_evidence" for c in d.checks)
+    assert d.dsr_binding is False and d.dsr_confidence is None
+
+
+def test_dsr_binding_can_only_reject():
+    wf = _wf_with(_GOOD_HOLDOUT, _GOOD_STAB)
+    # huge trial dispersion + many trials -> SR* far above the holdout Sharpe -> DSR fails
+    d = evaluate_gate(wf, GateCriteria(), n_combos=500, pit_ok=True,
+                      dsr_binding=True, dsr_trial_var_ann=400.0)
+    assert d.passed is False
+    assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
+
+
+def test_dsr_binding_missing_variance_fails_closed():
+    wf = _wf_with(_GOOD_HOLDOUT, _GOOD_STAB)
+    d = evaluate_gate(wf, GateCriteria(), n_combos=10, pit_ok=True,
+                      dsr_binding=True, dsr_trial_var_ann=None)
+    assert d.passed is False
+    assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
+    assert d.dsr_confidence is None
+
+
+def test_tighten_only_invariant():
+    # new_pass == old_pass AND (not dsr_binding or dsr_pass), over a grid of decisions.
+    for sharpe, nbars, binding, var in itertools.product(
+            [0.2, 0.6, 1.2], [80, 252], [False, True], [None, 0.0, 4.0, 400.0]):
+        holdout = {"sharpe": sharpe, "total_return": 0.1, "n_bars": nbars,
+                   "skewness": 0.0, "kurtosis": 3.0}
+        stab = {"pct_positive_windows": 0.8, "min_sharpe": 0.1}
+        wf = _wf_with(holdout, stab)
+        old = evaluate_gate(wf, GateCriteria(), n_combos=20, pit_ok=True, dsr_binding=False)
+        new = evaluate_gate(wf, GateCriteria(), n_combos=20, pit_ok=True,
+                            dsr_binding=binding, dsr_trial_var_ann=var)
+        dsr_check = next((c for c in new.checks if c["name"] == "dsr_evidence"), None)
+        dsr_pass = (dsr_check is None) or dsr_check["passed"]
+        assert new.passed == (old.passed and ((not binding) or dsr_pass))

@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 23
+    assert SCHEMA_VERSION == 24
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -20,7 +20,7 @@ def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(forward_gate_evaluations)")}
     assert {"strategy_id", "passed", "realized_sharpe", "holdout_sharpe", "first_tick_id",
             "last_tick_id", "n_concurrent_forward", "consumed", "created_at"} <= fcols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 23
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 24
 
 
 def test_v21_new_columns_are_nullable_on_existing_rows(tmp_path):
@@ -393,3 +393,17 @@ def test_ideas_table_created_with_expected_columns(tmp_path):
     # FK to strategies(id) is declared
     fks = {row["table"] for row in conn.execute("PRAGMA foreign_key_list(ideas)")}
     assert "strategies" in fks
+
+
+def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
+    # open twice to prove the ALTER path is idempotent and NULL on pre-existing rows
+    db = tmp_path / "r.db"
+    c1 = connect(db)
+    migrate(c1)
+    c1.close()
+    c2 = connect(db)
+    migrate(c2)
+    cols = {row["name"] for row in c2.execute("PRAGMA table_info(search_trials)")}
+    assert {"trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann"} <= cols
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 24
+    c2.close()

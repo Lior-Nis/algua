@@ -9,11 +9,18 @@ from algua.backtest.engine import BacktestError
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry.db import connect, migrate
 from algua.registry.promotion import (
+    BreadthContext,
     guard_agent_relaxations,
     promotion_preflight,
     resolve_pit_ok,
+    run_gate,
 )
 from algua.registry.store import SqliteStrategyRepository
+from algua.research.gates import (
+    FUNNEL_WINDOW_DAYS,
+    GateCriteria,
+    effective_funnel_breadth,
+)
 
 _START = datetime(2024, 1, 1, tzinfo=UTC)
 _END = datetime(2024, 6, 1, tzinfo=UTC)
@@ -233,3 +240,83 @@ def test_preflight_passes_parity_for_faithful_bundled_strategy(tmp_path):
         allow_holdout_reuse=False, allow_non_pit=False,
         provider=SyntheticProvider(seed=7), start=_START, end=_END)
     assert ctx.own == 4 and ctx.provenance == "measured"
+
+
+# --- run_gate DSR binding (#211) ---------------------------------------------------------------
+# run_gate calls compute_artifact_hashes(name) -> load_strategy(name), so these tests use a real
+# bundled strategy ("cross_sectional_momentum"). The holdout Sharpe is set far above the deflated
+# bar at the n_combos used, so the DSR check under test is the only thing that can flip `passed`.
+
+_GATE_START = date(2024, 1, 1)
+_GATE_END = date(2024, 6, 1)
+_GATE_NAME = "cross_sectional_momentum"
+
+# a walk-forward that passes everything-but-DSR; high Sharpe clears the breadth-deflated bar.
+_GATE_HOLDOUT = {
+    "sharpe": 7.0, "total_return": 0.2, "n_bars": 252, "skewness": 0.0, "kurtosis": 3.0}
+_GATE_STAB = {"pct_positive_windows": 0.8, "min_sharpe": 0.1}
+
+
+def _gate_wf(holdout=None, stability=None):
+    from algua.backtest.walkforward import WalkForwardResult
+
+    return WalkForwardResult(
+        strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
+        timeframe="1d", seed=None,
+        period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
+        window_metrics=[], holdout_metrics=holdout or dict(_GATE_HOLDOUT),
+        stability=stability or dict(_GATE_STAB))
+
+
+def _gate_repo(tmp_path):
+    repo = _repo(tmp_path)
+    rec = repo.add(_GATE_NAME)
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    return repo
+
+
+def _breadth(repo, provenance: str, *, n: int = 5) -> BreadthContext:
+    windowed_total = repo.windowed_search_combos(FUNNEL_WINDOW_DAYS)
+    n_funnel = effective_funnel_breadth(n, windowed_total)
+    return BreadthContext(n_funnel, n, windowed_total, provenance)
+
+
+def _run(repo, breadth, wf=None):
+    return run_gate(
+        repo, wf or _gate_wf(), name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=breadth, universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="")
+
+
+def test_run_gate_measured_binds_dsr(tmp_path):
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    breadth = _breadth(repo, "measured")
+    outcome = _run(repo, breadth)
+    d = outcome.decision
+    assert d.dsr_binding is True
+    assert any(c["name"] == "dsr_evidence" for c in d.checks)
+
+
+def test_run_gate_declared_breadth_omits_dsr(tmp_path):
+    repo = _gate_repo(tmp_path)
+    breadth = _breadth(repo, "declared")
+    outcome = _run(repo, breadth)
+    d = outcome.decision
+    assert d.dsr_binding is False
+    assert all(c["name"] != "dsr_evidence" for c in d.checks)
+    assert d.dsr_skip_reason == "no_measured_dispersion"
+
+
+def test_run_gate_measured_but_missing_stats_fails_closed(tmp_path):
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}")  # measured row, NULL stats (pre-migration)
+    breadth = _breadth(repo, "measured")
+    outcome = _run(repo, breadth)
+    d = outcome.decision
+    assert d.dsr_binding is True
+    assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
+    assert d.passed is False
+    assert outcome.promoted is False

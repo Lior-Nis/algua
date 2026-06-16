@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -395,16 +396,49 @@ class SqliteStrategyRepository:
         ).fetchone()
         return row is not None
 
-    def record_search_trial(self, strategy_name: str, n_combos: int, grid_json: str) -> int:
+    def record_search_trial(
+        self, strategy_name: str, n_combos: int, grid_json: str,
+        *, trial_sharpe_count: int | None = None,
+        trial_sharpe_mean: float | None = None,
+        trial_sharpe_var_ann: float | None = None,
+    ) -> int:
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
-                " VALUES (?,?,?,?)",
-                (strategy_name, n_combos, grid_json, _now()),
+                "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at,"
+                " trial_sharpe_count, trial_sharpe_mean, trial_sharpe_var_ann)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (strategy_name, n_combos, grid_json, _now(),
+                 trial_sharpe_count, trial_sharpe_mean, trial_sharpe_var_ann),
             )
         rowid = cur.lastrowid
         assert rowid is not None  # a successful INSERT always sets lastrowid
         return rowid
+
+    def pooled_trial_sharpe_var(self, strategy_name: str) -> float | None:
+        """Exact pooled SAMPLE variance (ddof=1) of the strategy's trial Sharpes across all its
+        search_trials rows. Returns None (fail closed) if there are no rows OR any contributing
+        row has a NULL/NaN/inf/negative count|mean|var. NULL rows are NEVER silently skipped."""
+        rows = self._conn.execute(
+            "SELECT trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
+            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name=?",
+            (strategy_name,),
+        ).fetchall()
+        if not rows:
+            return None
+        triples: list[tuple[int, float, float]] = []
+        for r in rows:
+            n, mean, var = r["n"], r["mean"], r["var"]
+            if n is None or mean is None or var is None:
+                return None
+            if not (math.isfinite(mean) and math.isfinite(var)) or int(n) < 1 or var < 0.0:
+                return None
+            triples.append((int(n), float(mean), float(var)))
+        total_n = sum(n for n, _, _ in triples)
+        if total_n <= 1:
+            return 0.0
+        grand_mean = sum(n * m for n, m, _ in triples) / total_n
+        sse = sum((n - 1) * v + n * (m - grand_mean) ** 2 for n, m, v in triples)
+        return sse / (total_n - 1)
 
     def total_search_combos(self, strategy_name: str) -> int:
         # COALESCE so an empty result (no trials) reads as 0 rather than NULL.

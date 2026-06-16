@@ -61,7 +61,9 @@ PSR(SR*) = Φ( (SR_obs − SR*) · √(T − 1) / √(1 − γ₃·SR_obs + ((γ
   Gaussian series it must reduce to `(3−1)/4 = 0.5`, giving the Lo/Mertens SR-estimator variance
   `1 + SR²/2`. `scipy.stats.kurtosis(..., fisher=False)` (or `excess + 3`) — pinned by a test on a
   normal-like series expecting `γ₃≈0`, `γ₄≈3`.
-- `√(T − 1)` — matches the published PSR (Bailey–LdP use `n−1`); kept as-is.
+- `√(T − 1)` — conservative small-sample form (matches the López de Prado reference
+  implementations of PSR; the asymptotic form uses `√T`, a <1% difference at `T ≥ 30` and in the
+  safe/stricter direction). Kept as-is; do not claim a specific equation number.
 - `Φ` — standard-normal CDF (`scipy.stats.norm.cdf`).
 
 **DSR (Deflated Sharpe Ratio)** — PSR where the benchmark `SR*` is the **expected maximum Sharpe
@@ -76,9 +78,10 @@ SR* = 0                                                                         
   `EULER_MASCHERONI` in `gates.py`). NOT `e⁻¹`: `e⁻¹≈0.368` systematically *understates* the
   expected max → too-low `SR*` → too-lenient gate. (Numerically, for N=100 the γ_E form gives
   E[max]≈2.53 vs the true 2.51; the `e⁻¹` form gives 2.46.)
-- **`N ≤ 1` is special-cased to `SR* = 0`** before any `Z⁻¹` is evaluated — the formula itself
-  yields `Z⁻¹(0) = −∞` at `N=1`, so the collapse-to-PSR is an explicit guard, not a limit. `N < 1`
-  (defensive) → `None`/fail closed.
+- **Guard ordering (precise, to resolve the `N=1` vs `N<1` overlap):** evaluate in this order —
+  `if N < 1: return None` (invalid breadth → fail closed); `elif N <= 1: SR* = 0` (collapse to PSR,
+  before any `Z⁻¹`, since the formula yields `Z⁻¹(0) = −∞` at `N=1`); `else:` the formula. So
+  `N=0` fails closed and is never silently turned into plain PSR.
 - `N` — trial count = `effective_funnel_breadth(own_lifetime, windowed_total)` (the **same** `N`
   the haircut uses; a raw count).
 - `trial_sr_var` — **variance of the per-combo trial Sharpe ratios** across the strategy's
@@ -92,7 +95,12 @@ are **annualized** (`SR_ann = SR_per_period · √ANN`). Conversion happens at t
 `gates.py`: `SR_obs → SR_obs/√ANN`, `trial_sr_var → trial_sr_var/ANN` (variance scales by the
 square). The DB column stores the variance of the **annualized** sweep Sharpes (name encodes it:
 `trial_sharpe_var_ann`); the single `/ANN` conversion lives in the protected gate so all unit
-handling is co-located with the math.
+handling is co-located with the math. **Fixed-`ANN` assumption:** `ANN` is the single global
+constant (`algua.backtest._constants.ANN`) the haircut already uses; because both `SR_obs` and the
+sweep Sharpes are annualized by the *same* constant, the `/ANN` conversion is internally consistent
+even if a strategy was swept on a non-daily timeframe — the per-period units cancel. A future
+per-timeframe `ANN` (intraday) would require persisting the sweep's annualization factor; out of
+scope for Phase 1 (the same assumption the existing haircut already makes).
 
 **Gate check:** `dsr_evidence` passes iff `dsr_confidence ≥ 1 − DSR_ALPHA`, protected constant
 `DSR_ALPHA = 0.05` (≥95% confidence the true Sharpe beats the selection-inflated benchmark). The
@@ -110,10 +118,17 @@ it exists, Phase 1 uses:
 - `N` = raw funnel breadth. Taken alone this is the conservative direction (overstates independent
   trials → larger `SR*`).
 - `trial_sr_var` = the variance of the strategy's **own** sweep Sharpes (per-period after `/ANN`),
-  **pooled across all of the strategy's sweeps via the law of total variance** — NOT a naive
-  count-weighted mean of per-sweep variances (that ignores between-sweep mean differences and
-  *understates* dispersion). To pool correctly the sweep records a `(count, mean, var)` triple per
-  row (see Footprint); `Var_total = E[var_within] + Var[mean_across_sweeps]` weighted by count.
+  **pooled across all of the strategy's sweeps as the exact pooled SAMPLE variance** (`ddof=1`,
+  matching how each row's `var` is computed) — NOT a naive count-weighted mean of per-sweep
+  variances (that ignores between-sweep means and understates dispersion), and NOT the
+  population-style `E[var]+Var[mean]` (divides by `N`, not `N−1`). From the `(count nᵢ, mean μᵢ,
+  var sᵢ²)` triples (see Footprint):
+
+  ```
+  M   = Σ(nᵢ·μᵢ) / Σnᵢ
+  SSE = Σ( (nᵢ−1)·sᵢ²  +  nᵢ·(μᵢ − M)² )
+  pooled_sample_var = SSE / (Σnᵢ − 1)          for Σnᵢ ≥ 2;  0.0 for Σnᵢ == 1
+  ```
 
 **This pairing is NOT guaranteed conservative overall — stated plainly.** `N` is conservative, but
 own-sweep `trial_sr_var` can be *small* when the grid explores near-duplicate parameters (low
@@ -132,10 +147,15 @@ documented at the computation site in `gates.py` and surfaced in the gate payloa
 1. **`algua/backtest/metrics.py`** *(unprotected)* — add `skewness` and **raw** `kurtosis`
    (`fisher=False`) to `metrics_from_returns`, computed on the **same** return series as `sharpe`.
    This puts the moments (and the consistent sample length) into `holdout_metrics` so the gate reads
-   pre-computed values and `gates.py` stays pure-math. The existing empty/degenerate guard returns
-   0.0 for the new keys too. `holdout_metrics` is already SENSITIVE (withheld from operators) — the
-   moments inherit that handling. The PSR `T` is the count of finite returns in that series (the
-   segment length the moments were computed on), passed alongside the moments.
+   pre-computed values and `gates.py` stays pure-math. **The new keys are coerced to 0.0 when
+   non-finite** — extend the degenerate guard beyond `len(r) == 0` to also cover `len(r) ≤ 1` and
+   zero-variance series, where `scipy.stats.skew/kurtosis` return **NaN** that would otherwise leak
+   into `holdout_metrics` and violate the "never NaN in the payload" discipline. These 0.0
+   placeholders are never *consumed* by the PSR formula because `dsr_confidence`'s `T ≤ 1` guard and
+   `MIN_HOLDOUT_OBSERVATIONS=63` floor reject such holdouts first. `holdout_metrics` is already
+   SENSITIVE (withheld from operators) — the moments inherit that handling. The PSR `T` is the count
+   of finite returns in that series (the segment length the moments were computed on), passed
+   alongside the moments.
 
 2. **`algua/backtest/sweep.py`** *(unprotected)* — `sweep()` computes, over its per-combo ranking
    Sharpes (annualized, in COMBO order, before ranking), the triple `(count, mean, var)` with
@@ -150,17 +170,27 @@ documented at the computation site in `gates.py` and surfaced in the gate payloa
    `trial_sharpe_count`, `trial_sharpe_mean`, `trial_sharpe_var_ann` parameters (update the
    `StrategyRepository` Protocol and all call sites — additive, no optional-default cruft on a
    single internal caller). New accessor pools the strategy's own `(count, mean, var)` triples via
-   the law of total variance into one per-period dispersion; it returns `None` (→ agent fail-closed)
-   **iff any row contributing to the strategy's own breadth lacks a finite variance/count** (precise
-   rule: the query selects the strategy's own measured sweep rows and fails if any has NULL/non-finite
-   stats — NULL rows are never silently skipped).
+   the exact pooled-sample-variance formula (see "DSR inputs") into one per-period dispersion; it
+   returns `None` (→ agent fail-closed) **iff any row contributing to the strategy's own breadth
+   lacks finite stats** (precise rule: the query selects the strategy's own measured sweep rows and
+   fails if any has NULL/non-finite stats — NULL rows are never silently skipped). **Non-finite
+   detection at the SQLite boundary:** treat `NULL`, `NaN`, and `±inf` uniformly as missing — after
+   reading each value, `None`-or-`not math.isfinite(...)` → return `None`. **Known Phase-1 limitation
+   (documented at the computation site):** overlapping combos across re-sweeps are double-counted in
+   the pooled `count`/variance; acceptable because the haircut stays binding and Phase 3's
+   cross-strategy dispersion floor supersedes it. (A sweep always yields ≥1 combo — grid validation
+   enforces it — so `count = 0` is unreachable.)
 
 4. **`algua/research/gates.py`** *(PROTECTED)* — pure `dsr_confidence(sr_obs_per_period, t, skew,
    raw_kurtosis, n_trials, trial_sr_var_perperiod) -> float | None` (with the `N≤1→SR*=0`,
-   denominator, finiteness, and negative-variance guards above); protected constants
-   `DSR_ALPHA = 0.05` and `EULER_MASCHERONI`. The `dsr_evidence` check is added to the binding
-   check-list **only when binding** (see rules); its confidence + all inputs + `dsr_binding` flag +
-   skip-reason are recorded in the `GateDecision` payload either way.
+   denominator, finiteness, and negative-variance guards above; `n_trials` is an integer count —
+   defensive `int(...)` cast at the top). Protected constants `DSR_ALPHA = 0.05` and
+   `EULER_MASCHERONI`. The `dsr_evidence` check is added to the binding check-list **only when
+   binding** (see rules). New `GateDecision` fields recorded either way (nulled when not finite, like
+   the existing payload): `dsr_confidence: float | None`, `dsr_binding: bool`,
+   `dsr_skip_reason: str | None`, `dsr_sr_star: float | None`, `dsr_n_trials: int | None`,
+   `dsr_trial_sr_var: float | None`, `dsr_t: int | None`, `dsr_skew: float | None`,
+   `dsr_raw_kurtosis: float | None`.
 
 5. **`algua/registry/promotion.py`** *(PROTECTED)* — `run_gate` reads `skew`/`raw_kurtosis`/`T`
    from `wf.holdout_metrics`, `N` from `effective_funnel_breadth`, and the pooled per-period
@@ -169,19 +199,32 @@ documented at the computation site in `gates.py` and surfaced in the gate payloa
 
 ### Binding / fallback rules (advisory = OMITTED from the AND-set, not appended-as-False)
 
-- **DSR binds only when its inputs are real.** The dispersion exists only from a *measured* sweep.
-  The agent path **requires** measured breadth → DSR is always computable → `dsr_evidence` is
-  **added to the binding check-list** and contributes to `passed = all(checks)`. If a contributing
-  row lacks variance (old pre-migration row), the accessor returns `None` → `dsr_confidence` is
-  `None` → the binding check **fails closed** with a re-sweep message.
-- **Human `--n-combos` declared-breadth path:** no measured dispersion exists, so in Phase 1 DSR is
-  **not computed at all** — the `dsr_evidence` check is **omitted from the binding check-list**
-  (NOT appended with `passed=False`, which would wrongly block the human escape hatch). The payload
-  records `dsr_binding=false`, `dsr_confidence=null`, `dsr_skip_reason="declared_breadth"` for audit.
-  This mirrors how `pit_required` separates a relaxable concern from the hard AND-set.
+The binding rule is **actor-INDEPENDENT and keyed only on whether measured dispersion exists** — so
+declared breadth can never be used to *dodge* a computable DSR check (the round-1 actor-based rule
+had that bypass: a human with a real sweep could `--n-combos` past DSR).
+
+- **DSR binds whenever measured dispersion is available.** Concretely: the strategy has ≥1 measured
+  sweep row and the pooled-variance accessor returns a finite value → `dsr_evidence` is **added to
+  the binding check-list** and contributes to `passed = all(checks)`, for agent AND human alike.
+  The agent path requires measured breadth, so DSR always binds there. A human using `--n-combos`
+  while a measured sweep also exists is **still bound** by DSR.
+- **DSR is omitted ONLY when no measured dispersion exists** (a strategy with no sweep at all,
+  reachable only on the human declared-breadth path). Then the `dsr_evidence` check is **omitted
+  from the binding check-list** (NOT appended `passed=False`, which would wrongly block the human
+  escape hatch). Payload records `dsr_binding=false`, `dsr_confidence=null`,
+  `dsr_skip_reason="no_measured_dispersion"`. Mirrors how `pit_required` separates a relaxable
+  concern from the hard AND-set.
+- **Old pre-migration rows fail closed (not omitted).** If the strategy has measured sweep rows but
+  any contributing row lacks finite `(count, mean, var)`, the accessor returns `None` →
+  `dsr_confidence None` → the binding check **fails closed** with a re-sweep message. (Distinct from
+  the no-sweep case above: a sweep happened but its stats predate the schema bump.)
+- **No implicit DSR override.** Phase 1 has NO flag to relax a *failing* DSR check. Consistent with
+  the gate philosophy, any future escape must be an explicit, audited human flag — deferred; not a
+  side effect of declared breadth. (`candidate` is not capital and DSR is tighten-only, so a missing
+  override is safe.)
 - **Tighten-only invariant (precise).** For any input, the new overall verdict equals
   `old_pass AND (NOT dsr_binding OR dsr_pass)`. Existing checks and their thresholds are byte-for-byte
-  unchanged; DSR can only ever subtract a pass on the agent path and is absent on the human path.
+  unchanged; DSR can only ever subtract a pass when bound, and is absent otherwise.
 
 ### Edge cases (all fail-closed, mirroring the existing haircut)
 
@@ -204,9 +247,10 @@ documented at the computation site in `gates.py` and surfaced in the gate payloa
   `T≤1`→`None`; denominator≤0→`None`; negative/NaN variance→`None`.
 - **Tighten-only property test (strong form):** over a generated grid of gate decisions, assert
   `new_pass == old_pass AND (not dsr_binding or dsr_pass)` — not merely "never flips FAIL→PASS".
-- Pooling test: law-of-total-variance accessor across multiple sweeps with differing means exceeds
-  the naive count-weighted within-sweep mean; single-sweep matches that sweep's variance; any NULL
-  contributing row → `None`.
+- Pooling test: the exact pooled-sample-variance accessor across multiple sweeps with differing means
+  exceeds the naive count-weighted within-sweep mean; **equal-sweep-means → pooled equals the naive
+  within-sweep average** (between-sweep term zero); single-sweep matches that sweep's variance; any
+  NULL/NaN/inf contributing value → `None`.
 - Promotion integration: agent measured path binds; human declared path omits DSR (still promotable);
   missing-variance old row fails closed for an agent with the re-sweep message.
 - `metrics.py`: skew/kurtosis present, raw-kurtosis convention pinned, empty segment → 0.0.
@@ -229,7 +273,9 @@ which may import third-party libs; `contracts`/`features` purity is untouched).
 **Phase 2 — online hierarchical FDR accounting.** LORD++ first (conservative, valid for
 never-fixed-N streaming; plain BH needs a fixed N), SAFFRON later once p-value calibration is
 auditable. Introduces a **persistent alpha-wealth ledger** (new state): discoveries replenish
-budget, dry spells tighten it. **Builds on Phase 1's calibrated p-value** as the LORD++ input.
+budget, dry spells tighten it. **Builds on Phase 1's calibrated evidence** as the LORD++ input —
+the LORD++ p-value is `p = 1 − dsr_confidence` (Phase 1 exposes a *confidence*; convert explicitly at
+the interface to avoid re-introducing the `≥`/`≤` inversion hazard).
 
 **Phase 3 — dependence-aware calibration (load-bearing).** Estimate **effective independent
 trials** from strategy return-stream correlation (replaces the raw-count `N` in the DSR benchmark);

@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -127,7 +127,10 @@ CREATE TABLE IF NOT EXISTS search_trials (
     strategy_name TEXT NOT NULL,
     n_combos INTEGER NOT NULL,
     grid_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    trial_sharpe_count INTEGER,
+    trial_sharpe_mean REAL,
+    trial_sharpe_var_ann REAL
 );
 CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_name);
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
@@ -464,6 +467,13 @@ def migrate(conn: sqlite3.Connection) -> None:
         {"committed_at": "TEXT", "holdout_start": "TEXT", "holdout_end": "TEXT"},
     )
     _backfill_holdout_intervals(conn)
+    # v24 (#211): trial-Sharpe dispersion columns for the DSR evidence layer. NULL on pre-existing
+    # rows — old sweep rows lack stats and the pooled accessor returns None (fail closed).
+    _add_missing_columns(conn, "search_trials", {
+        "trial_sharpe_count": "INTEGER",
+        "trial_sharpe_mean": "REAL",
+        "trial_sharpe_var_ann": "REAL",
+    })
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
