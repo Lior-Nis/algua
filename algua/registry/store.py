@@ -1242,6 +1242,45 @@ class SqliteStrategyRepository:
             self._conn.rollback()
             raise
 
+    def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
+        """Return [(family_id, members_list)] for all families that have active members.
+
+        Each member dict: {"code_hash": str, "factors": set[str]}.
+        The code_hash is looked up via compute_artifact_hashes; strategies whose module
+        cannot be loaded silently get code_hash='' and factors=set() (fail-closed: they
+        will not match unless the new strategy also fails to load, which is extremely
+        unlikely and also fails closed elsewhere).
+        """
+        from algua.registry.approvals import compute_artifact_hashes
+        from algua.registry.lineage import factors_used_by
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT family_id, strategy_name"
+            " FROM family_members"
+            " WHERE removed_at IS NULL"
+            " ORDER BY family_id"
+        ).fetchall()
+        # Group by family_id
+        family_map: dict[int, list[dict]] = {}
+        for row in rows:
+            fid = int(row["family_id"])
+            sname = row["strategy_name"]
+            try:
+                identity = compute_artifact_hashes(sname)
+                code_hash = identity.code_hash
+            except Exception:  # noqa: BLE001
+                code_hash = ""
+            try:
+                factor_specs = factors_used_by(sname)
+                # factors_used_by returns list[FactorSpec]; get the name string
+                factors: set[str] = {
+                    f.name if hasattr(f, "name") else str(f) for f in factor_specs
+                }
+            except Exception:  # noqa: BLE001
+                factors = set()
+            family_map.setdefault(fid, []).append({"code_hash": code_hash, "factors": factors})
+        return list(family_map.items())
+
     def windowed_family_combos(self, family_id: int, window_days: int) -> int:
         """Windowed search combos for a family + transitive ancestors.
 

@@ -553,6 +553,15 @@ class StrategyRepository(Protocol):
         """Atomically add a parent edge (cycle-guarded, BEGIN IMMEDIATE, top-level-only)."""
         ...
 
+    def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
+        """Return [(family_id, members_list)] for all families with active members.
+
+        Each member dict: {"code_hash": str, "factors": set[str]}.
+        Used by the clustering guard in promotion_preflight to classify a strategy
+        against all known families before the holdout is touched.
+        """
+        ...
+
     def windowed_family_combos(self, family_id: int, window_days: int) -> int:
         """Windowed search combos for a family + transitive ancestors within trailing window_days.
         """

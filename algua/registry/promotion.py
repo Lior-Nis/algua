@@ -3,7 +3,7 @@ from __future__ import annotations
 import functools
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from algua.backtest.engine import verify_signal_panel_parity
@@ -11,7 +11,14 @@ from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.types import DataProvider
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.lineage import factors_used_by
 from algua.registry.repository import StrategyRepository
+from algua.registry.transitions import transition_strategy
+from algua.research.clustering import (
+    SimVerdict,
+    clustering_version,
+    family_similarity,
+)
 from algua.research.gates import (
     FDR_ALPHA,
     FDR_W0,
@@ -22,6 +29,7 @@ from algua.research.gates import (
     evaluate_gate,
     lord_plus_plus_level,
 )
+from algua.strategies.loader import StrategyNotFound, load_strategy
 
 
 def guard_agent_relaxations(
@@ -68,6 +76,134 @@ class BreadthContext:
     own: int
     windowed_total: int
     provenance: str
+    family_id: int | None = field(default=None)         # resolved family after classification
+    expected_family_id: int | None = field(default=None)  # CAS token for run_gate (Task 5)
+
+
+def _get_all_family_members_for_clustering(
+    repo: StrategyRepository,
+) -> list[tuple[int, list[dict]]]:
+    """Return [(family_id, members_list)] for all families with active members.
+
+    Each member dict: {"code_hash": str, "factors": set[str]}.
+    Delegates to the repository so the Protocol seam is respected.
+    """
+    return repo.all_families_with_member_profiles()
+
+
+def _classify_and_assign_family(
+    repo: StrategyRepository,
+    name: str,
+    *,
+    actor: Actor,
+    new_family_slug: str | None,
+) -> int | None:
+    """Classify ``name`` against all known families and assign it if needed.
+
+    Returns the resolved family_id (or None only if it somehow stays unassigned, which
+    should not happen — every branch either raises or assigns).
+
+    Decision tree:
+    - Already assigned: return current family_id, no re-classification.
+    - MERGE: assign to best-matching family.
+    - PARENTAGE + agent: fold into best parent family (agents cannot mint child families).
+    - PARENTAGE + human: create a child family with a parent edge, assign there.
+    - NOVEL + agent: raise ValueError (agents cannot mint new families).
+    - NOVEL + human: create a new root family using new_family_slug (required); assign.
+    """
+    current_family_id = repo.strategy_family(name)
+    if current_family_id is not None:
+        # Already assigned — skip reclassification, keep existing assignment.
+        return current_family_id
+
+    # Get the strategy's identity for clustering comparison. A strategy whose module cannot be
+    # loaded (e.g. test-only names) gets code_hash="" and factors=set(): it will never match an
+    # existing member's real code_hash, so these strategies get NOVEL verdict (fail-closed).
+    try:
+        strategy_code_hash = compute_artifact_hashes(name).code_hash
+    except StrategyNotFound:
+        strategy_code_hash = ""
+    try:
+        factor_specs = factors_used_by(name)
+        # factors_used_by returns list[FactorSpec]; get names.
+        strategy_factors: set[str] = {
+            f.name if hasattr(f, "name") else str(f) for f in factor_specs
+        }
+    except Exception:  # noqa: BLE001 — unregistered/test strategies silently get no factors
+        strategy_factors = set()
+
+    best_family_id: int | None = None
+    best_verdict = SimVerdict.NOVEL
+    best_score = 0.0
+
+    for fam_id, members in _get_all_family_members_for_clustering(repo):
+        verdict, score = family_similarity(strategy_code_hash, strategy_factors, members)
+        if score > best_score or (score == best_score and best_verdict == SimVerdict.NOVEL):
+            best_score = score
+            best_verdict = verdict
+            best_family_id = fam_id
+
+    cv = clustering_version()
+    clustering_config_json = "{}"  # stub: Task 7 fills in when return axis activates
+    axis_json = "{}"               # stub: include score breakdown when axes are live
+
+    if best_verdict == SimVerdict.MERGE:
+        assert best_family_id is not None
+        repo.assign_strategy_to_family(
+            name, best_family_id, actor=actor.value,
+            verdict=best_verdict.value, similarity_score=best_score,
+            clustering_version=cv, clustering_config_json=clustering_config_json,
+            axis_json=axis_json, matched_family_id=best_family_id,
+        )
+        return best_family_id
+
+    if best_verdict == SimVerdict.PARENTAGE:
+        assert best_family_id is not None
+        if actor is Actor.AGENT:
+            # Agent cannot mint a child family. Fold into the best parent.
+            repo.assign_strategy_to_family(
+                name, best_family_id, actor=actor.value,
+                verdict=best_verdict.value, similarity_score=best_score,
+                clustering_version=cv, clustering_config_json=clustering_config_json,
+                axis_json=axis_json, matched_family_id=best_family_id,
+            )
+            return best_family_id
+        else:
+            # Human: create a child family, add a parent edge, assign.
+            child_name = new_family_slug or f"{name}_family"
+            child_fam_id = repo.create_family(child_name, actor=actor.value,
+                                               created_by_strategy=name)
+            repo.add_parent_edge(child_fam_id, best_family_id)
+            repo.assign_strategy_to_family(
+                name, child_fam_id, actor=actor.value,
+                verdict=best_verdict.value, similarity_score=best_score,
+                clustering_version=cv, clustering_config_json=clustering_config_json,
+                axis_json=axis_json, matched_family_id=best_family_id,
+            )
+            return child_fam_id
+
+    # NOVEL verdict
+    if actor is Actor.AGENT:
+        raise ValueError(
+            f"strategy {name!r} has no matching family (clustering verdict: NOVEL). "
+            "Assign to a family or use --actor human with --new-family <slug>."
+        )
+    else:
+        # Human: create a new root family using the provided slug.
+        if new_family_slug is None:
+            raise ValueError(
+                f"strategy {name!r}: clustering verdict is NOVEL (no matching family). "
+                "Provide --new-family <slug> to create a new family."
+            )
+        new_fam_id = repo.create_family(new_family_slug, actor=actor.value,
+                                         created_by_strategy=name)
+        repo.assign_strategy_to_family(
+            name, new_fam_id, actor=actor.value,
+            verdict=SimVerdict.NOVEL.value, similarity_score=0.0,
+            clustering_version=cv, clustering_config_json=clustering_config_json,
+            axis_json=axis_json,
+        )
+        return new_fam_id
 
 
 def promotion_preflight(
@@ -81,6 +217,7 @@ def promotion_preflight(
     provider: DataProvider,
     start: datetime,
     end: datetime,
+    new_family_slug: str | None = None,   # human-only, for NOVEL verdict
 ) -> BreadthContext:
     """Pre-peek phase — runs BEFORE walk_forward, so every hard refusal happens before the holdout
     is touched and before any gate row is minted: (1) relaxations-need-human; (2) stage legality
@@ -122,8 +259,6 @@ def promotion_preflight(
     # Fundamentals strategies cannot be promoted past backtested until the paper/live fundamentals
     # lane exists (#132): block the agent's only path to candidate early, with a clear message.
     # Silently skip if the strategy is not a bundled module (e.g. tests using synthetic names).
-    from algua.strategies.loader import StrategyNotFound, load_strategy
-
     try:
         _loaded = load_strategy(name)
     except StrategyNotFound:
@@ -144,6 +279,13 @@ def promotion_preflight(
     # Raises BacktestError on divergence (caught by the `promote` CLI's @json_errors).
     if _loaded is not None:
         verify_signal_panel_parity(_loaded, provider, start, end)
+    # --- Family classification (clustering verdict, #222) ---
+    # Runs BEFORE breadth resolution (no holdout has been touched yet). A strategy already
+    # assigned to a family is left as-is (no reclassification). A NOVEL verdict refuses an
+    # agent (agents cannot mint new families). A human NOVEL requires --new-family <slug>.
+    family_id_resolved = _classify_and_assign_family(
+        repo, name, actor=actor, new_family_slug=new_family_slug
+    )
     measured = repo.total_search_combos(name)
     windowed_total = repo.windowed_search_combos(FUNNEL_WINDOW_DAYS)
     if measured > 0:
@@ -155,8 +297,11 @@ def promotion_preflight(
             f"no recorded search breadth for {name!r}; run `algua backtest sweep {name} ...` "
             f"(records breadth). Declaring via --n-combos requires --actor human."
         )
-    return BreadthContext(effective_funnel_breadth(own, windowed_total), own, windowed_total,
-                          provenance)
+    ctx = BreadthContext(effective_funnel_breadth(own, windowed_total), own, windowed_total,
+                         provenance)
+    ctx.family_id = family_id_resolved
+    ctx.expected_family_id = family_id_resolved  # run_gate will CAS-verify this (Task 5)
+    return ctx
 
 
 @dataclass

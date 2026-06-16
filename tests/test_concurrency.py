@@ -28,6 +28,53 @@ ALGUA_BIN = Path(sys.executable).parent / "algua"
 STRATEGY_E2E = "cross_sectional_momentum"
 
 
+def _ensure_family_in_db(db_path: Path, strategy_name: str, family_name: str) -> None:
+    """Pre-assign a strategy to a family in the given DB file.
+
+    Task 4 (#222): promotion_preflight now requires a family assignment. Tests that probe
+    non-family behavior must satisfy this prerequisite.
+    """
+    from datetime import UTC, datetime
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    now = datetime.now(UTC).isoformat()
+    try:
+        row = conn.execute(
+            "SELECT family_id FROM family_members WHERE strategy_name=? AND removed_at IS NULL",
+            (strategy_name,),
+        ).fetchone()
+        if row is not None:
+            return
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO families(name, created_at, created_by_actor, created_by_strategy)"
+                " VALUES (?,?,?,?)",
+                (family_name, now, "agent", strategy_name),
+            )
+            fam_id = cur.lastrowid
+            conn.execute(
+                "INSERT INTO family_events(event_type, family_id, actor, created_at)"
+                " VALUES (?,?,?,?)",
+                ("family_created", fam_id, "agent", now),
+            )
+            conn.execute(
+                "INSERT INTO family_members(family_id, strategy_name, joined_at, joined_by_actor)"
+                " VALUES (?,?,?,?)",
+                (fam_id, strategy_name, now, "agent"),
+            )
+            conn.execute(
+                "INSERT INTO family_events"
+                "(event_type, family_id, strategy_name, actor,"
+                " clustering_verdict, similarity_score, clustering_version,"
+                " clustering_config_json, axis_json, matched_family_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("strategy_assigned", fam_id, strategy_name, "agent",
+                 "NOVEL", 0.0, "v0", "{}", "{}", None, now),
+            )
+    finally:
+        conn.close()
+
+
 def test_connect_sets_busy_timeout(tmp_path):
     conn = connect(tmp_path / "b.db")
     assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
@@ -417,6 +464,9 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
          "--start", "2022-01-01", "--end", "2023-12-31", "--register"],
         cwd=REPO_ROOT, capture_output=True, text=True, env=env)
     assert seed.returncode == 0, f"backtest seed failed:\n{seed.stderr}\n{seed.stdout}"
+
+    # Task 4 (#222): pre-assign family so the clustering guard passes in both concurrent processes.
+    _ensure_family_in_db(db, STRATEGY_E2E, "csm_e2e_family")
 
     promote_args = [str(ALGUA_BIN), "research", "promote", STRATEGY_E2E, "--demo",
                     "--start", "2022-01-01", "--end", "2023-12-31",
