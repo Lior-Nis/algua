@@ -923,6 +923,13 @@ class SqliteStrategyRepository:
                 }]
             decision_json = json.dumps(raw_decision)
 
+            # Agent passing rows are born-consumed: the stage has already advanced inside this
+            # transaction, so the token is spent. Leaving consumed=0 would let a future
+            # `registry transition --to candidate --actor agent` reuse the old row after a
+            # back-step, bypassing the gate re-run requirement. Human rows stay consumed=0
+            # (humans are exempt from _validate_shortlist_gate and the actor='agent' filter in
+            # find_consumable_gate_evaluation already excludes them from replay).
+            born_consumed = int(actor is Actor.AGENT and final_passed)
             cur = self._conn.execute(
                 "INSERT INTO gate_evaluations"
                 "(strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
@@ -931,7 +938,7 @@ class SqliteStrategyRepository:
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
                 " consumed, created_at,"
                 " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (rec.id, int(final_passed),
                  gate_row["n_funnel"], gate_row["own_lifetime_combos"],
                  gate_row["windowed_total_combos"], gate_row["funnel_window_days"],
@@ -941,7 +948,7 @@ class SqliteStrategyRepository:
                  gate_row["code_hash"], gate_row["config_hash"], gate_row.get("dependency_hash"),
                  gate_row["data_source"], gate_row.get("snapshot_id"),
                  gate_row["period_start"], gate_row["period_end"], gate_row["holdout_frac"],
-                 actor.value, decision_json, _now(),
+                 actor.value, decision_json, born_consumed, _now(),
                  1 if fdr_binding else None,
                  p_value if fdr_binding else None,
                  alpha_t if fdr_binding else None,

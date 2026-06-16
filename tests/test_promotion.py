@@ -436,3 +436,21 @@ def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
     assert stream is not None
     assert stream.t == 1
     assert stream.discovery_indices == []
+
+
+def test_run_gate_non_binding_decision_json_has_fdr_skip_reason(tmp_path):
+    """Non-binding rows: DB decision_json must include fdr_skip_reason (set before serialization,
+    not after, so the audit record matches what is returned to the caller)."""
+    import json
+    repo = _gate_repo(tmp_path)
+    breadth = _breadth(repo, "declared")  # declared breadth → non-binding
+    outcome = _run(repo, breadth)
+    assert outcome.decision.fdr_binding is False
+    assert outcome.decision.fdr_skip_reason == "no_measured_dispersion"
+    # Check the DB's decision_json (the stored audit record) also has the skip reason
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    stored = json.loads(row["decision_json"])
+    assert stored.get("fdr_binding") is False
+    assert stored.get("fdr_skip_reason") == "no_measured_dispersion"

@@ -1285,6 +1285,45 @@ def test_fdr_gate_decision_json_contains_fdr_evidence_check(repo):
     assert check["passed"] is True
 
 
+def test_fdr_gate_agent_pass_is_born_consumed(repo):
+    """Agent passing rows must be born-consumed so a back-stepped strategy cannot replay the
+    old token via `registry transition --to candidate --actor agent`."""
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert outcome.final_passed is True
+    row = repo._conn.execute(
+        "SELECT consumed FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()
+    assert row["consumed"] == 1  # born-consumed; find_consumable_gate_evaluation can't reuse it
+
+
+def test_fdr_gate_agent_fail_and_human_pass_not_consumed(repo):
+    """Non-passing agent rows and human rows must stay consumed=0 (no token to protect)."""
+    rec = _at_backtested(repo)
+    # Agent non-pass: consumed=0
+    outcome_fail = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_reject, actor=Actor.AGENT)
+    assert outcome_fail.final_passed is False
+    row_fail = repo._conn.execute(
+        "SELECT consumed FROM gate_evaluations WHERE id=?", (outcome_fail.gate_id,)
+    ).fetchone()
+    assert row_fail["consumed"] == 0
+
+    # Human pass: consumed=0 (humans bypass _validate_shortlist_gate)
+    rec2 = _at_backtested(repo, "s2")
+    outcome_human = repo.record_gate_with_fdr_and_maybe_promote(
+        rec2, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.HUMAN)
+    assert outcome_human.final_passed is True
+    row_human = repo._conn.execute(
+        "SELECT consumed FROM gate_evaluations WHERE id=?", (outcome_human.gate_id,)
+    ).fetchone()
+    assert row_human["consumed"] == 0
+
+
 def test_fdr_gate_stream_grows_for_binding_rows(repo):
     rec = _at_backtested(repo)
     repo.record_gate_with_fdr_and_maybe_promote(
