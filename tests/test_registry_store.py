@@ -1404,3 +1404,41 @@ def test_fdr_gate_concurrent_distinct_t_values(tmp_path):
             raise o
     t_values = {o.fdr_test_index for o in outcomes if isinstance(o, FdrGateOutcome)}
     assert t_values == {1, 2}, f"expected distinct t=1,2 but got {t_values}"
+
+
+def test_fdr_gate_agent_pass_is_born_consumed(repo):
+    """Agent passing rows must be born consumed=1 so a back-step cannot replay the token."""
+    rec = _at_backtested(repo)
+    repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True),
+        p_value=0.01, level_fn=_level_accept, actor=Actor.AGENT,
+    )
+    row = repo._conn.execute(
+        "SELECT consumed FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["consumed"] == 1
+
+
+def test_fdr_gate_agent_fail_and_human_pass_not_consumed(repo):
+    """Non-passing agent rows and human rows must have consumed=0."""
+    # Agent row that fails FDR (provisional pass but FDR rejects) → consumed=0
+    rec = _at_backtested(repo)
+    repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True),
+        p_value=0.01, level_fn=_level_reject, actor=Actor.AGENT,
+    )
+    row_agent_fail = repo._conn.execute(
+        "SELECT consumed FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row_agent_fail["consumed"] == 0
+
+    # Human passing row → also consumed=0 (human rows are never consumable tokens)
+    rec2 = _at_backtested(repo, "s2")
+    repo.record_gate_with_fdr_and_maybe_promote(
+        rec2, gate_row=_make_gate_row(passed=True),
+        p_value=0.01, level_fn=_level_accept, actor=Actor.HUMAN,
+    )
+    row_human = repo._conn.execute(
+        "SELECT consumed FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row_human["consumed"] == 0
