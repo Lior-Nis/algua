@@ -46,10 +46,13 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   agent: `--universe` is required (PIT — non-PIT fails closed); search breadth must be MEASURED via
   `backtest sweep` (declaring it with `--n-combos` is human-only); the holdout-Sharpe bar is
   DEFLATED by funnel-wide search breadth (multiple-testing defense); a minimum holdout-observations
-  floor (63) applies (underpowered holdouts fail closed). A passing run is the ONLY way an agent
-  reaches `candidate` — there is no raw `registry transition --to candidate` shortcut for an
-  agent (`--allow-non-pit`, `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition
-  are all human-only).
+  floor (63) applies (underpowered holdouts fail closed); a funnel-wide **LORD++ FDR alpha-wealth
+  ledger** (#220, schema v26) applies a SECOND tighten-only AND-check on measured runs — the
+  per-strategy DSR p-value (p = 1 − dsr_confidence) must ≤ α_t (LORD++ level, global stream);
+  FDR is an operating target (FDR_ALPHA=0.05, W0=0.025); declared/human breadth and missing
+  dsr_confidence skip FDR. A passing run is the ONLY way an agent reaches `candidate` — there is no
+  raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
+  `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).
 - `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the
   `dormant` pool: re-runs walk-forward per dormant strategy and reports which ones' window/stability
   metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger

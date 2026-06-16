@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import json
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -5,7 +9,7 @@ import pytest
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry.db import connect, migrate
-from algua.registry.repository import StrategyExists
+from algua.registry.repository import FdrGateOutcome, FdrStreamState, StrategyExists
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 
@@ -989,3 +993,414 @@ def test_pooled_variance_none_when_any_stat_missing(repo):
 
 def test_pooled_variance_none_when_no_rows(repo):
     assert repo.pooled_trial_sharpe_var("nope") is None
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (#220 Phase 2): fdr_stream_state — LORD++ alpha-wealth stream accessor
+# ---------------------------------------------------------------------------
+
+
+def _insert_fdr_row(
+    repo, sid, *,
+    fdr_binding,
+    fdr_p_value,
+    fdr_alpha_level,
+    fdr_rejected,
+    fdr_test_index,
+    passed=0,
+):
+    """Insert a gate_evaluations row with FDR columns directly (tests only; Task 4 owns the
+    production writer)."""
+    repo._conn.execute(
+        "INSERT INTO gate_evaluations"
+        " (strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+        "  funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
+        "  min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
+        "  snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
+        "  created_at, fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, passed, 9, 9, 9, 90, "measured", 1, 0, 80, 63,
+         "c0", "cfg0", "dep0", "SyntheticProvider", None,
+         "2022-01-01", "2023-12-31", 0.2, "agent", "{}",
+         "2024-01-01T00:00:00+00:00",
+         fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index),
+    )
+    repo._conn.commit()
+
+
+def test_fdr_stream_empty(repo):
+    result = repo.fdr_stream_state()
+    assert result == FdrStreamState(t=0, discovery_indices=[])
+
+
+def test_fdr_stream_non_binding_excluded(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=0, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=None)
+    result = repo.fdr_stream_state()
+    assert result == FdrStreamState(t=0, discovery_indices=[])
+
+
+def test_fdr_stream_legacy_null_binding_excluded(repo):
+    # A pre-v26 row has fdr_binding=NULL; it must be invisible to the stream.
+    sid = repo.add("s").id
+    repo._conn.execute(
+        "INSERT INTO gate_evaluations"
+        " (strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+        "  funnel_window_days, breadth_provenance, pit_ok, holdout_n_bars,"
+        "  min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
+        "  period_start, period_end, holdout_frac, actor, decision_json, created_at)"
+        " VALUES (?,0,9,9,9,90,'measured',1,80,63,'c0','cfg0','dep0','SyntheticProvider',"
+        "         '2022-01-01','2023-12-31',0.2,'agent','{}','2024-01-01T00:00:00+00:00')",
+        (sid,),
+    )
+    repo._conn.commit()
+    result = repo.fdr_stream_state()
+    assert result == FdrStreamState(t=0, discovery_indices=[])
+
+
+def test_fdr_stream_mixed_binding(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=1)
+    _insert_fdr_row(repo, sid, fdr_binding=0, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=None)
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.04,
+                    fdr_rejected=1, fdr_test_index=2)
+    result = repo.fdr_stream_state()
+    assert result is not None
+    assert result.t == 2
+    assert result.discovery_indices == [2]
+
+
+def test_fdr_stream_discovery_extraction(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=1)
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.01, fdr_alpha_level=0.04,
+                    fdr_rejected=1, fdr_test_index=2)
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.05, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=3)
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.001, fdr_alpha_level=0.02,
+                    fdr_rejected=1, fdr_test_index=4)
+    result = repo.fdr_stream_state()
+    assert result is not None
+    assert result.t == 4
+    assert result.discovery_indices == [2, 4]
+
+
+def test_fdr_stream_null_p_value_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=None, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=1)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_null_alpha_level_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=None,
+                    fdr_rejected=0, fdr_test_index=1)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_null_rejected_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=None, fdr_test_index=1)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_bad_rejected_value_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=2, fdr_test_index=1)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_zero_test_index_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=0)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_negative_test_index_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=-1)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_non_contiguous_indices_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=1)
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.04,
+                    fdr_rejected=1, fdr_test_index=3)  # skips 2 → gap → corrupted
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_null_test_index_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=None)
+    assert repo.fdr_stream_state() is None
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (#220 Phase 2): record_gate_with_fdr_and_maybe_promote — atomic FDR write
+# ---------------------------------------------------------------------------
+
+
+def _make_gate_row(*, passed: bool = True) -> dict:
+    return {
+        "passed": passed,
+        "n_funnel": 9, "own_lifetime_combos": 9, "windowed_total_combos": 9,
+        "funnel_window_days": 90, "breadth_provenance": "measured",
+        "pit_ok": True, "pit_override": False, "holdout_n_bars": 80,
+        "min_holdout_observations": 63, "code_hash": "c0", "config_hash": "cfg0",
+        "dependency_hash": "dep0", "data_source": "SyntheticProvider",
+        "snapshot_id": None, "period_start": "2022-01-01", "period_end": "2023-12-31",
+        "holdout_frac": 0.2, "decision_json": json.dumps({"passed": passed}),
+    }
+
+
+def _at_backtested(repo, name: str = "s"):
+    repo.add(name)
+    return transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, "setup")
+
+
+def _level_accept(t: int, taus: list[int]) -> float:
+    return 1.0  # p ≤ 1.0 always → always a discovery
+
+
+def _level_reject(t: int, taus: list[int]) -> float:
+    return 0.0  # p ≤ 0.0 never → never a discovery
+
+
+def test_fdr_gate_non_binding_passes_through_on_provisional_pass(repo):
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=None,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert isinstance(outcome, FdrGateOutcome)
+    assert outcome.final_passed is True
+    assert outcome.fdr_binding is False
+    assert outcome.fdr_test_index is None
+    assert outcome.fdr_p_value is None
+    assert outcome.fdr_alpha_level is None
+    assert outcome.fdr_rejected is None
+    # Non-binding: stream must remain empty.
+    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+
+
+def test_fdr_gate_non_binding_fails_on_provisional_fail(repo):
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=False), p_value=None,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert outcome.final_passed is False
+    assert outcome.updated_rec is None
+
+
+def test_fdr_gate_binding_accept_promotes_when_provisional_passes(repo):
+    rec = _at_backtested(repo)
+    # p=0.03 ≤ level_accept(1, []) = 1.0 → FDR accepts → final_passed=True
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert outcome.final_passed is True
+    assert outcome.fdr_binding is True
+    assert outcome.fdr_rejected is True
+    assert outcome.fdr_test_index == 1
+    assert outcome.updated_rec is not None
+    assert outcome.updated_rec.stage is Stage.CANDIDATE
+
+
+def test_fdr_gate_binding_reject_blocks_promotion(repo):
+    rec = _at_backtested(repo)
+    # p=0.03 > level_reject(1, []) = 0.0 → FDR rejects → final_passed=False
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_reject, actor=Actor.AGENT)
+    assert outcome.final_passed is False
+    assert outcome.fdr_binding is True
+    assert outcome.fdr_rejected is False
+    assert outcome.fdr_test_index == 1
+    assert outcome.updated_rec is None
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_fdr_gate_provisional_fail_skips_fdr_promotion(repo):
+    rec = _at_backtested(repo)
+    # provisional=False → final_passed=False regardless of FDR
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=False), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert outcome.final_passed is False
+    assert outcome.updated_rec is None
+
+
+def test_fdr_gate_db_passed_column_reflects_final_not_provisional(repo):
+    rec = _at_backtested(repo)
+    # provisional=True but FDR rejects → DB must store passed=0
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_reject, actor=Actor.AGENT)
+    assert outcome.final_passed is False
+    row = repo._conn.execute(
+        "SELECT passed FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()
+    assert row["passed"] == 0  # final_passed, not provisional True
+
+
+def test_fdr_gate_db_passed_column_true_on_accept(repo):
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert outcome.final_passed is True
+    row = repo._conn.execute(
+        "SELECT passed FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()
+    assert row["passed"] == 1
+
+
+def test_fdr_gate_decision_json_contains_fdr_evidence_check(repo):
+    """decision_json stored in DB must include fdr_evidence in its checks list."""
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()
+    import json
+    stored = json.loads(row["decision_json"])
+    fdr_checks = [c for c in stored.get("checks", []) if c.get("name") == "fdr_evidence"]
+    assert len(fdr_checks) == 1
+    check = fdr_checks[0]
+    assert check["value"] == pytest.approx(0.03)
+    assert check["op"] == "<="
+    assert check["passed"] is True
+
+
+def test_fdr_gate_stream_grows_for_binding_rows(repo):
+    rec = _at_backtested(repo)
+    repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_reject, actor=Actor.AGENT)
+    stream = repo.fdr_stream_state()
+    assert stream is not None
+    assert stream.t == 1
+    assert stream.discovery_indices == []
+
+
+def test_fdr_gate_discovery_increments_test_index_and_replenishes(repo):
+    rec = _at_backtested(repo)
+    # First call: binding accept → discovery at t=1
+    o1 = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_accept, actor=Actor.AGENT)
+    assert o1.fdr_test_index == 1
+    assert o1.fdr_rejected is True
+    # Second call with new strategy
+    rec2 = _at_backtested(repo, "s2")
+    # Use a level_fn that checks taus: if [1] present, it returns 0.5 (generous)
+    recorded_calls: list[tuple[int, list[int]]] = []
+    def level_fn_probe(t: int, taus: list[int]) -> float:
+        recorded_calls.append((t, list(taus)))
+        return 0.5
+    o2 = repo.record_gate_with_fdr_and_maybe_promote(
+        rec2, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=level_fn_probe, actor=Actor.AGENT)
+    assert o2.fdr_test_index == 2
+    # level_fn received t=2 and taus=[1] (the first discovery)
+    assert len(recorded_calls) == 1
+    assert recorded_calls[0] == (2, [1])
+
+
+def test_fdr_gate_top_level_only_guard(repo):
+    rec = _at_backtested(repo)
+    # BEGIN IMMEDIATE sets in_transaction=True explicitly.
+    repo._conn.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(RuntimeError, match="top level"):
+            repo.record_gate_with_fdr_and_maybe_promote(
+                rec, gate_row=_make_gate_row(), p_value=0.03,
+                level_fn=_level_accept, actor=Actor.AGENT)
+    finally:
+        repo._conn.rollback()
+
+
+def test_fdr_gate_rollback_on_stage_cas_failure(repo, tmp_path):
+    _at_backtested(repo)
+    # Force a stage change on the same connection before the CAS fires, making stale invalid.
+    stale = repo.get("s")  # record current state
+    # manually move strategy to RETIRED so the CAS in record_gate_with_fdr fails
+    repo._conn.execute(
+        "UPDATE strategies SET stage='retired' WHERE name='s'"
+    )
+    repo._conn.commit()
+    with pytest.raises(TransitionError):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            stale, gate_row=_make_gate_row(passed=True), p_value=0.03,
+            level_fn=_level_accept, actor=Actor.AGENT)
+    # FDR stream must be empty — the row was rolled back
+    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    # No gate row was committed
+    n = repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0]
+    assert n == 0
+
+
+def test_fdr_gate_concurrent_distinct_t_values(tmp_path):
+    """Two threads calling record_gate_with_fdr_and_maybe_promote concurrently against the same
+    DB file must receive distinct fdr_test_index values (BEGIN IMMEDIATE serializes them)."""
+    db = tmp_path / "c.db"
+
+    def _setup() -> tuple[SqliteStrategyRepository, object]:
+        c = connect(db)
+        migrate(c)
+        r = SqliteStrategyRepository(c)
+        return r, None
+
+    # Seed on main thread
+    seed_conn = connect(db)
+    migrate(seed_conn)
+    seed_repo = SqliteStrategyRepository(seed_conn)
+    seed_repo.add("s1")
+    seed_repo.add("s2")
+    transition_strategy(seed_repo, "s1", Stage.BACKTESTED, Actor.AGENT, "setup")
+    transition_strategy(seed_repo, "s2", Stage.BACKTESTED, Actor.AGENT, "setup")
+    seed_conn.close()
+
+    outcomes: list[FdrGateOutcome | BaseException] = []
+    lock = threading.Lock()
+
+    def run_thread(name: str) -> None:
+        c = connect(db)
+        r = SqliteStrategyRepository(c)
+        rec = r.get(name)
+        try:
+            outcome = r.record_gate_with_fdr_and_maybe_promote(
+                rec, gate_row=_make_gate_row(passed=False), p_value=0.03,
+                level_fn=_level_reject, actor=Actor.AGENT)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                outcomes.append(exc)
+        else:
+            with lock:
+                outcomes.append(outcome)
+
+    t1 = threading.Thread(target=run_thread, args=("s1",))
+    t2 = threading.Thread(target=run_thread, args=("s2",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+    assert len(outcomes) == 2, f"expected 2 outcomes, got: {outcomes}"
+    for o in outcomes:
+        if isinstance(o, BaseException):
+            raise o
+    t_values = {o.fdr_test_index for o in outcomes if isinstance(o, FdrGateOutcome)}
+    assert t_values == {1, 2}, f"expected distinct t=1,2 but got {t_values}"

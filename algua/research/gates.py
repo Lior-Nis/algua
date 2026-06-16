@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +22,79 @@ MIN_HOLDOUT_OBSERVATIONS = 63
 # DSR evidence layer (#211, Phase 1). Protected constants — relaxing them weakens the gate.
 DSR_ALPHA = 0.05  # require >= 95% confidence the true Sharpe beats the selection-inflated benchmark
 EULER_MASCHERONI = 0.5772156649015329  # gamma_E, the DSR expected-max weight (NOT e^-1)
+
+# LORD++ FDR accounting layer (#220, Phase 2). Protected constants — relaxing them weakens the gate.
+# FDR here is an operating target (shared-holdout dependence breaks the formal guarantee); Phase 3
+# (#221) adds dependence-aware calibration. The p-value fed here is 1 − dsr_confidence, which is
+# P(SR_true ≤ SR*) — i.e. the FDR guarantee governs discoveries relative to the DSR null (SR > SR*),
+# a STRONGER criterion than the simple null (SR > 0).
+FDR_ALPHA = 0.05   # target FDR level
+FDR_W0 = FDR_ALPHA / 2   # initial alpha-wealth (standard choice, Ramdas et al. 2017)
+# γ-sequence truncation for normalization. 10 000 terms captures >99.99% of tail mass; α_t at
+# positions > 10 000 uses γ_j=0 for j>10 000 (negligible, conservative).
+FDR_GAMMA_TRUNCATION = 10_000
+
+
+def _compute_lord_gamma(n: int) -> list[float]:
+    """Normalized LORD++ γ weights for j=1..n.
+
+    Raw: γ_j ∝ log(max(j, 2)) / (j · exp(√(log(max(j, 2)))))
+    max(j, 2) is the standard practical variant per Ramdas et al. 2017 / the onlineFDR R package,
+    ensuring γ_j > 0 for all j (log(max(1,2))=log(2)>0 handles j=1). Dividing by the truncated
+    sum normalizes so Σγ_j ≤ 1.0 + machine-epsilon over the truncation window.
+    """
+    raw = [
+        math.log(max(j, 2)) / (j * math.exp(math.sqrt(math.log(max(j, 2)))))
+        for j in range(1, n + 1)
+    ]
+    total = sum(raw)
+    return [w / total for w in raw]
+
+
+_LORD_GAMMA: list[float] = _compute_lord_gamma(FDR_GAMMA_TRUNCATION)
+
+
+def lord_plus_plus_level(
+    t: int,
+    discovery_indices: Sequence[int],
+    *,
+    alpha: float = FDR_ALPHA,
+    w0: float = FDR_W0,
+) -> float:
+    """LORD++ test level α_t (Ramdas et al. 2017 Biometrika 104:1).
+
+    α_t = γ_t · w0 + (α − w0) · γ_{t−τ_1} + α · Σ_{j≥2} γ_{t−τ_j}
+
+    where τ_1 < τ_2 < … are the 1-indexed positions of past discoveries (all strictly < t).
+    α_t depends ONLY on past decisions — no circularity. Wealth is computed from the ledger
+    rows on every call (not cached), mirroring pooled_trial_sharpe_var's fail-closed philosophy.
+
+    The p-value fed here must be 1 − dsr_confidence (conversion at the caller), which equals
+    P(SR_true ≤ SR*) — the DSR selection-inflated null. The FDR guarantee is over that null.
+
+    Dry-spell behavior: with no discoveries, α_t = γ_t · w0 → 0 as t grows (expected
+    LORD++ "alpha-death" in a long null streak; no floor, by design).
+
+    Returns a CONSERVATIVE 0.0 on any degenerate input (t<1, non-finite alpha/w0, any
+    discovery index ≥ t or < 1). 0.0 means p_t ≤ α_t can never be satisfied — only tightens.
+    """
+    if t < 1 or not math.isfinite(alpha) or alpha <= 0 or not math.isfinite(w0) or w0 <= 0:
+        return 0.0
+    taus = sorted(int(tau) for tau in discovery_indices)
+    if any(tau < 1 or tau >= t for tau in taus):
+        return 0.0
+
+    def _gamma(j: int) -> float:
+        if j < 1 or j > len(_LORD_GAMMA):
+            return 0.0
+        return _LORD_GAMMA[j - 1]
+
+    level = _gamma(t) * w0
+    if taus:
+        level += (alpha - w0) * _gamma(t - taus[0])
+        for tau in taus[1:]:
+            level += alpha * _gamma(t - tau)
+    return level
 
 
 @dataclass
@@ -153,6 +226,15 @@ class GateDecision:
     dsr_t: int | None = None
     dsr_skew: float | None = None
     dsr_raw_kurtosis: float | None = None
+    # LORD++ FDR accounting (#220, Phase 2). Populated by run_gate() AFTER the atomic store
+    # call (α_t is only known inside the write transaction). Non-binding rows leave all fdr_*
+    # fields at their defaults (False/None); fdr_skip_reason explains why FDR was omitted.
+    fdr_binding: bool = False
+    fdr_p_value: float | None = None
+    fdr_alpha_level: float | None = None
+    fdr_test_index: int | None = None
+    fdr_rejected: bool | None = None
+    fdr_skip_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -184,6 +266,12 @@ class GateDecision:
             "dsr_t": self.dsr_t,
             "dsr_skew": _f(self.dsr_skew),
             "dsr_raw_kurtosis": _f(self.dsr_raw_kurtosis),
+            "fdr_binding": self.fdr_binding,
+            "fdr_p_value": _f(self.fdr_p_value),
+            "fdr_alpha_level": _f(self.fdr_alpha_level),
+            "fdr_test_index": self.fdr_test_index,
+            "fdr_rejected": self.fdr_rejected,
+            "fdr_skip_reason": self.fdr_skip_reason,
         }
 
 

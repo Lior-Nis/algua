@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import functools
 import json
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -10,13 +12,15 @@ from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_tr
 from algua.contracts.types import DataProvider
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.repository import StrategyRepository
-from algua.registry.transitions import transition_strategy
 from algua.research.gates import (
+    FDR_ALPHA,
+    FDR_W0,
     FUNNEL_WINDOW_DAYS,
     GateCriteria,
     GateDecision,
     effective_funnel_breadth,
     evaluate_gate,
+    lord_plus_plus_level,
 )
 
 
@@ -185,10 +189,8 @@ def run_gate(
     matches against (NOT wf.code_hash, which is git-HEAD-based and would never match)."""
     pit_ok = resolve_pit_ok(universe_name, universe_snapshots, period_start)
     holdout_n_bars = int(wf.holdout_metrics["n_bars"])
-    # DSR evidence (#211): the binding decision is actor-INDEPENDENT — DSR binds iff breadth is
-    # MEASURED (a real sweep ran). Then fetch the pooled trial-Sharpe dispersion; if it is None
-    # (old search_trials rows lacking the (count, mean, var) stats) the binding `dsr_evidence`
-    # check fails CLOSED inside evaluate_gate. Declared breadth (human, no sweep) omits DSR.
+    # DSR evidence (#211): binding iff breadth is MEASURED. Declared breadth (human, no sweep)
+    # omits DSR — and consequently FDR too (p_value requires a finite dsr_confidence).
     dsr_binding = breadth.provenance == "measured"
     dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
     decision = evaluate_gate(
@@ -197,26 +199,78 @@ def run_gate(
         windowed_total_combos=breadth.windowed_total, funnel_window_days=FUNNEL_WINDOW_DAYS,
         dsr_binding=dsr_binding, dsr_trial_var_ann=dsr_trial_var_ann,
     )
+    # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
+    # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
+    # here guards the ≥/≤ inversion hazard (see GATE-1 finding H3 in the design doc).
+    dsr_conf = decision.dsr_confidence
+    if dsr_conf is not None and math.isfinite(dsr_conf) and not (0.0 <= dsr_conf <= 1.0):
+        raise ValueError(
+            f"dsr_confidence={dsr_conf!r} is outside [0, 1]; this is a DSR computation bug"
+        )
+    fdr_binding_this_row = (
+        dsr_binding and dsr_conf is not None and math.isfinite(dsr_conf)
+    )
+    p_value = (1.0 - dsr_conf) if (fdr_binding_this_row and dsr_conf is not None) else None
+
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
-    repo.record_gate_evaluation(
-        rec.id, passed=decision.passed, n_funnel=breadth.n_funnel,
-        own_lifetime_combos=breadth.own, windowed_total_combos=breadth.windowed_total,
-        funnel_window_days=FUNNEL_WINDOW_DAYS, breadth_provenance=breadth.provenance,
-        pit_ok=bool(decision.pit_ok), pit_override=bool(decision.pit_override),
-        holdout_n_bars=holdout_n_bars, min_holdout_observations=criteria.min_holdout_observations,
-        code_hash=identity.code_hash, config_hash=identity.config_hash,
-        dependency_hash=identity.dependency_hash, data_source=data_source, snapshot_id=snapshot_id,
-        period_start=period_start.isoformat(), period_end=period_end.isoformat(),
-        holdout_frac=holdout_frac, actor=actor.value,
-        decision_json=json.dumps(decision.to_dict(), sort_keys=True),
+
+    # Build gate_row (all record_gate_evaluation kwargs, including provisional passed flag).
+    gate_row = {
+        "passed": decision.passed,
+        "n_funnel": breadth.n_funnel,
+        "own_lifetime_combos": breadth.own,
+        "windowed_total_combos": breadth.windowed_total,
+        "funnel_window_days": FUNNEL_WINDOW_DAYS,
+        "breadth_provenance": breadth.provenance,
+        "pit_ok": bool(decision.pit_ok),
+        "pit_override": bool(decision.pit_override),
+        "holdout_n_bars": holdout_n_bars,
+        "min_holdout_observations": criteria.min_holdout_observations,
+        "code_hash": identity.code_hash,
+        "config_hash": identity.config_hash,
+        "dependency_hash": identity.dependency_hash,
+        "data_source": data_source,
+        "snapshot_id": snapshot_id,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "holdout_frac": holdout_frac,
+        "decision_json": json.dumps(decision.to_dict(), sort_keys=True),
+    }
+
+    # Atomic FDR-test-and-maybe-promote. For non-binding rows (p_value=None), the method
+    # behaves identically to the old record_gate_evaluation + conditional transition_strategy
+    # pair, but always uses BEGIN IMMEDIATE for consistency (negligible overhead for ≤ a few
+    # thousand gate_evaluations rows).
+    level_fn = functools.partial(lord_plus_plus_level, alpha=FDR_ALPHA, w0=FDR_W0)
+    fdr_outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=gate_row, p_value=p_value, level_fn=level_fn, actor=actor,
+        reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
     )
-    promoted = False
-    if decision.passed:
-        transition_strategy(repo, name, Stage.CANDIDATE, actor,
-                            _gate_reason(decision) + reason_suffix)
-        promoted = True
-    return PromotionOutcome(decision=decision, promoted=promoted)
+
+    # Fold FDR audit fields into the GateDecision so they surface in to_dict() → CLI JSON.
+    if fdr_binding_this_row:
+        decision.fdr_binding = True
+        decision.fdr_p_value = fdr_outcome.fdr_p_value
+        decision.fdr_alpha_level = fdr_outcome.fdr_alpha_level
+        decision.fdr_test_index = fdr_outcome.fdr_test_index
+        decision.fdr_rejected = fdr_outcome.fdr_rejected
+        decision.checks.append({
+            "name": "fdr_evidence",
+            "value": fdr_outcome.fdr_p_value,
+            "threshold": fdr_outcome.fdr_alpha_level,
+            "op": "<=",
+            "passed": bool(fdr_outcome.fdr_rejected),
+        })
+    else:
+        decision.fdr_binding = False
+        if not dsr_binding:
+            decision.fdr_skip_reason = "no_measured_dispersion"
+        else:
+            decision.fdr_skip_reason = "no_dsr_confidence"
+    decision.passed = fdr_outcome.final_passed
+
+    return PromotionOutcome(decision=decision, promoted=fdr_outcome.final_passed)
 
 
 def _gate_reason(decision: GateDecision) -> str:
