@@ -5,6 +5,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from scipy.stats import norm as _norm
+
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 
@@ -16,6 +18,10 @@ FUNNEL_WINDOW_DAYS = 90
 # Minimum holdout sample (Wall C). A holdout with fewer observations is underpowered and fails
 # closed — complements the 1/sqrt(T) haircut, which is ZERO at N=1. ~one trading quarter. Protected.
 MIN_HOLDOUT_OBSERVATIONS = 63
+
+# DSR evidence layer (#211, Phase 1). Protected constants — relaxing them weakens the gate.
+DSR_ALPHA = 0.05  # require >= 95% confidence the true Sharpe beats the selection-inflated benchmark
+EULER_MASCHERONI = 0.5772156649015329  # gamma_E, the DSR expected-max weight (NOT e^-1)
 
 
 @dataclass
@@ -66,6 +72,56 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
     return math.sqrt(2.0 * math.log(n)) * math.sqrt(ANN) / math.sqrt(n_bars)
 
 
+def dsr_confidence(
+    sr_obs_per_period: float,
+    t: int,
+    skew: float,
+    raw_kurtosis: float,
+    n_trials: int,
+    trial_sr_var_per_period: float,
+) -> float | None:
+    """Deflated-Sharpe-Ratio confidence (Bailey & López de Prado): the probability — in [0,1],
+    NOT a p-value — that the true (per-period) Sharpe exceeds the expected maximum Sharpe of
+    ``n_trials`` selections.
+
+        SR* = sqrt(var) * [ (1-gamma_E)*Z^-1(1-1/N) + gamma_E*Z^-1(1-1/(N*e)) ]   for N > 1
+        SR* = 0                                                                    for N <= 1
+        DSR = Phi( (SR_obs - SR*) * sqrt(T-1) / sqrt(1 - skew*SR_obs + (kurt-1)/4 * SR_obs^2) )
+
+    ``raw_kurtosis`` is Pearson kurtosis (=3 for Gaussian), so the variance term reduces to the
+    Lo/Mertens 1 + SR^2/2 for a normal series. Inputs are PER-PERIOD; the caller converts from the
+    system's annualized Sharpes. Returns None (fail closed) on any degenerate input."""
+    n = int(n_trials)
+    if n < 1:                      # invalid breadth
+        return None
+    if t <= 1:                     # PSR needs sqrt(T-1) > 0; underpowered holdout
+        return None
+    if not math.isfinite(sr_obs_per_period) or not math.isfinite(skew) \
+            or not math.isfinite(raw_kurtosis):
+        return None
+    if not math.isfinite(trial_sr_var_per_period) or trial_sr_var_per_period < 0.0:
+        return None
+
+    sr = sr_obs_per_period
+    if n <= 1:
+        sr_star = 0.0
+    else:
+        # E[max] of n trial Sharpes (Gaussian approximation), scaled by the trial-SR spread.
+        sr_star = math.sqrt(trial_sr_var_per_period) * (
+            (1.0 - EULER_MASCHERONI) * float(_norm.ppf(1.0 - 1.0 / n))
+            + EULER_MASCHERONI * float(_norm.ppf(1.0 - 1.0 / (n * math.e)))
+        )
+    if not math.isfinite(sr_star):
+        return None
+
+    var_term = 1.0 - skew * sr + ((raw_kurtosis - 1.0) / 4.0) * sr * sr
+    if not math.isfinite(var_term) or var_term <= 0.0:
+        return None
+    z = (sr - sr_star) * math.sqrt(t - 1) / math.sqrt(var_term)
+    conf = float(_norm.cdf(z))
+    return conf if math.isfinite(conf) else None
+
+
 def effective_funnel_breadth(own_lifetime: int, windowed_total: int) -> int:
     """Effective funnel breadth fed to the haircut (Wall A): ``max`` of this strategy's LIFETIME
     recorded breadth and the funnel-wide breadth recorded in the rolling window (``windowed_total``
@@ -89,11 +145,23 @@ class GateDecision:
     funnel_window_days: int | None = None
     pit_ok: bool | None = None
     pit_override: bool = False
+    dsr_binding: bool = False
+    dsr_confidence: float | None = None
+    dsr_skip_reason: str | None = None
+    dsr_n_trials: int | None = None
+    dsr_trial_sr_var_ann: float | None = None
+    dsr_t: int | None = None
+    dsr_skew: float | None = None
+    dsr_raw_kurtosis: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
         # payload stays JSON-clean, mirroring how non-finite check values are nulled.
         eff = self.effective_min_holdout_sharpe
+
+        def _f(x: float | None) -> float | None:
+            return x if x is None or math.isfinite(x) else None
+
         return {
             "passed": self.passed,
             "checks": self.checks,
@@ -108,6 +176,14 @@ class GateDecision:
             "funnel_window_days": self.funnel_window_days,
             "pit_ok": self.pit_ok,
             "pit_override": self.pit_override,
+            "dsr_binding": self.dsr_binding,
+            "dsr_confidence": _f(self.dsr_confidence),
+            "dsr_skip_reason": self.dsr_skip_reason,
+            "dsr_n_trials": self.dsr_n_trials,
+            "dsr_trial_sr_var_ann": _f(self.dsr_trial_sr_var_ann),
+            "dsr_t": self.dsr_t,
+            "dsr_skew": _f(self.dsr_skew),
+            "dsr_raw_kurtosis": _f(self.dsr_raw_kurtosis),
         }
 
 
@@ -157,6 +233,8 @@ def evaluate_gate(
     own_lifetime_combos: int | None = None,
     windowed_total_combos: int | None = None,
     funnel_window_days: int | None = None,
+    dsr_binding: bool = False,
+    dsr_trial_var_ann: float | None = None,
 ) -> GateDecision:
     """Judge a walk-forward result against the gate criteria. Pure; no side effects.
 
@@ -207,6 +285,30 @@ def evaluate_gate(
     pit_override = bool((not pit_ok) and allow_non_pit)
     checks.append({"name": "pit_required", "passed": pit_passed,
                    "pit_ok": bool(pit_ok), "override": "non_pit" if pit_override else None})
+    # DSR evidence (#211): a tighten-only AND-check, appended ONLY when binding (measured trial
+    # dispersion is available). When not binding it is omitted entirely so `passed` is unchanged.
+    # Unit conversion lives here: holdout Sharpe and trial variance are ANNUALIZED; DSR per-period.
+    dsr_conf: float | None = None
+    dsr_skip_reason: str | None = None
+    n_for_dsr = n_combos if n_combos is not None else 1
+    t_hold = int(wf.holdout_metrics["n_bars"])
+    skew = float(wf.holdout_metrics.get("skewness", 0.0))
+    raw_kurt = float(wf.holdout_metrics.get("kurtosis", 3.0))
+    sr_obs_ann = float(wf.holdout_metrics["sharpe"])
+    if dsr_binding:
+        var_pp = (dsr_trial_var_ann / ANN) if dsr_trial_var_ann is not None else None
+        if var_pp is not None and math.isfinite(var_pp):
+            dsr_conf = dsr_confidence(
+                sr_obs_ann / math.sqrt(ANN), t_hold, skew, raw_kurt, n_for_dsr, var_pp)
+        passed_dsr = dsr_conf is not None and dsr_conf >= (1.0 - DSR_ALPHA)
+        dsr_value = dsr_conf if (dsr_conf is not None and math.isfinite(dsr_conf)) else None
+        checks.append({"name": "dsr_evidence", "value": dsr_value,
+                       "threshold": 1.0 - DSR_ALPHA, "op": ">=", "passed": bool(passed_dsr)})
+        if dsr_conf is None:
+            # measured sweep exists but stats missing -> fail closed
+            dsr_skip_reason = "no_dispersion"
+    else:
+        dsr_skip_reason = "no_measured_dispersion"
     return GateDecision(
         passed=all(c["passed"] for c in checks),
         checks=checks,
@@ -219,4 +321,12 @@ def evaluate_gate(
         funnel_window_days=funnel_window_days,
         pit_ok=bool(pit_ok),
         pit_override=pit_override,
+        dsr_binding=bool(dsr_binding),
+        dsr_confidence=dsr_conf,
+        dsr_skip_reason=dsr_skip_reason,
+        dsr_n_trials=(n_for_dsr if dsr_binding else None),
+        dsr_trial_sr_var_ann=(dsr_trial_var_ann if dsr_binding else None),
+        dsr_t=(t_hold if dsr_binding else None),
+        dsr_skew=(skew if dsr_binding else None),
+        dsr_raw_kurtosis=(raw_kurt if dsr_binding else None),
     )

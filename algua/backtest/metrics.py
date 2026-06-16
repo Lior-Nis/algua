@@ -7,11 +7,13 @@ thing everywhere. Metrics are a registry of named pure functions over a return s
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 import vectorbt as vbt
+from scipy import stats as _stats
 
 from algua.backtest._constants import ANN, REBALANCE_EPS
 
@@ -67,12 +69,23 @@ def metrics_from_returns(returns: pd.Series, *, risk_free: float = 0.0) -> dict[
     """
     r = returns.dropna()
     if len(r) == 0:
-        return {name: 0.0 for name in METRIC_FUNCTIONS} | {"sharpe": 0.0}
+        return {name: 0.0 for name in METRIC_FUNCTIONS} | {
+            "sharpe": 0.0, "skewness": 0.0, "kurtosis": 0.0,
+        }
 
     out = {name: fn(r) for name, fn in METRIC_FUNCTIONS.items()}
     ann_vol = out["ann_volatility"]
     excess = out["ann_return"] - risk_free
     out["sharpe"] = float(excess / ann_vol) if ann_vol > 0 else 0.0
+    # Moments for the DSR non-normality adjustment (#211). RAW (Pearson) kurtosis (fisher=False):
+    # a Gaussian series gives ~3, so the gate's (kurtosis-1)/4 term reduces to 0.5. scipy returns
+    # NaN for a single-element or zero-variance series; coerce any non-finite moment to 0.0 so no
+    # NaN leaks into holdout_metrics / the JSON gate payload. dsr_confidence's T<=1 guard and the
+    # MIN_HOLDOUT_OBSERVATIONS=63 floor ensure these placeholders are never consumed.
+    skew = float(_stats.skew(r))
+    kurt = float(_stats.kurtosis(r, fisher=False))
+    out["skewness"] = skew if math.isfinite(skew) else 0.0
+    out["kurtosis"] = kurt if math.isfinite(kurt) else 0.0
     return out
 
 

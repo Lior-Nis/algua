@@ -285,7 +285,7 @@ def test_pit_mode_forces_loop_even_with_signal_panel_fn() -> None:
 
 def test_simulate_applies_lag_after_fast_path() -> None:
     strat = load_strategy("cross_sectional_momentum")
-    _pf, weights_eff = simulate(strat, SyntheticProvider(seed=7), START, END)
+    _pf, weights_eff, _forced = simulate(strat, SyntheticProvider(seed=7), START, END)
     bars, adj = _bars_adj(strat.universe, seed=7)
     raw = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
     expected = raw.shift(strat.execution.decision_lag_bars).fillna(0.0)

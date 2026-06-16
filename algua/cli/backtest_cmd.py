@@ -12,6 +12,7 @@ from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
     registry_conn,
+    resolve_delisting_inputs,
     resolve_eval_inputs,
     resolve_universe_inputs,
 )
@@ -55,12 +56,19 @@ def run(
     news_snapshot: str = typer.Option(
         None, "--news-snapshot",
         help="ingested news snapshot id (required for a needs_news strategy)"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    delisting_records, delisting_snapshot_id = resolve_delisting_inputs(delistings, end_dt)
     if fundamentals_snapshot and not strategy.config.needs_fundamentals:
         raise ValueError(
             "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
@@ -85,6 +93,9 @@ def run(
         universe_name=universe, universe_snapshots=universe_prov,
         fundamentals_provider=fundamentals_provider,
         news_provider=news_provider,
+        delisting_records=delisting_records,
+        delisting_snapshot=delisting_snapshot_id,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
 
     if register:
@@ -122,6 +133,12 @@ def walk_forward_cmd(
         help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     windows: int = typer.Option(4, "--windows", help="number of equal out-of-sample windows"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Walk-forward (out-of-sample) evaluation: per-window metrics + stability.
@@ -133,10 +150,13 @@ def walk_forward_cmd(
     """
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     result = walk_forward(strategy, provider, start_dt, end_dt,
                           windows=windows, holdout_frac=holdout_frac,
                           universe_by_date=universe_by_date,
-                          universe_name=universe, universe_snapshots=universe_prov)
+                          universe_name=universe, universe_snapshots=universe_prov,
+                          delisting_records=delisting_records,
+                          assume_terminal_last_close=assume_terminal_last_close)
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
@@ -164,6 +184,12 @@ def sweep_cmd(
     param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),
     rank_by: str = typer.Option("mean_sharpe", "--rank-by", help="mean_sharpe | min_sharpe"),
     top: int = typer.Option(20, "--top", help="max ranked rows to print"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
@@ -171,11 +197,14 @@ def sweep_cmd(
         raise ValueError("--top must be >= 1")
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     grid = parse_grid(param or [])
     result = sweep(strategy, provider, start_dt, end_dt,
                    grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by,
                    universe_by_date=universe_by_date,
-                   universe_name=universe, universe_snapshots=universe_prov)
+                   universe_name=universe, universe_snapshots=universe_prov,
+                   delisting_records=delisting_records,
+                   assume_terminal_last_close=assume_terminal_last_close)
     run_id = None
     if track:
         run_id = _track(lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
@@ -202,5 +231,10 @@ def _record_search_breadth(name: str, result: SweepResult) -> dict[str, int]:
     """
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        repo.record_search_trial(name, result.n_combos, json.dumps(result.grid, sort_keys=True))
+        repo.record_search_trial(
+            name, result.n_combos, json.dumps(result.grid, sort_keys=True),
+            trial_sharpe_count=result.trial_sharpe_count,
+            trial_sharpe_mean=result.trial_sharpe_mean,
+            trial_sharpe_var_ann=result.trial_sharpe_var_ann,
+        )
         return {"n_combos": result.n_combos, "cumulative": repo.total_search_combos(name)}

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import typer
 
-from algua.cli._common import ok, registry_conn
+from algua.backtest.engine import BacktestError
+from algua.backtest.factor_eval import evaluate_factor
+from algua.cli._common import ok, registry_conn, resolve_universe_inputs, select_provider, utc
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.data.capabilities import supported_capabilities
@@ -50,6 +52,33 @@ def _coerce_kind(raw: str | None) -> FactorKind | None:
         raise ValueError(f"unknown kind {raw!r}; allowed: {allowed}") from exc
 
 
+def _coerce_scalar(raw: str) -> object:
+    """Coerce a CLI value string to int, then float, else leave as str."""
+    for cast in (int, float):
+        try:
+            return cast(raw)
+        except ValueError:
+            continue
+    return raw
+
+
+def _parse_kv(items: list[str], flag: str) -> dict[str, object]:
+    """Parse repeatable `KEY=value` flags into a single dict (values coerced int->float->str).
+    Each key takes ONE value (a factor eval is a single point, not a grid)."""
+    out: dict[str, object] = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"malformed {flag} {item!r}: expected KEY=value")
+        key, _, raw = item.partition("=")
+        key = key.strip()
+        if not key or raw.strip() == "":
+            raise ValueError(f"malformed {flag} {item!r}: empty key or value")
+        if key in out:
+            raise ValueError(f"duplicate {flag} key {key!r}")
+        out[key] = _coerce_scalar(raw.strip())
+    return out
+
+
 @factor_app.command("list")
 @json_errors()
 def list_factors(
@@ -91,3 +120,45 @@ def factor_uses(strategy: str = typer.Argument(..., help="strategy name")) -> No
     """Catalogued factors a strategy composes."""
     specs = factors_used_by(strategy)
     emit(ok({"strategy": strategy, "factors": [s.name for s in specs]}))
+
+
+@factor_app.command("eval")
+@json_errors(ValueError, LookupError, BacktestError)
+def eval_factor(
+    name: str = typer.Argument(..., help="standalone factor name"),
+    symbols: str = typer.Option(..., "--symbols", help="comma-separated evaluation universe"),
+    construction: str = typer.Option(..., "--construction", help="construction policy id"),
+    construction_param: list[str] = typer.Option(
+        [], "--construction-param", help="KEY=value for the construction policy (repeatable)"),
+    param: list[str] = typer.Option(
+        [], "--param", help="KEY=value factor param, e.g. lookback=60 (repeatable)"),
+    horizon: int = typer.Option(1, "--horizon", help="forward-return horizon in bars"),
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str = typer.Option("2023-12-31", "--end"),
+    demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
+    snapshot: str = typer.Option(None, "--snapshot", help="evaluate an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe", help="point-in-time universe name (PIT membership for the backtest)"),
+) -> None:
+    """Evaluate ONE standalone factor on its own: a PIT backtest (via a 1-factor adapter) plus a
+    construction-free rank IC/IR block. Ephemeral — writes nothing to the registry; the IC t-stat
+    is NOT multiple-testing corrected (#140 slice E)."""
+    spec = get_factor(name)
+    provider = select_provider(demo, snapshot)
+    start_dt, end_dt = utc(start), utc(end)
+    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    syms = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not syms:
+        raise ValueError("--symbols must list at least one symbol")
+    result = evaluate_factor(
+        spec, provider, start_dt, end_dt,
+        symbols=syms,
+        params=_parse_kv(param, "--param"),
+        construction=construction,
+        construction_params=_parse_kv(construction_param, "--construction-param"),
+        horizon=horizon,
+        universe_by_date=universe_by_date,
+        universe_name=universe,
+        universe_snapshots=universe_prov,
+    )
+    emit(ok(result.to_dict()))

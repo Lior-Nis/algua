@@ -88,6 +88,7 @@ def test_evaluate_combo_returns_record_without_holdout():
         windows=4, holdout_frac=0.2,
         universe_by_date=None, universe_name=None, universe_snapshots=None,
         rank_by="mean_sharpe",
+        delisting_records=None, assume_terminal_last_close=False,
     )
     # The rankable fields are present; the holdout never leaves the worker.
     assert set(rec) == {"config_hash", "n_windows", "stability", "score", "meta"}
@@ -105,6 +106,7 @@ def _run_kwargs():
         windows=4, holdout_frac=0.2,
         universe_by_date=None, universe_name=None, universe_snapshots=None,
         rank_by="mean_sharpe",
+        delisting_records=None, assume_terminal_last_close=False,
     )
 
 
@@ -179,3 +181,50 @@ def test_sweep_combo_error_surfaces_as_backtest_error(monkeypatch):
     with pytest.raises(BacktestError):
         sweep(_momentum(), SyntheticProvider(seed=3), START, END,
               grid={"lookback": [20, 40]}, windows=500, holdout_frac=0.2)
+
+
+def test_sweep_records_trial_sharpe_triple():
+    # Three-combo grid: count == 3, mean is not None, var >= 0.
+    res = sweep(_momentum(), SyntheticProvider(seed=3), START, END,
+                grid={"lookback": [20, 40, 60]}, windows=4, holdout_frac=0.2)
+    assert res.trial_sharpe_count == 3
+    assert res.trial_sharpe_mean is not None
+    assert res.trial_sharpe_var_ann is not None and res.trial_sharpe_var_ann >= 0.0
+
+
+def test_sweep_single_combo_var_zero():
+    # Single-combo grid: count == 1, var == 0.0 (ddof=1 undefined → 0.0 by spec).
+    res = sweep(_momentum(), SyntheticProvider(seed=3), START, END,
+                grid={"lookback": [40]}, windows=4, holdout_frac=0.2)
+    assert res.trial_sharpe_count == 1
+    assert res.trial_sharpe_var_ann == 0.0
+
+
+def _rec(mean_sharpe: float) -> dict:
+    return {"stability": {"mean_sharpe": mean_sharpe}}
+
+
+def test_trial_sharpe_stats_uses_mean_sharpe_not_ranking_score():
+    from algua.backtest.sweep import _trial_sharpe_stats
+
+    # Canonical dispersion is over stability["mean_sharpe"], independent of the ranking `score`.
+    count, mean, var = _trial_sharpe_stats([_rec(0.2), _rec(0.4), _rec(0.6)])
+    assert count == 3
+    assert mean == pytest.approx(0.4)
+    assert var == pytest.approx(0.04)  # var([0.2,0.4,0.6], ddof=1)
+
+
+def test_trial_sharpe_stats_single_combo_var_zero():
+    from algua.backtest.sweep import _trial_sharpe_stats
+
+    assert _trial_sharpe_stats([_rec(0.5)]) == (1, 0.5, 0.0)
+
+
+def test_trial_sharpe_stats_fails_closed_on_any_nonfinite():
+    from algua.backtest.sweep import _trial_sharpe_stats
+
+    # A degenerate sweep (most combos NaN, one finite) must NOT record a tiny dispersion that
+    # would weaken the DSR — it fails closed so the pooled accessor returns None downstream.
+    degenerate = [_rec(0.5), _rec(float("nan")), _rec(float("inf"))]
+    assert _trial_sharpe_stats(degenerate) == (0, None, None)
+    assert _trial_sharpe_stats([]) == (0, None, None)

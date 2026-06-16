@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 from collections.abc import Iterator
 from pathlib import Path
@@ -11,6 +12,7 @@ from algua.cli._common import now_iso, ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
+from algua.data.constituents import constituents_to_snapshots, parse_constituents_rows
 from algua.data.contracts import (
     BarProvider,
     BarRequest,
@@ -217,6 +219,51 @@ def ingest_universe(
     emit(ok({"snapshot": rec.to_dict()}))
 
 
+@data_app.command("import-universe")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def import_universe(
+    universe: str,
+    file: Path = typer.Option(..., "--file", help="constituents CSV: symbol,add_date,drop_date"),
+    as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
+    source: str = typer.Option("bulk-import", "--source"),
+) -> None:
+    """Bulk-import a constituents CSV into the universe-snapshot timeline (one snapshot per change
+    date; add inclusive, drop exclusive, multiple rows/symbol for re-additions). Universes are
+    IMMUTABLE: a same-date membership conflict aborts before any write (corrections need a new
+    name). Empty-membership change dates are rejected (deferred limitation)."""
+    with file.expanduser().open(newline="", encoding="utf-8-sig") as fh:
+        rows = list(csv.DictReader(fh))
+    intervals = parse_constituents_rows(rows)
+    timeline = constituents_to_snapshots(intervals)
+    stamp = as_of or now_iso()
+    # Pre-scan: check for empty membership BEFORE any writes so the import is atomic —
+    # no partial timeline is written if any change-date has empty membership.
+    for effective_date, members in timeline:
+        if not members:
+            raise ValueError(
+                f"universe {universe!r}: membership is empty on {effective_date.isoformat()} "
+                "— empty-membership snapshots are a deferred limitation"
+            )
+    store = _store()
+    symbols_seen: set[str] = set()
+    for effective_date, members in timeline:
+        symbols_seen.update(members)
+        store.ingest_universe(
+            universe=universe,
+            symbols=sorted(members),
+            effective_date=effective_date.isoformat(),
+            as_of=stamp,
+            source=source,
+            require_immutable=True,
+        )
+    emit(ok({
+        "universe": universe,
+        "snapshots_written": len(timeline),
+        "change_dates": [d.isoformat() for d, _ in timeline],
+        "symbols_seen": sorted(symbols_seen),
+    }))
+
+
 @data_app.command("ingest-fundamentals")
 @json_errors(ValueError, LookupError, FileNotFoundError)
 def ingest_fundamentals(
@@ -277,6 +324,20 @@ def ingest_news(
     path = from_file.expanduser()
     raw = pd.read_parquet(path) if path.suffix.lower() == ".parquet" else pd.read_csv(path)
     rec = _store().ingest_news(provider=provider, as_of=as_of, frame=raw)
+    emit(ok({"snapshot": rec.to_dict()}))
+
+
+@data_app.command("import-delistings")
+@json_errors(ValueError, LookupError, FileNotFoundError)
+def import_delistings(
+    file: Path = typer.Option(..., "--file", help="CSV: symbol,delisting_date,delisting_value"),
+    as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
+    source: str = typer.Option("vendor", "--source"),
+) -> None:
+    """Import a delistings CSV (delisting_value = per-share terminal price in adj_close units,
+    strictly > 0) as one point-in-time delistings snapshot."""
+    frame = pd.read_csv(file.expanduser())
+    rec = _store().ingest_delistings(frame=frame, as_of=as_of or now_iso(), source=source)
     emit(ok({"snapshot": rec.to_dict()}))
 
 

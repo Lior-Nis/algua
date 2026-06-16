@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 from threadpoolctl import threadpool_limits
 
+from algua.backtest.delisting import DelistingRecord
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import _reject_pit_sidecar, walk_forward
 from algua.contracts.types import DataProvider
@@ -137,6 +139,31 @@ def _rank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(records, key=_key, reverse=True)
 
 
+def _trial_sharpe_stats(
+    records: list[dict[str, Any]],
+) -> tuple[int, float | None, float | None]:
+    """Per-combo trial-Sharpe ``(count, mean, sample-variance)`` for the DSR evidence layer (#211).
+
+    Uses each combo's CANONICAL per-combo Sharpe — the mean-window Sharpe
+    (``stability["mean_sharpe"]``) — NOT the ranking ``score``: ``score`` is ``rank_by``-dependent
+    (it is ``min_sharpe`` when ranking by worst window), a different statistic from the holdout
+    Sharpe the DSR compares against, which would mis-calibrate the benchmark.
+
+    FAILS CLOSED — returns ``(0, None, None)`` — when the sweep is degenerate (no combos, or ANY
+    non-finite per-combo Sharpe). Silently dropping non-finite combos would make the recorded count
+    undercount the trials the DSR's N still counts, shrinking the dispersion and WEAKENING the gate;
+    None stats instead make the pooled accessor return None so the binding DSR check fails closed.
+    Variance is sample variance (``ddof=1``) for count ≥ 2, and ``0.0`` for a single combo.
+    """
+    combo_sharpes = [r["stability"]["mean_sharpe"] for r in records]
+    if not combo_sharpes or not all(math.isfinite(s) for s in combo_sharpes):
+        return 0, None, None
+    count = len(combo_sharpes)
+    mean = float(np.mean(combo_sharpes))
+    var = float(np.var(combo_sharpes, ddof=1)) if count >= 2 else 0.0
+    return count, mean, var
+
+
 _RANK_KEYS = {"mean_sharpe", "min_sharpe"}
 
 
@@ -155,6 +182,9 @@ class SweepResult:
     rank_by: str
     ranked: list[dict[str, Any]]
     best: dict[str, Any] | None
+    trial_sharpe_count: int = 0
+    trial_sharpe_mean: float | None = None
+    trial_sharpe_var_ann: float | None = None
     code_hash: str | None = None
     dependency_hash: str | None = None
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
@@ -177,6 +207,8 @@ def _evaluate_combo(
     universe_name: str | None,
     universe_snapshots: list[dict[str, str]] | None,
     rank_by: str,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None,
+    assume_terminal_last_close: bool,
 ) -> dict[str, Any]:
     """Evaluate one already-overridden combo via walk_forward; return its rankable record + the
     combo-independent meta. Module-level so it is picklable into a ProcessPoolExecutor worker.
@@ -190,6 +222,8 @@ def _evaluate_combo(
         windows=windows, holdout_frac=holdout_frac,
         universe_by_date=universe_by_date,
         universe_name=universe_name, universe_snapshots=universe_snapshots,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
     return {
         "config_hash": wf.config_hash,
@@ -283,6 +317,8 @@ def sweep(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
 ) -> SweepResult:
     """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
 
@@ -307,6 +343,8 @@ def sweep(
         universe_by_date=universe_by_date,
         universe_name=universe_name, universe_snapshots=universe_snapshots,
         rank_by=rank_by,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
     results = _run_combos(overridden, eval_kwargs)
 
@@ -328,6 +366,9 @@ def sweep(
 
     ranked = _rank_records(records)
     best = {"params": ranked[0]["params"], "score": ranked[0]["score"]}
+
+    t_count, t_mean, t_var = _trial_sharpe_stats(records)
+
     return SweepResult(
         strategy=strategy.name,
         data_source=meta["data_source"],
@@ -344,6 +385,9 @@ def sweep(
         rank_by=rank_by,
         ranked=ranked,
         best=best,
+        trial_sharpe_count=t_count,
+        trial_sharpe_mean=t_mean,
+        trial_sharpe_var_ann=t_var,
         universe_name=meta["universe_name"],
         universe_snapshots=meta["universe_snapshots"],
     )

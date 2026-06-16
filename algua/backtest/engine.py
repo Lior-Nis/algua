@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import vectorbt as vbt
 
+from algua.backtest.delisting import DelistingExitError, DelistingRecord, apply_delisting_exits
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
@@ -26,6 +27,9 @@ from algua.risk.limits import WEIGHT_TOL, RiskBreach, validate_decision_weights
 from algua.strategies.base import LoadedStrategy
 
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
+
+# Residual-position tolerance for the post-delisting-exit guarantee.
+POSITION_EPS = 1e-9
 
 # Fail-closed runtime parity guard: number of post-warmup bars at which the fast path is
 # re-verified against the canonical per-bar definition on every run that uses a signal_panel_fn.
@@ -565,15 +569,22 @@ def simulate(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
-) -> tuple[vbt.Portfolio, pd.DataFrame]:
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
+) -> tuple[vbt.Portfolio, pd.DataFrame, list[dict]]:
     """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
     the strategy exposes a parity-guarded `signal_panel_fn` — see `_decision_weights_fast_or_loop`),
-    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift and
-    simulate. Returns (portfolio, effective-weights). The shift lives ONLY here — the panel fn (like
-    the loop) returns DECISION-time weights, never executable ones.
+    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift, the
+    delisting-aware exit overlay, and simulate. Returns (portfolio, executed-weights, forced-exits).
+    The shift lives ONLY here — the panel fn (like the loop) returns DECISION-time weights, never
+    executable ones.
 
-    This is the public simulation step: bars -> (portfolio, effective weights). Metrics are
-    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+    This is the public simulation step: bars -> (portfolio, executed weights, forced exits).
+    Metrics are computed separately (see algua.backtest.metrics). Shared by run()/walk_forward().
+
+    Delisting-aware exit (`delisting_records`): a position held past a symbol's last bar is realized
+    at the record's terminal price and removed (see `apply_delisting_exits`); a held-into-gap symbol
+    with no record fails closed unless `assume_terminal_last_close` (human-only).
 
     Point-in-time universe (`universe_by_date`): when provided, bars are fetched for the UNION of
     all ever-effective members and the per-bar decision is masked to as-of-t membership (see
@@ -628,15 +639,43 @@ def simulate(
 
     lag = strategy.execution.decision_lag_bars
     weights_eff = weights.shift(lag).fillna(0.0)
+
+    try:
+        adj_exec, weights_exec, forced_exits = apply_delisting_exits(
+            adj, weights_eff, delisting_records,
+            assume_terminal_last_close=assume_terminal_last_close,
+        )
+    except DelistingExitError as exc:
+        raise BacktestError(str(exc)) from exc
+
+    # call_seq="auto" (sells before buys under cash_sharing) only when a forced exit needs the
+    # same-bar liquidation cash — keeps non-delisting backtests bit-identical to today.
+    extra = {"call_seq": "auto"} if forced_exits else {}
     pf = vbt.Portfolio.from_orders(
-        close=adj,
-        size=weights_eff,
+        close=adj_exec,
+        size=weights_exec,
         size_type="targetpercent",
         cash_sharing=True,
         group_by=True,
         freq="1D",
+        **extra,
     )
-    return pf, weights_eff
+
+    if forced_exits:
+        positions = pf.assets()
+        for fe in forced_exits:
+            sym = fe["symbol"]
+            bar = pd.Timestamp(fe["bar"])
+            after = positions[sym].loc[positions.index >= bar]
+            if bool((after.abs() > POSITION_EPS).any()):
+                raise BacktestError(
+                    f"delisting exit for {sym} left a residual position after {fe['bar']}"
+                )
+        returns = pf.returns()
+        if not bool(np.isfinite(returns.fillna(0.0)).all()):
+            raise BacktestError("non-finite returns after delisting exits")
+
+    return pf, weights_exec, forced_exits
 
 
 # build_portfolio is the explicit public alias of the simulation step. walk_forward and
@@ -656,11 +695,16 @@ def run(
     universe_snapshots: list[dict[str, str]] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    delisting_snapshot: str | None = None,  # surfaced in BacktestResult provenance (#212)
+    assume_terminal_last_close: bool = False,
 ) -> BacktestResult:
-    pf, weights_eff = simulate(
+    pf, weights_eff, forced_exits = simulate(
         strategy, provider, start, end,
         universe_by_date=universe_by_date, fundamentals_provider=fundamentals_provider,
         news_provider=news_provider,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
@@ -680,5 +724,7 @@ def run(
             getattr(news_provider, "snapshot_id", None)
             if strategy.config.needs_news else None
         ),
+        delisting_snapshot=delisting_snapshot,
+        forced_exits=forced_exits,
         **prov,
     )

@@ -186,10 +186,23 @@ class StrategyRepository(Protocol):
         row with a NULL ``dependency_hash`` never matches a concrete hash — both fail closed."""
         ...
 
-    def record_search_trial(self, strategy_name: str, n_combos: int, grid_json: str) -> int:
-        """Persist one measured search-breadth row (the size + grid of one sweep); return its row
-        id. Keyed by strategy NAME so a sweep run BEFORE the strategy is registered still counts
-        toward promotion breadth. The promotion gate's multiple-testing defense reads these back."""
+    def record_search_trial(
+        self, strategy_name: str, n_combos: int, grid_json: str,
+        *, trial_sharpe_count: int | None = None,
+        trial_sharpe_mean: float | None = None,
+        trial_sharpe_var_ann: float | None = None,
+    ) -> int:
+        """Persist one measured search-breadth row (size + grid + the sweep's trial-Sharpe
+        (count, mean, annualized var) for the #211 DSR dispersion); return its row id. Keyed by
+        strategy NAME so a sweep run BEFORE the strategy is registered still counts toward promotion
+        breadth. Stats default to None for callers that record only breadth."""
+        ...
+
+    def pooled_trial_sharpe_var(self, strategy_name: str) -> float | None:
+        """Exact pooled SAMPLE variance (ddof=1) of the strategy's trial Sharpes across all its
+        search_trials rows, via the law of total variance over the per-row (count, mean, var)
+        triples. Returns None (fail closed) if there are no rows OR any contributing row has a
+        NULL/NaN/inf count/mean/var. ANNUALIZED units (caller converts)."""
         ...
 
     def total_search_combos(self, strategy_name: str) -> int:
