@@ -19,9 +19,10 @@ those cross the seam and are wired at the CLI layer.
 from __future__ import annotations
 
 import math
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
-from algua.research.gates import DSR_ALPHA, dsr_confidence, effective_funnel_breadth
+from algua.research.gates import DSR_ALPHA, dsr_confidence
 
 # Re-export constants callers need without opening gates.py explicitly.
 __all__ = [
@@ -108,6 +109,8 @@ def correct_factor_ic(
 
     if dsr_binding:
         # IC is per-period; no ANN scaling needed (unlike strategy Sharpe in gates.py).
+        # trial_ir_var is not None here — guaranteed by the dsr_binding condition above.
+        assert trial_ir_var is not None  # noqa: S101 (mypy narrowing)
         safe_ir = ir if (ir is not None and math.isfinite(ir)) else 0.0
         safe_skew = ic_skew if (ic_skew is not None and math.isfinite(ic_skew)) else 0.0
         safe_kurt = ic_kurtosis if (ic_kurtosis is not None and math.isfinite(ic_kurtosis)) else 3.0

@@ -76,7 +76,6 @@ def test_ic_skew_kurtosis_none_when_underpowered():
 
 def test_gaussian_ic_series_has_kurtosis_near_3():
     """A large-ish near-Gaussian IC series gives raw (Pearson) kurtosis ≈ 3."""
-    import scipy.stats as st
     rng = np.random.default_rng(42)
     n = 300
     # Fix IC values directly: create scores whose Spearman IC == draw from N(0,1)

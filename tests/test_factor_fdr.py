@@ -16,8 +16,7 @@ from algua.research.factor_fdr import (
     correct_factor_ic,
     trial_ir_variance,
 )
-from algua.research.gates import DSR_ALPHA, dsr_confidence
-
+from algua.research.gates import dsr_confidence
 
 # ---------------------------------------------------------------------------
 # breadth_benchmark_t

@@ -4,14 +4,14 @@ Mirrors test_shortlist_gate.py's _repo(tmp_path) fixture pattern.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _repo(tmp_path):
