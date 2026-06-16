@@ -158,7 +158,9 @@ and the gate falls back to Phase-1 behavior.
 
 - **`algua/registry/store.py`** — new `funnel_trial_sharpe_var(window_days: int) → float | None`
   accessor (per-strategy pooling first, then mean); Protocol declaration in
-  `algua/registry/repository.py`.
+  `algua/registry/repository.py`.  The `search_trials` table needs an index on `created_at` for
+  the window query — add `CREATE INDEX IF NOT EXISTS ix_search_trials_created_at ON search_trials(created_at)`
+  in Slice 0's schema footprint (no version bump required, just an index addition).
 - **`algua/research/gates.py`** *(PROTECTED)* — `dsr_confidence` gains a `funnel_floor_var_pp:
   float | None` parameter; the `max(own, floor)` is applied before the `SR*` calculation.  New
   protected constants `MIN_FUNNEL_FLOOR_STRATEGIES`.  Reuse `FUNNEL_WINDOW_DAYS` as the window;
@@ -166,7 +168,8 @@ and the gate falls back to Phase-1 behavior.
 - **`algua/registry/promotion.py`** *(PROTECTED)* — `run_gate` calls
   `repo.funnel_trial_sharpe_var(FUNNEL_WINDOW_DAYS)` and passes the result to `evaluate_gate` /
   `dsr_confidence`.  Audit fields in `GateDecision`: `dsr_funnel_floor_var_ann` (null-coerced),
-  `dsr_funnel_floor_n_strategies` (int, for auditability).
+  `dsr_funnel_floor_n_strategies` (int), `dsr_funnel_floor_n_total_rows` (total rows pooled across
+  all eligible strategies, for stale-history auditability).
 
 ### Testing
 
@@ -200,33 +203,47 @@ burn token commit or roll back atomically — no orphaned sidecar, no sidecar-wi
 parquet sidecars: they break burn atomicity; a holdout OOS vector is small (~63–500 floats × 8
 bytes).
 
-**Atomicity requirement:** the existing standalone `finalize_holdout_reservation` method must be
-superseded (for the return-vector path) by a new composite method
-`store.finalize_holdout_with_returns(holdout_id, strategy_id, returns, dates, holdout_start,
-holdout_end)` that wraps both writes in a **single** `with self._conn:` block:
+**Two-transaction architecture (required by on_peek discipline):** The holdout burn
+(`committed_at` update) MUST happen at `on_peek` time — when the holdout is first revealed to the
+strategy — using the existing `finalize_holdout_reservation` call unchanged. The OOS return vector
+is only available AFTER `walk_forward` returns.  These events are architecturally separate and
+cannot share a transaction.  The return vector is written in a subsequent call in `run_gate` after
+`walk_forward` completes.
+
+The `UNIQUE(holdout_evaluation_id)` constraint on `holdout_returns` prevents double-writes.  A
+missing `holdout_returns` row for a committed `holdout_evaluations` row is a recoverable
+inconsistency (the return vector is deterministic from re-running the same walk-forward on the same
+data); the `UNIQUE` constraint makes a reconciliation job safe.
+
+The burn is upgraded to include `strategy_id` in the WHERE predicate (not only as a pre-call
+assertion) to prevent a caller-bug from leaving an ID mismatch:
 
 ```python
-with self._conn:  # one transaction — both commit or both roll back
-    self._conn.execute(
-        "UPDATE holdout_evaluations SET committed_at=?, config_hash=? "
-        "WHERE id=? AND committed_at IS NULL", (now, config_hash, holdout_id)
-    )
-    if self._conn.changes() == 0:
-        raise AlreadyCommitted(holdout_id)
+cur = self._conn.execute(
+    "UPDATE holdout_evaluations SET committed_at=?, config_hash=? "
+    "WHERE id=? AND strategy_id=? AND committed_at IS NULL",
+    (now, config_hash, holdout_id, strategy_id)
+)
+if cur.rowcount == 0:           # note: cur.rowcount, not self._conn.changes()
+    raise ValueError(f"holdout {holdout_id} already committed or strategy_id mismatch")
+```
+
+The subsequent returns write (separate transaction, after `walk_forward` returns):
+
+```python
+with self._conn:
     self._conn.execute(
         "INSERT INTO holdout_returns (...) VALUES (...)",
         (holdout_id, strategy_id, ...)
     )
 ```
 
-If the UPDATE matches zero rows (already committed), the INSERT is never issued and the whole
-transaction rolls back — leaving `committed_at` NULL and no `holdout_returns` row.
-
-**Write-time validation contracts:**
-- Assert `len(returns) == len(dates) == n_bars` before the transaction; mismatch raises immediately.
+**Write-time validation contracts (before the burns, outside transactions):**
+- Assert `len(returns) == len(dates) == n_bars`; mismatch raises immediately.
 - Assert that `strategy_id` matches the `holdout_evaluations.strategy_id` for the given
-  `holdout_id` (defensive redundancy check — the caller in `promotion.py` should always provide the
-  same ID, but silent mismatch would corrupt the sibling-overlap index).
+  `holdout_id` (do this BEFORE the `with self._conn:` block — avoids holding a lock for a read).
+- Raise a named exception (define `AlreadyReturnsWritten` or reuse `ValueError`) if the
+  `holdout_returns` row already exists (from the `UNIQUE` constraint violation).
 
 ### Schema (schema bump 24 → 25, Slice 1 only)
 
@@ -261,8 +278,21 @@ gaps, and custom universes without a calendar dependency.
 Surface a new SENSITIVE field `holdout_returns: tuple[list[float], list[str]] | None` on
 `WalkForwardResult` — the `(per-period returns, bar dates)` pair.  It inherits
 `holdout_metrics`' withhold-from-operators handling; it is more sensitive, not less.  The write
-happens in `promotion.py` `run_gate`, inside the same transaction that finalizes the holdout burn.
+happens in `promotion.py` `run_gate` after `walk_forward` returns (see burn-on-peek timing above).
 `gates.py` receives NO return vectors and does NO DB reads — the gate remains pure-math.
+
+`WalkForwardResult.to_dict()` (used for CLI/operator output) must **explicitly exclude**
+`holdout_returns`.  The field must not appear in any JSON/dict serialization path.  Implement by
+overriding `to_dict()` or using `dataclasses.field(repr=False)` combined with a custom `to_dict`
+that skips it — do NOT rely on `dataclasses.asdict()` for this type going forward.
+
+**`returns_available` binding condition (pre-Slice-1 migration):** Bootstrap (b) and multi-regime
+(c) checks both require a `holdout_returns` row.  Strategies promoted BEFORE Slice 1 deployed will
+have no such row.  Define a boolean `returns_available` (True iff a `holdout_returns` row exists
+for the current promotion's `holdout_evaluation_id`).  When `returns_available=False`, the bootstrap
+and regime checks are **omitted** (NOT FAILED) — this is the pre-Slice-1 baseline, analogous to
+`dsr_binding=False`.  When `returns_available=True`, the checks follow their normal binding logic.
+Record `returns_available` in the audit payload.
 
 **`sweep()` must persist nothing.** The single-use discipline is preserved by persisting only at
 the one burn point (`research promote`), never in the grid workers.
@@ -303,14 +333,20 @@ strategies × 500 bars × 8 bytes ≈ 4 MB; trivially within SQLite.
 ### Testing
 
 - Round-trip: vector and dates written at burn time, read back from `holdout_returns` row.
-- Atomicity: if `finalize_holdout_with_returns` rolls back (e.g. the UPDATE matches zero rows
-  because `committed_at` was already set), `committed_at` remains NULL **and** the
-  `holdout_returns` row is absent — both writes are reverted atomically.
-- Write is gated on the burn commit — a strategy with no `holdout_evaluations` row has no
-  `holdout_returns` row.
+- Burn + returns are two separate transactions (see atomicity note above). To test the
+  partial-write scenario: simulate a crash after the burn commit but before the returns write
+  → `committed_at` is already NOT NULL (burned), `holdout_returns` row is absent; confirm
+  reconciliation (re-running the returns write) succeeds and `UNIQUE` prevents a double-write.
+  (Do NOT test that "`committed_at` remains NULL" — after a successful burn, it is NOT NULL.)
+- Write is gated on the burn commit — a strategy with no `holdout_evaluations.committed_at`
+  set has no `holdout_returns` row.
 - `sweep()` produces no `holdout_returns` rows in isolation.
 - Access control: no `StrategyRepository` method returns a strategy's own `returns_blob` to the
   caller; only the sibling-read accessor exists.
+- `to_dict()` exclusion: `WalkForwardResult.to_dict()` must NOT include `holdout_returns`; test
+  that `"holdout_returns"` is absent from the serialized dict.
+- Read-time validation: when decoding `returns_blob`, assert `len(np.frombuffer(blob, float64)) == n_bars`;
+  raise on mismatch to catch corrupted blobs.
 
 ---
 
@@ -330,9 +366,9 @@ the haircut and the DSR are independent checks: the haircut's binding status doe
 DSR from moving FAIL→PASS when its `N` decreases.
 
 **How N_eff becomes binding:** at Slice 5 (haircut retirement), disabling the haircut AND enabling
-the binding `N_eff` in the DSR happen in the **same atomic CODEOWNERS-gated PR**.  The two changes
-cancel: the haircut (which used raw `N`) is removed, and the DSR (which now uses `N_eff ≤ N`)
-takes full responsibility.  The net effect is a pass-rate change whose direction must be validated
+the binding `N_eff` in the DSR happen in the **same atomic CODEOWNERS-gated PR**.  Both changes
+weaken the gate — they do NOT cancel.  The dominance audit validates that the net pass-rate effect
+is acceptable before the PR merges.  The net effect is a pass-rate change whose direction must be validated
 by the dominance audit before the PR can merge.
 
 ### Motivation
@@ -388,7 +424,13 @@ on `bar_dates` before computing pairwise correlations.
 
 - **`algua/registry/store.py`** — `overlapping_holdout_return_streams(strategy_id, holdout_start,
   holdout_end, window_days) → list[tuple[list[float], list[str]]]` — returns date-aligned sibling
-  vectors (NEVER the requesting strategy's own vector — see access-control design above).
+  vectors (NEVER the requesting strategy's own vector — see access-control design above).  The
+  rolling-window filter must JOIN `holdout_returns` → `holdout_evaluations` on
+  `holdout_evaluation_id` and filter by `holdout_evaluations.created_at` (burn time), NOT
+  `holdout_returns.created_at` (write time), to correctly scope the window to when the holdout was
+  evaluated.  Note: `holdout_returns` uses `strategy_id` (FK) while `search_trials` uses
+  `strategy_name` — these are different keys for the same strategy; the asymmetry is intentional
+  (trial records may predate registration).
 - **`algua/research/gates.py`** *(PROTECTED)* — `estimate_n_eff(raw_n, siblings, ...)` helper
   that returns `int | None`; new protected constants `MIN_N_EFF_SIBLINGS`, `MIN_CORR_OVERLAP_BARS`,
   `RHO_BAR_SHRINKAGE_K`.  `GateDecision` gains audit fields `dsr_n_eff`, `dsr_rho_bar`,
@@ -399,6 +441,9 @@ on `bar_dates` before computing pairwise correlations.
   # N_eff is shadow-only until HAIRCUT_RETIRED — never pass it as n_trials.
   ```
   This prevents an accidental wiring mistake in a future edit from silently changing gate behavior.
+  The property test must also machine-check this: when `HAIRCUT_RETIRED is False`, the test asserts
+  that `n_trials` passed into the binding `dsr_confidence` call equals the raw `N`, not `N_eff`.
+  The test fails if `N_eff` is ever wired as `n_trials` prematurely.
 - **`algua/registry/promotion.py`** *(PROTECTED)* — queries siblings, calls the estimator, records
   `n_eff` in the audit payload; does NOT pass it as the binding trial count.
 
@@ -448,8 +493,8 @@ Sharpe SE, the bootstrap catches it.
 **What gets bootstrapped:** the DSR confidence itself.  Resample the OOS return vector
 (block-stationary) `B = DSR_BOOTSTRAP_RESAMPLES` times; on each resample recompute `SR_obs`,
 moments `γ₃, γ₄`, and the per-period DSR confidence against the same `SR*`.  Take the
-`DSR_BOOTSTRAP_LOWER_PCT`th percentile (e.g. 5th) of the bootstrap distribution as
-`bootstrap_lower_confidence`.  This estimates the sampling distribution of DSR confidence under
+`DSR_BOOTSTRAP_LOWER_QUANTILE`th quantile (e.g. 0.05 = 5th percentile, as a fraction) of the
+bootstrap distribution as `bootstrap_lower_confidence`.  This estimates the sampling distribution of DSR confidence under
 serial dependence and uses a lower percentile as a conservative cross-check — a lower percentile
 means MORE resampled copies had lower confidence, indicating the closed-form overstated certainty.
 
@@ -471,9 +516,13 @@ is well under one second per promote.
   dates, sr_star, dsr_alpha, b, seed, block_len_auto=True, block_len_override=None) →
   BootstrapResult(lower_confidence, seed_used, b_used, block_len)`.
 - **`algua/research/gates.py`** *(PROTECTED)* — new `dsr_bootstrap_evidence` check appended to
-  the AND-set when `bootstrap_lower_confidence` is not None; new protected constants
-  `DSR_BOOTSTRAP_RESAMPLES`, `DSR_BOOTSTRAP_LOWER_PCT`; audit fields `dsr_bootstrap_lower`,
-  `dsr_bootstrap_seed`, `dsr_bootstrap_b`, `dsr_bootstrap_block_len`.
+  the AND-set when `dsr_binding=True` (same condition as `dsr_evidence`); when
+  `bootstrap_lower_confidence` is None (degenerate), the check is appended as FAILED; when
+  `dsr_binding=False`, the check is omitted entirely (never appended).  New protected constants
+  `DSR_BOOTSTRAP_RESAMPLES`, `DSR_BOOTSTRAP_LOWER_QUANTILE` (fraction, not percentage — consistent
+  with `DSR_ALPHA`; e.g. 0.05 = 5th quantile), `MAX_BOOTSTRAP_BLOCK_LEN_FRACTION` (cap block length
+  at `max(1, floor(T * FRACTION))`); audit fields `dsr_bootstrap_lower`, `dsr_bootstrap_seed`,
+  `dsr_bootstrap_b`, `dsr_bootstrap_block_len`.
 - **`algua/registry/promotion.py`** *(PROTECTED)* — assembles the seed, calls the bootstrap
   helper, passes the scalar to `evaluate_gate`.
 
@@ -522,15 +571,23 @@ second powered regime can survive → `< 2 surviving regimes` → fail closed (s
 closed is the correct behavior here: a strategy with a nearly-constant-vol holdout cannot be
 assessed for multi-regime robustness.
 
-**Calendar-split fallback — EXPLICITLY NON-BINDING:** when no market-vol series is available (or
-the vol series has insufficient overlap), the `regime_robustness` check is **omitted entirely**.
-A calendar split provides temporal diversity, not market-state diversity; calendar-split evidence
-does NOT count as multi-regime robustness.  The binding check requires a vol series.  This is
-recorded as `regime_method = "unavailable"` and `regime_robustness_binding = false` in the audit
-payload.  Omitting the check when vol is unavailable is NOT a binding fallback — the check simply
-does not appear in the AND-set for that evaluation.  The benchmark vol series must be a
-reproducible, PIT-compliant data source (same ingested universe bars available at promote time,
-not a live pull — **Q4.2** must be resolved before Slice 4 ships).
+**Calendar-split fallback — EXPLICITLY NON-BINDING:** when no market-vol series is available, or
+the post-alignment overlap between the vol series and the strategy's `bar_dates` is fewer than
+`MIN_REGIME_OVERLAP_BARS` (suggested: `MIN_HOLDOUT_OBSERVATIONS = 63` to ensure at least one
+powered regime can survive), the `regime_robustness` check is **omitted entirely**.  A calendar
+split provides temporal diversity, not market-state diversity; calendar-split evidence does NOT
+count as multi-regime robustness.  The binding check requires a vol series with sufficient overlap.
+This is recorded as `regime_method = "unavailable"` or `"insufficient_overlap"` and
+`regime_robustness_binding = false` in the audit payload.  Omitting the check is NOT a binding
+fallback — the check simply does not appear in the AND-set for that evaluation.
+
+**Vol computation method (to be pinned in Slice 4 TDD plan per Q4.2):** Suggested: rolling 21-
+trading-day realized volatility (annualized std of daily log-returns over trailing 21 bars) of the
+market/benchmark series, aligned to the strategy's OOS dates via inner-join on `bar_dates`.  The
+method must be reproducible from ingested PIT-compliant snapshot bars (not a live pull).
+
+The benchmark vol series must be a reproducible, PIT-compliant data source — **Q4.2** must be
+resolved before Slice 4 ships (blocking).
 
 ### `regime_robustness` check
 
@@ -545,6 +602,13 @@ For each of the `N_REGIMES` regimes:
   than the aggregate `min_holdout_sharpe`).
 
 `regime_robustness` passes iff every surviving regime clears `MIN_REGIME_SHARPE`.
+
+**Zero-vol regime degenerate case:** `metrics_from_returns` returns `sharpe = 0.0` when
+`ann_volatility = 0.0` (all returns in a regime are identical).  With `MIN_REGIME_SHARPE = 0.0`,
+such a regime would pass despite providing no risk-adjusted evidence.  Treat a regime with
+`ann_volatility = 0.0` as underpowered (drop it) rather than a Sharpe = 0.0 pass — zero vol is
+a degenerate observation, not a valid regime.  Record `dropped_reason = "zero_vol"` in the regime
+audit payload alongside `dropped_reason = "too_short"`.
 
 **Tighten-only:** adding per-regime floors can only subtract passes from the aggregate gate, never
 add — the aggregate `holdout_sharpe` check is byte-for-byte unchanged.  For any input when vol is
@@ -621,7 +685,10 @@ The haircut cannot be retired until:
 
 1. **Shadow phase (in Slice 4 or earlier).** Keep the haircut binding.  Add non-binding audit field
    `haircut_would_have_blocked: bool` to every `decision_json` so the dominance audit can run on
-   real traffic.
+   real traffic.  Also add `phase3_component_mask: int` (bitmask of which Phase-3 slices were
+   active at evaluation time: bit 0 = Slice 0, bit 1 = Slice 1, etc.).  The dominance audit MUST
+   filter only rows where `phase3_component_mask` has all required bits set — partial-slice rows
+   reflect a different gate composition and cannot be counted.
 2. **Flagged cutover (Slice 5).** Introduce a protected named constant `HAIRCUT_RETIRED: bool =
    False` in `gates.py`.  When True, the haircut is dropped from the binding AND-set and the
    binding trial count for DSR switches from raw `N` to `N_eff`.  The haircut is still **computed
@@ -671,15 +738,21 @@ Slice 1  Return-stream persistence (schema 24→25)
             ├─ Vol-tertile AND floors; deterministic tie-breaking; constant-vol → fail closed.
             ├─ Tightening-only AND check.
             ├─ Independent of Slices 2 & 3.
-            └─ BLOCKING PREDECLARATION before Slice 4 merges: DOMINANCE_AUDIT_MIN_PROMOTIONS,
-               DOMINANCE_AUDIT_MIN_WINDOW_DAYS, and DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS must
-               be committed as CODEOWNERS-protected constants in gates.py before Slice 4 ships
-               the haircut_would_have_blocked shadow field.  Post-hoc threshold selection (after
-               seeing the data) invalidates the dominance audit.  See Q6.1.
+            ├─ BLOCKING PREDECLARATION before Slice 4 merges: DOMINANCE_AUDIT_MIN_PROMOTIONS,
+            │  DOMINANCE_AUDIT_MIN_WINDOW_DAYS, and DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS must
+            │  be committed as CODEOWNERS-protected constants in gates.py before Slice 4 ships
+            │  the haircut_would_have_blocked shadow field.  Post-hoc threshold selection (after
+            │  seeing the data) invalidates the dominance audit.  See Q6.1.
+            └─ CI enforcement: Slice 4's test suite must import all three DOMINANCE_AUDIT_* constants
+               from gates.py and fail if any is absent.  This prevents a Slice 4 PR from landing
+               without the predeclaration.
 
 Slice 5  (e) Haircut retirement + binding N_eff (ATOMIC)
   ├─ LAST — gates on Slices 0–4 live + Phase-2 FDR live + dominance audit (raw-N baseline).
   ├─ ONLY weakening change; ships as a bundle (haircut off + N_eff binding = net-calibrated).
+  ├─ Dominance audit MUST filter only `decision_json` rows where `phase3_component_mask`
+  │  indicates all of Slices 0–4 were active — rows from partial-Slice periods cannot be
+  │  counted (they reflect a different gate composition).
   └─ Filed as a separate post-Phase-2 issue (dependency on Phase 2 explicitly enforced).
 ```
 
@@ -698,14 +771,17 @@ Slice 3 is shadow-only so it can merge before the haircut retires without any ti
 | `MIN_N_EFF_SIBLINGS` | (a) | `gates.py` | min overlapping siblings to attempt N_eff |
 | `RHO_BAR_SHRINKAGE_K` | (a) | `gates.py` | SE multiplier for conservative (lower-bound) ρ̄ |
 | `DSR_BOOTSTRAP_RESAMPLES` (B) | (b) | `gates.py` | resample count |
-| `DSR_BOOTSTRAP_LOWER_PCT` | (b) | `gates.py` | lower percentile of bootstrap confidence distribution |
+| `DSR_BOOTSTRAP_LOWER_QUANTILE` | (b) | `gates.py` | lower quantile of bootstrap confidence distribution (fraction, e.g. 0.05; consistent with `DSR_ALPHA`) |
+| `MAX_BOOTSTRAP_BLOCK_LEN_FRACTION` | (b) | `gates.py` | cap block length at `floor(T × FRACTION)` to prevent block > series length |
 | `N_REGIMES` | (c) | `gates.py` | regime bucket count (= 3) |
 | `MIN_REGIME_OBSERVATIONS` | (c) | `gates.py` | per-regime power floor |
 | `MIN_REGIME_SHARPE` | (c) | `gates.py` | relaxed per-regime Sharpe bar |
+| `MIN_REGIME_OVERLAP_BARS` | (c) | `gates.py` | min post-alignment dates between vol series and OOS vector; below threshold → "vol unavailable" → check omitted |
 | `HAIRCUT_RETIRED` | (e) | `gates.py` | binding-membership toggle (also switches N to N_eff); default False |
 | `DOMINANCE_AUDIT_MIN_PROMOTIONS` | (e) | `gates.py` | min promotions evaluated before retirement audit can pass; suggested 30; must be predeclared before Slice 4 ships |
 | `DOMINANCE_AUDIT_MIN_WINDOW_DAYS` | (e) | `gates.py` | min calendar days of evaluation data before retirement audit; suggested 90; predeclared before Slice 4 |
 | `DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS` | (e) | `gates.py` | allowed `haircut_fail AND dsr_raw_N_pass` cases (suggested 0); predeclared before Slice 4 |
+| `phase3_component_mask` | (Slice 4 shadow) | `decision_json` | bitmask recorded in each gate evaluation; dominance audit filters rows where all required bits set |
 
 Schema bump: **24 → 25** in Slice 1 (`holdout_returns` table).  Slice 0 requires **no bump**.
 
@@ -742,9 +818,13 @@ Open questions to be resolved in the GATE-1 review round before per-slice TDD pl
 
 **Component (a) — effective N (Q2.x)**
 - **Q2.1** Shadow-only confirmed for Slice 3; binding switch happens at Slice 5 (retirement)?
-- **Q2.2** ρ̄ SE calculation: `SE = σ_ρ/√M` treats pairwise correlations as independent (acceptable
-  for shadow mode?) vs Fisher-z CI with effective sample size based on overlap length.  Pin which
-  to use before Slice 5 where (a) becomes binding.
+- **Q2.2** ρ̄ SE calculation: `SE = σ_ρ/√M` treats pairwise correlations as independent, which
+  **understates uncertainty** (correlated pairs have overlapping information), making the
+  lower-bound ρ̄ potentially **too low** (N_eff too low = more lenient on the DSR in binding mode).
+  This bias is acceptable in shadow mode but MUST be corrected before Slice 5 (binding).  **BLOCKING
+  for Slice 5:** resolve between (a) Fisher-z CI with effective sample size, (b) block-bootstrap of
+  the correlation matrix.  The chosen method must tighten (not loosen) the ρ̄ lower bound relative
+  to `σ_ρ/√M`.
 - **Q2.3** Sibling set = funnel strategies with overlapping OOS intervals in the rolling
   `FUNNEL_WINDOW_DAYS` window — confirm.
 - **Q2.4** `MIN_N_EFF_SIBLINGS = 2` minimum?  Note: 2 is the minimum to compute any pairwise
@@ -755,21 +835,27 @@ Open questions to be resolved in the GATE-1 review round before per-slice TDD pl
 - **Q3.2** Scope is intra-strategy serial dependence — confirmed, NOT a cross-strategy dependence
   fix?
 - **Q3.3** Block length: automatic Politis–White selector with a floor/cap, audited in payload?
-- **Q3.4** Pin `DSR_BOOTSTRAP_RESAMPLES` (suggested: 2000) and `DSR_BOOTSTRAP_LOWER_PCT` (suggested:
-  0.05, i.e. 5th percentile).
-- **Q3.5** Seed derivation: `hash((strategy_id, holdout_start, holdout_end, config_hash))` —
-  confirm inputs are stable and available at promote time.
+- **Q3.4** Pin `DSR_BOOTSTRAP_RESAMPLES` (suggested: 2000) and `DSR_BOOTSTRAP_LOWER_QUANTILE`
+  (suggested: 0.05, i.e. 5th quantile as a fraction — matches `DSR_ALPHA` convention).
+- **Q3.5** Seed derivation: `hash((strategy_name, holdout_start, holdout_end, config_hash))` —
+  confirm `strategy_name` is sufficiently stable (name + config_hash together prevent collisions
+  even if a name is reused after deletion).
+- **Q3.6** `MAX_BOOTSTRAP_BLOCK_LEN_FRACTION`: confirm suggested 0.5 (cap at `T // 2`) to prevent
+  block length ≥ series length from degenerating the bootstrap.
 
 **Component (c) — multi-regime (Q4.x)**
 - **Q4.1** Vol-tertile labeling by *market/benchmark* series (not strategy's own returns) confirmed?
-  Calendar-split as fallback confirmed?
+  Calendar-split explicitly NON-binding (check omitted when vol unavailable) confirmed?
 - **Q4.2** (**Blocking for Slice 4 TDD plan**) Benchmark vol series source: which universe?
   Suggested: equal-weighted cross-sectional daily return vol of the strategy's own `--universe`
   bars already ingested.  Must be a PIT-compliant reproducible snapshot (provenance fields to
-  record in audit payload).
-- **Q4.3** Short-regime policy: drop-underpowered-and-require-≥2-survivors confirmed?
+  record in audit payload).  Pin the vol computation method (suggested: rolling 21-trading-day
+  realized volatility — std of daily log-returns over trailing 21 bars, aligned to OOS dates).
+- **Q4.3** Short-regime policy: drop-underpowered-and-require-≥2-survivors confirmed?  Also drop
+  zero-vol regimes (no Sharpe evidence) confirmed?
 - **Q4.4** Pin `N_REGIMES` (= 3), `MIN_REGIME_OBSERVATIONS` (suggested: 21), `MIN_REGIME_SHARPE`
-  (suggested: 0.0 — require non-negative per-regime return, a lenient floor).
+  (suggested: 0.0 — require non-negative per-regime return; but pair with zero-vol drop guard),
+  `MIN_REGIME_OVERLAP_BARS` (suggested: 63 — minimum post-alignment dates for vol binding).
 
 **Component (d) — dispersion floor (Q5.x)**
 - **Q5.1** Per-strategy pooling first (anti-gaming), then mean of strategy-level variances —
