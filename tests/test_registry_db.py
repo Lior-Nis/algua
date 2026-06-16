@@ -20,7 +20,7 @@ def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(forward_gate_evaluations)")}
     assert {"strategy_id", "passed", "realized_sharpe", "holdout_sharpe", "first_tick_id",
             "last_tick_id", "n_concurrent_forward", "consumed", "created_at"} <= fcols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_v21_new_columns_are_nullable_on_existing_rows(tmp_path):
