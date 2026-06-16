@@ -270,7 +270,7 @@ which may import third-party libs; `contracts`/`features` purity is untouched).
 
 ## Deferred phases (designed; file as follow-up issues)
 
-**Phase 2 — online hierarchical FDR accounting.** **IMPLEMENTED** (#220, schema v25, 2026-06-16).
+**Phase 2 — online hierarchical FDR accounting.** **IMPLEMENTED** (#220, schema v26, 2026-06-16).
 LORD++ alpha-wealth ledger merged into the `backtested → candidate` gate: `FDR_ALPHA=0.05`,
 `W0=0.025`, γ-discount sequence normalized over 10 000 terms. The per-strategy DSR p-value
 (`p = 1 − dsr_confidence`) is the LORD++ input; every measured-breadth gate evaluation is one

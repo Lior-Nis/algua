@@ -52,7 +52,7 @@ Declared/human breadth → FDR entirely skipped (non-binding).
 
 ## Architecture
 
-### New schema columns (`gate_evaluations`, schema v25)
+### New schema columns (`gate_evaluations`, schema v26)
 
 | Column | Type | Description |
 |---|---|---|
@@ -102,7 +102,7 @@ w0=FDR_W0)`. This keeps `algua/registry` free of `algua/research` imports (lint-
 
 1. **Pure LORD++ math** (`algua/research/gates.py`) — `lord_plus_plus_level`, `_lord_gamma_weights`,
    `FDR_ALPHA`, `FDR_W0`, `FDR_GAMMA_TRUNCATION`, `_LORD_GAMMA`.
-2. **Schema 24→25** (`algua/registry/db.py`) — 5 FDR columns + partial unique index + migration.
+2. **Schema 25→26** (`algua/registry/db.py`) — 5 FDR columns + partial unique index + migration.
 3. **Stream read accessor** (`repository.py` Protocol + `store.py`) — `fdr_stream_state()` with
    fail-closed validation.
 4. **Atomic FDR-test-and-maybe-promote** (`store.py`) — `record_gate_with_fdr_and_maybe_promote()`
