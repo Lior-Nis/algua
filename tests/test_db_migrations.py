@@ -5,6 +5,34 @@ import pytest
 from algua.registry.db import SCHEMA_VERSION, _add_missing_columns, connect, migrate
 
 
+def test_factor_evaluations_table_created_on_fresh_v24_db(tmp_path):
+    """Migrating a v24-era DB without factor_evaluations creates the table, bumps
+    user_version to 25, and is idempotent on a second migrate() call."""
+    conn = connect(tmp_path / "r.db")
+    # Simulate a v24 DB that pre-dates the factor_evaluations table.
+    conn.execute("DROP TABLE IF EXISTS factor_evaluations")
+    conn.execute("PRAGMA user_version=24")
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(factor_evaluations)")}
+    expected = {
+        "id", "factor_name", "import_path", "code_hash", "hypothesis_hash",
+        "period_start", "period_end", "horizon", "params_json", "construction",
+        "construction_params_json", "n_obs", "mean_ic", "ic_ir", "t_stat",
+        "ic_skew", "ic_kurtosis", "n_dependents", "data_source", "snapshot_id",
+        "actor", "created_at", "n_hypotheses", "dsr_confidence", "significant",
+    }
+    assert expected <= cols, f"missing columns: {expected - cols}"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+    # idempotent
+    migrate(conn)
+    cols2 = {row["name"] for row in conn.execute("PRAGMA table_info(factor_evaluations)")}
+    assert cols == cols2
+
+
 def test_add_missing_columns_tolerates_lost_alter_race(tmp_path):
     """A process that loses the concurrent-ALTER race holds a stale 'column absent' snapshot,
     then its own ALTER raises 'duplicate column name'. _add_missing_columns must swallow that
