@@ -441,7 +441,7 @@ class StrategyRepository(Protocol):
 
     def finalize_factor_evaluation(
         self,
-        id: int,
+        row_id: int,
         n_hypotheses: int,
         dsr_confidence: float | None,
         significant: bool,

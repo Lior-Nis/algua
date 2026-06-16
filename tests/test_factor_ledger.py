@@ -11,8 +11,6 @@ import pytest
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 
-UTC = UTC
-
 
 def _repo(tmp_path):
     conn = connect(tmp_path / "t.db")
@@ -237,7 +235,11 @@ def test_finalize_significant_false_stored_as_zero(tmp_path):
 
 
 def test_finalize_dsr_confidence_none_stored_as_null(tmp_path):
-    """When DSR didn't bind, dsr_confidence=None → stored as NULL."""
+    """When DSR didn't bind, dsr_confidence=None → stored as NULL.
+
+    significant=True is valid here: DSR skipped (N=1) so the verdict is breadth-only,
+    and the caller determined breadth passed.
+    """
     repo = _repo(tmp_path)
     row_id = repo.record_factor_evaluation(**_row())
     repo.finalize_factor_evaluation(row_id, n_hypotheses=1, dsr_confidence=None, significant=True)

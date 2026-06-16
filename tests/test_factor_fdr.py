@@ -186,17 +186,18 @@ def test_dsr_confidence_matches_gates_function():
 
 def test_and_check_dsr_fail_overrides_breadth_pass():
     """DSR fail on a breadth-significant t-stat → significant False (tighten-only)."""
-    # Manufacture a binding DSR that returns low confidence.
-    # Use a high trial_ir_var so SR* >> ir → DSR conf near 0.
+    # bm_t(3)≈1.48, z_alpha≈1.64, threshold≈3.13; t_stat=5.0 → breadth passes.
+    # trial_ir_var=100.0 → SR*>>ir=0.3 → dsr_confidence≈0 → DSR fails.
     fdr = correct_factor_ic(
-        t_stat=5.0, ir=0.3,   # small ir, so DSR will fail despite big t-stat
+        t_stat=5.0, ir=0.3,
         n_obs=100,
         ic_skew=0.0, ic_kurtosis=3.0,
-        n_hypotheses=3, trial_ir_var=100.0,  # huge spread → SR* large → conf ≈ 0
+        n_hypotheses=3, trial_ir_var=100.0,
     )
-    if fdr["dsr_binding"] and fdr["dsr_significant"] is False:
-        assert fdr["significant"] is False  # DSR fail overrides
-    # Either DSR didn't bind (irrelevant to this test) or it tightened as expected.
+    assert fdr["breadth_significant"] is True
+    assert fdr["dsr_binding"] is True
+    assert fdr["dsr_significant"] is False
+    assert fdr["significant"] is False
 
 
 def test_and_check_breadth_fail_stays_fail_even_if_dsr_pass():
@@ -213,13 +214,15 @@ def test_and_check_breadth_fail_stays_fail_even_if_dsr_pass():
 
 def test_both_pass_significant_true():
     """High t-stat + good DSR → significant True."""
+    # bm_t(2)≈1.18, z_alpha≈1.64, threshold≈2.82; t_stat=4.0 → breadth passes.
+    # trial_ir_var=0.01 → SR*≈0 << ir=2.0 → dsr_confidence≈1.0 → DSR passes.
     fdr = correct_factor_ic(
         t_stat=4.0, ir=2.0, n_obs=30,
         ic_skew=0.0, ic_kurtosis=3.0,
-        n_hypotheses=2, trial_ir_var=0.01,  # small spread → SR* small → DSR passes
+        n_hypotheses=2, trial_ir_var=0.01,
     )
-    # May or may not bind depending on exact values; if binding, both should pass.
     assert fdr["fdr_corrected"] is True
-    if fdr["dsr_binding"]:
-        if fdr["dsr_significant"]:
-            assert fdr["significant"] is True
+    assert fdr["breadth_significant"] is True
+    assert fdr["dsr_binding"] is True
+    assert fdr["dsr_significant"] is True
+    assert fdr["significant"] is True

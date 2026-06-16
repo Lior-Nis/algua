@@ -923,7 +923,7 @@ class SqliteStrategyRepository:
 
     def finalize_factor_evaluation(
         self,
-        id: int,
+        row_id: int,
         n_hypotheses: int,
         dsr_confidence: float | None,
         significant: bool,
@@ -933,5 +933,5 @@ class SqliteStrategyRepository:
             self._conn.execute(
                 "UPDATE factor_evaluations SET n_hypotheses=?, dsr_confidence=?, significant=?"
                 " WHERE id=?",
-                (n_hypotheses, dsr_confidence, int(significant), id),
+                (n_hypotheses, dsr_confidence, int(significant), row_id),
             )
