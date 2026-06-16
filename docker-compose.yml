@@ -1,0 +1,17 @@
+services:
+  algua:
+    build: .
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"   # host-owned ./runs, not root-owned
+    env_file: .env
+    environment:
+      ALGUA_DATA_DIR: /snapshots
+      ALGUA_DB_PATH: /app/runs/${RUN_ID:-default}/algua.db
+      ALGUA_MLFLOW_TRACKING_URI: /app/runs/${RUN_ID:-default}/mlruns
+    volumes:
+      - ./data:/snapshots:ro          # shared deep-history snapshots, read-only
+      - ./kb:/app/kb:ro               # shared knowledge vault, read-only (doctor reads it)
+      - ./runs:/app/runs              # per-run writable state (DB + mlruns)
+
+  gate:
+    build: .
+    entrypoint: ["./scripts/gate.sh"]
