@@ -819,3 +819,119 @@ class SqliteStrategyRepository:
             (strategy_id, code_hash, config_hash, dependency_hash),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    # -------------------------------------------------------------------------
+    # Factor-evaluation ledger (#219, slice E of #140)
+    # -------------------------------------------------------------------------
+
+    def record_factor_evaluation(
+        self,
+        *,
+        factor_name: str,
+        import_path: str,
+        code_hash: str,
+        hypothesis_hash: str,
+        period_start: str,
+        period_end: str,
+        horizon: int,
+        params_json: str,
+        construction: str,
+        construction_params_json: str,
+        n_obs: int | None,
+        mean_ic: float | None,
+        ic_ir: float | None,
+        t_stat: float | None,
+        ic_skew: float | None,
+        ic_kurtosis: float | None,
+        n_dependents: int,
+        data_source: str,
+        snapshot_id: str | None,
+        actor: str,
+        created_at: str,
+    ) -> int:
+        """Persist one factor evaluation (correction cols NULL until finalize). Returns row id."""
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO factor_evaluations"
+                "(factor_name, import_path, code_hash, hypothesis_hash,"
+                " period_start, period_end, horizon, params_json, construction,"
+                " construction_params_json, n_obs, mean_ic, ic_ir, t_stat,"
+                " ic_skew, ic_kurtosis, n_dependents, data_source, snapshot_id,"
+                " actor, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    factor_name, import_path, code_hash, hypothesis_hash,
+                    period_start, period_end, horizon, params_json, construction,
+                    construction_params_json, n_obs, mean_ic, ic_ir, t_stat,
+                    ic_skew, ic_kurtosis, n_dependents, data_source, snapshot_id,
+                    actor, created_at,
+                ),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None
+        return rowid
+
+    def factor_hypothesis_breadth(
+        self, factor_name: str, window_days: int
+    ) -> tuple[int, int]:
+        """(own_lifetime, windowed_total) distinct hypothesis_hash counts.
+
+        own_lifetime: all-time DISTINCT hypothesis_hash for this factor.
+        windowed_total: DISTINCT hypothesis_hash across ALL factors within the
+        trailing window_days (funnel-wide breadth — mirrors windowed_search_combos).
+        ISO-8601 UTC timestamps compare lexicographically in chronological order.
+        """
+        own_row = self._conn.execute(
+            "SELECT COUNT(DISTINCT hypothesis_hash) AS cnt"
+            " FROM factor_evaluations WHERE factor_name=?",
+            (factor_name,),
+        ).fetchone()
+        own = int(own_row["cnt"])
+
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        win_row = self._conn.execute(
+            "SELECT COUNT(DISTINCT hypothesis_hash) AS cnt"
+            " FROM factor_evaluations WHERE created_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        windowed = int(win_row["cnt"])
+
+        return own, windowed
+
+    def windowed_factor_irs(self, window_days: int) -> list[float]:
+        """Latest finite ic_ir per distinct hypothesis_hash within the trailing window.
+
+        Deduplicated: for each hypothesis_hash, only the most-recent row's ic_ir is
+        considered (a re-run that updates the IR doesn't double-count dispersion).
+        Non-finite ic_ir values (NULL, NaN, inf) are excluded — fail-closed.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        rows = self._conn.execute(
+            "SELECT ic_ir FROM ("
+            "  SELECT ic_ir, ROW_NUMBER() OVER ("
+            "    PARTITION BY hypothesis_hash ORDER BY created_at DESC, id DESC"
+            "  ) AS rn"
+            "  FROM factor_evaluations WHERE created_at >= ?"
+            ") WHERE rn = 1 AND ic_ir IS NOT NULL",
+            (cutoff,),
+        ).fetchall()
+        return [
+            float(row["ic_ir"])
+            for row in rows
+            if row["ic_ir"] is not None and math.isfinite(float(row["ic_ir"]))
+        ]
+
+    def finalize_factor_evaluation(
+        self,
+        id: int,
+        n_hypotheses: int,
+        dsr_confidence: float | None,
+        significant: bool,
+    ) -> None:
+        """Write the correction columns to the factor evaluation row."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE factor_evaluations SET n_hypotheses=?, dsr_confidence=?, significant=?"
+                " WHERE id=?",
+                (n_hypotheses, dsr_confidence, int(significant), id),
+            )
