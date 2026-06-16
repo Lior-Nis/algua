@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import typer
 
+from algua.backtest.engine import BacktestError
 from algua.backtest.factor_eval import evaluate_factor
 from algua.cli._common import ok, registry_conn, resolve_universe_inputs, select_provider, utc
 from algua.cli.app import app, emit
@@ -122,7 +123,7 @@ def factor_uses(strategy: str = typer.Argument(..., help="strategy name")) -> No
 
 
 @factor_app.command("eval")
-@json_errors(ValueError, LookupError)
+@json_errors(ValueError, LookupError, BacktestError)
 def eval_factor(
     name: str = typer.Argument(..., help="standalone factor name"),
     symbols: str = typer.Option(..., "--symbols", help="comma-separated evaluation universe"),

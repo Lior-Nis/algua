@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 import algua.strategies.momentum as _momfam
+from algua.backtest.engine import BacktestError
 from algua.cli.main import app
 
 runner = CliRunner()
@@ -141,3 +142,22 @@ def test_factor_eval_rejects_non_standalone_factor():
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert "standalone" in payload["error"].lower()
+
+
+def test_factor_eval_renders_backtest_error_as_json(monkeypatch):
+    # evaluate_factor runs the backtest engine, which raises BacktestError on ordinary operational
+    # failures (empty data, risk breach, ...). The command must keep those inside the JSON contract.
+    import algua.cli.factor_cmd as fc
+
+    def _boom(*a, **k):
+        raise BacktestError("no bars in window")
+
+    monkeypatch.setattr(fc, "evaluate_factor", _boom)
+    result = runner.invoke(app, [
+        "factor", "eval", "xs_trailing_return", "--demo", "--symbols", "AAA,BBB",
+        "--construction", "equal_weight_positive", "--param", "lookback=5",
+    ])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "no bars in window" in payload["error"]
