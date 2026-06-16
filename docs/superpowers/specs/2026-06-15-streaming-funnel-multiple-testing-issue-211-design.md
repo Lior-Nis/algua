@@ -294,6 +294,8 @@ can't mint free alpha; empirical clustering by return-correlation / holdings / *
 (#140)** / **code ancestry**, with parentage tracking, so a "new" family that behaves like an old
 one inherits its budget. Builds on #137 (bind funnel breadth to family-id), #122 (family metadata),
 #161/#192/#193/#205 (holdout single-use + identity), #140 (factor lineage).
+Full design (GATE-1 reviewed): `docs/superpowers/specs/2026-06-16-hierarchical-family-budgets-anti-gaming-issue-222-design.md`
+TDD plan: `docs/superpowers/plans/2026-06-16-hierarchical-family-budgets-222.md`
 
 **End-state (retire the haircut).** The haircut and the DSR both correct for the **same** best-of-N
 selection inflation — the haircut is the crude unit-normal/asymptotic version; the DSR is the better
