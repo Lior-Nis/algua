@@ -1,6 +1,11 @@
 # algua/cli/factor_cmd.py
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json as _json_mod
+from datetime import UTC, datetime
+
 import typer
 
 from algua.backtest.engine import BacktestError
@@ -14,9 +19,12 @@ from algua.features.catalogue import (
     FactorSpec,
     filter_factors,
     get_factor,
+    load_factor_callable,
 )
 from algua.registry.lineage import dependents_of, factors_used_by
 from algua.registry.store import SqliteStrategyRepository
+from algua.research.factor_fdr import correct_factor_ic, trial_ir_variance
+from algua.research.gates import FUNNEL_WINDOW_DAYS, effective_funnel_breadth
 
 factor_app = typer.Typer(
     help="Factor catalogue: discover and trace composable factors", no_args_is_help=True
@@ -60,6 +68,41 @@ def _coerce_scalar(raw: str) -> object:
         except ValueError:
             continue
     return raw
+
+
+def _factor_hashes(
+    spec: FactorSpec,
+    params: dict,
+    horizon: int,
+    construction: str,
+    construction_params: dict,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[str, str]:
+    """Return (code_hash, hypothesis_hash) for a factor eval invocation.
+
+    code_hash: SHA-256 of the factor function's source (changes when code changes).
+    hypothesis_hash: SHA-256 of the canonical identity tuple — so the same
+      factor+params+window is a re-run (dedup), different params are a new hypothesis.
+    """
+    fn = load_factor_callable(spec)
+    code_hash = hashlib.sha256(inspect.getsource(fn).encode()).hexdigest()
+    identity = _json_mod.dumps(
+        {
+            "import_path": spec.import_path,
+            "code_hash": code_hash,
+            "params": sorted(params.items()),
+            "horizon": horizon,
+            "construction": construction,
+            "construction_params": sorted(construction_params.items()),
+            "start": start_iso,
+            "end": end_iso,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    hypothesis_hash = hashlib.sha256(identity.encode()).hexdigest()
+    return code_hash, hypothesis_hash
 
 
 def _parse_kv(items: list[str], flag: str) -> dict[str, object]:
@@ -139,10 +182,14 @@ def eval_factor(
     snapshot: str = typer.Option(None, "--snapshot", help="evaluate an ingested bars snapshot id"),
     universe: str = typer.Option(
         None, "--universe", help="point-in-time universe name (PIT membership for the backtest)"),
+    actor: str = typer.Option("agent", "--actor", help="attribution actor for the eval ledger"),
 ) -> None:
-    """Evaluate ONE standalone factor on its own: a PIT backtest (via a 1-factor adapter) plus a
-    construction-free rank IC/IR block. Ephemeral — writes nothing to the registry; the IC t-stat
-    is NOT multiple-testing corrected (#140 slice E)."""
+    """Evaluate ONE standalone factor: PIT backtest + FDR-corrected rank IC/IR.
+
+    Each evaluation is recorded in the factor_evaluations ledger. The IC t-stat is
+    multiple-testing corrected: breadth haircut sqrt(2*ln N) + DSR-confidence layer
+    (#219 slice E of #140). `significant` in the `fdr` block is the honest verdict.
+    """
     spec = get_factor(name)
     provider = select_provider(demo, snapshot)
     start_dt, end_dt = utc(start), utc(end)
@@ -150,15 +197,89 @@ def eval_factor(
     syms = [s.strip() for s in symbols.split(",") if s.strip()]
     if not syms:
         raise ValueError("--symbols must list at least one symbol")
+
+    params = _parse_kv(param, "--param")
+    construction_params = _parse_kv(construction_param, "--construction-param")
+
     result = evaluate_factor(
         spec, provider, start_dt, end_dt,
         symbols=syms,
-        params=_parse_kv(param, "--param"),
+        params=params,
         construction=construction,
-        construction_params=_parse_kv(construction_param, "--construction-param"),
+        construction_params=construction_params,
         horizon=horizon,
         universe_by_date=universe_by_date,
         universe_name=universe,
         universe_snapshots=universe_prov,
     )
-    emit(ok(result.to_dict()))
+
+    # --- FDR accounting (#219) ---
+    code_hash, hypothesis_hash = _factor_hashes(
+        spec, params, horizon, construction, construction_params, start, end,
+    )
+    ic = result.ic
+    created_at = datetime.now(UTC).isoformat()
+
+    # Data provenance for the ledger row.
+    data_source = "demo" if demo else ("snapshot" if snapshot else "provider")
+    snapshot_id_val: str | None = snapshot  # None unless --snapshot given
+
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+
+        # Blast radius: how many registered strategies compose this factor?
+        dep_result = dependents_of(repo, name)
+        n_dependents = len(dep_result.dependents)
+
+        row_id = repo.record_factor_evaluation(
+            factor_name=name,
+            import_path=spec.import_path,
+            code_hash=code_hash,
+            hypothesis_hash=hypothesis_hash,
+            period_start=start,
+            period_end=end,
+            horizon=horizon,
+            params_json=_json_mod.dumps(params, separators=(",", ":")),
+            construction=construction,
+            construction_params_json=_json_mod.dumps(construction_params, separators=(",", ":")),
+            n_obs=ic.get("n_obs"),
+            mean_ic=ic.get("mean_ic"),
+            ic_ir=ic.get("ir"),
+            t_stat=ic.get("t_stat"),
+            ic_skew=ic.get("ic_skew"),
+            ic_kurtosis=ic.get("ic_kurtosis"),
+            n_dependents=n_dependents,
+            data_source=data_source,
+            snapshot_id=snapshot_id_val,
+            actor=actor,
+            created_at=created_at,
+        )
+
+        # Breadth (self included — inserted above before the query).
+        own, windowed = repo.factor_hypothesis_breadth(name, FUNNEL_WINDOW_DAYS)
+        n_hypotheses = effective_funnel_breadth(own, windowed)
+        irs = repo.windowed_factor_irs(FUNNEL_WINDOW_DAYS)
+        tr_var = trial_ir_variance(irs)
+
+        fdr = correct_factor_ic(
+            t_stat=ic.get("t_stat"),
+            ir=ic.get("ir"),
+            n_obs=ic.get("n_obs") or 0,
+            ic_skew=ic.get("ic_skew"),
+            ic_kurtosis=ic.get("ic_kurtosis"),
+            n_hypotheses=n_hypotheses,
+            trial_ir_var=tr_var,
+        )
+
+        repo.finalize_factor_evaluation(
+            row_id,
+            n_hypotheses=n_hypotheses,
+            dsr_confidence=fdr.get("dsr_confidence"),
+            significant=bool(fdr.get("significant")),
+        )
+
+    result_dict = result.to_dict()
+    result_dict["ic"]["fdr_corrected"] = True   # overrides the raw False
+    result_dict["fdr"] = fdr
+    result_dict["n_dependents"] = n_dependents
+    emit(ok(result_dict))
