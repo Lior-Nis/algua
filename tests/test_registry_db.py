@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION == 26
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -20,7 +20,7 @@ def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
     fcols = {r["name"] for r in conn.execute("PRAGMA table_info(forward_gate_evaluations)")}
     assert {"strategy_id", "passed", "realized_sharpe", "holdout_sharpe", "first_tick_id",
             "last_tick_id", "n_concurrent_forward", "consumed", "created_at"} <= fcols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_v21_new_columns_are_nullable_on_existing_rows(tmp_path):
@@ -405,5 +405,64 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
     migrate(c2)
     cols = {row["name"] for row in c2.execute("PRAGMA table_info(search_trials)")}
     assert {"trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 25
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 26
     c2.close()
+
+
+def test_v26_adds_fdr_columns_to_gate_evaluations(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)")}
+    assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
+            "fdr_test_index"} <= cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 26
+
+
+def test_v26_fdr_partial_unique_index_exists(tmp_path):
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    indexes = {
+        r["name"] for r in conn.execute("PRAGMA index_list(gate_evaluations)")
+    }
+    assert "ix_gate_evaluations_fdr_index" in indexes
+
+
+def test_v26_migration_is_idempotent(tmp_path):
+    db = tmp_path / "r.db"
+    c1 = connect(db)
+    migrate(c1)
+    c1.close()
+    c2 = connect(db)
+    migrate(c2)   # second migrate must not raise
+    cols = {r["name"] for r in c2.execute("PRAGMA table_info(gate_evaluations)")}
+    assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
+            "fdr_test_index"} <= cols
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 26
+    c2.close()
+
+
+def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
+    # A gate_evaluations row inserted before v26 gets NULL FDR columns → excluded from stream.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # Insert a minimal strategy + gate_evaluations row (no FDR columns)
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at)"
+        " VALUES ('s', 'backtested', '2020-01-01', '2020-01-01')"
+    )
+    sid = conn.execute("SELECT id FROM strategies WHERE name='s'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO gate_evaluations"
+        "(strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+        " funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
+        " min_holdout_observations, code_hash, config_hash, data_source, period_start,"
+        " period_end, holdout_frac, actor, decision_json, consumed, created_at)"
+        " VALUES (?, 0, 1, 1, 1, 90, 'declared', 1, 0, 100, 63,"
+        " 'abc', 'def', 'demo', '2020-01-01', '2021-01-01', 0.2, 'agent', '{}', 0,"
+        " '2020-01-01T00:00:00')",
+        (sid,),
+    )
+    conn.commit()
+    row = conn.execute("SELECT fdr_binding, fdr_test_index FROM gate_evaluations").fetchone()
+    assert row["fdr_binding"] is None
+    assert row["fdr_test_index"] is None

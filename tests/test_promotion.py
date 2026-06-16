@@ -320,3 +320,119 @@ def test_run_gate_measured_but_missing_stats_fails_closed(tmp_path):
     assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
     assert d.passed is False
     assert outcome.promoted is False
+
+
+# --- run_gate FDR binding (#220, Phase 2) -----------------------------------------------
+# Calibration notes:
+#   sharpe=7.0 → dsr_confidence≈1.0 → p≈0.0 ≤ α_1≈0.00165 → FDR accepts (discovery)
+#   sharpe=2.0 → dsr_confidence≈0.96 → p≈0.04 > α_1≈0.00165 → FDR rejects (no discovery)
+
+
+def _wf_sharpe(sharpe: float):
+    return _gate_wf(holdout={**_GATE_HOLDOUT, "sharpe": sharpe})
+
+
+def _run_measured(repo, *, sharpe: float = 7.0):
+    """run_gate with measured breadth and trial stats, variable holdout Sharpe."""
+    breadth = _breadth(repo, "measured")
+    return run_gate(
+        repo, _wf_sharpe(sharpe), name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=breadth, universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="")
+
+
+def test_run_gate_fdr_binding_accept_promotes(tmp_path):
+    """Sharpe=7.0 → DSR passes + p≈0 ≤ α_1 → FDR accepts (discovery) → promoted."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=7.0)
+    d = outcome.decision
+    assert d.dsr_binding is True
+    assert d.fdr_binding is True
+    assert d.fdr_rejected is True     # a discovery
+    assert d.fdr_test_index == 1
+    assert d.fdr_p_value is not None and d.fdr_p_value < 1e-6
+    assert d.fdr_alpha_level is not None and d.fdr_alpha_level > 0
+    assert outcome.promoted is True
+    assert any(c["name"] == "fdr_evidence" and c["passed"] is True for c in d.checks)
+
+
+def test_run_gate_fdr_binding_reject_no_promotion(tmp_path):
+    """Sharpe=2.0 → DSR passes + p≈0.04 > α_1≈0.00165 → FDR rejects → not promoted."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=2.0)
+    d = outcome.decision
+    assert d.dsr_binding is True
+    assert d.fdr_binding is True
+    assert d.fdr_rejected is False    # not a discovery
+    assert d.fdr_test_index == 1
+    assert outcome.promoted is False
+    assert any(c["name"] == "fdr_evidence" and c["passed"] is False for c in d.checks)
+
+
+def test_run_gate_declared_breadth_omits_fdr_entirely(tmp_path):
+    """Declared breadth → dsr_binding=False → fdr_binding=False → no fdr_evidence check."""
+    repo = _gate_repo(tmp_path)
+    breadth = _breadth(repo, "declared")
+    outcome = _run(repo, breadth)
+    d = outcome.decision
+    assert d.fdr_binding is False
+    assert d.fdr_skip_reason is not None
+    assert all(c["name"] != "fdr_evidence" for c in d.checks)
+
+
+def test_run_gate_missing_dsr_stats_omits_fdr(tmp_path):
+    """Measured breadth but NULL trial stats → dsr_confidence=None → fdr_binding=False."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}")  # no stats → pooled_trial_sharpe_var=None
+    breadth = _breadth(repo, "measured")
+    outcome = _run(repo, breadth)
+    d = outcome.decision
+    assert d.dsr_binding is True
+    assert d.fdr_binding is False
+    assert d.fdr_skip_reason is not None
+    assert all(c["name"] != "fdr_evidence" for c in d.checks)
+
+
+def test_run_gate_fdr_decision_in_to_dict(tmp_path):
+    """FDR audit fields appear in decision.to_dict() for downstream CLI serialisation."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=7.0)
+    d_dict = outcome.decision.to_dict()
+    assert d_dict["fdr_binding"] is True
+    assert d_dict["fdr_rejected"] is True
+    assert d_dict["fdr_test_index"] == 1
+    assert d_dict["fdr_p_value"] is not None
+    assert d_dict["fdr_alpha_level"] is not None
+
+
+def test_run_gate_fdr_discovery_increments_stream(tmp_path):
+    """A passing FDR-binding gate (t=1, discovery) is recorded in the stream."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=7.0)
+    assert outcome.promoted is True
+    stream = repo.fdr_stream_state()
+    assert stream is not None
+    assert stream.t == 1
+    assert stream.discovery_indices == [1]
+
+
+def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
+    """A failing FDR-binding gate (t=1, no discovery) increments t but leaves discoveries empty."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=2.0)
+    assert outcome.promoted is False
+    stream = repo.fdr_stream_state()
+    assert stream is not None
+    assert stream.t == 1
+    assert stream.discovery_indices == []

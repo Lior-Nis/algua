@@ -270,12 +270,15 @@ which may import third-party libs; `contracts`/`features` purity is untouched).
 
 ## Deferred phases (designed; file as follow-up issues)
 
-**Phase 2 — online hierarchical FDR accounting.** LORD++ first (conservative, valid for
-never-fixed-N streaming; plain BH needs a fixed N), SAFFRON later once p-value calibration is
-auditable. Introduces a **persistent alpha-wealth ledger** (new state): discoveries replenish
-budget, dry spells tighten it. **Builds on Phase 1's calibrated evidence** as the LORD++ input —
-the LORD++ p-value is `p = 1 − dsr_confidence` (Phase 1 exposes a *confidence*; convert explicitly at
-the interface to avoid re-introducing the `≥`/`≤` inversion hazard).
+**Phase 2 — online hierarchical FDR accounting.** **IMPLEMENTED** (#220, schema v26, 2026-06-16).
+LORD++ alpha-wealth ledger merged into the `backtested → candidate` gate: `FDR_ALPHA=0.05`,
+`W0=0.025`, γ-discount sequence normalized over 10 000 terms. The per-strategy DSR p-value
+(`p = 1 − dsr_confidence`) is the LORD++ input; every measured-breadth gate evaluation is one
+stream position; discoveries replenish budget, dry spells tighten it. FDR is a tighten-only
+AND-check (declared/human breadth skips FDR entirely). The persistent stream lives in
+`gate_evaluations` (5 new nullable FDR columns + partial unique index on `fdr_test_index`);
+atomic write uses `BEGIN IMMEDIATE` (mirrors `reserve_holdout`). See plan doc
+`2026-06-16-lord-plus-plus-fdr-ledger-211.md`. SAFFRON deferred to Phase 4 (#222).
 
 **Phase 3 — dependence-aware calibration (load-bearing).** Estimate **effective independent
 trials** from strategy return-stream correlation (replaces the raw-count `N` in the DSR benchmark);

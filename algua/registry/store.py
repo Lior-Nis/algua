@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
-from algua.registry.repository import StrategyExists, StrategyNotFound, StrategyRecord
+from algua.registry.repository import (
+    FdrGateOutcome,
+    FdrStreamState,
+    StrategyExists,
+    StrategyNotFound,
+    StrategyRecord,
+)
 
 __all__ = [
     "SqliteStrategyRepository",
@@ -819,6 +827,153 @@ class SqliteStrategyRepository:
             (strategy_id, code_hash, config_hash, dependency_hash),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def fdr_stream_state(self) -> FdrStreamState | None:
+        """Read the global LORD++ FDR stream from ``gate_evaluations WHERE fdr_binding=1``.
+
+        Rows with ``fdr_binding`` NULL or 0 are excluded (legacy-safe). The stream is read in
+        ``id`` (insertion) order so the position counter t matches the order in which evaluations
+        were serialized. Integrity is validated fail-closed: any binding row with NULL/non-finite
+        p-value or alpha-level, ``fdr_rejected`` not in {0, 1}, NULL or non-positive
+        ``fdr_test_index``, or non-contiguous indices returns None."""
+        rows = self._conn.execute(
+            "SELECT fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index"
+            " FROM gate_evaluations WHERE fdr_binding=1 ORDER BY id",
+        ).fetchall()
+        if not rows:
+            return FdrStreamState(t=0, discovery_indices=[])
+        discovery_indices: list[int] = []
+        for pos, r in enumerate(rows, start=1):
+            p, alpha, rejected, idx = (
+                r["fdr_p_value"], r["fdr_alpha_level"], r["fdr_rejected"], r["fdr_test_index"]
+            )
+            if p is None or alpha is None or not math.isfinite(p) or not math.isfinite(alpha):
+                return None
+            if rejected is None or int(rejected) not in (0, 1):
+                return None
+            if idx is None or int(idx) < 1:
+                return None
+            if int(idx) != pos:
+                return None
+            if int(rejected) == 1:
+                discovery_indices.append(int(idx))
+        return FdrStreamState(t=len(rows), discovery_indices=discovery_indices)
+
+    def record_gate_with_fdr_and_maybe_promote(
+        self,
+        rec: StrategyRecord,
+        *,
+        gate_row: dict[str, Any],
+        p_value: float | None,
+        level_fn: Callable[[int, list[int]], float],
+        actor: Actor,
+        reason: str | None = None,
+    ) -> FdrGateOutcome:
+        # TOP-LEVEL ONLY — mirrors reserve_holdout's contract. A manual BEGIN IMMEDIATE inside an
+        # already-open transaction would raise "cannot start a transaction within a transaction";
+        # catching that instead of pre-checking would leave the caller's surrounding tx open in a
+        # rolled-back state. Fail loudly so the contract is enforced, not assumed.
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "record_gate_with_fdr_and_maybe_promote must be called at top level,"
+                " not inside an open transaction")
+
+        provisional_passed = bool(gate_row.get("passed"))
+        fdr_binding = p_value is not None and math.isfinite(p_value)
+
+        t_next: int | None = None
+        alpha_t: float | None = None
+        fdr_rejected: bool | None = None
+        final_passed: bool
+
+        # BEGIN IMMEDIATE takes the write lock up front so the stream-state SELECT, the gate row
+        # INSERT, and the optional stage CAS are one atomic critical section — two concurrent
+        # binding evaluations can't both read t=0 and both write fdr_test_index=1.
+        # BaseException (not Exception) so KeyboardInterrupt/SystemExit still rolls back.
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            if fdr_binding:
+                stream = self.fdr_stream_state()
+                if stream is None:
+                    raise RuntimeError("FDR stream integrity failure — cannot compute alpha_t")
+                t_next = stream.t + 1
+                alpha_t = level_fn(t_next, stream.discovery_indices)
+                assert p_value is not None
+                fdr_rejected = p_value <= alpha_t
+                final_passed = provisional_passed and fdr_rejected
+            else:
+                final_passed = provisional_passed
+
+            # Patch decision_json so the stored audit record reflects final_passed and the FDR
+            # outcome — both are only known after the stream read inside this transaction.
+            raw_decision = json.loads(gate_row.get("decision_json") or "{}")
+            raw_decision["passed"] = final_passed
+            if fdr_binding:
+                raw_decision["fdr_binding"] = True
+                raw_decision["fdr_p_value"] = p_value
+                raw_decision["fdr_alpha_level"] = alpha_t
+                raw_decision["fdr_rejected"] = bool(fdr_rejected)
+                raw_decision["fdr_test_index"] = t_next
+                raw_decision["checks"] = raw_decision.get("checks", []) + [{
+                    "name": "fdr_evidence",
+                    "value": p_value,
+                    "threshold": alpha_t,
+                    "op": "<=",
+                    "passed": bool(fdr_rejected),
+                }]
+            decision_json = json.dumps(raw_decision)
+
+            cur = self._conn.execute(
+                "INSERT INTO gate_evaluations"
+                "(strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+                " funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
+                " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
+                " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
+                " consumed, created_at,"
+                " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
+                (rec.id, int(final_passed),
+                 gate_row["n_funnel"], gate_row["own_lifetime_combos"],
+                 gate_row["windowed_total_combos"], gate_row["funnel_window_days"],
+                 gate_row["breadth_provenance"], int(gate_row["pit_ok"]),
+                 int(gate_row.get("pit_override", False)),
+                 gate_row["holdout_n_bars"], gate_row["min_holdout_observations"],
+                 gate_row["code_hash"], gate_row["config_hash"], gate_row.get("dependency_hash"),
+                 gate_row["data_source"], gate_row.get("snapshot_id"),
+                 gate_row["period_start"], gate_row["period_end"], gate_row["holdout_frac"],
+                 actor.value, decision_json, _now(),
+                 1 if fdr_binding else None,
+                 p_value if fdr_binding else None,
+                 alpha_t if fdr_binding else None,
+                 int(fdr_rejected) if fdr_rejected is not None else None,
+                 t_next if fdr_binding else None),
+            )
+            gate_id = cur.lastrowid
+            assert gate_id is not None
+
+            updated_rec: StrategyRecord | None = None
+            if final_passed:
+                updated_rec = self._apply_transition_locked(
+                    rec, Stage.CANDIDATE, actor, reason,
+                    code_hash=gate_row["code_hash"], config_hash=gate_row["config_hash"],
+                    dependency_hash=gate_row.get("dependency_hash"),
+                    consume_gate_id=None, consume_forward_gate_id=None, now=_now())
+
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+        return FdrGateOutcome(
+            gate_id=gate_id,
+            fdr_binding=fdr_binding,
+            fdr_test_index=t_next,
+            fdr_p_value=p_value if fdr_binding else None,
+            fdr_alpha_level=alpha_t,
+            fdr_rejected=fdr_rejected,
+            final_passed=final_passed,
+            updated_rec=updated_rec,
+        )
 
     # -------------------------------------------------------------------------
     # Factor-evaluation ledger (#219, slice E of #140)

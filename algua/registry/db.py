@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -516,6 +516,21 @@ def migrate(conn: sqlite3.Connection) -> None:
     })
     # v25 (#219): factor_evaluations is a brand-new table — `executescript(_SCHEMA)` above
     # creates it via `CREATE TABLE IF NOT EXISTS`. No _add_missing_columns needed.
+    # v26 (#220): FDR accounting columns for the LORD++ alpha-wealth ledger. NULL on pre-existing
+    # rows — legacy evaluations are excluded from the FDR stream by WHERE fdr_binding=1 (fail
+    # closed). The partial unique index is created AFTER the columns exist (it references
+    # fdr_test_index which isn't in the base DDL), so it lives here rather than in _SCHEMA.
+    _add_missing_columns(conn, "gate_evaluations", {
+        "fdr_binding": "INTEGER",
+        "fdr_p_value": "REAL",
+        "fdr_alpha_level": "REAL",
+        "fdr_rejected": "INTEGER",
+        "fdr_test_index": "INTEGER",
+    })
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_index"
+        " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1"
+    )
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

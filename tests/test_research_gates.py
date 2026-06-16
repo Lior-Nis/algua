@@ -6,8 +6,12 @@ import pytest
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
+    _LORD_GAMMA,
     DSR_ALPHA,
     EULER_MASCHERONI,
+    FDR_ALPHA,
+    FDR_GAMMA_TRUNCATION,
+    FDR_W0,
     FUNNEL_WINDOW_DAYS,
     MIN_HOLDOUT_OBSERVATIONS,
     GateCriteria,
@@ -15,6 +19,7 @@ from algua.research.gates import (
     dsr_confidence,
     effective_funnel_breadth,
     evaluate_gate,
+    lord_plus_plus_level,
     sharpe_haircut,
 )
 
@@ -348,3 +353,147 @@ def test_tighten_only_invariant():
         dsr_check = next((c for c in new.checks if c["name"] == "dsr_evidence"), None)
         dsr_pass = (dsr_check is None) or dsr_check["passed"]
         assert new.passed == (old.passed and ((not binding) or dsr_pass))
+
+
+# ---------------------------------------------------------------------------
+# Task 1 — LORD++ alpha-wealth level (#220, Phase 2)
+# ---------------------------------------------------------------------------
+
+def test_fdr_constants():
+    assert FDR_ALPHA == 0.05
+    assert FDR_W0 == pytest.approx(FDR_ALPHA / 2)
+    assert FDR_GAMMA_TRUNCATION == 10_000
+
+
+def test_gamma_weights_sum_to_at_most_one():
+    # Normalized weights must sum to ≤ 1.0 + tol (normalized by definition, rounding ≤ 1e-9).
+    assert abs(sum(_LORD_GAMMA) - 1.0) < 1e-9
+
+
+def test_gamma_weights_are_positive():
+    assert all(g > 0 for g in _LORD_GAMMA)
+
+
+def test_gamma_weights_are_eventually_decreasing():
+    # The raw formula is eventually monotone-decreasing; after the first few terms, γ is ↓.
+    # We check that the tail is strictly decreasing (j=10 onward is reliable).
+    for j in range(10, 100):
+        assert _LORD_GAMMA[j] <= _LORD_GAMMA[j - 1], f"γ not decreasing at j={j+1}"
+
+
+def test_lord_no_discoveries_alpha_decreasing():
+    # With no prior discoveries, α_t = γ_t · W_0 → decreases as γ_t → 0.
+    levels = [lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0) for t in range(1, 50)]
+    # All positive (weights are positive)
+    assert all(lv > 0 for lv in levels)
+    # Monotone non-increasing after the first position (tail of γ is ↓ past j~2)
+    for i in range(2, len(levels)):
+        assert levels[i] <= levels[i - 1] + 1e-15, f"level not decreasing at t={i+2}"
+
+
+def test_lord_first_discovery_bumps_alpha():
+    # A discovery at τ_1=1 adds (α-W_0)·γ_{t-1} to every subsequent α_t.
+    # At t=2: α_2_with = γ_2·W_0 + (α-W_0)·γ_1 > α_2_without = γ_2·W_0
+    alpha_2_no_disc = lord_plus_plus_level(2, [], alpha=FDR_ALPHA, w0=FDR_W0)
+    alpha_2_disc1 = lord_plus_plus_level(2, [1], alpha=FDR_ALPHA, w0=FDR_W0)
+    assert alpha_2_disc1 > alpha_2_no_disc
+
+    # The bump equals (α-W_0)·γ_{t-τ_1}
+    expected_bump = (FDR_ALPHA - FDR_W0) * _LORD_GAMMA[0]  # γ_{2-1}=γ_1=_LORD_GAMMA[0]
+    assert alpha_2_disc1 - alpha_2_no_disc == pytest.approx(expected_bump, rel=1e-9)
+
+
+def test_lord_multiple_discoveries_replenish():
+    # More discoveries → more replenishment → higher α_t vs no-discovery baseline.
+    t = 10
+    alpha_no_disc = lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
+    alpha_1disc = lord_plus_plus_level(t, [1], alpha=FDR_ALPHA, w0=FDR_W0)
+    alpha_3disc = lord_plus_plus_level(t, [1, 3, 5], alpha=FDR_ALPHA, w0=FDR_W0)
+    assert alpha_no_disc < alpha_1disc < alpha_3disc
+
+
+def test_lord_manual_recursion_check():
+    # Verify the formula directly for a small stream.
+    # t=3, τ_1=1, τ_2=2:
+    # α_3 = γ_3·W_0 + (α-W_0)·γ_{3-1} + α·γ_{3-2}
+    #      = γ_3·W_0 + (α-W_0)·γ_2 + α·γ_1
+    g1, g2, g3 = _LORD_GAMMA[0], _LORD_GAMMA[1], _LORD_GAMMA[2]
+    expected = g3 * FDR_W0 + (FDR_ALPHA - FDR_W0) * g2 + FDR_ALPHA * g1
+    computed = lord_plus_plus_level(3, [1, 2], alpha=FDR_ALPHA, w0=FDR_W0)
+    assert computed == pytest.approx(expected, rel=1e-12)
+
+
+def test_lord_fail_closed_guards():
+    # t < 1 → 0.0 (conservative; can't pass a level-0 test)
+    assert lord_plus_plus_level(0, [], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
+    assert lord_plus_plus_level(-1, [], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
+    # non-finite alpha/w0
+    assert lord_plus_plus_level(1, [], alpha=float("nan"), w0=FDR_W0) == 0.0
+    assert lord_plus_plus_level(1, [], alpha=FDR_ALPHA, w0=float("inf")) == 0.0
+    # discovery index >= t (not a past discovery)
+    assert lord_plus_plus_level(2, [2], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
+    # discovery index < 1
+    assert lord_plus_plus_level(2, [0], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
+
+
+def test_lord_injected_params():
+    # Calling with different alpha/w0 produces a proportionally scaled level.
+    alpha_half = lord_plus_plus_level(1, [], alpha=0.025, w0=0.0125)
+    alpha_full = lord_plus_plus_level(1, [], alpha=FDR_ALPHA, w0=FDR_W0)
+    assert alpha_half == pytest.approx(alpha_full / 2, rel=1e-9)
+
+
+def test_lord_t1_no_discoveries_equals_gamma1_times_w0():
+    # α_1 = γ_1 · W_0 (base case, no prior discoveries)
+    expected = _LORD_GAMMA[0] * FDR_W0
+    result = lord_plus_plus_level(1, [], alpha=FDR_ALPHA, w0=FDR_W0)
+    assert result == pytest.approx(expected, rel=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (#220 Phase 2): GateDecision FDR fields
+# ---------------------------------------------------------------------------
+
+
+def test_gate_decision_has_fdr_fields_with_defaults():
+    d = GateDecision(passed=True, checks=[])
+    assert d.fdr_binding is False
+    assert d.fdr_p_value is None
+    assert d.fdr_alpha_level is None
+    assert d.fdr_test_index is None
+    assert d.fdr_rejected is None
+    assert d.fdr_skip_reason is None
+
+
+def test_gate_decision_to_dict_includes_fdr_keys():
+    d = GateDecision(passed=True, checks=[])
+    out = d.to_dict()
+    for key in ("fdr_binding", "fdr_p_value", "fdr_alpha_level",
+                "fdr_test_index", "fdr_rejected", "fdr_skip_reason"):
+        assert key in out, f"to_dict() missing {key!r}"
+
+
+def test_gate_decision_to_dict_fdr_fields_populated():
+    d = GateDecision(
+        passed=False, checks=[],
+        fdr_binding=True, fdr_p_value=0.02, fdr_alpha_level=0.001645,
+        fdr_test_index=3, fdr_rejected=False, fdr_skip_reason=None,
+    )
+    out = d.to_dict()
+    assert out["fdr_binding"] is True
+    assert out["fdr_p_value"] == pytest.approx(0.02)
+    assert out["fdr_alpha_level"] == pytest.approx(0.001645)
+    assert out["fdr_test_index"] == 3
+    assert out["fdr_rejected"] is False
+    assert out["fdr_skip_reason"] is None
+
+
+def test_gate_decision_to_dict_non_binding_fdr():
+    d = GateDecision(
+        passed=True, checks=[],
+        fdr_binding=False, fdr_skip_reason="no_measured_dispersion",
+    )
+    out = d.to_dict()
+    assert out["fdr_binding"] is False
+    assert out["fdr_p_value"] is None
+    assert out["fdr_skip_reason"] == "no_measured_dispersion"

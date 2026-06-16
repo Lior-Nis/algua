@@ -1,10 +1,40 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
+
+
+class FdrGateOutcome(NamedTuple):
+    """Return value of ``record_gate_with_fdr_and_maybe_promote``.
+
+    Carries the gate row id, the FDR audit fields (None when non-binding), the composite
+    ``final_passed`` verdict, and the updated ``StrategyRecord`` if the strategy was promoted
+    (None otherwise). Task 5 surfaces these in ``GateDecision.fdr_*`` fields."""
+
+    gate_id: int
+    fdr_binding: bool
+    fdr_test_index: int | None
+    fdr_p_value: float | None
+    fdr_alpha_level: float | None
+    fdr_rejected: bool | None
+    final_passed: bool
+    updated_rec: StrategyRecord | None
+
+
+class FdrStreamState(NamedTuple):
+    """Snapshot of the global LORD++ alpha-wealth stream.
+
+    Source: ``gate_evaluations WHERE fdr_binding=1``. ``t`` is the count of binding rows (the
+    current stream position); ``discovery_indices`` is the ordered list of ``fdr_test_index``
+    values where ``fdr_rejected=1`` (past rejections that replenish alpha-wealth for future
+    tests). Together they fully determine ``lord_plus_plus_level`` for the NEXT test."""
+
+    t: int
+    discovery_indices: list[int]
 
 
 class ArtifactIdentity(NamedTuple):
@@ -386,6 +416,51 @@ class StrategyRepository(Protocol):
         regardless of passed/consumed, or None. The live wall's certificate selection —
         pass-or-fail on purpose: a newer failed re-evaluation must invalidate an older pass
         (#124). A NULL ``dependency_hash`` matches nothing — fail-closed."""
+        ...
+
+    def fdr_stream_state(self) -> FdrStreamState | None:
+        """Read the global LORD++ FDR stream: all ``gate_evaluations`` rows where
+        ``fdr_binding=1``, ordered by ``id``.
+
+        Returns ``FdrStreamState(t, discovery_indices)`` where ``t`` is the total count of
+        binding rows and ``discovery_indices`` is the ordered list of ``fdr_test_index`` values
+        where ``fdr_rejected=1``. Returns ``None`` (fail-closed) on any stream integrity failure:
+        a binding row with NULL or non-finite ``fdr_p_value``/``fdr_alpha_level``, ``fdr_rejected``
+        not in {0, 1}, NULL or non-positive ``fdr_test_index``, or non-contiguous indices
+        (``fdr_test_index`` must equal 1, 2, …, t in order). Rows with ``fdr_binding`` NULL or 0
+        are invisible to the stream (legacy-safe)."""
+        ...
+
+    def record_gate_with_fdr_and_maybe_promote(
+        self,
+        rec: StrategyRecord,
+        *,
+        gate_row: dict[str, Any],
+        p_value: float | None,
+        level_fn: Callable[[int, list[int]], float],
+        actor: Actor,
+        reason: str | None = None,
+    ) -> FdrGateOutcome:
+        """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
+        ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
+        the stream-state SELECT through the INSERT + stage CAS).
+
+        ``gate_row`` carries ``record_gate_evaluation``'s keyword arguments (including the
+        provisional ``passed`` flag). ``p_value`` is ``1 − dsr_confidence`` when the row is
+        FDR-binding (``dsr_binding=True`` AND ``dsr_confidence`` is finite); ``None`` means
+        non-binding and FDR is skipped entirely for this row.
+
+        When binding: reads the prior stream state UNDER the write lock, computes
+        ``t_next = prior.t + 1``, ``α_t = level_fn(t_next, prior.discovery_indices)``,
+        ``fdr_rejected = (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND
+        fdr_rejected``. The gate row is inserted with ``passed = final_passed`` (never the
+        provisional value — ``find_consumable_gate_evaluation`` reads this column). If
+        ``final_passed`` is True, ``rec`` is atomically advanced to ``candidate``.
+
+        TOP-LEVEL ONLY: raises ``RuntimeError`` if called inside an open transaction (mirrors
+        ``reserve_holdout``). Crash semantics: a process crash before commit rolls back both
+        the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy.
+        """
         ...
 
     # -------------------------------------------------------------------------
