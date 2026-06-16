@@ -79,6 +79,30 @@ def resolve_eval_inputs(
     return strategy, provider, utc(start), utc(end)
 
 
+def resolve_delisting_inputs(
+    delistings_name: str | None, end_dt: datetime
+) -> tuple[Mapping[str, list] | None, str | None]:
+    """Resolve opt-in delisting records as-of end_dt (mirror of resolve_universe_inputs).
+
+    ``delistings_name is None`` (no ``--delistings``) => ``(None, None)``.
+    Returns ``(records, snapshot_id)`` where ``snapshot_id`` is the ACTUAL snapshot selected
+    (not the user-supplied name label) for truthful provenance stamping.
+    Raises ``ValueError`` if no delistings snapshot is effective on or before ``end_dt``.
+    """
+    if delistings_name is None:
+        return None, None
+    store = DataStore(get_settings().data_dir)
+    # Single manifest read: records and snapshot_id come from the SAME selected snapshot, so a
+    # concurrent ingest can never make the stamped provenance disagree with the loaded records.
+    records, snapshot_id = store.read_delistings_with_snapshot(as_of=end_dt.isoformat())
+    if not records:
+        raise ValueError(
+            f"--delistings {delistings_name!r}: no delistings snapshot effective on or before "
+            f"{end_dt.date().isoformat()}"
+        )
+    return records, snapshot_id
+
+
 def resolve_universe_inputs(
     universe_name: str | None, start_dt: datetime, end_dt: datetime
 ) -> tuple[Mapping[date, Collection[str]] | None, list[dict[str, str]] | None]:

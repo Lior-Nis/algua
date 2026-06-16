@@ -14,6 +14,7 @@ from typing import Any
 
 from threadpoolctl import threadpool_limits
 
+from algua.backtest.delisting import DelistingRecord
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import _reject_pit_sidecar, walk_forward
 from algua.contracts.types import DataProvider
@@ -177,6 +178,8 @@ def _evaluate_combo(
     universe_name: str | None,
     universe_snapshots: list[dict[str, str]] | None,
     rank_by: str,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None,
+    assume_terminal_last_close: bool,
 ) -> dict[str, Any]:
     """Evaluate one already-overridden combo via walk_forward; return its rankable record + the
     combo-independent meta. Module-level so it is picklable into a ProcessPoolExecutor worker.
@@ -190,6 +193,8 @@ def _evaluate_combo(
         windows=windows, holdout_frac=holdout_frac,
         universe_by_date=universe_by_date,
         universe_name=universe_name, universe_snapshots=universe_snapshots,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
     return {
         "config_hash": wf.config_hash,
@@ -283,6 +288,8 @@ def sweep(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
 ) -> SweepResult:
     """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
 
@@ -307,6 +314,8 @@ def sweep(
         universe_by_date=universe_by_date,
         universe_name=universe_name, universe_snapshots=universe_snapshots,
         rank_by=rank_by,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
     results = _run_combos(overridden, eval_kwargs)
 

@@ -222,7 +222,7 @@ def test_simulate_label_aligns_misordered_weights():
     )
     # Strategy always wants 100% BBB but returns it as the only label.
     strat = _strategy(cfg, lambda v, p: pd.Series([1.0], index=["BBB"]))
-    _pf, weights_eff = simulate(strat, SyntheticProvider(seed=4), START, END)
+    _pf, weights_eff, _forced = simulate(strat, SyntheticProvider(seed=4), START, END)
     # Every non-zero weight must sit in the BBB column; AAA must remain flat zero.
     assert (weights_eff["AAA"] == 0.0).all()
     assert weights_eff["BBB"].abs().sum() > 0

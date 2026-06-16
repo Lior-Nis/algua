@@ -16,6 +16,7 @@ class Dataset(StrEnum):
     UNIVERSES = "universes"
     FUNDAMENTALS = "fundamentals"
     NEWS = "news"
+    DELISTINGS = "delistings"
 
 
 class Kind(StrEnum):
@@ -26,6 +27,7 @@ class Kind(StrEnum):
     FILE = "file"
     FUNDAMENTALS = "fundamentals"
     NEWS = "news"
+    DELISTING = "delisting"
 
 
 @dataclass(frozen=True)

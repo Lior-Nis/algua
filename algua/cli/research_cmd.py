@@ -10,6 +10,7 @@ from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
     registry_conn,
+    resolve_delisting_inputs,
     resolve_eval_inputs,
     resolve_universe_inputs,
     select_provider,
@@ -64,6 +65,14 @@ def promote(
         help="HUMAN-ONLY override: promote a non-PIT (survivorship-biased) backtest. Audited. "
              "Agents may not pass this.",
     ),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="HUMAN-ONLY: realize a held-into-gap name at its last close when no delisting record "
+             "exists. An agent must supply explicit delisting records; no-record-gap fails closed.",
+    ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
 ) -> None:
     """Gate backtested->candidate on walk-forward holdout + stability; promote only on pass.
@@ -83,12 +92,23 @@ def promote(
         raise ValueError("--n-combos must be >= 1 when provided")
     if not 0.0 <= min_pct_positive <= 1.0:
         raise ValueError("--min-pct-positive must be in [0, 1]")
+    # HUMAN-ONLY guard (same mechanism as guard_agent_relaxations in promotion_preflight):
+    # --assume-terminal-last-close is a data-integrity relaxation that must never be granted to
+    # an agent. An agent must supply explicit delisting records; a held-into-gap name with no
+    # record fails closed on the agent path. Humans may pass the flag (and accept the cost).
+    if assume_terminal_last_close and actor_enum is not Actor.HUMAN:
+        raise ValueError(
+            "--assume-terminal-last-close is human-only (an agent must supply delisting records "
+            "via --delistings; a held-into-gap name without a record fails closed for the agent "
+            "path). Pass --actor human to accept the cost."
+        )
     # 1. Resolve inputs. The PIT universe is resolved up front alongside the other inputs (a bad
     # --universe refuses here, before any holdout is peeked at). The universe is intentionally NOT
     # part of the holdout-burn identity below (conservative: the same OOS data window is burned
     # regardless of universe).
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     data_source = type(provider).__name__
     snapshot_id = getattr(provider, "snapshot_id", None)
     period_start = start_dt.date().isoformat()
@@ -128,6 +148,8 @@ def promote(
                 strategy, provider, start_dt, end_dt, windows=windows,
                 holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                 universe_name=universe, universe_snapshots=universe_prov,
+                delisting_records=delisting_records,
+                assume_terminal_last_close=assume_terminal_last_close,
                 # Burn-on-peek: commit the reservation into a burn the instant BEFORE walk_forward
                 # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
                 # committed row, the except-release below is then correct for EVERY post-peek
