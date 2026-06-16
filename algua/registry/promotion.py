@@ -203,7 +203,7 @@ def run_gate(
     # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
     # here guards the ≥/≤ inversion hazard (see GATE-1 finding H3 in the design doc).
     dsr_conf = decision.dsr_confidence
-    if dsr_conf is not None and math.isfinite(dsr_conf) and not (0.0 <= dsr_conf <= 1.0):
+    if dsr_conf is not None and not (0.0 <= dsr_conf <= 1.0):
         raise ValueError(
             f"dsr_confidence={dsr_conf!r} is outside [0, 1]; this is a DSR computation bug"
         )
@@ -211,6 +211,16 @@ def run_gate(
         dsr_binding and dsr_conf is not None and math.isfinite(dsr_conf)
     )
     p_value = (1.0 - dsr_conf) if (fdr_binding_this_row and dsr_conf is not None) else None
+
+    # Pre-populate non-binding FDR skip reason before decision_json is serialized so the DB
+    # audit record matches the in-memory GateDecision (binding fields are unknown until the
+    # store call and are patched there).
+    if not fdr_binding_this_row:
+        decision.fdr_binding = False
+        if not dsr_binding:
+            decision.fdr_skip_reason = "no_measured_dispersion"
+        else:
+            decision.fdr_skip_reason = "no_dsr_confidence"
 
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
@@ -248,7 +258,9 @@ def run_gate(
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
     )
 
-    # Fold FDR audit fields into the GateDecision so they surface in to_dict() → CLI JSON.
+    # Fold binding FDR audit fields into the GateDecision so they surface in to_dict() → CLI
+    # JSON. Non-binding fields (fdr_binding=False, fdr_skip_reason) were set above, before
+    # decision_json was serialized, so the DB record and the return value are consistent.
     if fdr_binding_this_row:
         decision.fdr_binding = True
         decision.fdr_p_value = fdr_outcome.fdr_p_value
@@ -262,12 +274,6 @@ def run_gate(
             "op": "<=",
             "passed": bool(fdr_outcome.fdr_rejected),
         })
-    else:
-        decision.fdr_binding = False
-        if not dsr_binding:
-            decision.fdr_skip_reason = "no_measured_dispersion"
-        else:
-            decision.fdr_skip_reason = "no_dsr_confidence"
     decision.passed = fdr_outcome.final_passed
 
     return PromotionOutcome(decision=decision, promoted=fdr_outcome.final_passed)
