@@ -53,7 +53,7 @@ a better hypothesis) — that's the gate doing its job.
 - **The judgment layer.** `kb/principles/research-methodology.md` explains *why* these walls exist,
   the leakage vectors no wall catches, and how to read an in-sample↔holdout gap honestly.
 
-## Reading `algua factor eval` IC (issue #140 slice B)
+## Reading `algua factor eval` IC (issues #140 slice B + #219 slice E)
 
 `algua factor eval <factor>` evaluates a single catalogued factor on its own: a PIT backtest (via
 a 1-factor→weights adapter) plus a construction-free **IC** block. In the `ic` block:
@@ -64,11 +64,24 @@ a 1-factor→weights adapter) plus a construction-free **IC** block. In the `ic`
 - `n_obs` — usable bars. A stable small-but-positive IC over many observations is more credible
   than a large IC over few bars — always check `n_obs` (a `None` mean_ic means too few usable bars).
 
-**Caveat — `fdr_corrected: false`.** The t-stat is RAW: it is NOT corrected for the multiple-
-testing surface created by evaluating many factors. A factor that looks good on its own is a prior
-worth investigating, NOT evidence of edge. Funnel-wide FDR accounting for factor hypotheses is
-#140 slice E. And a factor never goes live — only a *strategy* that composes it does, through the
-normal walk-forward/holdout gates above.
+**`fdr_corrected: true` (#219 slice E).** Each evaluation is recorded in the `factor_evaluations`
+ledger. The JSON now carries a top-level `fdr` block with the multiple-testing-corrected verdict:
+
+- `n_hypotheses` — effective funnel breadth (distinct factor hypotheses evaluated in the rolling
+  90-day window). Higher N inflates the expected-max t-stat benchmark.
+- `breadth_benchmark_t` — `sqrt(2·ln N)` expected-max inflator on the t-stat.
+- `breadth_significant` — whether `t_stat >= z_alpha + breadth_benchmark_t`.
+- `dsr_binding` / `dsr_confidence` — DSR (Bailey–LdP) layer binds when N≥2 and pooled IR
+  dispersion is measurable. Tighten-only AND with the breadth check.
+- **`significant`** — the honest verdict. This is the field to act on; the raw `t_stat` is
+  inflated by search effort and should not be used in isolation.
+- `n_dependents` — strategies that compose this factor (blast radius). A factor with many
+  dependents that fails FDR is a systemic exposure, not just one bad idea.
+
+A factor never goes live — only a *strategy* that composes it does, through the normal
+walk-forward/holdout gates. `significant: false` means the factor has not yet demonstrated
+edge beyond the expected noise of the search process; add more out-of-sample evidence or
+discard it.
 
 ## Your recommendation
 

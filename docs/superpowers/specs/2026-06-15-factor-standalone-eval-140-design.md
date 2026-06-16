@@ -28,8 +28,10 @@ metric (IC/IR).
 2. **Bridge:** introduce a **uniform alpha-factor shape** — a standalone-evaluable factor is
    signal-shaped `(view, params) -> scores`. Transforms (`zscore`) and helpers (`momentum`) are
    **not** standalone-evaluable. A generic adapter wraps any standalone factor.
-3. **Persistence/FDR:** **ephemeral JSON now.** No eval ledger, no #137 funnel-FDR wiring — both
-   deferred to slice E. The reported `t_stat` is therefore **not** multiple-testing-corrected.
+3. **Persistence/FDR:** **implemented in #219 (slice E).** Each `factor eval` invocation is
+   recorded in the `factor_evaluations` ledger. The IC t-stat is multiple-testing corrected:
+   breadth haircut `sqrt(2·ln N)` + DSR-confidence AND-check (`significant` in the `fdr` block).
+   `fdr_corrected: true` in the CLI output reflects this.
 4. **Rewire demo:** included — extract `cross_sectional_momentum`'s alpha into a catalogued
    standalone factor and have the strategy compose it (exercises slice-A/C lineage end to end).
 
@@ -154,10 +156,11 @@ reuses the sweep `_coerce` value coercion. Emits one `ok(...)` JSON envelope:
 - **No walk-forward / sweep for factors.** Those are strategy-*promotion* tools tied to the
   holdout-burn integrity surface (#161/#192/#193); a factor is non-promotable, so factor eval is a
   plain in-sample backtest only. Param sweeps over a factor are a possible later add.
-- **No FDR / persistence (slice E).** Ephemeral JSON. Each factor eval IS a hypothesis test, but
-  the reported `t_stat` is **not** multiple-testing-corrected and no eval is recorded for
-  funnel-wide breadth accounting. Stated in the spec, the JSON caveat path, and the
-  `interpret-results` skill.
+- **FDR / persistence implemented in #219 (slice E).** `factor eval` now records each evaluation
+  in the `factor_evaluations` ledger (SCHEMA_VERSION 25) and emits a `fdr` block with
+  `fdr_corrected: true`. The `significant` field in the `fdr` block is the honest verdict after
+  breadth haircut + DSR correction. Report-only — `research promote` and `gates.py` are unchanged.
+  The `interpret-results` skill reflects this.
 - **Factors never become tradable.** The only path from a promising factor to live is an operator
   authoring a real strategy module that composes it — preserving the live-gate model.
 - **No vectorized IC.** The score panel is built by the per-bar expanding-window loop.

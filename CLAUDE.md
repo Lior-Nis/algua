@@ -80,6 +80,17 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
   payload back from disk (full read-back) and check it against its record; emits per-snapshot
   JSON and exits non-zero if any snapshot is damaged.
+- `uv run algua factor list [--kind K]` — catalogue of known factors.
+- `uv run algua factor show <name>` — one factor's full spec.
+- `uv run algua factor eval <name> --symbols S,S --construction POLICY --demo` — evaluate ONE
+  standalone factor: PIT backtest + FDR-corrected rank IC/IR (#219 slice E). Emits an `fdr`
+  block: `breadth_benchmark_t`, `dsr_confidence`, **`significant`** (the honest verdict after
+  funnel-wide multiple-testing correction), and `n_dependents` (blast radius). Records the eval
+  in the `factor_evaluations` ledger (SCHEMA_VERSION 25) — `factor eval` is the ONLY agent path
+  to a multiple-testing-honest factor verdict. See `interpret-results` skill for how to read the
+  output. Factors are NEVER gate-tokened or live-pathed.
+- `uv run algua factor dependents <name>` — strategies that compose a factor (blast radius).
+- `uv run algua factor uses <strategy>` — factors a strategy composes.
 
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
