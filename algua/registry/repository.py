@@ -553,6 +553,11 @@ class StrategyRepository(Protocol):
         """Atomically add a parent edge (cycle-guarded, BEGIN IMMEDIATE, top-level-only)."""
         ...
 
+    def windowed_family_combos(self, family_id: int, window_days: int) -> int:
+        """Windowed search combos for a family + transitive ancestors within trailing window_days.
+        """
+        ...
+
     def family_lifetime_combos(self, family_id: int) -> int:
         """Lifetime search combos across this family + all transitive ancestors."""
         ...

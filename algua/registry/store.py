@@ -1242,6 +1242,28 @@ class SqliteStrategyRepository:
             self._conn.rollback()
             raise
 
+    def windowed_family_combos(self, family_id: int, window_days: int) -> int:
+        """Windowed search combos for a family + transitive ancestors.
+
+        Like family_lifetime_combos but filtered to search_trials created within
+        the trailing window_days. Used for informational output and gate_evaluations
+        audit field; NOT used in the 3-way max (which uses lifetime).
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        ancestor_ids = [family_id] + self.family_ancestry(family_id)
+        placeholders = ",".join("?" * len(ancestor_ids))
+        params: list[Any] = [cutoff, *ancestor_ids]
+        row = self._conn.execute(
+            f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
+            f" WHERE st.created_at >= ?"
+            f" AND st.strategy_name IN ("
+            f"  SELECT DISTINCT fm.strategy_name FROM family_members fm"
+            f"  WHERE fm.family_id IN ({placeholders})"
+            f")",
+            params,
+        ).fetchone()
+        return int(row[0])
+
     def family_lifetime_combos(self, family_id: int) -> int:
         """Lifetime search combos across this family + all transitive ancestors.
 
