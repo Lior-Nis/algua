@@ -315,9 +315,13 @@ class StrategyRepository(Protocol):
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        family_id: int | None = None,
+        family_lifetime_effective: int | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
-        the single-use token the shortlist transition consumes."""
+        the single-use token the shortlist transition consumes. ``family_id`` and
+        ``family_lifetime_effective`` are audit columns added by Task 5 (#222) — optional with
+        default None so all existing callers continue to work."""
         ...
 
     def find_consumable_gate_evaluation(
@@ -569,4 +573,25 @@ class StrategyRepository(Protocol):
 
     def family_lifetime_combos(self, family_id: int) -> int:
         """Lifetime search combos across this family + all transitive ancestors."""
+        ...
+
+    # -------------------------------------------------------------------------
+    # Backtest returns persistence (#222, Task 7)
+    # -------------------------------------------------------------------------
+
+    def persist_backtest_returns(
+        self,
+        strategy_name: str,
+        period_start: str,
+        period_end: str,
+        returns: Any,
+    ) -> int:
+        """Persist a backtest return series as JSON [[date_str, float], ...]. Returns row id.
+        ``returns`` is a ``pd.Series`` (typed ``Any`` here to avoid the pandas import in the
+        Protocol module)."""
+        ...
+
+    def load_backtest_returns(self, strategy_name: str) -> Any:
+        """Load the most recent return series for a strategy, or None.
+        Returns a ``pd.Series | None`` (typed ``Any`` here to avoid the pandas import)."""
         ...

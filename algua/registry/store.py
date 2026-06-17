@@ -5,7 +5,10 @@ import math
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
@@ -587,6 +590,8 @@ class SqliteStrategyRepository:
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        family_id: int | None = None,
+        family_lifetime_effective: int | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
         the single-use token the shortlist transition consumes."""
@@ -597,13 +602,13 @@ class SqliteStrategyRepository:
                 " funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
                 " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
-                " consumed, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+                " consumed, created_at, family_id, family_lifetime_effective)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
                 (strategy_id, int(passed), n_funnel, own_lifetime_combos, windowed_total_combos,
                  funnel_window_days, breadth_provenance, int(pit_ok), int(pit_override),
                  holdout_n_bars, min_holdout_observations, code_hash, config_hash, dependency_hash,
                  data_source, snapshot_id, period_start, period_end, holdout_frac, actor,
-                 decision_json, _now()),
+                 decision_json, _now(), family_id, family_lifetime_effective),
             )
         rowid = cur.lastrowid
         assert rowid is not None
@@ -1097,6 +1102,56 @@ class SqliteStrategyRepository:
             )
 
     # -------------------------------------------------------------------------
+    # Backtest returns persistence (#222, Task 7)
+    # -------------------------------------------------------------------------
+
+    def persist_backtest_returns(
+        self,
+        strategy_name: str,
+        period_start: str,
+        period_end: str,
+        returns: pd.Series,
+    ) -> int:
+        """Persist a backtest return series as JSON [[date_str, float], ...]. Returns row id."""
+        import json
+
+        pairs = [
+            [idx.isoformat() if hasattr(idx, "isoformat") else str(idx), float(v)]
+            for idx, v in returns.items()
+        ]
+        blob = json.dumps(pairs)
+        now = _now()
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO backtest_returns"
+                " (strategy_name, period_start, period_end, returns_json, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (strategy_name, period_start, period_end, blob, now),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None
+        return rowid
+
+    def load_backtest_returns(self, strategy_name: str) -> pd.Series | None:
+        """Load the most recent return series for a strategy, or None."""
+        import json
+
+        import pandas as pd
+
+        row = self._conn.execute(
+            "SELECT returns_json FROM backtest_returns WHERE strategy_name = ?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (strategy_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        pairs = json.loads(row["returns_json"])
+        if not pairs:
+            return None
+        dates, values = zip(*pairs, strict=True)
+        return pd.Series(values, index=pd.to_datetime(dates), dtype=float)
+
+    # -------------------------------------------------------------------------
     # Family registry + parentage DAG (#222)
     # -------------------------------------------------------------------------
 
@@ -1278,7 +1333,9 @@ class SqliteStrategyRepository:
                 }
             except Exception:  # noqa: BLE001
                 factors = set()
-            family_map.setdefault(fid, []).append({"code_hash": code_hash, "factors": factors})
+            family_map.setdefault(fid, []).append({
+                "code_hash": code_hash, "factors": factors, "name": sname,
+            })
         return list(family_map.items())
 
     def windowed_family_combos(self, family_id: int, window_days: int) -> int:

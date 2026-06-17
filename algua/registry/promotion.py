@@ -334,12 +334,29 @@ def run_gate(
     matches against (NOT wf.code_hash, which is git-HEAD-based and would never match)."""
     pit_ok = resolve_pit_ok(universe_name, universe_snapshots, period_start)
     holdout_n_bars = int(wf.holdout_metrics["n_bars"])
+    # Resolve family breadth for the 3-way max (breadth snapshotted here, not in preflight).
+    # family_id set by preflight classification (Task 4); None when no family assigned.
+    family_id = breadth.family_id
+    family_lifetime_effective = (
+        repo.family_lifetime_combos(family_id) if family_id is not None else 0
+    )
+    # CAS: verify the family hasn't changed since preflight (concurrent-preflight safety R2-F5).
+    if breadth.expected_family_id is not None and family_id != breadth.expected_family_id:
+        raise ValueError(
+            f"family assignment changed between preflight and gate evaluation "
+            f"(expected {breadth.expected_family_id}, got {family_id}); re-run promote."
+        )
+    # 3-way max: recompute final n_funnel including family dimension (overrides breadth.n_funnel,
+    # which was computed in preflight without the family component).
+    n_funnel = effective_funnel_breadth(
+        breadth.own, breadth.windowed_total, family_lifetime_effective,
+    )
     # DSR evidence (#211): binding iff breadth is MEASURED. Declared breadth (human, no sweep)
     # omits DSR — and consequently FDR too (p_value requires a finite dsr_confidence).
     dsr_binding = breadth.provenance == "measured"
     dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
     decision = evaluate_gate(
-        wf, criteria, n_combos=breadth.n_funnel, breadth_provenance=breadth.provenance,
+        wf, criteria, n_combos=n_funnel, breadth_provenance=breadth.provenance,
         pit_ok=pit_ok, allow_non_pit=allow_non_pit, own_lifetime_combos=breadth.own,
         windowed_total_combos=breadth.windowed_total, funnel_window_days=FUNNEL_WINDOW_DAYS,
         dsr_binding=dsr_binding, dsr_trial_var_ann=dsr_trial_var_ann,
@@ -373,7 +390,7 @@ def run_gate(
     # Build gate_row (all record_gate_evaluation kwargs, including provisional passed flag).
     gate_row = {
         "passed": decision.passed,
-        "n_funnel": breadth.n_funnel,
+        "n_funnel": n_funnel,
         "own_lifetime_combos": breadth.own,
         "windowed_total_combos": breadth.windowed_total,
         "funnel_window_days": FUNNEL_WINDOW_DAYS,
@@ -391,6 +408,8 @@ def run_gate(
         "period_end": period_end.isoformat(),
         "holdout_frac": holdout_frac,
         "decision_json": json.dumps(decision.to_dict(), sort_keys=True),
+        "family_id": family_id,
+        "family_lifetime_effective": family_lifetime_effective,
     }
 
     # Atomic FDR-test-and-maybe-promote. For non-binding rows (p_value=None), the method

@@ -709,6 +709,12 @@ def run(
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
+    # Surface daily returns for downstream correlation analysis (#222 Task 7).
+    returns = pf.returns()
+    if not bool(np.isfinite(returns.fillna(0.0)).all()):
+        returns_series: pd.Series | None = None  # fail-closed: non-finite returns not surfaced
+    else:
+        returns_series = returns
     return BacktestResult(
         strategy=strategy.name,
         metrics=metrics,
@@ -726,5 +732,6 @@ def run(
         ),
         delisting_snapshot=delisting_snapshot,
         forced_exits=forced_exits,
+        returns=returns_series,
         **prov,
     )

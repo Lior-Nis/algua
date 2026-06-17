@@ -61,9 +61,14 @@ def _sweep_result() -> SweepResult:
     )
 
 
-def test_backtest_result_to_dict_matches_asdict():
+def test_backtest_result_to_dict_excludes_returns():
     r = _backtest_result()
-    assert r.to_dict() == dataclasses.asdict(r)
+    d = r.to_dict()
+    # to_dict() pops 'returns' because pd.Series is not JSON-serializable
+    assert "returns" not in d
+    expected = dataclasses.asdict(r)
+    expected.pop("returns", None)
+    assert d == expected
 
 
 def test_walkforward_result_to_dict_matches_asdict():
@@ -78,6 +83,7 @@ def test_sweep_result_to_dict_matches_asdict():
 
 def test_backtest_result_to_dict_has_expected_keys():
     d = _backtest_result().to_dict()
+    # 'returns' is excluded from to_dict() (not JSON-serializable)
     assert set(d) == {
         "strategy", "metrics", "config_hash", "data_source", "timeframe",
         "period", "seed", "snapshot_id", "code_hash", "dependency_hash",

@@ -431,6 +431,16 @@ CREATE INDEX IF NOT EXISTS ix_factor_evaluations_created
     ON factor_evaluations (created_at);
 CREATE INDEX IF NOT EXISTS ix_factor_evaluations_hypothesis
     ON factor_evaluations (hypothesis_hash, created_at);
+-- v26 (#222): backtest_returns stores daily return series for return-correlation clustering.
+CREATE TABLE IF NOT EXISTS backtest_returns (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name  TEXT NOT NULL,
+    period_start   TEXT NOT NULL,
+    period_end     TEXT NOT NULL,
+    returns_json   BLOB NOT NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_backtest_returns_strategy ON backtest_returns(strategy_name);
 -- v26 (#222): family registry tables.
 -- families: canonical family registry
 CREATE TABLE IF NOT EXISTS families (
@@ -576,9 +586,15 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_index"
         " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1"
     )
+    # v26 (#222): backtest_returns is a brand-new table; executescript creates it.
     # v26 (#222): family registry tables (families/family_members/family_parents/family_events).
     # All brand-new tables; executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
     # No _add_missing_columns needed for new tables.
+    # v26 (#222): family breadth audit columns on gate_evaluations (Task 5).
+    _add_missing_columns(conn, "gate_evaluations", {
+        "family_id": "INTEGER",
+        "family_lifetime_effective": "INTEGER",
+    })
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

@@ -195,14 +195,23 @@ def dsr_confidence(
     return conf if math.isfinite(conf) else None
 
 
-def effective_funnel_breadth(own_lifetime: int, windowed_total: int) -> int:
-    """Effective funnel breadth fed to the haircut (Wall A): ``max`` of this strategy's LIFETIME
-    recorded breadth and the funnel-wide breadth recorded in the rolling window (``windowed_total``
-    INCLUDES this strategy's own windowed sweeps, so no double-count, no name-exclusion subtlety).
+def effective_funnel_breadth(
+    own_lifetime: int,
+    windowed_total: int,
+    family_lifetime_effective: int = 0,
+) -> int:
+    """3-way max (tighten-only): own lifetime, funnel-wide windowed, family+ancestor lifetime.
+
+    Effective funnel breadth fed to the haircut (Wall A): ``max`` of this strategy's LIFETIME
+    recorded breadth, the funnel-wide breadth recorded in the rolling window (``windowed_total``
+    INCLUDES this strategy's own windowed sweeps, so no double-count, no name-exclusion subtlety),
+    and the family+ancestor lifetime combos (``family_lifetime_effective``).
     An *effective funnel-breadth policy*, NOT a literal independent-trial count. A lone hypothesis
     with no siblings has ``windowed_total <= own_lifetime`` ⇒ returns ``own_lifetime`` ⇒ identical
-    to the prior per-strategy behavior (no regression)."""
-    return max(int(own_lifetime), int(windowed_total))
+    to the prior per-strategy behavior (no regression).
+    ``family_lifetime_effective=0`` (default) is byte-identical to the prior 2-arg behavior:
+    ``max(own, windowed, 0) == max(own, windowed)`` when family=0."""
+    return max(int(own_lifetime), int(windowed_total), int(family_lifetime_effective))
 
 
 @dataclass

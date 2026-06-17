@@ -251,15 +251,16 @@ def test_max_across_members():
     assert verdict == SimVerdict.PARENTAGE  # 0.80 >= 0.50 but < 0.85
 
 
-def test_returns_lookup_stub_ignored():
-    """returns_lookup is accepted but ignored (stubbed until Task 7)."""
+def test_returns_lookup_without_strategy_returns_does_not_change_score():
+    """returns_lookup with no __strategy__ key -> return axis contributes 0.0."""
     verdict, score = family_similarity(
         strategy_code_hash="abc",
         strategy_factors={"f1"},
         family_members=[{"code_hash": "abc", "factors": {"f1"}}],
+        # No __strategy__ key, so return_correlation_axis gets None for strategy_returns
         returns_lookup={"abc": [0.01, 0.02, 0.03]},
     )
-    # Should behave identically to no returns_lookup
+    # Should behave identically to no returns_lookup (return axis = 0.0)
     verdict2, score2 = family_similarity(
         strategy_code_hash="abc",
         strategy_factors={"f1"},

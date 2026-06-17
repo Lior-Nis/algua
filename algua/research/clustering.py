@@ -32,8 +32,12 @@ WEIGHT_RETURN_CORRELATION = 0.20  # Stubbed 0.0 until Task 7 activates return ax
 _AXIS_AVAILABILITY = {
     "code_ancestry": True,
     "factor_lineage": True,
-    "return_correlation": False,  # becomes True in Task 7
+    "return_correlation": True,  # activated in Task 7 (#222)
 }
+
+# Minimum shared trading dates for the return-correlation axis to be computed.
+# Below this threshold the axis is omitted (contributes 0.0).
+_RETURN_CORRELATION_MIN_OVERLAP = 63
 
 
 def clustering_version() -> str:
@@ -54,6 +58,31 @@ def clustering_version() -> str:
     return digest[:32]
 
 
+def _return_correlation_axis(
+    strategy_returns: object | None,
+    member_returns: object | None,
+    *,
+    min_overlap: int = _RETURN_CORRELATION_MIN_OVERLAP,
+) -> float | None:
+    """Max correlation between strategy and family member returns over shared dates.
+
+    Returns None if either series is None or shared dates < min_overlap (axis omitted).
+    Negative correlation is clamped to 0.0 (anticorrelated strategies are not similar).
+
+    Parameters are typed ``object | None`` so the module avoids a top-level ``pandas`` import;
+    callers pass ``pd.Series`` instances.
+    """
+    if strategy_returns is None or member_returns is None:
+        return None
+    shared_idx = strategy_returns.index.intersection(member_returns.index)  # type: ignore[attr-defined]
+    if len(shared_idx) < min_overlap:
+        return None
+    corr = strategy_returns.loc[shared_idx].corr(member_returns.loc[shared_idx])  # type: ignore[attr-defined]
+    if not math.isfinite(corr):
+        return None
+    return max(0.0, corr)  # negative correlation -> 0.0 (not similar)
+
+
 def family_similarity(
     strategy_code_hash: str,
     strategy_factors: set[str],
@@ -66,8 +95,10 @@ def family_similarity(
     Args:
         strategy_code_hash: The strategy's code hash.
         strategy_factors: Set of factor names used by the strategy.
-        family_members: Each dict has keys ``"code_hash": str`` and ``"factors": set[str]``.
-        returns_lookup: Stub — ignored until Task 7 activates the return_correlation axis.
+        family_members: Each dict has keys ``"code_hash": str``, ``"factors": set[str]``,
+            and optionally ``"name": str`` (strategy name, used for return-correlation lookup).
+        returns_lookup: Maps strategy names to their ``pd.Series`` return series.
+            If None, the return_correlation axis contributes 0.0 for all members.
 
     Returns:
         ``(SimVerdict, float)`` — verdict and similarity score (0.0–1.0, or 0.0 on failure).
@@ -93,8 +124,16 @@ def family_similarity(
         else:
             factor_score = len(a & b) / len(union)
 
-        # --- return_correlation axis (stubbed until Task 7) ---
+        # --- return_correlation axis ---
         return_score = 0.0
+        if returns_lookup is not None:
+            strategy_name_key = "__strategy__"  # sentinel; caller injects via returns_lookup
+            strategy_returns = returns_lookup.get(strategy_name_key)
+            member_name = member.get("name")
+            member_returns = returns_lookup.get(member_name) if member_name else None
+            corr = _return_correlation_axis(strategy_returns, member_returns)
+            if corr is not None:
+                return_score = corr
 
         # Weighted sum
         score = (

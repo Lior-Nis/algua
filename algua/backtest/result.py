@@ -4,6 +4,8 @@ import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 
+import pandas as pd
+
 from algua.contracts.types import DataProvider
 
 # config_hash is canonical in strategies.base (shared by the backtest engine and the registry's
@@ -49,6 +51,10 @@ class BacktestResult:
     # Delisting provenance (issue #212): snapshot name + forced exits applied during simulate().
     delisting_snapshot: str | None = None
     forced_exits: list[dict] = field(default_factory=list)
+    # Daily return series from the backtest portfolio; None if non-finite returns detected.
+    returns: pd.Series | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        d = dataclasses.asdict(self)
+        d.pop("returns", None)  # Series not JSON-serializable
+        return d
