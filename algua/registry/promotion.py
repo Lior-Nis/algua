@@ -13,7 +13,6 @@ from algua.contracts.types import DataProvider
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
 from algua.registry.repository import StrategyRepository
-from algua.registry.transitions import transition_strategy
 from algua.research.clustering import (
     SimVerdict,
     clustering_version,
