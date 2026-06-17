@@ -53,6 +53,12 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   dsr_confidence skip FDR. A passing run is the ONLY way an agent reaches `candidate` — there is no
   raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
   `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).
+  **Family governance (#222):** at preflight, the strategy is empirically classified into a family
+  via code-ancestry + factor-lineage + return-correlation clustering; MERGE verdict → assign into the
+  incumbent family (inherits its breadth); PARENTAGE → new family but inherits the incumbent's
+  accumulated breadth via a parent edge; NOVEL → **agent fail-closed** (new family requires
+  `--new-family` + `--actor human`). Family-scoped lifetime breadth feeds the 3-way
+  `effective_funnel_breadth(own, windowed_total, family_lifetime_effective)` tighten-only max.
 - `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the
   `dormant` pool: re-runs walk-forward per dormant strategy and reports which ones' window/stability
   metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger

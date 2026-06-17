@@ -288,14 +288,21 @@ floor** the Phase-1 own-sweep `trial_sr_var` lacks: a funnel-wide cross-strategy
 variance, computable from the `(count, mean, var)` triples Phase 1 already records (no migration),
 to remove the low-dispersion leniency noted in "DSR inputs".
 
-**Phase 4 — hierarchical family budgets + anti-gaming.** A GLOBAL alpha budget above per-thesis-
-**family** budgets; family creation governed (not automatic); the global cap means spawning families
-can't mint free alpha; empirical clustering by return-correlation / holdings / **factor lineage
-(#140)** / **code ancestry**, with parentage tracking, so a "new" family that behaves like an old
-one inherits its budget. Builds on #137 (bind funnel breadth to family-id), #122 (family metadata),
-#161/#192/#193/#205 (holdout single-use + identity), #140 (factor lineage).
-Full design (GATE-1 reviewed): `docs/superpowers/specs/2026-06-16-hierarchical-family-budgets-anti-gaming-issue-222-design.md`
+**Phase 4 — hierarchical family budgets + anti-gaming (#222).** A GLOBAL alpha budget above
+per-thesis-**family** budgets; family creation governed (not automatic); the global cap means
+spawning families can't mint free alpha; empirical clustering by return-correlation / holdings /
+**factor lineage (#140)** / **code ancestry**, with parentage tracking, so a "new" family that
+behaves like an old one inherits its budget. Builds on #137 (bind funnel breadth to family-id),
+#122 (family metadata), #161/#192/#193/#205 (holdout single-use + identity), #140 (factor lineage).
+**Detailed spec:**
+`docs/superpowers/specs/2026-06-16-hierarchical-family-budgets-anti-gaming-issue-222-design.md`.
 TDD plan: `docs/superpowers/plans/2026-06-16-hierarchical-family-budgets-222.md`
+**Status:** Stratum A (anti-gaming core) BUILT — canonical family registry + parentage DAG
+(schema 25→26), pure clustering module (code-ancestry + factor-lineage + return-correlation axes),
+governed family creation (agent NOVEL → fail-closed), family-scoped breadth (3-way
+`effective_funnel_breadth`, tighten-only), anti-reset lifetime inheritance, CAS verification.
+Stratum B (`FamilyBudgetLedger` Protocol + in-memory contract) shipped as interface-only — real
+LORD++ binding deferred to Phase 2.
 
 **End-state (retire the haircut).** The haircut and the DSR both correct for the **same** best-of-N
 selection inflation — the haircut is the crude unit-normal/asymptotic version; the DSR is the better
