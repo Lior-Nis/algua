@@ -80,6 +80,9 @@ def test_walk_forward_populates_holdout_returns():
     n = res.holdout_metrics["n_bars"]
     assert len(rets) == n
     assert len(dates) == n
+    # Date alignment: first/last dates must match the holdout segment's start/end.
+    assert dates[0] == res.holdout_metrics["start"]
+    assert dates[-1] == res.holdout_metrics["end"]
 
 
 def test_walk_forward_holdout_returns_dates_are_iso_strings():

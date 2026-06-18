@@ -94,10 +94,11 @@ class WalkForwardResult:
     holdout_returns: tuple[list[float], list[str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        # holdout_returns is SENSITIVE and MUST NOT appear in any serialized payload (#221 Slice 1).
-        d = dataclasses.asdict(self)
-        d.pop("holdout_returns", None)
-        return d
+        # holdout_returns is SENSITIVE and is NEVER serialized (#221 Slice 1). Build the dict
+        # explicitly so the raw vector is never even materialized into the output dict.
+        return {f.name: getattr(self, f.name)
+                for f in dataclasses.fields(self)
+                if f.name != "holdout_returns"}
 
 
 def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, Any]:

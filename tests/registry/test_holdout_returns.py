@@ -103,7 +103,7 @@ def test_length_mismatch_raises(repo_with_burn):
 
 def test_strategy_id_mismatch_raises(repo_with_burn, other_strategy_id):
     repo, sid, hid, (h_start, h_end) = repo_with_burn
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="does not match"):
         repo.record_holdout_returns(
             hid, other_strategy_id, holdout_start=h_start, holdout_end=h_end,
             returns=[0.1], bar_dates=["2020-12-31"])
@@ -209,6 +209,12 @@ def test_sibling_read_excludes_own_vector(repo_with_two_strategy_burns):
     # B's vector is returned; A's own is NOT.
     assert len(streams) == 1
     assert all(isinstance(v, tuple) and len(v) == 2 for v in streams)
+    # Roundtrip fidelity: the returned payload must equal B's actual returns/dates.
+    b_returns = [0.03, 0.04, 0.05]
+    b_dates = ["2020-12-15", "2020-12-31", "2021-01-15"]
+    ret_vec, ret_dates = streams[0]
+    assert ret_vec == pytest.approx(b_returns)
+    assert ret_dates == b_dates
 
 
 def test_singleton_funnel_returns_empty(repo_with_burn_and_returns):
@@ -248,3 +254,37 @@ def test_out_of_window_excluded(_repo):
     interval = ("2020-12-01", "2020-12-31")
     streams = _repo.overlapping_holdout_return_streams(a_id, interval[0], interval[1], 365)
     assert streams == []
+
+
+# ---------------------------------------------------------------------------
+# GATE-2 findings: new guard tests
+# ---------------------------------------------------------------------------
+
+def test_empty_vector_raises(repo_with_burn):
+    """Finding 5: record_holdout_returns with zero-length vector/dates raises ValueError."""
+    repo, sid, hid, (h_start, h_end) = repo_with_burn
+    with pytest.raises(ValueError):
+        repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
+                                    returns=[], bar_dates=[])
+
+
+def test_pending_reservation_raises(repo_pending_reservation):
+    """Finding 2: record_holdout_returns against a PENDING (uncommitted) reservation raises."""
+    repo, sid, rid = repo_pending_reservation
+    with pytest.raises(ValueError, match="not a committed burn"):
+        repo.record_holdout_returns(rid, sid, holdout_start="2020-12-29", holdout_end="2020-12-31",
+                                    returns=[0.1], bar_dates=["2020-12-31"])
+
+
+def test_corrupt_bar_dates_blob_raises(repo_with_two_strategy_burns):
+    """Finding 1: overlapping_holdout_return_streams raises ValueError when bar_dates_blob
+    length != n_bars (corrupt row)."""
+    repo, a_id, b_id, interval, window = repo_with_two_strategy_burns
+    # Corrupt B's bar_dates_blob to a wrong-length value (only one date instead of three).
+    repo._conn.execute(
+        "UPDATE holdout_returns SET bar_dates_blob=? WHERE strategy_id=?",
+        (b"only-one-date", b_id),
+    )
+    repo._conn.commit()
+    with pytest.raises(ValueError, match="bar_dates_blob"):
+        repo.overlapping_holdout_return_streams(a_id, interval[0], interval[1], window)

@@ -573,18 +573,24 @@ class SqliteStrategyRepository:
         if n_bars != len(bar_dates):
             raise ValueError(
                 f"holdout_returns length mismatch: {n_bars} returns vs {len(bar_dates)} dates")
-        # strategy_id must match the burn row (caller-bug defense; read before the write tx).
+        if n_bars == 0:
+            raise ValueError("holdout_returns must have at least one bar")
+        # strategy_id must match the burn row, AND the burn must be committed (caller-bug defense;
+        # read before the write tx).
         row = self._conn.execute(
-            "SELECT strategy_id FROM holdout_evaluations WHERE id = ?",
+            "SELECT strategy_id, committed_at FROM holdout_evaluations WHERE id = ?",
             (holdout_evaluation_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"holdout_evaluation {holdout_evaluation_id} does not exist")
+        if row["committed_at"] is None:
+            raise ValueError(
+                f"holdout_evaluation {holdout_evaluation_id} is not a committed burn")
         if int(row["strategy_id"]) != int(strategy_id):
             raise ValueError(
                 f"strategy_id {strategy_id} does not match holdout_evaluation "
                 f"{holdout_evaluation_id} (strategy_id {row['strategy_id']})")
-        returns_blob = np.asarray(returns, dtype=np.float64).tobytes()
+        returns_blob = np.asarray(returns, dtype="<f8").tobytes()
         bar_dates_blob = "\n".join(bar_dates).encode("utf-8")
         try:
             with self._conn:
@@ -634,11 +640,15 @@ class SqliteStrategyRepository:
         ).fetchall()
         out: list[tuple[list[float], list[str]]] = []
         for r in rows:
-            vec = np.frombuffer(r["rb"], dtype=np.float64)
+            vec = np.frombuffer(r["rb"], dtype="<f8")
             if len(vec) != int(r["n_bars"]):
                 raise ValueError(
                     f"corrupt holdout_returns blob: {len(vec)} floats != n_bars {r['n_bars']}")
             dates = r["db"].decode("utf-8").split("\n")
+            if len(dates) != int(r["n_bars"]):
+                raise ValueError(
+                    f"corrupt holdout_returns bar_dates_blob: "
+                    f"{len(dates)} dates != n_bars {r['n_bars']}")
             out.append(([float(x) for x in vec], dates))
         return out
 

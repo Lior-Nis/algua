@@ -591,3 +591,11 @@ def test_run_gate_write_persists_even_on_failed_gate(tmp_path):
         "SELECT COUNT(*) c FROM holdout_returns WHERE holdout_evaluation_id=?", (rid,)
     ).fetchone()["c"]
     assert count == 1
+
+    # The persisted decision_json must carry returns_available=True on the failed-gate path too.
+    import json as _json  # noqa: PLC0415
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    stored = _json.loads(row["decision_json"])
+    assert stored.get("returns_available") is True
