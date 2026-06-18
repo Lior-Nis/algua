@@ -300,6 +300,26 @@ class StrategyRepository(Protocol):
         Returns the new holdout_returns row id."""
         ...
 
+    def overlapping_holdout_return_streams(
+        self, strategy_id: int, holdout_start: str, holdout_end: str, window_days: int
+    ) -> list[tuple[list[float], list[str]]]:
+        """SIBLING-ONLY cross-strategy read (#221 Slice 1 access control): returns OTHER strategies'
+        OOS return vectors (date-aligned ``(returns, bar_dates)`` pairs) whose holdout interval
+        overlaps ``[holdout_start, holdout_end]``, burned within the trailing ``window_days``.
+        NEVER returns the requesting strategy's own vector (``hr.strategy_id != strategy_id``).
+        This is the ONLY method that reads ``returns_blob``.
+
+        Window filter is on ``holdout_evaluations.created_at`` (burn time), NOT
+        ``holdout_returns.created_at`` (write time). Interval overlap is the standard test:
+        ``hr.holdout_start <= holdout_end AND holdout_start <= hr.holdout_end``.
+
+        Raises ``ValueError`` if a returned blob is corrupt (length ≠ n_bars).
+
+        NOTE: ``holdout_returns`` keys by ``strategy_id`` (FK to ``strategies.id``) while
+        ``search_trials`` keys by ``strategy_name`` — the asymmetry is intentional.
+        """
+        ...
+
     def windowed_search_combos(self, window_days: int) -> int:
         """Sum of ``n_combos`` across ALL strategies' ``search_trials`` recorded within the trailing
         ``window_days`` — funnel-wide search effort for the breadth wall (0 if none)."""

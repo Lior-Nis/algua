@@ -127,3 +127,124 @@ def test_finalize_requires_matching_strategy_id(repo_pending_reservation, other_
     committed = repo._conn.execute(
         "SELECT committed_at FROM holdout_evaluations WHERE id=?", (rid,)).fetchone()
     assert committed["committed_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for overlapping_holdout_return_streams access-control tests
+# ---------------------------------------------------------------------------
+
+def _make_burn_and_returns(repo, name, *, h_start, h_end, returns, dates):
+    """Helper: register strategy, create committed burn, write return vector. Returns (sid, hid)."""
+    sid = repo.add(name).id
+    rid, _ = _reserve(repo, sid, hs=h_start, he=h_end)
+    repo.finalize_holdout_reservation(rid, config_hash="h", strategy_id=sid)
+    repo.record_holdout_returns(rid, sid, holdout_start=h_start, holdout_end=h_end,
+                                returns=returns, bar_dates=dates)
+    return sid, rid
+
+
+@pytest.fixture()
+def repo_with_burn_and_returns(_repo):
+    """Single strategy with a return vector — used by singleton-funnel test."""
+    sid, hid = _make_burn_and_returns(
+        _repo, "alpha",
+        h_start="2020-12-29", h_end="2020-12-31",
+        returns=[0.01, -0.02, 0.005],
+        dates=["2020-12-29", "2020-12-30", "2020-12-31"],
+    )
+    interval = ("2020-12-29", "2020-12-31")
+    window = 365
+    return _repo, sid, interval, window
+
+
+@pytest.fixture()
+def repo_with_two_strategy_burns(_repo):
+    """Two strategies A and B with overlapping holdout intervals and return vectors."""
+    a_id, _ = _make_burn_and_returns(
+        _repo, "alpha",
+        h_start="2020-12-01", h_end="2020-12-31",
+        returns=[0.01, -0.02],
+        dates=["2020-12-01", "2020-12-31"],
+    )
+    b_id, _ = _make_burn_and_returns(
+        _repo, "bravo",
+        h_start="2020-12-15", h_end="2021-01-15",
+        returns=[0.03, 0.04, 0.05],
+        dates=["2020-12-15", "2020-12-31", "2021-01-15"],
+    )
+    interval = ("2020-12-01", "2020-12-31")
+    window = 365
+    return _repo, a_id, b_id, interval, window
+
+
+@pytest.fixture()
+def repo_with_two_strategy_burns_disjoint(_repo):
+    """Two strategies where B's OOS interval does NOT overlap A's query interval."""
+    a_id, _ = _make_burn_and_returns(
+        _repo, "alpha",
+        h_start="2020-01-01", h_end="2020-06-30",
+        returns=[0.01, 0.02],
+        dates=["2020-01-01", "2020-06-30"],
+    )
+    # B's interval is entirely after A's — disjoint
+    b_id, _ = _make_burn_and_returns(
+        _repo, "bravo",
+        h_start="2020-07-01", h_end="2020-12-31",
+        returns=[0.03, 0.04],
+        dates=["2020-07-01", "2020-12-31"],
+    )
+    a_interval = ("2020-01-01", "2020-06-30")
+    window = 365
+    return _repo, a_id, b_id, a_interval, window
+
+
+# ---------------------------------------------------------------------------
+# Access-control tests for overlapping_holdout_return_streams
+# ---------------------------------------------------------------------------
+
+def test_sibling_read_excludes_own_vector(repo_with_two_strategy_burns):
+    # strategy A and sibling B both have overlapping-interval holdout_returns rows.
+    repo, a_id, b_id, interval, window = repo_with_two_strategy_burns
+    streams = repo.overlapping_holdout_return_streams(a_id, interval[0], interval[1], window)
+    # B's vector is returned; A's own is NOT.
+    assert len(streams) == 1
+    assert all(isinstance(v, tuple) and len(v) == 2 for v in streams)
+
+
+def test_singleton_funnel_returns_empty(repo_with_burn_and_returns):
+    # only the requesting strategy has a vector -> it is its own sibling -> empty.
+    repo, sid, interval, window = repo_with_burn_and_returns
+    assert repo.overlapping_holdout_return_streams(sid, interval[0], interval[1], window) == []
+
+
+def test_disjoint_interval_excluded(repo_with_two_strategy_burns_disjoint):
+    repo, a_id, b_id, a_interval, window = repo_with_two_strategy_burns_disjoint
+    # B's OOS interval does not overlap A's -> not a sibling for this query.
+    assert repo.overlapping_holdout_return_streams(a_id, a_interval[0], a_interval[1], window) == []
+
+
+def test_out_of_window_excluded(_repo):
+    """A sibling whose burn he.created_at is older than window_days is not returned."""
+    a_id, a_hid = _make_burn_and_returns(
+        _repo, "alpha",
+        h_start="2020-12-01", h_end="2020-12-31",
+        returns=[0.01, -0.02],
+        dates=["2020-12-01", "2020-12-31"],
+    )
+    b_id, b_hid = _make_burn_and_returns(
+        _repo, "bravo",
+        h_start="2020-12-15", h_end="2021-01-15",
+        returns=[0.03, 0.04, 0.05],
+        dates=["2020-12-15", "2020-12-31", "2021-01-15"],
+    )
+    # Backdate B's holdout_evaluation created_at to 400 days ago (outside a 365-day window)
+    from datetime import UTC, datetime, timedelta
+    old_ts = (datetime.now(UTC) - timedelta(days=400)).isoformat()
+    _repo._conn.execute(
+        "UPDATE holdout_evaluations SET created_at=? WHERE id=?", (old_ts, b_hid)
+    )
+    _repo._conn.commit()
+
+    interval = ("2020-12-01", "2020-12-31")
+    streams = _repo.overlapping_holdout_return_streams(a_id, interval[0], interval[1], 365)
+    assert streams == []

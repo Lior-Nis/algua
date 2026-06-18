@@ -604,6 +604,44 @@ class SqliteStrategyRepository:
         assert rowid is not None
         return rowid
 
+    def overlapping_holdout_return_streams(
+        self, strategy_id: int, holdout_start: str, holdout_end: str, window_days: int
+    ) -> list[tuple[list[float], list[str]]]:
+        """SIBLING-ONLY cross-strategy read (#221 Slice 1 access control).
+
+        Returns OTHER strategies' OOS return vectors whose holdout interval overlaps
+        [holdout_start, holdout_end], burned within the trailing window_days. NEVER
+        returns the requesting strategy's own vector. This is the ONLY method that reads
+        returns_blob. The caller (promotion.run_gate) is trusted to pass the correct
+        strategy_id so self-exclusion holds.
+
+        NOTE: holdout_returns keys by strategy_id (FK to strategies.id) while
+        search_trials keys by strategy_name — the asymmetry is intentional: returns
+        vectors belong to a specific registered strategy row, whereas search trials are
+        recorded before registration.
+        """
+        # Window filter uses he.created_at (burn time via holdout_evaluations.created_at),
+        # NOT hr.created_at (write time of the vector row), so a late-written vector for an
+        # out-of-window burn is correctly excluded.
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        rows = self._conn.execute(
+            "SELECT hr.n_bars AS n_bars, hr.returns_blob AS rb, hr.bar_dates_blob AS db "
+            "FROM holdout_returns hr JOIN holdout_evaluations he"
+            " ON hr.holdout_evaluation_id = he.id "
+            "WHERE hr.strategy_id != ? AND he.created_at >= ?"
+            "  AND hr.holdout_start <= ? AND ? <= hr.holdout_end",
+            (strategy_id, cutoff, holdout_end, holdout_start),
+        ).fetchall()
+        out: list[tuple[list[float], list[str]]] = []
+        for r in rows:
+            vec = np.frombuffer(r["rb"], dtype=np.float64)
+            if len(vec) != int(r["n_bars"]):
+                raise ValueError(
+                    f"corrupt holdout_returns blob: {len(vec)} floats != n_bars {r['n_bars']}")
+            dates = r["db"].decode("utf-8").split("\n")
+            out.append(([float(x) for x in vec], dates))
+        return out
+
     def windowed_search_combos(self, window_days: int) -> int:
         """Sum of ``n_combos`` across ALL strategies' search_trials recorded within the trailing
         ``window_days`` (funnel-wide search effort for Wall A). ISO-8601 UTC timestamps compare
