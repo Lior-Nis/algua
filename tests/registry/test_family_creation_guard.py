@@ -127,16 +127,16 @@ def test_breadth_context_has_family_id_field() -> None:
 # ---------------------------------------------------------------------------
 
 def test_agent_novel_verdict_raises(tmp_path) -> None:
-    """No existing families; actor=agent → ValueError naming the NOVEL verdict."""
+    """No existing families; actor=agent → ValueError (empty-registry message)."""
     repo = _make_repo()
     _add_backtested_strategy(repo, "strat_novel_agent")
 
-    with pytest.raises(ValueError, match="NOVEL"):
+    with pytest.raises(ValueError, match="family registry is empty"):
         _call_preflight(repo, "strat_novel_agent", actor=Actor.AGENT)
 
 
 def test_agent_novel_message_mentions_family_assignment(tmp_path) -> None:
-    """The ValueError for an agent NOVEL should mention assigning to a family."""
+    """The ValueError for an agent NOVEL should mention family."""
     repo = _make_repo()
     _add_backtested_strategy(repo, "strat_novel_msg")
 

@@ -14,6 +14,11 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
 from algua.registry.repository import StrategyRepository
 from algua.research.clustering import (
+    MERGE_THRESHOLD,
+    PARENTAGE_THRESHOLD,
+    WEIGHT_CODE_ANCESTRY,
+    WEIGHT_FACTOR_LINEAGE,
+    WEIGHT_RETURN_CORRELATION,
     SimVerdict,
     clustering_version,
     family_similarity,
@@ -135,37 +140,76 @@ def _classify_and_assign_family(
     best_verdict = SimVerdict.NOVEL
     best_score = 0.0
 
-    for fam_id, members in _get_all_family_members_for_clustering(repo):
-        verdict, score = family_similarity(strategy_code_hash, strategy_factors, members)
+    # Load family data once; also collect member names for return-correlation axis
+    all_family_data = _get_all_family_members_for_clustering(repo)
+    all_member_names: list[str] = [
+        m["name"]
+        for _fid, members in all_family_data
+        for m in members
+        if "name" in m
+    ]
+
+    # Build returns_lookup from stored backtest returns so the correlation axis is live
+    # whenever prior run() or sweep results have been persisted (#222, Task 7)
+    returns_lookup: dict[str, object] = {}
+    strategy_stored_returns = repo.load_backtest_returns(name)
+    if strategy_stored_returns is not None:
+        returns_lookup["__strategy__"] = strategy_stored_returns
+    for member_name in all_member_names:
+        if member_name not in returns_lookup:
+            member_returns = repo.load_backtest_returns(member_name)
+            if member_returns is not None:
+                returns_lookup[member_name] = member_returns
+
+    has_any_family = False
+    for fam_id, members in all_family_data:
+        has_any_family = True
+        verdict, score = family_similarity(
+            strategy_code_hash, strategy_factors, members,
+            returns_lookup=returns_lookup or None,
+        )
         if score > best_score or (score == best_score and best_verdict == SimVerdict.NOVEL):
             best_score = score
             best_verdict = verdict
             best_family_id = fam_id
 
     cv = clustering_version()
-    clustering_config_json = "{}"  # stub: Task 7 fills in when return axis activates
-    axis_json = "{}"               # stub: include score breakdown when axes are live
+    clustering_config_json = json.dumps({
+        "version": cv,
+        "merge_threshold": MERGE_THRESHOLD,
+        "parentage_threshold": PARENTAGE_THRESHOLD,
+        "weights": {
+            "code_ancestry": WEIGHT_CODE_ANCESTRY,
+            "factor_lineage": WEIGHT_FACTOR_LINEAGE,
+            "return_correlation": WEIGHT_RETURN_CORRELATION,
+        },
+    }, sort_keys=True)
+    axis_json = json.dumps({
+        "verdict": best_verdict.value,
+        "score": best_score,
+        "has_returns_data": bool(returns_lookup),
+    }, sort_keys=True)
+
+    def _do_assign(target_family_id: int, *, matched_family_id: int | None = None) -> None:
+        repo.assign_strategy_to_family(
+            name, target_family_id, actor=actor.value,
+            verdict=best_verdict.value, similarity_score=best_score,
+            clustering_version=cv, clustering_config_json=clustering_config_json,
+            axis_json=axis_json,
+            matched_family_id=matched_family_id if matched_family_id is not None
+            else target_family_id,
+        )
 
     if best_verdict == SimVerdict.MERGE:
         assert best_family_id is not None
-        repo.assign_strategy_to_family(
-            name, best_family_id, actor=actor.value,
-            verdict=best_verdict.value, similarity_score=best_score,
-            clustering_version=cv, clustering_config_json=clustering_config_json,
-            axis_json=axis_json, matched_family_id=best_family_id,
-        )
+        _do_assign(best_family_id)
         return best_family_id
 
     if best_verdict == SimVerdict.PARENTAGE:
         assert best_family_id is not None
         if actor is Actor.AGENT:
             # Agent cannot mint a child family. Fold into the best parent.
-            repo.assign_strategy_to_family(
-                name, best_family_id, actor=actor.value,
-                verdict=best_verdict.value, similarity_score=best_score,
-                clustering_version=cv, clustering_config_json=clustering_config_json,
-                axis_json=axis_json, matched_family_id=best_family_id,
-            )
+            _do_assign(best_family_id)
             return best_family_id
         else:
             # Human: create a child family, add a parent edge, assign.
@@ -173,16 +217,17 @@ def _classify_and_assign_family(
             child_fam_id = repo.create_family(child_name, actor=actor.value,
                                                created_by_strategy=name)
             repo.add_parent_edge(child_fam_id, best_family_id)
-            repo.assign_strategy_to_family(
-                name, child_fam_id, actor=actor.value,
-                verdict=best_verdict.value, similarity_score=best_score,
-                clustering_version=cv, clustering_config_json=clustering_config_json,
-                axis_json=axis_json, matched_family_id=best_family_id,
-            )
+            _do_assign(child_fam_id, matched_family_id=best_family_id)
             return child_fam_id
 
     # NOVEL verdict
     if actor is Actor.AGENT:
+        if not has_any_family:
+            raise ValueError(
+                f"strategy {name!r}: the family registry is empty — no existing family to "
+                "merge into. A human operator must create the first family via "
+                "`research promote --actor human --new-family <slug>` before agents can promote."
+            )
         raise ValueError(
             f"strategy {name!r} has no matching family (clustering verdict: NOVEL). "
             "Assign to a family or use --actor human with --new-family <slug>."
@@ -196,12 +241,7 @@ def _classify_and_assign_family(
             )
         new_fam_id = repo.create_family(new_family_slug, actor=actor.value,
                                          created_by_strategy=name)
-        repo.assign_strategy_to_family(
-            name, new_fam_id, actor=actor.value,
-            verdict=SimVerdict.NOVEL.value, similarity_score=0.0,
-            clustering_version=cv, clustering_config_json=clustering_config_json,
-            axis_json=axis_json,
-        )
+        _do_assign(new_fam_id, matched_family_id=None)
         return new_fam_id
 
 
@@ -334,8 +374,9 @@ def run_gate(
     pit_ok = resolve_pit_ok(universe_name, universe_snapshots, period_start)
     holdout_n_bars = int(wf.holdout_metrics["n_bars"])
     # Resolve family breadth for the 3-way max (breadth snapshotted here, not in preflight).
-    # family_id set by preflight classification (Task 4); None when no family assigned.
-    family_id = breadth.family_id
+    # Re-query live DB state (not in-memory BreadthContext) so the CAS below detects concurrent
+    # re-assignments between preflight and run_gate (R2-F5 concurrency safety).
+    family_id = repo.strategy_family(name)
     family_lifetime_effective = (
         repo.family_lifetime_combos(family_id) if family_id is not None else 0
     )

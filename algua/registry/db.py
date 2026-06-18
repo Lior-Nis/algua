@@ -460,7 +460,7 @@ CREATE TABLE IF NOT EXISTS family_members (
     removed_at      TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy_family
-    ON family_members(strategy_name, family_id);
+    ON family_members(strategy_name, family_id) WHERE removed_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_active
     ON family_members(strategy_name) WHERE removed_at IS NULL;
 -- family_parents: parentage DAG (multi-parent; cycle-guarded at write time)

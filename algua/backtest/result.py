@@ -55,6 +55,8 @@ class BacktestResult:
     returns: pd.Series | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        d = dataclasses.asdict(self)
-        d.pop("returns", None)  # Series not JSON-serializable
-        return d
+        return {
+            f.name: getattr(self, f.name)
+            for f in dataclasses.fields(self)
+            if f.name != "returns"
+        }

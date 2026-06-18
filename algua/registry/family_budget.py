@@ -20,9 +20,13 @@ class FamilyBudgetLedger(Protocol):
         """Current unallocated alpha wealth for family_id (α_f · W_global remaining)."""
         ...
 
-    def reserve(self, family_id: int, p_value: float, actor: str) -> bool:
-        """Allocate p_value of alpha from family_id's budget. Returns True if budget allows;
-        False if exhausted (promotion blocked). Only called when dsr_confidence is not None."""
+    def reserve(self, family_id: int, p_value: float, actor: str) -> str | None:
+        """Allocate p_value of alpha from family_id's budget.
+
+        Returns the reservation key (a str) on success; None if budget exhausted
+        (promotion blocked). Pass the returned key to settle() when the strategy is
+        retired/dormant. Only called when dsr_confidence is not None.
+        """
         ...
 
     def settle(self, family_id: int, reservation_key: str) -> None:
@@ -46,14 +50,14 @@ class InMemoryFamilyBudgetLedger:
         allocated = sum(self._reservations.values())
         return max(0.0, self._cap - allocated)
 
-    def reserve(self, family_id: int, p_value: float, actor: str) -> bool:
+    def reserve(self, family_id: int, p_value: float, actor: str) -> str | None:
         allocated = sum(self._reservations.values())
         if allocated + p_value > self._cap + 1e-10:
-            return False
+            return None
         self._counter += 1
         key = str(self._counter)
         self._reservations[key] = p_value
-        return True
+        return key
 
     def settle(self, family_id: int, reservation_key: str) -> None:
         self._reservations.pop(reservation_key, None)

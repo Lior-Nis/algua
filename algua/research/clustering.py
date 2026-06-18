@@ -27,7 +27,7 @@ PARENTAGE_THRESHOLD = 0.50  # similarity >= this (but < MERGE) → PARENTAGE
 
 WEIGHT_CODE_ANCESTRY = 0.50
 WEIGHT_FACTOR_LINEAGE = 0.30
-WEIGHT_RETURN_CORRELATION = 0.20  # Stubbed 0.0 until Task 7 activates return axis
+WEIGHT_RETURN_CORRELATION = 0.20  # return-correlation axis (Task 7; requires returns_lookup)
 
 _AXIS_AVAILABILITY = {
     "code_ancestry": True,
@@ -97,8 +97,10 @@ def family_similarity(
         strategy_factors: Set of factor names used by the strategy.
         family_members: Each dict has keys ``"code_hash": str``, ``"factors": set[str]``,
             and optionally ``"name": str`` (strategy name, used for return-correlation lookup).
-        returns_lookup: Maps strategy names to their ``pd.Series`` return series.
-            If None, the return_correlation axis contributes 0.0 for all members.
+        returns_lookup: Maps names to ``pd.Series`` return series. Use the sentinel
+            key ``"__strategy__"`` to supply the current strategy's own returns (a
+            name that would otherwise collide with a strategy literally registered
+            as ``"__strategy__"``). If None, the return-correlation axis is 0.0.
 
     Returns:
         ``(SimVerdict, float)`` — verdict and similarity score (0.0–1.0, or 0.0 on failure).
@@ -112,7 +114,10 @@ def family_similarity(
 
     for member in family_members:
         # --- code_ancestry axis ---
-        code_score = 1.0 if strategy_code_hash == member["code_hash"] else 0.0
+        if not strategy_code_hash or not member["code_hash"]:
+            code_score = 0.0  # empty hash means unloadable strategy — no ancestry signal
+        else:
+            code_score = 1.0 if strategy_code_hash == member["code_hash"] else 0.0
 
         # --- factor_lineage axis (Jaccard) ---
         a: set[str] = strategy_factors
@@ -127,7 +132,10 @@ def family_similarity(
         # --- return_correlation axis ---
         return_score = 0.0
         if returns_lookup is not None:
-            strategy_name_key = "__strategy__"  # sentinel; caller injects via returns_lookup
+            # "__strategy__" is the sentinel key for the current strategy's returns in
+            # returns_lookup. A strategy literally named "__strategy__" would collide —
+            # callers must not register strategies with this name.
+            strategy_name_key = "__strategy__"
             strategy_returns = returns_lookup.get(strategy_name_key)
             member_name = member.get("name")
             member_returns = returns_lookup.get(member_name) if member_name else None

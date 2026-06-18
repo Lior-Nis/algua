@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -935,8 +936,9 @@ class SqliteStrategyRepository:
                 " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
                 " consumed, created_at,"
-                " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,"
+                " family_id, family_lifetime_effective)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 # Agent passing rows are born-consumed: the stage has already advanced inside
                 # this transaction, so the token is spent. Leaving consumed=0 would let a
                 # future `registry transition --to candidate --actor agent` reuse the old row
@@ -956,7 +958,8 @@ class SqliteStrategyRepository:
                  p_value if fdr_binding else None,
                  alpha_t if fdr_binding else None,
                  int(fdr_rejected) if fdr_rejected is not None else None,
-                 t_next if fdr_binding else None),
+                 t_next if fdr_binding else None,
+                 gate_row.get("family_id"), gate_row.get("family_lifetime_effective")),
             )
             gate_id = cur.lastrowid
             assert gate_id is not None
@@ -1113,8 +1116,6 @@ class SqliteStrategyRepository:
         returns: pd.Series,
     ) -> int:
         """Persist a backtest return series as JSON [[date_str, float], ...]. Returns row id."""
-        import json
-
         pairs = [
             [idx.isoformat() if hasattr(idx, "isoformat") else str(idx), float(v)]
             for idx, v in returns.items()
@@ -1134,8 +1135,6 @@ class SqliteStrategyRepository:
 
     def load_backtest_returns(self, strategy_name: str) -> pd.Series | None:
         """Load the most recent return series for a strategy, or None."""
-        import json
-
         import pandas as pd
 
         row = self._conn.execute(
@@ -1225,11 +1224,11 @@ class SqliteStrategyRepository:
 
     def family_ancestry(self, family_id: int) -> list[int]:
         """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
-        visited: set[int] = set()
-        queue: list[int] = [family_id]
+        visited: set[int] = {family_id}
+        queue: deque[int] = deque([family_id])
         ancestors: list[int] = []
         while queue:
-            current = queue.pop(0)
+            current = queue.popleft()
             rows = self._conn.execute(
                 "SELECT parent_family_id FROM family_parents WHERE child_family_id=?",
                 (current,),
@@ -1262,10 +1261,10 @@ class SqliteStrategyRepository:
                 raise ValueError(
                     f"cycle detected: cannot add self-edge {child_family_id} -> {parent_family_id}"
                 )
-            visited: set[int] = set()
-            queue: list[int] = [parent_family_id]
+            visited: set[int] = {parent_family_id}
+            queue: deque[int] = deque([parent_family_id])
             while queue:
-                current = queue.pop(0)
+                current = queue.popleft()
                 rows = self._conn.execute(
                     "SELECT parent_family_id FROM family_parents WHERE child_family_id=?",
                     (current,),
@@ -1338,6 +1337,17 @@ class SqliteStrategyRepository:
             })
         return list(family_map.items())
 
+    def _family_member_strategies(self, family_id: int) -> list[str]:
+        """DISTINCT strategy names for a family and all its transitive ancestors."""
+        ancestor_ids = [family_id] + self.family_ancestry(family_id)
+        placeholders = ",".join("?" * len(ancestor_ids))
+        rows = self._conn.execute(
+            f"SELECT DISTINCT fm.strategy_name FROM family_members fm"
+            f" WHERE fm.family_id IN ({placeholders})",
+            ancestor_ids,
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def windowed_family_combos(self, family_id: int, window_days: int) -> int:
         """Windowed search combos for a family + transitive ancestors.
 
@@ -1346,17 +1356,14 @@ class SqliteStrategyRepository:
         audit field; NOT used in the 3-way max (which uses lifetime).
         """
         cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
-        ancestor_ids = [family_id] + self.family_ancestry(family_id)
-        placeholders = ",".join("?" * len(ancestor_ids))
-        params: list[Any] = [cutoff, *ancestor_ids]
+        member_strategies = self._family_member_strategies(family_id)
+        if not member_strategies:
+            return 0
+        placeholders = ",".join("?" * len(member_strategies))
         row = self._conn.execute(
             f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
-            f" WHERE st.created_at >= ?"
-            f" AND st.strategy_name IN ("
-            f"  SELECT DISTINCT fm.strategy_name FROM family_members fm"
-            f"  WHERE fm.family_id IN ({placeholders})"
-            f")",
-            params,
+            f" WHERE st.created_at >= ? AND st.strategy_name IN ({placeholders})",
+            [cutoff, *member_strategies],
         ).fetchone()
         return int(row[0])
 
@@ -1367,14 +1374,13 @@ class SqliteStrategyRepository:
         families (leaving a removed_at row in one and an active row in another) is counted
         exactly once — not once per matching family_members row.
         """
-        ancestor_ids = [family_id] + self.family_ancestry(family_id)
-        placeholders = ",".join("?" * len(ancestor_ids))
+        member_strategies = self._family_member_strategies(family_id)
+        if not member_strategies:
+            return 0
+        placeholders = ",".join("?" * len(member_strategies))
         row = self._conn.execute(
             f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
-            f" WHERE st.strategy_name IN ("
-            f"  SELECT DISTINCT fm.strategy_name FROM family_members fm"
-            f"  WHERE fm.family_id IN ({placeholders})"
-            f")",
-            ancestor_ids,
+            f" WHERE st.strategy_name IN ({placeholders})",
+            member_strategies,
         ).fetchone()
         return int(row[0])
