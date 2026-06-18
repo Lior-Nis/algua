@@ -72,8 +72,12 @@ def test_backtest_result_to_dict_excludes_returns():
 
 
 def test_walkforward_result_to_dict_matches_asdict():
+    # holdout_returns is SENSITIVE and excluded from to_dict() (#221 Slice 1); strip it from
+    # the dataclasses.asdict reference so the invariant "to_dict == asdict minus SENSITIVE" holds.
     r = _walkforward_result()
-    assert r.to_dict() == dataclasses.asdict(r)
+    expected = dataclasses.asdict(r)
+    expected.pop("holdout_returns", None)
+    assert r.to_dict() == expected
 
 
 def test_sweep_result_to_dict_matches_asdict():
