@@ -179,6 +179,7 @@ def promote(
             universe_name=universe, universe_snapshots=universe_prov,
             period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
             data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
+            holdout_evaluation_id=reservation_id,
             reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
         decision, promoted = outcome.decision, outcome.promoted
 

@@ -474,3 +474,120 @@ def test_run_gate_non_binding_decision_json_has_fdr_skip_reason(tmp_path):
     stored = _json.loads(row["decision_json"])
     assert stored.get("fdr_binding") is False
     assert stored.get("fdr_skip_reason") == "no_measured_dispersion"
+
+
+# --- run_gate returns_available audit (#221 Slice 1) ------------------------------------------
+
+
+def test_run_gate_no_holdout_id_is_returns_unavailable(tmp_path):
+    """_run/_run_measured (no holdout_evaluation_id) must yield returns_available=False
+    and write NO holdout_returns row."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run(repo, _breadth(repo, "measured"))
+    assert outcome.decision.returns_available is False
+    assert repo._conn.execute("SELECT COUNT(*) c FROM holdout_returns").fetchone()["c"] == 0
+
+
+def test_run_gate_with_holdout_id_and_returns_writes_row(tmp_path):
+    """When holdout_evaluation_id is provided and wf.holdout_returns is populated,
+    run_gate writes a holdout_returns row and sets returns_available=True."""
+    import json as _json  # noqa: PLC0415
+
+    from algua.backtest.walkforward import WalkForwardResult
+
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+
+    # Reserve and finalize a holdout burn to get a real holdout_evaluation_id.
+    sid = repo.get(_GATE_NAME).id
+    h_start, h_end = "2024-01-01", "2024-06-01"
+    rid, _ = repo.reserve_holdout(
+        sid, data_source="synthetic", snapshot_id=None,
+        period_start="2024-01-01", period_end="2024-06-01",
+        holdout_frac=0.2, holdout_start=h_start, holdout_end=h_end, allow_reuse=False)
+    repo.finalize_holdout_reservation(rid, config_hash="c", strategy_id=sid)
+
+    rets = [0.01, -0.02, 0.005]
+    bar_dates = ["2024-01-02", "2024-03-15", "2024-05-30"]
+    wf = WalkForwardResult(
+        strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
+        timeframe="1d", seed=None,
+        period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
+        window_metrics=[], holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end},
+        stability=dict(_GATE_STAB),
+        holdout_returns=(rets, bar_dates),
+    )
+
+    outcome = run_gate(
+        repo, wf, name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="",
+        holdout_evaluation_id=rid,
+    )
+
+    assert outcome.decision.returns_available is True
+    assert "returns_available" in outcome.decision.to_dict()
+    assert outcome.decision.to_dict()["returns_available"] is True
+
+    # holdout_returns row must exist for this holdout_evaluation_id
+    count = repo._conn.execute(
+        "SELECT COUNT(*) c FROM holdout_returns WHERE holdout_evaluation_id=?", (rid,)
+    ).fetchone()["c"]
+    assert count == 1
+
+    # The persisted decision_json must carry returns_available=True (written before serializing)
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    stored = _json.loads(row["decision_json"])
+    assert stored.get("returns_available") is True
+
+
+def test_run_gate_write_persists_even_on_failed_gate(tmp_path):
+    """The returns vector is written even when the gate FAILS. The burn already committed
+    at on_peek, so the vector must persist regardless of pass/fail."""
+    from algua.backtest.walkforward import WalkForwardResult
+
+    repo = _gate_repo(tmp_path)
+    # Use measured breadth but no trial stats → DSR fails closed → gate fails.
+    repo.record_search_trial(_GATE_NAME, 5, "{}")  # no stats → fails DSR
+
+    sid = repo.get(_GATE_NAME).id
+    h_start, h_end = "2024-01-01", "2024-06-01"
+    rid, _ = repo.reserve_holdout(
+        sid, data_source="synthetic", snapshot_id=None,
+        period_start="2024-01-01", period_end="2024-06-01",
+        holdout_frac=0.2, holdout_start=h_start, holdout_end=h_end, allow_reuse=False)
+    repo.finalize_holdout_reservation(rid, config_hash="c", strategy_id=sid)
+
+    rets = [0.01, -0.02]
+    bar_dates = ["2024-01-02", "2024-03-15"]
+    wf = WalkForwardResult(
+        strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
+        timeframe="1d", seed=None,
+        period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
+        window_metrics=[], holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end},
+        stability=dict(_GATE_STAB),
+        holdout_returns=(rets, bar_dates),
+    )
+
+    outcome = run_gate(
+        repo, wf, name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="",
+        holdout_evaluation_id=rid,
+    )
+
+    # Gate must have failed (DSR fails closed with NULL stats)
+    assert outcome.promoted is False
+    # But the returns row must still exist
+    assert outcome.decision.returns_available is True
+    count = repo._conn.execute(
+        "SELECT COUNT(*) c FROM holdout_returns WHERE holdout_evaluation_id=?", (rid,)
+    ).fetchone()["c"]
+    assert count == 1

@@ -244,6 +244,9 @@ class GateDecision:
     fdr_test_index: int | None = None
     fdr_rejected: bool | None = None
     fdr_skip_reason: str | None = None
+    # Returns-persistence audit (#221 Slice 1). Non-binding: True iff run_gate wrote a
+    # holdout_returns row for this evaluation. False for pre-Slice-1 promotions (omit-not-fail).
+    returns_available: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -281,6 +284,7 @@ class GateDecision:
             "fdr_test_index": self.fdr_test_index,
             "fdr_rejected": self.fdr_rejected,
             "fdr_skip_reason": self.fdr_skip_reason,
+            "returns_available": self.returns_available,
         }
 
 
