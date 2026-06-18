@@ -148,20 +148,29 @@ def test_human_exempt_from_reproducible_guard_through_preflight(tmp_path):
     # to COMPLETION (breadth resolved) rather than refusing — proving the exemption holds all the
     # way through, not just that it doesn't raise at the guard. ("alpha" is not a bundled module, so
     # signal-panel parity step is skipped and the provider is never read.)
+    # Task 4 (#222): pass new_family_slug so the NOVEL verdict creates a family for this human.
     repo = _repo(tmp_path)
     rec = repo.add("alpha")
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.HUMAN, "bt")
     repo.record_search_trial("alpha", 4, "{}")
     ctx = promotion_preflight(repo, "alpha", actor=Actor.HUMAN, declared_combos=None,
                               allow_holdout_reuse=False, allow_non_pit=False,
-                              provider=_NonReproducibleWorkingProvider(), start=_START, end=_END)
+                              provider=_NonReproducibleWorkingProvider(), start=_START, end=_END,
+                              new_family_slug="alpha_family")
     assert ctx.own == 4 and ctx.provenance == "measured"
 
 
 def test_preflight_refuses_agent_without_measured_breadth(tmp_path):
+    # Task 4 (#222): pre-assign strategy to a family so the clustering guard passes and the test
+    # isolates the breadth check (the ORIGINAL intent of this test).
     repo = _repo(tmp_path)
     rec = repo.add("alpha")
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    fam_id = repo.create_family("alpha_family", actor="agent")
+    repo.assign_strategy_to_family(
+        "alpha", fam_id, "agent", verdict="NOVEL", similarity_score=0.0,
+        clustering_version="v0", clustering_config_json="{}", axis_json="{}",
+    )
     with pytest.raises(ValueError, match="search breadth"):
         promotion_preflight(repo, "alpha", actor=Actor.AGENT, declared_combos=None,
                             allow_holdout_reuse=False, allow_non_pit=False,
@@ -169,11 +178,17 @@ def test_preflight_refuses_agent_without_measured_breadth(tmp_path):
 
 
 def test_preflight_resolves_measured_funnel_breadth(tmp_path):
+    # Task 4 (#222): pre-assign strategy to a family so the clustering guard passes.
     repo = _repo(tmp_path)
     rec = repo.add("alpha")
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
     repo.record_search_trial("alpha", 4, "{}")
     repo.record_search_trial("beta", 10, "{}")  # sibling effort raises the funnel bar
+    fam_id = repo.create_family("alpha_family", actor="agent")
+    repo.assign_strategy_to_family(
+        "alpha", fam_id, "agent", verdict="NOVEL", similarity_score=0.0,
+        clustering_version="v0", clustering_config_json="{}", axis_json="{}",
+    )
     ctx = promotion_preflight(repo, "alpha", actor=Actor.AGENT, declared_combos=None,
                               allow_holdout_reuse=False, allow_non_pit=False,
                               provider=SyntheticProvider(seed=0), start=_START, end=_END)
@@ -231,10 +246,16 @@ def test_preflight_refuses_divergent_signal_panel_before_holdout(tmp_path):
 def test_preflight_passes_parity_for_faithful_bundled_strategy(tmp_path):
     """A real bundled strategy with a faithful signal_panel passes the parity gate and preflight
     resolves breadth as usual (no false positive)."""
+    # Task 4 (#222): pre-assign strategy to a family so the clustering guard passes.
     repo = _repo(tmp_path)
     rec = repo.add("cross_sectional_momentum")
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
     repo.record_search_trial("cross_sectional_momentum", 4, "{}")
+    fam_id = repo.create_family("csm_family", actor="agent")
+    repo.assign_strategy_to_family(
+        "cross_sectional_momentum", fam_id, "agent", verdict="NOVEL", similarity_score=0.0,
+        clustering_version="v0", clustering_config_json="{}", axis_json="{}",
+    )
     ctx = promotion_preflight(
         repo, "cross_sectional_momentum", actor=Actor.AGENT, declared_combos=None,
         allow_holdout_reuse=False, allow_non_pit=False,

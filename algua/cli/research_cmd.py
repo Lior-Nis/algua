@@ -74,6 +74,12 @@ def promote(
              "exists. An agent must supply explicit delisting records; no-record-gap fails closed.",
     ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
+    new_family: str = typer.Option(
+        None, "--new-family",
+        help="HUMAN-ONLY: slug for a new family when clustering verdict is NOVEL or PARENTAGE. "
+             "Ignored when the strategy is already assigned to a family. "
+             "Required for a human actor facing a NOVEL verdict.",
+    ),
 ) -> None:
     """Gate backtested->candidate on walk-forward holdout + stability; promote only on pass.
 
@@ -126,7 +132,8 @@ def promote(
         breadth = promotion_preflight(
             repo, name, actor=actor_enum, declared_combos=n_combos,
             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit,
-            provider=provider, start=start_dt, end=end_dt)
+            provider=provider, start=start_dt, end=end_dt,
+            new_family_slug=new_family)
         # Atomic holdout reservation (#161): claim the window under the write lock (fast SELECT +
         # INSERT a pending row), run walk_forward with NO lock held, then finalize on success /
         # release on a clean failure. The match identity is the data window and deliberately

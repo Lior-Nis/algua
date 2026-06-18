@@ -315,9 +315,13 @@ class StrategyRepository(Protocol):
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        family_id: int | None = None,
+        family_lifetime_effective: int | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
-        the single-use token the shortlist transition consumes."""
+        the single-use token the shortlist transition consumes. ``family_id`` and
+        ``family_lifetime_effective`` are audit columns added by Task 5 (#222) — optional with
+        default None so all existing callers continue to work."""
         ...
 
     def find_consumable_gate_evaluation(
@@ -522,4 +526,72 @@ class StrategyRepository(Protocol):
         significant: bool,
     ) -> None:
         """Write the correction columns (n_hypotheses, dsr_confidence, significant) to the row."""
+        ...
+
+    # -------------------------------------------------------------------------
+    # Family registry + parentage DAG (#222)
+    # -------------------------------------------------------------------------
+
+    def create_family(self, name: str, actor: str, created_by_strategy: str | None = None) -> int:
+        """Create a new family and record the family_created event. Return the new family id."""
+        ...
+
+    def assign_strategy_to_family(
+        self, strategy_name: str, family_id: int, actor: str, *,
+        verdict: str, similarity_score: float, clustering_version: str,
+        clustering_config_json: str, axis_json: str,
+        matched_family_id: int | None = None,
+    ) -> None:
+        """Assign a strategy to a family (append-only: old row gets removed_at set)."""
+        ...
+
+    def strategy_family(self, strategy_name: str) -> int | None:
+        """Return the current (active) family_id for the strategy, or None."""
+        ...
+
+    def family_ancestry(self, family_id: int) -> list[int]:
+        """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
+        ...
+
+    def add_parent_edge(self, child_family_id: int, parent_family_id: int) -> None:
+        """Atomically add a parent edge (cycle-guarded, BEGIN IMMEDIATE, top-level-only)."""
+        ...
+
+    def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
+        """Return [(family_id, members_list)] for all families with active members.
+
+        Each member dict: {"code_hash": str, "factors": set[str]}.
+        Used by the clustering guard in promotion_preflight to classify a strategy
+        against all known families before the holdout is touched.
+        """
+        ...
+
+    def windowed_family_combos(self, family_id: int, window_days: int) -> int:
+        """Windowed search combos for a family + transitive ancestors within trailing window_days.
+        """
+        ...
+
+    def family_lifetime_combos(self, family_id: int) -> int:
+        """Lifetime search combos across this family + all transitive ancestors."""
+        ...
+
+    # -------------------------------------------------------------------------
+    # Backtest returns persistence (#222, Task 7)
+    # -------------------------------------------------------------------------
+
+    def persist_backtest_returns(
+        self,
+        strategy_name: str,
+        period_start: str,
+        period_end: str,
+        returns: Any,
+    ) -> int:
+        """Persist a backtest return series as JSON [[date_str, float], ...]. Returns row id.
+        ``returns`` is a ``pd.Series`` (typed ``Any`` here to avoid the pandas import in the
+        Protocol module)."""
+        ...
+
+    def load_backtest_returns(self, strategy_name: str) -> Any:
+        """Load the most recent return series for a strategy, or None.
+        Returns a ``pd.Series | None`` (typed ``Any`` here to avoid the pandas import)."""
         ...

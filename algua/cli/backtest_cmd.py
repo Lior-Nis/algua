@@ -110,6 +110,23 @@ def run(
             )
             transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason)
 
+    # Persist return series for the return-correlation clustering axis (#222, Task 7).
+    # Only persists for registered strategies; silently skips otherwise.
+    if result.returns is not None:
+        with registry_conn() as conn:
+            repo = SqliteStrategyRepository(conn)
+            try:
+                repo.get(name)
+            except Exception:  # noqa: BLE001 — strategy not yet registered, skip
+                pass
+            else:
+                repo.persist_backtest_returns(
+                    name,
+                    start_dt.date().isoformat(),
+                    end_dt.date().isoformat(),
+                    result.returns,
+                )
+
     payload = result.to_dict()
     if track:
         payload["mlflow_run_id"] = _track(

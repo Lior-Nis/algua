@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
@@ -587,6 +591,8 @@ class SqliteStrategyRepository:
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        family_id: int | None = None,
+        family_lifetime_effective: int | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
         the single-use token the shortlist transition consumes."""
@@ -597,13 +603,13 @@ class SqliteStrategyRepository:
                 " funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
                 " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
-                " consumed, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+                " consumed, created_at, family_id, family_lifetime_effective)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
                 (strategy_id, int(passed), n_funnel, own_lifetime_combos, windowed_total_combos,
                  funnel_window_days, breadth_provenance, int(pit_ok), int(pit_override),
                  holdout_n_bars, min_holdout_observations, code_hash, config_hash, dependency_hash,
                  data_source, snapshot_id, period_start, period_end, holdout_frac, actor,
-                 decision_json, _now()),
+                 decision_json, _now(), family_id, family_lifetime_effective),
             )
         rowid = cur.lastrowid
         assert rowid is not None
@@ -930,8 +936,9 @@ class SqliteStrategyRepository:
                 " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
                 " consumed, created_at,"
-                " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,"
+                " family_id, family_lifetime_effective)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 # Agent passing rows are born-consumed: the stage has already advanced inside
                 # this transaction, so the token is spent. Leaving consumed=0 would let a
                 # future `registry transition --to candidate --actor agent` reuse the old row
@@ -951,7 +958,8 @@ class SqliteStrategyRepository:
                  p_value if fdr_binding else None,
                  alpha_t if fdr_binding else None,
                  int(fdr_rejected) if fdr_rejected is not None else None,
-                 t_next if fdr_binding else None),
+                 t_next if fdr_binding else None,
+                 gate_row.get("family_id"), gate_row.get("family_lifetime_effective")),
             )
             gate_id = cur.lastrowid
             assert gate_id is not None
@@ -1095,3 +1103,284 @@ class SqliteStrategyRepository:
                 " WHERE id=?",
                 (n_hypotheses, dsr_confidence, int(significant), row_id),
             )
+
+    # -------------------------------------------------------------------------
+    # Backtest returns persistence (#222, Task 7)
+    # -------------------------------------------------------------------------
+
+    def persist_backtest_returns(
+        self,
+        strategy_name: str,
+        period_start: str,
+        period_end: str,
+        returns: pd.Series,
+    ) -> int:
+        """Persist a backtest return series as JSON [[date_str, float], ...]. Returns row id."""
+        pairs = [
+            [idx.isoformat() if hasattr(idx, "isoformat") else str(idx), float(v)]
+            for idx, v in returns.items()
+        ]
+        blob = json.dumps(pairs)
+        now = _now()
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO backtest_returns"
+                " (strategy_name, period_start, period_end, returns_json, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (strategy_name, period_start, period_end, blob, now),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None
+        return rowid
+
+    def load_backtest_returns(self, strategy_name: str) -> pd.Series | None:
+        """Load the most recent return series for a strategy, or None."""
+        import pandas as pd
+
+        row = self._conn.execute(
+            "SELECT returns_json FROM backtest_returns WHERE strategy_name = ?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (strategy_name,),
+        ).fetchone()
+        if row is None:
+            return None
+        pairs = json.loads(row["returns_json"])
+        if not pairs:
+            return None
+        dates, values = zip(*pairs, strict=True)
+        return pd.Series(values, index=pd.to_datetime(dates), dtype=float)
+
+    # -------------------------------------------------------------------------
+    # Family registry + parentage DAG (#222)
+    # -------------------------------------------------------------------------
+
+    def create_family(
+        self, name: str, actor: str, created_by_strategy: str | None = None
+    ) -> int:
+        """Create a new family and record the family_created event. Return the new family id."""
+        now = _now()
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO families(name, created_at, created_by_actor, created_by_strategy)"
+                " VALUES (?,?,?,?)",
+                (name, now, actor, created_by_strategy),
+            )
+            family_id = cur.lastrowid
+            assert family_id is not None
+            self._conn.execute(
+                "INSERT INTO family_events(event_type, family_id, actor, created_at)"
+                " VALUES (?,?,?,?)",
+                ("family_created", family_id, actor, now),
+            )
+        return int(family_id)
+
+    def assign_strategy_to_family(
+        self,
+        strategy_name: str,
+        family_id: int,
+        actor: str,
+        *,
+        verdict: str,
+        similarity_score: float,
+        clustering_version: str,
+        clustering_config_json: str,
+        axis_json: str,
+        matched_family_id: int | None = None,
+    ) -> None:
+        """Assign a strategy to a family (append-only: old row gets removed_at set)."""
+        now = _now()
+        event_type = "strategy_merged" if verdict == "MERGE" else "strategy_assigned"
+        with self._conn:
+            # If an active membership row exists, soft-delete it first.
+            self._conn.execute(
+                "UPDATE family_members SET removed_at=?"
+                " WHERE strategy_name=? AND removed_at IS NULL",
+                (now, strategy_name),
+            )
+            self._conn.execute(
+                "INSERT INTO family_members"
+                "(family_id, strategy_name, joined_at, joined_by_actor, removed_at)"
+                " VALUES (?,?,?,?,NULL)",
+                (family_id, strategy_name, now, actor),
+            )
+            self._conn.execute(
+                "INSERT INTO family_events"
+                "(event_type, family_id, strategy_name, actor,"
+                " clustering_verdict, similarity_score, clustering_version,"
+                " clustering_config_json, axis_json, matched_family_id, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (event_type, family_id, strategy_name, actor,
+                 verdict, similarity_score, clustering_version,
+                 clustering_config_json, axis_json, matched_family_id, now),
+            )
+
+    def strategy_family(self, strategy_name: str) -> int | None:
+        """Return the current (active) family_id for the strategy, or None."""
+        row = self._conn.execute(
+            "SELECT family_id FROM family_members WHERE strategy_name=? AND removed_at IS NULL",
+            (strategy_name,),
+        ).fetchone()
+        return int(row["family_id"]) if row is not None else None
+
+    def family_ancestry(self, family_id: int) -> list[int]:
+        """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
+        visited: set[int] = {family_id}
+        queue: deque[int] = deque([family_id])
+        ancestors: list[int] = []
+        while queue:
+            current = queue.popleft()
+            rows = self._conn.execute(
+                "SELECT parent_family_id FROM family_parents WHERE child_family_id=?",
+                (current,),
+            ).fetchall()
+            for row in rows:
+                pid = int(row[0])
+                if pid not in visited:
+                    visited.add(pid)
+                    ancestors.append(pid)
+                    queue.append(pid)
+        return ancestors
+
+    def add_parent_edge(self, child_family_id: int, parent_family_id: int) -> None:
+        """Atomically add a parent edge (cycle-guarded, BEGIN IMMEDIATE, top-level-only)."""
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "add_parent_edge must be called at top level, not inside an open transaction"
+            )
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            # Cycle guard: adding edge (child, parent) creates a cycle iff parent_family_id is
+            # already an ancestor of child_family_id, OR parent == child (self-edge).
+            # Cycle means: following PARENT edges from parent_family_id upward reaches
+            # child_family_id (closing a loop: child -> parent -> ... -> child).
+            # Equivalently: child_family_id must not already be an ancestor-or-self of
+            # parent_family_id when we add child as parent's ancestor.
+            # Correct check: BFS from parent_family_id following PARENT links (going up the
+            # ancestry). If child_family_id appears, the new edge would form a cycle.
+            if parent_family_id == child_family_id:
+                raise ValueError(
+                    f"cycle detected: cannot add self-edge {child_family_id} -> {parent_family_id}"
+                )
+            visited: set[int] = {parent_family_id}
+            queue: deque[int] = deque([parent_family_id])
+            while queue:
+                current = queue.popleft()
+                rows = self._conn.execute(
+                    "SELECT parent_family_id FROM family_parents WHERE child_family_id=?",
+                    (current,),
+                ).fetchall()
+                for row in rows:
+                    pid = int(row[0])
+                    if pid not in visited:
+                        visited.add(pid)
+                        queue.append(pid)
+            if child_family_id in visited:
+                raise ValueError(
+                    f"cycle detected: adding edge {child_family_id} -> {parent_family_id}"
+                    f" would create a cycle"
+                )
+            now = _now()
+            self._conn.execute(
+                "INSERT INTO family_parents(child_family_id, parent_family_id)"
+                " VALUES (?,?)",
+                (child_family_id, parent_family_id),
+            )
+            self._conn.execute(
+                "INSERT INTO family_events"
+                "(event_type, family_id, actor, created_at)"
+                " VALUES (?,?,?,?)",
+                ("parent_edge_added", child_family_id, "system", now),
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
+        """Return [(family_id, members_list)] for all families that have active members.
+
+        Each member dict: {"code_hash": str, "factors": set[str]}.
+        The code_hash is looked up via compute_artifact_hashes; strategies whose module
+        cannot be loaded silently get code_hash='' and factors=set() (fail-closed: they
+        will not match unless the new strategy also fails to load, which is extremely
+        unlikely and also fails closed elsewhere).
+        """
+        from algua.registry.approvals import compute_artifact_hashes
+        from algua.registry.lineage import factors_used_by
+
+        rows = self._conn.execute(
+            "SELECT DISTINCT family_id, strategy_name"
+            " FROM family_members"
+            " WHERE removed_at IS NULL"
+            " ORDER BY family_id"
+        ).fetchall()
+        # Group by family_id
+        family_map: dict[int, list[dict]] = {}
+        for row in rows:
+            fid = int(row["family_id"])
+            sname = row["strategy_name"]
+            try:
+                identity = compute_artifact_hashes(sname)
+                code_hash = identity.code_hash
+            except Exception:  # noqa: BLE001
+                code_hash = ""
+            try:
+                factor_specs = factors_used_by(sname)
+                # factors_used_by returns list[FactorSpec]; get the name string
+                factors: set[str] = {
+                    f.name if hasattr(f, "name") else str(f) for f in factor_specs
+                }
+            except Exception:  # noqa: BLE001
+                factors = set()
+            family_map.setdefault(fid, []).append({
+                "code_hash": code_hash, "factors": factors, "name": sname,
+            })
+        return list(family_map.items())
+
+    def _family_member_strategies(self, family_id: int) -> list[str]:
+        """DISTINCT strategy names for a family and all its transitive ancestors."""
+        ancestor_ids = [family_id] + self.family_ancestry(family_id)
+        placeholders = ",".join("?" * len(ancestor_ids))
+        rows = self._conn.execute(
+            f"SELECT DISTINCT fm.strategy_name FROM family_members fm"
+            f" WHERE fm.family_id IN ({placeholders})",
+            ancestor_ids,
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def windowed_family_combos(self, family_id: int, window_days: int) -> int:
+        """Windowed search combos for a family + transitive ancestors.
+
+        Like family_lifetime_combos but filtered to search_trials created within
+        the trailing window_days. Used for informational output and gate_evaluations
+        audit field; NOT used in the 3-way max (which uses lifetime).
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        member_strategies = self._family_member_strategies(family_id)
+        if not member_strategies:
+            return 0
+        placeholders = ",".join("?" * len(member_strategies))
+        row = self._conn.execute(
+            f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
+            f" WHERE st.created_at >= ? AND st.strategy_name IN ({placeholders})",
+            [cutoff, *member_strategies],
+        ).fetchone()
+        return int(row[0])
+
+    def family_lifetime_combos(self, family_id: int) -> int:
+        """Lifetime search combos across this family + all transitive ancestors.
+
+        Uses a DISTINCT subquery so a strategy that was reassigned between two ancestor
+        families (leaving a removed_at row in one and an active row in another) is counted
+        exactly once — not once per matching family_members row.
+        """
+        member_strategies = self._family_member_strategies(family_id)
+        if not member_strategies:
+            return 0
+        placeholders = ",".join("?" * len(member_strategies))
+        row = self._conn.execute(
+            f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
+            f" WHERE st.strategy_name IN ({placeholders})",
+            member_strategies,
+        ).fetchone()
+        return int(row[0])
