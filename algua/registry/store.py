@@ -8,6 +8,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -533,19 +535,22 @@ class SqliteStrategyRepository:
         assert rowid is not None  # a successful INSERT always sets lastrowid
         return rowid, reused
 
-    def finalize_holdout_reservation(self, reservation_id: int, *, config_hash: str) -> None:
+    def finalize_holdout_reservation(
+        self, reservation_id: int, *, config_hash: str, strategy_id: int
+    ) -> None:
         with self._conn:  # UPDATE + guard commit together or roll back
             cur = self._conn.execute(
                 "UPDATE holdout_evaluations SET committed_at = ?, config_hash = ?"
-                " WHERE id = ? AND committed_at IS NULL",
-                (_now(), config_hash, reservation_id),
+                " WHERE id = ? AND strategy_id = ? AND committed_at IS NULL",
+                (_now(), config_hash, reservation_id, strategy_id),
             )
             if cur.rowcount != 1:
                 # Raise INSIDE the with so the mismatch rolls back (mirrors apply_transition's
                 # gate-consume guard). Guards a double-finalize or a vanished/released row. Raise,
                 # not assert — asserts strip under python -O.
                 raise ValueError(
-                    f"holdout reservation {reservation_id} is missing or already committed")
+                    f"holdout reservation {reservation_id} is missing, already committed, "
+                    f"or strategy_id mismatch")
 
     def release_holdout_reservation(self, reservation_id: int) -> None:
         with self._conn:
@@ -555,6 +560,49 @@ class SqliteStrategyRepository:
                 "DELETE FROM holdout_evaluations WHERE id = ? AND committed_at IS NULL",
                 (reservation_id,),
             )
+
+    def record_holdout_returns(
+        self, holdout_evaluation_id: int, strategy_id: int, *,
+        holdout_start: str, holdout_end: str,
+        returns: list[float], bar_dates: list[str],
+    ) -> int:
+        """Persist ONE OOS return vector for a committed holdout burn (#221 Slice 1). Separate
+        transaction from the burn (the burn committed at on_peek). UNIQUE(holdout_evaluation_id)
+        makes a re-run reconciliation safe. Validation is fail-closed, before the write."""
+        n_bars = len(returns)
+        if n_bars != len(bar_dates):
+            raise ValueError(
+                f"holdout_returns length mismatch: {n_bars} returns vs {len(bar_dates)} dates")
+        # strategy_id must match the burn row (caller-bug defense; read before the write tx).
+        row = self._conn.execute(
+            "SELECT strategy_id FROM holdout_evaluations WHERE id = ?",
+            (holdout_evaluation_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"holdout_evaluation {holdout_evaluation_id} does not exist")
+        if int(row["strategy_id"]) != int(strategy_id):
+            raise ValueError(
+                f"strategy_id {strategy_id} does not match holdout_evaluation "
+                f"{holdout_evaluation_id} (strategy_id {row['strategy_id']})")
+        returns_blob = np.asarray(returns, dtype=np.float64).tobytes()
+        bar_dates_blob = "\n".join(bar_dates).encode("utf-8")
+        try:
+            with self._conn:
+                cur = self._conn.execute(
+                    "INSERT INTO holdout_returns"
+                    "(holdout_evaluation_id, strategy_id, holdout_start, holdout_end, n_bars,"
+                    " returns_blob, bar_dates_blob, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (holdout_evaluation_id, strategy_id, holdout_start, holdout_end, n_bars,
+                     returns_blob, bar_dates_blob, _now()),
+                )
+        except sqlite3.IntegrityError as e:  # UNIQUE(holdout_evaluation_id) double-write
+            raise ValueError(
+                f"holdout_returns already written for holdout_evaluation "
+                f"{holdout_evaluation_id}") from e
+        rowid = cur.lastrowid
+        assert rowid is not None
+        return rowid
 
     def windowed_search_combos(self, window_days: int) -> int:
         """Sum of ``n_combos`` across ALL strategies' search_trials recorded within the trailing

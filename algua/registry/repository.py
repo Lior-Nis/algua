@@ -275,15 +275,29 @@ class StrategyRepository(Protocol):
         (raises ``RuntimeError`` if ``self._conn.in_transaction``)."""
         ...
 
-    def finalize_holdout_reservation(self, reservation_id: int, *, config_hash: str) -> None:
+    def finalize_holdout_reservation(
+        self, reservation_id: int, *, config_hash: str, strategy_id: int
+    ) -> None:
         """Commit a reservation into a burn: set ``committed_at`` + the real evidentiary
-        ``config_hash``. Raises if the row is missing or already committed (guards double-finalize).
+        ``config_hash``. Raises if the row is missing, already committed, or strategy_id mismatches
+        (guards double-finalize and caller-bug cross-strategy writes).
         """
         ...
 
     def release_holdout_reservation(self, reservation_id: int) -> None:
         """Free a still-pending reservation (clean walk_forward failure). Never touches a committed
         burn; a release after finalize/crash is a harmless no-op."""
+        ...
+
+    def record_holdout_returns(
+        self, holdout_evaluation_id: int, strategy_id: int, *,
+        holdout_start: str, holdout_end: str,
+        returns: list[float], bar_dates: list[str],
+    ) -> int:
+        """Persist ONE OOS return vector for a committed holdout burn (#221 Slice 1). Separate
+        transaction from the burn (the burn committed at on_peek). UNIQUE(holdout_evaluation_id)
+        makes a re-run reconciliation safe. Validation is fail-closed and happens before the write.
+        Returns the new holdout_returns row id."""
         ...
 
     def windowed_search_combos(self, window_days: int) -> int:

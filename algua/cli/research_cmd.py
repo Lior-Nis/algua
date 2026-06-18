@@ -145,8 +145,9 @@ def promote(
         holdout_start, holdout_end = holdout_window(
             strategy, provider, start_dt, end_dt,
             holdout_frac=holdout_frac, universe_by_date=universe_by_date)
+        sid = repo.get(name).id
         reservation_id, reused = repo.reserve_holdout(
-            repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
+            sid, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             holdout_start=holdout_start, holdout_end=holdout_end,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
@@ -162,7 +163,7 @@ def promote(
                 # committed row, the except-release below is then correct for EVERY post-peek
                 # failure (incl. KeyboardInterrupt) — a computed holdout can never be released.
                 on_peek=lambda cfg: repo.finalize_holdout_reservation(
-                    reservation_id, config_hash=cfg),
+                    reservation_id, config_hash=cfg, strategy_id=sid),
             )
         except BaseException:
             # Pre-peek failure: the row is still pending, so release frees the window. Post-peek
