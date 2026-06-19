@@ -23,6 +23,11 @@ MIN_HOLDOUT_OBSERVATIONS = 63
 DSR_ALPHA = 0.05  # require >= 95% confidence the true Sharpe beats the selection-inflated benchmark
 EULER_MASCHERONI = 0.5772156649015329  # gamma_E, the DSR expected-max weight (NOT e^-1)
 
+# Serial-dependence bootstrap (#221, Phase 3 Slice 2). Protected — relaxing weakens the gate.
+DSR_BOOTSTRAP_RESAMPLES = 2000            # stationary-bootstrap resample count (B)
+DSR_BOOTSTRAP_LOWER_QUANTILE = 0.05       # lower quantile of the bootstrap DSR-confidence dist.
+MAX_BOOTSTRAP_BLOCK_LEN_FRACTION = 0.5    # cap block length at max(1, floor(T * FRACTION))
+
 # Funnel-wide dispersion floor (#221, Phase 3 Slice 0). Min finite per-strategy trial-Sharpe
 # variances needed to form a meaningful cross-strategy floor. Below this, the floor is unavailable
 # and the DSR falls back to own-sweep variance (Phase-1 behavior). Protected — raising it weakens
@@ -152,6 +157,57 @@ def sharpe_haircut(n_combos: int, n_bars: int) -> float:
     return math.sqrt(2.0 * math.log(n)) * math.sqrt(ANN) / math.sqrt(n_bars)
 
 
+def floored_trial_var_per_period(
+    own_var_pp: float, floor_var_pp: float | None
+) -> float | None:
+    """Own-variance-first dispersion floor (#221 Slice 0): validate own (finite & >=0 else None),
+    then max(own, floor) only when floor is finite and strictly greater. Returns the floored
+    per-period trial-Sharpe variance, or None when own is degenerate (the floor must never rescue a
+    degenerate own variance into a pass)."""
+    if not math.isfinite(own_var_pp) or own_var_pp < 0.0:
+        return None
+    var_used = own_var_pp
+    if floor_var_pp is not None and math.isfinite(floor_var_pp) and floor_var_pp > var_used:
+        var_used = floor_var_pp
+    return var_used
+
+
+def dsr_sr_star(n_trials: int, trial_sr_var_per_period: float) -> float | None:
+    """Selection-inflated benchmark SR* (per-period). 0.0 for n<=1; else the López de Prado E[max]
+    of n trial Sharpes scaled by sqrt(var). None on degenerate input."""
+    n = int(n_trials)
+    if n < 1:
+        return None
+    if not math.isfinite(trial_sr_var_per_period) or trial_sr_var_per_period < 0.0:
+        return None
+    if n <= 1:
+        return 0.0
+    sr_star = math.sqrt(trial_sr_var_per_period) * (
+        (1.0 - EULER_MASCHERONI) * float(_norm.ppf(1.0 - 1.0 / n))
+        + EULER_MASCHERONI * float(_norm.ppf(1.0 - 1.0 / (n * math.e)))
+    )
+    return sr_star if math.isfinite(sr_star) else None
+
+
+def dsr_sr_star_annualized(
+    n_trials: int, trial_var_ann: float | None, floor_var_ann: float | None
+) -> float | None:
+    """SR* (per-period) from ANNUALIZED inputs — the SR* the binding dsr_evidence uses. Converts
+    /ANN, applies the funnel floor, then dsr_sr_star. None if no own variance or degenerate."""
+    if trial_var_ann is None or not math.isfinite(trial_var_ann):
+        return None
+    own_pp = trial_var_ann / ANN
+    floor_pp = (
+        floor_var_ann / ANN
+        if floor_var_ann is not None and math.isfinite(floor_var_ann)
+        else None
+    )
+    var_used = floored_trial_var_per_period(own_pp, floor_pp)
+    if var_used is None:
+        return None
+    return dsr_sr_star(n_trials, var_used)
+
+
 def dsr_confidence(
     sr_obs_per_period: float,
     t: int,
@@ -187,30 +243,13 @@ def dsr_confidence(
     if not math.isfinite(sr_obs_per_period) or not math.isfinite(skew) \
             or not math.isfinite(raw_kurtosis):
         return None
-    # Own variance must fail closed on its OWN merits first: a negative/non-finite own variance is
-    # a degenerate input (Phase-1 returns None). The floor must NEVER rescue it into a pass — that
-    # would be a FAIL->PASS tighten-only violation. Validate own, THEN apply the floor.
-    if not math.isfinite(trial_sr_var_per_period) or trial_sr_var_per_period < 0.0:
+    var_used = floored_trial_var_per_period(trial_sr_var_per_period, funnel_floor_var_per_period)
+    if var_used is None:
         return None
-    var_used = trial_sr_var_per_period
-    # Funnel-wide dispersion floor (#221 Slice 0): max(own, floor) can only RAISE SR* -> lower
-    # confidence -> tighten-only. floor > var_used (with var_used >= 0) implies floor > 0; a
-    # None/non-finite floor falls back to own (Phase-1 behavior).
-    if funnel_floor_var_per_period is not None and math.isfinite(funnel_floor_var_per_period) \
-            and funnel_floor_var_per_period > var_used:
-        var_used = funnel_floor_var_per_period
-
+    sr_star = dsr_sr_star(n, var_used)
+    if sr_star is None:
+        return None
     sr = sr_obs_per_period
-    if n <= 1:
-        sr_star = 0.0
-    else:
-        # E[max] of n trial Sharpes (Gaussian approximation), scaled by the trial-SR spread.
-        sr_star = math.sqrt(var_used) * (
-            (1.0 - EULER_MASCHERONI) * float(_norm.ppf(1.0 - 1.0 / n))
-            + EULER_MASCHERONI * float(_norm.ppf(1.0 - 1.0 / (n * math.e)))
-        )
-    if not math.isfinite(sr_star):
-        return None
 
     var_term = 1.0 - skew * sr + ((raw_kurtosis - 1.0) / 4.0) * sr * sr
     if not math.isfinite(var_term) or var_term <= 0.0:
