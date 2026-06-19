@@ -584,7 +584,13 @@ class SqliteStrategyRepository:
         bar_dates_blob = "\n".join(bar_dates).encode("utf-8")
         try:
             with self._conn:
-                # Validation INSIDE the tx so check+insert are atomic (TOCTOU).
+                # Concurrency safety here rests on UNIQUE(holdout_evaluation_id) + the caught
+                # IntegrityError below + the idempotency check, NOT on these SELECTs: Python's
+                # sqlite3 opens the transaction only on the first DML (the INSERT), so a read-only
+                # validation runs in autocommit. That is acceptable — no supported API mutates a
+                # committed burn's strategy_id/committed_at, and concurrent inserts of the same
+                # holdout_evaluation_id are caught by the UNIQUE constraint. The checks are
+                # caller-bug defense (missing / uncommitted / mismatched-strategy burn).
                 row = self._conn.execute(
                     "SELECT strategy_id, committed_at FROM holdout_evaluations WHERE id = ?",
                     (holdout_evaluation_id,),
