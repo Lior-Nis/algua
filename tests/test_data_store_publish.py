@@ -13,6 +13,7 @@ from algua.data.files import (
     write_partitioned_bars,
 )
 from algua.data.manifest import SnapshotManifest
+from algua.data.models import Dataset
 from algua.data.store import DataStore
 
 
@@ -139,7 +140,7 @@ def test_ingest_file_hashes_the_staging_copy_not_the_live_source(tmp_path, monke
 
     monkeypatch.setattr(_shutil, "copy2", copy_then_mutate)
     rec = store.ingest_file(
-        dataset="alt", provider="p", symbols=["AAA"], start="2024-07-01", end="2024-07-02",
+        dataset=Dataset.BARS, provider="p", symbols=["AAA"], start="2024-07-01", end="2024-07-02",
         as_of="2024-07-03", source="unit", file_path=source,
     )
     from algua.data.files import sha256_file

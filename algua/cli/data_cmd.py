@@ -22,6 +22,7 @@ from algua.data.contracts import (
 )
 from algua.data.hindsight import query_fundamentals, query_news
 from algua.data.importers import get_importer
+from algua.data.models import Dataset
 from algua.data.providers import get_provider
 from algua.data.store import DataStore, normalize_symbols
 
@@ -61,7 +62,7 @@ def ingest(
 ) -> None:
     """Register a local immutable data snapshot."""
     rec = _store().ingest_file(
-        dataset=dataset,
+        dataset=Dataset(dataset),
         provider=provider,
         symbols=symbols.split(","),
         start=start,
@@ -401,4 +402,4 @@ def inspect(
     if snapshot_id is not None:
         emit(ds.get_snapshot(snapshot_id).to_dict())
         return
-    emit([rec.to_dict() for rec in ds.list_snapshots(dataset)])
+    emit([rec.to_dict() for rec in ds.list_snapshots(Dataset(dataset) if dataset else None)])

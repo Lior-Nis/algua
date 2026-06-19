@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from algua.data.files import fsync_dir
-from algua.data.models import SnapshotRecord
+from algua.data.models import Dataset, SnapshotRecord
 
 
 class ManifestLockReplacedError(RuntimeError):
@@ -37,7 +37,7 @@ class SnapshotManifest:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def list_records(self, dataset: str | None = None) -> list[SnapshotRecord]:
+    def list_records(self, dataset: Dataset | None = None) -> list[SnapshotRecord]:
         records = self._read_all()
         if dataset is not None:
             records = [r for r in records if r.dataset == dataset]

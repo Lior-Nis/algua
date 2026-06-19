@@ -77,7 +77,7 @@ class DataStore:
     def ingest_file(
         self,
         *,
-        dataset: str,
+        dataset: Dataset,
         provider: str,
         symbols: list[str],
         start: str,
@@ -85,7 +85,7 @@ class DataStore:
         as_of: str,
         source: str,
         file_path: Path,
-        kind: str = Kind.FILE.value,
+        kind: Kind = Kind.FILE,
         timeframe: str | None = None,
         adjustment: str | None = None,
         universe: str | None = None,
@@ -169,14 +169,14 @@ class DataStore:
     ) -> SnapshotRecord:
         validate_timeframe(timeframe)
         metadata = _metadata(
-            dataset=Dataset.BARS.value,
+            dataset=Dataset.BARS,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=source,
-            kind=Kind.BARS.value,
+            kind=Kind.BARS,
             timeframe=timeframe,
             adjustment=adjustment,
             source_metadata=source_metadata,
@@ -265,14 +265,14 @@ class DataStore:
             {"effective_date": effective_date, "universe": universe, "symbol": clean_symbols}
         )
         metadata = _metadata(
-            dataset=Dataset.UNIVERSES.value,
+            dataset=Dataset.UNIVERSES,
             provider=provider,
             symbols=clean_symbols,
             start=effective_date,
             end=effective_date,
             as_of=as_of,
             source=source,
-            kind=Kind.UNIVERSE.value,
+            kind=Kind.UNIVERSE,
             universe=universe,
             source_metadata=source_metadata,
         )
@@ -282,7 +282,7 @@ class DataStore:
             def conflict_check(committed, rec):  # noqa: E306
                 for other in committed:
                     if (
-                        other.dataset == Dataset.UNIVERSES.value
+                        other.dataset == Dataset.UNIVERSES
                         and other.metadata.universe == universe
                         and other.metadata.start == effective_date
                         and other.content_hash != rec.content_hash
@@ -328,14 +328,14 @@ class DataStore:
             raise ValueError("duplicate (symbol, delisting_date) delisting event")
         symbols = normalize_symbols(list(clean["symbol"]))
         metadata = _metadata(
-            dataset=Dataset.DELISTINGS.value,
+            dataset=Dataset.DELISTINGS,
             provider=provider,
             symbols=symbols,
             start=min(clean["delisting_date"]),
             end=max(clean["delisting_date"]),
             as_of=as_of,
             source=source,
-            kind=Kind.DELISTING.value,
+            kind=Kind.DELISTING,
         )
         return self._ingest_parquet(
             metadata=metadata, frame=clean.reset_index(drop=True), filename="delistings.parquet"
@@ -343,7 +343,7 @@ class DataStore:
 
     def _latest_delistings_record(self, as_of: str | None) -> SnapshotRecord | None:
         """Return the newest DELISTINGS snapshot record as-of `as_of` (or overall if None)."""
-        records = self.manifest.list_records(Dataset.DELISTINGS.value)
+        records = self.manifest.list_records(Dataset.DELISTINGS)
         if as_of is not None:
             records = [r for r in records if r.metadata.as_of <= as_of]
         return max(records, key=lambda r: r.metadata.as_of) if records else None
@@ -532,14 +532,14 @@ class DataStore:
             meta_extra["content_hash_algorithm"] = BARS_STREAMED_HASH_ALGO
 
             metadata = _metadata(
-                dataset=Dataset.BARS.value,
+                dataset=Dataset.BARS,
                 provider=provider,
                 symbols=symbols,
                 start=observed_start,
                 end=observed_end,
                 as_of=as_of,
                 source=source,
-                kind=Kind.BARS.value,
+                kind=Kind.BARS,
                 timeframe=timeframe,
                 adjustment=adjustment,
                 source_metadata=meta_extra,
@@ -564,7 +564,7 @@ class DataStore:
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
 
-    def list_snapshots(self, dataset: str | None = None) -> list[SnapshotRecord]:
+    def list_snapshots(self, dataset: Dataset | None = None) -> list[SnapshotRecord]:
         return self.manifest.list_records(dataset)
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotRecord:
@@ -628,7 +628,7 @@ class DataStore:
         for rec in records:
             row: dict[str, Any] = {
                 "snapshot_id": rec.snapshot_id,
-                "dataset": rec.dataset,
+                "dataset": rec.dataset.value,
                 "storage_format": rec.storage_format,
                 "ok": True,
                 "error": None,
@@ -653,9 +653,10 @@ class DataStore:
         `[start, end)` filters down to the partitioned parquet dataset (issue #130). Any filter left
         as None is unbounded. Empty result => the contract's empty-but-typed frame."""
         rec = self.get_snapshot(snapshot_id)  # raises SnapshotNotFound
-        if rec.dataset != Dataset.BARS.value:
+        if rec.dataset != Dataset.BARS:
             raise ValueError(
-                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not {Dataset.BARS.value!r}"
+                f"snapshot {snapshot_id} is dataset {rec.dataset.value!r}, "
+                f"not {Dataset.BARS.value!r}"
             )
         if rec.storage_format != "parquet_dataset":
             raise ValueError(
@@ -697,14 +698,14 @@ class DataStore:
         start = canon["knowable_at"].min().date().isoformat()
         end = canon["knowable_at"].max().date().isoformat()
         metadata = _metadata(
-            dataset=Dataset.FUNDAMENTALS.value,
+            dataset=Dataset.FUNDAMENTALS,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=source,
-            kind=Kind.FUNDAMENTALS.value,
+            kind=Kind.FUNDAMENTALS,
             source_metadata=source_metadata,
         )
         content_hash = logical_fundamentals_hash(canon)
@@ -734,9 +735,9 @@ class DataStore:
         (fundamentals are far smaller than bars; partitioned pushdown is deferred). Re-normalizes
         on read so parquet dtype drift cannot escape the schema. Empty => empty_fundamentals()."""
         rec = self.get_snapshot(snapshot_id)
-        if rec.dataset != Dataset.FUNDAMENTALS.value:
+        if rec.dataset != Dataset.FUNDAMENTALS:
             raise ValueError(
-                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, "
+                f"snapshot {snapshot_id} is dataset {rec.dataset.value!r}, "
                 f"not {Dataset.FUNDAMENTALS.value!r}"
             )
         raw = pd.read_parquet(self.data_dir / rec.data_path)
@@ -783,14 +784,14 @@ class DataStore:
             "row_symbols": ",".join(symbols),
         }
         metadata = _metadata(
-            dataset=Dataset.NEWS.value,
+            dataset=Dataset.NEWS,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=provider,
-            kind=Kind.NEWS.value,
+            kind=Kind.NEWS,
             source_metadata=derived,
         )
         content_hash = logical_news_hash(canon)
@@ -816,9 +817,10 @@ class DataStore:
         Re-normalizes on read (idempotent) so parquet dtype drift cannot escape the schema.
         Empty => empty_news()."""
         rec = self.get_snapshot(snapshot_id)
-        if rec.dataset != Dataset.NEWS.value:
+        if rec.dataset != Dataset.NEWS:
             raise ValueError(
-                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not {Dataset.NEWS.value!r}"
+                f"snapshot {snapshot_id} is dataset {rec.dataset.value!r}, "
+                f"not {Dataset.NEWS.value!r}"
             )
         raw = pd.read_parquet(self.data_dir / rec.data_path)
         if symbols is not None:
@@ -844,7 +846,7 @@ class DataStore:
         """
         records = [
             rec
-            for rec in self.manifest.list_records(Dataset.UNIVERSES.value)
+            for rec in self.manifest.list_records(Dataset.UNIVERSES)
             if rec.metadata.universe == universe
         ]
         by_date: dict[date, UniverseSnapshot] = {}
@@ -868,9 +870,9 @@ class DataStore:
         datasets: dict[str, dict[str, Any]] = {}
         for rec in records:
             item = datasets.setdefault(
-                rec.dataset,
+                rec.dataset.value,
                 {
-                    "dataset": rec.dataset,
+                    "dataset": rec.dataset.value,
                     "snapshots": 0,
                     "symbols": set(),
                     "start": rec.start,
@@ -912,20 +914,19 @@ def normalize_symbols(symbols: list[str]) -> list[str]:
 
 def _metadata(
     *,
-    dataset: str,
+    dataset: Dataset,
     provider: str,
     symbols: list[str],
     start: str,
     end: str,
     as_of: str,
     source: str,
-    kind: str = Kind.FILE.value,
+    kind: Kind = Kind.FILE,
     timeframe: str | None = None,
     adjustment: str | None = None,
     universe: str | None = None,
     source_metadata: dict[str, str] | None = None,
 ) -> SnapshotMetadata:
-    _validate_non_empty("dataset", dataset)
     _validate_non_empty("provider", provider)
     _validate_non_empty("source", source)
     _validate_date_bounds(start, end)
