@@ -23,6 +23,13 @@ MIN_HOLDOUT_OBSERVATIONS = 63
 DSR_ALPHA = 0.05  # require >= 95% confidence the true Sharpe beats the selection-inflated benchmark
 EULER_MASCHERONI = 0.5772156649015329  # gamma_E, the DSR expected-max weight (NOT e^-1)
 
+# Funnel-wide dispersion floor (#221, Phase 3 Slice 0). Min finite per-strategy trial-Sharpe
+# variances needed to form a meaningful cross-strategy floor. Below this, the floor is unavailable
+# and the DSR falls back to own-sweep variance (Phase-1 behavior). Protected — raising it weakens
+# the floor's availability; the floor can only ever TIGHTEN the gate, so its absence is
+# conservative.
+MIN_FUNNEL_FLOOR_STRATEGIES = 5
+
 # LORD++ FDR accounting layer (#220, Phase 2). Protected constants — relaxing them weakens the gate.
 # FDR here is an operating target (shared-holdout dependence breaks the formal guarantee); Phase 3
 # (#221) adds dependence-aware calibration. The p-value fed here is 1 − dsr_confidence, which is
@@ -152,6 +159,7 @@ def dsr_confidence(
     raw_kurtosis: float,
     n_trials: int,
     trial_sr_var_per_period: float,
+    funnel_floor_var_per_period: float | None = None,
 ) -> float | None:
     """Deflated-Sharpe-Ratio confidence (Bailey & López de Prado): the probability — in [0,1],
     NOT a p-value — that the true (per-period) Sharpe exceeds the expected maximum Sharpe of
@@ -163,7 +171,14 @@ def dsr_confidence(
 
     ``raw_kurtosis`` is Pearson kurtosis (=3 for Gaussian), so the variance term reduces to the
     Lo/Mertens 1 + SR^2/2 for a normal series. Inputs are PER-PERIOD; the caller converts from the
-    system's annualized Sharpes. Returns None (fail closed) on any degenerate input."""
+    system's annualized Sharpes. Returns None (fail closed) on any degenerate input.
+
+    ``funnel_floor_var_per_period`` is the optional funnel-wide dispersion floor (#221 Slice 0).
+    When finite and > own variance, ``max(own, floor)`` is used — a tighten-only operation (SR*
+    can only rise, DSR confidence can only fall). A None or non-finite floor falls back to own
+    variance (Phase-1 behavior). The own variance is validated FIRST (fail-closed on
+    non-finite/negative): the floor must never rescue a degenerate own variance into a pass —
+    that would be a FAIL->PASS tighten-only violation."""
     n = int(n_trials)
     if n < 1:                      # invalid breadth
         return None
@@ -172,15 +187,25 @@ def dsr_confidence(
     if not math.isfinite(sr_obs_per_period) or not math.isfinite(skew) \
             or not math.isfinite(raw_kurtosis):
         return None
+    # Own variance must fail closed on its OWN merits first: a negative/non-finite own variance is
+    # a degenerate input (Phase-1 returns None). The floor must NEVER rescue it into a pass — that
+    # would be a FAIL->PASS tighten-only violation. Validate own, THEN apply the floor.
     if not math.isfinite(trial_sr_var_per_period) or trial_sr_var_per_period < 0.0:
         return None
+    var_used = trial_sr_var_per_period
+    # Funnel-wide dispersion floor (#221 Slice 0): max(own, floor) can only RAISE SR* -> lower
+    # confidence -> tighten-only. floor > var_used (with var_used >= 0) implies floor > 0; a
+    # None/non-finite floor falls back to own (Phase-1 behavior).
+    if funnel_floor_var_per_period is not None and math.isfinite(funnel_floor_var_per_period) \
+            and funnel_floor_var_per_period > var_used:
+        var_used = funnel_floor_var_per_period
 
     sr = sr_obs_per_period
     if n <= 1:
         sr_star = 0.0
     else:
         # E[max] of n trial Sharpes (Gaussian approximation), scaled by the trial-SR spread.
-        sr_star = math.sqrt(trial_sr_var_per_period) * (
+        sr_star = math.sqrt(var_used) * (
             (1.0 - EULER_MASCHERONI) * float(_norm.ppf(1.0 - 1.0 / n))
             + EULER_MASCHERONI * float(_norm.ppf(1.0 - 1.0 / (n * math.e)))
         )
@@ -235,6 +260,10 @@ class GateDecision:
     dsr_t: int | None = None
     dsr_skew: float | None = None
     dsr_raw_kurtosis: float | None = None
+    # Funnel-wide dispersion floor audit (#221, Phase 3 Slice 0). Populated when dsr_binding.
+    dsr_funnel_floor_var_ann: float | None = None
+    dsr_funnel_floor_n_strategies: int | None = None
+    dsr_funnel_floor_n_total_rows: int | None = None
     # LORD++ FDR accounting (#220, Phase 2). Populated by run_gate() AFTER the atomic store
     # call (α_t is only known inside the write transaction). Non-binding rows leave all fdr_*
     # fields at their defaults (False/None); fdr_skip_reason explains why FDR was omitted.
@@ -278,6 +307,9 @@ class GateDecision:
             "dsr_t": self.dsr_t,
             "dsr_skew": _f(self.dsr_skew),
             "dsr_raw_kurtosis": _f(self.dsr_raw_kurtosis),
+            "dsr_funnel_floor_var_ann": _f(self.dsr_funnel_floor_var_ann),
+            "dsr_funnel_floor_n_strategies": self.dsr_funnel_floor_n_strategies,
+            "dsr_funnel_floor_n_total_rows": self.dsr_funnel_floor_n_total_rows,
             "fdr_binding": self.fdr_binding,
             "fdr_p_value": _f(self.fdr_p_value),
             "fdr_alpha_level": _f(self.fdr_alpha_level),
@@ -336,6 +368,9 @@ def evaluate_gate(
     funnel_window_days: int | None = None,
     dsr_binding: bool = False,
     dsr_trial_var_ann: float | None = None,
+    dsr_funnel_floor_var_ann: float | None = None,
+    dsr_funnel_floor_n_strategies: int | None = None,
+    dsr_funnel_floor_n_total_rows: int | None = None,
 ) -> GateDecision:
     """Judge a walk-forward result against the gate criteria. Pure; no side effects.
 
@@ -398,9 +433,15 @@ def evaluate_gate(
     sr_obs_ann = float(wf.holdout_metrics["sharpe"])
     if dsr_binding:
         var_pp = (dsr_trial_var_ann / ANN) if dsr_trial_var_ann is not None else None
+        floor_pp = (
+            dsr_funnel_floor_var_ann / ANN
+            if dsr_funnel_floor_var_ann is not None and math.isfinite(dsr_funnel_floor_var_ann)
+            else None
+        )
         if var_pp is not None and math.isfinite(var_pp):
             dsr_conf = dsr_confidence(
-                sr_obs_ann / math.sqrt(ANN), t_hold, skew, raw_kurt, n_for_dsr, var_pp)
+                sr_obs_ann / math.sqrt(ANN), t_hold, skew, raw_kurt, n_for_dsr, var_pp,
+                funnel_floor_var_per_period=floor_pp)
         passed_dsr = dsr_conf is not None and dsr_conf >= (1.0 - DSR_ALPHA)
         dsr_value = dsr_conf if (dsr_conf is not None and math.isfinite(dsr_conf)) else None
         checks.append({"name": "dsr_evidence", "value": dsr_value,
@@ -430,4 +471,7 @@ def evaluate_gate(
         dsr_t=(t_hold if dsr_binding else None),
         dsr_skew=(skew if dsr_binding else None),
         dsr_raw_kurtosis=(raw_kurt if dsr_binding else None),
+        dsr_funnel_floor_var_ann=(dsr_funnel_floor_var_ann if dsr_binding else None),
+        dsr_funnel_floor_n_strategies=(dsr_funnel_floor_n_strategies if dsr_binding else None),
+        dsr_funnel_floor_n_total_rows=(dsr_funnel_floor_n_total_rows if dsr_binding else None),
     )

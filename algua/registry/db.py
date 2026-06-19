@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS search_trials (
     trial_sharpe_var_ann REAL
 );
 CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_name);
+CREATE INDEX IF NOT EXISTS ix_search_trials_created_at ON search_trials(created_at);
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a

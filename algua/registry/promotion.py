@@ -396,11 +396,15 @@ def run_gate(
     # omits DSR — and consequently FDR too (p_value requires a finite dsr_confidence).
     dsr_binding = breadth.provenance == "measured"
     dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
+    funnel_floor = repo.funnel_trial_sharpe_var(FUNNEL_WINDOW_DAYS) if dsr_binding else None
     decision = evaluate_gate(
         wf, criteria, n_combos=n_funnel, breadth_provenance=breadth.provenance,
         pit_ok=pit_ok, allow_non_pit=allow_non_pit, own_lifetime_combos=breadth.own,
         windowed_total_combos=breadth.windowed_total, funnel_window_days=FUNNEL_WINDOW_DAYS,
         dsr_binding=dsr_binding, dsr_trial_var_ann=dsr_trial_var_ann,
+        dsr_funnel_floor_var_ann=(funnel_floor.var_ann if funnel_floor else None),
+        dsr_funnel_floor_n_strategies=(funnel_floor.n_strategies if funnel_floor else None),
+        dsr_funnel_floor_n_total_rows=(funnel_floor.n_total_rows if funnel_floor else None),
     )
     # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
     # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
