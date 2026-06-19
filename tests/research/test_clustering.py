@@ -40,7 +40,7 @@ def test_pairwise_axes_factor_jaccard():
 def test_pairwise_axes_return_axis_present_and_clamped():
     s = _series([0.01, -0.02, 0.03, 0.0, 0.01] * 20)  # 100 points
     blended, axes = pairwise_axes("", set(), s, "", set(), s)
-    assert axes["return"] == 1.0  # perfect self-correlation
+    assert math.isclose(axes["return"], 1.0)  # perfect self-correlation
     assert math.isclose(blended, C.WEIGHT_RETURN_CORRELATION)  # 0.20
 
 

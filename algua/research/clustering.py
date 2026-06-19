@@ -80,9 +80,7 @@ def _return_correlation_axis(
     corr = strategy_returns.loc[shared_idx].corr(member_returns.loc[shared_idx])  # type: ignore[attr-defined]
     if not math.isfinite(corr):
         return None
-    # Round to 14 decimal places to avoid floating-point noise (e.g. self-correlation != 1.0),
-    # then clamp to [0.0, 1.0]. float() cast drops the numpy dtype.
-    return max(0.0, min(1.0, round(float(corr), 14)))
+    return max(0.0, corr)  # negative correlation -> 0.0 (not similar)
 
 
 def pairwise_axes(
