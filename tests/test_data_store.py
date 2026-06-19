@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from algua.data.files import count_tabular_rows
+from algua.data.models import Dataset
 from algua.data.store import DataStore, SnapshotNotFound
 
 
@@ -32,7 +33,7 @@ def test_ingest_file_copies_payload_and_records_manifest(tmp_path):
     store = DataStore(tmp_path / "data")
 
     rec = store.ingest_file(
-        dataset="daily-bars",
+        dataset=Dataset.BARS,
         provider="local",
         symbols=["AAPL"],
         start="2026-01-02",
@@ -42,7 +43,7 @@ def test_ingest_file_copies_payload_and_records_manifest(tmp_path):
         file_path=source,
     )
 
-    assert rec.dataset == "daily-bars"
+    assert rec.dataset == Dataset.BARS
     assert rec.symbols == ("AAPL",)
     assert rec.row_count == 1
     assert rec.snapshot_id
@@ -58,7 +59,7 @@ def test_ingest_same_file_is_idempotent(tmp_path):
     store = DataStore(tmp_path / "data")
 
     first = store.ingest_file(
-        dataset="daily-bars",
+        dataset=Dataset.BARS,
         provider="local",
         symbols=["AAPL"],
         start="2026-01-02",
@@ -68,7 +69,7 @@ def test_ingest_same_file_is_idempotent(tmp_path):
         file_path=source,
     )
     second = store.ingest_file(
-        dataset="daily-bars",
+        dataset=Dataset.BARS,
         provider="local",
         symbols=["AAPL"],
         start="2026-01-02",
@@ -88,7 +89,7 @@ def test_ingest_non_csv_records_unknown_row_count(tmp_path):
     store = DataStore(tmp_path / "data")
 
     rec = store.ingest_file(
-        dataset="daily-bars",
+        dataset=Dataset.BARS,
         provider="local",
         symbols=["AAPL"],
         start="2026-01-02",
@@ -185,7 +186,7 @@ def test_summary_groups_snapshots_by_dataset(tmp_path):
     source.write_text("ts,symbol,close\n2026-01-02,AAPL,100\n", encoding="utf-8")
     store = DataStore(tmp_path / "data")
     store.ingest_file(
-        dataset="daily-bars",
+        dataset=Dataset.BARS,
         provider="local",
         symbols=["AAPL"],
         start="2026-01-02",
@@ -198,7 +199,7 @@ def test_summary_groups_snapshots_by_dataset(tmp_path):
     summary = store.summary()
 
     assert summary["snapshots"] == 1
-    assert summary["datasets"][0]["dataset"] == "daily-bars"
+    assert summary["datasets"][0]["dataset"] == Dataset.BARS.value
     assert summary["datasets"][0]["symbols"] == ["AAPL"]
 
 
@@ -216,7 +217,7 @@ def test_ingest_rejects_invalid_date_bounds(tmp_path):
 
     with pytest.raises(ValueError, match="start must be <= end"):
         store.ingest_file(
-            dataset="daily-bars",
+            dataset=Dataset.BARS,
             provider="local",
             symbols=["AAPL"],
             start="2026-01-03",
@@ -232,7 +233,7 @@ def test_ingest_requires_existing_file(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         store.ingest_file(
-            dataset="daily-bars",
+            dataset=Dataset.BARS,
             provider="local",
             symbols=["AAPL"],
             start="2026-01-02",
@@ -309,6 +310,62 @@ def test_from_dict_requires_schema_version():
     }
     with pytest.raises(KeyError):
         SnapshotRecord.from_dict(payload)
+
+
+def _valid_record_payload(**overrides):
+    payload = {
+        "schema_version": 2, "snapshot_id": "abc", "dataset": "bars", "provider": "p",
+        "symbols": ["AAPL"], "start": "2026-01-02", "end": "2026-01-02",
+        "as_of": "2026-01-03T00:00:00+00:00", "source": "s", "kind": "bars",
+        "row_count": 1, "content_hash": "h",
+        "data_path": "snapshots/bars/abc/bars.parquet", "storage_format": "parquet",
+        "created_at": "2026-01-03T00:00:00+00:00",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_from_dict_rejects_unknown_dataset():
+    # #168: a typo'd dataset on disk fails closed at deserialization, not at read/query time.
+    from algua.data.models import SnapshotRecord
+
+    with pytest.raises(ValueError):
+        SnapshotRecord.from_dict(_valid_record_payload(dataset="daily-bars"))
+
+
+def test_from_dict_rejects_unknown_kind():
+    # #168: same fail-closed guarantee for the `kind` routing key.
+    from algua.data.models import SnapshotRecord
+
+    with pytest.raises(ValueError):
+        SnapshotRecord.from_dict(_valid_record_payload(kind="bogus"))
+
+
+def test_snapshot_fields_are_enums_and_json_roundtrips(tmp_path):
+    # #168: dataset/kind are the closed enums end-to-end; to_dict() emits the raw string
+    # value at the JSON boundary and from_dict() reparses to an identical record.
+    from algua.data.models import Dataset, Kind, SnapshotRecord
+
+    source = tmp_path / "bars.csv"
+    source.write_text("ts,symbol,close\n2026-01-02,AAPL,100\n", encoding="utf-8")
+    store = DataStore(tmp_path / "data")
+    rec = store.ingest_file(
+        dataset=Dataset.BARS,
+        provider="local",
+        symbols=["AAPL"],
+        start="2026-01-02",
+        end="2026-01-02",
+        as_of="2026-01-03T00:00:00+00:00",
+        source="fixture",
+        file_path=source,
+    )
+
+    assert isinstance(rec.dataset, Dataset)
+    assert isinstance(rec.kind, Kind)
+    emitted = rec.to_dict()
+    assert emitted["dataset"] == "bars" and type(emitted["dataset"]) is str
+    assert emitted["kind"] == "file" and type(emitted["kind"]) is str
+    assert SnapshotRecord.from_dict(emitted) == rec
 
 
 def test_normalize_symbols_is_shared_public_helper():

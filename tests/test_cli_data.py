@@ -30,7 +30,7 @@ def test_data_ingest_and_inspect(tmp_path):
             [
                 "data",
                 "ingest",
-                "daily-bars",
+                "bars",
                 "--provider",
                 "local",
                 "--symbols",
@@ -56,8 +56,36 @@ def test_data_ingest_and_inspect(tmp_path):
     assert [r["snapshot_id"] for r in listed] == [snapshot_id]
 
     shown = _json(runner.invoke(app, ["data", "inspect", "--snapshot-id", snapshot_id]))
-    assert shown["dataset"] == "daily-bars"
+    assert shown["dataset"] == "bars"
     assert shown["symbols"] == ["AAPL"]
+
+
+def test_data_ingest_rejects_unknown_dataset(tmp_path):
+    # #168: the `data ingest` positional is the closed Dataset enum — a typo fails closed
+    # with a JSON error instead of recording a snapshot no typed reader can ever match.
+    source = tmp_path / "bars.csv"
+    source.write_text("ts,symbol,close\n2026-01-02,AAPL,100\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "data", "ingest", "daily-bars",
+            "--provider", "local", "--symbols", "AAPL",
+            "--start", "2026-01-02", "--end", "2026-01-02",
+            "--as-of", "2026-01-03T00:00:00+00:00", "--source", "fixture",
+            "--from-file", str(source),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_data_inspect_rejects_unknown_dataset_filter():
+    result = runner.invoke(app, ["data", "inspect", "--dataset", "daily-bars"])
+
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["ok"] is False
 
 
 def test_data_ingest_bars_with_provider(monkeypatch):
@@ -171,7 +199,7 @@ def test_data_errors_emit_json(tmp_path):
         [
             "data",
             "ingest",
-            "daily-bars",
+            "bars",
             "--provider",
             "local",
             "--symbols",
@@ -269,7 +297,7 @@ def test_data_verify_all_healthy_exits_zero(tmp_path):
             [
                 "data",
                 "ingest",
-                "daily-bars",
+                "bars",
                 "--provider",
                 "local",
                 "--symbols",
@@ -309,7 +337,7 @@ def test_data_verify_flags_damage_and_exits_nonzero(tmp_path, monkeypatch):
             [
                 "data",
                 "ingest",
-                "daily-bars",
+                "bars",
                 "--provider",
                 "local",
                 "--symbols",

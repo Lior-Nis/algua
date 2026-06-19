@@ -32,14 +32,14 @@ class Kind(StrEnum):
 
 @dataclass(frozen=True)
 class SnapshotMetadata:
-    dataset: str
+    dataset: Dataset
     provider: str
     symbols: tuple[str, ...]
     start: str
     end: str
     as_of: str
     source: str
-    kind: str = "file"
+    kind: Kind = Kind.FILE
     timeframe: str | None = None
     adjustment: str | None = None
     universe: str | None = None
@@ -58,7 +58,7 @@ class SnapshotRecord:
     schema_version: int = SCHEMA_VERSION
 
     @property
-    def dataset(self) -> str:
+    def dataset(self) -> Dataset:
         return self.metadata.dataset
 
     @property
@@ -86,21 +86,21 @@ class SnapshotRecord:
         return self.metadata.source
 
     @property
-    def kind(self) -> str:
+    def kind(self) -> Kind:
         return self.metadata.kind
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
             "snapshot_id": self.snapshot_id,
-            "dataset": self.dataset,
+            "dataset": self.dataset.value,
             "provider": self.provider,
             "symbols": list(self.symbols),
             "start": self.start,
             "end": self.end,
             "as_of": self.as_of,
             "source": self.source,
-            "kind": self.kind,
+            "kind": self.kind.value,
             "timeframe": self.metadata.timeframe,
             "adjustment": self.metadata.adjustment,
             "universe": self.metadata.universe,
@@ -116,14 +116,14 @@ class SnapshotRecord:
     def from_dict(cls, payload: dict[str, Any]) -> SnapshotRecord:
         row_count = payload["row_count"]
         metadata = SnapshotMetadata(
-            dataset=str(payload["dataset"]),
+            dataset=Dataset(str(payload["dataset"])),
             provider=str(payload["provider"]),
             symbols=tuple(str(s) for s in payload["symbols"]),
             start=str(payload["start"]),
             end=str(payload["end"]),
             as_of=str(payload["as_of"]),
             source=str(payload["source"]),
-            kind=str(payload.get("kind", "file")),
+            kind=Kind(str(payload.get("kind", Kind.FILE.value))),
             timeframe=_optional_str(payload.get("timeframe")),
             adjustment=_optional_str(payload.get("adjustment")),
             universe=_optional_str(payload.get("universe")),

@@ -9,7 +9,7 @@ import queue
 from pathlib import Path
 
 from algua.data.manifest import SnapshotManifest
-from algua.data.models import SnapshotMetadata, SnapshotRecord
+from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
 
 _CTX = multiprocessing.get_context("fork")
 
@@ -18,8 +18,8 @@ def _record(snapshot_id: str, worker: int) -> SnapshotRecord:
     return SnapshotRecord(
         snapshot_id=snapshot_id,
         metadata=SnapshotMetadata(
-            dataset="bars", provider="p", symbols=("AAA",), start="2026-01-01",
-            end="2026-01-01", as_of="2026-01-02T00:00:00+00:00", source="s", kind="bars",
+            dataset=Dataset.BARS, provider="p", symbols=("AAA",), start="2026-01-01",
+            end="2026-01-01", as_of="2026-01-02T00:00:00+00:00", source="s", kind=Kind.BARS,
             timeframe="1d", adjustment="none",
         ),
         row_count=1, content_hash="h",
