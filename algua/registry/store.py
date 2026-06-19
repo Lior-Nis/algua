@@ -1299,7 +1299,7 @@ class SqliteStrategyRepository:
     def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
         """Return [(family_id, members_list)] for all families that have active members.
 
-        Each member dict: {"code_hash": str, "factors": set[str]}.
+        Each member dict: {"name": str, "code_hash": str, "factors": set[str]}.
         The code_hash is looked up via compute_artifact_hashes; strategies whose module
         cannot be loaded silently get code_hash='' and factors=set() (fail-closed: they
         will not match unless the new strategy also fails to load, which is extremely

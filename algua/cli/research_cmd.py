@@ -310,6 +310,7 @@ def family_audit_cmd() -> None:
     with registry_conn() as conn:
         # One connection = one consistent read snapshot for the whole scan (no writes).
         repo = SqliteStrategyRepository(conn)
+        conn.execute("BEGIN")
         profile_list = repo.all_families_with_member_profiles()
         profiles = {fid: members for fid, members in profile_list}
         fam_names = repo.family_names()
@@ -344,6 +345,7 @@ def family_audit_cmd() -> None:
             components, kept, candidate_edges, component_breadth=component_breadth,
             individual_breadth=individual_breadth, family_names=fam_names,
             active_counts=active_counts)
+        conn.rollback()
 
     n_pairs = len(list(combinations(profiles, 2)))
     emit(ok({
@@ -353,13 +355,13 @@ def family_audit_cmd() -> None:
                  "Mutates nothing."),
         "clusters": clusters,
         "n_families_scanned": len(profiles),
-        "n_pairs_evaluated": n_pairs,
+        "n_pairs_total": n_pairs,
         "n_pairs_flagged_or_inconclusive": len(candidate_edges),
         "n_pairs_skipped_zero_evasion": len([e for e in candidate_edges if e.flagged]) - len(kept),
         "wall_time_seconds": round(time.monotonic() - started, 3),
         "config": {
             "audit_flag_threshold": family_audit.AUDIT_FLAG_THRESHOLD,
             "return_independent_threshold": family_audit.RETURN_INDEPENDENT_THRESHOLD,
-            "return_correlation_min_overlap": family_audit._RETURN_CORRELATION_MIN_OVERLAP,
+            "return_correlation_min_overlap": family_audit.RETURN_CORRELATION_MIN_OVERLAP,
         },
     }))

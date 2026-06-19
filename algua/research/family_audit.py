@@ -18,6 +18,7 @@ from algua.research.clustering import (
 
 AUDIT_FLAG_THRESHOLD = PARENTAGE_THRESHOLD          # 0.50 — multi-axis blend floor
 RETURN_INDEPENDENT_THRESHOLD = MERGE_THRESHOLD      # 0.85 — return-only flag floor (beta-safe)
+RETURN_CORRELATION_MIN_OVERLAP = _RETURN_CORRELATION_MIN_OVERLAP  # public alias
 _MATERIAL_OVERLAP_FRACTION = 0.5                    # shared window must cover this fraction of each
 
 
@@ -27,12 +28,12 @@ class Edge:
     family_b: int
     audit_score: float
     blended: float
-    axes: dict
+    axes: dict[str, float | None]
     status: str          # "flagged" | "flagged_code_factor" | "inconclusive"
     tier: str            # "merge" | "parentage" | ""
     return_overlap_days: int
     provenance_comparable: bool
-    representative_pair: tuple[str, str]
+    representative_pair: tuple[str | None, str | None]
     flagged: bool
 
 
@@ -43,6 +44,8 @@ def provenance_comparable(
     shared window covering a material fraction of BOTH series.
     Returns (comparable, overlap_days)."""
     if returns_a is None or returns_b is None:
+        return (False, 0)
+    if len(returns_a) == 0 or len(returns_b) == 0:  # type: ignore[arg-type]
         return (False, 0)
     shared = returns_a.index.intersection(returns_b.index)  # type: ignore[attr-defined]
     days = len(shared)
@@ -90,7 +93,7 @@ def _best_pair(members_a: list[dict], members_b: list[dict], returns: dict) -> E
                 family_a=0, family_b=0, audit_score=audit_score, blended=blended, axes=axes,
                 status=status, tier=_tier(audit_score) if flagged else "",
                 return_overlap_days=overlap, provenance_comparable=comparable,
-                representative_pair=(ma["name"], mb["name"]), flagged=flagged)
+                representative_pair=(ma.get("name"), mb.get("name")), flagged=flagged)
             # rank candidates: flagged beats inconclusive, then by audit_score
             key = (1 if cand.flagged else 0, cand.audit_score)
             if best is None or key > (1 if best.flagged else 0, best.audit_score):
