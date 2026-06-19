@@ -19,10 +19,12 @@ from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     FdrGateOutcome,
     FdrStreamState,
+    FunnelFloor,
     StrategyExists,
     StrategyNotFound,
     StrategyRecord,
 )
+from algua.research.gates import MIN_FUNNEL_FLOOR_STRATEGIES
 
 __all__ = [
     "SqliteStrategyRepository",
@@ -30,6 +32,34 @@ __all__ = [
     "StrategyNotFound",
     "StrategyRecord",
 ]
+
+
+def _pool_trial_sharpe_var(triples: list[tuple[int, float, float]]) -> float | None:
+    """Exact pooled SAMPLE variance (ddof=1) of trial Sharpes from ``(count, mean, var)`` triples.
+    ``None`` for empty input; ``0.0`` for total count <= 1. Callers must pre-validate each triple
+    (finite mean/var, count >= 1, var >= 0); this helper assumes clean triples."""
+    if not triples:
+        return None
+    total_n = sum(n for n, _, _ in triples)
+    if total_n <= 1:
+        return 0.0
+    grand_mean = sum(n * m for n, m, _ in triples) / total_n
+    sse = sum((n - 1) * v + n * (m - grand_mean) ** 2 for n, m, v in triples)
+    return sse / (total_n - 1)
+
+
+def _validated_triples(rows) -> list[tuple[int, float, float]] | None:
+    """Validate raw (n, mean, var) DB rows. Returns None (fail closed) if ANY row has a
+    NULL/NaN/inf/negative stat — NULL rows are NEVER silently skipped."""
+    triples: list[tuple[int, float, float]] = []
+    for r in rows:
+        n, mean, var = r["n"], r["mean"], r["var"]
+        if n is None or mean is None or var is None:
+            return None
+        if not (math.isfinite(mean) and math.isfinite(var)) or int(n) < 1 or var < 0.0:
+            return None
+        triples.append((int(n), float(mean), float(var)))
+    return triples
 
 
 def _now() -> str:
@@ -435,20 +465,10 @@ class SqliteStrategyRepository:
         ).fetchall()
         if not rows:
             return None
-        triples: list[tuple[int, float, float]] = []
-        for r in rows:
-            n, mean, var = r["n"], r["mean"], r["var"]
-            if n is None or mean is None or var is None:
-                return None
-            if not (math.isfinite(mean) and math.isfinite(var)) or int(n) < 1 or var < 0.0:
-                return None
-            triples.append((int(n), float(mean), float(var)))
-        total_n = sum(n for n, _, _ in triples)
-        if total_n <= 1:
-            return 0.0
-        grand_mean = sum(n * m for n, m, _ in triples) / total_n
-        sse = sum((n - 1) * v + n * (m - grand_mean) ** 2 for n, m, v in triples)
-        return sse / (total_n - 1)
+        triples = _validated_triples(rows)
+        if triples is None:
+            return None
+        return _pool_trial_sharpe_var(triples)
 
     def total_search_combos(self, strategy_name: str) -> int:
         # COALESCE so an empty result (no trials) reads as 0 rather than NULL.
@@ -687,6 +707,42 @@ class SqliteStrategyRepository:
             (cutoff,),
         ).fetchone()
         return int(row["total"])
+
+    def funnel_trial_sharpe_var(self, window_days: int) -> FunnelFloor:
+        """Per-strategy pooling FIRST (anti-gaming: one vote per strategy regardless of combo
+        count), then MEAN across strategies with at least one search_trials row in the trailing
+        ``window_days``. A selected strategy pools ALL its rows (the window selects strategies, it
+        does NOT slice rows). A strategy with any NULL/NaN/inf stat row is excluded. Returns
+        FunnelFloor(None, ...) when fewer than _MIN_FUNNEL_FLOOR_STRATEGIES finite variances exist
+        (fail-open -> Phase-1 behavior). ISO-8601 UTC timestamps sort lexically, so a string `>=`
+        on created_at is chronological."""
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        # SELECT all rows of every strategy that has at least one in-window row. The window
+        # filters which STRATEGIES are eligible; pooling then uses every row of each.
+        rows = self._conn.execute(
+            "SELECT strategy_name AS name, trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
+            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name IN"
+            " (SELECT DISTINCT strategy_name FROM search_trials WHERE created_at >= ?)",
+            (cutoff,),
+        ).fetchall()
+        by_strategy: dict[str, list] = {}
+        for r in rows:
+            by_strategy.setdefault(r["name"], []).append(r)
+        per_strategy_vars: list[float] = []
+        total_rows = 0
+        for name_rows in by_strategy.values():
+            triples = _validated_triples(name_rows)
+            if triples is None:
+                continue  # excluded: a NULL/non-finite stat in any of this strategy's rows
+            var_s = _pool_trial_sharpe_var(triples)
+            if var_s is None or not math.isfinite(var_s):
+                continue
+            per_strategy_vars.append(var_s)
+            total_rows += len(name_rows)
+        n_strategies = len(per_strategy_vars)
+        if n_strategies < MIN_FUNNEL_FLOOR_STRATEGIES:
+            return FunnelFloor(None, n_strategies, total_rows)
+        return FunnelFloor(sum(per_strategy_vars) / n_strategies, n_strategies, total_rows)
 
     def record_gate_evaluation(
         self,

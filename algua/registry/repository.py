@@ -37,6 +37,22 @@ class FdrStreamState(NamedTuple):
     discovery_indices: list[int]
 
 
+class FunnelFloor(NamedTuple):
+    """Funnel-wide cross-strategy trial-Sharpe dispersion floor (#221 Slice 0). ``var_ann`` is the
+    MEAN of per-strategy pooled trial-Sharpe variances (annualized) across strategies active in the
+    rolling window, or ``None`` when fewer than ``MIN_FUNNEL_FLOOR_STRATEGIES`` finite per-strategy
+    variances exist (fail-open -> Phase-1 behavior). ``n_strategies`` is the count of strategies
+    that contributed a FINITE per-strategy pooled variance (strategies with NULL or non-finite
+    pooled variance are excluded entirely and do not count toward this total). ``n_total_rows`` is
+    the total search_trials rows across THOSE strategies (including their out-of-window/stale rows,
+    since the window selects strategies by their most-recent trial date, then pools ALL of each
+    selected strategy's rows)."""
+
+    var_ann: float | None
+    n_strategies: int
+    n_total_rows: int
+
+
 class ArtifactIdentity(NamedTuple):
     """The full identity a human approval binds to and the live gate recomputes.
 
@@ -233,6 +249,11 @@ class StrategyRepository(Protocol):
         search_trials rows, via the law of total variance over the per-row (count, mean, var)
         triples. Returns None (fail closed) if there are no rows OR any contributing row has a
         NULL/NaN/inf count/mean/var. ANNUALIZED units (caller converts)."""
+        ...
+
+    def funnel_trial_sharpe_var(self, window_days: int) -> FunnelFloor:
+        """Per-strategy pooling FIRST, then mean across strategies active in the trailing
+        ``window_days`` (anti-gaming: one vote per strategy regardless of combo count)."""
         ...
 
     def total_search_combos(self, strategy_name: str) -> int:
