@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol
 
@@ -615,7 +615,7 @@ class StrategyRepository(Protocol):
     def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
         """Return [(family_id, members_list)] for all families with active members.
 
-        Each member dict: {"code_hash": str, "factors": set[str]}.
+        Each member dict: {"name": str, "code_hash": str, "factors": set[str]}.
         Used by the clustering guard in promotion_preflight to classify a strategy
         against all known families before the holdout is touched.
         """
@@ -626,8 +626,16 @@ class StrategyRepository(Protocol):
         """
         ...
 
+    def lifetime_combos_for_families(self, family_ids: Iterable[int]) -> int:
+        """Lifetime combos across the union of families + transitive ancestors (deduped)."""
+        ...
+
     def family_lifetime_combos(self, family_id: int) -> int:
         """Lifetime search combos across this family + all transitive ancestors."""
+        ...
+
+    def family_names(self) -> dict[int, str]:
+        """All family ids → names."""
         ...
 
     # -------------------------------------------------------------------------

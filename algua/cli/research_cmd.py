@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from itertools import combinations
 from typing import Any
 
 import typer
@@ -21,6 +23,7 @@ from algua.cli.errors import json_errors
 from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
+from algua.research import family_audit
 from algua.research.gates import GateCriteria
 from algua.strategies.loader import load_strategy
 
@@ -295,4 +298,72 @@ def dormant_sweep(
                        "min_pct_positive": min_pct_positive},
         "total_dormant": len(dormant), "evaluated": evaluated,
         "passed": passed, "failed": failed, "skipped": skipped, "errors": errors,
+    }))
+
+
+@research_app.command("family-audit")
+@json_errors(ValueError, LookupError, sqlite3.OperationalError)
+def family_audit_cmd() -> None:
+    """ADVISORY cross-family gaming detector. Scans the family DAG for separate families that
+    empirically behave as one thesis (deliberate-split breadth evasion that #222's assignment-time
+    clustering can't see), ranks them by family-term breadth dodged, and recommends a human-governed
+    consolidation. READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation."""
+    started = time.monotonic()
+    with registry_conn() as conn:
+        # One connection = one consistent read snapshot for the whole scan (no writes).
+        repo = SqliteStrategyRepository(conn)
+        conn.execute("BEGIN")
+        profile_list = repo.all_families_with_member_profiles()
+        profiles = {fid: members for fid, members in profile_list}
+        fam_names = repo.family_names()
+
+        # Batch-load each distinct strategy's returns ONCE (O(M), not O(M^2)).
+        all_names = {m["name"] for members in profiles.values() for m in members}
+        returns = {name: repo.load_backtest_returns(name) for name in all_names}
+        returns = {k: v for k, v in returns.items() if v is not None}
+
+        # Pipeline step 1: similarity-only candidate edges.
+        candidate_edges = family_audit.flag_edges(profiles, returns)
+
+        # Step 2 (CLI I/O): pairwise union breadth for candidate pairs only + per-family breadth.
+        individual_breadth = {fid: repo.family_lifetime_combos(fid) for fid in profiles}
+        pair_breadth = {
+            frozenset({e.family_a, e.family_b}):
+                repo.lifetime_combos_for_families([e.family_a, e.family_b])
+            for e in candidate_edges
+        }
+
+        # Step 3: evasion skip + components.
+        components, kept = family_audit.build_components(
+            candidate_edges, pair_breadth=pair_breadth, individual_breadth=individual_breadth)
+
+        # Step 4 (CLI I/O): unified breadth per component.
+        component_breadth = {
+            comp: repo.lifetime_combos_for_families(list(comp)) for comp in components}
+
+        # Step 5: rank + assemble.
+        active_counts = {fid: len(members) for fid, members in profiles.items()}
+        clusters = family_audit.rank_clusters(
+            components, kept, candidate_edges, component_breadth=component_breadth,
+            individual_breadth=individual_breadth, family_names=fam_names,
+            active_counts=active_counts)
+        conn.rollback()
+
+    n_pairs = len(list(combinations(profiles, 2)))
+    emit(ok({
+        "note": ("ADVISORY cross-family gaming screen; NOT a gate. Flags separate families that "
+                 "behave as one thesis (return-correlation authoritative). Acting on a cluster "
+                 "is a human judgement: consolidate via member reassignment (--actor human). "
+                 "Mutates nothing."),
+        "clusters": clusters,
+        "n_families_scanned": len(profiles),
+        "n_pairs_total": n_pairs,
+        "n_pairs_flagged_or_inconclusive": len(candidate_edges),
+        "n_pairs_skipped_zero_evasion": len([e for e in candidate_edges if e.flagged]) - len(kept),
+        "wall_time_seconds": round(time.monotonic() - started, 3),
+        "config": {
+            "audit_flag_threshold": family_audit.AUDIT_FLAG_THRESHOLD,
+            "return_independent_threshold": family_audit.RETURN_INDEPENDENT_THRESHOLD,
+            "return_correlation_min_overlap": family_audit.RETURN_CORRELATION_MIN_OVERLAP,
+        },
     }))

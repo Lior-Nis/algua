@@ -83,6 +83,40 @@ def _return_correlation_axis(
     return max(0.0, corr)  # negative correlation -> 0.0 (not similar)
 
 
+def pairwise_axes(
+    code_a: str,
+    factors_a: set[str],
+    returns_a: object | None,
+    code_b: str,
+    factors_b: set[str],
+    returns_b: object | None,
+) -> tuple[float, dict]:
+    """Per-axis similarity between two strategies + the weighted blend.
+
+    Single source of the axis math (family_similarity routes through this). The "return"
+    axis is None when not evaluable (< MIN_OVERLAP shared dates or a series missing);
+    blended uses 0.0 for an unevaluable return axis. Mirrors family_similarity's prior
+    inner loop exactly: empty hash -> 0.0, empty factor sets -> 0.0, negative corr -> 0.0.
+    """
+    if not code_a or not code_b:
+        code_score = 0.0
+    else:
+        code_score = 1.0 if code_a == code_b else 0.0
+
+    union = factors_a | factors_b
+    factor_score = (len(factors_a & factors_b) / len(union)) if union else 0.0
+
+    return_axis = _return_correlation_axis(returns_a, returns_b)
+    return_score = return_axis if return_axis is not None else 0.0
+
+    blended = (
+        WEIGHT_CODE_ANCESTRY * code_score
+        + WEIGHT_FACTOR_LINEAGE * factor_score
+        + WEIGHT_RETURN_CORRELATION * return_score
+    )
+    return blended, {"code": code_score, "factor": factor_score, "return": return_axis}
+
+
 def family_similarity(
     strategy_code_hash: str,
     strategy_factors: set[str],
@@ -110,58 +144,24 @@ def family_similarity(
     if not family_members:
         return (SimVerdict.NOVEL, 0.0)
 
+    strategy_returns = returns_lookup.get("__strategy__") if returns_lookup is not None else None
     best_score = 0.0
-
     for member in family_members:
-        # --- code_ancestry axis ---
-        if not strategy_code_hash or not member["code_hash"]:
-            code_score = 0.0  # empty hash means unloadable strategy — no ancestry signal
-        else:
-            code_score = 1.0 if strategy_code_hash == member["code_hash"] else 0.0
-
-        # --- factor_lineage axis (Jaccard) ---
-        a: set[str] = strategy_factors
-        b: set[str] = member["factors"]
-        union = a | b
-        if not union:
-            # Both sets empty → 0.0 (no overlap, not 1.0)
-            factor_score = 0.0
-        else:
-            factor_score = len(a & b) / len(union)
-
-        # --- return_correlation axis ---
-        return_score = 0.0
+        member_returns = None
         if returns_lookup is not None:
-            # "__strategy__" is the sentinel key for the current strategy's returns in
-            # returns_lookup. A strategy literally named "__strategy__" would collide —
-            # callers must not register strategies with this name.
-            strategy_name_key = "__strategy__"
-            strategy_returns = returns_lookup.get(strategy_name_key)
             member_name = member.get("name")
             member_returns = returns_lookup.get(member_name) if member_name else None
-            corr = _return_correlation_axis(strategy_returns, member_returns)
-            if corr is not None:
-                return_score = corr
-
-        # Weighted sum
-        score = (
-            WEIGHT_CODE_ANCESTRY * code_score
-            + WEIGHT_FACTOR_LINEAGE * factor_score
-            + WEIGHT_RETURN_CORRELATION * return_score
+        score, _axes = pairwise_axes(
+            strategy_code_hash, strategy_factors, strategy_returns,
+            member["code_hash"], member["factors"], member_returns,
         )
-
-        # Fail-closed: non-finite intermediate → NOVEL
         if not math.isfinite(score):
             return (SimVerdict.NOVEL, 0.0)
-
         if score > best_score:
             best_score = score
 
-    # Final non-finite check on best_score (e.g. if weights were patched to NaN)
     if not math.isfinite(best_score):
         return (SimVerdict.NOVEL, 0.0)
-
-    # Apply verdict thresholds
     if best_score >= MERGE_THRESHOLD:
         return (SimVerdict.MERGE, best_score)
     if best_score >= PARENTAGE_THRESHOLD:

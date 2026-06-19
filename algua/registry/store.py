@@ -4,7 +4,7 @@ import json
 import math
 import sqlite3
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -1476,7 +1476,7 @@ class SqliteStrategyRepository:
     def all_families_with_member_profiles(self) -> list[tuple[int, list[dict]]]:
         """Return [(family_id, members_list)] for all families that have active members.
 
-        Each member dict: {"code_hash": str, "factors": set[str]}.
+        Each member dict: {"name": str, "code_hash": str, "factors": set[str]}.
         The code_hash is looked up via compute_artifact_hashes; strategies whose module
         cannot be loaded silently get code_hash='' and factors=set() (fail-closed: they
         will not match unless the new strategy also fails to load, which is extremely
@@ -1544,20 +1544,28 @@ class SqliteStrategyRepository:
         ).fetchone()
         return int(row[0])
 
-    def family_lifetime_combos(self, family_id: int) -> int:
-        """Lifetime search combos across this family + all transitive ancestors.
-
-        Uses a DISTINCT subquery so a strategy that was reassigned between two ancestor
-        families (leaving a removed_at row in one and an active row in another) is counted
-        exactly once — not once per matching family_members row.
-        """
-        member_strategies = self._family_member_strategies(family_id)
-        if not member_strategies:
+    def lifetime_combos_for_families(self, family_ids: Iterable[int]) -> int:
+        """Lifetime search combos across the UNION of the given families + all their
+        transitive ancestors. A strategy reachable via several of the families is counted
+        exactly once (the union of member-strategy sets is deduped before the sum)."""
+        all_strategies: set[str] = set()
+        for fid in family_ids:
+            all_strategies.update(self._family_member_strategies(fid))
+        if not all_strategies:
             return 0
-        placeholders = ",".join("?" * len(member_strategies))
+        placeholders = ",".join("?" * len(all_strategies))
         row = self._conn.execute(
             f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
             f" WHERE st.strategy_name IN ({placeholders})",
-            member_strategies,
+            list(all_strategies),
         ).fetchone()
         return int(row[0])
+
+    def family_lifetime_combos(self, family_id: int) -> int:
+        """Lifetime search combos across this family + all transitive ancestors."""
+        return self.lifetime_combos_for_families([family_id])
+
+    def family_names(self) -> dict[int, str]:
+        """All family ids → names (read-only)."""
+        rows = self._conn.execute("SELECT id, name FROM families").fetchall()
+        return {int(r[0]): r[1] for r in rows}

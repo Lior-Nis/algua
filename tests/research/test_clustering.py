@@ -4,13 +4,67 @@ from __future__ import annotations
 import math
 import re
 
+import pandas as pd
+
+from algua.research import clustering as C
 from algua.research.clustering import (
     PARENTAGE_THRESHOLD,
     WEIGHT_FACTOR_LINEAGE,
     SimVerdict,
     clustering_version,
     family_similarity,
+    pairwise_axes,
 )
+
+
+def _series(vals, start="2023-01-01"):
+    idx = pd.date_range(start, periods=len(vals), freq="D")
+    return pd.Series(vals, index=idx)
+
+
+def test_pairwise_axes_code_exact_match():
+    blended, axes = pairwise_axes("h1", set(), None, "h1", set(), None)
+    assert axes["code"] == 1.0
+    assert axes["factor"] == 0.0
+    assert axes["return"] is None
+    assert blended == C.WEIGHT_CODE_ANCESTRY  # 0.50
+
+
+def test_pairwise_axes_factor_jaccard():
+    blended, axes = pairwise_axes("", {"a", "b"}, None, "", {"b", "c"}, None)
+    assert axes["code"] == 0.0
+    assert axes["factor"] == 1 / 3
+    assert axes["return"] is None
+
+
+def test_pairwise_axes_return_axis_present_and_clamped():
+    s = _series([0.01, -0.02, 0.03, 0.0, 0.01] * 20)  # 100 points
+    blended, axes = pairwise_axes("", set(), s, "", set(), s)
+    assert math.isclose(axes["return"], 1.0)  # perfect self-correlation
+    assert math.isclose(blended, C.WEIGHT_RETURN_CORRELATION)  # 0.20
+
+
+def test_pairwise_axes_return_axis_none_when_thin_overlap():
+    s1 = _series([0.01] * 10)
+    s2 = _series([0.01] * 10, start="2024-01-01")  # disjoint dates
+    _blended, axes = pairwise_axes("", set(), s1, "", set(), s2)
+    assert axes["return"] is None
+
+
+def test_pairwise_axes_symmetric():
+    s1 = _series([0.01, -0.01, 0.02, 0.0] * 20)
+    s2 = _series([0.0, 0.01, -0.01, 0.02] * 20)
+    a = pairwise_axes("h1", {"x"}, s1, "h2", {"y"}, s2)
+    b = pairwise_axes("h2", {"y"}, s2, "h1", {"x"}, s1)
+    assert a == b
+
+
+def test_family_similarity_still_routes_and_matches_reference():
+    # code-exact member → MERGE at 0.50 floor (code weight), no returns
+    members = [{"code_hash": "h1", "factors": set(), "name": "m1"}]
+    verdict, score = family_similarity("h1", set(), members, returns_lookup=None)
+    assert verdict == SimVerdict.PARENTAGE  # 0.50 == PARENTAGE floor, < MERGE 0.85
+    assert math.isclose(score, 0.50)
 
 
 def test_identical_code_hash_is_merge():
