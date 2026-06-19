@@ -19,7 +19,7 @@ damage.
 
 | Leakage vector | How the platform blocks it | Code wall (`path::symbol`) | Where the wall STOPS |
 |---|---|---|---|
-| **Execution-timing look-ahead** | Central `t→t+1` decision lag; the optional `compute_weights_panel` fast path is guarded by a fail-closed parity check against the per-bar path. | `algua/backtest/engine.py::simulate` (shifts by `decision_lag_bars`), `algua/backtest/engine.py::_assert_parity`; contract floor `algua/contracts/types.py::ExecutionContract` (`decision_lag_bars >= 1`) | **Execution timing only.** It does NOT catch feature/data leakage inside your signal — see "Leaks no wall can catch". |
+| **Execution-timing look-ahead** | Central `t→t+1` decision lag; the optional `signal_panel` fast path is guarded by a fail-closed **weight-level** parity check against the per-bar `construct(signal(view), view)` path. | `algua/backtest/engine.py::simulate` (shifts by `decision_lag_bars`), `algua/backtest/engine.py::_assert_parity`; contract floor `algua/contracts/types.py::ExecutionContract` (`decision_lag_bars >= 1`) | **Execution timing only.** It does NOT catch feature/data leakage inside your signal — see "Leaks no wall can catch". |
 | **Survivorship** | Point-in-time universe: membership is masked as-of each decision date, with snapshot provenance recorded. | `algua/backtest/engine.py::_members_as_of`, `algua/backtest/engine.py::_decision_weights`; CLI resolution + provenance `algua/cli/_common.py::resolve_universe_inputs` | **Opt-in only.** Absence of `--universe` selects a static universe; PIT is not the default (see "Not yet enforced"). |
 | **Holdout peeking** | `holdout_metrics` is withheld from every command except `research promote`, which reveals AND burns it (single-use). The audited override is `--allow-holdout-reuse`. | `algua/backtest/walkforward.py` (`holdout_metrics` is the SENSITIVE field; stripped by `algua/cli/backtest_cmd.py::walk_forward_cmd` and `algua/tracking/mlflow_tracker.py`); burn identity in `algua/cli/research_cmd.py::promote` (`overlapping_holdout_evaluations` → `record_holdout_evaluation`) | **Re-evaluating the same window.** Nothing stops you forming a *new* hypothesis after seeing a burn result, or peeking at the holdout "to debug". |
 | **Multiple testing (per-strategy only)** | The holdout-Sharpe bar is deflated by `sqrt(2·ln N)·sqrt(ANN)/sqrt(T)`. Breadth N is **measured** from recorded sweep trials (preferred) or **declared** via `--n-combos` (audited as less trustworthy); promotion refuses if neither exists; a degenerate (0-bar) holdout fails closed (`inf`). | `algua/research/gates.py::sharpe_haircut`, `algua/research/gates.py::evaluate_gate`; `algua/cli/backtest_cmd.py::_record_search_breadth`, `algua/cli/research_cmd.py::_resolve_breadth` | **N counts recorded sweep trials for THIS strategy name** — not the breadth of the whole research funnel (see "Not yet enforced"). |
@@ -46,10 +46,11 @@ methodologically-aware author avoids them:
   *whole* sample instead of a trailing window leaks the future into every bar.
 - **Target leakage inside a custom feature.** A feature that reads a future bar (e.g. a forward
   return, an off-by-one `shift`) is look-ahead the execution lag never sees.
-- **Panel fast-path parity-vs-validity trap.** `compute_weights_panel` runs over the whole period,
-  so it is the easiest place to compute full-sample normalizers, `shift(-1)`, or fitted thresholds.
-  The parity guard proves the panel output *equals* `compute_weights` — it does **not** prove either
-  is scientifically valid. A bug present in *both* paths passes parity silently.
+- **Panel fast-path parity-vs-validity trap.** `signal_panel` — the optional scores twin of
+  `signal` — runs over the whole period, so it is the easiest place to compute full-sample
+  normalizers, `shift(-1)`, or fitted thresholds. The **weight-level** parity guard proves the
+  panel-derived weights *equal* the per-bar `construct(signal(view), view)` weights — it does
+  **not** prove either is scientifically valid. A bug present in *both* paths passes parity silently.
 - **`adj_close` / data-provenance leaks.** Using adjustment factors, vendor-restated bars, or
   split-adjusted history that was not knowable as of the decision date smuggles the future in
   through the data, not the code.
