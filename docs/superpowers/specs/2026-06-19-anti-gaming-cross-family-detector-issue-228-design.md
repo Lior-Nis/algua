@@ -142,7 +142,10 @@ For every **unordered pair of families (A, B)** with non-zero evasion (see §4):
     near-clone (whose returns track ~1.0).
 
   Both thresholds are imported from `clustering.py`; `family_audit.py` adds no protected constants.
-  `audit_score = max(blended, return_axis or 0.0)` is reported for ranking/tier display.
+  `audit_score = max(blended, return_axis if (return_axis is not None and provenance_comparable)
+  else 0.0)` is reported for ranking/tier display — the return term contributes to the score only
+  when its provenance is comparable (matching the independent-flag gate), so a non-comparable
+  correlation never inflates the rank.
   Max-linkage = the `argmax over a∈A, b∈B` of the flagging strength. The winning pair is the edge's
   `representative_pair` and supplies its `axis_breakdown`.
 
@@ -239,13 +242,19 @@ a false positive (GATE-1-R2 provenance finding). Each flagged edge carries a `st
   adversary who obfuscates code can suppress this); the operator is told so. The only way past the
   0.50 blend floor here is a (near-)exact code-hash match or very high factor overlap — a documented
   blind spot, surfaced not hidden.
-- **`inconclusive`** — pair has thin/incomparable returns AND a sub-floor code/factor blend: not
-  flagged, but listed under a cluster's `inconclusive_edges[]` when it sits inside a flagged
-  component, so a return-data blind spot is **visible** rather than dropped.
+- **`inconclusive`** — a pair whose returns *look* like a near-clone (return ≥ 0.85) but whose
+  provenance is **not** comparable, so the independent return-flag cannot fire: not flagged, but
+  listed under a cluster's `inconclusive_edges[]` when it sits inside a flagged component, so this
+  "looks-like-a-clone-but-untrusted-provenance" blind spot is **visible** rather than dropped.
+  (Other unconfirmed intra-cluster links are not silently hidden either: they are structurally
+  visible — a family pair that is co-present in a cluster but absent from `flagged_edges` is a
+  transitive/unconfirmed link the human can see directly. Truly dissimilar pairs with no evidence
+  are correctly dropped.)
 
-Edges report `return_overlap_days`, the two series' period spans, and `provenance_comparable` so the
-human can judge the evidence. This replaces the binary "evaluated | insufficient_overlap" with an
-honest taxonomy.
+Edges report `return_overlap_days` (the count of shared trading dates backing the correlation) and
+`provenance_comparable` so the human can judge the evidence — `return_overlap_days` IS the material
+provenance signal (how much shared history the correlation rests on). This replaces the binary
+"evaluated | insufficient_overlap" with an honest taxonomy.
 
 **Detection runs over ACTIVE members** (`all_families_with_member_profiles()` returns active members
 only) while breadth is **lifetime** (includes removed members) — a deliberate asymmetry: a removed
@@ -281,7 +290,7 @@ explicit (GATE-1 active-vs-lifetime finding).
     }
   ],
   "n_families_scanned": 12,
-  "n_pairs_evaluated": 34,
+  "n_pairs_total": 34,
   "n_pairs_skipped_zero_evasion": 4,
   "wall_time_seconds": 0.42,
   "clustering_version": "…",
@@ -300,10 +309,13 @@ operator scaling telemetry (GATE-1 M1/L3).
 
 ### 8. Read-only guarantees (mirror `dormant-sweep`)
 
-No holdout reservation/peek/burn; no `gate_evaluations`/`family_events` writes; no transitions; no
-return-series recompute (reads stored blobs only). All reads happen under one consistent snapshot.
-The command's only effect is stdout JSON. Collapse stays the existing human-governed
-`add_parent_edge`. **Scaling:** the scan is `O(F² × M²)` pairwise; for the current funnel that is
+No **business-state** writes: no holdout reservation/peek/burn; no `gate_evaluations`/`family_events`
+writes; no transitions; no return-series recompute (reads stored blobs only). Like every algua
+command, it opens the registry via the shared connection helper, which may run an **idempotent schema
+migration on connect** (a platform bootstrap, not a business-state mutation — `dormant-sweep` and the
+other "read-only" commands behave identically). The audit reads then run inside **one explicit read
+transaction** (`BEGIN` … `rollback`) so they see a single consistent snapshot. Collapse stays the
+existing human-governed `add_parent_edge` (or member reassignment). **Scaling:** the scan is `O(F² × M²)` pairwise; for the current funnel that is
 trivial. Cheap pruning (skip families with no usable profile; the zero-evasion skip in §4 drops
 already-unified pairs) and the telemetry counters bound surprise. Hard caps / truncation are
 deferred (YAGNI) until the funnel actually reaches the scale this issue's reopen condition names.
