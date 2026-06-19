@@ -601,3 +601,134 @@ def test_run_gate_write_persists_even_on_failed_gate(tmp_path):
     ).fetchone()
     stored = _json.loads(row["decision_json"])
     assert stored.get("returns_available") is True
+
+
+# --- run_gate bootstrap AND-check (#221 Slice 2) -----------------------------------------------
+# Calibration notes:
+#   Bootstrap binds iff dsr_binding=True AND wf.holdout_returns is not None.
+#   - wf WITHOUT holdout_returns (all _run/_run_measured calls) → bootstrap NOT binding.
+#   - wf WITH holdout_returns AND measured breadth → bootstrap binds, adds dsr_bootstrap check.
+#   The benign fixture uses 63 bars of alternating [0.01, 0.005] (mean ~0.0076, low autocorr)
+#   so the bootstrap lower-confidence is well above the DSR_ALPHA threshold.
+
+# 63-bar benign return series: alternating 0.01 / 0.005, low autocorrelation, positive Sharpe.
+_BOOTSTRAP_RETS = [0.01 if i % 2 == 0 else 0.005 for i in range(63)]
+_BOOTSTRAP_DATES = [f"2024-{(i // 20) + 1:02d}-{(i % 20) + 1:02d}" for i in range(63)]
+_BOOTSTRAP_N = len(_BOOTSTRAP_RETS)
+_BOOTSTRAP_H_START = "2024-01-01"
+_BOOTSTRAP_H_END = "2024-03-31"
+
+
+def _gate_repo_with_stats(tmp_path):
+    """Repo ready for bootstrap tests: measured breadth with trial stats."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    return repo
+
+
+def _wf_with_holdout_returns(rets=None, bar_dates=None, h_start=None, h_end=None):
+    """Build a WalkForwardResult carrying holdout_returns (bootstrap-binding)."""
+    from algua.backtest.walkforward import WalkForwardResult
+
+    rets = rets if rets is not None else _BOOTSTRAP_RETS
+    bar_dates = bar_dates if bar_dates is not None else _BOOTSTRAP_DATES
+    h_start = h_start or _BOOTSTRAP_H_START
+    h_end = h_end or _BOOTSTRAP_H_END
+    return WalkForwardResult(
+        strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
+        timeframe="1d", seed=None,
+        period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
+        window_metrics=[],
+        holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end, "n_bars": len(rets)},
+        stability=dict(_GATE_STAB),
+        holdout_returns=(rets, bar_dates),
+    )
+
+
+def _run_bootstrap(repo, wf, rid=None):
+    """run_gate with measured breadth and holdout_returns wf."""
+    return run_gate(
+        repo, wf, name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="",
+        holdout_evaluation_id=rid,
+    )
+
+
+def _reserve_holdout(repo):
+    """Reserve and finalize a holdout burn; returns rid."""
+    sid = repo.get(_GATE_NAME).id
+    rid, _ = repo.reserve_holdout(
+        sid, data_source="synthetic", snapshot_id=None,
+        period_start="2024-01-01", period_end="2024-06-01",
+        holdout_frac=0.2, holdout_start=_BOOTSTRAP_H_START, holdout_end=_BOOTSTRAP_H_END,
+        allow_reuse=False)
+    repo.finalize_holdout_reservation(rid, config_hash="c", strategy_id=sid)
+    return rid
+
+
+def test_bootstrap_binds_when_holdout_returns_present(tmp_path):
+    """Measured promote with holdout_returns → dsr_bootstrap_binding=True, check in decision,
+    audit fields populated, dsr_bootstrap_lower in persisted decision_json."""
+    import json as _json  # noqa: PLC0415
+
+    repo = _gate_repo_with_stats(tmp_path)
+    rid = _reserve_holdout(repo)
+    wf = _wf_with_holdout_returns()
+    outcome = _run_bootstrap(repo, wf, rid)
+    d = outcome.decision
+
+    # Bootstrap must bind
+    assert d.dsr_bootstrap_binding is True
+    # A dsr_bootstrap check must appear in the checks list
+    assert any(c["name"] == "dsr_bootstrap" for c in d.checks)
+    # Audit scalars must be populated
+    assert d.dsr_bootstrap_seed is not None
+    assert d.dsr_bootstrap_b is not None
+    assert d.dsr_bootstrap_block_len is not None
+    # The lower confidence must be a finite float (benign series → high value)
+    assert d.dsr_bootstrap_lower is not None
+    assert isinstance(d.dsr_bootstrap_lower, float)
+
+    # decision_json in DB must carry the bootstrap lower confidence
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    stored = _json.loads(row["decision_json"])
+    assert "dsr_bootstrap_lower" in stored
+    assert stored["dsr_bootstrap_lower"] is not None
+
+
+def test_bootstrap_not_binding_without_holdout_returns(tmp_path):
+    """Existing _run helper (wf has no holdout_returns) → bootstrap NOT binding, no check,
+    and existing pass/fail outcome is UNCHANGED (measured passing case still passes)."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    breadth = _breadth(repo, "measured")
+    # _gate_wf() has no holdout_returns — bootstrap must NOT bind
+    outcome = _run(repo, breadth)
+    d = outcome.decision
+
+    assert d.dsr_bootstrap_binding is False
+    assert all(c["name"] != "dsr_bootstrap" for c in d.checks)
+    # The existing DSR+FDR outcome is unchanged: dsr Sharpe=7.0 → passes, FDR accepts → promoted
+    assert d.dsr_binding is True
+    assert outcome.promoted is True
+
+
+def test_bootstrap_determinism(tmp_path):
+    """Two identical run_gate calls on fresh repos produce the same dsr_bootstrap_lower."""
+    wf = _wf_with_holdout_returns()
+
+    def _run_fresh(path):
+        repo = _gate_repo_with_stats(path)
+        rid = _reserve_holdout(repo)
+        return _run_bootstrap(repo, wf, rid).decision.dsr_bootstrap_lower
+
+    lower1 = _run_fresh(tmp_path / "db1")
+    lower2 = _run_fresh(tmp_path / "db2")
+    assert lower1 is not None
+    assert lower1 == lower2
