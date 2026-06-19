@@ -45,6 +45,14 @@ class SnapshotMetadata:
     universe: str | None = None
     source_metadata: dict[str, str] | None = None
 
+    def __post_init__(self) -> None:
+        # Construction backstop: every snapshot's dataset/kind is ALWAYS a valid enum member.
+        # A raw/invalid string reaching the dataclass (a direct ingest call, untyped caller)
+        # fails closed here with ValueError — which, because metadata is built before any
+        # staging/publish side effect, prevents an orphan payload from a typo'd dataset.
+        object.__setattr__(self, "dataset", Dataset(self.dataset))
+        object.__setattr__(self, "kind", Kind(self.kind))
+
 
 @dataclass(frozen=True)
 class SnapshotRecord:

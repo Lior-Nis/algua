@@ -341,6 +341,32 @@ def test_from_dict_rejects_unknown_kind():
         SnapshotRecord.from_dict(_valid_record_payload(kind="bogus"))
 
 
+def test_ingest_file_unknown_dataset_fails_closed_without_side_effects(tmp_path):
+    # #168: a typo'd dataset is rejected at metadata construction — which runs before any
+    # staging/copy/publish — so the ingest fails closed and leaves NO orphan snapshot payload.
+    source = tmp_path / "bars.csv"
+    source.write_text("ts,symbol,close\n2026-01-02,AAPL,100\n", encoding="utf-8")
+    store = DataStore(tmp_path / "data")
+
+    with pytest.raises(ValueError):
+        store.ingest_file(
+            dataset="not-a-dataset",
+            provider="local",
+            symbols=["AAPL"],
+            start="2026-01-02",
+            end="2026-01-02",
+            as_of="2026-01-03T00:00:00+00:00",
+            source="fixture",
+            file_path=source,
+        )
+
+    assert store.list_snapshots() == []
+    snapshots_dir = tmp_path / "data" / "snapshots"
+    assert not snapshots_dir.exists() or not any(
+        p.is_file() and "_staging" not in p.parts for p in snapshots_dir.rglob("*")
+    )
+
+
 def test_snapshot_fields_are_enums_and_json_roundtrips(tmp_path):
     # #168: dataset/kind are the closed enums end-to-end; to_dict() emits the raw string
     # value at the JSON boundary and from_dict() reparses to an identical record.
