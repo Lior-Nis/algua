@@ -44,7 +44,7 @@ from algua.registry.live_gate import (
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
-from algua.strategies.loader import load_strategy
+from algua.strategies.loader import load_tradable_strategy
 
 live_app = typer.Typer(help="LIVE (real-money) trading — human-authorized strategies only",
                        no_args_is_help=True)
@@ -110,13 +110,7 @@ def _run_strategy_tick(  # noqa: PLR0913
     (trip + scoped flatten), snapshot persistence. Returns a result dict; raises typer.Exit(1) with
     an emitted breach/halt payload on TickHalted/RiskBreach (same behaviour as the single-strategy
     command)."""
-    strategy = load_strategy(name)
-    from algua.strategies.base import (
-        assert_tradable_without_fundamentals,
-        assert_tradable_without_news,
-    )
-    assert_tradable_without_fundamentals(strategy)
-    assert_tradable_without_news(strategy)
+    strategy = load_tradable_strategy(name)
 
     rec = SqliteStrategyRepository(conn).get(name)
     alloc = active_allocation(conn, rec.id)
