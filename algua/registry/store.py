@@ -127,36 +127,31 @@ class SqliteStrategyRepository:
             if derived_from == name:
                 raise ValueError(f"{name} cannot be derived from itself")
             self.get(derived_from)
-        sets: list[str] = []
-        params: list[object] = []
+        # One dict drives both the clause list and the param list, so a column and its value can
+        # never drift out of lockstep — adding a field is a single line, not two parallel edits.
+        updates: dict[str, object] = {}
         if family is not None:
-            sets.append("family = ?")
-            params.append(family)
+            updates["family"] = family
         if author is not None:
-            sets.append("author = ?")
-            params.append(author.value)
+            updates["author"] = author.value
         if hypothesis_status is not None:
-            sets.append("hypothesis_status = ?")
-            params.append(hypothesis_status.value)
+            updates["hypothesis_status"] = hypothesis_status.value
         if derived_from is not None:
-            sets.append("derived_from = ?")
-            params.append(derived_from)
+            updates["derived_from"] = derived_from
         if description is not None:
-            sets.append("description = ?")
-            params.append(description)
+            updates["description"] = description
         if add_tags or remove_tags:
             tags = set(rec.tags)
             tags |= set(canonicalize_tags(add_tags or []))
             tags -= set(canonicalize_tags(remove_tags or []))
-            sets.append("tags = ?")
-            params.append(dump_tags(tags))
-        if sets:
-            sets.append("updated_at = ?")
-            params.append(_now())
-            params.append(rec.id)
+            updates["tags"] = dump_tags(tags)
+        if updates:
+            updates["updated_at"] = _now()
+            clauses = ", ".join(f"{col} = ?" for col in updates)
             with self._conn:
                 self._conn.execute(
-                    f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params
+                    f"UPDATE strategies SET {clauses} WHERE id = ?",
+                    [*updates.values(), rec.id],
                 )
         return self.get(name)
 
@@ -169,30 +164,31 @@ class SqliteStrategyRepository:
         author: Author | None = None,
         hypothesis_status: HypothesisStatus | None = None,
     ) -> list[StrategyRecord]:
-        clauses: list[str] = []
-        params: list[object] = []
+        # Each clause carries its OWN params as a co-located tuple, so a multi-placeholder clause
+        # (e.g. the COALESCE pairs below) can never fall out of sync with a separate param list.
+        clauses: list[tuple[str, tuple[object, ...]]] = []
         if stage is not None:
-            clauses.append("stage = ?")
-            params.append(stage.value)
+            clauses.append(("stage = ?", (stage.value,)))
         if family is not None:
-            clauses.append("family = ?")
-            params.append(family)
+            clauses.append(("family = ?", (family,)))
         if author is not None:
             # COALESCE so legacy NULL rows (pre-metadata schema) match the default 'agent'.
-            clauses.append("COALESCE(author, ?) = ?")
-            params.extend((Author.AGENT.value, author.value))
+            clauses.append(("COALESCE(author, ?) = ?", (Author.AGENT.value, author.value)))
         if hypothesis_status is not None:
             # Same NULL-legacy treatment; hypothesis_status defaults to 'untested'.
-            clauses.append("COALESCE(hypothesis_status, ?) = ?")
-            params.extend((HypothesisStatus.UNTESTED.value, hypothesis_status.value))
+            clauses.append((
+                "COALESCE(hypothesis_status, ?) = ?",
+                (HypothesisStatus.UNTESTED.value, hypothesis_status.value),
+            ))
         for tag in canonicalize_tags(tags or []):
-            clauses.append(
+            clauses.append((
                 "EXISTS (SELECT 1 FROM json_each("
                 "CASE WHEN json_valid(tags) THEN tags ELSE '[]' END"
-                ") WHERE value = ?)"
-            )
-            params.append(tag)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                ") WHERE value = ?)",
+                (tag,),
+            ))
+        where = f" WHERE {' AND '.join(c for c, _ in clauses)}" if clauses else ""
+        params = [p for _, clause_params in clauses for p in clause_params]
         rows = self._conn.execute(
             f"SELECT * FROM strategies{where} ORDER BY id", params
         ).fetchall()
