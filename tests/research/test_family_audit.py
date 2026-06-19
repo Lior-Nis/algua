@@ -56,6 +56,19 @@ def test_inconclusive_when_returns_high_but_provenance_not_comparable():
     assert all(x.status != "flagged" for x in matches)
 
 
+def test_code_match_with_low_return_is_flagged_code_factor():
+    # identical code hash (blend flags via code=1.0) but only weak return corr (< 0.85)
+    # over a comparable window → status must be "flagged_code_factor", NOT "flagged".
+    a = _series([0.01, -0.02, 0.015, 0.0, 0.005, -0.01] * 40)   # 240 pts
+    b = _series([-0.01, 0.02, -0.015, 0.0, -0.005, 0.01] * 40)  # anti-ish/low corr, same dates
+    profiles = {1: [_prof("a", code="same")], 2: [_prof("b", code="same")]}
+    edges = flag_edges(profiles, {"a": a, "b": b})
+    e = next(x for x in edges if {x.family_a, x.family_b} == {1, 2})
+    assert e.flagged is True
+    assert e.status == "flagged_code_factor"
+    assert e.axes["return"] is not None and e.axes["return"] < 0.85
+
+
 def test_max_linkage_picks_hottest_pair():
     rng = _series([0.01, -0.02, 0.015, 0.0] * 60)  # 240 pts
     # family 1 has a diverse member + a hidden clone of family 2's member

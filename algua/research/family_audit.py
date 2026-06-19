@@ -78,9 +78,7 @@ def _best_pair(members_a: list[dict], members_b: list[dict], returns: dict) -> E
             audit_score = max(blended, ret if (ret is not None and comparable) else 0.0)
 
             if flagged:
-                has_return_evidence = ret is not None and comparable and ret > 0.0
-                status = "flagged" if (return_flag or has_return_evidence) \
-                    else "flagged_code_factor"
+                status = "flagged" if return_flag else "flagged_code_factor"
             elif ret is not None and ret >= RETURN_INDEPENDENT_THRESHOLD and not comparable:
                 status = "inconclusive"
             else:
