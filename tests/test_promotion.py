@@ -516,7 +516,8 @@ def test_run_gate_with_holdout_id_and_returns_writes_row(tmp_path):
         strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
         timeframe="1d", seed=None,
         period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
-        window_metrics=[], holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end},
+        window_metrics=[],
+        holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end, "n_bars": len(rets)},
         stability=dict(_GATE_STAB),
         holdout_returns=(rets, bar_dates),
     )
@@ -570,7 +571,8 @@ def test_run_gate_write_persists_even_on_failed_gate(tmp_path):
         strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
         timeframe="1d", seed=None,
         period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
-        window_metrics=[], holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end},
+        window_metrics=[],
+        holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end, "n_bars": len(rets)},
         stability=dict(_GATE_STAB),
         holdout_returns=(rets, bar_dates),
     )

@@ -90,7 +90,7 @@ def test_record_and_read_back_round_trip(repo_with_burn):
         "SELECT n_bars, returns_blob, bar_dates_blob FROM holdout_returns WHERE id=?", (rid,)
     ).fetchone()
     assert row["n_bars"] == 3
-    assert list(np.frombuffer(row["returns_blob"], dtype=np.float64)) == pytest.approx(rets)
+    assert list(np.frombuffer(row["returns_blob"], dtype="<f8")) == pytest.approx(rets)
     assert row["bar_dates_blob"].decode("utf-8").split("\n") == dates
 
 
@@ -110,12 +110,44 @@ def test_strategy_id_mismatch_raises(repo_with_burn, other_strategy_id):
 
 
 def test_unique_prevents_double_write(repo_with_burn):
+    """A second write with DIFFERENT returns raises ValueError (conflicting double-write)."""
     repo, sid, hid, (h_start, h_end) = repo_with_burn
     repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
                                 returns=[0.1], bar_dates=["2020-12-31"])
-    with pytest.raises(ValueError):  # UNIQUE(holdout_evaluation_id) -> second write rejected
+    with pytest.raises(ValueError, match="different content"):
         repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
                                     returns=[0.2], bar_dates=["2020-12-31"])
+
+
+def test_idempotent_rewrite_returns_existing_id(repo_with_burn):
+    """Identical content written twice: second call returns the SAME row id, ONE row in DB."""
+    repo, sid, hid, (h_start, h_end) = repo_with_burn
+    rets = [0.01, -0.02, 0.005]
+    dates = ["2020-12-29", "2020-12-30", "2020-12-31"]
+    rid1 = repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
+                                       returns=rets, bar_dates=dates)
+    rid2 = repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
+                                       returns=rets, bar_dates=dates)
+    assert rid1 == rid2, "second identical write must return the same row id"
+    count = repo._conn.execute(
+        "SELECT COUNT(*) FROM holdout_returns WHERE holdout_evaluation_id=?", (hid,)
+    ).fetchone()[0]
+    assert count == 1, "exactly one row must exist after idempotent double-write"
+
+
+def test_reconciliation_after_missing_gate_row(repo_with_burn):
+    """Committed burn with returns row already present → re-calling record_holdout_returns
+    with identical args succeeds and returns the existing id (reconciliation path)."""
+    repo, sid, hid, (h_start, h_end) = repo_with_burn
+    rets = [0.03, 0.04]
+    dates = ["2020-12-29", "2020-12-30"]
+    # Simulate: returns written, gate row absent (will be written later by re-run).
+    rid1 = repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
+                                       returns=rets, bar_dates=dates)
+    # Re-run calls record_holdout_returns again with identical args — must not raise.
+    rid2 = repo.record_holdout_returns(hid, sid, holdout_start=h_start, holdout_end=h_end,
+                                       returns=rets, bar_dates=dates)
+    assert rid1 == rid2
 
 
 def test_finalize_requires_matching_strategy_id(repo_pending_reservation, other_strategy_id):

@@ -437,6 +437,10 @@ def run_gate(
     returns_available = False
     if holdout_evaluation_id is not None and wf.holdout_returns is not None:
         rets, bar_dates = wf.holdout_returns
+        if not (len(rets) == len(bar_dates) == holdout_n_bars):
+            raise ValueError(
+                f"holdout_returns length {len(rets)}/{len(bar_dates)}"
+                f" != holdout n_bars {holdout_n_bars}")
         repo.record_holdout_returns(
             holdout_evaluation_id, rec.id,
             holdout_start=wf.holdout_metrics["start"], holdout_end=wf.holdout_metrics["end"],

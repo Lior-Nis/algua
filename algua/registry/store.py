@@ -567,33 +567,55 @@ class SqliteStrategyRepository:
         returns: list[float], bar_dates: list[str],
     ) -> int:
         """Persist ONE OOS return vector for a committed holdout burn (#221 Slice 1). Separate
-        transaction from the burn (the burn committed at on_peek). UNIQUE(holdout_evaluation_id)
-        makes a re-run reconciliation safe. Validation is fail-closed, before the write."""
+        transaction from the burn (the burn committed at on_peek). IDEMPOTENT on identical content:
+        if a row already exists with the same (strategy_id, holdout_start, holdout_end, n_bars,
+        returns_blob, bar_dates_blob), the existing row id is returned without error — enabling
+        the "returns row exists, gate row missing → re-run" reconciliation path. A row that exists
+        with DIFFERENT content raises ValueError (genuine conflicting double-write).
+        Validation is fail-closed, INSIDE the transaction so check+insert are atomic (TOCTOU)."""
         n_bars = len(returns)
         if n_bars != len(bar_dates):
             raise ValueError(
                 f"holdout_returns length mismatch: {n_bars} returns vs {len(bar_dates)} dates")
         if n_bars == 0:
             raise ValueError("holdout_returns must have at least one bar")
-        # strategy_id must match the burn row, AND the burn must be committed (caller-bug defense;
-        # read before the write tx).
-        row = self._conn.execute(
-            "SELECT strategy_id, committed_at FROM holdout_evaluations WHERE id = ?",
-            (holdout_evaluation_id,),
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"holdout_evaluation {holdout_evaluation_id} does not exist")
-        if row["committed_at"] is None:
-            raise ValueError(
-                f"holdout_evaluation {holdout_evaluation_id} is not a committed burn")
-        if int(row["strategy_id"]) != int(strategy_id):
-            raise ValueError(
-                f"strategy_id {strategy_id} does not match holdout_evaluation "
-                f"{holdout_evaluation_id} (strategy_id {row['strategy_id']})")
+        # Encoding is CPU-only — do it OUTSIDE the transaction so we don't hold a lock during it.
         returns_blob = np.asarray(returns, dtype="<f8").tobytes()
         bar_dates_blob = "\n".join(bar_dates).encode("utf-8")
         try:
             with self._conn:
+                # Validation INSIDE the tx so check+insert are atomic (TOCTOU).
+                row = self._conn.execute(
+                    "SELECT strategy_id, committed_at FROM holdout_evaluations WHERE id = ?",
+                    (holdout_evaluation_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"holdout_evaluation {holdout_evaluation_id} does not exist")
+                if row["committed_at"] is None:
+                    raise ValueError(
+                        f"holdout_evaluation {holdout_evaluation_id} is not a committed burn")
+                if int(row["strategy_id"]) != int(strategy_id):
+                    raise ValueError(
+                        f"strategy_id {strategy_id} does not match holdout_evaluation "
+                        f"{holdout_evaluation_id} (strategy_id {row['strategy_id']})")
+                existing = self._conn.execute(
+                    "SELECT id, strategy_id, holdout_start, holdout_end, n_bars,"
+                    " returns_blob, bar_dates_blob"
+                    " FROM holdout_returns WHERE holdout_evaluation_id = ?",
+                    (holdout_evaluation_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (int(existing["strategy_id"]) == int(strategy_id)
+                            and existing["holdout_start"] == holdout_start
+                            and existing["holdout_end"] == holdout_end
+                            and int(existing["n_bars"]) == n_bars
+                            and bytes(existing["returns_blob"]) == returns_blob
+                            and bytes(existing["bar_dates_blob"]) == bar_dates_blob):
+                        # idempotent reconciliation: identical content already written
+                        return int(existing["id"])
+                    raise ValueError(
+                        f"holdout_returns already written for holdout_evaluation "
+                        f"{holdout_evaluation_id} with different content")
                 cur = self._conn.execute(
                     "INSERT INTO holdout_returns"
                     "(holdout_evaluation_id, strategy_id, holdout_start, holdout_end, n_bars,"
@@ -602,13 +624,14 @@ class SqliteStrategyRepository:
                     (holdout_evaluation_id, strategy_id, holdout_start, holdout_end, n_bars,
                      returns_blob, bar_dates_blob, _now()),
                 )
-        except sqlite3.IntegrityError as e:  # UNIQUE(holdout_evaluation_id) double-write
+                rowid = cur.lastrowid
+        except sqlite3.IntegrityError as e:
+            # Concurrent insert raced between our existence check and INSERT — conflicting write.
             raise ValueError(
                 f"holdout_returns already written for holdout_evaluation "
-                f"{holdout_evaluation_id}") from e
-        rowid = cur.lastrowid
+                f"{holdout_evaluation_id} (concurrent insert)") from e
         assert rowid is not None
-        return rowid
+        return int(rowid)
 
     def overlapping_holdout_return_streams(
         self, strategy_id: int, holdout_start: str, holdout_end: str, window_days: int
