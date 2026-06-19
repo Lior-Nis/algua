@@ -229,12 +229,15 @@ confirmed comparable, the return axis may still **corroborate** the blended scor
 independently flag — this is what stops a beta-driven or period-mismatched correlation from minting
 a false positive (GATE-1-R2 provenance finding). Each flagged edge carries a `status`:
 
-- **`flagged`** — return axis evaluated, provenance comparable, return ≥ 0.85 (independent) or it
-  raised a blend ≥ 0.50. Strongest evidence; not gameable by code/factor relabeling.
-- **`flagged_code_factor`** — flagged on the code/factor **blend** only (returns unavailable, thin,
-  or provenance not comparable). **Weaker and gameable** (an adversary who obfuscates code can
-  suppress this); the operator is told so. Without an authoritative return axis, the only way past
-  the 0.50 blend floor is (near-)exact code-hash match or very high factor overlap — a documented
+- **`flagged`** — the return axis **independently** cleared the bar (evaluable, provenance
+  comparable, return ≥ 0.85). Strongest evidence; not gameable by code/factor relabeling. (A flag
+  driven by the code/factor blend is NOT `flagged` even if a sub-0.85 return correlation happens to
+  exist — a low return correlation is not return-backed evidence; such a pair is
+  `flagged_code_factor`.)
+- **`flagged_code_factor`** — flagged on the code/factor **blend** (returns unavailable, thin,
+  provenance not comparable, or return below the 0.85 independent bar). **Weaker and gameable** (an
+  adversary who obfuscates code can suppress this); the operator is told so. The only way past the
+  0.50 blend floor here is a (near-)exact code-hash match or very high factor overlap — a documented
   blind spot, surfaced not hidden.
 - **`inconclusive`** — pair has thin/incomparable returns AND a sub-floor code/factor blend: not
   flagged, but listed under a cluster's `inconclusive_edges[]` when it sits inside a flagged
