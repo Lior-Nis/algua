@@ -33,6 +33,17 @@ def ok(data: dict) -> dict:
     return {"ok": True, **data}
 
 
+def breach_payload(error: str, **extra: object) -> dict:
+    """A failure envelope for a tripped kill-switch: ``{"ok": false, "kill_switch": "tripped"...}``.
+
+    The shared skeleton of every paper/live-command halt/breach emit; callers pass the
+    human-readable ``error`` plus whatever variant keys (``kind``, ``strategy``, ``halted``, ...)
+    that path adds. Pure presentation — lives beside ``ok`` in the CLI infrastructure, not in a
+    command module (so paper and live share it without a cli→cli import).
+    """
+    return {"ok": False, "kill_switch": "tripped", "error": error, **extra}
+
+
 @contextmanager
 def registry_conn() -> Iterator[sqlite3.Connection]:
     """Yield a migrated registry connection, closed on exit.

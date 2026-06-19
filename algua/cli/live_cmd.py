@@ -5,11 +5,10 @@ from datetime import UTC, datetime
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.cli._common import ok, registry_conn, utc
+from algua.cli._common import breach_payload, ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.cli.paper_cmd import _breach_payload, _trip
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization
@@ -44,6 +43,7 @@ from algua.registry.live_gate import (
 )
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
+from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_tradable_strategy
 
@@ -150,10 +150,10 @@ def _run_strategy_tick(  # noqa: PLR0913
     except TickHalted as exc:
         audit_append(conn, actor="system", action="live_trade_tick_halted",
                      reason=str(exc), strategy=name)
-        emit(_breach_payload(str(exc), strategy=name, halted=True))
+        emit(breach_payload(str(exc), strategy=name, halted=True))
         raise typer.Exit(1) from exc
     except RiskBreach as exc:
-        _trip(conn, name, exc)
+        trip_for_breach(conn, name, exc)
         liquidation_submitted = True
         flatten_error = None
         try:
@@ -173,7 +173,7 @@ def _run_strategy_tick(  # noqa: PLR0913
             flatten_error = str(fexc)
             audit_append(conn, actor="system", action="flatten_failed",
                          reason=str(fexc), strategy=name)
-        payload = _breach_payload(exc.detail, kind=exc.kind,
+        payload = breach_payload(exc.detail, kind=exc.kind,
                                   liquidation_submitted=liquidation_submitted)
         if flatten_error is not None:
             payload["flatten_error"] = flatten_error
@@ -250,7 +250,7 @@ def run_all(
             emit(ok({"strategies": [], "note": "no live strategies"}))
             return
         if global_halt.is_engaged(conn):
-            emit(_breach_payload("global halt engaged", halted=True))
+            emit(breach_payload("global halt engaged", halted=True))
             raise typer.Exit(1)
         # re-verify each; skip + flag failures, keep one authorization for the account broker
         verified: list[tuple[str, LiveAuthorization]] = []

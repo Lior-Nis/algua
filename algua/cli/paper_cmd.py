@@ -8,7 +8,7 @@ import typer
 from algua.audit.log import append as audit_append
 from algua.backtest.engine import BacktestError
 from algua.calendar.market_calendar import MarketCalendar
-from algua.cli._common import ok, registry_conn, utc
+from algua.cli._common import breach_payload, ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -58,6 +58,7 @@ from algua.research.forward_gates import (
     ForwardGateCriteria,
 )
 from algua.risk import global_halt, kill_switch
+from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_strategy
 
@@ -123,23 +124,6 @@ def _live_strategy_flat(
     return is_flat, {"believed": own, "broker_unexplained": unexplained}
 
 
-def _breach_payload(error: str, **extra: object) -> dict:
-    """A failure envelope for a tripped kill-switch: ``{"ok": false, "kill_switch": "tripped"...}``.
-
-    The shared skeleton of every paper-command halt/breach emit; callers pass the human-readable
-    ``error`` plus whatever variant keys (``kind``, ``strategy``, ``halted``, ...) that path adds.
-    """
-    return {"ok": False, "kill_switch": "tripped", "error": error, **extra}
-
-
-def _trip(conn: sqlite3.Connection, name: str, exc: RiskBreach) -> None:
-    """Trip the kill-switch for a risk breach and write the matching audit row (the shared half of
-    both commands' breach handling; the divergent emit/flatten stays in each caller)."""
-    kill_switch.trip(conn, name, reason=exc.detail, actor="system")
-    audit_append(conn, actor="system", action="kill_switch_trip",
-                 reason=f"{exc.kind}: {exc.detail}", strategy=name)
-
-
 def _strategy_held_symbols(
     conn: sqlite3.Connection, strategy: str, universe: list[str]
 ) -> list[str]:
@@ -177,8 +161,8 @@ def run(
             result = run_paper(strategy, SimBroker(cash=cash), provider,
                                utc(start), utc(end), max_drawdown=max_drawdown)
         except RiskBreach as exc:
-            _trip(conn, name, exc)
-            emit(_breach_payload(exc.detail, kind=exc.kind))
+            trip_for_breach(conn, name, exc)
+            emit(breach_payload(exc.detail, kind=exc.kind))
             raise typer.Exit(1) from exc
         persist_run(conn, result)
         audit_append(
@@ -352,10 +336,10 @@ def trade_tick(
             # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
             audit_append(conn, actor="system", action="trade_tick_halted",
                          reason=str(exc), strategy=name)
-            emit(_breach_payload(str(exc), strategy=name, halted=True))
+            emit(breach_payload(str(exc), strategy=name, halted=True))
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
-            _trip(conn, name, exc)
+            trip_for_breach(conn, name, exc)
             liquidation_submitted = True
             flatten_error = None
             symbols = _strategy_held_symbols(conn, name, strategy.universe)
@@ -370,7 +354,7 @@ def trade_tick(
             else:
                 # Close succeeded: reset the derived belief so the next reconcile starts flat.
                 clear_derived_positions(conn, name)
-            payload = _breach_payload(exc.detail, kind=exc.kind,
+            payload = breach_payload(exc.detail, kind=exc.kind,
                                       liquidation_submitted=liquidation_submitted,
                                       closed_symbols=symbols)
             if flatten_error is not None:
@@ -508,7 +492,7 @@ def flatten(
             broker.cancel_open_orders()
             broker.close_positions(symbols)
         except BrokerError as exc:
-            emit(_breach_payload(str(exc), strategy=name, liquidation_submitted=False))
+            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
         # Close succeeded: reset the derived belief so a later trade-tick reconcile starts flat.
         clear_derived_positions(conn, name)
