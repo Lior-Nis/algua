@@ -315,6 +315,13 @@ class GateDecision:
     # Returns-persistence audit (#221 Slice 1). Non-binding: True iff run_gate wrote a
     # holdout_returns row for this evaluation. False for pre-Slice-1 promotions (omit-not-fail).
     returns_available: bool = False
+    # Serial-dependence bootstrap audit (#221 Slice 2). Binding only when dsr_binding AND the OOS
+    # return vector is available; non-binding otherwise (omit-not-fail).
+    dsr_bootstrap_binding: bool = False
+    dsr_bootstrap_lower: float | None = None
+    dsr_bootstrap_seed: int | None = None
+    dsr_bootstrap_b: int | None = None
+    dsr_bootstrap_block_len: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -356,6 +363,11 @@ class GateDecision:
             "fdr_rejected": self.fdr_rejected,
             "fdr_skip_reason": self.fdr_skip_reason,
             "returns_available": self.returns_available,
+            "dsr_bootstrap_binding": self.dsr_bootstrap_binding,
+            "dsr_bootstrap_lower": _f(self.dsr_bootstrap_lower),
+            "dsr_bootstrap_seed": self.dsr_bootstrap_seed,
+            "dsr_bootstrap_b": self.dsr_bootstrap_b,
+            "dsr_bootstrap_block_len": self.dsr_bootstrap_block_len,
         }
 
 
@@ -410,6 +422,11 @@ def evaluate_gate(
     dsr_funnel_floor_var_ann: float | None = None,
     dsr_funnel_floor_n_strategies: int | None = None,
     dsr_funnel_floor_n_total_rows: int | None = None,
+    bootstrap_binding: bool = False,
+    bootstrap_lower_confidence: float | None = None,
+    bootstrap_seed: int | None = None,
+    bootstrap_b: int | None = None,
+    bootstrap_block_len: int | None = None,
 ) -> GateDecision:
     """Judge a walk-forward result against the gate criteria. Pure; no side effects.
 
@@ -488,6 +505,14 @@ def evaluate_gate(
         if dsr_conf is None:
             # measured sweep exists but stats missing -> fail closed
             dsr_skip_reason = "no_dispersion"
+        if bootstrap_binding:
+            boot_pass = (bootstrap_lower_confidence is not None
+                         and bootstrap_lower_confidence >= (1.0 - DSR_ALPHA))
+            boot_value = (bootstrap_lower_confidence
+                          if (bootstrap_lower_confidence is not None
+                              and math.isfinite(bootstrap_lower_confidence)) else None)
+            checks.append({"name": "dsr_bootstrap", "value": boot_value,
+                           "threshold": 1.0 - DSR_ALPHA, "op": ">=", "passed": bool(boot_pass)})
     else:
         dsr_skip_reason = "no_measured_dispersion"
     return GateDecision(
@@ -513,4 +538,9 @@ def evaluate_gate(
         dsr_funnel_floor_var_ann=(dsr_funnel_floor_var_ann if dsr_binding else None),
         dsr_funnel_floor_n_strategies=(dsr_funnel_floor_n_strategies if dsr_binding else None),
         dsr_funnel_floor_n_total_rows=(dsr_funnel_floor_n_total_rows if dsr_binding else None),
+        dsr_bootstrap_binding=bool(bootstrap_binding),
+        dsr_bootstrap_lower=(bootstrap_lower_confidence if bootstrap_binding else None),
+        dsr_bootstrap_seed=(bootstrap_seed if bootstrap_binding else None),
+        dsr_bootstrap_b=(bootstrap_b if bootstrap_binding else None),
+        dsr_bootstrap_block_len=(bootstrap_block_len if bootstrap_binding else None),
     )
