@@ -1,6 +1,6 @@
 import pandas as pd
 
-from algua.research.family_audit import flag_edges
+from algua.research.family_audit import Edge, build_components, flag_edges, rank_clusters
 
 
 def _series(vals, start="2023-01-01"):
@@ -81,3 +81,68 @@ def test_max_linkage_picks_hottest_pair():
     e = next(x for x in edges if {x.family_a, x.family_b} == {1, 2})
     assert e.flagged is True
     assert e.representative_pair in (("clone", "target"), ("target", "clone"))
+
+
+# --- Task 4 tests: build_components and rank_clusters ---
+
+def _edge(a, b, score=0.9, flagged=True, status="flagged"):
+    return Edge(
+        a, b,
+        audit_score=score, blended=score,
+        axes={"code": 0, "factor": 0, "return": score},
+        status=status, tier="merge", return_overlap_days=200,
+        provenance_comparable=True,
+        representative_pair=(f"s{a}", f"s{b}"), flagged=flagged,
+    )
+
+
+def test_zero_evasion_pair_is_skipped():
+    edges = [_edge(1, 2)]
+    pair_breadth = {frozenset({1, 2}): 500}  # == max individual → no evasion
+    individual = {1: 500, 2: 300}
+    components, kept = build_components(
+        edges, pair_breadth=pair_breadth, individual_breadth=individual
+    )
+    assert kept == []
+    assert components == []
+
+
+def test_sibling_split_stays_in_scope():
+    edges = [_edge(1, 2)]
+    pair_breadth = {frozenset({1, 2}): 800}  # > max(500, 300) → real evasion
+    individual = {1: 500, 2: 300}
+    components, kept = build_components(
+        edges, pair_breadth=pair_breadth, individual_breadth=individual
+    )
+    assert len(kept) == 1
+    assert components == [frozenset({1, 2})]
+
+
+def test_connected_components_transitive():
+    edges = [_edge(1, 2), _edge(2, 3)]
+    pair_breadth = {frozenset({1, 2}): 999, frozenset({2, 3}): 999}
+    individual = {1: 10, 2: 10, 3: 10}
+    components, _kept = build_components(
+        edges, pair_breadth=pair_breadth, individual_breadth=individual
+    )
+    assert components == [frozenset({1, 2, 3})]
+
+
+def test_rank_clusters_orders_by_breadth_delta_and_builds_remediation():
+    components = [frozenset({1, 2}), frozenset({3, 4})]
+    kept = [_edge(1, 2), _edge(3, 4)]
+    component_breadth = {frozenset({1, 2}): 800, frozenset({3, 4}): 1000}
+    individual = {1: 500, 2: 300, 3: 950, 4: 100}
+    names = {1: "a", 2: "b", 3: "c", 4: "d"}
+    active = {1: 2, 2: 1, 3: 3, 4: 1}
+    clusters = rank_clusters(
+        components, kept, kept,
+        component_breadth=component_breadth,
+        individual_breadth=individual, family_names=names, active_counts=active,
+    )
+    # cluster {1,2}: delta 800-500=300 ; cluster {3,4}: delta 1000-950=50 → {1,2} ranks first
+    assert clusters[0]["family_breadth_delta"] == 300
+    assert clusters[1]["family_breadth_delta"] == 50
+    assert clusters[0]["consolidation_target_family_id"] == 1  # highest individual breadth
+    assert "recommended_remediation" in clusters[0]
+    assert len(clusters[0]["flagged_edges"]) == 1

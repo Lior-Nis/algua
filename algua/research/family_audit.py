@@ -112,3 +112,100 @@ def flag_edges(profiles: dict[int, list[dict]], returns: dict[str, object]) -> l
             provenance_comparable=best.provenance_comparable,
             representative_pair=best.representative_pair, flagged=best.flagged))
     return edges
+
+
+def _connected_components(edges: list[Edge]) -> list[frozenset[int]]:
+    """Union-find over flagged edges; deterministic (sorted) output."""
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        parent[find(x)] = find(y)
+
+    for e in edges:
+        union(e.family_a, e.family_b)
+    groups: dict[int, set[int]] = {}
+    for node in parent:
+        groups.setdefault(find(node), set()).add(node)
+    return sorted((frozenset(g) for g in groups.values()), key=lambda s: min(s))
+
+
+def build_components(
+    candidate_edges: list[Edge],
+    *,
+    pair_breadth: dict[frozenset[int], int],
+    individual_breadth: dict[int, int],
+) -> tuple[list[frozenset[int]], list[Edge]]:
+    """Apply the evasion-based skip to flagged edges, then group survivors into components.
+
+    Skip a pair iff unifying it adds no breadth to the larger family
+    (breadth_of({A,B}) == max(breadth(A), breadth(B))) — the only zero-evasion case.
+    """
+    kept: list[Edge] = []
+    for e in candidate_edges:
+        if not e.flagged:
+            continue
+        union_breadth = pair_breadth[frozenset({e.family_a, e.family_b})]
+        if union_breadth == max(individual_breadth[e.family_a], individual_breadth[e.family_b]):
+            continue
+        kept.append(e)
+    return _connected_components(kept), kept
+
+
+def _edge_json(e: Edge) -> dict:
+    return {
+        "family_a": e.family_a, "family_b": e.family_b,
+        "audit_score": round(e.audit_score, 4), "tier": e.tier, "status": e.status,
+        "axis_breakdown": e.axes, "return_overlap_days": e.return_overlap_days,
+        "provenance_comparable": e.provenance_comparable,
+        "representative_pair": {"strategy_a": e.representative_pair[0],
+                               "strategy_b": e.representative_pair[1]},
+    }
+
+
+def rank_clusters(
+    components: list[frozenset[int]],
+    kept_edges: list[Edge],
+    candidate_edges: list[Edge],
+    *,
+    component_breadth: dict[frozenset[int], int],
+    individual_breadth: dict[int, int],
+    family_names: dict[int, str],
+    active_counts: dict[int, int],
+) -> list[dict]:
+    clusters: list[dict] = []
+    for comp in components:
+        unified = component_breadth[comp]
+        max_indiv = max(individual_breadth[f] for f in comp)
+        delta = unified - max_indiv
+        # consolidation target: highest individual breadth, tie → lowest id
+        target = sorted(comp, key=lambda f: (-individual_breadth[f], f))[0]
+        flagged = [_edge_json(e) for e in kept_edges
+                   if {e.family_a, e.family_b} <= set(comp)]
+        inconclusive = [_edge_json(e) for e in candidate_edges
+                        if e.status == "inconclusive" and {e.family_a, e.family_b} <= set(comp)]
+        ids = sorted(comp)
+        clusters.append({
+            "families": [{"id": f, "name": family_names.get(f, str(f)),
+                          "lifetime_combos": individual_breadth[f],
+                          "active_member_count": active_counts.get(f, 0)} for f in ids],
+            "unified_breadth": unified,
+            "max_individual_breadth": max_indiv,
+            "family_breadth_delta": delta,
+            "flagged_edges": flagged,
+            "inconclusive_edges": inconclusive,
+            "consolidation_target_family_id": target,
+            "recommended_remediation": (
+                f"human review: consolidate families {ids} into family {target} by reassigning "
+                f"members (assign_strategy_to_family, --actor human) so future promotions face the "
+                f"pooled lifetime breadth. NOTE: add_parent_edge is directional and does not "
+                f"symmetrically unify breadth."),
+        })
+    clusters.sort(key=lambda c: (-c["family_breadth_delta"], c["families"][0]["id"]))
+    return clusters
