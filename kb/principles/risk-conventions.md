@@ -63,8 +63,8 @@ into weights, that final step is the construction policy's, not the signal's.
 Size by signal strength, not equal-weight by default. A stronger signal earns a larger target weight; a
 marginal one earns a small one. Equal-weighting throws away the information in *how* strong each signal
 is. **Composes across both layers:** emit the conviction in the **score** (`signal`), then pick a
-magnitude-weighting policy — `score_proportional_long` is exactly the snippet below — to turn it into
-weights.
+magnitude-weighting policy — `score_proportional_long` is the shipped version of the sketch below (it
+drops missing/non-finite scores and weights only the strictly-positive ones) — to turn it into weights.
 
 ```python
 raw = scores.clip(lower=0.0)            # scores: conviction per symbol, info up to t (signal's job)
