@@ -46,7 +46,7 @@ from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
-from algua.registry.repository import StrategyRecord
+from algua.registry.gating import load_gated_strategy
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
@@ -60,7 +60,6 @@ from algua.research.forward_gates import (
 )
 from algua.risk import global_halt, kill_switch
 from algua.risk.limits import RiskBreach
-from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
@@ -125,40 +124,6 @@ def _live_strategy_flat(
     return is_flat, {"believed": own, "broker_unexplained": unexplained}
 
 
-def _load_gated_strategy(
-    conn: sqlite3.Connection, name: str, command: str,
-) -> tuple[LoadedStrategy, StrategyRecord]:
-    """Load a strategy and clear the two gates every trading command shares: it must be at the
-    PAPER or FORWARD_TESTED stage and its kill-switch must not be tripped. ``command`` only
-    colours the error text.
-
-    Returns ``(strategy, rec)`` so callers can read the registry record (e.g. ``rec.id``) without
-    a second DB round-trip.  A forward_tested strategy keeps accumulating evidence ticks while
-    awaiting the go-live signature, so it is treated the same as paper for trading purposes.
-
-    Centralises the stage + kill-switch preamble that ``run`` and ``trade-tick`` both need (an SRP
-    fix: the command bodies no longer hand-roll these checks). Commands that intentionally TRIP the
-    switch (kill/flatten) do their own, narrower gating instead.
-    """
-    strategy = load_strategy(name)
-    from algua.strategies.base import (
-        assert_tradable_without_fundamentals,
-        assert_tradable_without_news,
-    )
-    assert_tradable_without_fundamentals(strategy)
-    assert_tradable_without_news(strategy)
-    rec = SqliteStrategyRepository(conn).get(name)
-    if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
-        raise ValueError(
-            f"{name} is at stage '{rec.stage.value}'; "
-            f"{command} requires 'paper' or 'forward_tested'"
-        )
-    if global_halt.is_engaged(conn):
-        raise ValueError("global halt active; clear with 'algua paper resume-all'")
-    if kill_switch.is_tripped(conn, name):
-        raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
-    return strategy, rec
-
 
 def _tick_clock(clock: Callable[[], str]) -> tuple[str, str]:
     """``(tick_ts, clock_source)`` for the evidence-tick stamp: the venue's clock normalized to a
@@ -221,7 +186,7 @@ def run(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy, _rec = _load_gated_strategy(conn, name, "paper run")
+        strategy, _rec = load_gated_strategy(conn, name, "paper run")
         provider = _select_provider(demo, snapshot)
         try:
             result = run_paper(strategy, SimBroker(cash=cash), provider,
@@ -374,7 +339,7 @@ def trade_tick(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy, rec = _load_gated_strategy(conn, name, "trade-tick")
+        strategy, rec = load_gated_strategy(conn, name, "trade-tick")
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
         identity = compute_artifact_hashes(name)
