@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol
 
@@ -571,8 +571,16 @@ class StrategyRepository(Protocol):
         """
         ...
 
+    def lifetime_combos_for_families(self, family_ids: Iterable[int]) -> int:
+        """Lifetime combos across the union of families + transitive ancestors (deduped)."""
+        ...
+
     def family_lifetime_combos(self, family_id: int) -> int:
         """Lifetime search combos across this family + all transitive ancestors."""
+        ...
+
+    def family_names(self) -> dict[int, str]:
+        """All family ids → names."""
         ...
 
     # -------------------------------------------------------------------------

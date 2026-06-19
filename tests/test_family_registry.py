@@ -412,3 +412,59 @@ def test_family_lifetime_combos_no_double_count_on_strategy_move() -> None:
     # Both A and B are ancestors of C; strat_x has rows in both families.
     # Must count 100 (once), not 200 (double-counted).
     assert repo.family_lifetime_combos(fam_c) == 100
+
+
+# ---------------------------------------------------------------------------
+# lifetime_combos_for_families + family_names  (#228 Task 2)
+# ---------------------------------------------------------------------------
+
+def _seed_member_with_trials(
+    repo: SqliteStrategyRepository,
+    family_id: int,
+    strategy_name: str,
+    *,
+    n_combos: int,
+) -> None:
+    """Assign strategy to family and record n_combos search trials."""
+    repo.assign_strategy_to_family(
+        strategy_name,
+        family_id,
+        "human",
+        verdict="merge",
+        similarity_score=0.9,
+        clustering_version="v",
+        clustering_config_json="{}",
+        axis_json="{}",
+    )
+    repo.record_search_trial(strategy_name, n_combos=n_combos, grid_json="{}")
+
+
+def test_lifetime_combos_for_families_dedups_shared_strategy() -> None:
+    # family A and B both reference strategy "s_shared" via membership;
+    # union breadth must count its trials exactly once.
+    repo = _make_repo()
+    fa = repo.create_family("fam_a", actor="human")
+    fb = repo.create_family("fam_b", actor="human")
+    _seed_member_with_trials(repo, fa, "s_a", n_combos=100)
+    _seed_member_with_trials(repo, fb, "s_b", n_combos=200)
+    # s_shared assigned to A then reassigned to B → appears in both (append-only)
+    _seed_member_with_trials(repo, fa, "s_shared", n_combos=50)
+    repo.assign_strategy_to_family(
+        "s_shared", fb, "human", verdict="merge", similarity_score=0.9,
+        clustering_version="v", clustering_config_json="{}", axis_json="{}")
+    union = repo.lifetime_combos_for_families([fa, fb])
+    assert union == 100 + 200 + 50  # s_shared counted once
+
+
+def test_lifetime_combos_for_families_singleton_equals_family_lifetime_combos() -> None:
+    repo = _make_repo()
+    fa = repo.create_family("fam_solo", actor="human")
+    _seed_member_with_trials(repo, fa, "s_a", n_combos=77)
+    assert repo.lifetime_combos_for_families([fa]) == repo.family_lifetime_combos(fa)
+
+
+def test_family_names_returns_id_to_name() -> None:
+    repo = _make_repo()
+    fa = repo.create_family("alpha", actor="human")
+    names = repo.family_names()
+    assert names[fa] == "alpha"
