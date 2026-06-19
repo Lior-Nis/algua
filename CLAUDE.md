@@ -64,6 +64,12 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger
   rows, and transitions nothing. A pass is a prioritization signal for re-auditioning (`registry
   transition --to paper`), NOT a gate and NOT a guarantee of re-promotion/forward-gate clearance.
+- `uv run algua research family-audit` — ADVISORY cross-family gaming detector. Scans the family DAG
+  for separate families that empirically behave as one thesis (deliberate-split breadth evasion #222's
+  assignment-time clustering can't see), using return-correlation as the authoritative axis; ranks
+  flagged clusters by family-term breadth dodged and recommends a human-governed consolidation
+  (member reassignment). READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation —
+  a prioritization signal, not a gate.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
