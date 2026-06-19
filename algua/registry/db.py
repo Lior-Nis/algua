@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -133,6 +133,7 @@ CREATE TABLE IF NOT EXISTS search_trials (
     trial_sharpe_var_ann REAL
 );
 CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_name);
+CREATE INDEX IF NOT EXISTS ix_search_trials_created_at ON search_trials(created_at);
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
@@ -166,6 +167,28 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
 );
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
+-- holdout_returns persists EXACTLY ONE out-of-sample per-period return vector per holdout burn
+-- (#221 Slice 1) — the heavy shared prerequisite for Phase-3 Slices 2/3/4 (bootstrap, N_eff,
+-- multi-regime). Grain is per-strategy-holdout, NOT per-combo: persisting per-combo vectors would
+-- re-open the single-use best-of-N surface sweep() is built to prevent. The FK ties each vector to
+-- the burn that produced it; UNIQUE(holdout_evaluation_id) prevents double-writes and makes a
+-- reconciliation job (re-running the deterministic walk-forward) safe. SENSITIVE: no CLI
+-- accessor and no "get my own vector" API may read returns_blob — sibling-only cross-strategy.
+CREATE TABLE IF NOT EXISTS holdout_returns (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    holdout_evaluation_id INTEGER NOT NULL REFERENCES holdout_evaluations(id),
+    strategy_id           INTEGER NOT NULL REFERENCES strategies(id),
+    holdout_start         TEXT    NOT NULL,   -- OOS interval identity (mirrors #192 / #205)
+    holdout_end           TEXT    NOT NULL,
+    n_bars                INTEGER NOT NULL,   -- length of stored vector; == holdout_metrics n_bars
+    returns_blob          BLOB    NOT NULL,   -- float64 per-period OOS returns, np.tobytes()
+    bar_dates_blob        BLOB    NOT NULL,   -- ISO-8601 bar dates, UTF-8 newline-delimited
+    created_at            TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_holdout_returns_eval ON holdout_returns(holdout_evaluation_id);
+CREATE INDEX IF NOT EXISTS ix_holdout_returns_strategy  ON holdout_returns(strategy_id);
+CREATE INDEX IF NOT EXISTS ix_holdout_returns_interval
+    ON holdout_returns(holdout_start, holdout_end);
 -- gate_evaluations records every promotion-gate evaluation (pass AND fail) for the audit trail,
 -- AND is the single-use, AGENT-ONLY token the BACKTESTED->CANDIDATE transition consumes (the
 -- shortlist gate, mirroring the live gate: trust the gate record, not the stage flag). A passing

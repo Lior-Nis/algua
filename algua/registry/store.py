@@ -8,6 +8,8 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -17,10 +19,12 @@ from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     FdrGateOutcome,
     FdrStreamState,
+    FunnelFloor,
     StrategyExists,
     StrategyNotFound,
     StrategyRecord,
 )
+from algua.research.gates import MIN_FUNNEL_FLOOR_STRATEGIES
 
 __all__ = [
     "SqliteStrategyRepository",
@@ -28,6 +32,34 @@ __all__ = [
     "StrategyNotFound",
     "StrategyRecord",
 ]
+
+
+def _pool_trial_sharpe_var(triples: list[tuple[int, float, float]]) -> float | None:
+    """Exact pooled SAMPLE variance (ddof=1) of trial Sharpes from ``(count, mean, var)`` triples.
+    ``None`` for empty input; ``0.0`` for total count <= 1. Callers must pre-validate each triple
+    (finite mean/var, count >= 1, var >= 0); this helper assumes clean triples."""
+    if not triples:
+        return None
+    total_n = sum(n for n, _, _ in triples)
+    if total_n <= 1:
+        return 0.0
+    grand_mean = sum(n * m for n, m, _ in triples) / total_n
+    sse = sum((n - 1) * v + n * (m - grand_mean) ** 2 for n, m, v in triples)
+    return sse / (total_n - 1)
+
+
+def _validated_triples(rows) -> list[tuple[int, float, float]] | None:
+    """Validate raw (n, mean, var) DB rows. Returns None (fail closed) if ANY row has a
+    NULL/NaN/inf/negative stat — NULL rows are NEVER silently skipped."""
+    triples: list[tuple[int, float, float]] = []
+    for r in rows:
+        n, mean, var = r["n"], r["mean"], r["var"]
+        if n is None or mean is None or var is None:
+            return None
+        if not (math.isfinite(mean) and math.isfinite(var)) or int(n) < 1 or var < 0.0:
+            return None
+        triples.append((int(n), float(mean), float(var)))
+    return triples
 
 
 def _now() -> str:
@@ -125,36 +157,31 @@ class SqliteStrategyRepository:
             if derived_from == name:
                 raise ValueError(f"{name} cannot be derived from itself")
             self.get(derived_from)
-        sets: list[str] = []
-        params: list[object] = []
+        # One dict drives both the clause list and the param list, so a column and its value can
+        # never drift out of lockstep — adding a field is a single line, not two parallel edits.
+        updates: dict[str, object] = {}
         if family is not None:
-            sets.append("family = ?")
-            params.append(family)
+            updates["family"] = family
         if author is not None:
-            sets.append("author = ?")
-            params.append(author.value)
+            updates["author"] = author.value
         if hypothesis_status is not None:
-            sets.append("hypothesis_status = ?")
-            params.append(hypothesis_status.value)
+            updates["hypothesis_status"] = hypothesis_status.value
         if derived_from is not None:
-            sets.append("derived_from = ?")
-            params.append(derived_from)
+            updates["derived_from"] = derived_from
         if description is not None:
-            sets.append("description = ?")
-            params.append(description)
+            updates["description"] = description
         if add_tags or remove_tags:
             tags = set(rec.tags)
             tags |= set(canonicalize_tags(add_tags or []))
             tags -= set(canonicalize_tags(remove_tags or []))
-            sets.append("tags = ?")
-            params.append(dump_tags(tags))
-        if sets:
-            sets.append("updated_at = ?")
-            params.append(_now())
-            params.append(rec.id)
+            updates["tags"] = dump_tags(tags)
+        if updates:
+            updates["updated_at"] = _now()
+            clauses = ", ".join(f"{col} = ?" for col in updates)
             with self._conn:
                 self._conn.execute(
-                    f"UPDATE strategies SET {', '.join(sets)} WHERE id = ?", params
+                    f"UPDATE strategies SET {clauses} WHERE id = ?",
+                    [*updates.values(), rec.id],
                 )
         return self.get(name)
 
@@ -167,30 +194,31 @@ class SqliteStrategyRepository:
         author: Author | None = None,
         hypothesis_status: HypothesisStatus | None = None,
     ) -> list[StrategyRecord]:
-        clauses: list[str] = []
-        params: list[object] = []
+        # Each clause carries its OWN params as a co-located tuple, so a multi-placeholder clause
+        # (e.g. the COALESCE pairs below) can never fall out of sync with a separate param list.
+        clauses: list[tuple[str, tuple[object, ...]]] = []
         if stage is not None:
-            clauses.append("stage = ?")
-            params.append(stage.value)
+            clauses.append(("stage = ?", (stage.value,)))
         if family is not None:
-            clauses.append("family = ?")
-            params.append(family)
+            clauses.append(("family = ?", (family,)))
         if author is not None:
             # COALESCE so legacy NULL rows (pre-metadata schema) match the default 'agent'.
-            clauses.append("COALESCE(author, ?) = ?")
-            params.extend((Author.AGENT.value, author.value))
+            clauses.append(("COALESCE(author, ?) = ?", (Author.AGENT.value, author.value)))
         if hypothesis_status is not None:
             # Same NULL-legacy treatment; hypothesis_status defaults to 'untested'.
-            clauses.append("COALESCE(hypothesis_status, ?) = ?")
-            params.extend((HypothesisStatus.UNTESTED.value, hypothesis_status.value))
+            clauses.append((
+                "COALESCE(hypothesis_status, ?) = ?",
+                (HypothesisStatus.UNTESTED.value, hypothesis_status.value),
+            ))
         for tag in canonicalize_tags(tags or []):
-            clauses.append(
+            clauses.append((
                 "EXISTS (SELECT 1 FROM json_each("
                 "CASE WHEN json_valid(tags) THEN tags ELSE '[]' END"
-                ") WHERE value = ?)"
-            )
-            params.append(tag)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+                ") WHERE value = ?)",
+                (tag,),
+            ))
+        where = f" WHERE {' AND '.join(c for c, _ in clauses)}" if clauses else ""
+        params = [p for _, clause_params in clauses for p in clause_params]
         rows = self._conn.execute(
             f"SELECT * FROM strategies{where} ORDER BY id", params
         ).fetchall()
@@ -437,20 +465,10 @@ class SqliteStrategyRepository:
         ).fetchall()
         if not rows:
             return None
-        triples: list[tuple[int, float, float]] = []
-        for r in rows:
-            n, mean, var = r["n"], r["mean"], r["var"]
-            if n is None or mean is None or var is None:
-                return None
-            if not (math.isfinite(mean) and math.isfinite(var)) or int(n) < 1 or var < 0.0:
-                return None
-            triples.append((int(n), float(mean), float(var)))
-        total_n = sum(n for n, _, _ in triples)
-        if total_n <= 1:
-            return 0.0
-        grand_mean = sum(n * m for n, m, _ in triples) / total_n
-        sse = sum((n - 1) * v + n * (m - grand_mean) ** 2 for n, m, v in triples)
-        return sse / (total_n - 1)
+        triples = _validated_triples(rows)
+        if triples is None:
+            return None
+        return _pool_trial_sharpe_var(triples)
 
     def total_search_combos(self, strategy_name: str) -> int:
         # COALESCE so an empty result (no trials) reads as 0 rather than NULL.
@@ -533,19 +551,22 @@ class SqliteStrategyRepository:
         assert rowid is not None  # a successful INSERT always sets lastrowid
         return rowid, reused
 
-    def finalize_holdout_reservation(self, reservation_id: int, *, config_hash: str) -> None:
+    def finalize_holdout_reservation(
+        self, reservation_id: int, *, config_hash: str, strategy_id: int
+    ) -> None:
         with self._conn:  # UPDATE + guard commit together or roll back
             cur = self._conn.execute(
                 "UPDATE holdout_evaluations SET committed_at = ?, config_hash = ?"
-                " WHERE id = ? AND committed_at IS NULL",
-                (_now(), config_hash, reservation_id),
+                " WHERE id = ? AND strategy_id = ? AND committed_at IS NULL",
+                (_now(), config_hash, reservation_id, strategy_id),
             )
             if cur.rowcount != 1:
                 # Raise INSIDE the with so the mismatch rolls back (mirrors apply_transition's
                 # gate-consume guard). Guards a double-finalize or a vanished/released row. Raise,
                 # not assert — asserts strip under python -O.
                 raise ValueError(
-                    f"holdout reservation {reservation_id} is missing or already committed")
+                    f"holdout reservation {reservation_id} is missing, already committed, "
+                    f"or strategy_id mismatch")
 
     def release_holdout_reservation(self, reservation_id: int) -> None:
         with self._conn:
@@ -555,6 +576,126 @@ class SqliteStrategyRepository:
                 "DELETE FROM holdout_evaluations WHERE id = ? AND committed_at IS NULL",
                 (reservation_id,),
             )
+
+    def record_holdout_returns(
+        self, holdout_evaluation_id: int, strategy_id: int, *,
+        holdout_start: str, holdout_end: str,
+        returns: list[float], bar_dates: list[str],
+    ) -> int:
+        """Persist ONE OOS return vector for a committed holdout burn (#221 Slice 1). Separate
+        transaction from the burn (the burn committed at on_peek). IDEMPOTENT on identical content:
+        if a row already exists with the same (strategy_id, holdout_start, holdout_end, n_bars,
+        returns_blob, bar_dates_blob), the existing row id is returned without error — enabling
+        the "returns row exists, gate row missing → re-run" reconciliation path. A row that exists
+        with DIFFERENT content raises ValueError (genuine conflicting double-write).
+        Validation is fail-closed, INSIDE the transaction so check+insert are atomic (TOCTOU)."""
+        n_bars = len(returns)
+        if n_bars != len(bar_dates):
+            raise ValueError(
+                f"holdout_returns length mismatch: {n_bars} returns vs {len(bar_dates)} dates")
+        if n_bars == 0:
+            raise ValueError("holdout_returns must have at least one bar")
+        # Encoding is CPU-only — do it OUTSIDE the transaction so we don't hold a lock during it.
+        returns_blob = np.asarray(returns, dtype="<f8").tobytes()
+        bar_dates_blob = "\n".join(bar_dates).encode("utf-8")
+        try:
+            with self._conn:
+                # Concurrency safety here rests on UNIQUE(holdout_evaluation_id) + the caught
+                # IntegrityError below + the idempotency check, NOT on these SELECTs: Python's
+                # sqlite3 opens the transaction only on the first DML (the INSERT), so a read-only
+                # validation runs in autocommit. That is acceptable — no supported API mutates a
+                # committed burn's strategy_id/committed_at, and concurrent inserts of the same
+                # holdout_evaluation_id are caught by the UNIQUE constraint. The checks are
+                # caller-bug defense (missing / uncommitted / mismatched-strategy burn).
+                row = self._conn.execute(
+                    "SELECT strategy_id, committed_at FROM holdout_evaluations WHERE id = ?",
+                    (holdout_evaluation_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"holdout_evaluation {holdout_evaluation_id} does not exist")
+                if row["committed_at"] is None:
+                    raise ValueError(
+                        f"holdout_evaluation {holdout_evaluation_id} is not a committed burn")
+                if int(row["strategy_id"]) != int(strategy_id):
+                    raise ValueError(
+                        f"strategy_id {strategy_id} does not match holdout_evaluation "
+                        f"{holdout_evaluation_id} (strategy_id {row['strategy_id']})")
+                existing = self._conn.execute(
+                    "SELECT id, strategy_id, holdout_start, holdout_end, n_bars,"
+                    " returns_blob, bar_dates_blob"
+                    " FROM holdout_returns WHERE holdout_evaluation_id = ?",
+                    (holdout_evaluation_id,),
+                ).fetchone()
+                if existing is not None:
+                    if (int(existing["strategy_id"]) == int(strategy_id)
+                            and existing["holdout_start"] == holdout_start
+                            and existing["holdout_end"] == holdout_end
+                            and int(existing["n_bars"]) == n_bars
+                            and bytes(existing["returns_blob"]) == returns_blob
+                            and bytes(existing["bar_dates_blob"]) == bar_dates_blob):
+                        # idempotent reconciliation: identical content already written
+                        return int(existing["id"])
+                    raise ValueError(
+                        f"holdout_returns already written for holdout_evaluation "
+                        f"{holdout_evaluation_id} with different content")
+                cur = self._conn.execute(
+                    "INSERT INTO holdout_returns"
+                    "(holdout_evaluation_id, strategy_id, holdout_start, holdout_end, n_bars,"
+                    " returns_blob, bar_dates_blob, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (holdout_evaluation_id, strategy_id, holdout_start, holdout_end, n_bars,
+                     returns_blob, bar_dates_blob, _now()),
+                )
+                rowid = cur.lastrowid
+        except sqlite3.IntegrityError as e:
+            # Concurrent insert raced between our existence check and INSERT — conflicting write.
+            raise ValueError(
+                f"holdout_returns already written for holdout_evaluation "
+                f"{holdout_evaluation_id} (concurrent insert)") from e
+        assert rowid is not None
+        return int(rowid)
+
+    def overlapping_holdout_return_streams(
+        self, strategy_id: int, holdout_start: str, holdout_end: str, window_days: int
+    ) -> list[tuple[list[float], list[str]]]:
+        """SIBLING-ONLY cross-strategy read (#221 Slice 1 access control).
+
+        Returns OTHER strategies' OOS return vectors whose holdout interval overlaps
+        [holdout_start, holdout_end], burned within the trailing window_days. NEVER
+        returns the requesting strategy's own vector. This is the ONLY method that reads
+        returns_blob. The caller (promotion.run_gate) is trusted to pass the correct
+        strategy_id so self-exclusion holds.
+
+        NOTE: holdout_returns keys by strategy_id (FK to strategies.id) while
+        search_trials keys by strategy_name — the asymmetry is intentional: returns
+        vectors belong to a specific registered strategy row, whereas search trials are
+        recorded before registration.
+        """
+        # Window filter uses he.created_at (burn time via holdout_evaluations.created_at),
+        # NOT hr.created_at (write time of the vector row), so a late-written vector for an
+        # out-of-window burn is correctly excluded.
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        rows = self._conn.execute(
+            "SELECT hr.n_bars AS n_bars, hr.returns_blob AS rb, hr.bar_dates_blob AS db "
+            "FROM holdout_returns hr JOIN holdout_evaluations he"
+            " ON hr.holdout_evaluation_id = he.id "
+            "WHERE hr.strategy_id != ? AND he.created_at >= ?"
+            "  AND hr.holdout_start <= ? AND ? <= hr.holdout_end",
+            (strategy_id, cutoff, holdout_end, holdout_start),
+        ).fetchall()
+        out: list[tuple[list[float], list[str]]] = []
+        for r in rows:
+            vec = np.frombuffer(r["rb"], dtype="<f8")
+            if len(vec) != int(r["n_bars"]):
+                raise ValueError(
+                    f"corrupt holdout_returns blob: {len(vec)} floats != n_bars {r['n_bars']}")
+            dates = r["db"].decode("utf-8").split("\n")
+            if len(dates) != int(r["n_bars"]):
+                raise ValueError(
+                    f"corrupt holdout_returns bar_dates_blob: "
+                    f"{len(dates)} dates != n_bars {r['n_bars']}")
+            out.append(([float(x) for x in vec], dates))
+        return out
 
     def windowed_search_combos(self, window_days: int) -> int:
         """Sum of ``n_combos`` across ALL strategies' search_trials recorded within the trailing
@@ -566,6 +707,42 @@ class SqliteStrategyRepository:
             (cutoff,),
         ).fetchone()
         return int(row["total"])
+
+    def funnel_trial_sharpe_var(self, window_days: int) -> FunnelFloor:
+        """Per-strategy pooling FIRST (anti-gaming: one vote per strategy regardless of combo
+        count), then MEAN across strategies with at least one search_trials row in the trailing
+        ``window_days``. A selected strategy pools ALL its rows (the window selects strategies, it
+        does NOT slice rows). A strategy with any NULL/NaN/inf stat row is excluded. Returns
+        FunnelFloor(None, ...) when fewer than _MIN_FUNNEL_FLOOR_STRATEGIES finite variances exist
+        (fail-open -> Phase-1 behavior). ISO-8601 UTC timestamps sort lexically, so a string `>=`
+        on created_at is chronological."""
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        # SELECT all rows of every strategy that has at least one in-window row. The window
+        # filters which STRATEGIES are eligible; pooling then uses every row of each.
+        rows = self._conn.execute(
+            "SELECT strategy_name AS name, trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
+            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name IN"
+            " (SELECT DISTINCT strategy_name FROM search_trials WHERE created_at >= ?)",
+            (cutoff,),
+        ).fetchall()
+        by_strategy: dict[str, list] = {}
+        for r in rows:
+            by_strategy.setdefault(r["name"], []).append(r)
+        per_strategy_vars: list[float] = []
+        total_rows = 0
+        for name_rows in by_strategy.values():
+            triples = _validated_triples(name_rows)
+            if triples is None:
+                continue  # excluded: a NULL/non-finite stat in any of this strategy's rows
+            var_s = _pool_trial_sharpe_var(triples)
+            if var_s is None or not math.isfinite(var_s):
+                continue
+            per_strategy_vars.append(var_s)
+            total_rows += len(name_rows)
+        n_strategies = len(per_strategy_vars)
+        if n_strategies < MIN_FUNNEL_FLOOR_STRATEGIES:
+            return FunnelFloor(None, n_strategies, total_rows)
+        return FunnelFloor(sum(per_strategy_vars) / n_strategies, n_strategies, total_rows)
 
     def record_gate_evaluation(
         self,

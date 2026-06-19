@@ -10,7 +10,7 @@ import pytest
 
 from algua.data import files
 from algua.data.manifest import SnapshotManifest
-from algua.data.models import SnapshotMetadata, SnapshotRecord
+from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
 from algua.data.store import DataStore
 
 
@@ -124,9 +124,9 @@ def test_ingest_file_fsyncs_staged_before_replace_then_parents(
     )
 
     store.ingest_file(
-        file_path=src, dataset="custom", provider="local", symbols=["AAPL"],
+        file_path=src, dataset=Dataset.BARS, provider="local", symbols=["AAPL"],
         start="2026-01-02", end="2026-01-02", as_of="2026-01-03T00:00:00+00:00",
-        source="fixture", kind="custom",
+        source="fixture", kind=Kind.FILE,
     )
     # a payload fsync precedes its replace; parent-chain fsyncs follow it
     assert "fsync" in events and "replace" in events
@@ -184,8 +184,8 @@ def _rec(snapshot_id: str) -> SnapshotRecord:
     return SnapshotRecord(
         snapshot_id=snapshot_id,
         metadata=SnapshotMetadata(
-            dataset="bars", provider="p", symbols=["AAPL"], start="2026-01-02",
-            end="2026-01-02", as_of="2026-01-03T00:00:00+00:00", source="s", kind="bars",
+            dataset=Dataset.BARS, provider="p", symbols=["AAPL"], start="2026-01-02",
+            end="2026-01-02", as_of="2026-01-03T00:00:00+00:00", source="s", kind=Kind.BARS,
         ),
         row_count=1, content_hash="h",
         data_path=Path("snapshots/bars") / snapshot_id, created_at="2026-01-03T00:00:00+00:00",
@@ -341,9 +341,9 @@ def test_verify_snapshot_byte_hash_branch_detects_tamper(tmp_path: Path) -> None
     pd.DataFrame({"a": [1, 2, 3]}).to_csv(src, index=False)
     store = DataStore(tmp_path / "store")
     rec = store.ingest_file(
-        file_path=src, dataset="custom", provider="local", symbols=["AAPL"],
+        file_path=src, dataset=Dataset.BARS, provider="local", symbols=["AAPL"],
         start="2026-01-02", end="2026-01-02", as_of="2026-01-03T00:00:00+00:00",
-        source="fixture", kind="custom",
+        source="fixture", kind=Kind.FILE,
     )
     p = (tmp_path / "store") / rec.data_path
     p.write_text("a\n9\n9\n9\n")  # same row count, different bytes

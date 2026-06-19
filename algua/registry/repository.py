@@ -37,6 +37,22 @@ class FdrStreamState(NamedTuple):
     discovery_indices: list[int]
 
 
+class FunnelFloor(NamedTuple):
+    """Funnel-wide cross-strategy trial-Sharpe dispersion floor (#221 Slice 0). ``var_ann`` is the
+    MEAN of per-strategy pooled trial-Sharpe variances (annualized) across strategies active in the
+    rolling window, or ``None`` when fewer than ``MIN_FUNNEL_FLOOR_STRATEGIES`` finite per-strategy
+    variances exist (fail-open -> Phase-1 behavior). ``n_strategies`` is the count of strategies
+    that contributed a FINITE per-strategy pooled variance (strategies with NULL or non-finite
+    pooled variance are excluded entirely and do not count toward this total). ``n_total_rows`` is
+    the total search_trials rows across THOSE strategies (including their out-of-window/stale rows,
+    since the window selects strategies by their most-recent trial date, then pools ALL of each
+    selected strategy's rows)."""
+
+    var_ann: float | None
+    n_strategies: int
+    n_total_rows: int
+
+
 class ArtifactIdentity(NamedTuple):
     """The full identity a human approval binds to and the live gate recomputes.
 
@@ -235,6 +251,11 @@ class StrategyRepository(Protocol):
         NULL/NaN/inf count/mean/var. ANNUALIZED units (caller converts)."""
         ...
 
+    def funnel_trial_sharpe_var(self, window_days: int) -> FunnelFloor:
+        """Per-strategy pooling FIRST, then mean across strategies active in the trailing
+        ``window_days`` (anti-gaming: one vote per strategy regardless of combo count)."""
+        ...
+
     def total_search_combos(self, strategy_name: str) -> int:
         """Sum of ``n_combos`` across every recorded ``search_trials`` row for the strategy NAME —
         the cumulative count of parameter combinations searched in this family (0 if none)."""
@@ -275,15 +296,49 @@ class StrategyRepository(Protocol):
         (raises ``RuntimeError`` if ``self._conn.in_transaction``)."""
         ...
 
-    def finalize_holdout_reservation(self, reservation_id: int, *, config_hash: str) -> None:
+    def finalize_holdout_reservation(
+        self, reservation_id: int, *, config_hash: str, strategy_id: int
+    ) -> None:
         """Commit a reservation into a burn: set ``committed_at`` + the real evidentiary
-        ``config_hash``. Raises if the row is missing or already committed (guards double-finalize).
+        ``config_hash``. Raises if the row is missing, already committed, or strategy_id mismatches
+        (guards double-finalize and caller-bug cross-strategy writes).
         """
         ...
 
     def release_holdout_reservation(self, reservation_id: int) -> None:
         """Free a still-pending reservation (clean walk_forward failure). Never touches a committed
         burn; a release after finalize/crash is a harmless no-op."""
+        ...
+
+    def record_holdout_returns(
+        self, holdout_evaluation_id: int, strategy_id: int, *,
+        holdout_start: str, holdout_end: str,
+        returns: list[float], bar_dates: list[str],
+    ) -> int:
+        """Persist ONE OOS return vector for a committed holdout burn (#221 Slice 1). Separate
+        transaction from the burn (the burn committed at on_peek). UNIQUE(holdout_evaluation_id)
+        makes a re-run reconciliation safe. Validation is fail-closed and happens before the write.
+        Returns the new holdout_returns row id."""
+        ...
+
+    def overlapping_holdout_return_streams(
+        self, strategy_id: int, holdout_start: str, holdout_end: str, window_days: int
+    ) -> list[tuple[list[float], list[str]]]:
+        """SIBLING-ONLY cross-strategy read (#221 Slice 1 access control): returns OTHER strategies'
+        OOS return vectors (date-aligned ``(returns, bar_dates)`` pairs) whose holdout interval
+        overlaps ``[holdout_start, holdout_end]``, burned within the trailing ``window_days``.
+        NEVER returns the requesting strategy's own vector (``hr.strategy_id != strategy_id``).
+        This is the ONLY method that reads ``returns_blob``.
+
+        Window filter is on ``holdout_evaluations.created_at`` (burn time), NOT
+        ``holdout_returns.created_at`` (write time). Interval overlap is the standard test:
+        ``hr.holdout_start <= holdout_end AND holdout_start <= hr.holdout_end``.
+
+        Raises ``ValueError`` if a returned blob is corrupt (length ≠ n_bars).
+
+        NOTE: ``holdout_returns`` keys by ``strategy_id`` (FK to ``strategies.id``) while
+        ``search_trials`` keys by ``strategy_name`` — the asymmetry is intentional.
+        """
         ...
 
     def windowed_search_combos(self, window_days: int) -> int:

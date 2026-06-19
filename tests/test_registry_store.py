@@ -190,7 +190,7 @@ def test_null_interval_row_fails_closed(repo_with_strategy):
 def test_finalize_and_release_unchanged(repo_with_strategy):
     repo, sid = repo_with_strategy
     rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
-    repo.finalize_holdout_reservation(rid, config_hash="real-evidence-hash")
+    repo.finalize_holdout_reservation(rid, config_hash="real-evidence-hash", strategy_id=sid)
     row = repo._conn.execute(
         "SELECT committed_at, config_hash FROM holdout_evaluations WHERE id = ?", (rid,)
     ).fetchone()
@@ -218,15 +218,15 @@ def test_reserve_inside_open_transaction_raises(repo_with_strategy):
 def test_finalize_twice_raises(repo_with_strategy):
     repo, sid = repo_with_strategy
     rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
-    repo.finalize_holdout_reservation(rid, config_hash="h1")
+    repo.finalize_holdout_reservation(rid, config_hash="h1", strategy_id=sid)
     with pytest.raises(ValueError):
-        repo.finalize_holdout_reservation(rid, config_hash="h2")
+        repo.finalize_holdout_reservation(rid, config_hash="h2", strategy_id=sid)
 
 
 def test_release_after_finalize_is_noop(repo_with_strategy):
     repo, sid = repo_with_strategy
     rid, _ = _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")
-    repo.finalize_holdout_reservation(rid, config_hash="h1")
+    repo.finalize_holdout_reservation(rid, config_hash="h1", strategy_id=sid)
     repo.release_holdout_reservation(rid)  # no-op, no raise
     with pytest.raises(ValueError, match="holdout already consumed"):
         _reserve(repo, sid, hs="2022-06-01", he="2022-12-31")

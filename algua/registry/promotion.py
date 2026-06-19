@@ -366,6 +366,7 @@ def run_gate(
     snapshot_id: str | None,
     allow_non_pit: bool,
     reason_suffix: str,
+    holdout_evaluation_id: int | None = None,
 ) -> PromotionOutcome:
     """Post-walk phase: resolve PIT, evaluate, record the gate_evaluations row (pass AND fail), and
     on pass transition BACKTESTED->CANDIDATE (which consumes the just-minted agent token).
@@ -395,11 +396,15 @@ def run_gate(
     # omits DSR — and consequently FDR too (p_value requires a finite dsr_confidence).
     dsr_binding = breadth.provenance == "measured"
     dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
+    funnel_floor = repo.funnel_trial_sharpe_var(FUNNEL_WINDOW_DAYS) if dsr_binding else None
     decision = evaluate_gate(
         wf, criteria, n_combos=n_funnel, breadth_provenance=breadth.provenance,
         pit_ok=pit_ok, allow_non_pit=allow_non_pit, own_lifetime_combos=breadth.own,
         windowed_total_combos=breadth.windowed_total, funnel_window_days=FUNNEL_WINDOW_DAYS,
         dsr_binding=dsr_binding, dsr_trial_var_ann=dsr_trial_var_ann,
+        dsr_funnel_floor_var_ann=(funnel_floor.var_ann if funnel_floor else None),
+        dsr_funnel_floor_n_strategies=(funnel_floor.n_strategies if funnel_floor else None),
+        dsr_funnel_floor_n_total_rows=(funnel_floor.n_total_rows if funnel_floor else None),
     )
     # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
     # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
@@ -426,6 +431,26 @@ def run_gate(
 
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
+
+    # Persist the OOS return vector for this burn (#221 Slice 1) — separate tx from the burn
+    # (which committed at on_peek). Written on EVERY burn (pass or fail): the holdout was
+    # revealed, so the vector exists and funnel siblings may use it. gates.py never sees the
+    # vector; promotion is the sole writer. A missing row for a committed burn is a recoverable
+    # inconsistency (UNIQUE guards a re-run). returns_available feeds Slices 2-4
+    # (omit-not-fail for pre-Slice-1 promotions).
+    returns_available = False
+    if holdout_evaluation_id is not None and wf.holdout_returns is not None:
+        rets, bar_dates = wf.holdout_returns
+        if not (len(rets) == len(bar_dates) == holdout_n_bars):
+            raise ValueError(
+                f"holdout_returns length {len(rets)}/{len(bar_dates)}"
+                f" != holdout n_bars {holdout_n_bars}")
+        repo.record_holdout_returns(
+            holdout_evaluation_id, rec.id,
+            holdout_start=wf.holdout_metrics["start"], holdout_end=wf.holdout_metrics["end"],
+            returns=rets, bar_dates=bar_dates)
+        returns_available = True
+    decision.returns_available = returns_available
 
     # Build gate_row (all record_gate_evaluation kwargs, including provisional passed flag).
     gate_row = {
