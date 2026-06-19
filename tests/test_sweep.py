@@ -8,6 +8,7 @@ from algua.backtest.sweep import SweepResult, sweep
 from algua.contracts.types import ExecutionContract
 from algua.features.indicators import momentum
 from algua.portfolio.construction import get_construction_policy
+from algua.registry.db import connect, migrate
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 START = datetime(2022, 1, 1, tzinfo=UTC)
@@ -228,3 +229,42 @@ def test_trial_sharpe_stats_fails_closed_on_any_nonfinite():
     degenerate = [_rec(0.5), _rec(float("nan")), _rec(float("inf"))]
     assert _trial_sharpe_stats(degenerate) == (0, None, None)
     assert _trial_sharpe_stats([]) == (0, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Regression: sweep() persists no holdout_returns rows (#221 Slice 1)
+# ---------------------------------------------------------------------------
+
+def test_sweep_persists_zero_holdout_returns_rows(tmp_path):
+    """sweep() must NEVER write to holdout_returns — single-use discipline.
+
+    sweep() does not accept a registry repo argument and imports nothing from
+    algua.registry, so it is structurally incapable of calling
+    record_holdout_returns().  This test documents and guards that invariant:
+    even after a full sweep() run the holdout_returns table in a
+    freshly-migrated registry DB remains empty.
+
+    The holdout return vector is persisted ONLY at the one OOS burn point inside
+    run_gate() (called by `research promote`), never per sweep combo.
+    """
+    # Freshly migrated registry DB — sweep() has no reference to it, which is
+    # exactly the point: the table must stay at zero rows after a sweep run.
+    conn = connect(tmp_path / "t.db")
+    migrate(conn)
+
+    sweep(
+        _momentum(),
+        SyntheticProvider(seed=3),
+        START,
+        END,
+        grid={"lookback": [20, 40]},
+        windows=3,
+        holdout_frac=0.2,
+    )
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS c FROM holdout_returns"
+    ).fetchone()["c"]
+    assert count == 0, (
+        f"sweep() wrote {count} holdout_returns row(s) — single-use discipline violated"
+    )

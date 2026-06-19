@@ -366,6 +366,7 @@ def run_gate(
     snapshot_id: str | None,
     allow_non_pit: bool,
     reason_suffix: str,
+    holdout_evaluation_id: int | None = None,
 ) -> PromotionOutcome:
     """Post-walk phase: resolve PIT, evaluate, record the gate_evaluations row (pass AND fail), and
     on pass transition BACKTESTED->CANDIDATE (which consumes the just-minted agent token).
@@ -426,6 +427,26 @@ def run_gate(
 
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
+
+    # Persist the OOS return vector for this burn (#221 Slice 1) — separate tx from the burn
+    # (which committed at on_peek). Written on EVERY burn (pass or fail): the holdout was
+    # revealed, so the vector exists and funnel siblings may use it. gates.py never sees the
+    # vector; promotion is the sole writer. A missing row for a committed burn is a recoverable
+    # inconsistency (UNIQUE guards a re-run). returns_available feeds Slices 2-4
+    # (omit-not-fail for pre-Slice-1 promotions).
+    returns_available = False
+    if holdout_evaluation_id is not None and wf.holdout_returns is not None:
+        rets, bar_dates = wf.holdout_returns
+        if not (len(rets) == len(bar_dates) == holdout_n_bars):
+            raise ValueError(
+                f"holdout_returns length {len(rets)}/{len(bar_dates)}"
+                f" != holdout n_bars {holdout_n_bars}")
+        repo.record_holdout_returns(
+            holdout_evaluation_id, rec.id,
+            holdout_start=wf.holdout_metrics["start"], holdout_end=wf.holdout_metrics["end"],
+            returns=rets, bar_dates=bar_dates)
+        returns_available = True
+    decision.returns_available = returns_available
 
     # Build gate_row (all record_gate_evaluation kwargs, including provisional passed flag).
     gate_row = {

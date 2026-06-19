@@ -87,9 +87,18 @@ class WalkForwardResult:
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
     universe_name: str | None = None
     universe_snapshots: list[dict[str, str]] | None = None
+    # SENSITIVE — stronger than holdout_metrics: the raw OOS return vector lets a researcher
+    # identify which days their strategy failed and tune a later strategy to exploit the same
+    # holdout window. NEVER serialized: to_dict() excludes it; only research promote persists it
+    # (in promotion.run_gate), and only the sibling-only store read may surface it. (#221 Slice 1)
+    holdout_returns: tuple[list[float], list[str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        # holdout_returns is SENSITIVE and is NEVER serialized (#221 Slice 1). Build the dict
+        # explicitly so the raw vector is never even materialized into the output dict.
+        return {f.name: getattr(self, f.name)
+                for f in dataclasses.fields(self)
+                if f.name != "holdout_returns"}
 
 
 def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, Any]:
@@ -161,6 +170,11 @@ def walk_forward(
     if on_peek is not None:
         on_peek(cfg_hash)
     holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
+    holdout_seg = returns.iloc[holdout[0]:holdout[1]]
+    holdout_returns = (
+        [float(x) for x in holdout_seg.to_numpy()],
+        [str(idx.date()) for idx in holdout_seg.index],
+    )
 
     return WalkForwardResult(
         strategy=strategy.name,
@@ -176,5 +190,6 @@ def walk_forward(
         stability=stability,
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
+        holdout_returns=holdout_returns,
         **prov,
     )
