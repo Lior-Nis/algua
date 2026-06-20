@@ -434,7 +434,7 @@ def verify_signal_panel_parity(
     # Re-raise an existing BacktestError unchanged (divergence message preserved verbatim);
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
-        adj = _adj_grid(bars)
+        adj = adj_grid(bars)
         # Project to the operating universe identically to simulate()'s static path so the panel
         # under test sees exactly what the runtime fast path sees (observation parity, #208). Also
         # absorbs the empty-universe fail-closed guard.
@@ -492,9 +492,6 @@ def fetch_symbols(
     return sorted(union)
 
 
-# Private alias for internal callers that pre-date the public name (keeps internal call-sites
-# unchanged while allowing external importers to use the public name).
-_fetch_symbols = fetch_symbols
 
 
 def adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
@@ -505,8 +502,6 @@ def adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     return adj.sort_index()
 
 
-# Private alias for internal callers that pre-date the public name.
-_adj_grid = adj_grid
 
 
 def _static_operating_view(
@@ -555,12 +550,12 @@ def holdout_window(
     if not 0.0 < holdout_frac < 1.0:
         raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
     try:
-        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         return start.date().isoformat(), end.date().isoformat()
-    idx = _adj_grid(bars).index
+    idx = adj_grid(bars).index
     n = len(idx)
     holdout_n = int(n * holdout_frac)
     if holdout_n < 1:
@@ -605,13 +600,13 @@ def simulate(
             f"this slice rebalances daily only ({sorted(_SUPPORTED_CADENCES)})"
         )
     try:
-        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         raise BacktestError("provider returned no bars for the universe/period")
 
-    adj = _adj_grid(bars)
+    adj = adj_grid(bars)
 
     if universe_by_date is None:
         # Static mode: project the strategy-visible view + grid to the operating universe so an
@@ -627,7 +622,7 @@ def simulate(
                 f"fundamentals_provider was supplied (fail closed)"
             )
         fundamentals = fundamentals_provider.get_fundamentals(
-            _fetch_symbols(strategy, universe_by_date), end
+            fetch_symbols(strategy, universe_by_date), end
         )
         _assert_fundamentals_shape(fundamentals)
 
@@ -638,7 +633,7 @@ def simulate(
                 f"strategy {strategy.name!r} declares needs_news but no news_provider was "
                 f"supplied (fail closed)"
             )
-        news = news_provider.get_news(_fetch_symbols(strategy, universe_by_date), end)
+        news = news_provider.get_news(fetch_symbols(strategy, universe_by_date), end)
         _assert_news_shape(news)
 
     weights = _decision_weights_fast_or_loop(

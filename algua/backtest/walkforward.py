@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from algua.backtest.delisting import DelistingRecord
-from algua.backtest.engine import BacktestError, _fetch_symbols, adj_grid, build_portfolio
+from algua.backtest.engine import BacktestError, adj_grid, build_portfolio, fetch_symbols
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
@@ -121,7 +121,7 @@ def _market_return_series(
     later 21-bar trailing vol has lookback for every holdout date (#221 Slice 4).
     """
     try:
-        symbols = _fetch_symbols(strategy, universe_by_date)
+        symbols = fetch_symbols(strategy, universe_by_date)
         bars = provider.get_bars(symbols, start, end, "1d")
         adj = adj_grid(bars)                          # (dates x symbols) adj_close panel
         xs = adj.pct_change().mean(axis=1).dropna()   # equal-weighted cross-sectional return

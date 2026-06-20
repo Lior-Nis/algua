@@ -1,4 +1,5 @@
 """Tests for #221 Slice 4 Task 1: WalkForwardResult.market_returns benchmark series."""
+import math
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -81,7 +82,6 @@ def test_walk_forward_populates_market_returns():
     # Dates are sorted (monotonically increasing)
     assert md == sorted(md)
     # All returns are finite floats
-    import math
     assert all(math.isfinite(r) for r in mr)
 
 
