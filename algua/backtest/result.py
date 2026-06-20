@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,3 +61,25 @@ class BacktestResult:
             for f in dataclasses.fields(self)
             if f.name != "returns"
         }
+
+
+def series_frame(result: BacktestResult) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Pure projection of a backtest's daily return series to a `[date, ret]` frame + metadata
+    (#181). NO serialization, NO I/O — keeps `algua.backtest` off the data lane.
+    Caller guards `returns is not None and len(returns) > 0`.
+
+    `ret` is canonicalized `-0.0 -> +0.0` (a flat day must not perturb the parquet bytes — mirrors
+    `logical_bars_hash`). Metadata embeds the WHOLE run identity as one sorted-key JSON blob so the
+    standalone file is self-describing (carries config/code/dependency hashes, snapshot, seed,
+    timeframe, period, universe/fundamentals/news/delisting provenance, metrics — everything in
+    `to_dict()` except the series itself)."""
+    assert result.returns is not None
+    r = result.returns
+    frame = pd.DataFrame(
+        {
+            "date": [pd.Timestamp(ts).isoformat() for ts in r.index],
+            "ret": r.to_numpy(dtype=float) + 0.0,  # -0.0 -> +0.0
+        }
+    )
+    metadata = {"algua.result_json": json.dumps(result.to_dict(), sort_keys=True, default=str)}
+    return frame, metadata
