@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
+import numpy as np
+
 from algua.backtest.result import BacktestResult, series_frame
 from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
@@ -75,10 +77,14 @@ def _log_series_artifact(result: BacktestResult) -> None:
     The report-experiments skill can then plot the LOGGED run's own series (no re-run, no
     code/input drift). Only `log_backtest` calls this — `log_sweep`/`log_walk_forward` must
     NOT, because their return vectors contain the reserved single-use holdout tail.
-    Best-effort: an absent/empty series is skipped."""
+    Best-effort: an absent/empty/non-finite series is skipped — do NOT raise."""
     import mlflow
 
-    if result.returns is None or len(result.returns) == 0:
+    if (
+        result.returns is None
+        or len(result.returns) == 0
+        or not np.isfinite(result.returns.to_numpy(dtype=float)).all()
+    ):
         return
     frame, metadata = series_frame(result)
     data = frame_to_parquet_bytes(frame, metadata)

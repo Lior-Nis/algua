@@ -73,7 +73,8 @@ def series_frame(result: BacktestResult) -> tuple[pd.DataFrame, dict[str, str]]:
     standalone file is self-describing (carries config/code/dependency hashes, snapshot, seed,
     timeframe, period, universe/fundamentals/news/delisting provenance, metrics — everything in
     `to_dict()` except the series itself)."""
-    assert result.returns is not None
+    if result.returns is None:
+        raise ValueError("series_frame requires non-None returns; caller must guard")
     r = result.returns
     frame = pd.DataFrame(
         {

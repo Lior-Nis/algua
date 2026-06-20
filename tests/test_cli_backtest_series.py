@@ -1,6 +1,7 @@
 # tests/test_cli_backtest_series.py
 import json
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -42,11 +43,48 @@ def test_emit_series_file_fails_closed_on_empty(tmp_path):
     assert not (tmp_path / "s.parquet").exists()
 
 
+def test_emit_series_file_fails_closed_on_nan(tmp_path):
+    """A series containing NaN must be rejected as non-finite (finding #1, GATE-2)."""
+    idx = pd.to_datetime(["2023-01-01", "2023-01-02"])
+    nan_series = pd.Series([0.01, np.nan], index=idx)
+    with pytest.raises(BacktestError, match="no finite return series"):
+        emit_series_file(_result(nan_series), tmp_path / "s.parquet")
+    assert not (tmp_path / "s.parquet").exists()
+
+
+def test_emit_series_file_fails_closed_on_inf(tmp_path):
+    """A series containing inf must be rejected as non-finite (finding #1, GATE-2)."""
+    idx = pd.to_datetime(["2023-01-01", "2023-01-02"])
+    inf_series = pd.Series([0.01, np.inf], index=idx)
+    with pytest.raises(BacktestError, match="no finite return series"):
+        emit_series_file(_result(inf_series), tmp_path / "s.parquet")
+    assert not (tmp_path / "s.parquet").exists()
+
+
+def test_emit_series_file_bad_path_json_contract(tmp_path):
+    """An unwritable path must produce a BacktestError (stays in JSON contract, finding #3)."""
+    import os
+    idx = pd.to_datetime(["2023-01-01", "2023-01-02"])
+    good_series = pd.Series([0.01, 0.02], index=idx)
+    # Make the parent directory read-only so mkstemp inside write_bytes_atomic fails.
+    ro_dir = tmp_path / "ro"
+    ro_dir.mkdir()
+    os.chmod(ro_dir, 0o555)
+    try:
+        with pytest.raises(BacktestError, match="failed to write series"):
+            emit_series_file(_result(good_series), ro_dir / "s.parquet")
+    finally:
+        os.chmod(ro_dir, 0o755)  # restore so tmp_path cleanup succeeds
+
+
 def test_emit_series_file_writes_and_descriptor(tmp_path):
     idx = pd.to_datetime(["2023-01-01", "2023-01-02"])
     desc = emit_series_file(_result(pd.Series([0.01, 0.02], index=idx)), tmp_path / "s.parquet")
     assert desc["n"] == 2
     assert desc["config_hash"] == "cfg" and desc["start"] == "2023-01-01"
+    # Finding #7: all identity fields must be present in the stdout descriptor
+    for key in ("universe_name", "fundamentals_snapshot", "news_snapshot", "delisting_snapshot"):
+        assert key in desc, f"descriptor missing key: {key}"
     meta = pq.read_schema(pa.BufferReader((tmp_path / "s.parquet").read_bytes())).metadata
     assert b"algua.result_json" in meta
 
@@ -61,7 +99,8 @@ def test_cli_emit_series_demo(tmp_path):
     assert payload["series"]["path"] == str(out)
     df = pd.read_parquet(out)
     assert list(df.columns) == ["date", "ret"]
-    assert payload["series"]["n"] == len(df) > 0
+    assert payload["series"]["n"] == len(df)
+    assert len(df) > 0
 
 
 def test_cli_emit_series_deterministic(tmp_path):

@@ -278,7 +278,8 @@ def _load_series(uri: str, run_id: str):
             run_id=run_id, artifact_path="series.parquet", tracking_uri=uri)
         df = pd.read_parquet(local)
         return df if {"date", "ret"}.issubset(df.columns) and len(df) else None
-    except Exception:
+    except Exception as exc:
+        print(f"[warn] _load_series failed for run_id={run_id}: {exc}")
         return None
 
 
@@ -407,14 +408,21 @@ def main() -> int:
     chosen = None
     chosen_res: dict[str, Any] = {}
     chosen_df = None
-    if args.backtest_run_id:
+    explicit_id_given = bool(args.backtest_run_id)
+    if explicit_id_given:
         chosen = next((r for r in bt_runs if r.info.run_id == args.backtest_run_id), None)
         if chosen is not None:
             chosen_res = _artifact_json(chosen.info.run_id, "result.json", uri) or {}
             chosen_df = _load_series(uri, chosen.info.run_id)
-    # Prefer a backtest whose identity matches the report's walk-forward (then sweep) run.
-    ref = provenance.get("walk_forward") or provenance.get("sweep") or {}
-    if chosen is None:
+        if chosen is None or chosen_df is None:
+            # Terminal: explicit id given but not found/loadable — skip series plots entirely.
+            print(f"[warn] --backtest-run-id {args.backtest_run_id} not found among backtest"
+                  " runs with a series; skipping series plots")
+    if not explicit_id_given:
+        # Prefer a backtest whose identity matches the report's walk-forward (then sweep) run.
+        # For sweep runs, the best combo's hash is stored under best_config_hash (not config_hash).
+        ref = provenance.get("walk_forward") or provenance.get("sweep") or {}
+        ref_config = ref.get("config_hash") or ref.get("best_config_hash")
         for r in bt_runs:
             res = _artifact_json(r.info.run_id, "result.json", uri)
             if res is None:
@@ -423,18 +431,18 @@ def main() -> int:
             if df_candidate is None:
                 continue
             if ref and (res.get("config_hash"), res.get("snapshot_id")) == (
-                    ref.get("config_hash"), ref.get("snapshot_id")):
+                    ref_config, ref.get("snapshot_id")):
                 chosen, chosen_res, chosen_df = r, res, df_candidate
                 break
-    if chosen is None:  # fall back to newest backtest with a series artifact (label its identity)
-        for r in bt_runs:
-            res = _artifact_json(r.info.run_id, "result.json", uri)
-            if res is None:
-                continue
-            df_candidate = _load_series(uri, r.info.run_id)
-            if df_candidate is not None:
-                chosen, chosen_res, chosen_df = r, res, df_candidate
-                break
+        if chosen is None:  # fall back to newest backtest with a series artifact
+            for r in bt_runs:
+                res = _artifact_json(r.info.run_id, "result.json", uri)
+                if res is None:
+                    continue
+                df_candidate = _load_series(uri, r.info.run_id)
+                if df_candidate is not None:
+                    chosen, chosen_res, chosen_df = r, res, df_candidate
+                    break
     if chosen is not None and chosen_df is not None:
         provenance["series"] = _series_provenance(uri, chosen, chosen_res)
         for fn, name in (

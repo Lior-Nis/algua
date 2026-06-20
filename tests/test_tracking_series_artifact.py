@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from mlflow.tracking import MlflowClient
 
@@ -33,6 +34,16 @@ def test_log_backtest_logs_series_parquet(tmp_path):
 def test_log_backtest_skips_series_when_returns_none(tmp_path):
     uri = (tmp_path / "mlruns").as_uri()
     run_id = log_backtest(_result(None), {}, tracking_uri=uri)
+    assert "series.parquet" not in _artifact_names(uri, run_id)
+
+
+def test_log_backtest_skips_series_when_returns_contain_nan(tmp_path):
+    """NaN in the return series must be skipped (best-effort), not raised (finding #1, GATE-2)."""
+    uri = (tmp_path / "mlruns").as_uri()
+    idx = pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"])
+    nan_series = pd.Series([0.01, np.nan, 0.02], index=idx)
+    # Must not raise; must simply skip the series artifact
+    run_id = log_backtest(_result(nan_series), {}, tracking_uri=uri)
     assert "series.parquet" not in _artifact_names(uri, run_id)
 
 

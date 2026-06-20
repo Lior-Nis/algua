@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from algua.backtest.result import BacktestResult, series_frame
 
@@ -37,3 +38,9 @@ def test_series_frame_metadata_carries_full_identity_minus_returns():
     assert payload["strategy"] == "mom"
     assert payload["config_hash"] == "cfg"
     assert "returns" not in payload  # to_dict already excludes it
+
+
+def test_series_frame_raises_on_none_returns():
+    """series_frame must raise ValueError (not AssertionError) when returns is None (finding #2)."""
+    with pytest.raises(ValueError, match="series_frame requires non-None returns"):
+        series_frame(_result(None))

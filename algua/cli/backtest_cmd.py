@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
+import pyarrow as pa
 import typer
 
 from algua.backtest.engine import BacktestError
@@ -44,12 +46,21 @@ def _track(call: Callable[[], str]) -> str:
 
 def emit_series_file(result: BacktestResult, path: Path) -> dict:
     """Write the backtest's daily return series to a deterministic, provenance-stamped parquet at
-    `path` and return the stdout `series` descriptor. Fail closed (#181): a `None` (non-finite) or
-    empty series raises BacktestError — never a partial/empty file."""
-    if result.returns is None or len(result.returns) == 0:
+    `path` and return the stdout `series` descriptor. Fail closed (#181): a `None`, empty, or
+    non-finite series raises BacktestError — never a partial/empty file."""
+    if (
+        result.returns is None
+        or len(result.returns) == 0
+        or not np.isfinite(result.returns.to_numpy(dtype=float)).all()
+    ):
         raise BacktestError("backtest produced no finite return series; nothing to emit")
     frame, metadata = series_frame(result)
-    write_bytes_atomic(frame_to_parquet_bytes(frame, metadata), path)
+    try:
+        write_bytes_atomic(frame_to_parquet_bytes(frame, metadata), path)
+    except (OSError, pa.ArrowInvalid, Exception) as exc:
+        if isinstance(exc, BacktestError):
+            raise
+        raise BacktestError(f"failed to write series to {path}: {exc}") from exc
     return {
         "path": str(path), "n": int(len(frame)),
         "code_hash": result.code_hash, "dependency_hash": result.dependency_hash,
@@ -57,6 +68,10 @@ def emit_series_file(result: BacktestResult, path: Path) -> dict:
         "seed": result.seed, "data_source": result.data_source,
         "start": result.period["start"], "end": result.period["end"],
         "timeframe": result.timeframe,
+        "universe_name": result.universe_name,
+        "fundamentals_snapshot": result.fundamentals_snapshot,
+        "news_snapshot": result.news_snapshot,
+        "delisting_snapshot": result.delisting_snapshot,
     }
 
 
