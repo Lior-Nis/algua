@@ -7,7 +7,6 @@ import typer
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import emit
 from algua.cli.errors import json_errors
-from algua.cli.research_cmd import research_app
 from algua.contracts.idea import DataCapability, IdeaStatus, SourceType
 from algua.data.capabilities import supported_capabilities
 from algua.registry.ideas import Collision, IdeaRepository
@@ -18,7 +17,6 @@ _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 idea_app = typer.Typer(
     help="Idea pool: source, dedup, and park research hypotheses", no_args_is_help=True)
-research_app.add_typer(idea_app, name="idea")
 
 
 def _idea_json(idea) -> dict:

@@ -203,3 +203,22 @@ name = "live and execution stay off the data lane"
 type = "forbidden"
 source_modules = ["algua.live", "algua.execution"]
 forbidden_modules = ["algua.data"]
+
+[[tool.importlinter.contracts]]
+# The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
+# the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
+# gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is
+# NOT listed, so command modules may still import it.
+name = "cli command modules are independent of one another (no cli->cli sibling imports)"
+type = "independence"
+modules = [
+    "algua.cli.backtest_cmd",
+    "algua.cli.data_cmd",
+    "algua.cli.factor_cmd",
+    "algua.cli.idea_cmd",
+    "algua.cli.live_cmd",
+    "algua.cli.paper_cmd",
+    "algua.cli.registry_cmd",
+    "algua.cli.research_cmd",
+    "algua.cli.strategy_cmd",
+]

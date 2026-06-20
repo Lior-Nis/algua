@@ -88,6 +88,19 @@ class StrategyRecord:
     description: str | None = None
 
 
+def kb_metadata(rec: StrategyRecord) -> dict:
+    """Return the registry-owned frontmatter fields for kb sync (no id/name/stage).
+
+    Lives beside ``StrategyRecord`` so both ``registry_cmd`` and ``strategy_cmd`` import it from the
+    registry layer rather than from each other.
+    """
+    return {
+        "family": rec.family, "tags": rec.tags, "author": rec.author.value,
+        "hypothesis_status": rec.hypothesis_status.value,
+        "derived_from": rec.derived_from, "description": rec.description,
+    }
+
+
 class StrategyRepository(Protocol):
     """Persistence seam for the registry.
 

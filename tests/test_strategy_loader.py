@@ -125,3 +125,28 @@ def test_family_init_files_are_empty():
             continue
         body = (fam / "__init__.py").read_text().strip()
         assert body == "", f"family package {fam.name}/__init__.py must be empty, has: {body!r}"
+
+
+def test_load_tradable_strategy_loads_plain_strategy():
+    from algua.strategies.loader import load_tradable_strategy
+    s = load_tradable_strategy("cross_sectional_momentum")
+    assert s.config.name == "cross_sectional_momentum"
+
+
+def test_load_tradable_strategy_rejects_fundamentals_strategy(monkeypatch):
+    # A needs_fundamentals strategy must be refused by the tradability gate.
+    import algua.strategies.loader as loader
+
+    sentinel = object()
+
+    def _fake_load(name):
+        return sentinel
+
+    def _boom(strategy):
+        assert strategy is sentinel
+        raise ValueError("needs_fundamentals: not tradable without a fundamentals lane")
+
+    monkeypatch.setattr(loader, "load_strategy", _fake_load)
+    monkeypatch.setattr(loader, "assert_tradable_without_fundamentals", _boom)
+    with pytest.raises(ValueError, match="needs_fundamentals"):
+        loader.load_tradable_strategy("x")
