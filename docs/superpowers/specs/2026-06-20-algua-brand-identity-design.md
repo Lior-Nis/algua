@@ -73,20 +73,25 @@ the letterform itself blurs.
 
 ## 4. Wordmark
 
-The wordmark is `algua`, **lowercase** — quieter and more liquid than all-caps,
-while staying sharp.
+The wordmark is `Algua` — **capital A, lowercase `lgua`** (title case). The
+capitalized initial gives the mark a name-like, proper-noun presence while the
+lowercase tail keeps it quiet and liquid, not all-caps loud.
 
 - **Skeleton:** drawn from a **geometric grotesk (Space Grotesk Medium)**, then
   **converted to outlines** in the final asset so the wordmark is
   font-independent (no dependency on the font being installed/licensed at use).
-- **Letterforms:** tight-but-open tracking; flat terminals; both `a`s use the
-  **single-story round-bowl** form to echo the glyph's geometry.
+- **Letterforms:** tight-but-open tracking; flat terminals; the lowercase `a`
+  uses the **single-story round-bowl** form to echo the glyph's geometry.
+- **The capital "A":** a standard sharp-apex capital A with a **normal ink
+  crossbar** (this is type, not the glyph). To make it *rhyme* with the glyph
+  without breaking accent discipline, its crossbar sits at the **same height
+  ratio** as the glyph's waterline — same line, lower down, rendered in ink.
 - **Baseline waterline:** the waterline device reappears as a **thin aqua baseline
   rule** that the letters sit on, overshooting the final `a` by the **same
   overshoot ratio** (≈12%) as the glyph. This is the single visual hinge that
   unifies glyph and wordmark — same device, same accent, scaled down.
-- **Accent discipline:** the letterforms are **never** aqua. Only the baseline
-  rule is.
+- **Accent discipline:** the letterforms are **never** aqua — including the
+  capital A's crossbar (ink). Only the baseline rule is aqua.
 
 ---
 
@@ -94,10 +99,10 @@ while staying sharp.
 
 | Lockup | Composition | Use |
 |---|---|---|
-| **Horizontal** (primary) | glyph + `algua`, **baselines aligned**; gap = one glyph stroke-width | README header, docs nav, default |
+| **Horizontal** (primary) | glyph + `Algua`, **baselines aligned**; gap = one glyph stroke-width | README header, docs nav, default |
 | **Stacked** | glyph above, wordmark below, centered | square-ish placements, social cards |
 | **Glyph-alone** | the waterline A | favicon, avatar, app icon, terminal banner |
-| **Wordmark-alone** | `algua` + baseline rule | inline text, footers, where a glyph is redundant |
+| **Wordmark-alone** | `Algua` + baseline rule | inline text, footers, where a glyph is redundant |
 
 In the horizontal lockup the glyph's waterline and the wordmark's baseline rule
 share the **same vertical position** (both are baselines), reinforcing that
