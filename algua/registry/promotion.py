@@ -8,6 +8,7 @@ from datetime import date, datetime
 
 from algua.backtest.bootstrap import stable_bootstrap_seed, stationary_bootstrap_dsr
 from algua.backtest.engine import verify_signal_panel_parity
+from algua.backtest.neff import estimate_n_eff
 from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.types import DataProvider
@@ -31,6 +32,9 @@ from algua.research.gates import (
     FDR_ALPHA,
     FDR_W0,
     FUNNEL_WINDOW_DAYS,
+    MIN_CORR_OVERLAP_BARS,
+    MIN_N_EFF_SIBLINGS,
+    RHO_BAR_SHRINKAGE_K,
     GateCriteria,
     GateDecision,
     dsr_sr_star_annualized,
@@ -456,6 +460,23 @@ def run_gate(
 
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
+
+    # Effective independent trials N_eff (#221 Slice 3) — SHADOW-ONLY: recorded for the audit trail,
+    # NEVER passed as the binding DSR trial count (a lower N_eff would loosen the gate; it goes
+    # binding only at Slice 5 with haircut retirement). Sibling-only read (excludes own vector).
+    # Guarded on holdout_metrics["start"/"end"] presence (omit-not-fail for legacy fixtures
+    # that pre-date Slice 1 and don't carry the OOS interval in the WalkForwardResult).
+    h_start_neff = wf.holdout_metrics.get("start")
+    h_end_neff = wf.holdout_metrics.get("end")
+    if dsr_binding and h_start_neff is not None and h_end_neff is not None:
+        siblings = repo.overlapping_holdout_return_streams(
+            rec.id, h_start_neff, h_end_neff, FUNNEL_WINDOW_DAYS)
+        neff = estimate_n_eff(
+            n_funnel, siblings, min_siblings=MIN_N_EFF_SIBLINGS,
+            min_overlap_bars=MIN_CORR_OVERLAP_BARS, shrinkage_k=RHO_BAR_SHRINKAGE_K)
+        decision.dsr_n_eff = neff.n_eff
+        decision.dsr_rho_bar = neff.rho_bar
+        decision.dsr_n_siblings = neff.n_siblings
 
     # Persist the OOS return vector for this burn (#221 Slice 1) — separate tx from the burn
     # (which committed at on_peek). Written on EVERY burn (pass or fail): the holdout was
