@@ -502,6 +502,14 @@ class GateDecision:
     dsr_n_eff: int | None = None
     dsr_rho_bar: float | None = None
     dsr_n_siblings: int | None = None
+    # Multi-regime robustness audit (#221 Slice 4). Populated by evaluate_gate when the check
+    # binds (holdout_returns + market_returns present, overlap >= MIN_REGIME_OVERLAP_BARS).
+    # When omitted (unavailable / insufficient overlap): regime_method explains why.
+    regime_method: str | None = None          # "vol_tertile"|"unavailable"|"insufficient_overlap"
+    n_regimes_attempted: int | None = None    # total regime slices fed to robustness_check
+    n_regimes_surviving: int | None = None    # regimes that cleared power + vol floors
+    per_regime_sharpes: list[float | None] | None = None  # per-slice Sharpe; None for dropped
+    regime_robustness_binding: bool = False   # True iff the check was appended to checks
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -551,6 +559,15 @@ class GateDecision:
             "dsr_n_eff": self.dsr_n_eff,
             "dsr_rho_bar": _f(self.dsr_rho_bar),
             "dsr_n_siblings": self.dsr_n_siblings,
+            "regime_method": self.regime_method,
+            "n_regimes_attempted": self.n_regimes_attempted,
+            "n_regimes_surviving": self.n_regimes_surviving,
+            "per_regime_sharpes": (
+                [None if (x is None or not math.isfinite(x)) else x
+                 for x in self.per_regime_sharpes]
+                if self.per_regime_sharpes is not None else None
+            ),
+            "regime_robustness_binding": self.regime_robustness_binding,
         }
 
 
@@ -610,6 +627,7 @@ def evaluate_gate(
     bootstrap_seed: int | None = None,
     bootstrap_b: int | None = None,
     bootstrap_block_len: int | None = None,
+    market_returns: tuple[list[float], list[str]] | None = None,
 ) -> GateDecision:
     """Judge a walk-forward result against the gate criteria. Pure; no side effects.
 
@@ -705,6 +723,46 @@ def evaluate_gate(
                            "threshold": 1.0 - DSR_ALPHA, "op": ">=", "passed": bool(boot_pass)})
     else:
         dsr_skip_reason = "no_measured_dispersion"
+
+    # Multi-regime robustness (#221 Slice 4): a tighten-only AND-check, appended ONLY when the
+    # market series is available AND wf.holdout_returns is present AND overlap is sufficient.
+    # When omitted (unavailable / insufficient_overlap), checks is byte-identical to today so
+    # every existing promotion test (no market_returns) is unchanged.
+    # Binding is INDEPENDENT of dsr_binding — purely a holdout-robustness check.
+    regime_method: str | None = None
+    n_regimes_attempted: int | None = None
+    n_regimes_surviving: int | None = None
+    per_regime_sharpes_out: list[float | None] | None = None
+    regime_robustness_binding = False
+
+    holdout_ret_vec = wf.holdout_returns  # tuple[list[float], list[str]] | None
+    if holdout_ret_vec is None or market_returns is None:
+        regime_method = "unavailable"
+    else:
+        strat_rets_list, strat_dates_list = holdout_ret_vec
+        mkt_rets_list, mkt_dates_list = market_returns
+        slices, overlap_n = regime_splits(
+            strat_rets_list,
+            strat_dates_list,
+            mkt_rets_list,
+            mkt_dates_list,
+            n_regimes=N_REGIMES,
+            vol_window=VOL_ROLLING_WINDOW,
+        )
+        if overlap_n < MIN_REGIME_OVERLAP_BARS:
+            regime_method = "insufficient_overlap"
+        else:
+            res = regime_robustness_check(slices, min_obs=MIN_REGIME_OBSERVATIONS,
+                                          min_sharpe=MIN_REGIME_SHARPE)
+            checks.append({"name": "regime_robustness", "value": None,
+                           "threshold": MIN_REGIME_SHARPE, "op": ">=",
+                           "passed": bool(res.passed)})
+            regime_method = "vol_tertile"
+            regime_robustness_binding = True
+            n_regimes_attempted = res.n_attempted
+            n_regimes_surviving = res.n_surviving
+            per_regime_sharpes_out = res.per_regime_sharpes
+
     return GateDecision(
         passed=all(c["passed"] for c in checks),
         checks=checks,
@@ -733,4 +791,9 @@ def evaluate_gate(
         dsr_bootstrap_seed=(bootstrap_seed if effective_bootstrap_binding else None),
         dsr_bootstrap_b=(bootstrap_b if effective_bootstrap_binding else None),
         dsr_bootstrap_block_len=(bootstrap_block_len if effective_bootstrap_binding else None),
+        regime_method=regime_method,
+        n_regimes_attempted=n_regimes_attempted,
+        n_regimes_surviving=n_regimes_surviving,
+        per_regime_sharpes=per_regime_sharpes_out,
+        regime_robustness_binding=regime_robustness_binding,
     )

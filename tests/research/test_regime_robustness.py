@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import datetime
+import math
 
 import numpy as np
 
+from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
     MIN_REGIME_OBSERVATIONS,
     MIN_REGIME_SHARPE,
     N_REGIMES,
+    GateCriteria,
     RegimeSlice,
+    evaluate_gate,
     regime_robustness_check,
     regime_splits,
 )
@@ -272,3 +276,240 @@ def test_empty_slices_fails():
     assert res.n_attempted == 0
     assert res.n_surviving == 0
     assert res.per_regime_sharpes == []
+
+
+# ---------------------------------------------------------------------------
+# Task 3: evaluate_gate wiring — regime_robustness AND-check + audit
+# ---------------------------------------------------------------------------
+
+_HOLDOUT = {
+    "sharpe": 7.0,
+    "total_return": 0.2,
+    "n_bars": 252,
+    "skewness": 0.0,
+    "kurtosis": 3.0,
+}
+_STAB = {"pct_positive_windows": 0.8, "min_sharpe": 0.1}
+
+
+def _make_wf(
+    *,
+    holdout_returns: tuple[list[float], list[str]] | None = None,
+    market_returns: tuple[list[float], list[str]] | None = None,
+    sharpe: float = 7.0,
+) -> WalkForwardResult:
+    """Build a WalkForwardResult that passes all non-regime gate checks.
+    Optionally carry holdout_returns and market_returns for regime wiring tests.
+    """
+    return WalkForwardResult(
+        strategy="test_strat",
+        config_hash="c",
+        data_source="synthetic",
+        snapshot_id=None,
+        timeframe="1d",
+        seed=None,
+        period={"start": "2020-01-01", "end": "2021-01-01"},
+        windows=4,
+        holdout_frac=0.2,
+        window_metrics=[],
+        holdout_metrics={**_HOLDOUT, "sharpe": sharpe},
+        stability=dict(_STAB),
+        holdout_returns=holdout_returns,
+        market_returns=market_returns,
+    )
+
+
+def _make_regime_returns(
+    n: int = 252,
+    seed: int = 0,
+    positive_mean: float = 0.005,
+    start_date: datetime.date = datetime.date(2020, 1, 1),
+) -> tuple[list[float], list[str]]:
+    """Build a return series with n positive-mean bars and ISO date strings."""
+    rng = np.random.default_rng(seed)
+    rets = list(rng.normal(positive_mean, 0.01, n))
+    dates = _robust_dates(n, start_date)
+    return (rets, dates)
+
+
+# --- binding: regime_robustness check APPENDED + audit populated ----------
+
+def test_regime_check_appended_when_binding():
+    """With holdout_returns + market_returns + sufficient overlap -> regime_robustness present."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates), market_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    names = [c["name"] for c in d.checks]
+    assert "regime_robustness" in names
+
+
+def test_regime_check_method_vol_tertile_when_binding():
+    """When the check is binding, regime_method must be 'vol_tertile'."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates), market_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    assert d.regime_method == "vol_tertile"
+    assert d.regime_robustness_binding is True
+
+
+def test_regime_audit_fields_populated_when_binding():
+    """n_regimes_attempted, n_regimes_surviving, per_regime_sharpes set when binding."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates), market_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    assert d.n_regimes_attempted is not None and d.n_regimes_attempted > 0
+    assert d.n_regimes_surviving is not None
+    assert d.per_regime_sharpes is not None and len(d.per_regime_sharpes) > 0
+
+
+def test_regime_check_in_to_dict():
+    """All five regime audit fields appear in to_dict()."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates), market_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    dct = d.to_dict()
+    assert "regime_method" in dct
+    assert "n_regimes_attempted" in dct
+    assert "n_regimes_surviving" in dct
+    assert "per_regime_sharpes" in dct
+    assert "regime_robustness_binding" in dct
+
+
+# --- FAIL-CLOSED: binding + <2 survivors -> check FAILED -> gate passed=False ------
+
+def test_regime_binding_negative_sharpe_regime_fails_gate():
+    """Strategy has strongly negative returns in the high-vol regime -> regime_robustness FAILED.
+    A strategy that passes the aggregate holdout_sharpe (sharpe=7.0) must fail overall.
+
+    Mechanism:
+    - Market: first 63 bars low-vol, last 189 bars high-vol (clear tertile split).
+    - vol_window=21 -> from bar 20 onward all dates get a vol label.
+    - Strategy: good positive returns for bars 0..188, strong negative returns for bars 189..251
+      (the high-vol regime) -> sharpe in high-vol regime < 0.0 -> regime check FAILS.
+    """
+    n = 252
+    dates = _robust_dates(n)
+    rng = np.random.default_rng(77)
+    # Market: first third calm, then two thirds volatile
+    market_low = list(rng.normal(0, 0.001, 84))
+    market_high = list(rng.normal(0, 0.03, n - 84))
+    market_rets = market_low + market_high
+    # Strategy: very positive first 84+84=168 bars, very negative last 84 bars
+    strat_good = list(rng.normal(0.02, 0.01, 168))
+    strat_bad = list(rng.normal(-0.05, 0.01, n - 168))
+    strat_rets = strat_good + strat_bad
+
+    market = (market_rets, dates)
+    wf = _make_wf(holdout_returns=(strat_rets, dates), market_returns=market, sharpe=7.0)
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=market)
+    regime_check = next(c for c in d.checks if c["name"] == "regime_robustness")
+    assert regime_check["passed"] is False
+    assert d.passed is False
+
+
+# --- market_returns=None -> NO check, regime_method="unavailable" ----------
+
+def test_no_market_returns_omits_check():
+    """market_returns=None -> no regime_robustness check in checks list."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=None)
+    names = [c["name"] for c in d.checks]
+    assert "regime_robustness" not in names
+
+
+def test_no_market_returns_method_unavailable():
+    """market_returns=None -> regime_method='unavailable', binding=False."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=None)
+    assert d.regime_method == "unavailable"
+    assert d.regime_robustness_binding is False
+    assert d.n_regimes_attempted is None
+    assert d.n_regimes_surviving is None
+    assert d.per_regime_sharpes is None
+
+
+def test_no_holdout_returns_omits_check():
+    """wf.holdout_returns=None -> no regime check, regime_method='unavailable'."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=None)  # no holdout returns
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    names = [c["name"] for c in d.checks]
+    assert "regime_robustness" not in names
+    assert d.regime_method == "unavailable"
+
+
+# --- insufficient overlap -> omit + regime_method="insufficient_overlap" ---
+
+def test_insufficient_overlap_omits_check():
+    """When overlap_n < MIN_REGIME_OVERLAP_BARS -> no check, method='insufficient_overlap'."""
+    # strategy dates and market dates partially overlap but < MIN_REGIME_OVERLAP_BARS
+    market_dates = _robust_dates(40, datetime.date(2020, 1, 1))  # only 40 market dates
+    # Same dates -> overlap but vol_window=21 -> at most 20 labeled -> < 63
+    strat_dates = _robust_dates(40, datetime.date(2020, 1, 1))
+    # vol_window=21 -> at most 40-21+1=20 labeled -> < MIN_REGIME_OVERLAP_BARS (63)
+    market = ([0.005] * 40, market_dates)
+    strat_rets = list(np.random.default_rng(50).normal(0.005, 0.01, 40))
+    wf = _make_wf(holdout_returns=(strat_rets, strat_dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=market)
+    names = [c["name"] for c in d.checks]
+    assert "regime_robustness" not in names
+    assert d.regime_method == "insufficient_overlap"
+    assert d.regime_robustness_binding is False
+
+
+# --- tighten-only property: new.passed => old.passed ----------------------
+
+def test_tighten_only_passing_wf():
+    """Tighten-only: if the regime check passes, the overall gate outcome is the SAME as
+    the no-regime baseline (the regime check can only FAIL gates that would otherwise pass,
+    never PASS gates that would otherwise fail).
+    """
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates))
+    # without market_returns -> baseline
+    d_old = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=None)
+    # with market_returns -> same wf, regime check added
+    d_new = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    # If new passes, old must also pass (new.passed => old.passed)
+    if d_new.passed:
+        assert d_old.passed
+
+
+def test_tighten_only_cannot_repair_failing_gate():
+    """A gate that fails existing checks still fails even when regime check passes.
+    (Demonstrates regime check is AND — cannot rescue a failing gate.)
+    """
+    rets, dates = _make_regime_returns(n=252)
+    # Low sharpe so holdout_sharpe check FAILS
+    wf = _make_wf(holdout_returns=(rets, dates), sharpe=-5.0)
+    d_no_regime = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=None)
+    d_with_regime = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    assert d_no_regime.passed is False
+    assert d_with_regime.passed is False  # regime passing cannot rescue
+
+
+# --- per_regime_sharpes null-coercion in to_dict --------------------------
+
+def test_per_regime_sharpes_null_coerced_in_to_dict():
+    """to_dict() should null-coerce non-finite per_regime_sharpes entries."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates), market_returns=(rets, dates))
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(rets, dates))
+    dct = d.to_dict()
+    if dct["per_regime_sharpes"] is not None:
+        for v in dct["per_regime_sharpes"]:
+            assert v is None or (isinstance(v, float) and math.isfinite(v))
+
+
+# --- binding independence from dsr_binding --------------------------------
+
+def test_regime_binding_independent_of_dsr_binding():
+    """Regime check should bind independently of dsr_binding flag."""
+    rets, dates = _make_regime_returns(n=252)
+    wf = _make_wf(holdout_returns=(rets, dates), market_returns=(rets, dates))
+    # Without dsr_binding
+    d = evaluate_gate(wf, GateCriteria(), pit_ok=True,
+                      dsr_binding=False, market_returns=(rets, dates))
+    assert d.regime_robustness_binding is True  # regime is independent of DSR
