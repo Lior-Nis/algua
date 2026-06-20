@@ -131,19 +131,19 @@ def politis_white_block_length(
     rho = np.array([_acov(k) / r0 for k in range(max_lag + 1)])
 
     # --- Step 2: Bandwidth M via Politis & White (2004) §3 / Patton et al. (2009) ---
-    # Scan k=1,2,... for the smallest m_hat such that |rho(m_hat+j)| < bound
-    # for all j=1..K_N (K_N consecutive insignificant lags after m_hat).
-    # If no such run exists, m_hat = last significant lag (or 1 if none significant).
-    # Scanning the full dynamic horizon (vs. the old ~30-lag cap) ensures long-memory series
-    # (e.g., AR(1) with phi≈0.95) are not undercounted when significant lags extend beyond 30.
-    m_hat: int | None = None
-    last_sig = 0  # largest k with |rho(k)| >= bound
+    # m_hat is the SMALLEST k such that |rho(k+j)| < bound for all j=1..K_N (K_N consecutive
+    # insignificant lags) — the canonical PW "smallest such lag" definition, so the scan
+    # correctly early-exits at the first qualifying run. The dynamic horizon (vs. the old
+    # ~30-lag cap) ensures long-memory series (e.g. AR(1) phi≈0.95) whose dependence extends
+    # beyond 30 lags are not undercounted.
+    # last_sig (the no-clean-run fallback) is computed over the FULL horizon — independent of the
+    # early-exit loop — so it is NEVER blind to the final K_N tail lags.
+    sig = np.nonzero(np.abs(rho[1:max_lag + 1]) >= bound)[0]
+    last_sig = int(sig[-1]) + 1 if sig.size else 0  # +1 maps rho[1:] offset back to lag index
 
+    m_hat: int | None = None
     for k in range(1, max_lag - K_N + 1):
-        if abs(rho[k]) >= bound:
-            last_sig = k
-        # Check if K_N consecutive lags after k are all insignificant.
-        if k >= 1 and all(abs(rho[k + j]) < bound for j in range(1, K_N + 1) if k + j <= max_lag):
+        if all(abs(rho[k + j]) < bound for j in range(1, K_N + 1) if k + j <= max_lag):
             m_hat = k
             break
 
