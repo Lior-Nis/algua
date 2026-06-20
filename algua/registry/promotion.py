@@ -405,10 +405,13 @@ def run_gate(
     # Serial-dependence bootstrap (#221 Slice 2): bind iff measured AND the in-process OOS vector
     # is present. Recompute DSR confidence against the SAME floored SR* the closed form uses;
     # gates.py gets only the pre-computed scalar (it does no resampling).
-    holdout_rets = wf.holdout_returns  # local binding so mypy can narrow the tuple type
+    # NOTE: pre-existing measured promotion tests that supply holdout_returns also exercise this
+    # bootstrap path — a future reviewer adding a `checks` assertion for dsr_bootstrap should
+    # account for that.
+    holdout_rets = wf.holdout_returns  # local binding so mypy can narrow the tuple type below
     bootstrap_binding = dsr_binding and holdout_rets is not None
     boot_lower = boot_seed = boot_b = boot_block = None
-    if bootstrap_binding and holdout_rets is not None:
+    if bootstrap_binding and holdout_rets is not None:  # second guard narrows tuple type for mypy
         sr_star_pp = dsr_sr_star_annualized(
             n_funnel, dsr_trial_var_ann, funnel_floor.var_ann if funnel_floor else None)
         boot_seed = stable_bootstrap_seed(

@@ -109,8 +109,11 @@ def politis_white_block_length(
     c = 2.0
     bound = c * math.sqrt(math.log10(n) / n)
 
-    # We do not know M yet; compute up to a safe upper limit first.
-    max_lag = min(n - 1, 4 * K_N + 10)  # generous upper bound; will extend if M grows
+    # We do not know M yet; compute up to a principled upper limit first.
+    # Dynamic horizon: grows with n to detect long-memory series (high-order AR) that need
+    # lags well beyond the old fixed ~30-lag cap. The n//3 term ensures we always scan at
+    # least one-third of the series, while the 4*K_N+10 baseline keeps short series fast.
+    max_lag = min(n - 1, max(4 * K_N + 10, n // 3))
 
     def _acov(k: int) -> float:
         """Biased autocovariance R(k) = (1/n) * sum xc[i]*xc[i+k]."""
@@ -131,6 +134,8 @@ def politis_white_block_length(
     # Scan k=1,2,... for the smallest m_hat such that |rho(m_hat+j)| < bound
     # for all j=1..K_N (K_N consecutive insignificant lags after m_hat).
     # If no such run exists, m_hat = last significant lag (or 1 if none significant).
+    # Scanning the full dynamic horizon (vs. the old ~30-lag cap) ensures long-memory series
+    # (e.g., AR(1) with phi≈0.95) are not undercounted when significant lags extend beyond 30.
     m_hat: int | None = None
     last_sig = 0  # largest k with |rho(k)| >= bound
 
@@ -288,9 +293,18 @@ def stationary_bootstrap_dsr(
     arr = np.asarray(returns, dtype=float)
     T = len(arr)
 
+    # Guard max_block_fraction to a sane range; treat out-of-range as the default 0.5.
+    if not (0 < max_block_fraction <= 1):
+        max_block_fraction = 0.5
+
+    # Compute block-length cap once; applied to BOTH the auto and override paths so the
+    # contract is consistent regardless of which path is taken.
+    max_bl = max(1, int(math.floor(T * max_block_fraction))) if T > 0 else 1
+
     # --- Compute block length first (always, for audit; uses T=1 floor safely) ---
     if not block_len_auto and block_len_override is not None and block_len_override >= 1:
-        block_len = int(block_len_override)
+        # Clamp manual override to the same cap that the auto path enforces.
+        block_len = min(int(block_len_override), max_bl)
     else:
         block_len = politis_white_block_length(returns, max_block_fraction) if T > 1 else 1
 

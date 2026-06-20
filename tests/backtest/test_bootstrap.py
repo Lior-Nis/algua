@@ -108,3 +108,51 @@ def test_dsr_core_consistent_with_gates() -> None:
     sr_star = dsr_sr_star(n, var)
     sr, t, skew, kurt = 0.1, 120, -0.1, 3.5
     assert _dsr_conf_core(sr, t, skew, kurt, sr_star) == dsr_confidence(sr, t, skew, kurt, n, var)
+
+
+# Finding 1: high-persistence AR(1) block length — dynamic PW scan horizon
+def test_block_length_high_persistence_ar1_larger_than_low_persistence() -> None:
+    """phi=0.95 over n=400 must yield a block length >= phi=0.7 and clearly > 10.
+
+    With the old ~30-lag scan cap (max_lag=30), phi=0.95/seed=0 finds no clean
+    K_N-consecutive-insignificant run within 30 lags (all lags 1..30 are significant),
+    so it falls back to last_sig=30 → M=60. The improved scan (up to n//3=133 lags)
+    finds the clean run at lag ~53 → M=106, yielding a much larger block that better
+    protects the autocorrelated series. We assert direction and magnitude, not brittle exact
+    values, so a correct improvement never breaks this test.
+    """
+    # seed=0: with old 30-lag cap phi=0.95 can't find a clean run → undercounts.
+    # With the improved scan it finds one at lag ~53 and produces a substantially larger block.
+    bl_lo = politis_white_block_length(_ar1(400, 0.7, seed=0), 0.5)
+    bl_hi = politis_white_block_length(_ar1(400, 0.95, seed=0), 0.5)
+    assert bl_hi >= bl_lo, (
+        f"phi=0.95 block ({bl_hi}) should be >= phi=0.7 block ({bl_lo})"
+    )
+    assert bl_hi > 10, f"phi=0.95 block ({bl_hi}) should be well above iid baseline of ~1"
+
+
+# Finding 3: block_len_override clamping
+def test_block_len_override_clamped_to_fraction() -> None:
+    """A manual override of 10*T must be clamped to max(1, floor(T * 0.5)), not used raw."""
+    n = 100
+    r = _white(n, seed=7)
+    dates = ["d"] * n
+    # override = 10*n = 1000, which far exceeds floor(100 * 0.5) = 50
+    result = stationary_bootstrap_dsr(
+        r, dates, 0.0, 0.05, 100, 1,
+        block_len_auto=False, block_len_override=10 * n,
+        lower_quantile=0.05, max_block_fraction=0.5,
+    )
+    expected_cap = max(1, int(100 * 0.5))  # 50
+    assert result.block_len == expected_cap, (
+        f"Expected block_len={expected_cap} but got {result.block_len}"
+    )
+
+
+# Finding 4: non-finite input fail-closed
+def test_non_finite_returns_gives_none() -> None:
+    """NaN in the return series must produce lower_confidence=None (fail-closed)."""
+    result = stationary_bootstrap_dsr(
+        [0.1, float("nan"), 0.2], ["d", "d", "d"], 0.0, 0.05, 100, 1, lower_quantile=0.05
+    )
+    assert result.lower_confidence is None

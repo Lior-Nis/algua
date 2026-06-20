@@ -315,8 +315,11 @@ class GateDecision:
     # Returns-persistence audit (#221 Slice 1). Non-binding: True iff run_gate wrote a
     # holdout_returns row for this evaluation. False for pre-Slice-1 promotions (omit-not-fail).
     returns_available: bool = False
-    # Serial-dependence bootstrap audit (#221 Slice 2). Binding only when dsr_binding AND the OOS
-    # return vector is available; non-binding otherwise (omit-not-fail).
+    # Serial-dependence bootstrap audit (#221 Slice 2). Binding only when dsr_binding AND
+    # bootstrap_binding are both True (gates computes effective_bootstrap_binding = dsr_binding
+    # AND bootstrap_binding). The caller (promotion.py) sets bootstrap_binding only when measured
+    # breadth AND the OOS vector is present; gates binds on dsr_binding AND bootstrap_binding.
+    # Non-binding: all dsr_bootstrap_* fields remain False/None (omit-not-fail).
     dsr_bootstrap_binding: bool = False
     dsr_bootstrap_lower: float | None = None
     dsr_bootstrap_seed: int | None = None
@@ -487,6 +490,13 @@ def evaluate_gate(
     skew = float(wf.holdout_metrics.get("skewness", 0.0))
     raw_kurt = float(wf.holdout_metrics.get("kurtosis", 3.0))
     sr_obs_ann = float(wf.holdout_metrics["sharpe"])
+    # The bootstrap check is only armed when BOTH dsr_binding AND bootstrap_binding are True.
+    # The caller (promotion.py) sets bootstrap_binding only when measured breadth AND the OOS
+    # vector is present; gates binds on dsr_binding AND bootstrap_binding.
+    # Using effective_bootstrap_binding throughout keeps the audit state self-consistent: if
+    # dsr_binding=False the bootstrap check is never appended and all bootstrap audit fields
+    # remain None/False, regardless of what the caller passed for bootstrap_binding.
+    effective_bootstrap_binding = bool(dsr_binding and bootstrap_binding)
     if dsr_binding:
         var_pp = (dsr_trial_var_ann / ANN) if dsr_trial_var_ann is not None else None
         floor_pp = (
@@ -505,7 +515,7 @@ def evaluate_gate(
         if dsr_conf is None:
             # measured sweep exists but stats missing -> fail closed
             dsr_skip_reason = "no_dispersion"
-        if bootstrap_binding:
+        if effective_bootstrap_binding:
             boot_pass = (bootstrap_lower_confidence is not None
                          and bootstrap_lower_confidence >= (1.0 - DSR_ALPHA))
             boot_value = (bootstrap_lower_confidence
@@ -538,9 +548,9 @@ def evaluate_gate(
         dsr_funnel_floor_var_ann=(dsr_funnel_floor_var_ann if dsr_binding else None),
         dsr_funnel_floor_n_strategies=(dsr_funnel_floor_n_strategies if dsr_binding else None),
         dsr_funnel_floor_n_total_rows=(dsr_funnel_floor_n_total_rows if dsr_binding else None),
-        dsr_bootstrap_binding=bool(bootstrap_binding),
-        dsr_bootstrap_lower=(bootstrap_lower_confidence if bootstrap_binding else None),
-        dsr_bootstrap_seed=(bootstrap_seed if bootstrap_binding else None),
-        dsr_bootstrap_b=(bootstrap_b if bootstrap_binding else None),
-        dsr_bootstrap_block_len=(bootstrap_block_len if bootstrap_binding else None),
+        dsr_bootstrap_binding=effective_bootstrap_binding,
+        dsr_bootstrap_lower=(bootstrap_lower_confidence if effective_bootstrap_binding else None),
+        dsr_bootstrap_seed=(bootstrap_seed if effective_bootstrap_binding else None),
+        dsr_bootstrap_b=(bootstrap_b if effective_bootstrap_binding else None),
+        dsr_bootstrap_block_len=(bootstrap_block_len if effective_bootstrap_binding else None),
     )

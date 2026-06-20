@@ -133,3 +133,35 @@ def test_bootstrap_tighten_only(make_wf):
     dd = d.to_dict()
     assert dd["dsr_bootstrap_lower"] == 0.97 and dd["dsr_bootstrap_seed"] == 42
     assert dd["dsr_bootstrap_b"] == 2000 and dd["dsr_bootstrap_block_len"] == 8
+
+
+# Finding 2: audit-flag consistency when dsr_binding=False but bootstrap_binding=True
+def test_bootstrap_audit_consistent_when_dsr_not_binding(make_wf):
+    """dsr_binding=False, bootstrap_binding=True must produce a self-consistent audit state.
+
+    No dsr_bootstrap check must appear, dsr_bootstrap_binding must be False,
+    and all dsr_bootstrap_* audit scalars must be None.
+    """
+    wf = make_wf(sharpe=7.0)
+    d = evaluate_gate(
+        wf, GateCriteria(), n_combos=5, pit_ok=True,
+        dsr_binding=False,
+        bootstrap_binding=True,
+        bootstrap_lower_confidence=0.99,
+        bootstrap_seed=42,
+        bootstrap_b=2000,
+        bootstrap_block_len=8,
+    )
+    # No dsr_bootstrap check in checks
+    assert all(c["name"] != "dsr_bootstrap" for c in d.checks), (
+        "dsr_bootstrap check must be absent when dsr_binding=False"
+    )
+    # Audit flag must be False (consistent: no check => not armed)
+    assert d.dsr_bootstrap_binding is False, (
+        f"dsr_bootstrap_binding should be False but got {d.dsr_bootstrap_binding}"
+    )
+    # All scalar audit fields must be None
+    assert d.dsr_bootstrap_seed is None
+    assert d.dsr_bootstrap_b is None
+    assert d.dsr_bootstrap_block_len is None
+    assert d.dsr_bootstrap_lower is None
