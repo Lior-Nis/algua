@@ -52,6 +52,24 @@ MIN_REGIME_SHARPE = 0.0        # relaxed per-regime Sharpe bar (paired with zero
 MIN_REGIME_OVERLAP_BARS = 63   # min holdout dates with a valid trailing market-vol for the check
 VOL_ROLLING_WINDOW = 21        # trailing bars for the benchmark realized-vol estimate
 
+# Dominance-audit predeclaration (#221, Phase 3 Slice 4). CODEOWNERS-protected constants — these
+# thresholds are committed HERE (before any audit data accumulates) so the Slice 5
+# haircut-retirement audit cannot select them post-hoc. The retirement audit (Slice 5) filters
+# decision_json rows where `phase3_component_mask` has all required bits set, then checks that no
+# row where `haircut_would_have_blocked=True AND dsr_raw_N_pass=True` exceeds
+# DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS over >= DOMINANCE_AUDIT_MIN_PROMOTIONS promotions
+# across >= DOMINANCE_AUDIT_MIN_WINDOW_DAYS of real-traffic wall time. SHADOW/AUDIT ONLY in
+# Slice 4 — these constants are read only by the Slice 5 audit, not by any gate pass/fail logic.
+DOMINANCE_AUDIT_MIN_PROMOTIONS = 30        # min promotions in the audit window for a verdict
+DOMINANCE_AUDIT_MIN_WINDOW_DAYS = 90       # min calendar days of traffic for the audit to bind
+DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS = 0  # haircut-blocked-but-DSR-passed cases allowed: none
+
+# Phase 3 component mask — bitmask recording which Phase 3 slices are active on a gate evaluation.
+# Bits 0-4 = Slices 0-4; all five set = 0b11111 = 31. Stored as `phase3_component_mask` in
+# decision_json so the Slice 5 audit can filter rows where all Phase 3 components are active.
+# SHADOW/AUDIT ONLY — does not affect passed.
+PHASE3_COMPONENT_MASK = 0b11111  # all five Slice 4 components active (slices 0-4)
+
 
 class RegimeSlice(NamedTuple):
     """One volatility-tertile regime slice of the holdout period.
@@ -510,6 +528,16 @@ class GateDecision:
     n_regimes_surviving: int | None = None    # regimes that cleared power + vol floors
     per_regime_sharpes: list[float | None] | None = None  # per-slice Sharpe; None for dropped
     regime_robustness_binding: bool = False   # True iff the check was appended to checks
+    # Dominance-audit shadow fields (#221 Slice 4). SHADOW/AUDIT ONLY — not in checks, not in
+    # passed. Recorded on every evaluate_gate call so the Slice 5 retirement audit can accumulate
+    # real-traffic statistics with pre-committed thresholds.
+    # haircut_would_have_blocked: True iff the holdout Sharpe cleared the BASE bar but failed the
+    #   haircut-inflated bar (the haircut is what blocked an otherwise-passing holdout). When the
+    #   effective bar is +inf (degenerate zero-length holdout), True iff the base bar passed.
+    # phase3_component_mask: PHASE3_COMPONENT_MASK (0b11111 = 31) — all five Slice 0-4 components
+    #   active. Allows the audit to filter rows where the full Phase 3 stack was live.
+    haircut_would_have_blocked: bool = False
+    phase3_component_mask: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -568,6 +596,9 @@ class GateDecision:
                 if self.per_regime_sharpes is not None else None
             ),
             "regime_robustness_binding": self.regime_robustness_binding,
+            # Dominance-audit shadow fields (#221 Slice 4)
+            "haircut_would_have_blocked": self.haircut_would_have_blocked,
+            "phase3_component_mask": self.phase3_component_mask,
         }
 
 
@@ -763,6 +794,16 @@ def evaluate_gate(
             n_regimes_surviving = res.n_surviving
             per_regime_sharpes_out = res.per_regime_sharpes
 
+    # Dominance-audit shadow field (#221 Slice 4): did the haircut alone block an otherwise-passing
+    # holdout? True iff the holdout Sharpe clears the BASE bar but fails the haircut-inflated bar.
+    # The haircut is still BINDING (this is shadow recording only). When the effective bar is +inf
+    # (degenerate zero-length holdout drove the haircut to inf), the haircut blocks everything the
+    # base bar passed, so True iff the base bar passed. SHADOW/AUDIT ONLY — does not affect passed.
+    haircut_would_have_blocked = bool(
+        sr_obs_ann >= base_holdout_sharpe
+        and (not math.isfinite(effective_holdout_sharpe) or sr_obs_ann < effective_holdout_sharpe)
+    )
+
     return GateDecision(
         passed=all(c["passed"] for c in checks),
         checks=checks,
@@ -796,4 +837,6 @@ def evaluate_gate(
         n_regimes_surviving=n_regimes_surviving,
         per_regime_sharpes=per_regime_sharpes_out,
         regime_robustness_binding=regime_robustness_binding,
+        haircut_would_have_blocked=haircut_would_have_blocked,
+        phase3_component_mask=PHASE3_COMPONENT_MASK,
     )
