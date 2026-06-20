@@ -116,8 +116,9 @@ named mitigation — not defects to fix:
   malicious module could do more than compute weights. The mitigation is that go-live approval hashes
   the strategy's transitive **first-party** (`algua.*`) import closure into `code_hash`
   (`algua/registry/approvals.py::compute_artifact_hashes`), so a prior approval can satisfy the live
-  gate only against the exact source a human reviewed; a true execution sandbox is future
-  live-hardening work.
+  gate only against the same statically-reachable first-party source a human reviewed (dynamic
+  `importlib` string imports and non-source data files are outside the closure). A true execution
+  sandbox is future live-hardening work.
 
 **Deployment hardening (enforce when deployment lands).** The signed-live-gate trust anchor
 `approvers/allowed_signers` is the root of go-live authority. In any real deployment it MUST NOT be
