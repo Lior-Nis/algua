@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
+from algua.backtest.bootstrap import stable_bootstrap_seed, stationary_bootstrap_dsr
 from algua.backtest.engine import verify_signal_panel_parity
 from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
@@ -24,11 +25,15 @@ from algua.research.clustering import (
     family_similarity,
 )
 from algua.research.gates import (
+    DSR_ALPHA,
+    DSR_BOOTSTRAP_LOWER_QUANTILE,
+    DSR_BOOTSTRAP_RESAMPLES,
     FDR_ALPHA,
     FDR_W0,
     FUNNEL_WINDOW_DAYS,
     GateCriteria,
     GateDecision,
+    dsr_sr_star_annualized,
     effective_funnel_breadth,
     evaluate_gate,
     lord_plus_plus_level,
@@ -397,6 +402,24 @@ def run_gate(
     dsr_binding = breadth.provenance == "measured"
     dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
     funnel_floor = repo.funnel_trial_sharpe_var(FUNNEL_WINDOW_DAYS) if dsr_binding else None
+    # Serial-dependence bootstrap (#221 Slice 2): bind iff measured AND the in-process OOS vector
+    # is present. Recompute DSR confidence against the SAME floored SR* the closed form uses;
+    # gates.py gets only the pre-computed scalar (it does no resampling).
+    # NOTE: pre-existing measured promotion tests that supply holdout_returns also exercise this
+    # bootstrap path — a future reviewer adding a `checks` assertion for dsr_bootstrap should
+    # account for that.
+    holdout_rets = wf.holdout_returns  # local binding so mypy can narrow the tuple type below
+    bootstrap_binding = dsr_binding and holdout_rets is not None
+    boot_lower = boot_seed = boot_b = boot_block = None
+    if bootstrap_binding and holdout_rets is not None:  # second guard narrows tuple type for mypy
+        sr_star_pp = dsr_sr_star_annualized(
+            n_funnel, dsr_trial_var_ann, funnel_floor.var_ann if funnel_floor else None)
+        boot_seed = stable_bootstrap_seed(
+            name, wf.holdout_metrics["start"], wf.holdout_metrics["end"], wf.config_hash)
+        boot = stationary_bootstrap_dsr(
+            holdout_rets[0], holdout_rets[1], sr_star_pp, DSR_ALPHA,
+            DSR_BOOTSTRAP_RESAMPLES, boot_seed, lower_quantile=DSR_BOOTSTRAP_LOWER_QUANTILE)
+        boot_lower, boot_b, boot_block = boot.lower_confidence, boot.b_used, boot.block_len
     decision = evaluate_gate(
         wf, criteria, n_combos=n_funnel, breadth_provenance=breadth.provenance,
         pit_ok=pit_ok, allow_non_pit=allow_non_pit, own_lifetime_combos=breadth.own,
@@ -405,6 +428,8 @@ def run_gate(
         dsr_funnel_floor_var_ann=(funnel_floor.var_ann if funnel_floor else None),
         dsr_funnel_floor_n_strategies=(funnel_floor.n_strategies if funnel_floor else None),
         dsr_funnel_floor_n_total_rows=(funnel_floor.n_total_rows if funnel_floor else None),
+        bootstrap_binding=bootstrap_binding, bootstrap_lower_confidence=boot_lower,
+        bootstrap_seed=boot_seed, bootstrap_b=boot_b, bootstrap_block_len=boot_block,
     )
     # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
     # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
