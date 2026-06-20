@@ -43,7 +43,7 @@ class BacktestError(RuntimeError):
     pass
 
 
-def _members_as_of(
+def members_as_of(
     universe_by_date: Mapping[date, Collection[str]], t: pd.Timestamp
 ) -> frozenset[str]:
     """As-of-t membership: the snapshot with the greatest effective_date <= t.date().
@@ -58,6 +58,10 @@ def _members_as_of(
     if not eligible:
         return frozenset()
     return frozenset(universe_by_date[max(eligible)])
+
+
+# Private alias kept for internal callers within this module.
+_members_as_of = members_as_of
 
 
 def _assert_fundamentals_shape(frame: pd.DataFrame) -> None:

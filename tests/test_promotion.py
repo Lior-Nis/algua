@@ -1035,6 +1035,8 @@ def test_regime_robustness_binds_when_market_returns_present(tmp_path):
     assert "regime_method" in d_dict and d_dict["regime_method"] == "vol_tertile"
 
     # Shadow fields must also flow through a real run_gate (Task 4)
+    # 0b11111 = bits 0-4 = Phase 3 slices 0-4 all active (dispersion-floor, persistence,
+    # bootstrap, n_eff, multi-regime)
     assert d.phase3_component_mask == 0b11111
     assert "haircut_would_have_blocked" in d_dict
 

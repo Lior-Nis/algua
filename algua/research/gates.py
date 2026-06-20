@@ -68,7 +68,7 @@ DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS = 0  # haircut-blocked-but-DSR-passed ca
 # Bits 0-4 = Slices 0-4; all five set = 0b11111 = 31. Stored as `phase3_component_mask` in
 # decision_json so the Slice 5 audit can filter rows where all Phase 3 components are active.
 # SHADOW/AUDIT ONLY — does not affect passed.
-PHASE3_COMPONENT_MASK = 0b11111  # all five Slice 4 components active (slices 0-4)
+PHASE3_COMPONENT_MASK = 0b11111  # bits 0-4 = Phase 3 slices 0-4, all five active
 
 
 class RegimeSlice(NamedTuple):
@@ -154,15 +154,34 @@ def regime_splits(
     if overlap_n == 0:
         return ([], 0)
 
-    # Step 4: rank by (vol, date_string) and split into n_regimes contiguous groups
-    joined_sorted = sorted(joined, key=lambda x: (x[1], x[0]))  # (vol, date) asc
-    date_order = [x[0] for x in joined_sorted]
-    groups = np.array_split(np.arange(len(date_order)), n_regimes)
+    # Step 4: assign tertiles by market-vol VALUE (quantile thresholds), not by equal-count rank.
+    # This ensures a degenerate vol distribution collapses: if all vols are equal,
+    # t1 == t2 == that value, ALL dates satisfy vol <= t1 (regime 0), and regimes 1 & 2 are
+    # EMPTY (n_bars=0). Empty regimes are dropped by regime_robustness_check (too_short) ->
+    # n_surviving < 2 -> passed=False. That is the intended fail-closed behavior for constant vol.
+    #
+    # For a genuine low/mid/high spread, dates distribute across all 3 tertiles normally.
+    # Boundaries: regime 0: vol <= t1; regime 1: t1 < vol <= t2; regime 2: vol > t2.
+    # Deterministic: equal vols always resolve to the same regime (<=/>).
+    # The joined list is sorted by (vol, date) for order-independence before assignment.
+    joined_sorted = sorted(joined, key=lambda x: (x[1], x[0]))  # sort by (vol, date) asc
+    vols_array = np.array([x[1] for x in joined_sorted])
+    t1 = float(np.quantile(vols_array, 1.0 / n_regimes))
+    t2 = float(np.quantile(vols_array, 2.0 / n_regimes))
+
+    # Build per-regime date lists (in vol-sorted order, which matches joined_sorted)
+    regime_date_sets: list[list[str]] = [[] for _ in range(n_regimes)]
+    for date_str, vol in joined_sorted:
+        if vol <= t1:
+            regime_date_sets[0].append(date_str)
+        elif vol > t2:
+            regime_date_sets[n_regimes - 1].append(date_str)
+        else:
+            regime_date_sets[1].append(date_str)
 
     # Step 5: build RegimeSlice for each regime — collect strategy returns in DATE order
     slices: list[RegimeSlice] = []
-    for regime_idx, group_indices in enumerate(groups):
-        regime_dates_unordered = [date_order[i] for i in group_indices]
+    for regime_idx, regime_dates_unordered in enumerate(regime_date_sets):
         # ISO date strings sort lexicographically = chronologically
         regime_dates = sorted(regime_dates_unordered)
         regime_returns = [strategy_map[d] for d in regime_dates]

@@ -10,7 +10,13 @@ import numpy as np
 import pandas as pd
 
 from algua.backtest.delisting import DelistingRecord
-from algua.backtest.engine import BacktestError, adj_grid, build_portfolio, fetch_symbols
+from algua.backtest.engine import (
+    BacktestError,
+    adj_grid,
+    build_portfolio,
+    fetch_symbols,
+    members_as_of,
+)
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
@@ -124,7 +130,23 @@ def _market_return_series(
         symbols = fetch_symbols(strategy, universe_by_date)
         bars = provider.get_bars(symbols, start, end, "1d")
         adj = adj_grid(bars)                          # (dates x symbols) adj_close panel
-        xs = adj.pct_change().mean(axis=1).dropna()   # equal-weighted cross-sectional return
+        daily = adj.pct_change()
+        if universe_by_date is not None:
+            # PIT masking: apply the SAME as-of membership the engine uses in _decision_weights
+            # so the benchmark never includes symbols before their effective-date join.
+            # Non-members at date t are set to NaN so pandas .mean(axis=1) skips them,
+            # correctly averaging only the as-of members at each bar. Reuses members_as_of
+            # (the engine's public as-of helper) — no reinvention of the masking logic.
+            masked = daily.copy()
+            for ts in daily.index:
+                members = members_as_of(universe_by_date, ts)
+                non_members = [c for c in daily.columns if c not in members]
+                if non_members:
+                    masked.loc[ts, non_members] = float("nan")
+            xs = masked.mean(axis=1).dropna()
+        else:
+            # Static universe: no masking needed — current behavior is correct.
+            xs = daily.mean(axis=1).dropna()
         if xs.empty:
             return None
         return ([float(x) for x in xs.to_numpy()],

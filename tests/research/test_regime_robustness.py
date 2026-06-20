@@ -5,6 +5,7 @@ import datetime
 import math
 
 import numpy as np
+import pytest
 
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
@@ -101,18 +102,37 @@ def test_no_dropped_reason_from_splits():
 # ---------------------------------------------------------------------------
 
 def test_constant_vol_fewer_than_two_survivors_fails():
-    """Near-constant market: all vol labels are equal -> ties broken by date -> even split.
-    But all returns are constant zero -> ann_volatility==0.0 -> all regimes dropped.
-    Result: < 2 survivors -> passed=False.
+    """CONSTANT market vol + uniformly POSITIVE strategy -> fails via n_surviving < 2.
+
+    Mechanism (value-based tertiles):
+    - Market: all returns identical -> all vol labels == 0 -> t1 == t2 == 0
+    - vol <= t1 is True for ALL dates -> ALL dates land in regime 0
+    - Regimes 1 and 2 are EMPTY (n_bars == 0)
+    - regime_robustness_check drops empty regimes (n_bars < min_obs=21 -> too_short)
+    - 1 survivor (or 0 if regime 0 is also dropped) -> n_surviving < 2 -> passed=False
+
+    Strategy returns are uniformly positive with variance so they are NOT zero-vol.
+    This proves the gate fails via the SURVIVOR COUNT path (< 2 non-empty regimes),
+    not via zero_vol dropping after an equal-count split.
     """
     n = 90
     md = _robust_dates(n)
-    # constant market returns -> log-vol of window is always 0 (std of identical values)
+    # Constant market returns: all vol labels equal 0 -> ALL dates collapse into regime 0
     market = [0.01] * n
-    strat = list(np.random.default_rng(1).normal(0.001, 0.01, n))
+    # Uniformly positive strategy with variance (not zero-vol) to distinguish failure path:
+    # if the strategy were zero-vol, zero_vol drop would trigger first on regime 0.
+    # We want: regime 0 has positive non-zero-vol strategy, regimes 1 & 2 are empty (n_bars=0)
+    # -> regimes 1 & 2 dropped (too_short) -> n_surviving < 2 -> passed=False.
+    strat = list(np.random.default_rng(1).normal(0.005, 0.01, n))
     slices, overlap = regime_splits(strat, md, market, md, n_regimes=3, vol_window=21)
+    # With value-based tertiles: regime 0 has all overlap bars; regimes 1 & 2 are empty
+    assert slices[0].n_bars == overlap  # ALL labeled dates collapse into regime 0
+    assert slices[1].n_bars == 0        # regime 1: EMPTY
+    assert slices[2].n_bars == 0        # regime 2: EMPTY
     res = regime_robustness_check(slices, min_obs=21, min_sharpe=0.0)
-    assert res.passed is False  # fail-closed: constant vol -> zero-vol regimes dropped
+    # Fails via the survivor count path (< 2 non-empty regimes), not zero_vol dropping
+    assert res.n_surviving < 2
+    assert res.passed is False
 
 
 # ---------------------------------------------------------------------------
@@ -295,11 +315,15 @@ _STAB = {"pct_positive_windows": 0.8, "min_sharpe": 0.1}
 def _make_wf(
     *,
     holdout_returns: tuple[list[float], list[str]] | None = None,
+    # market_returns: stored on wf.market_returns, but evaluate_gate reads from
+    # its own market_returns kwarg (passed separately at each call site — not from wf).
     market_returns: tuple[list[float], list[str]] | None = None,
     sharpe: float = 7.0,
 ) -> WalkForwardResult:
     """Build a WalkForwardResult that passes all non-regime gate checks.
     Optionally carry holdout_returns and market_returns for regime wiring tests.
+    Note: market_returns here populates wf.market_returns (unused by evaluate_gate itself —
+    evaluate_gate reads from its own market_returns kwarg, passed separately at call sites).
     """
     return WalkForwardResult(
         strategy="test_strat",
@@ -513,3 +537,93 @@ def test_regime_binding_independent_of_dsr_binding():
     d = evaluate_gate(wf, GateCriteria(), pit_ok=True,
                       dsr_binding=False, market_returns=(rets, dates))
     assert d.regime_robustness_binding is True  # regime is independent of DSR
+
+
+# ---------------------------------------------------------------------------
+# Finding 1 (additional): two distinct vol levels -> at most 2 non-empty regimes
+# ---------------------------------------------------------------------------
+
+def test_two_distinct_vol_levels_at_most_two_regimes():
+    """Market with only TWO distinct vol levels (all windows produce either vol_A or vol_B):
+    With value-based tertiles, t1=vol_A and t2=vol_B (or the quantile of the bimodal dist).
+    The regime 1 (middle bucket: t1 < vol <= t2) will be empty when no vol value falls
+    strictly between t1 and t2 — at most 2 non-empty regimes result.
+
+    Construction: vol_window=1 so each window's "vol" is just that single bar's log-return
+    magnitude. We inject exactly two distinct log-return magnitudes (two values that alternate),
+    so the vol distribution has only two distinct values and regime 1 is empty.
+
+    With value-based tertiles:
+    - t1 = np.quantile(vols, 1/3): the lower quantile of a bimodal 2-value distribution
+    - t2 = np.quantile(vols, 2/3): the upper quantile
+    - When ~half are low and ~half are high: t1 <= low_vol <= high_vol >= t2
+    - No vol in (t1, t2] when low_vol == t1 and high_vol == t2 (all values are boundary)
+    - Result: everything maps to regime 0 (vol <= t1) or regime 2 (vol > t2); regime 1 empty
+    """
+    n = 60
+    vol_window = 1  # each "window" is just one bar -> vol = annualized |log(1+r)|
+    md = _robust_dates(n)
+    # Alternate between exactly two return magnitudes so every vol label is one of two values.
+    # r_low -> log(1+r_low) repeated n/2 times, r_high -> log(1+r_high) repeated n/2 times.
+    # Use alternating so both values appear throughout (not one block each).
+    r_low, r_high = 0.001, 0.05  # two distinct magnitudes -> two distinct vols
+    market = [(r_low if i % 2 == 0 else r_high) for i in range(n)]
+    strat = list(np.random.default_rng(42).normal(0.005, 0.01, n))
+    slices, overlap = regime_splits(strat, md, market, md, n_regimes=3, vol_window=vol_window)
+    assert overlap > 0
+    assert len(slices) == 3
+    # Extract all vol labels for inspection
+    vol_values = np.array([x[1] for x in sorted(
+        [(md[i], abs(math.log(1.0 + market[i])) * math.sqrt(252))
+         for i in range(n)],
+        key=lambda x: x[1]
+    )])
+    t1 = float(np.quantile(vol_values, 1.0 / 3))
+    # All vols are either r_low_vol or r_high_vol; nothing strictly between t1 and t2
+    # when both thresholds land on the boundary values.
+    low_vol = abs(math.log(1.0 + r_low)) * math.sqrt(252)
+    high_vol = abs(math.log(1.0 + r_high)) * math.sqrt(252)
+    # The bimodal distribution has no values strictly between the two levels
+    # => regime 1 (t1 < vol <= t2) is EMPTY iff t1 == low_vol and t2 == high_vol
+    assert t1 == pytest.approx(low_vol) or t1 == pytest.approx(high_vol), (
+        f"t1={t1} should equal one of the two vol levels"
+    )
+    # At most 2 non-empty regimes (regime 1 middle bucket is empty when bimodal)
+    non_empty = [s for s in slices if s.n_bars > 0]
+    assert len(non_empty) <= 2
+
+
+# ---------------------------------------------------------------------------
+# Finding 4: NaN in vol window -> date excluded from tertile assignment
+# ---------------------------------------------------------------------------
+
+def test_nan_in_vol_window_excludes_date():
+    """A market series with a NaN in a window -> that date is excluded from overlap.
+
+    When 1 + r <= 0 (e.g. r = -1.0, a total loss), the log is undefined, so the ENTIRE
+    date's vol label is skipped. That date must not appear in any regime or in overlap_n.
+    """
+    n = 40
+    md = _robust_dates(n)
+    vol_window = 21
+    rng = np.random.default_rng(7)
+    # Normal market returns except one extreme value that makes the log undefined
+    market = list(rng.normal(0, 0.01, n))
+    # Inject a return of -1.0 at position 10 -> for ALL windows containing position 10
+    # (indices 10 through 10 + vol_window - 1 = 30), the log is undefined -> those dates
+    # have no vol label and are excluded. This is the existing guard, confirmed by test.
+    market[10] = -1.0  # 1 + (-1.0) = 0.0 <= 0.0 -> log guard triggers
+    strat = list(rng.normal(0.005, 0.01, n))
+    slices_with_nan, overlap_with_nan = regime_splits(
+        strat, md, market, md, n_regimes=3, vol_window=vol_window
+    )
+    # Compare to a clean market (no NaN window)
+    market_clean = list(rng.normal(0, 0.01, n))
+    slices_clean, overlap_clean = regime_splits(
+        strat, md, market_clean, md, n_regimes=3, vol_window=vol_window
+    )
+    # The NaN-affected market must exclude at least the windows containing index 10:
+    # windows i=10..30 (21 windows) are poisoned -> overlap_with_nan < overlap_clean
+    assert overlap_with_nan < overlap_clean
+    # And the excluded date must not be counted in overlap or in any regime
+    assert sum(s.n_bars for s in slices_with_nan) == overlap_with_nan
