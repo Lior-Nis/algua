@@ -3,11 +3,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
+import numpy as np
+import pandas as pd
 from scipy.stats import norm as _norm
 
 from algua.backtest._constants import ANN
+from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.walkforward import WalkForwardResult
 
 # Funnel-level multiple-testing window (Wall A). Protected constant, not an agent-tunable knob
@@ -41,6 +44,168 @@ RHO_BAR_SHRINKAGE_K = 1.0       # SE multiplier for the conservative (lower-boun
 # the floor's availability; the floor can only ever TIGHTEN the gate, so its absence is
 # conservative.
 MIN_FUNNEL_FLOOR_STRATEGIES = 5
+
+# Multi-regime robustness (#221, Phase 3 Slice 4). Protected — relaxing weakens the gate.
+N_REGIMES = 3                  # market-volatility tertiles (low/medium/high)
+MIN_REGIME_OBSERVATIONS = 21   # per-regime power floor (underpowered regimes are dropped)
+MIN_REGIME_SHARPE = 0.0        # relaxed per-regime Sharpe bar (paired with zero-vol drop)
+MIN_REGIME_OVERLAP_BARS = 63   # min holdout dates with a valid trailing market-vol for the check
+VOL_ROLLING_WINDOW = 21        # trailing bars for the benchmark realized-vol estimate
+
+
+class RegimeSlice(NamedTuple):
+    """One volatility-tertile regime slice of the holdout period.
+
+    ``dropped_reason`` is None when the slice is usable; ``"too_short"`` when it has fewer
+    than the observation floor; ``"zero_vol"`` when ann_volatility==0.0 in the robustness
+    check (set by ``regime_robustness_check``, not by ``regime_splits``).
+    """
+
+    regime_index: int
+    returns: list[float]
+    n_bars: int
+    dropped_reason: str | None  # None | "too_short" | "zero_vol"
+
+
+class RegimeRobustnessResult(NamedTuple):
+    """Outcome of the per-regime robustness check."""
+
+    passed: bool
+    n_attempted: int
+    n_surviving: int
+    per_regime_sharpes: list[float | None]  # None for dropped regimes, float for survivors
+
+
+def regime_splits(
+    strategy_returns: list[float],
+    strategy_dates: list[str],
+    market_returns: list[float],
+    market_dates: list[str],
+    *,
+    n_regimes: int,
+    vol_window: int,
+) -> tuple[list[RegimeSlice], int]:
+    """Partition holdout dates into ``n_regimes`` volatility-tertile buckets.
+
+    Algorithm:
+    1. Build ``market_date -> market_return`` and ``strategy_date -> strategy_return`` dicts.
+    2. Compute trailing-``vol_window`` realized vol of the MARKET series.  For each market
+       date index ``i`` with ``i >= vol_window - 1``, the window is the ``vol_window`` returns
+       ending at ``i`` (inclusive): ``market_returns[i - vol_window + 1 : i + 1]``.
+       Vol = annualized std (ddof=1) of log(1+r) for r in the window.  Guard: if any
+       ``1 + r <= 0`` the entire date is skipped (no valid log).  Dates with ``i < vol_window - 1``
+       have no vol label and are excluded from the join.
+    3. Inner-join: market dates that HAVE a valid vol label AND appear in ``strategy_dates``.
+       ``overlap_n = len(joined_dates)``.  Empty join returns ``([], 0)``.
+    4. Sort joined dates by ``(vol, date_string)`` ascending (deterministic tie-break on equal
+       vols by date string → reproducible rank assignment).  Split the sorted list into
+       ``n_regimes`` contiguous equal-sized groups using ``np.array_split``.
+       Group 0 = lowest-vol tertile, …, group n_regimes-1 = highest.
+    5. For each regime, collect STRATEGY returns for that regime's dates (in date order).
+       ``RegimeSlice.dropped_reason`` is always ``None`` here; dropping is done by
+       ``regime_robustness_check``.
+
+    Returns ``(slices, overlap_n)``.  If ``overlap_n == 0`` returns ``([], 0)``.
+    ``slices`` always has exactly ``n_regimes`` entries when ``overlap_n > 0``.
+    """
+    # Step 1: build lookup dicts
+    strategy_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=False))
+
+    # Step 2: compute trailing-vol_window realized vol for each market date
+    m_dates_list = list(market_dates)
+    m_returns_list = list(market_returns)
+    vol_labels: dict[str, float] = {}
+    for i in range(len(m_dates_list)):
+        if i < vol_window - 1:
+            continue  # insufficient lookback
+        window = m_returns_list[i - vol_window + 1 : i + 1]
+        # Guard: all 1+r must be > 0 to take log
+        if any(1.0 + r <= 0.0 for r in window):
+            continue
+        log_rets = [math.log(1.0 + r) for r in window]
+        std = float(np.std(log_rets, ddof=1))
+        vol_labels[m_dates_list[i]] = std * math.sqrt(ANN)
+
+    # Step 3: inner-join with strategy_dates
+    joined: list[tuple[str, float]] = [
+        (d, vol_labels[d])
+        for d in vol_labels
+        if d in strategy_map
+    ]
+    overlap_n = len(joined)
+    if overlap_n == 0:
+        return ([], 0)
+
+    # Step 4: rank by (vol, date_string) and split into n_regimes contiguous groups
+    joined_sorted = sorted(joined, key=lambda x: (x[1], x[0]))  # (vol, date) asc
+    date_order = [x[0] for x in joined_sorted]
+    groups = np.array_split(np.arange(len(date_order)), n_regimes)
+
+    # Step 5: build RegimeSlice for each regime — collect strategy returns in DATE order
+    slices: list[RegimeSlice] = []
+    for regime_idx, group_indices in enumerate(groups):
+        regime_dates_unordered = [date_order[i] for i in group_indices]
+        # ISO date strings sort lexicographically = chronologically
+        regime_dates = sorted(regime_dates_unordered)
+        regime_returns = [strategy_map[d] for d in regime_dates]
+        slices.append(RegimeSlice(
+            regime_index=regime_idx,
+            returns=regime_returns,
+            n_bars=len(regime_returns),
+            dropped_reason=None,
+        ))
+    return (slices, overlap_n)
+
+
+def regime_robustness_check(
+    slices: list[RegimeSlice],
+    *,
+    min_obs: int,
+    min_sharpe: float,
+) -> RegimeRobustnessResult:
+    """Check per-regime Sharpe robustness across volatility-tertile slices.
+
+    Drop rules (in order):
+    - ``n_bars < min_obs`` → ``dropped_reason = "too_short"``; ``per_regime_sharpe = None``.
+    - ``ann_volatility == 0.0`` → ``dropped_reason = "zero_vol"``; ``per_regime_sharpe = None``.
+      A zero-vol regime gives sharpe=0.0 which would falsely pass ``MIN_REGIME_SHARPE=0.0``,
+      so it must be dropped and NOT counted as a surviving pass.
+
+    Passing rule:
+    - ``n_surviving < 2`` → ``passed = False`` (cannot establish multi-regime evidence).
+    - Else ``passed = all(sharpe >= min_sharpe for surviving regimes)``.
+
+    ``per_regime_sharpes`` is aligned to the input ``slices`` list (None for dropped).
+    """
+    n_attempted = len(slices)
+    per_regime_sharpes: list[float | None] = []
+    surviving_sharpes: list[float] = []
+
+    for s in slices:
+        if s.n_bars < min_obs:
+            per_regime_sharpes.append(None)
+            continue
+        m = metrics_from_returns(pd.Series(s.returns))
+        if m["ann_volatility"] == 0.0:
+            per_regime_sharpes.append(None)
+            continue
+        sharpe = m["sharpe"]
+        per_regime_sharpes.append(sharpe)
+        surviving_sharpes.append(sharpe)
+
+    n_surviving = len(surviving_sharpes)
+    if n_surviving < 2:
+        passed = False
+    else:
+        passed = all(sh >= min_sharpe for sh in surviving_sharpes)
+
+    return RegimeRobustnessResult(
+        passed=passed,
+        n_attempted=n_attempted,
+        n_surviving=n_surviving,
+        per_regime_sharpes=per_regime_sharpes,
+    )
+
 
 # LORD++ FDR accounting layer (#220, Phase 2). Protected constants — relaxing them weakens the gate.
 # FDR here is an operating target (shared-holdout dependence breaks the formal guarantee); Phase 3
