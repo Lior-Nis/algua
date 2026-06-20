@@ -28,6 +28,13 @@ DSR_BOOTSTRAP_RESAMPLES = 2000            # stationary-bootstrap resample count 
 DSR_BOOTSTRAP_LOWER_QUANTILE = 0.05       # lower quantile of the bootstrap DSR-confidence dist.
 MAX_BOOTSTRAP_BLOCK_LEN_FRACTION = 0.5    # cap block length at max(1, floor(T * FRACTION))
 
+# Effective independent trials N_eff (#221, Phase 3 Slice 3). SHADOW-ONLY in Phase 3 — recorded in
+# the audit payload, never the binding DSR trial count (a lower N_eff would loosen the gate; it goes
+# binding only at Slice 5, bundled with haircut retirement). Protected — load-bearing from Slice 5.
+MIN_N_EFF_SIBLINGS = 5          # min overlapping-OOS sibling streams to attempt an N_eff estimate
+MIN_CORR_OVERLAP_BARS = 21      # min date-aligned shared bars per sibling pair to estimate a corr
+RHO_BAR_SHRINKAGE_K = 1.0       # SE multiplier for the conservative (lower-bound) rho_bar
+
 # Funnel-wide dispersion floor (#221, Phase 3 Slice 0). Min finite per-strategy trial-Sharpe
 # variances needed to form a meaningful cross-strategy floor. Below this, the floor is unavailable
 # and the DSR falls back to own-sweep variance (Phase-1 behavior). Protected — raising it weakens
@@ -325,6 +332,11 @@ class GateDecision:
     dsr_bootstrap_seed: int | None = None
     dsr_bootstrap_b: int | None = None
     dsr_bootstrap_block_len: int | None = None
+    # Effective independent trials audit (#221 Slice 3). SHADOW-ONLY: recorded, never fed into the
+    # binding dsr_confidence (which keeps n_trials = raw N). Populated by promotion.run_gate.
+    dsr_n_eff: int | None = None
+    dsr_rho_bar: float | None = None
+    dsr_n_siblings: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -371,6 +383,9 @@ class GateDecision:
             "dsr_bootstrap_seed": self.dsr_bootstrap_seed,
             "dsr_bootstrap_b": self.dsr_bootstrap_b,
             "dsr_bootstrap_block_len": self.dsr_bootstrap_block_len,
+            "dsr_n_eff": self.dsr_n_eff,
+            "dsr_rho_bar": _f(self.dsr_rho_bar),
+            "dsr_n_siblings": self.dsr_n_siblings,
         }
 
 
