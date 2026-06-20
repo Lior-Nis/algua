@@ -6,36 +6,35 @@ design spec: [`docs/superpowers/specs/2026-05-29-…`](../docs/superpowers/specs
 
 ## The one rule
 
-**Aqua appears only on the waterline.** Letterforms — including the wordmark's
-capital-A crossbar — are always ink or paper, never aqua. One accent, used once.
+**Black + the aqua water blue, nothing else.** Aqua appears only on the glyph's
+waterline; every letterform (glyph legs and the whole wordmark) is black or paper,
+never aqua. Slim strokes, no underline, no third tone.
 
 ## Assets
 
 | File | What | Use |
 |---|---|---|
-| `algua-glyph.svg` | flat glyph, light | default mark on light |
-| `algua-glyph-dark.svg` | flat glyph on ink | default mark on dark |
-| `algua-glyph-twotone.svg` | "submerged" lower legs, light | hero / large display, light |
-| `algua-glyph-twotone-dark.svg` | submerged, dark | hero / large display, dark |
+| `algua-glyph.svg` | black glyph, aqua waterline | default mark on light |
+| `algua-glyph-dark.svg` | glyph on black | default mark on dark |
 | `algua-glyph-mono.svg` | single-ink, knockout waterline | one-color print, stamp, laser |
-| `algua-wordmark.svg` / `-dark.svg` | `Algua` + baseline waterline | inline, footers |
+| `algua-wordmark.svg` / `-dark.svg` | `Algua`, plain (slim) | inline, footers |
 | `algua-lockup-h.svg` / `-dark` / `-mono` | glyph + wordmark, horizontal | **primary** — README, docs nav |
 | `algua-lockup-stacked.svg` / `-dark` | glyph over wordmark | square-ish placements, social |
-| `banner-dark.svg` | wide dark README header | repo header |
-| `favicon.svg` | flat glyph on paper | browser tab |
+| `banner-dark.svg` | wide black README header | repo header |
+| `favicon.svg` | glyph on paper | browser tab |
 | `favicon-16/32.png`, `apple-touch-icon-180.png`, `icon-512.png` | raster icons | favicons, app icon, avatar |
 | `tokens.json` | the color palette as design tokens | the single source of truth for color |
 
 ## Colors
 
-See `tokens.json`. Aqua (`#13C2CE`) = the waterline only; use `aqua-deep`
-(`#0A8E99`) where small aqua-on-light needs WCAG AA contrast.
+See `tokens.json`. Black (`#000000`) mark + aqua (`#13C2CE`) waterline only; use
+`aqua-deep` (`#0A8E99`) where small aqua-on-light needs WCAG AA contrast.
 
 ## Don'ts
 
-No recoloring letterforms aqua · no gradients/shadows/glows · no second accent ·
-no rounding the apex · no tilting the waterline off horizontal · no `two-tone`
-below 32px (use flat) · no stretching/condensing the wordmark.
+No recoloring letterforms aqua · no gradients/shadows/glows · no second accent or
+third tone · no rounding the apex · no tilting the waterline off horizontal · no
+wordmark underline · no thickening the strokes or stretching the wordmark.
 
 ## Regenerating
 

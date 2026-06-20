@@ -26,76 +26,57 @@ FONT_SRC = BRAND / ".cache" / "SpaceGrotesk-var.ttf"
 # §6 color tokens
 # ---------------------------------------------------------------------------
 TOK = {
-    "ink": "#0C1618",
-    "ink-submerged": "#16282B",
+    "ink": "#000000",          # true black
     "paper": "#F3F6F6",
-    "aqua": "#13C2CE",
+    "aqua": "#13C2CE",         # the water blue — the only accent
     "aqua-deep": "#0A8E99",
     "mute": "#5C6B6E",
-    "paper-submerged": "#93A3A3",
 }
 
-# Submerged tint is context-aware: a deeper ink on light fields, a dimmed paper on
-# dark fields (a dark tint would vanish into a dark background).
-SUB_ON_LIGHT = TOK["ink-submerged"]
-SUB_ON_DARK = TOK["paper-submerged"]
+# Wordmark weight (Space Grotesk axis) and whether to draw the baseline rule.
+WORDMARK_WGHT = 300        # Light — slimmer, sleeker
+WORDMARK_TRACK = 20.0      # a touch airier to match the lighter weight
+UNDERLINE = False          # the wordmark baseline waterline is off by default
 
 # ---------------------------------------------------------------------------
 # §8 glyph geometry — 100-unit master ("the waterline A")
 # ---------------------------------------------------------------------------
 APEX = (50.0, 10.0)
-LFOOT = (14.0, 90.0)
-RFOOT = (86.0, 90.0)
-STROKE = 15.0          # leg + waterline weight
-WL_CY = 62.0           # waterline centre (≈ lower third → smaller submerged part)
+LFOOT = (20.0, 90.0)
+RFOOT = (80.0, 90.0)
+STROKE = 9.0           # leg + waterline weight (slim)
+WL_CY = 62.0           # waterline centre
 WL_H = STROKE
-WL_X0, WL_X1 = 15.0, 85.0   # waterline span (overshoots the legs at this height)
+WL_X0, WL_X1 = 22.0, 78.0   # waterline span (overshoots the legs at this height)
 
 
-def glyph_body(fg: str, *, two_tone: str | None = None, mono_bg: str | None = None) -> str:
+
+
+def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
     """Inner SVG for the glyph on a 100x100 canvas.
 
-    fg        — letterform colour (ink or paper).
-    two_tone  — if set, the part below the waterline uses this colour.
-    mono_bg   — if set, the waterline is a true knockout (transparent band).
+    fg       — letterform colour (black or paper).
+    mono_bg  — if set, the waterline is a true knockout (transparent band).
     """
     caret = f"M {LFOOT[0]} {LFOOT[1]} L {APEX[0]} {APEX[1]} L {RFOOT[0]} {RFOOT[1]}"
     stroke_attrs = (
         f'fill="none" stroke-width="{STROKE}" '
         'stroke-linejoin="miter" stroke-miterlimit="20" stroke-linecap="butt"'
     )
-    parts: list[str] = []
-
     if mono_bg is not None:
         # Mono: caret masked so the waterline band is cut out (knockout).
-        parts.append(
+        return (
             '<defs><mask id="wl-knockout">'
             '<rect x="0" y="0" width="100" height="100" fill="white"/>'
             f'<rect x="0" y="{WL_CY - WL_H / 2}" width="100" height="{WL_H}" fill="black"/>'
             "</mask></defs>"
+            f'<path d="{caret}" stroke="{fg}" {stroke_attrs} mask="url(#wl-knockout)"/>'
         )
-        parts.append(f'<path d="{caret}" stroke="{fg}" {stroke_attrs} mask="url(#wl-knockout)"/>')
-        return "".join(parts)
-
-    # Base caret in fg.
-    parts.append(f'<path d="{caret}" stroke="{fg}" {stroke_attrs}/>')
-
-    if two_tone is not None:
-        # Re-draw the caret below the waterline centre in the submerged tint.
-        parts.append(
-            f'<clipPath id="below">'
-            f'<rect x="0" y="{WL_CY}" width="100" height="{100 - WL_CY}"/></clipPath>'
-        )
-        parts.append(
-            f'<path d="{caret}" stroke="{two_tone}" {stroke_attrs} clip-path="url(#below)"/>'
-        )
-
-    # Aqua waterline on top (the only accent).
-    parts.append(
+    return (
+        f'<path d="{caret}" stroke="{fg}" {stroke_attrs}/>'
         f'<rect x="{WL_X0}" y="{WL_CY - WL_H / 2}" width="{WL_X1 - WL_X0}" '
         f'height="{WL_H}" fill="{TOK["aqua"]}"/>'
     )
-    return "".join(parts)
 
 
 def svg(width: float, height: float, body: str, *, bg: str | None = None,
@@ -109,17 +90,16 @@ def svg(width: float, height: float, body: str, *, bg: str | None = None,
 
 
 # ---------------------------------------------------------------------------
-# Wordmark — real Space Grotesk Medium outlines, baked to <path>
+# Wordmark — real Space Grotesk outlines, baked to <path>
 # ---------------------------------------------------------------------------
-def build_wordmark_paths(word: str = "Algua", tracking: float = 12.0):
+def build_wordmark_paths(word: str = "Algua"):
     """Return (path_d, advance_width, cap_height) in font units (y-up)."""
     font = TTFont(FONT_SRC)
-    instantiateVariableFont(font, {"wght": 500}, inplace=True)
+    instantiateVariableFont(font, {"wght": WORDMARK_WGHT}, inplace=True)
     glyph_set = font.getGlyphSet()
     cmap = font.getBestCmap()
     hmtx = font["hmtx"]
 
-    # Cap height from the 'A' glyph bbox.
     bp = ControlBoundsPen(glyph_set)
     glyph_set[cmap[ord("A")]].draw(bp)
     cap_height = bp.bounds[3]
@@ -133,9 +113,19 @@ def build_wordmark_paths(word: str = "Algua", tracking: float = 12.0):
         cmds = pen.getCommands()
         if cmds:
             d_parts.append(f'<path d="{cmds}" transform="translate({x:.1f},0)"/>')
-        x += hmtx[gname][0] + tracking
-    advance = x - tracking
+        x += hmtx[gname][0] + WORDMARK_TRACK
+    advance = x - WORDMARK_TRACK
     return "".join(d_parts), advance, cap_height
+
+
+def _underline(x: float, y: float, w: float) -> str:
+    """Optional aqua baseline rule under a wordmark (off unless UNDERLINE)."""
+    if not UNDERLINE:
+        return ""
+    over = w * 0.04
+    h = STROKE * 0.7
+    return (f'<rect x="{x - over:.1f}" y="{y:.1f}" width="{w + 2 * over:.1f}" '
+            f'height="{h:.1f}" fill="{TOK["aqua"]}"/>')
 
 
 def wordmark_svg(fg: str, *, bg: str | None = None, target_cap: float = 64.0,
@@ -143,42 +133,32 @@ def wordmark_svg(fg: str, *, bg: str | None = None, target_cap: float = 64.0,
     paths, advance, cap = build_wordmark_paths()
     s = target_cap / cap
     word_w = advance * s
-    # Baseline waterline under the letters, overshooting the final glyph (§4).
-    wl_h = STROKE * (target_cap / 84.0) * 0.55   # scaled, lighter than the glyph bar
-    over = word_w * 0.04
     baseline_y = pad + target_cap
     total_w = word_w + 2 * pad
-    total_h = baseline_y + pad + wl_h + 4
-    # Flip y-up font space to y-down screen; place baseline.
+    total_h = baseline_y + pad
     g = (
         f'<g transform="translate({pad:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{fg}">{paths}</g>'
     )
-    bar = (
-        f'<rect x="{pad - over:.1f}" y="{baseline_y + 6:.1f}" '
-        f'width="{word_w + 2 * over:.1f}" height="{wl_h:.1f}" fill="{TOK["aqua"]}"/>'
-    )
-    return svg(round(total_w, 1), round(total_h, 1), g + bar, bg=bg), total_w, total_h, word_w
+    body = g + _underline(pad, baseline_y + 8, word_w)
+    return svg(round(total_w, 1), round(total_h, 1), body, bg=bg), total_w, total_h, word_w
 
 
 # ---------------------------------------------------------------------------
 # Lockups
 # ---------------------------------------------------------------------------
 def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
-    """Horizontal: glyph + wordmark, baselines aligned."""
+    """Horizontal: glyph + wordmark, glyph feet aligned to the text baseline."""
     cap = 64.0
     pad = 18.0
-    gsize = cap + 26          # glyph box edge
+    gsize = cap + 26
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = STROKE / 100 * gsize  # one glyph stroke-width
-    # Vertical: align glyph feet (y=90/100 of its box) with text baseline.
+    gap = gsize * 0.22
     glyph_x = pad
     glyph_y_top = pad
-    # text baseline sits at glyph foot line.
-    foot_y = glyph_y_top + gsize * 0.90
-    baseline_y = foot_y
+    baseline_y = glyph_y_top + gsize * 0.90
     text_x = glyph_x + gsize + gap
     total_w = text_x + word_w + pad
     total_h = glyph_y_top + gsize + pad
@@ -188,13 +168,7 @@ def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
         f'<g transform="translate({text_x:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{fg}">{paths}</g>'
     )
-    # wordmark baseline waterline, lined up with glyph waterline height? keep simple: under text
-    wl_h = STROKE * (cap / 84.0) * 0.55
-    over = word_w * 0.04
-    body += (
-        f'<rect x="{text_x - over:.1f}" y="{baseline_y + 6:.1f}" '
-        f'width="{word_w + 2 * over:.1f}" height="{wl_h:.1f}" fill="{TOK["aqua"]}"/>'
-    )
+    body += _underline(text_x, baseline_y + 8, word_w)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg)
 
 
@@ -207,7 +181,7 @@ def lockup_stacked(fg: str, *, bg: str | None = None, **glyph_kw):
     word_w = advance * s
     total_w = max(gsize, word_w) + 2 * pad
     glyph_x = (total_w - gsize) / 2
-    gap = 22.0
+    gap = 24.0
     baseline_y = pad + gsize + gap + cap
     text_x = (total_w - word_w) / 2
     total_h = baseline_y + pad
@@ -217,25 +191,19 @@ def lockup_stacked(fg: str, *, bg: str | None = None, **glyph_kw):
         f'<g transform="translate({text_x:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{fg}">{paths}</g>'
     )
-    wl_h = STROKE * (cap / 84.0) * 0.55
-    over = word_w * 0.04
-    body += (
-        f'<rect x="{text_x - over:.1f}" y="{baseline_y + 5:.1f}" '
-        f'width="{word_w + 2 * over:.1f}" height="{wl_h:.1f}" fill="{TOK["aqua"]}"/>'
-    )
+    body += _underline(text_x, baseline_y + 7, word_w)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg)
 
 
 def banner_dark():
-    """README header: dark field, horizontal lockup centred with breathing room."""
+    """README header: black field, horizontal lockup centred with breathing room."""
     W, H = 1280.0, 360.0
-    # Re-build lockup content scaled & centred.
     cap = 96.0
     gsize = cap + 40
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = STROKE / 100 * gsize
+    gap = gsize * 0.22
     block_w = gsize + gap + word_w
     x0 = (W - block_w) / 2
     gy = (H - gsize) / 2
@@ -243,17 +211,11 @@ def banner_dark():
     text_x = x0 + gsize + gap
     body = (
         f'<g transform="translate({x0:.1f},{gy:.1f})">'
-        f'<g transform="scale({gsize / 100})">'
-        f'{glyph_body(TOK["paper"], two_tone=SUB_ON_DARK)}</g></g>'
+        f'<g transform="scale({gsize / 100})">{glyph_body(TOK["paper"])}</g></g>'
         f'<g transform="translate({text_x:.1f},{foot_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{TOK["paper"]}">{paths}</g>'
     )
-    wl_h = STROKE * (cap / 84.0) * 0.55
-    over = word_w * 0.04
-    body += (
-        f'<rect x="{text_x - over:.1f}" y="{foot_y + 9:.1f}" '
-        f'width="{word_w + 2 * over:.1f}" height="{wl_h:.1f}" fill="{TOK["aqua"]}"/>'
-    )
+    body += _underline(text_x, foot_y + 11, word_w)
     return svg(W, H, body, bg=TOK["ink"])
 
 
@@ -261,36 +223,20 @@ def banner_dark():
 # Emit
 # ---------------------------------------------------------------------------
 def main() -> None:
-    out = {}
-
-    # Glyph variants
-    out["algua-glyph.svg"] = svg(100, 100, glyph_body(TOK["ink"]))
-    out["algua-glyph-dark.svg"] = svg(100, 100, glyph_body(TOK["paper"]), bg=TOK["ink"])
-    out["algua-glyph-twotone.svg"] = svg(
-        100, 100, glyph_body(TOK["ink"], two_tone=SUB_ON_LIGHT))
-    out["algua-glyph-twotone-dark.svg"] = svg(
-        100, 100, glyph_body(TOK["paper"], two_tone=SUB_ON_DARK), bg=TOK["ink"])
-    out["algua-glyph-mono.svg"] = svg(100, 100, glyph_body(TOK["ink"], mono_bg="x"))
-
-    # Wordmark
-    wm_light, *_ = wordmark_svg(TOK["ink"])
-    out["algua-wordmark.svg"] = wm_light
-    wm_dark, *_ = wordmark_svg(TOK["paper"], bg=TOK["ink"])
-    out["algua-wordmark-dark.svg"] = wm_dark
-
-    # Lockups
-    out["algua-lockup-h.svg"] = lockup_h(TOK["ink"], two_tone=SUB_ON_LIGHT)
-    out["algua-lockup-h-dark.svg"] = lockup_h(
-        TOK["paper"], bg=TOK["ink"], two_tone=SUB_ON_DARK)
-    out["algua-lockup-h-mono.svg"] = lockup_h(TOK["ink"], mono_bg="x")
-    out["algua-lockup-stacked.svg"] = lockup_stacked(TOK["ink"], two_tone=SUB_ON_LIGHT)
-    out["algua-lockup-stacked-dark.svg"] = lockup_stacked(
-        TOK["paper"], bg=TOK["ink"], two_tone=SUB_ON_DARK)
-
-    # Favicon (flat glyph, on paper so it reads on any tab bar)
-    out["favicon.svg"] = svg(100, 100, glyph_body(TOK["ink"]), bg=TOK["paper"])
-    out["banner-dark.svg"] = banner_dark()
-
+    out = {
+        "algua-glyph.svg": svg(100, 100, glyph_body(TOK["ink"])),
+        "algua-glyph-dark.svg": svg(100, 100, glyph_body(TOK["paper"]), bg=TOK["ink"]),
+        "algua-glyph-mono.svg": svg(100, 100, glyph_body(TOK["ink"], mono_bg="x")),
+        "algua-wordmark.svg": wordmark_svg(TOK["ink"])[0],
+        "algua-wordmark-dark.svg": wordmark_svg(TOK["paper"], bg=TOK["ink"])[0],
+        "algua-lockup-h.svg": lockup_h(TOK["ink"]),
+        "algua-lockup-h-dark.svg": lockup_h(TOK["paper"], bg=TOK["ink"]),
+        "algua-lockup-h-mono.svg": lockup_h(TOK["ink"], mono_bg="x"),
+        "algua-lockup-stacked.svg": lockup_stacked(TOK["ink"]),
+        "algua-lockup-stacked-dark.svg": lockup_stacked(TOK["paper"], bg=TOK["ink"]),
+        "favicon.svg": svg(100, 100, glyph_body(TOK["ink"]), bg=TOK["paper"]),
+        "banner-dark.svg": banner_dark(),
+    }
     for name, content in out.items():
         (BRAND / name).write_text(content)
         print("wrote", name)

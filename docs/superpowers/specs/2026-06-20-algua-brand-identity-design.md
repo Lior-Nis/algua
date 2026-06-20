@@ -40,8 +40,9 @@ aqua accent ever appears.** Everything else is monochrome ink. This makes the
 
 ## 3. The glyph — "the waterline A"
 
-A geometric capital **A**, built from straight, sharp strokes, with **no crossbar
-of its own**. The aqua waterline *is* the crossbar.
+A geometric capital **A**, built from straight, **slim** sharp strokes, with **no
+crossbar of its own**. The aqua waterline *is* the crossbar. Slim strokes keep the
+mark sleek; the waterline carries the only weight that needs to register.
 
 ```
    /\          apex: a sharp point (never rounded)
@@ -56,18 +57,15 @@ Requirements:
   horizontal member is the aqua waterline, a separate flat stroke slotted between
   the legs.
 - **Overshoot.** The waterline extends slightly **past both legs** (the tide
-  reaching beyond the form). Overshoot = **≈12% of the leg's horizontal span on
-  each side** — one ratio, reused at every scale.
+  reaching beyond the form) — a modest, symmetric overshoot, reused at every scale.
 - **Sharp apex.** The top is a true point. No rounding, no ink trap softening.
-- **Optional two-tone ("submerged").** The lower triangle of the A — the region
-  *below* the waterline — may drop to `ink-submerged`, suggesting "below water
-  level." This is the **only** allowed tonal move. The spec defines **two glyph
-  variants**: `flat` (single ink) and `two-tone` (submerged lower triangle).
-  Favicon and any sub-32px use **must** use `flat`.
+- **Two colors only.** The mark is **black + the aqua waterline** — nothing else.
+  (An earlier two-tone "submerged" lower-leg tint was tried and dropped; it added
+  a third tone and muddied the black-and-blue clarity.)
 
-Legibility intent: at 16px the glyph reads as a crisp monochrome **A** bisected by
-one bright aqua line; the overshoot keeps the waterline distinguishable even when
-the letterform itself blurs.
+Legibility intent: at 16px the glyph reads as a crisp black **A** bisected by one
+bright aqua line; the overshoot keeps the waterline distinguishable even when the
+letterform itself blurs. Slim strokes thin out at 16px but the A + bar still read.
 
 ---
 
@@ -77,22 +75,21 @@ The wordmark is `Algua` — **capital A, lowercase `lgua`** (title case). The
 capitalized initial gives the mark a name-like, proper-noun presence while the
 lowercase tail keeps it quiet and liquid, not all-caps loud.
 
-- **Skeleton:** drawn from a **geometric grotesk (Space Grotesk Medium)**, then
-  **converted to outlines** in the final asset so the wordmark is
-  font-independent (no dependency on the font being installed/licensed at use).
-- **Letterforms:** tight-but-open tracking; flat terminals; Space Grotesk's
-  native geometric lowercase (two-story `a`) is kept — it already reads sharp and
-  geometric, and altering it would abandon the stated skeleton.
-- **The capital "A":** a standard sharp-apex capital A with a **normal ink
-  crossbar** (this is type, not the glyph). To make it *rhyme* with the glyph
-  without breaking accent discipline, its crossbar sits at the **same height
-  ratio** as the glyph's waterline — same line, lower down, rendered in ink.
-- **Baseline waterline:** the waterline device reappears as a **thin aqua baseline
-  rule** that the letters sit on, overshooting the final `a` by the **same
-  overshoot ratio** (≈12%) as the glyph. This is the single visual hinge that
-  unifies glyph and wordmark — same device, same accent, scaled down.
-- **Accent discipline:** the letterforms are **never** aqua — including the
-  capital A's crossbar (ink). Only the baseline rule is aqua.
+- **Skeleton:** drawn from a **geometric grotesk (Space Grotesk Light, ~300
+  weight)** for a slim, sleek line, then **converted to outlines** in the final
+  asset so the wordmark is font-independent (no dependency on the font being
+  installed/licensed at use).
+- **Letterforms:** airy tracking to match the light weight; flat terminals; Space
+  Grotesk's native geometric lowercase (two-story `a`) is kept — it already reads
+  sharp and geometric, and altering it would abandon the stated skeleton.
+- **The capital "A":** the font's native sharp-apex capital A (with its own ink
+  crossbar). It is **type, not the glyph** — it deliberately does *not* try to
+  mimic the crossbar-less glyph, which stays the distinct mark.
+- **No underline.** The wordmark is set plain, in black, with **no aqua baseline
+  rule** (an underline was tried and dropped — it competed with the glyph's
+  waterline and cluttered the lockup). The aqua waterline lives in the glyph only.
+- **Accent discipline:** the wordmark carries **no aqua at all**; aqua appears
+  solely as the glyph's waterline crossbar.
 
 ---
 
@@ -103,12 +100,11 @@ lowercase tail keeps it quiet and liquid, not all-caps loud.
 | **Horizontal** (primary) | glyph + `Algua`, **baselines aligned**; gap = one glyph stroke-width | README header, docs nav, default |
 | **Stacked** | glyph above, wordmark below, centered | square-ish placements, social cards |
 | **Glyph-alone** | the waterline A | favicon, avatar, app icon, terminal banner |
-| **Wordmark-alone** | `Algua` + baseline rule | inline text, footers, where a glyph is redundant |
+| **Wordmark-alone** | `Algua`, plain black | inline text, footers, where a glyph is redundant |
 
-In the horizontal lockup the glyph's feet align to the wordmark's baseline; the
-glyph's waterline (mid-letter) and the wordmark's baseline rule are the **same
-device at the same overshoot ratio**, so they read as kin even though they sit at
-different heights.
+In the horizontal lockup the glyph's feet align to the wordmark's baseline. The
+glyph supplies the only aqua (its waterline crossbar); the wordmark sits beside it
+in plain black, so the eye lands on the one blue accent.
 
 ---
 
@@ -116,21 +112,21 @@ different heights.
 
 Near-monochrome with exactly **one accent**.
 
+**Black and the water blue — that's it.**
+
 | Token | Hex | Use |
 |---|---|---|
-| `ink` | `#0C1618` | primary mark on light backgrounds; deep slate-black |
-| `ink-submerged` | `#16282B` | "below waterline" submerged tint **on light** fields |
+| `ink` | `#000000` | the mark (letterforms) on light backgrounds; true black |
 | `paper` | `#F3F6F6` | the mark on dark backgrounds; off-white |
-| `paper-submerged` | `#93A3A3` | "below waterline" submerged tint **on dark** fields (a dark tint would vanish on dark) |
-| `aqua` | `#13C2CE` | **the waterline only** — the primary accent |
+| `aqua` | `#13C2CE` | **the waterline only** — the single accent (the water blue) |
 | `aqua-deep` | `#0A8E99` | aqua used on light where WCAG AA contrast is required (small lines/text) |
 | `mute` | `#5C6B6E` | dividers, captions, supporting UI — **never** the mark |
 
 Rules:
 
-- **Aqua is reserved for the waterline.** Letterforms are never aqua.
-- **No gradients. No second accent.** If a future surface needs more color, it
-  comes from neutrals, not new hues.
+- **Aqua is reserved for the glyph's waterline.** Letterforms (glyph legs and the
+  whole wordmark) are never aqua.
+- **No gradients. No second accent. No third tone.** Black + aqua only.
 - **One-color fallback** (single-ink print, laser, embroidery, stamp): render the
   whole mark in `ink` *or* `paper`, with the waterline as a **knockout/outline**
   so the device still reads without color.
@@ -139,12 +135,9 @@ Rules:
 
 **Required variants** (each lockup ships all that apply):
 
-- `light` — ink mark on paper, aqua waterline
-- `dark` — paper mark on ink, aqua waterline
-- `mono` — single-ink, knockout waterline (flat only)
-
-`flat` vs `two-tone` applies on top of `light`/`dark` for the glyph and any lockup
-containing it.
+- `light` — black mark on paper, aqua waterline
+- `dark` — paper mark on black, aqua waterline
+- `mono` — single-ink, knockout waterline
 
 ---
 
@@ -152,7 +145,7 @@ containing it.
 
 | Role | Typeface | Notes |
 |---|---|---|
-| **Logotype** | custom-drawn (Space Grotesk skeleton) | outlined in the final asset; not a live font |
+| **Logotype** | Space Grotesk **Light (~300)**, outlined | slim/sleek; baked to paths, not a live font |
 | **Display / headings** (README, docs) | **Space Grotesk** | sharp, technical; matches the logotype skeleton |
 | **Body** | **Inter** (or system sans stack) | neutral, highly legible |
 | **Code / CLI** | **JetBrains Mono** | terminal-adjacent; fits the agent-first, CLI character |
@@ -173,14 +166,14 @@ Masters (the spec produces measured drawings, not eyeballed art):
 
 Fixed parameters (exact values finalized during implementation, then frozen here):
 
-- **Stroke width** of the A legs (in master units).
-- **Apex angle** / leg spread.
-- **Waterline thickness** = **glyph stroke width** (the waterline is visually the
-  same weight as the legs).
-- **Overshoot ratio** = **≈12%** of leg horizontal span per side — reused for the
-  glyph crossbar *and* the wordmark baseline rule.
-- **Waterline vertical position** as a fraction of cap-height (sets how much of
-  the A is "submerged").
+As built (100-unit master): apex `(50,10)`, feet `(20,90)`/`(80,90)`, **stroke
+width 9** (slim), waterline centred at `y=62`, spanning `x=22..78`.
+
+- **Stroke width** of the A legs — slim (9/100).
+- **Waterline thickness** = **glyph stroke width** (same weight as the legs).
+- **Overshoot.** The waterline extends past the legs at its height — a modest,
+  symmetric overshoot reused at every scale.
+- **Waterline vertical position** ≈ lower third of cap-height.
 
 ---
 
@@ -195,12 +188,12 @@ Fixed parameters (exact values finalized during implementation, then frozen here
 
 **Don'ts:**
 
-- Don't recolor the letterforms aqua (aqua = waterline only).
-- Don't add gradients, drop shadows, glows, or a second accent color.
+- Don't recolor the letterforms aqua (aqua = the glyph's waterline only).
+- Don't add gradients, drop shadows, glows, a second accent, or a third tone.
 - Don't round the apex.
 - Don't rotate, tilt, or curve the waterline off horizontal.
-- Don't use the `two-tone` glyph below 32px (use `flat`).
-- Don't stretch, condense, or re-track the wordmark.
+- Don't add an aqua underline / baseline rule to the wordmark.
+- Don't thicken the strokes — slim is the point; or stretch/condense the wordmark.
 - Don't place the mark on a low-contrast field that breaks the variant rules.
 
 ---
@@ -211,27 +204,26 @@ Asset tree (target location `brand/` at repo root):
 
 ```
 brand/
-  algua-glyph.svg            # flat + two-tone, light/dark/mono
-  algua-wordmark.svg         # light/dark/mono
-  algua-lockup-h.svg         # horizontal (primary), light/dark/mono
-  algua-lockup-stacked.svg   # stacked, light/dark/mono
-  favicon.svg                # flat glyph, redrawn at small size
+  algua-glyph.svg            # light; + -dark, -mono
+  algua-wordmark.svg         # light; + -dark
+  algua-lockup-h.svg         # horizontal (primary); + -dark, -mono
+  algua-lockup-stacked.svg   # stacked; + -dark
+  favicon.svg                # glyph on paper
   favicon-16.png
   favicon-32.png
   apple-touch-icon-180.png
   icon-512.png
   tokens.json                # the §6 color table as design tokens
   README.md                  # this spec's usage rules, condensed
-  banner-dark.svg            # README header (dark-bg horizontal lockup)
+  banner-dark.svg            # README header (black-bg horizontal lockup)
+  build.py                   # regenerates the whole kit
 ```
 
 Notes:
 
-- Variant packaging (light/dark/mono, flat/two-tone) may be separate files or a
-  single SVG with `id`-addressable layers — decided at implementation; either way
-  every variant in §6 must be exportable.
-- PNG favicons are exported from the **24×24 hinted master**, not the 100-unit
-  master.
+- Each variant in §6 is a separate file (suffix `-dark` / `-mono`).
+- PNG favicons are currently exported by scaling the glyph master; a hand-hinted
+  small master is a future refinement for extra crispness at 16px.
 - `tokens.json` is the single source of truth for color; the SVGs reference the
   same hex values.
 
@@ -241,11 +233,10 @@ Notes:
 
 The identity is complete when:
 
-1. The glyph reads unambiguously as **A** + waterline at **16px** (flat variant).
-2. Glyph and wordmark visibly share the **one waterline device** at the **same
-   overshoot ratio**.
-3. Aqua appears **only** on the waterline in every asset.
-4. All §6 variants (light/dark/mono; flat/two-tone where applicable) export.
-5. The full favicon/icon set renders crisp at 16/32/180/512.
+1. The glyph reads as **A** + aqua waterline at **16px**.
+2. The mark is **black + aqua only** — no third tone, no gradient, no underline.
+3. Aqua appears **only** on the glyph's waterline in every asset.
+4. All §6 variants (light / dark / mono) export.
+5. The full favicon/icon set renders at 16/32/180/512.
 6. `tokens.json` matches the §6 table and the SVGs reference those values.
 7. The mono one-color fallback preserves the waterline as a knockout.
