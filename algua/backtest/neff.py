@@ -28,9 +28,13 @@ class NEffResult(NamedTuple):
 
 def _pair_correlation(a, b, min_overlap_bars):
     """Inner-join two (returns, dates) streams on DATE, return Pearson corr or None if the overlap
-    is too short or the correlation is non-finite (e.g. a zero-variance stream)."""
+    is too short, the correlation is non-finite (e.g. a zero-variance stream), or either stream
+    contains duplicate dates (invalid data — fail-closed)."""
     ar, ad = a
     br, bd = b
+    # Duplicate dates in either stream are invalid; fail-closed.
+    if len(set(ad)) != len(ad) or len(set(bd)) != len(bd):
+        return None
     amap = dict(zip(ad, ar, strict=True))
     bmap = dict(zip(bd, br, strict=True))
     common = sorted(set(amap) & set(bmap))
@@ -71,5 +75,7 @@ def estimate_n_eff(
     n_eff = raw_n / (1.0 + (raw_n - 1) * rho_lower)
     if not math.isfinite(n_eff):
         return NEffResult(None, None, n_sib, m)
-    n_eff_int = max(1, min(raw_n, int(round(n_eff))))
+    # Round UP (conservative): a lower N_eff would lower the DSR benchmark SR* (more lenient),
+    # so ceil is the anti-lenient direction. ceil(n_eff) <= raw_n always holds since n_eff <= raw_n.
+    n_eff_int = max(1, min(raw_n, math.ceil(n_eff)))
     return NEffResult(n_eff_int, rho_lower, n_sib, m)

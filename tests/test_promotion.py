@@ -757,7 +757,8 @@ def _seed_sibling_returns(repo, n_siblings: int, *, h_start: str, h_end: str,
     or n_funnel for the strategy-under-promotion (shadow-only invariant: seeding siblings changes
     no gate inputs for the focal strategy).
     """
-    bar_dates = [f"2024-{(i // 22) + 1:02d}-{(i % 22) + 1:02d}" for i in range(n_bars)]
+    from datetime import timedelta  # noqa: PLC0415
+    bar_dates = [(date(2024, 1, 1) + timedelta(days=i)).isoformat() for i in range(n_bars)]
     for k in range(n_siblings):
         sib_name = f"_sibling_{k}"
         sib_rec = repo.add(sib_name)
