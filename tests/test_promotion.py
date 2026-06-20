@@ -732,3 +732,175 @@ def test_bootstrap_determinism(tmp_path):
     lower2 = _run_fresh(tmp_path / "db2")
     assert lower1 is not None
     assert lower1 == lower2
+
+
+# --- run_gate N_eff shadow wiring (#221 Slice 3) -----------------------------------------------
+# N_eff is SHADOW-ONLY: recorded in dsr_n_eff/dsr_rho_bar/dsr_n_siblings, NEVER fed into
+# evaluate_gate. The binding DSR continues to use raw n_funnel (dsr_n_trials == n_funnel).
+#
+# Sibling seeding: we create extra registered strategies, reserve+finalize a holdout burn for
+# each, and call record_holdout_returns directly (bypassing run_gate) to plant sibling vectors
+# without touching the strategy-under-promotion's gate path.
+#
+# Calibration: _BOOTSTRAP_H_START/_BOOTSTRAP_H_END overlap the sibling window; each sibling
+# vector uses the same date range so overlap is guaranteed.
+
+def _seed_sibling_returns(repo, n_siblings: int, *, h_start: str, h_end: str,
+                          n_bars: int = 63) -> None:
+    """Register n_siblings extra strategies and plant overlapping holdout_returns rows.
+
+    Each sibling has its own strategy row, a committed holdout burn (reserve+finalize), and a
+    holdout_returns row with a synthetic return vector that overlaps [h_start, h_end].
+    The vectors use distinct but valid return series so correlations are well-defined.
+
+    NOTE: siblings do NOT get a search_trial row — we must not inflate windowed_search_combos
+    or n_funnel for the strategy-under-promotion (shadow-only invariant: seeding siblings changes
+    no gate inputs for the focal strategy).
+    """
+    bar_dates = [f"2024-{(i // 22) + 1:02d}-{(i % 22) + 1:02d}" for i in range(n_bars)]
+    for k in range(n_siblings):
+        sib_name = f"_sibling_{k}"
+        sib_rec = repo.add(sib_name)
+        repo.apply_transition(sib_rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+        sib_id = repo.get(sib_name).id
+        rid, _ = repo.reserve_holdout(
+            sib_id, data_source="synthetic", snapshot_id=None,
+            period_start="2024-01-01", period_end="2024-06-01",
+            holdout_frac=0.2, holdout_start=h_start, holdout_end=h_end,
+            allow_reuse=False)
+        repo.finalize_holdout_reservation(rid, config_hash=f"c{k}", strategy_id=sib_id)
+        # Small variation per sibling so all pairwise correlations are well-defined (not identical).
+        rets = [0.01 * (1 + 0.01 * k) if i % 2 == 0 else -0.005 * (1 + 0.01 * k)
+                for i in range(n_bars)]
+        repo.record_holdout_returns(
+            rid, sib_id, holdout_start=h_start, holdout_end=h_end,
+            returns=rets, bar_dates=bar_dates)
+
+
+def _run_bootstrap_neff(repo, rid=None):
+    """run_gate with measured breadth, holdout_returns, using the bootstrap window for N_eff."""
+    return run_gate(
+        repo, _wf_with_holdout_returns(), name=_GATE_NAME, actor=Actor.AGENT,
+        criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="",
+        holdout_evaluation_id=rid,
+    )
+
+
+def test_n_eff_populated_with_sufficient_siblings(tmp_path):
+    """Measured promote with >=5 sibling holdout_returns rows overlapping the OOS interval:
+    dsr_n_eff is populated, 1 <= n_eff <= n_funnel, n_siblings >= 5, and dsr_n_eff lands
+    in the persisted decision_json."""
+    import json as _json  # noqa: PLC0415
+
+    from algua.research.gates import MIN_N_EFF_SIBLINGS
+
+    repo = _gate_repo_with_stats(tmp_path)
+    rid = _reserve_holdout(repo)
+
+    # Seed MIN_N_EFF_SIBLINGS sibling return vectors overlapping the bootstrap OOS window.
+    _seed_sibling_returns(repo, MIN_N_EFF_SIBLINGS,
+                          h_start=_BOOTSTRAP_H_START, h_end=_BOOTSTRAP_H_END,
+                          n_bars=_BOOTSTRAP_N)
+
+    outcome = _run_bootstrap_neff(repo, rid)
+    d = outcome.decision
+
+    # N_eff fields must be populated
+    assert d.dsr_n_eff is not None, "dsr_n_eff should be populated with >=5 siblings"
+    assert d.dsr_n_siblings is not None
+    assert d.dsr_n_siblings >= MIN_N_EFF_SIBLINGS
+
+    # N_eff is bounded: 1 <= n_eff <= n_funnel (raw N)
+    n_funnel = d.dsr_n_trials
+    assert n_funnel is not None
+    assert 1 <= d.dsr_n_eff <= n_funnel
+
+    # dsr_n_eff must appear in the persisted decision_json
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    stored = _json.loads(row["decision_json"])
+    assert "dsr_n_eff" in stored
+    assert stored["dsr_n_eff"] is not None
+
+
+def test_n_eff_shadow_invariant(tmp_path):
+    """SHADOW invariant: N_eff must NEVER affect the binding gate outcome.
+
+    Two identical promotes — one with >=5 siblings seeded, one with none — must produce:
+    - the SAME decision.passed
+    - the SAME dsr_evidence check value
+    - dsr_n_trials == raw n_funnel in both cases (binding DSR used raw N, not N_eff)
+    """
+    from algua.research.gates import MIN_N_EFF_SIBLINGS
+
+    # --- Run WITH siblings ---
+    repo_with = _gate_repo_with_stats(tmp_path / "with")
+    rid_with = _reserve_holdout(repo_with)
+    _seed_sibling_returns(repo_with, MIN_N_EFF_SIBLINGS,
+                          h_start=_BOOTSTRAP_H_START, h_end=_BOOTSTRAP_H_END,
+                          n_bars=_BOOTSTRAP_N)
+    out_with = _run_bootstrap_neff(repo_with, rid_with)
+    d_with = out_with.decision
+
+    # --- Run WITHOUT siblings ---
+    repo_without = _gate_repo_with_stats(tmp_path / "without")
+    rid_without = _reserve_holdout(repo_without)
+    out_without = _run_bootstrap_neff(repo_without, rid_without)
+    d_without = out_without.decision
+
+    # Binding DSR used raw N in both cases
+    assert d_with.dsr_n_trials == d_without.dsr_n_trials, (
+        "dsr_n_trials must be identical (raw N) regardless of sibling count")
+
+    # passed must be identical
+    assert d_with.passed == d_without.passed, (
+        "N_eff shadow recording must not change gate outcome")
+
+    # dsr_evidence check value must be identical
+    def _dsr_evidence_value(d):
+        for c in d.checks:
+            if c["name"] == "dsr_evidence":
+                return c["value"]
+        return None
+
+    val_with = _dsr_evidence_value(d_with)
+    val_without = _dsr_evidence_value(d_without)
+    assert val_with == val_without, (
+        f"dsr_evidence value changed with siblings: {val_with} vs {val_without}")
+
+    # With siblings: n_eff should be populated; without: None
+    assert d_with.dsr_n_eff is not None
+    assert d_without.dsr_n_eff is None
+
+
+def test_n_eff_none_with_insufficient_siblings(tmp_path):
+    """Measured promote with FEWER than MIN_N_EFF_SIBLINGS overlapping siblings:
+    dsr_n_eff is None, dsr_n_siblings < MIN_N_EFF_SIBLINGS, gate outcome unchanged."""
+    from algua.research.gates import MIN_N_EFF_SIBLINGS
+
+    repo = _gate_repo_with_stats(tmp_path)
+    rid = _reserve_holdout(repo)
+
+    # Seed fewer than the minimum
+    n_too_few = max(0, MIN_N_EFF_SIBLINGS - 1)
+    if n_too_few > 0:
+        _seed_sibling_returns(repo, n_too_few,
+                              h_start=_BOOTSTRAP_H_START, h_end=_BOOTSTRAP_H_END,
+                              n_bars=_BOOTSTRAP_N)
+
+    outcome = _run_bootstrap_neff(repo, rid)
+    d = outcome.decision
+
+    # N_eff must be None (not enough siblings)
+    assert d.dsr_n_eff is None, "dsr_n_eff should be None with insufficient siblings"
+    # n_siblings reflects the actual count (may be 0 or less than min)
+    assert d.dsr_n_siblings is not None
+    assert d.dsr_n_siblings < MIN_N_EFF_SIBLINGS
+
+    # Gate outcome still valid (binding DSR still runs)
+    assert d.dsr_binding is True
+    assert any(c["name"] == "dsr_evidence" for c in d.checks)
