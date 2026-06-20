@@ -127,6 +127,15 @@ source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.research"]
 
 [[tool.importlinter.contracts]]
+# The dependency runs ONE way: the registry composes research (promotion gates, idea pool), never
+# the reverse. research is pure evaluation/scoring — it must not reach back into lifecycle state.
+# Stated as its own contract so the correct direction survives a future refactor (issue #170).
+name = "research never imports registry"
+type = "forbidden"
+source_modules = ["algua.research"]
+forbidden_modules = ["algua.registry"]
+
+[[tool.importlinter.contracts]]
 name = "execution / live / audit stay off the cli layer"
 type = "forbidden"
 source_modules = ["algua.execution", "algua.live", "algua.audit"]

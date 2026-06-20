@@ -533,7 +533,6 @@ def migrate(conn: sqlite3.Connection) -> None:
     we only stamp it afterward as a schema-generation marker.
     """
     _migrate_shortlisted_to_candidate(conn)
-    _rekey_search_trials_to_name(conn)
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
     _add_missing_columns(conn, "stage_transitions", {"dependency_hash": "TEXT"})
@@ -658,40 +657,6 @@ def _migrate_shortlisted_to_candidate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE stage_transitions SET to_stage='candidate' WHERE to_stage='shortlisted'"
             )
-
-
-def _rekey_search_trials_to_name(conn: sqlite3.Connection) -> None:
-    """Forward-migrate a dev DB whose ``search_trials`` is keyed by the old ``strategy_id`` FK to
-    the name-keyed table, carrying each row's breadth across by resolving the id to a strategy
-    name. Runs BEFORE the ``CREATE TABLE IF NOT EXISTS`` bootstrap (which would otherwise leave an
-    old-shaped table untouched). Idempotent: a no-op once the table is already name-keyed (or
-    absent — the bootstrap then creates it fresh)."""
-    table_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_trials'"
-    ).fetchone()
-    if table_exists is None:
-        return
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_trials)")}
-    if "strategy_name" in cols or "strategy_id" not in cols:
-        return  # already migrated (or some other shape) — leave it alone
-    # Rebuild the table name-keyed, joining through strategies to recover each row's name. Rows
-    # whose strategy_id no longer resolves are dropped (the strategy is gone; its breadth is moot).
-    conn.executescript(
-        """
-        ALTER TABLE search_trials RENAME TO _search_trials_old;
-        CREATE TABLE search_trials (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            strategy_name TEXT NOT NULL,
-            n_combos INTEGER NOT NULL,
-            grid_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)
-            SELECT s.name, o.n_combos, o.grid_json, o.created_at
-            FROM _search_trials_old o JOIN strategies s ON s.id = o.strategy_id;
-        DROP TABLE _search_trials_old;
-        """
-    )
 
 
 def _backfill_holdout_intervals(conn: sqlite3.Connection) -> None:

@@ -260,45 +260,6 @@ def test_migrate_adds_search_trials_to_legacy_db(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
 
 
-def test_migrate_rekeys_legacy_id_keyed_search_trials_to_name(tmp_path):
-    """A dev DB with the OLD id-keyed search_trials is forward-migrated to the name-keyed table,
-    carrying each row's breadth across by resolving strategy_id -> strategies.name."""
-    conn = connect(tmp_path / "r.db")
-    conn.executescript(
-        """
-        CREATE TABLE strategies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
-            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-        );
-        CREATE TABLE search_trials (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            strategy_id INTEGER NOT NULL REFERENCES strategies(id),
-            n_combos INTEGER NOT NULL,
-            grid_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        INSERT INTO strategies(name, stage, created_at, updated_at)
-            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
-        INSERT INTO search_trials(strategy_id, n_combos, grid_json, created_at)
-            VALUES (1, 7, '{}', '2026-01-02T00:00:00+00:00');
-        """
-    )
-    conn.commit()
-
-    migrate(conn)
-
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(search_trials)")}
-    assert "strategy_name" in cols
-    assert "strategy_id" not in cols
-    rows = conn.execute(
-        "SELECT strategy_name, n_combos FROM search_trials"
-    ).fetchall()
-    assert [(r["strategy_name"], r["n_combos"]) for r in rows] == [("s", 7)]
-
-    migrate(conn)  # idempotent re-run must not duplicate or drop the row
-    assert conn.execute("SELECT COUNT(*) FROM search_trials").fetchone()[0] == 1
-
-
 def test_migrate_creates_holdout_evaluations_table(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
