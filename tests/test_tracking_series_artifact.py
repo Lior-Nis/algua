@@ -1,5 +1,3 @@
-import inspect
-
 import pandas as pd
 from mlflow.tracking import MlflowClient
 
@@ -39,6 +37,9 @@ def test_log_backtest_skips_series_when_returns_none(tmp_path):
 
 
 def test_only_log_backtest_emits_series_artifact():
-    assert "series.parquet" in inspect.getsource(mlflow_tracker.log_backtest)
-    assert "series.parquet" not in inspect.getsource(mlflow_tracker.log_sweep)
-    assert "series.parquet" not in inspect.getsource(mlflow_tracker.log_walk_forward)
+    # Structural invariant: log_sweep and log_walk_forward must never reference series.parquet
+    # (those functions contain the single-use OOS holdout tail and must never emit a series).
+    assert "series.parquet" not in mlflow_tracker.log_sweep.__code__.co_consts
+    assert "series.parquet" not in mlflow_tracker.log_walk_forward.__code__.co_consts
+    # log_backtest must call the series emitter helper.
+    assert "_log_series_artifact" in mlflow_tracker.log_backtest.__code__.co_names

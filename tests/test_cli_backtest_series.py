@@ -32,6 +32,7 @@ def _result(returns):
 def test_emit_series_file_fails_closed_on_none(tmp_path):
     with pytest.raises(BacktestError):
         emit_series_file(_result(None), tmp_path / "s.parquet")
+    assert not (tmp_path / "s.parquet").exists()
 
 
 def test_emit_series_file_fails_closed_on_empty(tmp_path):

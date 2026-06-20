@@ -287,7 +287,6 @@ def _equity(ret):
 
 
 def plot_equity(df, strategy: str, out: Path) -> str | None:
-    import numpy as np  # noqa: F401
     eq = _equity(df["ret"])
     fig, ax = plt.subplots()
     ax.plot(range(len(eq)), eq.to_numpy())
@@ -406,34 +405,44 @@ def main() -> int:
     # --- series plots (#181): read the LOGGED backtest's series.parquet artifact (no re-run) ---
     bt_runs = [r for r in runs if r.data.tags.get("kind") == "backtest"]
     chosen = None
+    chosen_res: dict[str, Any] = {}
+    chosen_df = None
     if args.backtest_run_id:
         chosen = next((r for r in bt_runs if r.info.run_id == args.backtest_run_id), None)
+        if chosen is not None:
+            chosen_res = _artifact_json(chosen.info.run_id, "result.json", uri) or {}
+            chosen_df = _load_series(uri, chosen.info.run_id)
     # Prefer a backtest whose identity matches the report's walk-forward (then sweep) run.
     ref = provenance.get("walk_forward") or provenance.get("sweep") or {}
     if chosen is None:
         for r in bt_runs:
             res = _artifact_json(r.info.run_id, "result.json", uri)
-            if res is None or _load_series(uri, r.info.run_id) is None:
+            if res is None:
+                continue
+            df_candidate = _load_series(uri, r.info.run_id)
+            if df_candidate is None:
                 continue
             if ref and (res.get("config_hash"), res.get("snapshot_id")) == (
                     ref.get("config_hash"), ref.get("snapshot_id")):
-                chosen, chosen_res = r, res
+                chosen, chosen_res, chosen_df = r, res, df_candidate
                 break
     if chosen is None:  # fall back to newest backtest with a series artifact (label its identity)
         for r in bt_runs:
             res = _artifact_json(r.info.run_id, "result.json", uri)
-            if res is not None and _load_series(uri, r.info.run_id) is not None:
-                chosen, chosen_res = r, res
+            if res is None:
+                continue
+            df_candidate = _load_series(uri, r.info.run_id)
+            if df_candidate is not None:
+                chosen, chosen_res, chosen_df = r, res, df_candidate
                 break
-    if chosen is not None:
-        df = _load_series(uri, chosen.info.run_id)
+    if chosen is not None and chosen_df is not None:
         provenance["series"] = _series_provenance(uri, chosen, chosen_res)
         for fn, name in (
-            (plot_equity(df, args.strategy, rdir / "series_equity.svg"), "Equity curve"),
-            (plot_drawdown(df, args.strategy, rdir / "series_drawdown.svg"), "Drawdown"),
-            (plot_rolling_sharpe(df, args.strategy, rdir / "series_rolling_sharpe.svg"),
+            (plot_equity(chosen_df, args.strategy, rdir / "series_equity.svg"), "Equity curve"),
+            (plot_drawdown(chosen_df, args.strategy, rdir / "series_drawdown.svg"), "Drawdown"),
+            (plot_rolling_sharpe(chosen_df, args.strategy, rdir / "series_rolling_sharpe.svg"),
              "Rolling Sharpe (63d)"),
-            (plot_return_dist(df, args.strategy, rdir / "series_return_dist.svg"),
+            (plot_return_dist(chosen_df, args.strategy, rdir / "series_return_dist.svg"),
              "Return distribution"),
         ):
             if fn:

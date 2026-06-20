@@ -7,7 +7,7 @@ import typer
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
-from algua.backtest.result import series_frame
+from algua.backtest.result import BacktestResult, series_frame
 from algua.backtest.sweep import parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
@@ -42,7 +42,7 @@ def _track(call: Callable[[], str]) -> str:
         raise BacktestError(f"mlflow tracking failed: {exc}") from exc
 
 
-def emit_series_file(result, path: Path) -> dict:
+def emit_series_file(result: BacktestResult, path: Path) -> dict:
     """Write the backtest's daily return series to a deterministic, provenance-stamped parquet at
     `path` and return the stdout `series` descriptor. Fail closed (#181): a `None` (non-finite) or
     empty series raises BacktestError — never a partial/empty file."""
