@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import typer
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
+from algua.backtest.result import series_frame
 from algua.backtest.sweep import parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
@@ -19,6 +21,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.data.files import frame_to_parquet_bytes, write_bytes_atomic
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.registry.search_breadth import record_search_breadth
@@ -37,6 +40,24 @@ def _track(call: Callable[[], str]) -> str:
         return call()
     except Exception as exc:  # noqa: BLE001 - tracking is a best-effort side effect
         raise BacktestError(f"mlflow tracking failed: {exc}") from exc
+
+
+def emit_series_file(result, path: Path) -> dict:
+    """Write the backtest's daily return series to a deterministic, provenance-stamped parquet at
+    `path` and return the stdout `series` descriptor. Fail closed (#181): a `None` (non-finite) or
+    empty series raises BacktestError — never a partial/empty file."""
+    if result.returns is None or len(result.returns) == 0:
+        raise BacktestError("backtest produced no finite return series; nothing to emit")
+    frame, metadata = series_frame(result)
+    write_bytes_atomic(frame_to_parquet_bytes(frame, metadata), path)
+    return {
+        "path": str(path), "n": int(len(frame)),
+        "code_hash": result.code_hash, "dependency_hash": result.dependency_hash,
+        "config_hash": result.config_hash, "snapshot_id": result.snapshot_id,
+        "seed": result.seed, "data_source": result.data_source,
+        "start": result.period["start"], "end": result.period["end"],
+        "timeframe": result.timeframe,
+    }
 
 
 @backtest_app.command("run")
@@ -64,6 +85,9 @@ def run(
         help="realize a held-into-gap name at its last close when no delisting record exists"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
+    emit_series: str = typer.Option(
+        None, "--emit-series",
+        help="write the daily return series to a parquet at PATH (for series plots)"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
@@ -128,6 +152,8 @@ def run(
                 )
 
     payload = result.to_dict()
+    if emit_series:
+        payload["series"] = emit_series_file(result, Path(emit_series))
     if track:
         payload["mlflow_run_id"] = _track(
             lambda: log_backtest(
