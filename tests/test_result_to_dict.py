@@ -72,11 +72,13 @@ def test_backtest_result_to_dict_excludes_returns():
 
 
 def test_walkforward_result_to_dict_matches_asdict():
-    # holdout_returns is SENSITIVE and excluded from to_dict() (#221 Slice 1); strip it from
-    # the dataclasses.asdict reference so the invariant "to_dict == asdict minus SENSITIVE" holds.
+    # holdout_returns is SENSITIVE and excluded from to_dict() (#221 Slice 1).
+    # market_returns is bulky (full-period aggregate) and excluded from to_dict() (#221 Slice 4).
+    # Strip both from the dataclasses.asdict reference so the invariant holds.
     r = _walkforward_result()
     expected = dataclasses.asdict(r)
     expected.pop("holdout_returns", None)
+    expected.pop("market_returns", None)
     assert r.to_dict() == expected
 
 

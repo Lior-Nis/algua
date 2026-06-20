@@ -474,7 +474,7 @@ def verify_signal_panel_parity(
         ) from exc
 
 
-def _fetch_symbols(
+def fetch_symbols(
     strategy: LoadedStrategy, universe_by_date: Mapping[date, Collection[str]] | None
 ) -> list[str]:
     """Symbols to fetch bars for.
@@ -492,12 +492,21 @@ def _fetch_symbols(
     return sorted(union)
 
 
-def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
+# Private alias for internal callers that pre-date the public name (keeps internal call-sites
+# unchanged while allowing external importers to use the public name).
+_fetch_symbols = fetch_symbols
+
+
+def adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     """The simulation grid: adj_close pivoted to (timestamp index x symbol columns), sorted by
     time. This index IS the bar date-index `vectorbt` simulates on and `pf.returns()` carries, so
     it is the single source of truth for both `build_portfolio` and `holdout_window`."""
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     return adj.sort_index()
+
+
+# Private alias for internal callers that pre-date the public name.
+_adj_grid = adj_grid
 
 
 def _static_operating_view(

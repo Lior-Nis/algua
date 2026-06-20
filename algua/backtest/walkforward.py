@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from algua.backtest.delisting import DelistingRecord
-from algua.backtest.engine import BacktestError, build_portfolio
+from algua.backtest.engine import BacktestError, _fetch_symbols, adj_grid, build_portfolio
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
@@ -92,13 +92,45 @@ class WalkForwardResult:
     # holdout window. NEVER serialized: to_dict() excludes it; only research promote persists it
     # (in promotion.run_gate), and only the sibling-only store read may surface it. (#221 Slice 1)
     holdout_returns: tuple[list[float], list[str]] | None = None
+    # FULL-PERIOD equal-weighted cross-sectional daily return of the universe (#221 Slice 4) — the
+    # market/benchmark series for vol-tertile regime labeling. NOT sensitive, but bulky → excluded
+    # from to_dict (an internal gate input, like holdout_returns). None if the benchmark read fails.
+    market_returns: tuple[list[float], list[str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        # holdout_returns is SENSITIVE and is NEVER serialized (#221 Slice 1). Build the dict
-        # explicitly so the raw vector is never even materialized into the output dict.
+        # holdout_returns is SENSITIVE — never serialized (#221 Slice 1).
+        # market_returns is bulky (full-period aggregate) — internal gate input (#221 Slice 4).
+        # Both are excluded so the raw vectors never appear in operator-facing output.
         return {f.name: getattr(self, f.name)
                 for f in dataclasses.fields(self)
-                if f.name != "holdout_returns"}
+                if f.name not in ("holdout_returns", "market_returns")}
+
+
+def _market_return_series(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    universe_by_date: Mapping[date, Collection[str]] | None,
+) -> tuple[list[float], list[str]] | None:
+    """Equal-weighted cross-sectional daily return of the universe (PIT: same provider/snapshot as
+    the backtest). Returns (returns, ISO-dates) over the FULL period, or None on any failure.
+
+    Uses the SAME provider and universe_by_date the backtest used (PIT-identical — a second read
+    of the same immutable snapshot). The series spans the FULL period (not just the holdout) so a
+    later 21-bar trailing vol has lookback for every holdout date (#221 Slice 4).
+    """
+    try:
+        symbols = _fetch_symbols(strategy, universe_by_date)
+        bars = provider.get_bars(symbols, start, end, "1d")
+        adj = adj_grid(bars)                          # (dates x symbols) adj_close panel
+        xs = adj.pct_change().mean(axis=1).dropna()   # equal-weighted cross-sectional return
+        if xs.empty:
+            return None
+        return ([float(x) for x in xs.to_numpy()],
+                [str(idx.date()) for idx in xs.index])
+    except Exception:
+        return None
 
 
 def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, Any]:
@@ -145,6 +177,9 @@ def walk_forward(
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
     )
+    # Compute the full-period benchmark series immediately after build_portfolio (same provider +
+    # universe_by_date — PIT-identical, a second read of the same immutable snapshot). Never raises.
+    market_returns = _market_return_series(strategy, provider, start, end, universe_by_date)
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 
@@ -191,5 +226,6 @@ def walk_forward(
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
         holdout_returns=holdout_returns,
+        market_returns=market_returns,
         **prov,
     )
