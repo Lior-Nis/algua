@@ -60,9 +60,6 @@ def members_as_of(
     return frozenset(universe_by_date[max(eligible)])
 
 
-# Private alias kept for internal callers within this module.
-_members_as_of = members_as_of
-
 
 def _assert_fundamentals_shape(frame: pd.DataFrame) -> None:
     """Structural defense at the engine seam (no algua.data import): a foreign
@@ -193,7 +190,7 @@ def _decision_weights(
             continue
         view = bars_sorted.iloc[:stop]
         if universe_by_date is not None:
-            members = _members_as_of(universe_by_date, t)
+            members = members_as_of(universe_by_date, t)
             if not members:
                 continue  # before the earliest effective date -> flat
             view = view[view["symbol"].isin(members)]
