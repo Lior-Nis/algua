@@ -43,7 +43,7 @@ class BacktestError(RuntimeError):
     pass
 
 
-def _members_as_of(
+def members_as_of(
     universe_by_date: Mapping[date, Collection[str]], t: pd.Timestamp
 ) -> frozenset[str]:
     """As-of-t membership: the snapshot with the greatest effective_date <= t.date().
@@ -58,6 +58,7 @@ def _members_as_of(
     if not eligible:
         return frozenset()
     return frozenset(universe_by_date[max(eligible)])
+
 
 
 def _assert_fundamentals_shape(frame: pd.DataFrame) -> None:
@@ -189,7 +190,7 @@ def _decision_weights(
             continue
         view = bars_sorted.iloc[:stop]
         if universe_by_date is not None:
-            members = _members_as_of(universe_by_date, t)
+            members = members_as_of(universe_by_date, t)
             if not members:
                 continue  # before the earliest effective date -> flat
             view = view[view["symbol"].isin(members)]
@@ -434,7 +435,7 @@ def verify_signal_panel_parity(
     # Re-raise an existing BacktestError unchanged (divergence message preserved verbatim);
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
-        adj = _adj_grid(bars)
+        adj = adj_grid(bars)
         # Project to the operating universe identically to simulate()'s static path so the panel
         # under test sees exactly what the runtime fast path sees (observation parity, #208). Also
         # absorbs the empty-universe fail-closed guard.
@@ -474,7 +475,7 @@ def verify_signal_panel_parity(
         ) from exc
 
 
-def _fetch_symbols(
+def fetch_symbols(
     strategy: LoadedStrategy, universe_by_date: Mapping[date, Collection[str]] | None
 ) -> list[str]:
     """Symbols to fetch bars for.
@@ -492,12 +493,16 @@ def _fetch_symbols(
     return sorted(union)
 
 
-def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
+
+
+def adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     """The simulation grid: adj_close pivoted to (timestamp index x symbol columns), sorted by
     time. This index IS the bar date-index `vectorbt` simulates on and `pf.returns()` carries, so
     it is the single source of truth for both `build_portfolio` and `holdout_window`."""
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     return adj.sort_index()
+
+
 
 
 def _static_operating_view(
@@ -546,12 +551,12 @@ def holdout_window(
     if not 0.0 < holdout_frac < 1.0:
         raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
     try:
-        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         return start.date().isoformat(), end.date().isoformat()
-    idx = _adj_grid(bars).index
+    idx = adj_grid(bars).index
     n = len(idx)
     holdout_n = int(n * holdout_frac)
     if holdout_n < 1:
@@ -596,13 +601,13 @@ def simulate(
             f"this slice rebalances daily only ({sorted(_SUPPORTED_CADENCES)})"
         )
     try:
-        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         raise BacktestError("provider returned no bars for the universe/period")
 
-    adj = _adj_grid(bars)
+    adj = adj_grid(bars)
 
     if universe_by_date is None:
         # Static mode: project the strategy-visible view + grid to the operating universe so an
@@ -618,7 +623,7 @@ def simulate(
                 f"fundamentals_provider was supplied (fail closed)"
             )
         fundamentals = fundamentals_provider.get_fundamentals(
-            _fetch_symbols(strategy, universe_by_date), end
+            fetch_symbols(strategy, universe_by_date), end
         )
         _assert_fundamentals_shape(fundamentals)
 
@@ -629,7 +634,7 @@ def simulate(
                 f"strategy {strategy.name!r} declares needs_news but no news_provider was "
                 f"supplied (fail closed)"
             )
-        news = news_provider.get_news(_fetch_symbols(strategy, universe_by_date), end)
+        news = news_provider.get_news(fetch_symbols(strategy, universe_by_date), end)
         _assert_news_shape(news)
 
     weights = _decision_weights_fast_or_loop(

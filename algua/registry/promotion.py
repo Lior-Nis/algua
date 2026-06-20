@@ -434,6 +434,7 @@ def run_gate(
         dsr_funnel_floor_n_total_rows=(funnel_floor.n_total_rows if funnel_floor else None),
         bootstrap_binding=bootstrap_binding, bootstrap_lower_confidence=boot_lower,
         bootstrap_seed=boot_seed, bootstrap_b=boot_b, bootstrap_block_len=boot_block,
+        market_returns=wf.market_returns,
     )
     # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
     # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion

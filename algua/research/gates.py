@@ -3,11 +3,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
+import numpy as np
+import pandas as pd
 from scipy.stats import norm as _norm
 
 from algua.backtest._constants import ANN
+from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.walkforward import WalkForwardResult
 
 # Funnel-level multiple-testing window (Wall A). Protected constant, not an agent-tunable knob
@@ -41,6 +44,211 @@ RHO_BAR_SHRINKAGE_K = 1.0       # SE multiplier for the conservative (lower-boun
 # the floor's availability; the floor can only ever TIGHTEN the gate, so its absence is
 # conservative.
 MIN_FUNNEL_FLOOR_STRATEGIES = 5
+
+# Multi-regime robustness (#221, Phase 3 Slice 4). Protected — relaxing weakens the gate.
+N_REGIMES = 3                  # market-volatility tertiles (low/medium/high)
+MIN_REGIME_OBSERVATIONS = 21   # per-regime power floor (underpowered regimes are dropped)
+MIN_REGIME_SHARPE = 0.0        # relaxed per-regime Sharpe bar (paired with zero-vol drop)
+MIN_REGIME_OVERLAP_BARS = 63   # min holdout dates with a valid trailing market-vol for the check
+VOL_ROLLING_WINDOW = 21        # trailing bars for the benchmark realized-vol estimate
+
+# Dominance-audit predeclaration (#221, Phase 3 Slice 4). CODEOWNERS-protected constants — these
+# thresholds are committed HERE (before any audit data accumulates) so the Slice 5
+# haircut-retirement audit cannot select them post-hoc. The retirement audit (Slice 5) filters
+# decision_json rows where `phase3_component_mask` has all required bits set, then checks that no
+# row where `haircut_would_have_blocked=True AND dsr_raw_N_pass=True` exceeds
+# DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS over >= DOMINANCE_AUDIT_MIN_PROMOTIONS promotions
+# across >= DOMINANCE_AUDIT_MIN_WINDOW_DAYS of real-traffic wall time. SHADOW/AUDIT ONLY in
+# Slice 4 — these constants are read only by the Slice 5 audit, not by any gate pass/fail logic.
+DOMINANCE_AUDIT_MIN_PROMOTIONS = 30        # min promotions in the audit window for a verdict
+DOMINANCE_AUDIT_MIN_WINDOW_DAYS = 90       # min calendar days of traffic for the audit to bind
+DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS = 0  # haircut-blocked-but-DSR-passed cases allowed: none
+
+# Phase 3 component mask — bitmask recording which Phase 3 slices are active on a gate evaluation.
+# Bits 0-4 = Slices 0-4; all five set = 0b11111 = 31. Stored as `phase3_component_mask` in
+# decision_json so the Slice 5 audit can filter rows where all Phase 3 components are active.
+# SHADOW/AUDIT ONLY — does not affect passed.
+PHASE3_COMPONENT_MASK = 0b11111  # bits 0-4 = Phase 3 slices 0-4, all five active
+
+
+class RegimeSlice(NamedTuple):
+    """One volatility-tertile regime slice of the holdout period.
+
+    ``dropped_reason`` is None when the slice is usable; ``"too_short"`` when it has fewer
+    than the observation floor; ``"zero_vol"`` when ann_volatility==0.0 in the robustness
+    check (set by ``regime_robustness_check``, not by ``regime_splits``).
+    """
+
+    regime_index: int
+    returns: list[float]
+    n_bars: int
+    dropped_reason: str | None  # None | "too_short" | "zero_vol"
+
+
+class RegimeRobustnessResult(NamedTuple):
+    """Outcome of the per-regime robustness check."""
+
+    passed: bool
+    n_attempted: int
+    n_surviving: int
+    per_regime_sharpes: list[float | None]  # None for dropped regimes, float for survivors
+
+
+def regime_splits(
+    strategy_returns: list[float],
+    strategy_dates: list[str],
+    market_returns: list[float],
+    market_dates: list[str],
+    *,
+    n_regimes: int,
+    vol_window: int,
+) -> tuple[list[RegimeSlice], int]:
+    """Partition holdout dates into ``n_regimes`` volatility-tertile buckets.
+
+    Algorithm:
+    1. Build ``market_date -> market_return`` and ``strategy_date -> strategy_return`` dicts.
+    2. Compute trailing-``vol_window`` realized vol of the MARKET series.  For each market
+       date index ``i`` with ``i >= vol_window - 1``, the window is the ``vol_window`` returns
+       ending at ``i`` (inclusive): ``market_returns[i - vol_window + 1 : i + 1]``.
+       Vol = annualized std (ddof=1) of log(1+r) for r in the window.  Guard: if any
+       ``1 + r <= 0`` the entire date is skipped (no valid log).  Dates with ``i < vol_window - 1``
+       have no vol label and are excluded from the join.
+    3. Inner-join: market dates that HAVE a valid vol label AND appear in ``strategy_dates``.
+       ``overlap_n = len(joined_dates)``.  Empty join returns ``([], 0)``.
+    4. Assign tertiles by market-vol VALUE: thresholds ``t1 = quantile(vols, 1/3)`` and
+       ``t2 = quantile(vols, 2/3)``; regime 0 if ``vol <= t1``, regime 2 if ``vol > t2``, else
+       regime 1.  Value-based (not equal-count rank) so a degenerate/constant vol distribution
+       COLLAPSES — all dates fall into one tertile and the others are empty → dropped → fail-closed.
+       Group 0 = lowest-vol tertile, …, group n_regimes-1 = highest. Deterministic (no RNG).
+    5. For each regime, collect STRATEGY returns for that regime's dates (in date order).
+       ``RegimeSlice.dropped_reason`` is always ``None`` here; dropping is done by
+       ``regime_robustness_check``.
+
+    Returns ``(slices, overlap_n)``.  If ``overlap_n == 0`` returns ``([], 0)``.
+    ``slices`` always has exactly ``n_regimes`` entries when ``overlap_n > 0``.
+    """
+    # Step 1: build lookup dicts
+    strategy_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=False))
+
+    # Step 2: compute trailing-vol_window realized vol for each market date
+    m_dates_list = list(market_dates)
+    m_returns_list = list(market_returns)
+    vol_labels: dict[str, float] = {}
+    for i in range(len(m_dates_list)):
+        if i < vol_window - 1:
+            continue  # insufficient lookback
+        window = m_returns_list[i - vol_window + 1 : i + 1]
+        # Guard: every return must be FINITE and have 1+r > 0 to take log. A non-finite return
+        # (NaN/inf) must NOT produce a vol label — `1+r <= 0` is False for NaN, so check finiteness
+        # explicitly, else a NaN vol label would count toward overlap and poison np.quantile.
+        if any((not math.isfinite(r)) or (1.0 + r <= 0.0) for r in window):
+            continue
+        log_rets = [math.log(1.0 + r) for r in window]
+        std = float(np.std(log_rets, ddof=1))
+        vol = std * math.sqrt(ANN)
+        if not math.isfinite(vol):
+            continue  # fail-closed: a non-finite vol label is no label at all
+        vol_labels[m_dates_list[i]] = vol
+
+    # Step 3: inner-join with strategy_dates
+    joined: list[tuple[str, float]] = [
+        (d, vol_labels[d])
+        for d in vol_labels
+        if d in strategy_map
+    ]
+    overlap_n = len(joined)
+    if overlap_n == 0:
+        return ([], 0)
+
+    # Step 4: assign tertiles by market-vol VALUE (quantile thresholds), not by equal-count rank.
+    # This ensures a degenerate vol distribution collapses: if all vols are equal,
+    # t1 == t2 == that value, ALL dates satisfy vol <= t1 (regime 0), and regimes 1 & 2 are
+    # EMPTY (n_bars=0). Empty regimes are dropped by regime_robustness_check (too_short) ->
+    # n_surviving < 2 -> passed=False. That is the intended fail-closed behavior for constant vol.
+    #
+    # For a genuine low/mid/high spread, dates distribute across all 3 tertiles normally.
+    # Boundaries: regime 0: vol <= t1; regime 1: t1 < vol <= t2; regime 2: vol > t2.
+    # Deterministic: equal vols always resolve to the same regime (<=/>).
+    # The joined list is sorted by (vol, date) for order-independence before assignment.
+    joined_sorted = sorted(joined, key=lambda x: (x[1], x[0]))  # sort by (vol, date) asc
+    vols_array = np.array([x[1] for x in joined_sorted])
+    t1 = float(np.quantile(vols_array, 1.0 / n_regimes))
+    t2 = float(np.quantile(vols_array, 2.0 / n_regimes))
+
+    # Build per-regime date lists (in vol-sorted order, which matches joined_sorted)
+    regime_date_sets: list[list[str]] = [[] for _ in range(n_regimes)]
+    for date_str, vol in joined_sorted:
+        if vol <= t1:
+            regime_date_sets[0].append(date_str)
+        elif vol > t2:
+            regime_date_sets[n_regimes - 1].append(date_str)
+        else:
+            regime_date_sets[1].append(date_str)
+
+    # Step 5: build RegimeSlice for each regime — collect strategy returns in DATE order
+    slices: list[RegimeSlice] = []
+    for regime_idx, regime_dates_unordered in enumerate(regime_date_sets):
+        # ISO date strings sort lexicographically = chronologically
+        regime_dates = sorted(regime_dates_unordered)
+        regime_returns = [strategy_map[d] for d in regime_dates]
+        slices.append(RegimeSlice(
+            regime_index=regime_idx,
+            returns=regime_returns,
+            n_bars=len(regime_returns),
+            dropped_reason=None,
+        ))
+    return (slices, overlap_n)
+
+
+def regime_robustness_check(
+    slices: list[RegimeSlice],
+    *,
+    min_obs: int,
+    min_sharpe: float,
+) -> RegimeRobustnessResult:
+    """Check per-regime Sharpe robustness across volatility-tertile slices.
+
+    Drop rules (in order):
+    - ``n_bars < min_obs`` → ``dropped_reason = "too_short"``; ``per_regime_sharpe = None``.
+    - ``ann_volatility == 0.0`` → ``dropped_reason = "zero_vol"``; ``per_regime_sharpe = None``.
+      A zero-vol regime gives sharpe=0.0 which would falsely pass ``MIN_REGIME_SHARPE=0.0``,
+      so it must be dropped and NOT counted as a surviving pass.
+
+    Passing rule:
+    - ``n_surviving < 2`` → ``passed = False`` (cannot establish multi-regime evidence).
+    - Else ``passed = all(sharpe >= min_sharpe for surviving regimes)``.
+
+    ``per_regime_sharpes`` is aligned to the input ``slices`` list (None for dropped).
+    """
+    n_attempted = len(slices)
+    per_regime_sharpes: list[float | None] = []
+    surviving_sharpes: list[float] = []
+
+    for s in slices:
+        if s.n_bars < min_obs:
+            per_regime_sharpes.append(None)
+            continue
+        m = metrics_from_returns(pd.Series(s.returns))
+        if m["ann_volatility"] == 0.0:
+            per_regime_sharpes.append(None)
+            continue
+        sharpe = m["sharpe"]
+        per_regime_sharpes.append(sharpe)
+        surviving_sharpes.append(sharpe)
+
+    n_surviving = len(surviving_sharpes)
+    if n_surviving < 2:
+        passed = False
+    else:
+        passed = all(sh >= min_sharpe for sh in surviving_sharpes)
+
+    return RegimeRobustnessResult(
+        passed=passed,
+        n_attempted=n_attempted,
+        n_surviving=n_surviving,
+        per_regime_sharpes=per_regime_sharpes,
+    )
+
 
 # LORD++ FDR accounting layer (#220, Phase 2). Protected constants — relaxing them weakens the gate.
 # FDR here is an operating target (shared-holdout dependence breaks the formal guarantee); Phase 3
@@ -337,6 +545,24 @@ class GateDecision:
     dsr_n_eff: int | None = None
     dsr_rho_bar: float | None = None
     dsr_n_siblings: int | None = None
+    # Multi-regime robustness audit (#221 Slice 4). Populated by evaluate_gate when the check
+    # binds (holdout_returns + market_returns present, overlap >= MIN_REGIME_OVERLAP_BARS).
+    # When omitted (unavailable / insufficient overlap): regime_method explains why.
+    regime_method: str | None = None          # "vol_tertile"|"unavailable"|"insufficient_overlap"
+    n_regimes_attempted: int | None = None    # total regime slices fed to robustness_check
+    n_regimes_surviving: int | None = None    # regimes that cleared power + vol floors
+    per_regime_sharpes: list[float | None] | None = None  # per-slice Sharpe; None for dropped
+    regime_robustness_binding: bool = False   # True iff the check was appended to checks
+    # Dominance-audit shadow fields (#221 Slice 4). SHADOW/AUDIT ONLY — not in checks, not in
+    # passed. Recorded on every evaluate_gate call so the Slice 5 retirement audit can accumulate
+    # real-traffic statistics with pre-committed thresholds.
+    # haircut_would_have_blocked: True iff the holdout Sharpe cleared the BASE bar but failed the
+    #   haircut-inflated bar (the haircut is what blocked an otherwise-passing holdout). When the
+    #   effective bar is +inf (degenerate zero-length holdout), True iff the base bar passed.
+    # phase3_component_mask: PHASE3_COMPONENT_MASK (0b11111 = 31) — all five Slice 0-4 components
+    #   active. Allows the audit to filter rows where the full Phase 3 stack was live.
+    haircut_would_have_blocked: bool = False
+    phase3_component_mask: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
@@ -386,6 +612,18 @@ class GateDecision:
             "dsr_n_eff": self.dsr_n_eff,
             "dsr_rho_bar": _f(self.dsr_rho_bar),
             "dsr_n_siblings": self.dsr_n_siblings,
+            "regime_method": self.regime_method,
+            "n_regimes_attempted": self.n_regimes_attempted,
+            "n_regimes_surviving": self.n_regimes_surviving,
+            "per_regime_sharpes": (
+                [None if (x is None or not math.isfinite(x)) else x
+                 for x in self.per_regime_sharpes]
+                if self.per_regime_sharpes is not None else None
+            ),
+            "regime_robustness_binding": self.regime_robustness_binding,
+            # Dominance-audit shadow fields (#221 Slice 4)
+            "haircut_would_have_blocked": self.haircut_would_have_blocked,
+            "phase3_component_mask": self.phase3_component_mask,
         }
 
 
@@ -445,6 +683,7 @@ def evaluate_gate(
     bootstrap_seed: int | None = None,
     bootstrap_b: int | None = None,
     bootstrap_block_len: int | None = None,
+    market_returns: tuple[list[float], list[str]] | None = None,
 ) -> GateDecision:
     """Judge a walk-forward result against the gate criteria. Pure; no side effects.
 
@@ -540,6 +779,56 @@ def evaluate_gate(
                            "threshold": 1.0 - DSR_ALPHA, "op": ">=", "passed": bool(boot_pass)})
     else:
         dsr_skip_reason = "no_measured_dispersion"
+
+    # Multi-regime robustness (#221 Slice 4): a tighten-only AND-check, appended ONLY when the
+    # market series is available AND wf.holdout_returns is present AND overlap is sufficient.
+    # When omitted (unavailable / insufficient_overlap), checks is byte-identical to today so
+    # every existing promotion test (no market_returns) is unchanged.
+    # Binding is INDEPENDENT of dsr_binding — purely a holdout-robustness check.
+    regime_method: str | None = None
+    n_regimes_attempted: int | None = None
+    n_regimes_surviving: int | None = None
+    per_regime_sharpes_out: list[float | None] | None = None
+    regime_robustness_binding = False
+
+    holdout_ret_vec = wf.holdout_returns  # tuple[list[float], list[str]] | None
+    if holdout_ret_vec is None or market_returns is None:
+        regime_method = "unavailable"
+    else:
+        strat_rets_list, strat_dates_list = holdout_ret_vec
+        mkt_rets_list, mkt_dates_list = market_returns
+        slices, overlap_n = regime_splits(
+            strat_rets_list,
+            strat_dates_list,
+            mkt_rets_list,
+            mkt_dates_list,
+            n_regimes=N_REGIMES,
+            vol_window=VOL_ROLLING_WINDOW,
+        )
+        if overlap_n < MIN_REGIME_OVERLAP_BARS:
+            regime_method = "insufficient_overlap"
+        else:
+            res = regime_robustness_check(slices, min_obs=MIN_REGIME_OBSERVATIONS,
+                                          min_sharpe=MIN_REGIME_SHARPE)
+            checks.append({"name": "regime_robustness", "value": None,
+                           "threshold": MIN_REGIME_SHARPE, "op": ">=",
+                           "passed": bool(res.passed)})
+            regime_method = "vol_tertile"
+            regime_robustness_binding = True
+            n_regimes_attempted = res.n_attempted
+            n_regimes_surviving = res.n_surviving
+            per_regime_sharpes_out = res.per_regime_sharpes
+
+    # Dominance-audit shadow field (#221 Slice 4): did the haircut alone block an otherwise-passing
+    # holdout? True iff the holdout Sharpe clears the BASE bar but fails the haircut-inflated bar.
+    # The haircut is still BINDING (this is shadow recording only). When the effective bar is +inf
+    # (degenerate zero-length holdout drove the haircut to inf), the haircut blocks everything the
+    # base bar passed, so True iff the base bar passed. SHADOW/AUDIT ONLY — does not affect passed.
+    haircut_would_have_blocked = bool(
+        sr_obs_ann >= base_holdout_sharpe
+        and (not math.isfinite(effective_holdout_sharpe) or sr_obs_ann < effective_holdout_sharpe)
+    )
+
     return GateDecision(
         passed=all(c["passed"] for c in checks),
         checks=checks,
@@ -568,4 +857,11 @@ def evaluate_gate(
         dsr_bootstrap_seed=(bootstrap_seed if effective_bootstrap_binding else None),
         dsr_bootstrap_b=(bootstrap_b if effective_bootstrap_binding else None),
         dsr_bootstrap_block_len=(bootstrap_block_len if effective_bootstrap_binding else None),
+        regime_method=regime_method,
+        n_regimes_attempted=n_regimes_attempted,
+        n_regimes_surviving=n_regimes_surviving,
+        per_regime_sharpes=per_regime_sharpes_out,
+        regime_robustness_binding=regime_robustness_binding,
+        haircut_would_have_blocked=haircut_would_have_blocked,
+        phase3_component_mask=PHASE3_COMPONENT_MASK,
     )

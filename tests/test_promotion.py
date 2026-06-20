@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -905,3 +905,182 @@ def test_n_eff_none_with_insufficient_siblings(tmp_path):
     # Gate outcome still valid (binding DSR still runs)
     assert d.dsr_binding is True
     assert any(c["name"] == "dsr_evidence" for c in d.checks)
+
+
+# --- run_gate regime robustness wiring (#221 Slice 4) ------------------------------------------
+# Task 5 integration tests: verify that passing wf.market_returns into run_gate causes the
+# regime_robustness check to bind (via evaluate_gate receiving market_returns=wf.market_returns).
+#
+# Vector construction:
+#   _REGIME_MKT_DATES: 84 real ISO dates starting 2023-01-02 (step=1 calendar day).
+#   Market series: 84 returns whose trailing-21-bar vol clearly varies by tertile.
+#     - dates 0..20  (warmup, no vol label)
+#     - dates 21..41 (low-vol label)   → market returns near-zero (~0.001)
+#     - dates 42..62 (mid-vol label)   → market returns small (~0.005)
+#     - dates 63..83 (high-vol label)  → market returns large (~0.02)
+#   Holdout covers dates 21..83 = 63 labeled dates (overlap == 63 >= MIN_REGIME_OVERLAP_BARS).
+#   The vol-tertile split of those 63 dates:
+#     - low-vol tertile  (21 dates): 2023-01-23 .. 2023-02-12
+#     - mid-vol tertile  (21 dates): 2023-02-13 .. 2023-03-05
+#     - high-vol tertile (21 dates): 2023-03-06 .. 2023-03-26
+#
+# Regime-passing fixture: holdout returns are +0.01 on all 63 dates → all regimes pass.
+# Regime-failing fixture: holdout returns are -0.05 on the high-vol-tertile dates → high-vol
+#   regime fails (mean<0, negative Sharpe) while aggregate Sharpe stays ≥ gate bar.
+
+# 84 real ISO dates from 2023-01-02 (inclusive) — real calendar days for reliable sorting
+_REGIME_MKT_N = 84
+_REGIME_MKT_DATES = [
+    (date(2023, 1, 2) + timedelta(days=i)).isoformat() for i in range(_REGIME_MKT_N)
+]
+
+# Market returns: low vol for first third (after warmup), stepping up.
+# Window vol is computed over trailing-21 bars.  The first labeled date is index 20.
+# Dates 20..40 → windows of ~0.001 amplitude → low vol
+# Dates 41..61 → windows of ~0.005 amplitude → mid vol
+# Dates 62..83 → windows of ~0.02  amplitude → high vol
+_REGIME_MKT_RETS: list[float] = []
+for _i in range(_REGIME_MKT_N):
+    if _i < 42:          # first two thirds of the full period (includes warmup)
+        _REGIME_MKT_RETS.append(0.001 if _i % 2 == 0 else -0.001)
+    elif _i < 63:
+        _REGIME_MKT_RETS.append(0.005 if _i % 2 == 0 else -0.005)
+    else:
+        _REGIME_MKT_RETS.append(0.02 if _i % 2 == 0 else -0.02)
+
+# Holdout spans dates 21..83 (63 dates): the 63 vol-labeled dates
+_REGIME_HOLDOUT_DATES = _REGIME_MKT_DATES[21:]   # 63 dates, all with vol labels
+_REGIME_HOLDOUT_N = len(_REGIME_HOLDOUT_DATES)    # == 63
+assert _REGIME_HOLDOUT_N == 63
+
+# Regime-passing holdout: alternating +0.01 / +0.005 on every date so all three regimes pass
+# MIN_REGIME_SHARPE (positive mean, non-zero vol so bootstrap doesn't fail due to zero variance).
+_REGIME_PASS_RETS = [0.01 if i % 2 == 0 else 0.005 for i in range(_REGIME_HOLDOUT_N)]
+
+# For the blocking test we need to identify the 21 high-vol-tertile dates.
+# regime_splits ranks by (trailing_vol, date_string) asc; the highest-vol tertile is the last 21.
+# The trailing-21-bar vols over our market series:
+#   - dates 20..41: vol of windows mostly drawn from ±0.001 amplitude → ~annualized ~0.022
+#   - dates 42..62: vol of windows mostly drawn from ±0.005 amplitude → ~annualized ~0.11
+#   - dates 63..83: vol of windows mostly drawn from ±0.02  amplitude → ~annualized ~0.45
+# The 21 highest-vol dates are indices 63..83 of _REGIME_MKT_DATES, i.e. the last 21 holdout dates.
+_REGIME_HIGH_VOL_DATES = set(_REGIME_MKT_DATES[63:])  # the 21 high-vol holdout dates
+
+# Regime-failing holdout: -0.05 on high-vol dates (forces negative regime Sharpe there),
+# +0.015 on low/mid dates (ensures aggregate Sharpe well above the gate bar).
+_REGIME_FAIL_RETS = [
+    -0.05 if d in _REGIME_HIGH_VOL_DATES else 0.015
+    for d in _REGIME_HOLDOUT_DATES
+]
+
+
+def _wf_with_regime(holdout_rets, holdout_dates, market_rets, market_dates,
+                    h_start=None, h_end=None):
+    """Build a WalkForwardResult carrying both holdout_returns and market_returns."""
+    from algua.backtest.walkforward import WalkForwardResult
+
+    h_start = h_start or holdout_dates[0]
+    h_end = h_end or holdout_dates[-1]
+    return WalkForwardResult(
+        strategy=_GATE_NAME, config_hash="c", data_source="synthetic", snapshot_id=None,
+        timeframe="1d", seed=None,
+        period={"start": "2024-01-01", "end": "2024-06-01"}, windows=4, holdout_frac=0.2,
+        window_metrics=[],
+        holdout_metrics={**_GATE_HOLDOUT, "start": h_start, "end": h_end,
+                         "n_bars": len(holdout_rets)},
+        stability=dict(_GATE_STAB),
+        holdout_returns=(holdout_rets, holdout_dates),
+        market_returns=(market_rets, market_dates),
+    )
+
+
+def _run_regime(repo, wf):
+    """run_gate call for regime robustness tests (measured breadth, allow_non_pit)."""
+    return run_gate(
+        repo, wf, name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="",
+    )
+
+
+def test_regime_robustness_binds_when_market_returns_present(tmp_path):
+    """Measured promote with wf carrying holdout_returns + market_returns with real vol structure
+    and >=63 overlap: regime_robustness binds, vol_tertile method, audit fields populated."""
+    repo = _gate_repo_with_stats(tmp_path)
+    wf = _wf_with_regime(
+        _REGIME_PASS_RETS, _REGIME_HOLDOUT_DATES,
+        _REGIME_MKT_RETS, _REGIME_MKT_DATES,
+    )
+    outcome = _run_regime(repo, wf)
+    d = outcome.decision
+
+    # Regime check must bind
+    assert d.regime_robustness_binding is True, (
+        "regime_robustness_binding should be True when market_returns present with >=63 overlap")
+    # A regime_robustness check must appear in the checks list
+    assert any(c["name"] == "regime_robustness" for c in d.checks), (
+        "regime_robustness check must be in decision.checks when binding")
+    # Method must be vol_tertile
+    assert d.regime_method == "vol_tertile", f"expected vol_tertile, got {d.regime_method}"
+    # Audit counts must be populated
+    assert d.n_regimes_attempted is not None and d.n_regimes_attempted == 3
+    assert d.n_regimes_surviving is not None and d.n_regimes_surviving >= 2
+    assert d.per_regime_sharpes is not None and len(d.per_regime_sharpes) == 3
+
+    # Regime fields must appear in to_dict / decision_json
+    d_dict = d.to_dict()
+    assert "regime_robustness_binding" in d_dict
+    assert d_dict["regime_robustness_binding"] is True
+    assert "regime_method" in d_dict and d_dict["regime_method"] == "vol_tertile"
+
+    # Shadow fields must also flow through a real run_gate (Task 4)
+    # 0b11111 = bits 0-4 = Phase 3 slices 0-4 all active (dispersion-floor, persistence,
+    # bootstrap, n_eff, multi-regime)
+    assert d.phase3_component_mask == 0b11111
+    assert "haircut_would_have_blocked" in d_dict
+
+    # Promoted: regime passes, DSR+FDR pass at sharpe=7.0
+    assert outcome.promoted is True
+
+
+def test_regime_robustness_omits_when_no_market_returns(tmp_path):
+    """Promote with no market_returns: regime check omits, regime_method=unavailable,
+    existing pass/fail outcome UNCHANGED."""
+    repo = _gate_repo_with_stats(tmp_path)
+    # _gate_wf() has no holdout_returns nor market_returns → regime check must omit
+    outcome = _run(repo, _breadth(repo, "measured"))
+    d = outcome.decision
+
+    assert d.regime_robustness_binding is False
+    assert d.regime_method == "unavailable"
+    assert all(c["name"] != "regime_robustness" for c in d.checks)
+    # Existing outcome must be unchanged: measured breadth + sharpe=7.0 → promotes
+    assert outcome.promoted is True
+
+
+def test_regime_robustness_blocks_failing_high_vol_regime(tmp_path):
+    """Strategy that passes aggregate holdout Sharpe but fails the high-vol regime is BLOCKED
+    by regime_robustness check (tighten-only: regime check can only move PASS→FAIL)."""
+    repo = _gate_repo_with_stats(tmp_path)
+    wf = _wf_with_regime(
+        _REGIME_FAIL_RETS, _REGIME_HOLDOUT_DATES,
+        _REGIME_MKT_RETS, _REGIME_MKT_DATES,
+    )
+    outcome = _run_regime(repo, wf)
+    d = outcome.decision
+
+    # Regime check must bind and be present
+    assert d.regime_robustness_binding is True
+    regime_check = next(c for c in d.checks if c["name"] == "regime_robustness")
+    # High-vol regime returns are negative → regime_robustness check FAILS
+    assert regime_check["passed"] is False, (
+        "high-vol regime has negative returns; regime_robustness check must fail")
+    # Gate must be blocked (passed=False)
+    assert d.passed is False, "gate must be blocked when regime_robustness fails"
+    assert outcome.promoted is False
+
+    # decision_json must carry regime fields
+    d_dict = d.to_dict()
+    assert d_dict.get("regime_robustness_binding") is True
+    assert d_dict.get("regime_method") == "vol_tertile"
