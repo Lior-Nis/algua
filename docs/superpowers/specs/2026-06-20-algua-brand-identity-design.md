@@ -80,8 +80,9 @@ lowercase tail keeps it quiet and liquid, not all-caps loud.
 - **Skeleton:** drawn from a **geometric grotesk (Space Grotesk Medium)**, then
   **converted to outlines** in the final asset so the wordmark is
   font-independent (no dependency on the font being installed/licensed at use).
-- **Letterforms:** tight-but-open tracking; flat terminals; the lowercase `a`
-  uses the **single-story round-bowl** form to echo the glyph's geometry.
+- **Letterforms:** tight-but-open tracking; flat terminals; Space Grotesk's
+  native geometric lowercase (two-story `a`) is kept — it already reads sharp and
+  geometric, and altering it would abandon the stated skeleton.
 - **The capital "A":** a standard sharp-apex capital A with a **normal ink
   crossbar** (this is type, not the glyph). To make it *rhyme* with the glyph
   without breaking accent discipline, its crossbar sits at the **same height
@@ -104,9 +105,10 @@ lowercase tail keeps it quiet and liquid, not all-caps loud.
 | **Glyph-alone** | the waterline A | favicon, avatar, app icon, terminal banner |
 | **Wordmark-alone** | `Algua` + baseline rule | inline text, footers, where a glyph is redundant |
 
-In the horizontal lockup the glyph's waterline and the wordmark's baseline rule
-share the **same vertical position** (both are baselines), reinforcing that
-they're the same line.
+In the horizontal lockup the glyph's feet align to the wordmark's baseline; the
+glyph's waterline (mid-letter) and the wordmark's baseline rule are the **same
+device at the same overshoot ratio**, so they read as kin even though they sit at
+different heights.
 
 ---
 
@@ -117,8 +119,9 @@ Near-monochrome with exactly **one accent**.
 | Token | Hex | Use |
 |---|---|---|
 | `ink` | `#0C1618` | primary mark on light backgrounds; deep slate-black |
-| `ink-submerged` | `#16282B` | the optional "below waterline" lower-triangle tint |
+| `ink-submerged` | `#16282B` | "below waterline" submerged tint **on light** fields |
 | `paper` | `#F3F6F6` | the mark on dark backgrounds; off-white |
+| `paper-submerged` | `#93A3A3` | "below waterline" submerged tint **on dark** fields (a dark tint would vanish on dark) |
 | `aqua` | `#13C2CE` | **the waterline only** — the primary accent |
 | `aqua-deep` | `#0A8E99` | aqua used on light where WCAG AA contrast is required (small lines/text) |
 | `mute` | `#5C6B6E` | dividers, captions, supporting UI — **never** the mark |

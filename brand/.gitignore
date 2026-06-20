@@ -1,0 +1,2 @@
+# Font cache + preview renders — not deliverables (build.py re-creates them).
+.cache/
