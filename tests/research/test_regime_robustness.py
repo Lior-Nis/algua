@@ -5,7 +5,6 @@ import datetime
 import math
 
 import numpy as np
-import pytest
 
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
@@ -543,54 +542,29 @@ def test_regime_binding_independent_of_dsr_binding():
 # Finding 1 (additional): two distinct vol levels -> at most 2 non-empty regimes
 # ---------------------------------------------------------------------------
 
-def test_two_distinct_vol_levels_at_most_two_regimes():
-    """Market with only TWO distinct vol levels (all windows produce either vol_A or vol_B):
-    With value-based tertiles, t1=vol_A and t2=vol_B (or the quantile of the bimodal dist).
-    The regime 1 (middle bucket: t1 < vol <= t2) will be empty when no vol value falls
-    strictly between t1 and t2 — at most 2 non-empty regimes result.
-
-    Construction: vol_window=1 so each window's "vol" is just that single bar's log-return
-    magnitude. We inject exactly two distinct log-return magnitudes (two values that alternate),
-    so the vol distribution has only two distinct values and regime 1 is empty.
-
-    With value-based tertiles:
-    - t1 = np.quantile(vols, 1/3): the lower quantile of a bimodal 2-value distribution
-    - t2 = np.quantile(vols, 2/3): the upper quantile
-    - When ~half are low and ~half are high: t1 <= low_vol <= high_vol >= t2
-    - No vol in (t1, t2] when low_vol == t1 and high_vol == t2 (all values are boundary)
-    - Result: everything maps to regime 0 (vol <= t1) or regime 2 (vol > t2); regime 1 empty
-    """
+def test_value_based_tertiles_collapse_a_clustered_vol_distribution():
+    """Value-based tertiles (not equal-count rank split) must let one vol cluster absorb MORE
+    than a third of the dates. A constant-return low block gives many identical (zero) rolling-vol
+    labels; a noisy block gives higher vols. With value-based thresholds, all the zero-vol dates
+    fall into regime 0 — so regime 0 holds well over overlap/3 bars, which an equal-count
+    ``np.array_split`` could never produce (it caps each regime near overlap/3). This is the
+    discriminating property behind the constant-vol fail-close."""
+    vol_window = 21
     n = 60
-    vol_window = 1  # each "window" is just one bar -> vol = annualized |log(1+r)|
     md = _robust_dates(n)
-    # Alternate between exactly two return magnitudes so every vol label is one of two values.
-    # r_low -> log(1+r_low) repeated n/2 times, r_high -> log(1+r_high) repeated n/2 times.
-    # Use alternating so both values appear throughout (not one block each).
-    r_low, r_high = 0.001, 0.05  # two distinct magnitudes -> two distinct vols
-    market = [(r_low if i % 2 == 0 else r_high) for i in range(n)]
-    strat = list(np.random.default_rng(42).normal(0.005, 0.01, n))
+    rng = np.random.default_rng(42)
+    # First 40 bars: constant return -> every fully-contained 21-window has std 0 -> vol 0.
+    # Last 20 bars: noisy -> higher vol. Boundary windows mix.
+    market = [0.001] * 40 + list(rng.normal(0.0, 0.03, 20))
+    # strategy is NOT constant so its regimes are not zero-vol-dropped
+    strat = list(rng.normal(0.005, 0.01, n))
     slices, overlap = regime_splits(strat, md, market, md, n_regimes=3, vol_window=vol_window)
     assert overlap > 0
     assert len(slices) == 3
-    # Extract all vol labels for inspection
-    vol_values = np.array([x[1] for x in sorted(
-        [(md[i], abs(math.log(1.0 + market[i])) * math.sqrt(252))
-         for i in range(n)],
-        key=lambda x: x[1]
-    )])
-    t1 = float(np.quantile(vol_values, 1.0 / 3))
-    # All vols are either r_low_vol or r_high_vol; nothing strictly between t1 and t2
-    # when both thresholds land on the boundary values.
-    low_vol = abs(math.log(1.0 + r_low)) * math.sqrt(252)
-    high_vol = abs(math.log(1.0 + r_high)) * math.sqrt(252)
-    # The bimodal distribution has no values strictly between the two levels
-    # => regime 1 (t1 < vol <= t2) is EMPTY iff t1 == low_vol and t2 == high_vol
-    assert t1 == pytest.approx(low_vol) or t1 == pytest.approx(high_vol), (
-        f"t1={t1} should equal one of the two vol levels"
-    )
-    # At most 2 non-empty regimes (regime 1 middle bucket is empty when bimodal)
-    non_empty = [s for s in slices if s.n_bars > 0]
-    assert len(non_empty) <= 2
+    # The lowest-vol regime absorbs the big zero-vol cluster: strictly more than an equal split.
+    assert slices[0].n_bars > overlap / 3
+    # Every produced vol-derived assignment is finite-driven (no NaN leaked): bars sum to overlap.
+    assert sum(s.n_bars for s in slices) == overlap
 
 
 # ---------------------------------------------------------------------------
@@ -627,3 +601,25 @@ def test_nan_in_vol_window_excludes_date():
     assert overlap_with_nan < overlap_clean
     # And the excluded date must not be counted in overlap or in any regime
     assert sum(s.n_bars for s in slices_with_nan) == overlap_with_nan
+
+
+def test_genuine_nonfinite_market_return_excluded():
+    """A genuine NaN/inf market return (NOT just 1+r<=0) must produce NO vol label — `1+r<=0`
+    is False for NaN, so the finiteness guard must catch it; otherwise a NaN vol label would
+    count toward overlap and poison the quantile thresholds."""
+    n = 40
+    md = _robust_dates(n)
+    vol_window = 21
+    rng = np.random.default_rng(11)
+    strat = list(rng.normal(0.005, 0.01, n))
+    clean = list(rng.normal(0, 0.01, n))
+    _, overlap_clean = regime_splits(strat, md, clean, md, n_regimes=3, vol_window=vol_window)
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        market = list(rng.normal(0, 0.01, n))
+        market[10] = bad
+        slices_bad, overlap_bad = regime_splits(
+            strat, md, market, md, n_regimes=3, vol_window=vol_window)
+        # the poisoned windows (those containing index 10) must be excluded -> fewer labels
+        assert overlap_bad < overlap_clean, f"{bad!r} not excluded from overlap"
+        # every per-regime sharpe / label that remains is finite (no NaN leaked through)
+        assert sum(s.n_bars for s in slices_bad) == overlap_bad

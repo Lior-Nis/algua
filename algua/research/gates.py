@@ -115,10 +115,11 @@ def regime_splits(
        have no vol label and are excluded from the join.
     3. Inner-join: market dates that HAVE a valid vol label AND appear in ``strategy_dates``.
        ``overlap_n = len(joined_dates)``.  Empty join returns ``([], 0)``.
-    4. Sort joined dates by ``(vol, date_string)`` ascending (deterministic tie-break on equal
-       vols by date string → reproducible rank assignment).  Split the sorted list into
-       ``n_regimes`` contiguous equal-sized groups using ``np.array_split``.
-       Group 0 = lowest-vol tertile, …, group n_regimes-1 = highest.
+    4. Assign tertiles by market-vol VALUE: thresholds ``t1 = quantile(vols, 1/3)`` and
+       ``t2 = quantile(vols, 2/3)``; regime 0 if ``vol <= t1``, regime 2 if ``vol > t2``, else
+       regime 1.  Value-based (not equal-count rank) so a degenerate/constant vol distribution
+       COLLAPSES — all dates fall into one tertile and the others are empty → dropped → fail-closed.
+       Group 0 = lowest-vol tertile, …, group n_regimes-1 = highest. Deterministic (no RNG).
     5. For each regime, collect STRATEGY returns for that regime's dates (in date order).
        ``RegimeSlice.dropped_reason`` is always ``None`` here; dropping is done by
        ``regime_robustness_check``.
@@ -137,12 +138,17 @@ def regime_splits(
         if i < vol_window - 1:
             continue  # insufficient lookback
         window = m_returns_list[i - vol_window + 1 : i + 1]
-        # Guard: all 1+r must be > 0 to take log
-        if any(1.0 + r <= 0.0 for r in window):
+        # Guard: every return must be FINITE and have 1+r > 0 to take log. A non-finite return
+        # (NaN/inf) must NOT produce a vol label — `1+r <= 0` is False for NaN, so check finiteness
+        # explicitly, else a NaN vol label would count toward overlap and poison np.quantile.
+        if any((not math.isfinite(r)) or (1.0 + r <= 0.0) for r in window):
             continue
         log_rets = [math.log(1.0 + r) for r in window]
         std = float(np.std(log_rets, ddof=1))
-        vol_labels[m_dates_list[i]] = std * math.sqrt(ANN)
+        vol = std * math.sqrt(ANN)
+        if not math.isfinite(vol):
+            continue  # fail-closed: a non-finite vol label is no label at all
+        vol_labels[m_dates_list[i]] = vol
 
     # Step 3: inner-join with strategy_dates
     joined: list[tuple[str, float]] = [
