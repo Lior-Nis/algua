@@ -14,6 +14,7 @@ dependencies = [
     "vectorbt>=0.26",
     "scipy>=1.11",  # #211 DSR evidence: norm.cdf/ppf in research.gates + skew/kurtosis in metrics
     "mlflow>=3.1",
+    "matplotlib>=3.8",  # #181 series plots (report-experiments); was transitive via mlflow
     "threadpoolctl>=3,<4",
 ]
 
