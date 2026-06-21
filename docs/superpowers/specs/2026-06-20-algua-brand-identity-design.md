@@ -56,9 +56,10 @@ type-quality craft and ties it directly to the wordmark (the mark *is* the "A" i
 
 Requirements:
 
-- **Real letterform.** The black shape is the actual Space Grotesk `A` outline
-  (weight ~400 — a touch heavier than the Light wordmark, for presence), baked to
-  a `<path>`. It keeps the typeface's optical corrections; it is never a polyline.
+- **Real letterform.** The black shape is the actual Space Grotesk `A` outline,
+  at the **same weight as the wordmark (~300)** — it is the wordmark's own `A`
+  extracted — baked to a `<path>`. It keeps the typeface's optical corrections; it
+  is never a polyline.
 - **Crossbar = waterline.** The aqua bar is positioned and sized to the
   letterform's own crossbar band, replacing it. The result reads as a crossbar-less
   A whose crossbar is the waterline.
@@ -86,29 +87,28 @@ lowercase tail keeps it quiet and liquid, not all-caps loud.
 - **Letterforms:** airy tracking to match the light weight; flat terminals; Space
   Grotesk's native geometric lowercase (two-story `a`) is kept — it already reads
   sharp and geometric, and altering it would abandon the stated skeleton.
-- **The capital "A":** the font's native sharp-apex capital A (with its own ink
-  crossbar). It is **type, not the glyph** — it deliberately does *not* try to
-  mimic the crossbar-less glyph, which stays the distinct mark.
-- **No underline.** The wordmark is set plain, in black, with **no aqua baseline
-  rule** (an underline was tried and dropped — it competed with the glyph's
-  waterline and cluttered the lockup). The aqua waterline lives in the glyph only.
-- **Accent discipline:** the wordmark carries **no aqua at all**; aqua appears
-  solely as the glyph's waterline crossbar.
+- **The capital "A" carries the waterline.** The wordmark's *own* leading `A` is
+  the mark: its crossbar is recolored to the aqua waterline (a band-clipped copy
+  of that `A`, so the aqua keeps the letterform's slanted edges). There is **no
+  separate glyph placed beside the wordmark** — that would duplicate the A. The
+  logo is simply `Algua` with its A accented.
+- **No underline.** The wordmark is otherwise plain black — no aqua baseline rule.
+- **Accent discipline:** the only aqua anywhere is that one crossbar.
 
 ---
 
-## 5. Lockups
+## 5. The logo and the icon
 
-| Lockup | Composition | Use |
+There is **no glyph-beside-wordmark lockup** — the wordmark already contains the
+accented `A`, so adding a separate glyph would show the letter twice. Instead:
+
+| Asset | What | Use |
 |---|---|---|
-| **Horizontal** (primary) | glyph + `Algua`, **baselines aligned**; gap = one glyph stroke-width | README header, docs nav, default |
-| **Stacked** | glyph above, wordmark below, centered | square-ish placements, social cards |
-| **Glyph-alone** | the waterline A | favicon, avatar, app icon, terminal banner |
-| **Wordmark-alone** | `Algua`, plain black | inline text, footers, where a glyph is redundant |
+| **Logo** (primary) | the `Algua` wordmark, A accented with the waterline | README header, docs, default |
+| **Icon** | that same `A`, extracted standalone | favicon, avatar, app icon, terminal banner |
 
-In the horizontal lockup the glyph's feet align to the wordmark's baseline. The
-glyph supplies the only aqua (its waterline crossbar); the wordmark sits beside it
-in plain black, so the eye lands on the one blue accent.
+The icon is literally the wordmark's `A` on its own — same weight, same waterline
+— so the two never disagree.
 
 ---
 
@@ -209,18 +209,16 @@ Asset tree (target location `brand/` at repo root):
 
 ```
 brand/
-  algua-glyph.svg            # light; + -dark, -mono
-  algua-wordmark.svg         # light; + -dark
-  algua-lockup-h.svg         # horizontal (primary); + -dark, -mono
-  algua-lockup-stacked.svg   # stacked; + -dark
-  favicon.svg                # glyph on paper
+  algua-wordmark.svg         # the logo (A accented); + -dark
+  algua-glyph.svg            # the icon (the A alone); + -dark, -mono
+  favicon.svg                # the icon on paper
   favicon-16.png
   favicon-32.png
   apple-touch-icon-180.png
   icon-512.png
   tokens.json                # the §6 color table as design tokens
   README.md                  # this spec's usage rules, condensed
-  banner-dark.svg            # README header (black-bg horizontal lockup)
+  banner-dark.svg            # README header (wordmark on black)
   build.py                   # regenerates the whole kit
 ```
 

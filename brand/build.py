@@ -13,6 +13,7 @@ Usage:  uv run --with fonttools python brand/build.py
 from __future__ import annotations
 
 import json
+from functools import cache
 from pathlib import Path
 
 from fontTools.pens.boundsPen import ControlBoundsPen
@@ -35,15 +36,17 @@ TOK = {
     "mute": "#5C6B6E",
 }
 
-# Wordmark / glyph weights (Space Grotesk axis).
+# Wordmark / glyph weights (Space Grotesk axis). The glyph IS the wordmark's
+# capital "A", so they share one weight — the icon is literally the A of Algua.
 WORDMARK_WGHT = 300        # Light — slim, sleek
 WORDMARK_TRACK = 12.0      # tracking in font units
-GLYPH_WGHT = 400           # the A letterform — a touch of presence over the text
+GLYPH_WGHT = WORDMARK_WGHT
 
 # Glyph placement in the 100-unit master.
 APEX_Y = 8.0               # master-y of the cap top
 BASE_Y = 92.0             # master-y of the baseline (glyph feet)
-WL_BLEED = 0.4             # tiny vertical bleed so no black crossbar peeks
+WL_BLEED = 0.4             # vertical bleed (master units) so no black crossbar peeks
+WL_BLEED_FONT = 4.0        # same, in font units (for the in-wordmark A)
 
 
 def _extract_A() -> dict:
@@ -52,6 +55,7 @@ def _extract_A() -> dict:
     instantiateVariableFont(font, {"wght": GLYPH_WGHT}, inplace=True)
     gs = font.getGlyphSet()
     gname = font.getBestCmap()[ord("A")]
+    adv = font["hmtx"][gname][0]
 
     pen = SVGPathPen(gs)
     gs[gname].draw(pen)
@@ -110,7 +114,7 @@ def _extract_A() -> dict:
         y -= 2
     legs = crossings(outer, (cb_top + cb_bot) / 2)
     return {
-        "path": path_d, "ymin": oymin, "ymax": oymax,
+        "path": path_d, "adv": adv, "ymin": oymin, "ymax": oymax,
         "cx": (oxmin + oxmax) / 2, "cb_top": cb_top, "cb_bot": cb_bot,
         "leg_l": legs[0], "leg_r": legs[-1],
     }
@@ -125,11 +129,6 @@ def _a_transform() -> tuple[float, float, float]:
     ty = BASE_Y + s * _GA["ymin"]
     tx = 50.0 - s * _GA["cx"]
     return s, tx, ty
-
-
-def glyph_size_for_cap(cap: float) -> float:
-    """Return a 100-unit glyph box size whose apex-to-baseline height equals cap."""
-    return cap * 100 / (BASE_Y - APEX_Y)
 
 
 def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
@@ -174,6 +173,7 @@ def svg(width: float, height: float, body: str, *, bg: str | None = None,
 # ---------------------------------------------------------------------------
 # Wordmark — real Space Grotesk outlines, baked to <path>
 # ---------------------------------------------------------------------------
+@cache
 def build_wordmark_paths(word: str = "Algua"):
     """Return (path_d, advance_width, cap_height) in font units (y-up)."""
     font = TTFont(FONT_SRC)
@@ -200,91 +200,49 @@ def build_wordmark_paths(word: str = "Algua"):
     return "".join(d_parts), advance, cap_height
 
 
+def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
+    """The full 'Algua' wordmark, with the aqua waterline on its own capital A.
+
+    The accent is a band-clipped copy of the leading 'A' glyph (drawn at x=0 in
+    font units, same as the wordmark's first letter), so the aqua is the A's own
+    crossbar — no duplicated glyph, no rectangle on top.
+    """
+    paths, _, _ = build_wordmark_paths()
+    band_y = _GA["cb_bot"] - WL_BLEED_FONT
+    band_h = (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED_FONT
+    clip = (f'<clipPath id="wlw"><rect x="0" y="{band_y:.1f}" '
+            f'width="{_GA["adv"]:.1f}" height="{band_h:.1f}"/></clipPath>')
+    return (
+        f'<defs>{clip}</defs>'
+        f'<g transform="translate({tx:.2f},{ty:.2f}) scale({s:.5f},{-s:.5f})" fill="{fg}">'
+        f'{paths}'
+        f'<g clip-path="url(#wlw)"><path d="{_GA["path"]}" fill="{TOK["aqua"]}"/></g>'
+        f'</g>'
+    )
+
+
 def wordmark_svg(fg: str, *, bg: str | None = None, target_cap: float = 64.0,
                  pad: float = 16.0):
-    paths, advance, cap = build_wordmark_paths()
+    _, advance, cap = build_wordmark_paths()
     s = target_cap / cap
     word_w = advance * s
     baseline_y = pad + target_cap
     total_w = word_w + 2 * pad
     total_h = baseline_y + pad
-    body = (
-        f'<g transform="translate({pad:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
-        f'fill="{fg}">{paths}</g>'
-    )
+    body = _wordmark_group(fg, pad, baseline_y, s)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg), total_w, total_h, word_w
 
 
-# ---------------------------------------------------------------------------
-# Lockups
-# ---------------------------------------------------------------------------
-def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
-    """Horizontal: glyph + wordmark, glyph feet aligned to the text baseline."""
-    cap = 64.0
-    pad = 18.0
-    gsize = glyph_size_for_cap(cap)
-    paths, advance, fcap = build_wordmark_paths()
-    s = cap / fcap
-    word_w = advance * s
-    gap = cap * 0.34
-    glyph_x = pad
-    glyph_y_top = pad
-    baseline_y = glyph_y_top + gsize * (BASE_Y / 100)
-    text_x = glyph_x + gsize + gap
-    total_w = text_x + word_w + pad
-    total_h = glyph_y_top + gsize + pad
-    body = (
-        f'<g transform="translate({glyph_x},{glyph_y_top})">'
-        f'<g transform="scale({gsize / 100})">{glyph_body(fg, **glyph_kw)}</g></g>'
-        f'<g transform="translate({text_x:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
-        f'fill="{fg}">{paths}</g>'
-    )
-    return svg(round(total_w, 1), round(total_h, 1), body, bg=bg)
-
-
-def lockup_stacked(fg: str, *, bg: str | None = None, **glyph_kw):
-    pad = 20.0
-    gsize = glyph_size_for_cap(72.0)
-    cap = 46.0
-    paths, advance, fcap = build_wordmark_paths()
-    s = cap / fcap
-    word_w = advance * s
-    total_w = max(gsize, word_w) + 2 * pad
-    glyph_x = (total_w - gsize) / 2
-    gap = 24.0
-    baseline_y = pad + gsize + gap + cap
-    text_x = (total_w - word_w) / 2
-    total_h = baseline_y + pad
-    body = (
-        f'<g transform="translate({glyph_x:.1f},{pad})">'
-        f'<g transform="scale({gsize / 100})">{glyph_body(fg, **glyph_kw)}</g></g>'
-        f'<g transform="translate({text_x:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
-        f'fill="{fg}">{paths}</g>'
-    )
-    return svg(round(total_w, 1), round(total_h, 1), body, bg=bg)
-
-
 def banner_dark():
-    """README header: black field, horizontal lockup centred with breathing room."""
+    """README header: black field, the 'Algua' wordmark centred."""
     W, H = 1280.0, 360.0
-    cap = 96.0
-    gsize = glyph_size_for_cap(cap)
-    paths, advance, fcap = build_wordmark_paths()
+    cap = 124.0
+    _, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = cap * 0.34
-    block_w = gsize + gap + word_w
-    x0 = (W - block_w) / 2
-    gy = (H - gsize) / 2
-    foot_y = gy + gsize * (BASE_Y / 100)
-    text_x = x0 + gsize + gap
-    body = (
-        f'<g transform="translate({x0:.1f},{gy:.1f})">'
-        f'<g transform="scale({gsize / 100})">{glyph_body(TOK["paper"])}</g></g>'
-        f'<g transform="translate({text_x:.1f},{foot_y:.1f}) scale({s:.5f},{-s:.5f})" '
-        f'fill="{TOK["paper"]}">{paths}</g>'
-    )
-    return svg(W, H, body, bg=TOK["ink"])
+    tx = (W - word_w) / 2
+    ty = H / 2 + cap * 0.42        # baseline; descenders sit just below centre
+    return svg(W, H, _wordmark_group(TOK["paper"], tx, ty, s), bg=TOK["ink"])
 
 
 # ---------------------------------------------------------------------------
@@ -292,16 +250,13 @@ def banner_dark():
 # ---------------------------------------------------------------------------
 def main() -> None:
     out = {
+        # The logo = the wordmark, with the waterline on its own A.
+        "algua-wordmark.svg": wordmark_svg(TOK["ink"])[0],
+        "algua-wordmark-dark.svg": wordmark_svg(TOK["paper"], bg=TOK["ink"])[0],
+        # The icon = that same A, extracted (favicon / avatar).
         "algua-glyph.svg": svg(100, 100, glyph_body(TOK["ink"])),
         "algua-glyph-dark.svg": svg(100, 100, glyph_body(TOK["paper"]), bg=TOK["ink"]),
         "algua-glyph-mono.svg": svg(100, 100, glyph_body(TOK["ink"], mono_bg="x")),
-        "algua-wordmark.svg": wordmark_svg(TOK["ink"])[0],
-        "algua-wordmark-dark.svg": wordmark_svg(TOK["paper"], bg=TOK["ink"])[0],
-        "algua-lockup-h.svg": lockup_h(TOK["ink"]),
-        "algua-lockup-h-dark.svg": lockup_h(TOK["paper"], bg=TOK["ink"]),
-        "algua-lockup-h-mono.svg": lockup_h(TOK["ink"], mono_bg="x"),
-        "algua-lockup-stacked.svg": lockup_stacked(TOK["ink"]),
-        "algua-lockup-stacked-dark.svg": lockup_stacked(TOK["paper"], bg=TOK["ink"]),
         "favicon.svg": svg(100, 100, glyph_body(TOK["ink"]), bg=TOK["paper"]),
         "banner-dark.svg": banner_dark(),
     }
