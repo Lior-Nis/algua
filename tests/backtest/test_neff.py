@@ -240,6 +240,7 @@ def test_fisher_z_tighten_property_vs_pair_count_bound():
         return streams, dates
 
     failures = []
+    old_bounds_list: list[float] = []
     for n_sib in (5, 8):
         for lam in (0.1, 0.6, 0.9):   # low / mid / high correlation
             for n_dates in (30, 63):
@@ -248,16 +249,17 @@ def test_fisher_z_tighten_property_vs_pair_count_bound():
                 # Collect pair correlations the same way the implementation does
                 pair_rhos: list[float] = []
                 for a, b in __import__("itertools").combinations(sibs, 2):
-                    rho = _pair_correlation(a, b, min_overlap_bars=21)
-                    if rho is None:
+                    result = _pair_correlation(a, b, min_overlap_bars=21)
+                    if result is None:
                         # skip degenerate realisations (extremely unlikely with lam≠0)
                         continue
-                    pair_rhos.append(rho)
+                    pair_rhos.append(result[0])   # float rho only, NOT the (rho, n_overlap) tuple
 
                 if not pair_rhos:
                     continue
 
                 old_bound = _old_rho_lower(pair_rhos, shrinkage_k)
+                old_bounds_list.append(old_bound)
                 r = estimate_n_eff(40, sibs,
                                    min_siblings=2,
                                    min_overlap_bars=21,
@@ -274,6 +276,12 @@ def test_fisher_z_tighten_property_vs_pair_count_bound():
                         f"(violates must-tighten)"
                     )
 
+    # Non-vacuity guard: at least some grid points must produce a non-trivially-clamped
+    # old_bound < 1.0; if all are 1.0 the test cannot distinguish correct from broken impl.
+    assert any(b < 1.0 for b in old_bounds_list), (
+        "All old_bounds are 1.0 — grid is degenerate (vacuous test). "
+        "Check that pair_rhos contains float rho values, not (rho, n_overlap) tuples."
+    )
     assert not failures, "Must-tighten violated:\n" + "\n".join(failures)
 
 
@@ -324,27 +332,33 @@ def test_pair_correlation_none_on_failure_paths_still_returns_none():
 def test_fisher_z_n_overlap_used_for_sampling_variance():
     """The Fisher-z sampling variance uses n_overlap per pair (1/(n_overlap-3)).
 
-    With fewer overlapping dates, sampling variance is higher → SE_z larger → rho_bar lower
-    → N_eff larger (more conservative). Test: same pair-rho, shorter overlap → higher N_eff.
+    With fewer overlapping dates, sampling variance is higher → SE_z larger → rho_bar lower.
+    We demonstrate this directionally: two sibling sets are constructed with the SAME
+    correlation structure (same factor loading, same RNG seed draws) but different overlap
+    lengths (200 bars vs 25 bars). The short-overlap set must yield rho_bar <= the
+    long-overlap set's rho_bar (more uncertainty → more conservative lower bound).
 
-    We test via the rho_bar output: shorter overlap → lower rho_bar.
+    We use a large n_dates for the long arm (200) so the directional gap is unambiguous even
+    in a single realisation, and shrinkage_k=2.0 to amplify SE_z differences.
     """
-    # Build sibling sets using a 1-factor model at moderate correlation.
     lam = 0.7
-    rng = _rng(55)
     n_sib = 5
-    shrinkage_k = 1.0
+    shrinkage_k = 2.0
 
-    def sibs_with_overlap(n_dates: int) -> list:
-        dates = _DATES[:n_dates]
-        F = rng.normal(0, 1, n_dates)
-        eps_list = [rng.normal(0, 1, n_dates) for _ in range(n_sib)]
-        return [_stream(lam * F + math.sqrt(1 - lam**2) * e, dates) for e in eps_list]
+    # Build both arms from the SAME factor/eps draws by using a fixed large date list and
+    # simply truncating for the short arm. This keeps the realized pair-rho values close.
+    long_dates = [f"2000-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}" for i in range(200)]
+    rng_long = _rng(55)
+    F_long = rng_long.normal(0, 1, 200)
+    eps_long = [rng_long.normal(0, 1, 200) for _ in range(n_sib)]
+    sibs_long = [_stream(lam * F_long + math.sqrt(1 - lam**2) * e, long_dates)
+                 for e in eps_long]
 
-    # Reset RNG so both arms draw the same sequence of random variates at same correlation.
-    # We just need two cases: long overlap (63 bars) vs short overlap (25 bars).
-    sibs_long = sibs_with_overlap(63)
-    sibs_short = sibs_with_overlap(25)
+    # Short arm: take the first 25 values/dates from the same draws.
+    short_dates = long_dates[:25]
+    sibs_short = [_stream((lam * F_long + math.sqrt(1 - lam**2) * eps_long[i])[:25].tolist(),
+                          short_dates)
+                  for i in range(n_sib)]
 
     r_long = estimate_n_eff(
         40, sibs_long, min_siblings=5, min_overlap_bars=21, shrinkage_k=shrinkage_k
@@ -354,13 +368,15 @@ def test_fisher_z_n_overlap_used_for_sampling_variance():
     )
 
     # Both should yield a valid estimate (both > min_overlap_bars=21).
-    assert r_long.rho_bar is not None and r_short.rho_bar is not None
+    assert r_long.rho_bar is not None, "long-overlap arm should produce a valid rho_bar"
+    assert r_short.rho_bar is not None, "short-overlap arm should produce a valid rho_bar"
 
-    # Shorter overlap → larger sampling variance → larger SE_z → lower rho_bar (or equal)
-    # This is a directional check; exact value depends on realisation so we allow tiny slack.
-    # The effect may be small in a single realisation, so just assert rho_bar is valid in [0,1].
-    assert 0.0 <= r_long.rho_bar <= 1.0
-    assert 0.0 <= r_short.rho_bar <= 1.0
+    # Directional assertion: shorter overlap → larger 1/(n-3) sampling variance → larger SE_z
+    # → lower rho_bar lower-bound. Allow a small numerical slack (1e-9) for floating-point.
+    assert r_short.rho_bar <= r_long.rho_bar + 1e-9, (
+        f"Shorter overlap should yield rho_bar <= long-overlap rho_bar; "
+        f"got short={r_short.rho_bar:.6f} > long={r_long.rho_bar:.6f}"
+    )
 
 
 def test_fisher_z_determinism():
@@ -377,23 +393,22 @@ def test_fisher_z_determinism():
 def test_fisher_z_rho_zero_clamp_gives_n_eff_equals_raw_n():
     """When rho_bar_lower is clamped to 0 (mean correlation ≤ 0), N_eff = raw_n.
 
-    We construct anti-correlated sibling pairs (negative rho_mean) so that after clamping
-    rho_lower = 0, the Kish formula gives N_eff = raw_n/(1+0) = raw_n = ceil(raw_n) = raw_n.
+    Construction: use exactly 2 siblings (min_siblings=2) that are perfectly anti-correlated
+    (corr = -1). With a single pair, rho_mean = -1 < 0 so rho_lower is clamped to 0, and
+    the Kish formula gives N_eff = raw_n/(1+0) = raw_n.
+
+    This is fully deterministic — no random fillers, no opaque RNG luck.
     """
     n = len(_DATES)
-    # Two perfectly anti-correlated streams: corr(V, -V) = -1 → rho_mean = -1 < 0 → clamp to 0
+    # Two perfectly anti-correlated streams: corr(V, -V) = -1 → single pair rho = -1 < 0
     vals = np.linspace(-1, 1, n).tolist()
     s_pos = _stream(vals)
     s_neg = _stream([-v for v in vals])
-    # 3 more near-zero fillers (same sign)
-    rng = _rng(111)
-    fillers = [_stream(rng.normal(0, 1, n)) for _ in range(3)]
-    sibs = [s_pos, s_neg] + fillers
 
-    r = estimate_n_eff(40, sibs, min_siblings=5, min_overlap_bars=21, shrinkage_k=0.0)
+    r = estimate_n_eff(40, [s_pos, s_neg], min_siblings=2, min_overlap_bars=21, shrinkage_k=0.0)
     assert r.n_eff is not None
     assert r.rho_bar is not None and r.rho_bar == 0.0, (
-        f"Anti-correlated + fillers should give rho_bar=0 (clamped), got {r.rho_bar}"
+        f"Anti-correlated pair should give rho_bar=0 (clamped from -1), got {r.rho_bar}"
     )
     assert r.n_eff == 40, f"rho_bar=0 → N_eff=raw_n=40, got {r.n_eff}"
 

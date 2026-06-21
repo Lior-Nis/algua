@@ -120,7 +120,7 @@ def estimate_n_eff(
     # Step 3: M_eff = n_sib (sibling count, NOT pair count C(n_sib,2)).
     # Rationale: pairs sharing a strategy are dependent; independent information scales
     # with n_sib (strategies), not m = C(n_sib,2) (pairs).  See module docstring.
-    m_eff = float(n_sib)
+    m_eff = n_sib
 
     # Step 4: combined variance of z_bar (dispersion across pairs + within-pair sampling noise).
     dispersion_var = float(z_arr.var(ddof=1)) if m >= 2 else 0.0
