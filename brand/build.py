@@ -35,19 +35,24 @@ TOK = {
 
 # Wordmark weight (Space Grotesk axis) and whether to draw the baseline rule.
 WORDMARK_WGHT = 300        # Light — slimmer, sleeker
-WORDMARK_TRACK = 20.0      # a touch airier to match the lighter weight
+WORDMARK_TRACK = 12.0      # light, but tightened so the slim glyph does not feel detached
 UNDERLINE = False          # the wordmark baseline waterline is off by default
 
 # ---------------------------------------------------------------------------
 # §8 glyph geometry — 100-unit master ("the waterline A")
 # ---------------------------------------------------------------------------
-APEX = (50.0, 10.0)
-LFOOT = (20.0, 90.0)
-RFOOT = (80.0, 90.0)
-STROKE = 9.0           # leg + waterline weight (slim)
-WL_CY = 62.0           # waterline centre
+APEX = (50.0, 8.0)
+LFOOT = (24.0, 90.0)
+RFOOT = (76.0, 90.0)
+STROKE = 5.75          # leg + waterline weight (slim)
+WL_CY = 60.0           # waterline centre
 WL_H = STROKE
-WL_X0, WL_X1 = 22.0, 78.0   # waterline span (overshoots the legs at this height)
+WL_X0, WL_X1 = 30.0, 70.0   # waterline span (overshoots the legs at this height)
+
+
+def glyph_size_for_cap(cap: float) -> float:
+    """Return a 100-unit glyph box size whose apex-to-feet height equals cap."""
+    return cap * 100 / (LFOOT[1] - APEX[1])
 
 
 
@@ -151,14 +156,14 @@ def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
     """Horizontal: glyph + wordmark, glyph feet aligned to the text baseline."""
     cap = 64.0
     pad = 18.0
-    gsize = cap + 26
+    gsize = glyph_size_for_cap(cap)
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = gsize * 0.22
+    gap = gsize * STROKE / 100
     glyph_x = pad
     glyph_y_top = pad
-    baseline_y = glyph_y_top + gsize * 0.90
+    baseline_y = glyph_y_top + gsize * (LFOOT[1] / 100)
     text_x = glyph_x + gsize + gap
     total_w = text_x + word_w + pad
     total_h = glyph_y_top + gsize + pad
@@ -174,7 +179,7 @@ def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
 
 def lockup_stacked(fg: str, *, bg: str | None = None, **glyph_kw):
     pad = 20.0
-    gsize = 96.0
+    gsize = glyph_size_for_cap(72.0)
     cap = 46.0
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
@@ -199,15 +204,15 @@ def banner_dark():
     """README header: black field, horizontal lockup centred with breathing room."""
     W, H = 1280.0, 360.0
     cap = 96.0
-    gsize = cap + 40
+    gsize = glyph_size_for_cap(cap)
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = gsize * 0.22
+    gap = gsize * STROKE / 100
     block_w = gsize + gap + word_w
     x0 = (W - block_w) / 2
     gy = (H - gsize) / 2
-    foot_y = gy + gsize * 0.90
+    foot_y = gy + gsize * (LFOOT[1] / 100)
     text_x = x0 + gsize + gap
     body = (
         f'<g transform="translate({x0:.1f},{gy:.1f})">'
