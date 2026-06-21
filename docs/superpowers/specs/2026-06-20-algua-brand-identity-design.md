@@ -166,10 +166,12 @@ Masters (the spec produces measured drawings, not eyeballed art):
 
 Fixed parameters (exact values finalized during implementation, then frozen here):
 
-As built (100-unit master): apex `(50,10)`, feet `(20,90)`/`(80,90)`, **stroke
-width 9** (slim), waterline centred at `y=62`, spanning `x=22..78`.
+As built (100-unit master): apex `(50,8)`, feet `(24,90)`/`(76,90)` (tall, narrow
+A), **stroke width 5.75** (slim), waterline centred at `y=60`, spanning `x=30..70`.
+The glyph is sized from the wordmark's cap-height in lockups (not a fixed box), so
+it sits in balance with the text rather than overpowering it.
 
-- **Stroke width** of the A legs — slim (9/100).
+- **Stroke width** of the A legs — slim (5.75/100).
 - **Waterline thickness** = **glyph stroke width** (same weight as the legs).
 - **Overshoot.** The waterline extends past the legs at its height — a modest,
   symmetric overshoot reused at every scale.
