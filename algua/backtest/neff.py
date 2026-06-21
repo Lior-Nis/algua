@@ -94,8 +94,13 @@ def estimate_n_eff(
         if result is None:               # strict: any bad pair -> no estimate (raw N stands)
             return NEffResult(None, None, n_sib, len(rhos))
         rho, n_overlap = result
+        # The Fisher-z per-pair sampling variance v = 1/(n_overlap - 3) is undefined for
+        # n_overlap <= 3. Production passes min_overlap_bars=21 so this never triggers, but fail
+        # CLOSED (raw N stands) rather than divide by zero/negative for any caller that passes a
+        # smaller min_overlap_bars.
+        if n_overlap <= 3:
+            return NEffResult(None, None, n_sib, len(rhos))
         rhos.append(rho)
-        # n_overlap >= min_overlap_bars >= 21 > 3, so n_overlap - 3 >= 18 > 0 (always safe)
         sampling_vars.append(1.0 / (n_overlap - 3))
     m = len(rhos)
     if m == 0:  # n_sib >= min_siblings(>=2) guarantees m>=1, defensive

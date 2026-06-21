@@ -446,3 +446,14 @@ def test_fisher_z_m_eff_equals_n_sib_not_pair_count():
         f"SE_z should be > 0 with M_eff=n_sib=2; expected rho_bar(k=1) <= rho_bar(k=0), "
         f"got {r_k1.rho_bar:.6f} vs {r_k0.rho_bar:.6f}"
     )
+
+
+def test_small_overlap_bars_fails_closed_no_zerodivision():
+    """A caller passing min_overlap_bars <= 3 must fail closed (None), never ZeroDivisionError on
+    the Fisher-z sampling variance 1/(n_overlap-3). Production uses 21; this guards a misuse."""
+    dates = [f"2020-01-{i + 1:02d}" for i in range(3)]
+    a = ([0.0, 1.0, 2.0], list(dates))
+    b = ([0.0, 2.0, 4.0], list(dates))
+    for mo in (1, 2, 3):
+        r = estimate_n_eff(10, [a, b], min_siblings=2, min_overlap_bars=mo, shrinkage_k=1.0)
+        assert r.n_eff is None  # fail-closed, no exception
