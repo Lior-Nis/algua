@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate the Algua brand kit (glyph, wordmark, lockups, favicon, tokens).
 
-The glyph is hand-built geometry (the "waterline A"); the wordmark is the real
-Space Grotesk Medium outline, baked to <path> so the SVGs are font-independent
-and survive GitHub's SVG sanitizer. Re-runnable: regenerates the whole kit.
+The glyph is the real Space Grotesk capital "A" letterform with its crossbar
+recolored to the aqua "waterline"; the wordmark is the same typeface outlined.
+Both are baked to <path> so the SVGs are font-independent and survive GitHub's
+SVG sanitizer. Re-runnable: regenerates the whole kit.
 
 Source of truth for the design: docs/superpowers/specs/2026-06-20-algua-brand-identity-design.md
 
@@ -15,6 +16,7 @@ import json
 from pathlib import Path
 
 from fontTools.pens.boundsPen import ControlBoundsPen
+from fontTools.pens.recordingPen import RecordingPen
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
@@ -33,54 +35,129 @@ TOK = {
     "mute": "#5C6B6E",
 }
 
-# Wordmark weight (Space Grotesk axis) and whether to draw the baseline rule.
-WORDMARK_WGHT = 300        # Light — slimmer, sleeker
-WORDMARK_TRACK = 12.0      # light, but tightened so the slim glyph does not feel detached
-UNDERLINE = False          # the wordmark baseline waterline is off by default
+# Wordmark / glyph weights (Space Grotesk axis).
+WORDMARK_WGHT = 300        # Light — slim, sleek
+WORDMARK_TRACK = 12.0      # tracking in font units
+GLYPH_WGHT = 400           # the A letterform — a touch of presence over the text
 
-# ---------------------------------------------------------------------------
-# §8 glyph geometry — 100-unit master ("the waterline A")
-# ---------------------------------------------------------------------------
-APEX = (50.0, 8.0)
-LFOOT = (24.0, 90.0)
-RFOOT = (76.0, 90.0)
-STROKE = 5.75          # leg + waterline weight (slim)
-WL_CY = 60.0           # waterline centre
-WL_H = STROKE
-WL_X0, WL_X1 = 30.0, 70.0   # waterline span (overshoots the legs at this height)
+# Glyph placement in the 100-unit master.
+APEX_Y = 8.0               # master-y of the cap top
+BASE_Y = 92.0             # master-y of the baseline (glyph feet)
+WL_BLEED = 0.4             # tiny vertical bleed so no black crossbar peeks
+
+
+def _extract_A() -> dict:
+    """The real 'A' outline + its crossbar band, measured in font units."""
+    font = TTFont(FONT_SRC)
+    instantiateVariableFont(font, {"wght": GLYPH_WGHT}, inplace=True)
+    gs = font.getGlyphSet()
+    gname = font.getBestCmap()[ord("A")]
+
+    pen = SVGPathPen(gs)
+    gs[gname].draw(pen)
+    path_d = pen.getCommands()
+
+    rp = RecordingPen()
+    gs[gname].draw(rp)
+    contours: list[list] = []
+    cur: list = []
+    for cmd, args in rp.value:
+        if cmd == "moveTo":
+            if cur:
+                contours.append(cur)
+            cur = [args[0]]
+        elif cmd == "lineTo":
+            cur.append(args[0])
+        elif cmd in ("qCurveTo", "curveTo"):
+            cur += [p for p in args if p]
+        elif cmd == "closePath" and cur:
+            contours.append(cur)
+            cur = []
+    if cur:
+        contours.append(cur)
+
+    def bbox(c: list) -> tuple[float, float, float, float]:
+        xs = [p[0] for p in c]
+        ys = [p[1] for p in c]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def area(c: list) -> float:
+        x0, y0, x1, y1 = bbox(c)
+        return (x1 - x0) * (y1 - y0)
+
+    outer = max(contours, key=area)
+    inner = min(contours, key=area)           # the counter (triangular hole)
+    oxmin, oymin, oxmax, oymax = bbox(outer)
+    cb_top = bbox(inner)[1]                    # counter bottom = crossbar top edge
+
+    def crossings(poly: list, y: float) -> list[float]:
+        xs = []
+        n = len(poly)
+        for i in range(n):
+            x1, y1 = poly[i]
+            x2, y2 = poly[(i + 1) % n]
+            if (y1 <= y < y2) or (y2 <= y < y1):
+                xs.append(x1 + (y - y1) / (y2 - y1) * (x2 - x1))
+        return sorted(xs)
+
+    # Walk down from the crossbar top until the legs split (>2 crossings).
+    cb_bot = cb_top
+    y = cb_top
+    while y > oymin:
+        if len(crossings(outer, y)) > 2:
+            cb_bot = y
+            break
+        y -= 2
+    legs = crossings(outer, (cb_top + cb_bot) / 2)
+    return {
+        "path": path_d, "ymin": oymin, "ymax": oymax,
+        "cx": (oxmin + oxmax) / 2, "cb_top": cb_top, "cb_bot": cb_bot,
+        "leg_l": legs[0], "leg_r": legs[-1],
+    }
+
+
+_GA = _extract_A()
+
+
+def _a_transform() -> tuple[float, float, float]:
+    """(scale, tx, ty) mapping the font 'A' into the 100-unit master (y-down)."""
+    s = (BASE_Y - APEX_Y) / (_GA["ymax"] - _GA["ymin"])
+    ty = BASE_Y + s * _GA["ymin"]
+    tx = 50.0 - s * _GA["cx"]
+    return s, tx, ty
 
 
 def glyph_size_for_cap(cap: float) -> float:
-    """Return a 100-unit glyph box size whose apex-to-feet height equals cap."""
-    return cap * 100 / (LFOOT[1] - APEX[1])
-
-
+    """Return a 100-unit glyph box size whose apex-to-baseline height equals cap."""
+    return cap * 100 / (BASE_Y - APEX_Y)
 
 
 def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
-    """Inner SVG for the glyph on a 100x100 canvas.
+    """The 'A' letterform with its own crossbar recolored to the aqua waterline.
 
-    fg       — letterform colour (black or paper).
-    mono_bg  — if set, the waterline is a true knockout (transparent band).
+    The aqua is a band-clipped copy of the letterform — so it inherits the A's
+    slanted leg edges instead of being a rectangle laid on top.
     """
-    caret = f"M {LFOOT[0]} {LFOOT[1]} L {APEX[0]} {APEX[1]} L {RFOOT[0]} {RFOOT[1]}"
-    stroke_attrs = (
-        f'fill="none" stroke-width="{STROKE}" '
-        'stroke-linejoin="miter" stroke-miterlimit="20" stroke-linecap="butt"'
-    )
+    s, tx, ty = _a_transform()
+    tfm = f'transform="translate({tx:.3f},{ty:.3f}) scale({s:.4f},{-s:.4f})"'
+    band_y = ty - s * _GA["cb_top"] - WL_BLEED
+    band_h = s * (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED
     if mono_bg is not None:
-        # Mono: caret masked so the waterline band is cut out (knockout).
+        # Mono: knock the waterline band out of the letterform (transparent).
         return (
             '<defs><mask id="wl-knockout">'
             '<rect x="0" y="0" width="100" height="100" fill="white"/>'
-            f'<rect x="0" y="{WL_CY - WL_H / 2}" width="100" height="{WL_H}" fill="black"/>'
-            "</mask></defs>"
-            f'<path d="{caret}" stroke="{fg}" {stroke_attrs} mask="url(#wl-knockout)"/>'
+            f'<rect x="0" y="{band_y:.2f}" width="100" height="{band_h:.2f}" '
+            'fill="black"/></mask></defs>'
+            f'<g mask="url(#wl-knockout)"><g {tfm}>'
+            f'<path d="{_GA["path"]}" fill="{fg}"/></g></g>'
         )
     return (
-        f'<path d="{caret}" stroke="{fg}" {stroke_attrs}/>'
-        f'<rect x="{WL_X0}" y="{WL_CY - WL_H / 2}" width="{WL_X1 - WL_X0}" '
-        f'height="{WL_H}" fill="{TOK["aqua"]}"/>'
+        f'<defs><clipPath id="wl"><rect x="0" y="{band_y:.2f}" width="100" '
+        f'height="{band_h:.2f}"/></clipPath></defs>'
+        f'<g {tfm}><path d="{_GA["path"]}" fill="{fg}"/></g>'
+        f'<g clip-path="url(#wl)"><g {tfm}>'
+        f'<path d="{_GA["path"]}" fill="{TOK["aqua"]}"/></g></g>'
     )
 
 
@@ -123,16 +200,6 @@ def build_wordmark_paths(word: str = "Algua"):
     return "".join(d_parts), advance, cap_height
 
 
-def _underline(x: float, y: float, w: float) -> str:
-    """Optional aqua baseline rule under a wordmark (off unless UNDERLINE)."""
-    if not UNDERLINE:
-        return ""
-    over = w * 0.04
-    h = STROKE * 0.7
-    return (f'<rect x="{x - over:.1f}" y="{y:.1f}" width="{w + 2 * over:.1f}" '
-            f'height="{h:.1f}" fill="{TOK["aqua"]}"/>')
-
-
 def wordmark_svg(fg: str, *, bg: str | None = None, target_cap: float = 64.0,
                  pad: float = 16.0):
     paths, advance, cap = build_wordmark_paths()
@@ -141,11 +208,10 @@ def wordmark_svg(fg: str, *, bg: str | None = None, target_cap: float = 64.0,
     baseline_y = pad + target_cap
     total_w = word_w + 2 * pad
     total_h = baseline_y + pad
-    g = (
+    body = (
         f'<g transform="translate({pad:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{fg}">{paths}</g>'
     )
-    body = g + _underline(pad, baseline_y + 8, word_w)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg), total_w, total_h, word_w
 
 
@@ -160,10 +226,10 @@ def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = gsize * STROKE / 100
+    gap = cap * 0.34
     glyph_x = pad
     glyph_y_top = pad
-    baseline_y = glyph_y_top + gsize * (LFOOT[1] / 100)
+    baseline_y = glyph_y_top + gsize * (BASE_Y / 100)
     text_x = glyph_x + gsize + gap
     total_w = text_x + word_w + pad
     total_h = glyph_y_top + gsize + pad
@@ -173,7 +239,6 @@ def lockup_h(fg: str, *, bg: str | None = None, **glyph_kw):
         f'<g transform="translate({text_x:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{fg}">{paths}</g>'
     )
-    body += _underline(text_x, baseline_y + 8, word_w)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg)
 
 
@@ -196,7 +261,6 @@ def lockup_stacked(fg: str, *, bg: str | None = None, **glyph_kw):
         f'<g transform="translate({text_x:.1f},{baseline_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{fg}">{paths}</g>'
     )
-    body += _underline(text_x, baseline_y + 7, word_w)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg)
 
 
@@ -208,11 +272,11 @@ def banner_dark():
     paths, advance, fcap = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
-    gap = gsize * STROKE / 100
+    gap = cap * 0.34
     block_w = gsize + gap + word_w
     x0 = (W - block_w) / 2
     gy = (H - gsize) / 2
-    foot_y = gy + gsize * (LFOOT[1] / 100)
+    foot_y = gy + gsize * (BASE_Y / 100)
     text_x = x0 + gsize + gap
     body = (
         f'<g transform="translate({x0:.1f},{gy:.1f})">'
@@ -220,7 +284,6 @@ def banner_dark():
         f'<g transform="translate({text_x:.1f},{foot_y:.1f}) scale({s:.5f},{-s:.5f})" '
         f'fill="{TOK["paper"]}">{paths}</g>'
     )
-    body += _underline(text_x, foot_y + 11, word_w)
     return svg(W, H, body, bg=TOK["ink"])
 
 

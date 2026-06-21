@@ -40,9 +40,12 @@ aqua accent ever appears.** Everything else is monochrome ink. This makes the
 
 ## 3. The glyph — "the waterline A"
 
-A geometric capital **A**, built from straight, **slim** sharp strokes, with **no
-crossbar of its own**. The aqua waterline *is* the crossbar. Slim strokes keep the
-mark sleek; the waterline carries the only weight that needs to register.
+The glyph is the **real Space Grotesk capital `A`** (the same typeface as the
+wordmark) with **its crossbar recolored to the aqua waterline**. Using a true
+letterform — not hand-drawn strokes — is what gives the mark professional,
+type-quality craft and ties it directly to the wordmark (the mark *is* the "A" in
+"Algua," accented). The aqua bar sits exactly on the letterform's crossbar and
+**overshoots both legs** as the "tide."
 
 ```
    /\          apex: a sharp point (never rounded)
@@ -53,19 +56,20 @@ mark sleek; the waterline carries the only weight that needs to register.
 
 Requirements:
 
-- **Crossbar-less A.** The A's own structure is the two legs + apex only. The
-  horizontal member is the aqua waterline, a separate flat stroke slotted between
-  the legs.
-- **Overshoot.** The waterline extends slightly **past both legs** (the tide
-  reaching beyond the form) — a modest, symmetric overshoot, reused at every scale.
-- **Sharp apex.** The top is a true point. No rounding, no ink trap softening.
+- **Real letterform.** The black shape is the actual Space Grotesk `A` outline
+  (weight ~400 — a touch heavier than the Light wordmark, for presence), baked to
+  a `<path>`. It keeps the typeface's optical corrections; it is never a polyline.
+- **Crossbar = waterline.** The aqua bar is positioned and sized to the
+  letterform's own crossbar band, replacing it. The result reads as a crossbar-less
+  A whose crossbar is the waterline.
+- **Overshoot.** The waterline extends past both legs (the tide reaching beyond
+  the form) — a modest, symmetric overshoot.
 - **Two colors only.** The mark is **black + the aqua waterline** — nothing else.
-  (An earlier two-tone "submerged" lower-leg tint was tried and dropped; it added
-  a third tone and muddied the black-and-blue clarity.)
+  (An earlier two-tone "submerged" tint, and earlier still a hand-drawn polyline
+  caret, were both tried and dropped — the polyline read as crude SVG lines.)
 
-Legibility intent: at 16px the glyph reads as a crisp black **A** bisected by one
-bright aqua line; the overshoot keeps the waterline distinguishable even when the
-letterform itself blurs. Slim strokes thin out at 16px but the A + bar still read.
+Legibility intent: as a filled letterform the glyph reads as a solid black **A**
+crossed by one bright aqua line, and stays legible down to 16px.
 
 ---
 
@@ -157,25 +161,22 @@ licensing friction.
 
 ## 8. Construction geometry
 
-Masters (the spec produces measured drawings, not eyeballed art):
+The glyph is **not eyeballed geometry** — it is the Space Grotesk `A` outline
+placed and measured programmatically (`brand/build.py`):
 
-- **100-unit glyph master** — all proportions defined as ratios of this unit so
-  the mark scales exactly.
-- **24×24 favicon master** — the glyph is **redrawn (hinted) at favicon size**,
-  not naively downscaled, so the apex and waterline stay crisp on the pixel grid.
-
-Fixed parameters (exact values finalized during implementation, then frozen here):
-
-As built (100-unit master): apex `(50,8)`, feet `(24,90)`/`(76,90)` (tall, narrow
-A), **stroke width 5.75** (slim), waterline centred at `y=60`, spanning `x=30..70`.
-The glyph is sized from the wordmark's cap-height in lockups (not a fixed box), so
-it sits in balance with the text rather than overpowering it.
-
-- **Stroke width** of the A legs — slim (5.75/100).
-- **Waterline thickness** = **glyph stroke width** (same weight as the legs).
-- **Overshoot.** The waterline extends past the legs at its height — a modest,
-  symmetric overshoot reused at every scale.
-- **Waterline vertical position** ≈ lower third of cap-height.
+- **Letterform source.** The `A` glyph (weight ~400) is extracted from the font,
+  baked to a `<path>`, and scaled into a **100-unit master**: cap top at `y=8`,
+  baseline at `y=92`, centered horizontally.
+- **Crossbar band, measured — not guessed.** The script finds the crossbar by
+  geometry: the inner counter's lower edge is the crossbar *top*; a downward
+  scanline of the outline finds where the legs split, giving the crossbar *bottom*.
+- **Waterline = recolored crossbar.** A band-clipped copy of the letterform,
+  filled aqua over that crossbar band, recolors the crossbar (and the leg slices
+  it crosses). Because it is clipped to the letterform, the aqua **inherits the
+  A's slanted leg edges** — it is never a rectangle laid on top. A small vertical
+  bleed (`WL_BLEED`) ensures no black crossbar peeks above/below the aqua.
+- **Lockup sizing.** The glyph is sized from the wordmark's cap-height (not a
+  fixed box), so it balances the text rather than overpowering it.
 
 ---
 
@@ -190,12 +191,14 @@ it sits in balance with the text rather than overpowering it.
 
 **Don'ts:**
 
-- Don't recolor the letterforms aqua (aqua = the glyph's waterline only).
+- Don't recolor the letterforms aqua (aqua = the glyph's waterline band only).
 - Don't add gradients, drop shadows, glows, a second accent, or a third tone.
-- Don't round the apex.
+- Don't lay the waterline back as a rectangle on top — it must be the letterform's
+  own crossbar recolored, keeping the slanted leg edges.
 - Don't rotate, tilt, or curve the waterline off horizontal.
 - Don't add an aqua underline / baseline rule to the wordmark.
-- Don't thicken the strokes — slim is the point; or stretch/condense the wordmark.
+- Don't substitute a hand-drawn / polyline "A" for the real letterform.
+- Don't stretch, condense, or re-track the wordmark.
 - Don't place the mark on a low-contrast field that breaks the variant rules.
 
 ---
