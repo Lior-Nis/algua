@@ -21,37 +21,37 @@ The name **Algua** carries *aqua*. The identity leans on that echo — but quiet
 
 ---
 
-## 2. Concept: the waterline
+## 2. Concept: the ocean and the fin
 
-The entire identity rests on **one device: a single horizontal aqua "waterline."**
-We do not draw literal waves — that fights the chosen aesthetic (minimal & sharp).
-Instead, one flat horizontal stroke does all the work, reading three ways at once:
+The identity rests on **one device: a single horizontal aqua "waterline"** — the
+**ocean surface**. It runs *past* the A's legs, longer than the letter itself, so
+it reads as open water. The A's **sharp apex breaks the surface like a shark's
+fin** cutting through the sea. The line reads several ways at once:
 
-- **water** — the *aqua* in Algua;
+- **water** — the *aqua* in Algua, the sea the fin slices through;
 - a **price / equity level** — a market line;
 - a **threshold / gate** — the lifecycle's disciplined checkpoints
   (`idea → backtested → … → live`).
 
-One line, three meanings, zero decoration. **The waterline is the only place the
-aqua accent ever appears.** Everything else is monochrome ink. This makes the
-"single accent, used sparingly" rule literal and self-enforcing.
+One line, zero decoration. **The waterline is the only place the aqua accent ever
+appears.** Everything else is monochrome ink.
 
 ---
 
-## 3. The glyph — "the waterline A"
+## 3. The glyph — "the fin"
 
 The glyph is the **real Space Grotesk capital `A`** (the same typeface as the
-wordmark) with **its crossbar recolored to the aqua waterline**. Using a true
-letterform — not hand-drawn strokes — is what gives the mark professional,
-type-quality craft and ties it directly to the wordmark (the mark *is* the "A" in
-"Algua," accented). The aqua bar sits exactly on the letterform's crossbar and
-**overshoots both legs** as the "tide."
+wordmark) sitting in the **aqua waterline**. Using a true letterform — not
+hand-drawn strokes — gives the mark type-quality craft and ties it to the wordmark
+(the mark *is* the "A" in "Algua," accented). The aqua bar sits at the
+letterform's crossbar height but **runs well past both legs** as the ocean
+surface; the sharp apex above it is the fin.
 
 ```
-   /\          apex: a sharp point (never rounded)
-  /  \
- /====\   <-  aqua waterline = crossbar; overshoots both legs
-/      \
+      /\          apex: a sharp point — the fin
+     /  \
+ ===/====\===   <- aqua waterline = the OCEAN, longer than the A
+   /      \
 ```
 
 Requirements:
@@ -65,11 +65,10 @@ Requirements:
   is **raised above the cap line** (`APEX_SHARPEN`, font units) for a crisp,
   pointed peak. The same sharpened `A` is used in the wordmark, where the peak
   overshoots the cap line the way a pointed cap optically should.
-- **Crossbar = waterline.** The aqua bar is positioned and sized to the
-  letterform's own crossbar band, replacing it. The result reads as a crossbar-less
-  A whose crossbar is the waterline.
-- **Overshoot.** The waterline extends past both legs (the tide reaching beyond
-  the form) — a modest, symmetric overshoot.
+- **Waterline = the ocean.** The aqua bar sits at the letterform's crossbar
+  height but is **drawn long — it runs `WL_EXTEND` font units past each leg**, so
+  it is wider than the A and reads as the sea surface, not a crossbar. In the
+  wordmark `WL_EXTEND` is capped so the line clears the following `l`.
 - **Two colors only.** The mark is **black + the aqua waterline** — nothing else.
   (An earlier two-tone "submerged" tint, and earlier still a hand-drawn polyline
   caret, were both tried and dropped — the polyline read as crude SVG lines.)

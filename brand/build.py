@@ -47,6 +47,11 @@ APEX_Y = 8.0               # master-y of the cap top
 BASE_Y = 92.0             # master-y of the baseline (glyph feet)
 WL_BLEED = 0.4             # vertical bleed (master units) so no black crossbar peeks
 WL_BLEED_FONT = 4.0        # same, in font units (for the in-wordmark A)
+# The aqua waterline is the OCEAN: a horizontal line that runs well past the A's
+# legs (longer than the letter itself), so the sharp apex reads as a shark fin
+# breaking the surface. WL_EXTEND = how far past each leg the water reaches, in
+# font units. Capped so it clears the following 'l' in the wordmark.
+WL_EXTEND = 85.0
 
 # Apex sharpening: Space Grotesk's A has a flat top. We collapse that flat to a
 # true point; APEX_SHARPEN is how far (font units) the point rises above the cap
@@ -161,18 +166,29 @@ def _a_transform() -> tuple[float, float, float]:
     return s, tx, ty
 
 
-def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
-    """The 'A' letterform with its own crossbar recolored to the aqua waterline.
+def _waterline_rect(fill: str) -> str:
+    """The aqua ocean line, in font-unit (y-up) coords — place inside a scaled,
+    y-flipped group. Runs WL_EXTEND past each leg so it is longer than the A."""
+    x0 = _GA["leg_l"] - WL_EXTEND
+    x1 = _GA["leg_r"] + WL_EXTEND
+    y0 = _GA["cb_bot"] - WL_BLEED_FONT
+    h = (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED_FONT
+    return (f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{x1 - x0:.1f}" '
+            f'height="{h:.1f}" fill="{fill}"/>')
 
-    The aqua is a band-clipped copy of the letterform — so it inherits the A's
-    slanted leg edges instead of being a rectangle laid on top.
+
+def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
+    """The 'A' letterform (a shark fin) over the long aqua waterline (the ocean).
+
+    The waterline runs past both legs, so it reads as the sea surface and the
+    sharp apex as a fin breaking it.
     """
     s, tx, ty = _a_transform()
     tfm = f'transform="translate({tx:.3f},{ty:.3f}) scale({s:.4f},{-s:.4f})"'
-    band_y = ty - s * _GA["cb_top"] - WL_BLEED
-    band_h = s * (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED
     if mono_bg is not None:
         # Mono: knock the waterline band out of the letterform (transparent).
+        band_y = ty - s * _GA["cb_top"] - WL_BLEED
+        band_h = s * (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED
         return (
             '<defs><mask id="wl-knockout">'
             '<rect x="0" y="0" width="100" height="100" fill="white"/>'
@@ -182,11 +198,7 @@ def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
             f'<path d="{_GA["path"]}" fill="{fg}"/></g></g>'
         )
     return (
-        f'<defs><clipPath id="wl"><rect x="0" y="{band_y:.2f}" width="100" '
-        f'height="{band_h:.2f}"/></clipPath></defs>'
-        f'<g {tfm}><path d="{_GA["path"]}" fill="{fg}"/></g>'
-        f'<g clip-path="url(#wl)"><g {tfm}>'
-        f'<path d="{_GA["path"]}" fill="{TOK["aqua"]}"/></g></g>'
+        f'<g {tfm}><path d="{_GA["path"]}" fill="{fg}"/>{_waterline_rect(TOK["aqua"])}</g>'
     )
 
 
@@ -239,22 +251,15 @@ def build_wordmark_paths(word: str = "Algua"):
 
 
 def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
-    """The full 'Algua' wordmark, with the aqua waterline on its own capital A.
+    """The full 'Algua' wordmark, with the aqua ocean line on its leading A.
 
-    The accent is a band-clipped copy of the leading 'A' glyph (drawn at x=0 in
-    font units, same as the wordmark's first letter), so the aqua is the A's own
-    crossbar — no duplicated glyph, no rectangle on top.
+    The waterline is drawn at the leading A's crossbar height and runs past its
+    legs (the ocean), so the A's sharp apex reads as a fin above the surface.
     """
     paths, _, _, _ = build_wordmark_paths()
-    band_y = _GA["cb_bot"] - WL_BLEED_FONT
-    band_h = (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED_FONT
-    clip = (f'<clipPath id="wlw"><rect x="0" y="{band_y:.1f}" '
-            f'width="{_GA["adv"]:.1f}" height="{band_h:.1f}"/></clipPath>')
     return (
-        f'<defs>{clip}</defs>'
         f'<g transform="translate({tx:.2f},{ty:.2f}) scale({s:.5f},{-s:.5f})" fill="{fg}">'
-        f'{paths}'
-        f'<g clip-path="url(#wlw)"><path d="{_GA["path"]}" fill="{TOK["aqua"]}"/></g>'
+        f'{paths}{_waterline_rect(TOK["aqua"])}'
         f'</g>'
     )
 
