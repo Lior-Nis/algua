@@ -130,32 +130,29 @@ def _extract_A() -> dict:
 
     path_d = to_path(outer) + to_path(inner)
     oxmin, oymin, oxmax, oymax = bbox(outer)
-    cb_top = bbox(inner)[1]                    # counter bottom = crossbar top edge
-
-    def crossings(poly: list, y: float) -> list[float]:
-        xs = []
-        n = len(poly)
-        for i in range(n):
-            x1, y1 = poly[i]
-            x2, y2 = poly[(i + 1) % n]
-            if (y1 <= y < y2) or (y2 <= y < y1):
-                xs.append(x1 + (y - y1) / (y2 - y1) * (x2 - x1))
-        return sorted(xs)
-
-    # Walk down from the crossbar top until the legs split (>2 crossings).
-    cb_bot = cb_top
-    y = cb_top
-    while y > oymin:
-        if len(crossings(outer, y)) > 2:
-            cb_bot = y
-            break
-        y -= 2
-    legs = crossings(outer, (cb_top + cb_bot) / 2)
+    # `inner` is the crossbar bar; its bbox is the crossbar band.
+    _, cb_lo, _, cb_hi = bbox(inner)
+    cy = (cb_lo + cb_hi) / 2
+    legs = _crossings(outer, cy)
     return {
-        "path": path_d, "adv": adv, "ymin": oymin, "ymax": oymax, "cap0": cap0,
-        "cx": (oxmin + oxmax) / 2, "cb_top": cb_top, "cb_bot": cb_bot,
+        "path": path_d, "outer": outer, "adv": adv,
+        "ymin": oymin, "ymax": oymax, "cap0": cap0, "cx": (oxmin + oxmax) / 2,
+        "cb_lo": cb_lo, "cb_hi": cb_hi, "cy": cy,
         "leg_l": legs[0], "leg_r": legs[-1],
+        "apex": ((oxmin + oxmax) / 2, oymax),     # the sharpened peak (fin tip)
     }
+
+
+def _crossings(poly: list, y: float) -> list[float]:
+    """x-coords where the polygon edges cross horizontal line y, sorted."""
+    xs = []
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if (y1 <= y < y2) or (y2 <= y < y1):
+            xs.append(x1 + (y - y1) / (y2 - y1) * (x2 - x1))
+    return sorted(xs)
 
 
 _GA = _extract_A()
@@ -174,12 +171,24 @@ def _waterline_rect(fill: str, ext_l: float = WL_EXTEND, ext_r: float = WL_EXTEN
     coords; place inside a scaled, y-flipped group. The bottom edge is the longer
     one; each end angles in by WL_TAPER toward the top, for a horizon-in-perspective
     feel. Runs ext_l / ext_r past the left / right legs (longer than the A)."""
-    cy = (_GA["cb_top"] + _GA["cb_bot"]) / 2
+    cy = _GA["cy"]
     yb, yt = cy - WL_THICK / 2, cy + WL_THICK / 2
     lb0, lb1 = _GA["leg_l"] - ext_l, _GA["leg_r"] + ext_r            # bottom (long)
     lt0, lt1 = lb0 + WL_TAPER, lb1 - WL_TAPER                        # top (shorter)
     pts = f"{lb0:.1f},{yb:.1f} {lb1:.1f},{yb:.1f} {lt1:.1f},{yt:.1f} {lt0:.1f},{yt:.1f}"
     return f'<polygon points="{pts}" fill="{fill}"/>'
+
+
+def _fin(fill: str) -> str:
+    """The solid 'fin': the A's silhouette above the waterline, filled (so the
+    counter shows no white). Drawn under the waterline so the taper can't expose
+    background. Font-unit (y-up) coords for the scaled, y-flipped group."""
+    yb = _GA["cy"] - WL_THICK / 2
+    edges = _crossings(_GA["outer"], yb)        # outer leg x's at the band bottom
+    xl, xr = edges[0], edges[-1]
+    ax, ay = _GA["apex"]
+    return (f'<polygon points="{xl:.1f},{yb:.1f} {xr:.1f},{yb:.1f} '
+            f'{ax:.1f},{ay:.1f}" fill="{fill}"/>')
 
 
 def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
@@ -191,19 +200,22 @@ def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
     s, tx, ty = _a_transform()
     tfm = f'transform="translate({tx:.3f},{ty:.3f}) scale({s:.4f},{-s:.4f})"'
     if mono_bg is not None:
-        # Mono: knock the waterline band out of the letterform (transparent).
-        band_y = ty - s * _GA["cb_top"] - WL_BLEED
-        band_h = s * (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED
+        # Mono: solid fin above the waterline, with a knockout band for the line.
+        cy = _GA["cy"]
+        band_y = ty - s * (cy + WL_THICK / 2)
+        band_h = s * WL_THICK
         return (
             '<defs><mask id="wl-knockout">'
             '<rect x="0" y="0" width="100" height="100" fill="white"/>'
             f'<rect x="0" y="{band_y:.2f}" width="100" height="{band_h:.2f}" '
             'fill="black"/></mask></defs>'
             f'<g mask="url(#wl-knockout)"><g {tfm}>'
-            f'<path d="{_GA["path"]}" fill="{fg}"/></g></g>'
+            f'<path d="{_GA["path"]}" fill="{fg}"/>{_fin(fg)}</g></g>'
         )
+    # A (legs) → solid fin above the surface → the aqua waterline on top.
     return (
-        f'<g {tfm}><path d="{_GA["path"]}" fill="{fg}"/>{_waterline_rect(TOK["aqua"])}</g>'
+        f'<g {tfm}><path d="{_GA["path"]}" fill="{fg}"/>'
+        f'{_fin(fg)}{_waterline_rect(TOK["aqua"])}</g>'
     )
 
 
@@ -264,7 +276,7 @@ def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
     paths, _, _, _ = build_wordmark_paths()
     return (
         f'<g transform="translate({tx:.2f},{ty:.2f}) scale({s:.5f},{-s:.5f})" fill="{fg}">'
-        f'{paths}{_waterline_rect(TOK["aqua"], ext_r=WL_EXTEND_R)}'
+        f'{paths}{_fin(fg)}{_waterline_rect(TOK["aqua"], ext_r=WL_EXTEND_R)}'
         f'</g>'
     )
 

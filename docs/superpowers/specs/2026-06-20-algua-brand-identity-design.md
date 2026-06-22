@@ -69,6 +69,12 @@ Requirements:
   (longer than the letter), and its top edge is shorter than the bottom
   (`WL_TAPER`) for a horizon-in-perspective feel. In the wordmark the right side
   uses a smaller `WL_EXTEND_R` so the line clears the following `l`.
+- **Solid fin above the surface.** The part of the `A` above the waterline is
+  **filled solid** (the `_fin` triangle), so the emerged fin is a clean black
+  shape with no open counter — this is what removes the white triangle the open
+  `A` counter used to show on the line. The fin is drawn *under* the waterline so
+  the trapezoid taper can never expose background. The legs stay slim below the
+  surface (submerged body).
 - **Two colors only.** The mark is **black + the aqua waterline** — nothing else.
   (An earlier two-tone "submerged" tint, and earlier still a hand-drawn polyline
   caret, were both tried and dropped — the polyline read as crude SVG lines.)
