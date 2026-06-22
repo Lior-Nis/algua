@@ -74,11 +74,74 @@ def test_late_attribution_via_repull(tmp_path):
     assert L.believed_positions(conn, "s1") == {"AAA": 10.0}  # still 10, not doubled
 
 
-def test_ingest_rejects_malformed_fill(tmp_path):
+def _quarantine_ids(conn):
+    return [r["activity_id"]
+            for r in conn.execute("SELECT activity_id FROM live_activity_quarantine ORDER BY id")]
+
+
+def test_malformed_activity_is_quarantined_not_raised(tmp_path):
+    # A malformed activity must NOT wedge the loop: it is dead-lettered, not raised (#250).
     conn = _conn(tmp_path)
-    with pytest.raises(ValueError):
-        L.ingest_activities(conn, [{"id": "x", "activity_type": "FILL", "order_id": "o",
-                                    "symbol": "AAA", "side": "hold", "qty": "1", "price": "1",
-                                    "transaction_time": "t"}])
-    with pytest.raises(ValueError):
-        L.ingest_activities(conn, [_fill_act("y", "o", "AAA", "buy", 0, 100.0)])
+    L.ingest_activities(conn, [{"id": "x", "activity_type": "FILL", "order_id": "o",
+                                "symbol": "AAA", "side": "hold", "qty": "1", "price": "1",
+                                "transaction_time": "t"}])
+    assert _quarantine_ids(conn) == ["x"]
+    assert conn.execute("SELECT COUNT(*) FROM live_fills").fetchone()[0] == 0
+    # the cursor still advanced PAST the poison item, so the next pull won't re-fetch it forever
+    assert L.fill_cursor(conn) == "x"
+
+
+def test_poison_does_not_drop_good_activities_in_same_batch(tmp_path):
+    # good fill + a poison fill (bad side) + a poison fill (missing qty -> KeyError) + good div,
+    # interleaved: the good ones land, both poisons are quarantined, cursor = max id over the batch.
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-1")
+    L.backfill_broker_order_id(conn, "coid-1", "order-1")
+    L.ingest_activities(conn, [
+        _fill_act("a-1", "order-1", "AAA", "buy", 10, 100.0),
+        {"id": "a-2", "activity_type": "FILL", "order_id": "order-1", "symbol": "AAA",
+         "side": "hold", "qty": "1", "price": "1", "transaction_time": "t"},  # bad side
+        {"id": "a-3", "activity_type": "FILL", "order_id": "order-1", "symbol": "AAA",
+         "side": "buy", "price": "1", "transaction_time": "t"},  # missing qty -> KeyError
+        {"id": "a-4", "activity_type": "DIV", "symbol": "AAA", "net_amount": "5", "date": "d"},
+    ])
+    assert L.believed_positions(conn, "s1") == {"AAA": 10.0}  # only the good fill counts
+    assert _quarantine_ids(conn) == ["a-2", "a-3"]
+    assert conn.execute(
+        "SELECT amount FROM live_activities WHERE activity_id='a-4'").fetchone()["amount"] == 5.0
+    assert L.fill_cursor(conn) == "a-4"  # advanced to the max id, past the poisons
+
+
+def test_quarantine_dedups_on_replay(tmp_path):
+    conn = _conn(tmp_path)
+    poison = [{"id": "p-1", "activity_type": "FILL", "order_id": "o", "symbol": "AAA",
+               "side": "hold", "qty": "1", "price": "1", "transaction_time": "t"}]
+    L.ingest_activities(conn, poison)
+    L.ingest_activities(conn, poison)  # overlap re-pull must not double-quarantine
+    assert _quarantine_ids(conn) == ["p-1"]
+
+
+def test_infra_error_rolls_back_whole_batch(tmp_path, monkeypatch):
+    # A non-shape error (e.g. a DB failure) is NOT quarantined: it propagates and rolls back the
+    # whole batch, preserving the old all-or-nothing fail-closed behavior.
+    import sqlite3
+
+    conn = _conn(tmp_path)
+    calls = {"n": 0}
+    real = L._ingest_one_activity
+
+    def _boom(c, act, aid):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(c, act, aid)
+
+    monkeypatch.setattr(L, "_ingest_one_activity", _boom)
+    with pytest.raises(sqlite3.OperationalError):
+        L.ingest_activities(conn, [{"id": "div-1", "activity_type": "DIV", "net_amount": "1",
+                                    "date": "d"},
+                                   {"id": "div-2", "activity_type": "DIV", "net_amount": "1",
+                                    "date": "d"}])
+    # first item's insert was rolled back with the batch; cursor never advanced
+    assert conn.execute("SELECT COUNT(*) FROM live_activities").fetchone()[0] == 0
+    assert L.fill_cursor(conn) is None

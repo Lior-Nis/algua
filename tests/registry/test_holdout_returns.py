@@ -13,8 +13,8 @@ from algua.registry.db import SCHEMA_VERSION, connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 
 
-def test_schema_version_is_27():
-    assert SCHEMA_VERSION == 27
+def test_schema_version_is_28():
+    assert SCHEMA_VERSION == 28
 
 
 def test_holdout_returns_table_and_indexes_exist(tmp_path):

@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 27
+    assert SCHEMA_VERSION == 28
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -366,7 +366,7 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
     migrate(c2)
     cols = {row["name"] for row in c2.execute("PRAGMA table_info(search_trials)")}
     assert {"trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 27
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 28
     c2.close()
 
 
@@ -376,7 +376,7 @@ def test_v26_adds_fdr_columns_to_gate_evaluations(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)")}
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
             "fdr_test_index"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 27
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 28
 
 
 def test_v26_fdr_partial_unique_index_exists(tmp_path):
@@ -398,7 +398,7 @@ def test_v26_migration_is_idempotent(tmp_path):
     cols = {r["name"] for r in c2.execute("PRAGMA table_info(gate_evaluations)")}
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
             "fdr_test_index"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 27
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 28
     c2.close()
 
 
