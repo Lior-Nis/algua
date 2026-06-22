@@ -246,7 +246,7 @@ def kill(
 
 
 @paper_app.command("resume")
-@json_errors(ValueError, BrokerError)
+@json_errors(ValueError, LookupError, BrokerError)
 def resume(name: str) -> None:
     """Reset (clear) a strategy's kill-switch so paper runs may resume. For a LIVE strategy,
     confirms the strategy is flat via broker-truth reconcile before allowing resume. Human
@@ -525,7 +525,7 @@ def halt_all(
 
 
 @paper_app.command("resume-all")
-@json_errors(ValueError, BrokerError)
+@json_errors(ValueError, LookupError, BrokerError)
 def resume_all(
     actor: str = typer.Option("human", "--actor", help="human | agent"),
 ) -> None:

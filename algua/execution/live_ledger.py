@@ -156,51 +156,31 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
     re-pull DOES back-fill a previously-missing strategy/broker_order_id (COALESCE on conflict), so
     a fill ingested before its order mapping existed is attributed once the mapping lands. The
     cursor advances to the max activity id seen, in the same transaction as the inserts, so a crash
-    leaves books and cursor consistent (overlap replay re-dedupes). Malformed fills fail closed."""
+    leaves books and cursor consistent (overlap replay re-dedupes).
+
+    A single malformed activity must NOT wedge the loop: a shape error (`ValueError`/`KeyError`/
+    `TypeError`) dead-letters that one activity into `live_activity_quarantine` and processing
+    continues, so the cursor still advances PAST the poison item and the next cycle does not
+    re-fetch it forever (#250). Quarantining is recoverable — the raw payload is preserved for human
+    triage, and a quarantined fill the book is now missing still surfaces as broker-vs-ledger drift
+    at the reconcile guard (fail-closed backstop). Real infrastructure errors (e.g. `sqlite3.Error`)
+    are NOT shape errors: they propagate and roll back the whole batch, preserving the old
+    all-or-nothing fail-closed behavior."""
     try:
         max_id: str | None = None
         for act in activities:
+            # A missing/empty `id` is NOT a quarantinable shape error: the id IS the cursor, so
+            # there is no safe way to advance past an id-less item, and quarantining it (NULL id)
+            # would re-quarantine the same item every cycle. Fail closed instead — matching the
+            # broker adapter, which raises on an id-less activity (alpaca_broker.py).
+            if not act.get("id"):
+                raise ValueError(f"activity missing 'id'; cannot advance cursor: {act!r}")
             aid = str(act["id"])
+            try:
+                _ingest_one_activity(conn, act, aid)
+            except (ValueError, KeyError, TypeError) as exc:
+                _quarantine_activity(conn, aid, act, exc)
             max_id = aid if max_id is None or aid > max_id else max_id
-            if act.get("activity_type") == "FILL":
-                side = act.get("side")
-                if side not in {"buy", "sell"}:
-                    raise ValueError(f"bad fill side {side!r}")
-                qty = float(act["qty"])
-                price = float(act["price"])
-                if qty <= 0.0 or price <= 0.0:
-                    raise ValueError("fill qty and price must be positive")
-                signed = qty if side == "buy" else -qty
-                boid = act.get("order_id")
-                strat_row = conn.execute(
-                    "SELECT strategy FROM live_orders WHERE broker_order_id = ?", (boid,)
-                ).fetchone()
-                conn.execute(
-                    "INSERT INTO live_fills"
-                    "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
-                    " VALUES (?,?,?,?,?,?,?)"
-                    " ON CONFLICT(activity_id) DO UPDATE SET"
-                    "  strategy = COALESCE(live_fills.strategy, excluded.strategy),"
-                    "  broker_order_id = COALESCE(live_fills.broker_order_id,"
-                    "                             excluded.broker_order_id)",
-                    (
-                        aid, boid,
-                        strat_row["strategy"] if strat_row else None,
-                        act["symbol"], signed, price,
-                        act.get("transaction_time", ""),
-                    ),
-                )
-            else:
-                conn.execute(
-                    "INSERT OR IGNORE INTO live_activities"
-                    "(activity_id, type, symbol, amount, ts, raw) VALUES (?,?,?,?,?,?)",
-                    (
-                        aid, act.get("activity_type", "UNKNOWN"), act.get("symbol"),
-                        float(act["net_amount"]) if act.get("net_amount") is not None else None,
-                        act.get("date") or act.get("transaction_time"),
-                        json.dumps(act),
-                    ),
-                )
         if max_id is not None:
             conn.execute(
                 "INSERT INTO live_fill_cursor(name, cursor) VALUES ('activities', ?) "
@@ -211,6 +191,66 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+def _ingest_one_activity(conn: sqlite3.Connection, act: dict, aid: str) -> None:
+    """Record one activity (FILL -> signed `live_fills`, else -> `live_activities`). Raises a shape
+    error (`ValueError`/`KeyError`/`TypeError`) on a malformed activity; caller quarantines it."""
+    if act.get("activity_type") == "FILL":
+        side = act.get("side")
+        if side not in {"buy", "sell"}:
+            raise ValueError(f"bad fill side {side!r}")
+        qty = float(act["qty"])
+        price = float(act["price"])
+        if qty <= 0.0 or price <= 0.0:
+            raise ValueError("fill qty and price must be positive")
+        signed = qty if side == "buy" else -qty
+        boid = act.get("order_id")
+        strat_row = conn.execute(
+            "SELECT strategy FROM live_orders WHERE broker_order_id = ?", (boid,)
+        ).fetchone()
+        conn.execute(
+            "INSERT INTO live_fills"
+            "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
+            " VALUES (?,?,?,?,?,?,?)"
+            " ON CONFLICT(activity_id) DO UPDATE SET"
+            "  strategy = COALESCE(live_fills.strategy, excluded.strategy),"
+            "  broker_order_id = COALESCE(live_fills.broker_order_id,"
+            "                             excluded.broker_order_id)",
+            (
+                aid, boid,
+                strat_row["strategy"] if strat_row else None,
+                act["symbol"], signed, price,
+                act.get("transaction_time", ""),
+            ),
+        )
+    else:
+        conn.execute(
+            "INSERT OR IGNORE INTO live_activities"
+            "(activity_id, type, symbol, amount, ts, raw) VALUES (?,?,?,?,?,?)",
+            (
+                aid, act.get("activity_type", "UNKNOWN"), act.get("symbol"),
+                float(act["net_amount"]) if act.get("net_amount") is not None else None,
+                act.get("date") or act.get("transaction_time"),
+                json.dumps(act),
+            ),
+        )
+
+
+def _quarantine_activity(
+    conn: sqlite3.Connection, aid: str, act: dict, exc: Exception
+) -> None:
+    """Dead-letter a malformed (but id-bearing) activity so the loop can advance past it (#250).
+    Dedup is by `activity_id` (INSERT OR IGNORE), so re-pulling an overlap window never
+    double-quarantines the same item. Id-less activities never reach here — they fail closed."""
+    try:
+        raw = json.dumps(act, default=str)
+    except (TypeError, ValueError):
+        raw = repr(act)
+    conn.execute(
+        "INSERT OR IGNORE INTO live_activity_quarantine(activity_id, error, raw) VALUES (?,?,?)",
+        (aid, f"{type(exc).__name__}: {exc}", raw),
+    )
 
 
 def owned_open_order_ids(
