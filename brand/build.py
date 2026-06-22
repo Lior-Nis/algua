@@ -23,7 +23,7 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
 
 BRAND = Path(__file__).parent
-FONT_SRC = BRAND / ".cache" / "SpaceGrotesk-var.ttf"
+FONT_SRC = BRAND / ".cache" / "Outfit.ttf"
 
 # ---------------------------------------------------------------------------
 # §6 color tokens
@@ -36,10 +36,10 @@ TOK = {
     "mute": "#5C6B6E",
 }
 
-# Wordmark / glyph weights (Space Grotesk axis). The glyph IS the wordmark's
-# capital "A", so they share one weight — the icon is literally the A of Algua.
-WORDMARK_WGHT = 300        # Light — slim, sleek
-WORDMARK_TRACK = 12.0      # tracking in font units
+# Wordmark / glyph weights (Outfit axis, 100=thin .. 900). The glyph IS the
+# wordmark's capital "A", so they share one weight — the icon is literally the A.
+WORDMARK_WGHT = 160        # thin/hairline — slim and sleek
+WORDMARK_TRACK = 16.0      # tracking in font units (airier to match the thin weight)
 GLYPH_WGHT = WORDMARK_WGHT
 
 # Glyph placement in the 100-unit master.
@@ -47,11 +47,14 @@ APEX_Y = 8.0               # master-y of the cap top
 BASE_Y = 92.0             # master-y of the baseline (glyph feet)
 WL_BLEED = 0.4             # vertical bleed (master units) so no black crossbar peeks
 WL_BLEED_FONT = 4.0        # same, in font units (for the in-wordmark A)
-# The aqua waterline is the OCEAN: a horizontal line that runs well past the A's
-# legs (longer than the letter itself), so the sharp apex reads as a shark fin
-# breaking the surface. WL_EXTEND = how far past each leg the water reaches, in
-# font units. Capped so it clears the following 'l' in the wordmark.
-WL_EXTEND = 85.0
+
+# The aqua waterline is the OCEAN: a long, thin, tapered (trapezoid) horizontal
+# line that runs well past the A's legs, so the sharp apex reads as a fin breaking
+# the surface. All in font units.
+WL_EXTEND = 150.0          # how far past each leg the water reaches (long)
+WL_EXTEND_R = 120.0        # right side in the wordmark, capped to clear the 'l'
+WL_THICK = 34.0            # the line's thickness (thin)
+WL_TAPER = 60.0            # trapezoid: each end narrows this much from bottom to top
 
 # Apex sharpening: Space Grotesk's A has a flat top. We collapse that flat to a
 # true point; APEX_SHARPEN is how far (font units) the point rises above the cap
@@ -166,15 +169,17 @@ def _a_transform() -> tuple[float, float, float]:
     return s, tx, ty
 
 
-def _waterline_rect(fill: str) -> str:
-    """The aqua ocean line, in font-unit (y-up) coords — place inside a scaled,
-    y-flipped group. Runs WL_EXTEND past each leg so it is longer than the A."""
-    x0 = _GA["leg_l"] - WL_EXTEND
-    x1 = _GA["leg_r"] + WL_EXTEND
-    y0 = _GA["cb_bot"] - WL_BLEED_FONT
-    h = (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED_FONT
-    return (f'<rect x="{x0:.1f}" y="{y0:.1f}" width="{x1 - x0:.1f}" '
-            f'height="{h:.1f}" fill="{fill}"/>')
+def _waterline_rect(fill: str, ext_l: float = WL_EXTEND, ext_r: float = WL_EXTEND) -> str:
+    """The aqua ocean line — a long, thin, tapered trapezoid — in font-unit (y-up)
+    coords; place inside a scaled, y-flipped group. The bottom edge is the longer
+    one; each end angles in by WL_TAPER toward the top, for a horizon-in-perspective
+    feel. Runs ext_l / ext_r past the left / right legs (longer than the A)."""
+    cy = (_GA["cb_top"] + _GA["cb_bot"]) / 2
+    yb, yt = cy - WL_THICK / 2, cy + WL_THICK / 2
+    lb0, lb1 = _GA["leg_l"] - ext_l, _GA["leg_r"] + ext_r            # bottom (long)
+    lt0, lt1 = lb0 + WL_TAPER, lb1 - WL_TAPER                        # top (shorter)
+    pts = f"{lb0:.1f},{yb:.1f} {lb1:.1f},{yb:.1f} {lt1:.1f},{yt:.1f} {lt0:.1f},{yt:.1f}"
+    return f'<polygon points="{pts}" fill="{fill}"/>'
 
 
 def glyph_body(fg: str, *, mono_bg: str | None = None) -> str:
@@ -259,7 +264,7 @@ def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
     paths, _, _, _ = build_wordmark_paths()
     return (
         f'<g transform="translate({tx:.2f},{ty:.2f}) scale({s:.5f},{-s:.5f})" fill="{fg}">'
-        f'{paths}{_waterline_rect(TOK["aqua"])}'
+        f'{paths}{_waterline_rect(TOK["aqua"], ext_r=WL_EXTEND_R)}'
         f'</g>'
     )
 

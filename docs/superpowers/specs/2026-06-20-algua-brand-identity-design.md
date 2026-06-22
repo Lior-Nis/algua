@@ -40,7 +40,7 @@ appears.** Everything else is monochrome ink.
 
 ## 3. The glyph — "the fin"
 
-The glyph is the **real Space Grotesk capital `A`** (the same typeface as the
+The glyph is the **real Outfit capital `A`** (the same typeface as the
 wordmark) sitting in the **aqua waterline**. Using a true letterform — not
 hand-drawn strokes — gives the mark type-quality craft and ties it to the wordmark
 (the mark *is* the "A" in "Algua," accented). The aqua bar sits at the
@@ -56,19 +56,19 @@ surface; the sharp apex above it is the fin.
 
 Requirements:
 
-- **Real letterform.** The black shape is the actual Space Grotesk `A` outline,
-  at the **same weight as the wordmark (~300)** — it is the wordmark's own `A`
+- **Real letterform.** The black shape is the actual **Outfit `A`** outline, at
+  the **same thin weight as the wordmark (~160)** — it is the wordmark's own `A`
   extracted — baked to a `<path>`. It keeps the typeface's optical corrections; it
   is never a polyline.
-- **Sharpened apex.** Space Grotesk's `A` has a *flat* top. Both the outer apex
+- **Sharpened apex.** Whatever flat the font's `A` has on top, both the outer apex
   and the inner counter tip are collapsed to **true points**, and the outer point
   is **raised above the cap line** (`APEX_SHARPEN`, font units) for a crisp,
-  pointed peak. The same sharpened `A` is used in the wordmark, where the peak
-  overshoots the cap line the way a pointed cap optically should.
-- **Waterline = the ocean.** The aqua bar sits at the letterform's crossbar
-  height but is **drawn long — it runs `WL_EXTEND` font units past each leg**, so
-  it is wider than the A and reads as the sea surface, not a crossbar. In the
-  wordmark `WL_EXTEND` is capped so the line clears the following `l`.
+  pointed peak — the fin. The same sharpened `A` is used in the wordmark.
+- **Waterline = the ocean.** A **long, thin, tapered trapezoid** (not a rect): it
+  sits at the `A`'s crossbar height, runs `WL_EXTEND` font units past the legs
+  (longer than the letter), and its top edge is shorter than the bottom
+  (`WL_TAPER`) for a horizon-in-perspective feel. In the wordmark the right side
+  uses a smaller `WL_EXTEND_R` so the line clears the following `l`.
 - **Two colors only.** The mark is **black + the aqua waterline** — nothing else.
   (An earlier two-tone "submerged" tint, and earlier still a hand-drawn polyline
   caret, were both tried and dropped — the polyline read as crude SVG lines.)
@@ -84,21 +84,20 @@ The wordmark is `Algua` — **capital A, lowercase `lgua`** (title case). The
 capitalized initial gives the mark a name-like, proper-noun presence while the
 lowercase tail keeps it quiet and liquid, not all-caps loud.
 
-- **Skeleton:** drawn from a **geometric grotesk (Space Grotesk Light, ~300
-  weight)** for a slim, sleek line, then **converted to outlines** in the final
-  asset so the wordmark is font-independent (no dependency on the font being
-  installed/licensed at use).
-- **Letterforms:** airy tracking to match the light weight; flat terminals; Space
-  Grotesk's native geometric lowercase is kept as-is (the single-story `g` with
-  its hooked descender included). **The canvas must clear the descender** — the
-  `g` drops ~200 font units below the baseline, so the SVG height is computed as
-  `baseline + descent·scale + pad` (an earlier fixed height clipped the bottom of
-  the `g`'s tail).
-- **The capital "A" carries the waterline.** The wordmark's *own* leading `A` is
-  the mark: its crossbar is recolored to the aqua waterline (a band-clipped copy
-  of that `A`, so the aqua keeps the letterform's slanted edges). There is **no
-  separate glyph placed beside the wordmark** — that would duplicate the A. The
-  logo is simply `Algua` with its A accented.
+- **Skeleton:** drawn from the **geometric sans Outfit at a thin weight (~160)**
+  for a slim, sleek hairline, then **converted to outlines** in the final asset so
+  the wordmark is font-independent (no dependency on the font being installed at
+  use). Outfit replaced Space Grotesk, whose thinnest weight (300) wasn't slim
+  enough.
+- **Letterforms:** airy tracking to match the thin weight; Outfit's native
+  geometric lowercase is kept as-is (its **double-story `g`** included). **The
+  canvas must clear the descender** — the `g` drops ~200 font units below the
+  baseline, so the SVG height is computed as `baseline + descent·scale + pad` (a
+  fixed height once clipped the bottom of the `g`).
+- **The leading "A" carries the waterline.** The aqua trapezoid is drawn at the
+  wordmark's *own* leading `A` (at its crossbar height, running past its legs).
+  There is **no separate glyph placed beside the wordmark** — that would duplicate
+  the A. The logo is simply `Algua` with its A sitting in the ocean line.
 - **No underline.** The wordmark is otherwise plain black — no aqua baseline rule.
 - **Accent discipline:** the only aqua anywhere is that one crossbar.
 
@@ -156,8 +155,8 @@ Rules:
 
 | Role | Typeface | Notes |
 |---|---|---|
-| **Logotype** | Space Grotesk **Light (~300)**, outlined | slim/sleek; baked to paths, not a live font |
-| **Display / headings** (README, docs) | **Space Grotesk** | sharp, technical; matches the logotype skeleton |
+| **Logotype** | Outfit **Thin (~160)**, outlined | slim/sleek hairline; baked to paths, not a live font |
+| **Display / headings** (README, docs) | **Outfit** | clean geometric; matches the logotype |
 | **Body** | **Inter** (or system sans stack) | neutral, highly legible |
 | **Code / CLI** | **JetBrains Mono** | terminal-adjacent; fits the agent-first, CLI character |
 
@@ -168,20 +167,20 @@ licensing friction.
 
 ## 8. Construction geometry
 
-The glyph is **not eyeballed geometry** — it is the Space Grotesk `A` outline
-placed and measured programmatically (`brand/build.py`):
+The glyph is **not eyeballed geometry** — it is the Outfit `A` outline placed and
+measured programmatically (`brand/build.py`):
 
-- **Letterform source.** The `A` glyph (weight ~400) is extracted from the font,
-  baked to a `<path>`, and scaled into a **100-unit master**: cap top at `y=8`,
-  baseline at `y=92`, centered horizontally.
-- **Crossbar band, measured — not guessed.** The script finds the crossbar by
-  geometry: the inner counter's lower edge is the crossbar *top*; a downward
-  scanline of the outline finds where the legs split, giving the crossbar *bottom*.
-- **Waterline = recolored crossbar.** A band-clipped copy of the letterform,
-  filled aqua over that crossbar band, recolors the crossbar (and the leg slices
-  it crosses). Because it is clipped to the letterform, the aqua **inherits the
-  A's slanted leg edges** — it is never a rectangle laid on top. A small vertical
-  bleed (`WL_BLEED`) ensures no black crossbar peeks above/below the aqua.
+- **Letterform source.** The `A` glyph (thin weight ~160) is extracted from the
+  font, baked to a `<path>`, and scaled into a **100-unit master**: cap top at
+  `y=8`, baseline at `y=92`, centered horizontally.
+- **Crossbar height, measured.** The script finds the crossbar from the inner
+  counter / leg-split geometry; the waterline is centered on it.
+- **Waterline = a long thin trapezoid.** A separate aqua polygon at the crossbar
+  height, `WL_THICK` tall, running `WL_EXTEND` past each leg, with its top edge
+  shorter than the bottom by `WL_TAPER` (the trapezoid). In the wordmark the right
+  reach is capped (`WL_EXTEND_R`) to clear the `l`. (Earlier iterations recolored
+  the A's own crossbar to keep slanted edges; the explicit long trapezoid better
+  serves the ocean/fin reading.)
 - **Lockup sizing.** The glyph is sized from the wordmark's cap-height (not a
   fixed box), so it balances the text rather than overpowering it.
 
@@ -198,11 +197,10 @@ placed and measured programmatically (`brand/build.py`):
 
 **Don'ts:**
 
-- Don't recolor the letterforms aqua (aqua = the glyph's waterline band only).
+- Don't recolor the letterforms aqua (aqua = the waterline only).
 - Don't add gradients, drop shadows, glows, a second accent, or a third tone.
-- Don't lay the waterline back as a rectangle on top — it must be the letterform's
-  own crossbar recolored, keeping the slanted leg edges.
-- Don't rotate, tilt, or curve the waterline off horizontal.
+- Don't make the waterline a plain rect — keep it the long thin tapered trapezoid.
+- Don't rotate or curve the waterline off horizontal.
 - Don't add an aqua underline / baseline rule to the wordmark.
 - Don't substitute a hand-drawn / polyline "A" for the real letterform.
 - Don't stretch, condense, or re-track the wordmark.
