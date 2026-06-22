@@ -16,6 +16,7 @@ import json
 from functools import cache
 from pathlib import Path
 
+from fontTools.pens.boundsPen import ControlBoundsPen
 from fontTools.pens.recordingPen import RecordingPen
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.ttLib import TTFont
@@ -204,7 +205,7 @@ def svg(width: float, height: float, body: str, *, bg: str | None = None,
 # ---------------------------------------------------------------------------
 @cache
 def build_wordmark_paths(word: str = "Algua"):
-    """Return (path_d, advance_width, cap_height) in font units (y-up)."""
+    """Return (path_d, advance_width, cap_height, descent) in font units (y-up)."""
     font = TTFont(FONT_SRC)
     instantiateVariableFont(font, {"wght": WORDMARK_WGHT}, inplace=True)
     glyph_set = font.getGlyphSet()
@@ -215,26 +216,26 @@ def build_wordmark_paths(word: str = "Algua"):
     # sharpened apex overshoots it the way a pointed cap optically should.
     cap_height = _GA["cap0"]
 
-    # Use the double-story 'g' (stylistic set ss02). Space Grotesk's default 'g'
-    # is single-story with an open hook tail that reads as an unfinished lower
-    # part; ss02 has a proper closed lower loop.
-    alt = {"g": "g.ss02"}
-
     d_parts: list[str] = []
     x = 0.0
+    descent = 0.0
     for ch in word:
-        gname = alt.get(ch, cmap[ord(ch)])
+        gname = cmap[ord(ch)]
         if ch == "A":
             cmds = _GA["path"]                 # the sharpened A
         else:
             pen = SVGPathPen(glyph_set)
             glyph_set[gname].draw(pen)
             cmds = pen.getCommands()
+            bp = ControlBoundsPen(glyph_set)
+            glyph_set[gname].draw(bp)
+            if bp.bounds:
+                descent = max(descent, -bp.bounds[1])   # depth below baseline
         if cmds:
             d_parts.append(f'<path d="{cmds}" transform="translate({x:.1f},0)"/>')
         x += hmtx[gname][0] + WORDMARK_TRACK
     advance = x - WORDMARK_TRACK
-    return "".join(d_parts), advance, cap_height
+    return "".join(d_parts), advance, cap_height, descent
 
 
 def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
@@ -244,7 +245,7 @@ def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
     font units, same as the wordmark's first letter), so the aqua is the A's own
     crossbar — no duplicated glyph, no rectangle on top.
     """
-    paths, _, _ = build_wordmark_paths()
+    paths, _, _, _ = build_wordmark_paths()
     band_y = _GA["cb_bot"] - WL_BLEED_FONT
     band_h = (_GA["cb_top"] - _GA["cb_bot"]) + 2 * WL_BLEED_FONT
     clip = (f'<clipPath id="wlw"><rect x="0" y="{band_y:.1f}" '
@@ -260,12 +261,13 @@ def _wordmark_group(fg: str, tx: float, ty: float, s: float) -> str:
 
 def wordmark_svg(fg: str, *, bg: str | None = None, target_cap: float = 64.0,
                  pad: float = 16.0):
-    _, advance, cap = build_wordmark_paths()
+    _, advance, cap, descent = build_wordmark_paths()
     s = target_cap / cap
     word_w = advance * s
     baseline_y = pad + target_cap
     total_w = word_w + 2 * pad
-    total_h = baseline_y + pad
+    # Canvas must clear the descender (e.g. 'g') below the baseline, plus pad.
+    total_h = baseline_y + descent * s + pad
     body = _wordmark_group(fg, pad, baseline_y, s)
     return svg(round(total_w, 1), round(total_h, 1), body, bg=bg), total_w, total_h, word_w
 
@@ -274,11 +276,12 @@ def banner_dark():
     """README header: black field, the 'Algua' wordmark centred."""
     W, H = 1280.0, 360.0
     cap = 124.0
-    _, advance, fcap = build_wordmark_paths()
+    _, advance, fcap, descent = build_wordmark_paths()
     s = cap / fcap
     word_w = advance * s
     tx = (W - word_w) / 2
-    ty = H / 2 + cap * 0.42        # baseline; descenders sit just below centre
+    # Centre the full cap-to-descender ink block vertically.
+    ty = (H + cap) / 2 - descent * s / 2
     return svg(W, H, _wordmark_group(TOK["paper"], tx, ty, s), bg=TOK["ink"])
 
 

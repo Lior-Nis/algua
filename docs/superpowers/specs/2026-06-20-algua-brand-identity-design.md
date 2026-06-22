@@ -89,11 +89,12 @@ lowercase tail keeps it quiet and liquid, not all-caps loud.
   weight)** for a slim, sleek line, then **converted to outlines** in the final
   asset so the wordmark is font-independent (no dependency on the font being
   installed/licensed at use).
-- **Letterforms:** airy tracking to match the light weight; flat terminals; the
-  geometric lowercase is kept. The **`g` uses the double-story alternate
-  (`g.ss02`)** — Space Grotesk's default `g` is single-story with an open hook
-  tail that reads as a missing lower part; the double-story alternate has a proper
-  closed lower loop and pairs better with the round `a`.
+- **Letterforms:** airy tracking to match the light weight; flat terminals; Space
+  Grotesk's native geometric lowercase is kept as-is (the single-story `g` with
+  its hooked descender included). **The canvas must clear the descender** — the
+  `g` drops ~200 font units below the baseline, so the SVG height is computed as
+  `baseline + descent·scale + pad` (an earlier fixed height clipped the bottom of
+  the `g`'s tail).
 - **The capital "A" carries the waterline.** The wordmark's *own* leading `A` is
   the mark: its crossbar is recolored to the aqua waterline (a band-clipped copy
   of that `A`, so the aqua keeps the letterform's slanted edges). There is **no
