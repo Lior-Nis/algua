@@ -322,7 +322,7 @@ CREATE TABLE IF NOT EXISTS live_fill_cursor (
 );
 CREATE TABLE IF NOT EXISTS live_activity_quarantine (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    activity_id  TEXT UNIQUE,
+    activity_id  TEXT NOT NULL UNIQUE,
     error        TEXT NOT NULL,
     raw          TEXT NOT NULL,
     quarantined_ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))

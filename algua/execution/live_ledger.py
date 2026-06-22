@@ -169,14 +169,18 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
     try:
         max_id: str | None = None
         for act in activities:
-            aid: str | None = None
+            # A missing/empty `id` is NOT a quarantinable shape error: the id IS the cursor, so
+            # there is no safe way to advance past an id-less item, and quarantining it (NULL id)
+            # would re-quarantine the same item every cycle. Fail closed instead — matching the
+            # broker adapter, which raises on an id-less activity (alpaca_broker.py).
+            if not act.get("id"):
+                raise ValueError(f"activity missing 'id'; cannot advance cursor: {act!r}")
+            aid = str(act["id"])
             try:
-                aid = str(act["id"])
                 _ingest_one_activity(conn, act, aid)
             except (ValueError, KeyError, TypeError) as exc:
                 _quarantine_activity(conn, aid, act, exc)
-            if aid is not None:
-                max_id = aid if max_id is None or aid > max_id else max_id
+            max_id = aid if max_id is None or aid > max_id else max_id
         if max_id is not None:
             conn.execute(
                 "INSERT INTO live_fill_cursor(name, cursor) VALUES ('activities', ?) "
@@ -234,11 +238,11 @@ def _ingest_one_activity(conn: sqlite3.Connection, act: dict, aid: str) -> None:
 
 
 def _quarantine_activity(
-    conn: sqlite3.Connection, aid: str | None, act: dict, exc: Exception
+    conn: sqlite3.Connection, aid: str, act: dict, exc: Exception
 ) -> None:
-    """Dead-letter a malformed activity so the loop can advance past it (#250). Dedup is by
-    `activity_id` (INSERT OR IGNORE), so re-pulling an overlap window never double-quarantines an
-    id-bearing item; an id-less item (`activity_id` NULL) is recorded each time it is seen."""
+    """Dead-letter a malformed (but id-bearing) activity so the loop can advance past it (#250).
+    Dedup is by `activity_id` (INSERT OR IGNORE), so re-pulling an overlap window never
+    double-quarantines the same item. Id-less activities never reach here — they fail closed."""
     try:
         raw = json.dumps(act, default=str)
     except (TypeError, ValueError):

@@ -402,6 +402,23 @@ def test_v26_migration_is_idempotent(tmp_path):
     c2.close()
 
 
+def test_v28_upgrade_adds_quarantine_table(tmp_path):
+    # an existing v27 DB (no live_activity_quarantine) gains the dead-letter table on migrate (#250)
+    db = tmp_path / "r.db"
+    c1 = connect(db)
+    migrate(c1)
+    c1.execute("DROP TABLE live_activity_quarantine")
+    c1.execute("PRAGMA user_version=27")
+    c1.commit()
+    c1.close()
+    c2 = connect(db)
+    migrate(c2)
+    tables = {r["name"] for r in c2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "live_activity_quarantine" in tables
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 28
+    c2.close()
+
+
 def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
     # A gate_evaluations row inserted before v26 gets NULL FDR columns → excluded from stream.
     conn = connect(tmp_path / "r.db")

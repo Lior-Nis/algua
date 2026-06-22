@@ -121,6 +121,16 @@ def test_quarantine_dedups_on_replay(tmp_path):
     assert _quarantine_ids(conn) == ["p-1"]
 
 
+def test_id_less_activity_fails_closed(tmp_path):
+    # An id-less activity is NOT quarantined (the id IS the cursor — there is no safe advance past
+    # it, and a NULL activity_id would re-quarantine forever). It fails closed, like the adapter.
+    conn = _conn(tmp_path)
+    with pytest.raises(ValueError, match="missing 'id'"):
+        L.ingest_activities(conn, [{"activity_type": "DIV", "net_amount": "1", "date": "d"}])
+    assert conn.execute("SELECT COUNT(*) FROM live_activity_quarantine").fetchone()[0] == 0
+    assert L.fill_cursor(conn) is None  # batch rolled back, cursor untouched
+
+
 def test_infra_error_rolls_back_whole_batch(tmp_path, monkeypatch):
     # A non-shape error (e.g. a DB failure) is NOT quarantined: it propagates and rolls back the
     # whole batch, preserving the old all-or-nothing fail-closed behavior.
