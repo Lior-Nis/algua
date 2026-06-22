@@ -89,9 +89,11 @@ lowercase tail keeps it quiet and liquid, not all-caps loud.
   weight)** for a slim, sleek line, then **converted to outlines** in the final
   asset so the wordmark is font-independent (no dependency on the font being
   installed/licensed at use).
-- **Letterforms:** airy tracking to match the light weight; flat terminals; Space
-  Grotesk's native geometric lowercase (two-story `a`) is kept — it already reads
-  sharp and geometric, and altering it would abandon the stated skeleton.
+- **Letterforms:** airy tracking to match the light weight; flat terminals; the
+  geometric lowercase is kept. The **`g` uses the double-story alternate
+  (`g.ss02`)** — Space Grotesk's default `g` is single-story with an open hook
+  tail that reads as a missing lower part; the double-story alternate has a proper
+  closed lower loop and pairs better with the round `a`.
 - **The capital "A" carries the waterline.** The wordmark's *own* leading `A` is
   the mark: its crossbar is recolored to the aqua waterline (a band-clipped copy
   of that `A`, so the aqua keeps the letterform's slanted edges). There is **no

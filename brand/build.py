@@ -215,10 +215,15 @@ def build_wordmark_paths(word: str = "Algua"):
     # sharpened apex overshoots it the way a pointed cap optically should.
     cap_height = _GA["cap0"]
 
+    # Use the double-story 'g' (stylistic set ss02). Space Grotesk's default 'g'
+    # is single-story with an open hook tail that reads as an unfinished lower
+    # part; ss02 has a proper closed lower loop.
+    alt = {"g": "g.ss02"}
+
     d_parts: list[str] = []
     x = 0.0
     for ch in word:
-        gname = cmap[ord(ch)]
+        gname = alt.get(ch, cmap[ord(ch)])
         if ch == "A":
             cmds = _GA["path"]                 # the sharpened A
         else:
