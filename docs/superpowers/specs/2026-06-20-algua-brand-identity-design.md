@@ -60,6 +60,11 @@ Requirements:
   at the **same weight as the wordmark (~300)** — it is the wordmark's own `A`
   extracted — baked to a `<path>`. It keeps the typeface's optical corrections; it
   is never a polyline.
+- **Sharpened apex.** Space Grotesk's `A` has a *flat* top. Both the outer apex
+  and the inner counter tip are collapsed to **true points**, and the outer point
+  is **raised above the cap line** (`APEX_SHARPEN`, font units) for a crisp,
+  pointed peak. The same sharpened `A` is used in the wordmark, where the peak
+  overshoots the cap line the way a pointed cap optically should.
 - **Crossbar = waterline.** The aqua bar is positioned and sized to the
   letterform's own crossbar band, replacing it. The result reads as a crossbar-less
   A whose crossbar is the waterline.

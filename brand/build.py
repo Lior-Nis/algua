@@ -16,7 +16,6 @@ import json
 from functools import cache
 from pathlib import Path
 
-from fontTools.pens.boundsPen import ControlBoundsPen
 from fontTools.pens.recordingPen import RecordingPen
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.ttLib import TTFont
@@ -48,6 +47,11 @@ BASE_Y = 92.0             # master-y of the baseline (glyph feet)
 WL_BLEED = 0.4             # vertical bleed (master units) so no black crossbar peeks
 WL_BLEED_FONT = 4.0        # same, in font units (for the in-wordmark A)
 
+# Apex sharpening: Space Grotesk's A has a flat top. We collapse that flat to a
+# true point; APEX_SHARPEN is how far (font units) the point rises above the cap
+# line — larger = a taller, sharper peak. 0 = a clean point exactly at cap height.
+APEX_SHARPEN = 70.0
+
 
 def _extract_A() -> dict:
     """The real 'A' outline + its crossbar band, measured in font units."""
@@ -56,10 +60,6 @@ def _extract_A() -> dict:
     gs = font.getGlyphSet()
     gname = font.getBestCmap()[ord("A")]
     adv = font["hmtx"][gname][0]
-
-    pen = SVGPathPen(gs)
-    gs[gname].draw(pen)
-    path_d = pen.getCommands()
 
     rp = RecordingPen()
     gs[gname].draw(rp)
@@ -91,6 +91,35 @@ def _extract_A() -> dict:
 
     outer = max(contours, key=area)
     inner = min(contours, key=area)           # the counter (triangular hole)
+    cap0 = bbox(outer)[3]                      # original cap height (flat-top y)
+
+    def sharpen_apex(c: list, rise: float) -> list:
+        """Collapse the flat top (two topmost points) into one point, raised."""
+        top_y = max(p[1] for p in c)
+        tops = [i for i, p in enumerate(c) if abs(p[1] - top_y) < 1.0]
+        peak = (sum(c[i][0] for i in tops) / len(tops), top_y + rise)
+        out: list = []
+        placed = False
+        for i, p in enumerate(c):
+            if i in tops:
+                if not placed:
+                    out.append(peak)
+                    placed = True
+            else:
+                out.append(p)
+        return out
+
+    # Outer apex rises by APEX_SHARPEN; the inner counter tip just closes to a
+    # point (keeps the solid peak above it, which is what reads as "sharp").
+    outer = sharpen_apex(outer, APEX_SHARPEN)
+    inner = sharpen_apex(inner, 0.0)
+
+    def to_path(c: list) -> str:
+        head = f'M {c[0][0]:.1f} {c[0][1]:.1f}'
+        rest = "".join(f' L {x:.1f} {y:.1f}' for x, y in c[1:])
+        return head + rest + " Z"
+
+    path_d = to_path(outer) + to_path(inner)
     oxmin, oymin, oxmax, oymax = bbox(outer)
     cb_top = bbox(inner)[1]                    # counter bottom = crossbar top edge
 
@@ -114,7 +143,7 @@ def _extract_A() -> dict:
         y -= 2
     legs = crossings(outer, (cb_top + cb_bot) / 2)
     return {
-        "path": path_d, "adv": adv, "ymin": oymin, "ymax": oymax,
+        "path": path_d, "adv": adv, "ymin": oymin, "ymax": oymax, "cap0": cap0,
         "cx": (oxmin + oxmax) / 2, "cb_top": cb_top, "cb_bot": cb_bot,
         "leg_l": legs[0], "leg_r": legs[-1],
     }
@@ -182,17 +211,20 @@ def build_wordmark_paths(word: str = "Algua"):
     cmap = font.getBestCmap()
     hmtx = font["hmtx"]
 
-    bp = ControlBoundsPen(glyph_set)
-    glyph_set[cmap[ord("A")]].draw(bp)
-    cap_height = bp.bounds[3]
+    # Cap line is the original (flat-top) A height, so other letters align and the
+    # sharpened apex overshoots it the way a pointed cap optically should.
+    cap_height = _GA["cap0"]
 
     d_parts: list[str] = []
     x = 0.0
     for ch in word:
         gname = cmap[ord(ch)]
-        pen = SVGPathPen(glyph_set)
-        glyph_set[gname].draw(pen)
-        cmds = pen.getCommands()
+        if ch == "A":
+            cmds = _GA["path"]                 # the sharpened A
+        else:
+            pen = SVGPathPen(glyph_set)
+            glyph_set[gname].draw(pen)
+            cmds = pen.getCommands()
         if cmds:
             d_parts.append(f'<path d="{cmds}" transform="translate({x:.1f},0)"/>')
         x += hmtx[gname][0] + WORDMARK_TRACK
