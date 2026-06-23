@@ -1177,6 +1177,19 @@ class SqliteStrategyRepository:
 
             updated_rec: StrategyRecord | None = None
             if final_passed:
+                # #246: re-assert the source-stage invariant INSIDE this locked critical section.
+                # The CAS below only pins WHERE stage=rec.stage (the caller's post-walk_forward
+                # re-read). If a concurrent transition drifted the strategy off BACKTESTED before
+                # that re-read — e.g. to a terminal RETIRED — the CAS would happily apply a
+                # forbidden RETIRED->CANDIDATE edge (ALLOWED_TRANSITIONS forbids it). Mirror
+                # promotion_preflight here, atomic with the CAS, so the gate can never resurrect a
+                # drifted/terminal stage. Require exactly BACKTESTED (not validate_transition, which
+                # permits the legal PAPER->CANDIDATE back-step) — promotion_preflight's reasoning.
+                if rec.stage is not Stage.BACKTESTED:
+                    raise TransitionError(
+                        f"research promote requires stage backtested at promote time, got "
+                        f"{rec.stage.value} (source drifted off backtested under concurrency since "
+                        f"preflight); refusing to promote")
                 updated_rec = self._apply_transition_locked(
                     rec, Stage.CANDIDATE, actor, reason,
                     code_hash=gate_row["code_hash"], config_hash=gate_row["config_hash"],

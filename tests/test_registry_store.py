@@ -1203,6 +1203,36 @@ def test_fdr_gate_non_binding_fails_on_provisional_fail(repo):
     assert outcome.updated_rec is None
 
 
+def test_fdr_gate_refuses_promote_from_drifted_source_stage(repo):
+    # #246: if the source stage drifted off BACKTESTED before the post-walk_forward re-read (e.g. a
+    # concurrent transition to terminal RETIRED), the stage CAS would otherwise pin WHERE stage=
+    # RETIRED and apply a forbidden RETIRED->CANDIDATE edge. The source-stage invariant is now
+    # re-asserted INSIDE the locked critical section, so the gate refuses and the whole tx rolls
+    # back (no promotion, no gate row). Before the fix this resurrected a terminal strategy.
+    repo.add("s")
+    transition_strategy(repo, "s", Stage.BACKTESTED, Actor.AGENT, "setup")
+    drifted = transition_strategy(repo, "s", Stage.RETIRED, Actor.HUMAN, "retired")
+    assert drifted.stage is Stage.RETIRED
+    with pytest.raises(TransitionError, match="backtested"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            drifted, gate_row=_make_gate_row(passed=True), p_value=None,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert repo.get("s").stage is Stage.RETIRED            # not resurrected to candidate
+    assert repo.connection.execute(                         # gate row rolled back with the tx
+        "SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
+
+
+def test_fdr_gate_promotes_from_backtested_source(repo):
+    # Guard against over-restriction: a genuine BACKTESTED source still promotes to candidate.
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, gate_row=_make_gate_row(passed=True), p_value=None,
+        level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert outcome.final_passed is True
+    assert outcome.updated_rec is not None and outcome.updated_rec.stage is Stage.CANDIDATE
+    assert repo.get("s").stage is Stage.CANDIDATE
+
+
 def test_fdr_gate_binding_accept_promotes_when_provisional_passes(repo):
     rec = _at_backtested(repo)
     # p=0.03 ≤ level_accept(1, []) = 1.0 → FDR accepts → final_passed=True
