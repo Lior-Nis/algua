@@ -25,7 +25,6 @@ from algua.execution.live_reconcile import attributed_live_net
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
-    clear_derived_positions,
     clear_nav_peak,
     clear_peak_equity,
     client_order_id,
@@ -327,7 +326,12 @@ def trade_tick(
             # aborts before any order goes out (#21).
             should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
             peak_equity=get_peak_equity(conn, name),
-            derived_positions=derive_positions(conn, name),
+            # No DB-vs-broker reconcile in this lane: its only position-belief source would be
+            # `paper_fills`, which the wall-clock trade-tick lane never writes (only the SimBroker
+            # `paper run` replay does). Feeding the always-empty derived belief tripped a phantom
+            # RiskBreach('reconcile') against the real Alpaca-paper book as soon as an order filled,
+            # flattening a healthy strategy (#249). A real reconcile needs the wall-clock paper fill
+            # ledger, which is deferred by spec; until then run_tick runs in its no-reconcile mode.
         )
         try:
             result = run_tick(strategy, broker, provider, utc(start), utc(end),
@@ -351,9 +355,6 @@ def trade_tick(
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
-            else:
-                # Close succeeded: reset the derived belief so the next reconcile starts flat.
-                clear_derived_positions(conn, name)
             payload = breach_payload(exc.detail, kind=exc.kind,
                                       liquidation_submitted=liquidation_submitted,
                                       closed_symbols=symbols)
@@ -494,8 +495,6 @@ def flatten(
         except BrokerError as exc:
             emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
-        # Close succeeded: reset the derived belief so a later trade-tick reconcile starts flat.
-        clear_derived_positions(conn, name)
     # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
     emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True,
              "closed_symbols": symbols}))

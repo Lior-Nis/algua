@@ -266,6 +266,62 @@ def test_paper_flatten_closes_and_trips(monkeypatch):
     assert show["kill_switch"]["tripped"] is True
 
 
+def test_trade_tick_does_not_reconcile_against_unwritten_fills(monkeypatch):
+    # #249: the wall-clock trade-tick lane must NOT feed derive_positions() into run_tick. That
+    # belief comes from paper_fills, which this lane never writes, so it is permanently empty and
+    # tripped a phantom RiskBreach('reconcile') against the real broker book once an order filled.
+    # Assert the lane runs run_tick in its no-reconcile mode (derived_positions is None).
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    seen = {}
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        seen["derived_positions"] = hooks.derived_positions
+        return TickResult(decision_ts=datetime(2023, 6, 1, tzinfo=UTC), target_weights={},
+                          positions_before={"AAA": 7.0}, submitted=[], peak_equity=100_000.0)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    assert seen["derived_positions"] is None  # no reconcile wired in this lane
+
+
+def test_paper_flatten_does_not_wipe_simbroker_fills(monkeypatch):
+    # #249 cleanup: flatten no longer calls clear_derived_positions, so it can't corrupt the
+    # SimBroker `paper run` lane's paper_fills (a cross-lane side effect of the removed reconcile).
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import derive_positions
+    from algua.registry.db import connect, migrate
+    name = "cross_sectional_momentum"
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        cur = conn.execute(
+            "INSERT INTO paper_orders(strategy, symbol, side, target_weight, decision_ts, "
+            "submitted_ts, status, broker_order_id) VALUES (?,?,?,?,?,?,?,?)",
+            (name, "AAA", "buy", 0.5, "2023-01-01T00:00:00Z", "2023-01-01T00:00:00Z",
+             "filled", "bo-1"),
+        )
+        conn.execute(
+            "INSERT INTO paper_fills(order_id, symbol, qty, price, fill_ts) VALUES (?,?,?,?,?)",
+            (cur.lastrowid, "AAA", 5.0, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        conn.commit()
+    flat = _FlattenBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: flat)
+    assert runner.invoke(app, ["paper", "flatten", name]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        assert derive_positions(conn, name) == {"AAA": 5.0}  # SimBroker belief survives flatten
+
+
 def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch):
     """A certified forward_tested strategy still holds paper positions while awaiting the go-live
     signature — emergency flatten must work there too (#124 GATE-2)."""
@@ -536,10 +592,6 @@ def test_paper_flatten_closes_dropped_symbol_not_siblings(monkeypatch, tmp_path)
     assert "ZZZ" in closed                     # held-but-dropped symbol IS closed
     assert "SIB" not in closed                 # sibling's symbol is NOT closed
     assert "ZZZ" in json.loads(result.stdout)["closed_symbols"]
-
-    # the strategy's derived belief is reset to flat after the close
-    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
-    assert show["positions"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1028,7 +1080,7 @@ def test_paper_promote_missing_creds_json_error(monkeypatch):
     assert "ALGUA_ALPACA_API_KEY" in payload["error"]
 
 
-def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch, tmp_path):
+def test_trade_tick_breach_flattens_dropped_symbol(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
@@ -1055,9 +1107,6 @@ def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch
     assert payload["kind"] == "drawdown" and payload["kill_switch"] == "tripped"
     assert "ZZZ" in payload["closed_symbols"]      # held-but-dropped symbol was flattened
     assert "ZZZ" in broker.closed_symbols
-    # belief cleared after the successful flatten
-    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
-    assert show["positions"] == {}
 
 
 # ---------------------------------------------------------------------------
