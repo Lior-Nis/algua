@@ -264,6 +264,24 @@ def test_clear_staging_sweeps_old_dir_with_unheld_lease(tmp_path):
     assert not lock_path.exists()  # orphan marker cleaned too
 
 
+def test_clear_staging_fails_closed_when_lock_probe_errors(tmp_path):
+    # #255 (Codex GATE-2): _lock_held must FAIL CLOSED on a probe error that isn't "file absent".
+    # A .lock that is a directory makes os.open(O_RDWR) raise IsADirectoryError (an OSError, not
+    # FileNotFoundError) — cleanup must treat that as "can't prove abandoned" and spare the dir.
+    import os as _os
+    import time as _time
+    store = DataStore(tmp_path)
+    staging = tmp_path / "snapshots" / "_staging"
+    dirpath = staging / "feed"
+    dirpath.mkdir(parents=True)
+    (staging / "feed.lock").mkdir()  # unprobeable marker (a dir, not a lock file)
+    old = _time.time() - 7200
+    for p in (dirpath, staging / "feed.lock"):
+        _os.utime(p, (old, old))
+    store.clear_staging()
+    assert dirpath.exists()  # spared: an unprobeable lease marker is not provably abandoned
+
+
 def test_streamed_ingest_leaves_no_lock_residue(tmp_path):
     # the sibling lease marker is removed in the finally; a successful ingest leaves no .lock cruft.
     store = DataStore(tmp_path)
