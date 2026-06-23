@@ -1222,6 +1222,23 @@ def test_fdr_gate_refuses_promote_from_drifted_source_stage(repo):
         "SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
 
 
+def test_fdr_gate_drift_rollback_does_not_advance_fdr_stream(repo):
+    # #246 (Codex GATE-2): on the binding-FDR path, the drift assertion must roll back the inserted
+    # binding gate row AND leave the LORD++ alpha-wealth stream position untouched — else a refused
+    # promote would silently spend FDR alpha-wealth (corrupting the ledger) on a non-event.
+    repo.add("s")
+    transition_strategy(repo, "s", Stage.BACKTESTED, Actor.AGENT, "setup")
+    drifted = transition_strategy(repo, "s", Stage.RETIRED, Actor.HUMAN, "retired")
+    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    with pytest.raises(TransitionError, match="backtested"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            drifted, gate_row=_make_gate_row(passed=True), p_value=0.01,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")  # binding + would-pass
+    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])  # stream untouched
+    assert repo.connection.execute(
+        "SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
+
+
 def test_fdr_gate_promotes_from_backtested_source(repo):
     # Guard against over-restriction: a genuine BACKTESTED source still promotes to candidate.
     rec = _at_backtested(repo)
