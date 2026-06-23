@@ -178,6 +178,29 @@ def test_near_constant_nonzero_regime_dropped_not_rubber_stamped():
     res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
     assert res.per_regime_sharpes[0] is None  # dropped, NOT counted as a ~1e16-Sharpe survivor
     assert res.n_surviving == 2
+    assert res.passed is True  # two real regimes pass; the bogus +Sharpe regime is neither
+
+
+def test_near_constant_losing_regime_fails_closed_not_loosened():
+    """#248 (Codex GATE-2): a degenerate regime that LOST money must FAIL the gate, not be silently
+    dropped. The old `== 0.0` code kept its huge-NEGATIVE Sharpe, which failed `all(sh >= 0)`; an
+    unconditional drop would flip that to a pass (a LOOSENING). A sub-floor regime with negative
+    cumulative return forces passed=False, and its explosive Sharpe is never recorded (#268)."""
+    import pandas as pd
+
+    from algua.backtest.metrics import metrics_from_returns
+    m = metrics_from_returns(pd.Series([-0.0001] * 30))
+    assert 0.0 < m["ann_volatility"] < MIN_REGIME_VOL  # degenerate (sub-floor) vol
+    assert m["sharpe"] < -1e6                            # huge NEGATIVE Sharpe (a real steady loss)
+
+    s = [
+        RegimeSlice(0, [-0.0001] * 30, 30, None),      # constant LOSS -> degenerate -> must fail
+        RegimeSlice(1, [0.01, -0.01] * 15, 30, None),  # real vol -> would survive
+        RegimeSlice(2, [0.02, -0.005] * 15, 30, None), # real vol -> would survive
+    ]
+    res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
+    assert res.passed is False                  # fail closed on the degenerate loss (no loosening)
+    assert res.per_regime_sharpes[0] is None    # explosive -1e16 Sharpe never recorded (#268)
 
 
 # ---------------------------------------------------------------------------
