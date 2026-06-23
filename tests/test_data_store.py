@@ -140,6 +140,10 @@ def test_ingest_bars_writes_parquet_snapshot_with_provenance(tmp_path):
     assert rec.metadata.source_metadata == {"fixture": "true"}
     saved = pd.read_parquet(tmp_path / "data" / rec.data_path)
     assert list(saved["close"]) == [100.0, 101.0]
+    # the leased staging dir + its sibling .lock marker are both cleaned (#255 lease covers
+    # non-streamed ingest_bars too, not just the streamed path)
+    staging = tmp_path / "data" / "snapshots" / "_staging"
+    assert not staging.exists() or list(staging.iterdir()) == []
 
 
 def test_ingest_bars_rejects_frames_outside_bar_schema(tmp_path):
