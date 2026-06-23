@@ -48,7 +48,14 @@ MIN_FUNNEL_FLOOR_STRATEGIES = 5
 # Multi-regime robustness (#221, Phase 3 Slice 4). Protected — relaxing weakens the gate.
 N_REGIMES = 3                  # market-volatility tertiles (low/medium/high)
 MIN_REGIME_OBSERVATIONS = 21   # per-regime power floor (underpowered regimes are dropped)
-MIN_REGIME_SHARPE = 0.0        # relaxed per-regime Sharpe bar (paired with zero-vol drop)
+MIN_REGIME_SHARPE = 0.0        # relaxed per-regime Sharpe bar (paired with the vol-floor drop)
+# Annualized-vol floor: a regime at/below this is "effectively constant" and is DROPPED (not
+# counted as a surviving pass). An exact `== 0.0` test failed open (#248): a constant-but-NONZERO
+# return series produces a catastrophic-cancellation residual vol (~1e-18 — not exactly 0.0) and a
+# Sharpe ~1e16 that trivially clears MIN_REGIME_SHARPE=0.0. The floor sits orders of magnitude above
+# float64 cancellation noise and far below any real strategy vol (>=~1e-2). Protected — raising it
+# weakens the gate. `not (vol > MIN_REGIME_VOL)` also drops NaN vol (another degenerate case).
+MIN_REGIME_VOL = 1e-9
 MIN_REGIME_OVERLAP_BARS = 63   # min holdout dates with a valid trailing market-vol for the check
 VOL_ROLLING_WINDOW = 21        # trailing bars for the benchmark realized-vol estimate
 
@@ -75,8 +82,9 @@ class RegimeSlice(NamedTuple):
     """One volatility-tertile regime slice of the holdout period.
 
     ``dropped_reason`` is None when the slice is usable; ``"too_short"`` when it has fewer
-    than the observation floor; ``"zero_vol"`` when ann_volatility==0.0 in the robustness
-    check (set by ``regime_robustness_check``, not by ``regime_splits``).
+    than the observation floor; ``"zero_vol"`` when ann_volatility <= MIN_REGIME_VOL (effectively
+    constant, or NaN) in the robustness check (set by ``regime_robustness_check``, not
+    ``regime_splits``).
     """
 
     regime_index: int
@@ -210,9 +218,10 @@ def regime_robustness_check(
 
     Drop rules (in order):
     - ``n_bars < min_obs`` → ``dropped_reason = "too_short"``; ``per_regime_sharpe = None``.
-    - ``ann_volatility == 0.0`` → ``dropped_reason = "zero_vol"``; ``per_regime_sharpe = None``.
-      A zero-vol regime gives sharpe=0.0 which would falsely pass ``MIN_REGIME_SHARPE=0.0``,
-      so it must be dropped and NOT counted as a surviving pass.
+    - ``ann_volatility <= MIN_REGIME_VOL`` (effectively constant) or NaN → ``dropped_reason =
+      "zero_vol"``; ``per_regime_sharpe = None``. Such a regime's Sharpe is meaningless (and a
+      near-constant series' Sharpe explodes to ~1e16), so it would falsely pass
+      ``MIN_REGIME_SHARPE=0.0``; it must be dropped and NOT counted as a surviving pass (#248).
 
     Passing rule:
     - ``n_surviving < 2`` → ``passed = False`` (cannot establish multi-regime evidence).
@@ -229,7 +238,10 @@ def regime_robustness_check(
             per_regime_sharpes.append(None)
             continue
         m = metrics_from_returns(pd.Series(s.returns))
-        if m["ann_volatility"] == 0.0:
+        # Drop an effectively-constant (or NaN-vol) regime: its Sharpe is meaningless and would
+        # trivially clear MIN_REGIME_SHARPE=0.0. `not (vol > floor)` catches a catastrophic-
+        # cancellation residual vol (~1e-18 != 0.0) AND NaN, where `== 0.0` failed open (#248).
+        if not (m["ann_volatility"] > MIN_REGIME_VOL):
             per_regime_sharpes.append(None)
             continue
         sharpe = m["sharpe"]

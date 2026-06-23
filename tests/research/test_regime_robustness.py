@@ -10,6 +10,7 @@ from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
     MIN_REGIME_OBSERVATIONS,
     MIN_REGIME_SHARPE,
+    MIN_REGIME_VOL,
     N_REGIMES,
     GateCriteria,
     RegimeSlice,
@@ -32,6 +33,7 @@ def test_constants():
     assert N_REGIMES == 3
     assert MIN_REGIME_OBSERVATIONS == 21
     assert MIN_REGIME_SHARPE == 0.0
+    assert MIN_REGIME_VOL == 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +153,31 @@ def test_zero_vol_regime_dropped_not_passed():
     assert res.n_surviving == 2
     assert res.per_regime_sharpes[0] is None  # dropped -> None
     assert res.n_attempted == 3
+
+
+def test_near_constant_nonzero_regime_dropped_not_rubber_stamped():
+    """#248: a constant-but-NONZERO series produces a catastrophic-cancellation residual vol
+    (~4e-19 — NOT exactly 0.0) and a Sharpe ~1e16. The old `== 0.0` drop let it through and counted
+    that ~1e16 Sharpe as a surviving pass; the MIN_REGIME_VOL floor must DROP it instead, so it
+    provides no false robustness signal.
+    """
+    import pandas as pd
+
+    from algua.backtest.metrics import metrics_from_returns
+    # The fixture genuinely has a tiny, NONZERO, sub-floor vol (and an absurd Sharpe) — i.e. it is
+    # exactly the case the exact-zero test failed open on.
+    m = metrics_from_returns(pd.Series([0.0001] * 30))
+    assert 0.0 < m["ann_volatility"] < MIN_REGIME_VOL
+    assert m["sharpe"] > 1e6
+
+    s = [
+        RegimeSlice(0, [0.0001] * 30, 30, None),       # constant nonzero -> residual vol -> DROP
+        RegimeSlice(1, [0.01, -0.01] * 15, 30, None),  # real vol -> survives
+        RegimeSlice(2, [0.02, -0.005] * 15, 30, None), # real vol -> survives
+    ]
+    res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
+    assert res.per_regime_sharpes[0] is None  # dropped, NOT counted as a ~1e16-Sharpe survivor
+    assert res.n_surviving == 2
 
 
 # ---------------------------------------------------------------------------
