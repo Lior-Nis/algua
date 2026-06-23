@@ -217,8 +217,11 @@ class StrategyRepository(Protocol):
         re-checks the full token predicate (identity, actor, passed, unconsumed, TTL) against the
         caller-supplied ``code_hash``/``config_hash``/``dependency_hash`` at consume time.
 
-        When ``revoke_allocation`` is set, the strategy's active live allocation is revoked in the
-        SAME transaction as the stage change (used by the live -> dormant bench edge)."""
+        When ``revoke_allocation`` is set (the live -> dormant bench edge), the implementation MUST,
+        in ONE atomic write transaction (write lock taken up front): re-assert the strategy is flat
+        (no open live positions), revoke its active live allocation, and apply the stage CAS. Doing
+        the flatness check outside that transaction reopens the #247 TOCTOU (a fill landing between
+        the check and the CAS orphans a position on a now-dormant strategy)."""
         ...
 
     def record_approval(

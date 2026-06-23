@@ -58,17 +58,10 @@ def transition_strategy(
         consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
     elif rec.stage is Stage.LIVE and target is Stage.DORMANT:
         # Bench wind-down wall (#125): a live strategy must be flat before resting, else its open
-        # positions are orphaned (run-all only iterates Stage.LIVE). The check is on this single
-        # policy path so it cannot be bypassed; the revoke happens atomically in apply_transition.
-        # believed_positions is imported lazily — same registry->execution pattern the live
-        # certificate verifier already uses in this module.
-        from algua.execution.live_ledger import believed_positions
-        conn = getattr(repo, "connection", None)
-        if conn is None:
-            raise TransitionError("benching a live strategy needs a sqlite-backed repository")
-        if believed_positions(conn, name):
-            raise TransitionError(
-                f"{name} is not flat (open live positions); flatten before benching to dormant")
+        # positions are orphaned (run-all only iterates Stage.LIVE). The flatness check is enforced
+        # ATOMICALLY with the allocation revoke + stage CAS inside apply_transition (#247): doing it
+        # here as a separate autocommit read left a TOCTOU where a live fill committed between the
+        # check and the CAS would orphan a position on a now-dormant strategy.
         revoke_allocation = True
     elif rec.stage is Stage.PAPER and target == Stage.FORWARD_TESTED:
         # Identity is pinned for BOTH actors: the agent's token consume re-checks it inside
