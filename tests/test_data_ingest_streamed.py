@@ -282,6 +282,21 @@ def test_clear_staging_fails_closed_when_lock_probe_errors(tmp_path):
     assert dirpath.exists()  # spared: an unprobeable lease marker is not provably abandoned
 
 
+def test_new_leased_staging_cleans_up_on_lock_failure(tmp_path, monkeypatch):
+    # #255 (Codex round 2): the lease helper must be self-cleaning if flock fails before the
+    # caller's try/finally takes over — no leaked fd, no orphan dir/marker residue.
+    store = DataStore(tmp_path)
+
+    def _boom(*_a, **_k):
+        raise OSError("flock unsupported here")
+
+    monkeypatch.setattr("algua.data.store.fcntl.flock", _boom)
+    with pytest.raises(OSError, match="flock"):
+        store._new_leased_staging()
+    staging = tmp_path / "snapshots" / "_staging"
+    assert not staging.exists() or list(staging.iterdir()) == []  # nothing left behind
+
+
 def test_streamed_ingest_leaves_no_lock_residue(tmp_path):
     # the sibling lease marker is removed in the finally; a successful ingest leaves no .lock cruft.
     store = DataStore(tmp_path)

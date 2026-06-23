@@ -483,16 +483,27 @@ class DataStore:
             os.close(fd)
 
     def _new_leased_staging(self) -> tuple[Path, int, Path]:
-        """Create a unique `_staging/<uuid>` dir and take an exclusive `flock` lease on its SIBLING
-        `<uuid>.lock` marker, held until `_release_leased_staging`. The marker is a sibling (not
-        inside the dir) so `_commit_bars_dir`/`os.replace` move a pristine snapshot dir. Used by
-        EVERY staging writer so `clear_staging` can never rmtree any of them mid-write (#255). The
-        unique path means LOCK_EX never contends; the kernel frees the lease on writer death."""
-        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = staging_dir.with_name(staging_dir.name + ".lock")
+        """Take an exclusive `flock` lease on a unique SIBLING `<uuid>.lock` marker, THEN create the
+        `_staging/<uuid>` dir under it — so there is never an unleased-dir window (#255). The marker
+        is a sibling (not inside the dir) so `_commit_bars_dir`/`os.replace` move a clean snapshot
+        dir. Used by EVERY staging writer so `clear_staging` can never rmtree any of them mid-write;
+        the lease is released by `_release_leased_staging` (caller's finally). The unique path means
+        LOCK_EX never contends; the kernel frees the lease on writer death. Self-cleaning: a failure
+        before the caller takes over closes the fd and removes the marker/dir, leaking nothing."""
+        staging_root = self.data_dir / "snapshots" / "_staging"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        name = uuid.uuid4().hex
+        lock_path = staging_root / f"{name}.lock"
         lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            staging_dir = staging_root / name
+            staging_dir.mkdir()
+        except BaseException:
+            os.close(lock_fd)
+            lock_path.unlink(missing_ok=True)
+            shutil.rmtree(staging_root / name, ignore_errors=True)
+            raise
         return staging_dir, lock_fd, lock_path
 
     @staticmethod
