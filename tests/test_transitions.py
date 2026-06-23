@@ -1,5 +1,8 @@
+import sqlite3
+
 import pytest
 
+import algua.execution.live_ledger as live_ledger
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry import allocations
 from algua.registry.db import connect, migrate
@@ -97,3 +100,31 @@ def test_apply_transition_revoke_is_top_level_only(tmp_path):
                                   revoke_allocation=True)
     finally:
         conn.rollback()
+
+
+def test_bench_takes_write_lock_before_flatness_read(tmp_path, monkeypatch):
+    # #247: prove the fix uses BEGIN IMMEDIATE — the write lock must be acquired BEFORE the
+    # flatness read, so a concurrent fill writer cannot commit between the read and the CAS. A
+    # second connection holds the writer lock; the bench must block (and time out) on its OWN
+    # BEGIN IMMEDIATE before believed_positions is ever called. If this regressed to a deferred
+    # `with self._conn:`, the read would run first (read_seen=True) and only block later at the CAS.
+    repo, conn = _live_strategy(tmp_path)
+    conn.execute("PRAGMA busy_timeout=200")  # fail fast instead of the default 5s
+    other = connect(tmp_path / "reg.db")
+    other.execute("BEGIN IMMEDIATE")  # hold the writer lock from a second connection
+    try:
+        read_seen = {"v": False}
+        real = live_ledger.believed_positions
+
+        def _spy(c, n):
+            read_seen["v"] = True
+            return real(c, n)
+
+        monkeypatch.setattr(live_ledger, "believed_positions", _spy)
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            repo.apply_transition(repo.get("s1"), Stage.DORMANT, Actor.AGENT, reason="bench",
+                                  revoke_allocation=True)
+        assert read_seen["v"] is False  # blocked on BEGIN IMMEDIATE, before the flatness read
+    finally:
+        other.rollback()
+        other.close()
