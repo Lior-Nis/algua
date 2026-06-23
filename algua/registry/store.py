@@ -309,11 +309,45 @@ class SqliteStrategyRepository:
             raise ValueError(
                 "at most one of consume_gate_id/consume_forward_gate_id may be set — a single"
                 " transition spends a single token")
+        if revoke_allocation:
+            # Bench wind-down (#125/#247): the live->dormant flatness check, the allocation revoke,
+            # and the stage CAS must be ONE atomic critical section. Enforcing flatness in a
+            # separate autocommit read (the caller) left a TOCTOU: a live fill committed between the
+            # check and the CAS orphaned a position on a now-dormant strategy (run-all iterates
+            # Stage.LIVE only). BEGIN IMMEDIATE takes the write lock up front so no concurrent fill
+            # can land between the re-check below and the revoke+CAS. TOP-LEVEL ONLY (mirrors
+            # reserve_holdout) — a manual BEGIN inside an open tx raises, and the blanket rollback
+            # could roll back a surrounding tx.
+            if self._conn.in_transaction:
+                raise RuntimeError(
+                    "apply_transition(revoke_allocation=True) must run at top level, not inside an"
+                    " open transaction")
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._assert_flat_for_bench(rec.name)
+                result = self._apply_transition_locked(
+                    rec, to, actor, reason, code_hash, config_hash, dependency_hash,
+                    consume_gate_id, consume_forward_gate_id, _now(), revoke_allocation=True)
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+            return result
         with self._conn:  # consume + UPDATE + INSERT commit together or not at all
             return self._apply_transition_locked(
                 rec, to, actor, reason, code_hash, config_hash, dependency_hash,
                 consume_gate_id, consume_forward_gate_id, _now(),
-                revoke_allocation=revoke_allocation)
+                revoke_allocation=False)
+
+    def _assert_flat_for_bench(self, name: str) -> None:
+        """Re-check live flatness INSIDE the bench transaction (#247): with the BEGIN IMMEDIATE
+        write lock held, no concurrent fill can commit between this check and the revoke+CAS, so a
+        live strategy cannot go dormant while holding an open (and thus orphaned) position.
+        believed_positions is imported lazily — the registry->execution pattern transitions uses."""
+        from algua.execution.live_ledger import believed_positions
+        if believed_positions(self._conn, name):
+            raise TransitionError(
+                f"{name} is not flat (open live positions); flatten before benching to dormant")
 
     def _apply_transition_locked(
         self,
