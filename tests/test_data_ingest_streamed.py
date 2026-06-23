@@ -221,6 +221,58 @@ def test_clear_staging_noop_when_absent(tmp_path):
     DataStore(tmp_path).clear_staging()  # must not raise when nothing to clean
 
 
+def test_clear_staging_spares_old_dir_with_held_lease(tmp_path):
+    # #255: a >1h in-progress import's staging-root mtime is stale, but its flock lease is held —
+    # clear_staging must NOT delete it out from under the writer.
+    import fcntl
+    import os as _os
+    import time as _time
+    store = DataStore(tmp_path)
+    staging = tmp_path / "snapshots" / "_staging"
+    active = staging / "deadbeef"
+    active.mkdir(parents=True)
+    (active / "symbol=AAA").mkdir()
+    lock_path = staging / "deadbeef.lock"
+    fd = _os.open(lock_path, _os.O_RDWR | _os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)  # simulate a live writer holding the lease
+    try:
+        old = _time.time() - 7200  # 2h ago, older than the 1h default
+        _os.utime(active, (old, old))
+        _os.utime(lock_path, (old, old))
+        store.clear_staging()
+        assert active.exists()  # spared: an active lease overrides the stale mtime
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        _os.close(fd)
+
+
+def test_clear_staging_sweeps_old_dir_with_unheld_lease(tmp_path):
+    # #255: crash residue — the dir + an unheld lock marker, both old — is swept, marker and all.
+    import os as _os
+    import time as _time
+    store = DataStore(tmp_path)
+    staging = tmp_path / "snapshots" / "_staging"
+    dead = staging / "c0ffee"
+    dead.mkdir(parents=True)
+    lock_path = staging / "c0ffee.lock"
+    lock_path.write_bytes(b"")  # marker left by a crash, no writer holding it
+    old = _time.time() - 7200
+    for p in (dead, lock_path):
+        _os.utime(p, (old, old))
+    store.clear_staging()
+    assert not dead.exists()
+    assert not lock_path.exists()  # orphan marker cleaned too
+
+
+def test_streamed_ingest_leaves_no_lock_residue(tmp_path):
+    # the sibling lease marker is removed in the finally; a successful ingest leaves no .lock cruft.
+    store = DataStore(tmp_path)
+    _ingest_streamed(store, _two_symbol_chunks())
+    staging = tmp_path / "snapshots" / "_staging"
+    leftover = list(staging.iterdir()) if staging.exists() else []
+    assert leftover == [], f"unexpected staging residue: {leftover}"
+
+
 def test_streamed_ingest_rejects_symbol_split_across_chunks(tmp_path):
     store = DataStore(tmp_path)
     chunks = [
