@@ -241,17 +241,19 @@ def regime_robustness_check(
         if s.n_bars < min_obs:
             per_regime_sharpes.append(None)
             continue
-        m = metrics_from_returns(pd.Series(s.returns))
+        returns = pd.Series(s.returns)
+        m = metrics_from_returns(returns)
         # An effectively-constant (or NaN-vol) regime has no reliable Sharpe — a catastrophic-
         # cancellation residual vol (~1e-18 != 0.0, where `== 0.0` failed open, #248) yields a
         # ~±1e16 Sharpe. `not (vol > floor)` catches that and NaN. We never record that explosive
         # Sharpe (it would feed #268) — per_regime_sharpe is None. But the regime's RETURN direction
-        # is still real: a degenerate regime that LOST money (negative cumulative return) is a true
-        # robustness failure and must force a fail — dropping it would LOOSEN the gate vs the old
-        # code (whose huge-negative Sharpe failed the AND-check). A flat/favorable degenerate regime
-        # carries no signal and is simply dropped.
+        # is still real: a degenerate regime that LOST money is a true robustness failure and must
+        # force a fail — dropping it would LOOSEN the gate vs the old code (whose huge-negative
+        # Sharpe failed the AND-check). The loss proxy uses the SAME NaN-cleaned series metrics does
+        # (a raw sum() would be NaN for a NaN-bearing slice and silently skip the check, #248 r2). A
+        # flat/favorable degenerate regime carries no signal and is simply dropped.
         if not (m["ann_volatility"] > MIN_REGIME_VOL):
-            if sum(s.returns) < 0.0:
+            if returns.dropna().sum() < 0.0:
                 degenerate_loss = True
             per_regime_sharpes.append(None)
             continue

@@ -203,6 +203,24 @@ def test_near_constant_losing_regime_fails_closed_not_loosened():
     assert res.per_regime_sharpes[0] is None    # explosive -1e16 Sharpe never recorded (#268)
 
 
+def test_nan_bearing_degenerate_losing_regime_fails_closed():
+    """#248 (Codex round 2): the loss proxy must use the SAME NaN-cleaned series metrics does.
+    A NaN-bearing degenerate losing slice ([nan] + [-0.0001]*30) has a huge negative Sharpe after
+    dropna() (old code failed it), but a raw sum() is NaN -> NaN < 0 is False -> the loss check is
+    skipped and the gate could pass (a loosening). Using returns.dropna().sum() keeps it failing.
+    """
+    losing = [float("nan")] + [-0.0001] * 30
+    assert math.isnan(sum(losing))  # raw sum is NaN — the trap the proxy must avoid
+    s = [
+        RegimeSlice(0, losing, len(losing), None),     # NaN + steady loss -> degenerate -> fails
+        RegimeSlice(1, [0.01, -0.01] * 15, 30, None),
+        RegimeSlice(2, [0.02, -0.005] * 15, 30, None),
+    ]
+    res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
+    assert res.passed is False
+    assert res.per_regime_sharpes[0] is None
+
+
 # ---------------------------------------------------------------------------
 # regime_robustness_check: underpowered -> dropped -> <2 survivors -> fail
 # ---------------------------------------------------------------------------
