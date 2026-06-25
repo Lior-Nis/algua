@@ -117,22 +117,34 @@ def test_needs_news_without_snapshot_fails_closed_before_reservation(tmp_path):
     assert _holdout_count(tmp_path) == 0
 
 
-def test_news_lane_reaches_candidate(tmp_path):
+def test_news_lane_unblocked_through_funnel(tmp_path):
+    # #132 slice 4: a needs_news strategy is no longer blocked at the PIT gate. `research promote`
+    # threads the news snapshot through walk_forward + the holdout into the gate evaluation and
+    # records it in provenance. Reaching `candidate` ALSO requires passing the orthogonal #221
+    # regime-robustness gate, which this flat synthetic fixture cannot (no vol structure → tertiles
+    # collapse, fail-closed by design; that gate is covered by main's own regime tests). So we
+    # prove the PIT lane is unblocked THROUGH the funnel — gated only by regime-robustness.
     bid, nid, _fid = _seed(tmp_path)
     assert _backtest_to_backtested(
         "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", nid).exit_code == 0
     r = runner.invoke(app, ["research", "promote", "news_coverage_tilt",
-                            "--snapshot", bid, "--news-snapshot", nid, *_WINDOW, *_RELAX])
+                            "--snapshot", bid, "--news-snapshot", nid, *_WINDOW, *_RELAX,
+                            "--new-family", "news_fam"])  # #222: seed the first family (human)
     assert r.exit_code == 0, r.stdout
     payload = json.loads(r.stdout)
-    assert payload["promoted"] is True
-    # Fix 1 (#132 GATE-2): the emitted JSON payload carries the PIT snapshot ids.
+    # The PIT snapshot flowed into the emitted payload (#132 GATE-2 Fix 1) AND the gate-row
+    # provenance — i.e. all the way through walk_forward + the holdout into the recorded evaluation.
     assert payload["news_snapshot"] == nid
     assert payload["fundamentals_snapshot"] is None
-    assert _stage("news_coverage_tilt") == "candidate"
     fund_snap, news_snap = _latest_gate_snapshots(tmp_path)
-    assert news_snap == nid
-    assert fund_snap is None
+    assert news_snap == nid and fund_snap is None
+    # It got PAST the (removed) PIT block, family governance, and breadth, into the holdout + gate
+    # evaluation (a holdout was reserved/burned). The sole remaining blocker is the PIT-unrelated
+    # #221 regime-robustness gate — proving the funnel is unblocked for the PIT lane.
+    assert _holdout_count(tmp_path) >= 1
+    assert payload["promoted"] is False
+    failing = [c["name"] for c in payload.get("checks", []) if not c["passed"]]
+    assert failing == ["regime_robustness"], failing
 
 
 def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
@@ -153,17 +165,25 @@ def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
     assert _holdout_count(tmp_path) == 0
 
 
-def test_fundamentals_lane_reaches_candidate(tmp_path):
+def test_fundamentals_lane_unblocked_through_funnel(tmp_path):
+    # #132 slice 4: a needs_fundamentals strategy is no longer blocked at the PIT gate; the snapshot
+    # threads through walk_forward + the holdout into the gate-row provenance. Reaching `candidate`
+    # also needs the orthogonal #221 regime-robustness gate (unreachable on this flat fixture — see
+    # the news-lane test). Here we prove the PIT lane is unblocked THROUGH the funnel.
     bid, _nid, fid = _seed(tmp_path)
     assert _backtest_to_backtested(
         "fundamentals_earnings_tilt", "--snapshot", bid,
         "--fundamentals-snapshot", fid).exit_code == 0
     r = runner.invoke(app, ["research", "promote", "fundamentals_earnings_tilt",
-                            "--snapshot", bid, "--fundamentals-snapshot", fid, *_WINDOW, *_RELAX])
+                            "--snapshot", bid, "--fundamentals-snapshot", fid, *_WINDOW, *_RELAX,
+                            "--new-family", "fund_fam"])  # #222: seed the first family (human)
     assert r.exit_code == 0, r.stdout
     payload = json.loads(r.stdout)
-    assert payload["promoted"] is True
-    assert _stage("fundamentals_earnings_tilt") == "candidate"
+    assert payload["fundamentals_snapshot"] == fid
+    assert payload["news_snapshot"] is None
     fund_snap, news_snap = _latest_gate_snapshots(tmp_path)
-    assert fund_snap == fid
-    assert news_snap is None
+    assert fund_snap == fid and news_snap is None
+    assert _holdout_count(tmp_path) >= 1
+    assert payload["promoted"] is False
+    failing = [c["name"] for c in payload.get("checks", []) if not c["passed"]]
+    assert failing == ["regime_robustness"], failing

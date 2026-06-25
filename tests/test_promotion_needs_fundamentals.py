@@ -64,9 +64,9 @@ def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
         # Advance to backtested with HUMAN actor (skips the gate-token requirement)
         transition_strategy(repo, name, Stage.BACKTESTED, Actor.HUMAN, "seed")
         # After #132 slice 4: needs_fundamentals no longer blocks promotion. Preflight proceeds
-        # past the (removed) PIT block and fails LATER on missing measured breadth — proving the
-        # PIT block is gone.
-        with pytest.raises(ValueError, match="no recorded search breadth"):
+        # past the (removed) PIT block and fails LATER at the #222 family-governance gate (empty
+        # family registry) — proving the PIT block is gone.
+        with pytest.raises(ValueError, match="family registry is empty"):
             promotion_preflight(
                 repo,
                 name,
