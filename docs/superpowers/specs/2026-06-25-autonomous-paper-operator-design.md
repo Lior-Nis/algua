@@ -1,8 +1,12 @@
 # Autonomous Paper Operator — Design
 
-**Status:** Draft (design approved in brainstorming; pending Codex review → implementation plan)
+**Status:** Draft — revised after Codex adversarial review (findings folded in; pending human review → implementation plan)
 **Date:** 2026-06-25
 **Author:** agent (Claude) + human operator
+**Review:** Codex verified claims against the codebase (2026-06-25). It confirmed the paper-primitive
+gap (§5 G1) and the live-wall enforcement (§3, §10), and corrected five claims now fixed in this
+revision: breadth source (§6.3), merge ordering (§6.1–6.2), family-creation feasibility (§3.2, §5 G2),
+family-audit teeth + transition legality (§6.5), and the `block-push-to-main` scope (§6.4).
 
 ## 1. Problem & motivation
 
@@ -55,13 +59,20 @@ paper book. This is the regime that justifies that machinery. The design must th
 their integrity exactly — never run the metered promote against anything but the authoritative DB,
 never double-burn a holdout, never undercount search breadth.
 
-### 3.2 Accepted risk: automated family creation
+### 3.2 Accepted risk: automated family creation (full automation chosen)
 
-Making first-family / NOVEL family creation autonomous re-opens the breadth-evasion vector that #222
-made human-only: minting fresh families dodges funnel-wide breadth deflation and can inflate
-significance. **Mitigation:** the `research family-audit` cross-family gaming detector runs as a
-post-cycle **guard with teeth** (§6.5) — it benches a flagged strategy to `dormant` and alerts,
-rather than merely advising.
+Making NOVEL family creation autonomous re-opens the breadth-evasion vector that #222 made human-only:
+minting fresh families dodges funnel-wide breadth deflation and can inflate significance. **This is a
+deliberate teardown of an existing control**, not wiring. Codex confirmed: `--new-family` is human-only
+by code (`promotion.py:122,233,240`, `research_cmd.py:80`), and the `research family-audit` detector is
+**read-only — it benches nothing today** (`research_cmd.py:304–357`).
+
+The operator therefore must BUILD three new pieces (§5 G2/G3, §6.5): (a) permit agent NOVEL family
+creation in `promotion.py`; (b) the family-audit **guard with teeth**; (c) a *legal* remediation that
+does not violate the lifecycle (`candidate→dormant` is illegal — `lifecycle.py`). **Compensating
+control:** the guard blocks the auto-allocator for a flagged candidate (a quarantine flag, no illegal
+transition) and benches a flagged *paper* strategy `paper→dormant` (legal, reversible); a human then
+performs the #222 family consolidation.
 
 ## 4. Architecture & control flow
 
@@ -77,9 +88,9 @@ so a reboot just means "the next timer fires."
  │ RESEARCH JOB │                    │ PAPER       │
  │  (Codex)     │                    │ RUNTIME     │
  └──────────────┘                    │ (pure CLI)  │
-  ideate→author→backtest→            └─────────────┘
-  promote (auto-family)→              ingest fresh bars → paper run-all
-  quality-gate→merge→allocate         → paper promote (forward eval)
+  ideate→author→backtest→SWEEP→      └─────────────┘
+  quality-gate→merge→                 ingest fresh bars → paper run-all
+  promote (auto-family)→allocate      → paper promote (forward eval)
   → family-audit guard                → structured log + alert
 ```
 
@@ -108,12 +119,16 @@ makes the system testable by invoking one command against fixtures.
 ### Group 2 — Research cycle (Codex, made authoritative)
 - **[NEW] research-cycle driver** — evolves `run-research-loop.sh`: runs Codex in an isolated
   worktree (scratch), then performs the **automated merge-back** that replaces the human (§6).
-- **[WIRE] family auto-creation** — Codex passes `--new-family` on a NOVEL classification (now
-  permitted for the agent per §3.1).
+- **[NEW] agent NOVEL-family creation** — modify `promotion.py` (currently human-only at
+  `promotion.py:122,233,240` + `research_cmd.py:80`) to permit the agent to mint a NOVEL family.
+  This deliberately removes a #222 control; the §6.5 guard is its compensating enforcement.
 
 ### Group 3 — Autonomous safety guards
-- **[NEW] `family-audit` guard** — runs `research family-audit` at end of cycle; a flagged family ⟹
-  bench the strategy to `dormant` + alert (teeth, not advice).
+- **[NEW] `family-audit` guard (teeth)** — `research family-audit` is read-only today
+  (`research_cmd.py:304–357`); build a guard that, at end of cycle, acts on a flagged family:
+  **block the auto-allocator** for a flagged *candidate* (a quarantine flag — no illegal transition)
+  and **bench a flagged *paper* strategy `paper→dormant`** (legal, reversible). Alert; a human then
+  does the #222 consolidation. `candidate→dormant` is NOT a legal transition and must not be used.
 - **[WIRE] kill-switch / breach-flatten** — per-strategy, exists; the runtime surfaces trips to the
   alert channel.
 
@@ -126,8 +141,11 @@ makes the system testable by invoking one command against fixtures.
   gate-fail, or job crash (desktop notification / log line; pluggable later).
 
 ### Group 5 — Secrets & config
-- **[WIRE] `.env` + systemd `EnvironmentFile`** — Alpaca **paper** creds only. Live creds
-  deliberately absent — the box literally cannot trade live.
+- **[WIRE] `.env` + systemd `EnvironmentFile`** — Alpaca **paper** creds only. Note (Codex-confirmed):
+  the live wall is **cryptographically enforced** — `live` requires a human actor, an active
+  allocation, a fresh forward certificate, a recomputed identity, and a verified signature, re-checked
+  at trade time (`live_gate.py:155–188`, `live_cmd.py:248–273`). Absent live creds only block broker
+  construction; the wall itself does not depend on that. The operator cannot cross it regardless.
 
 ### Group 6 — Analysis job (optional)
 - **[NEW] `algua-report.timer`** — periodic Codex `report-experiments` over active paper strategies
@@ -141,41 +159,62 @@ per strategy per OOS interval — #192/#193/#161) and the FDR alpha-wealth ledge
 
 ### 6.1 Pipeline (one cycle, serialized under a lock)
 
+**Ordering note (Codex finding #2):** the metered promote mutates the shared DB to `candidate`. If
+that happened *before* the code reached main, the registry would reference a candidate not importable
+on main — a real (and crash-durable) inconsistency. So **merge precedes promote**, and a FAIL reverts
+the merge.
+
 | # | Step | Store | Metered? |
 |---|------|-------|----------|
-| 1 | Codex forms hypotheses, **registers each as an idea** (`research idea add`), authors code, backtests/sweeps — in an isolated **worktree/branch** | worktree git + idea pool | breadth counted |
+| 1 | Codex forms hypotheses, authors code, **runs `backtest sweep`** (the MEASURED breadth the gate reads — §6.3), in an isolated **worktree/branch** | worktree git + `search_trials` | breadth measured |
 | 2 | **Quality gate** on the branch: `pytest && ruff && mypy && lint-imports` | worktree | — |
-| 3 | **`research promote` once**, code loaded from the worktree, against the **authoritative DB** | authoritative DB | **the metered event** — breadth deflation, FDR draw, holdout burn, candidate mint |
-| 4a | **PASS** → merge branch → **local main** → `paper allocate` + `candidate→paper` | git main + authoritative DB | — |
-| 4b | **FAIL** → **discard the branch** (nothing merged), log | — | holdout for that interval now spent (correct) |
+| 3 | **Merge branch → local main** (additions-only) so the strategy is importable on main | git main | — |
+| 4 | **`research promote` once**, code loaded from **main**, against the **authoritative DB** | authoritative DB | **the metered event** — breadth deflation, FDR draw, holdout burn, candidate mint |
+| 5a | **PASS** → family-audit guard → `paper allocate` + `candidate→paper` | authoritative DB | — |
+| 5b | **FAIL** → **revert the merge commit** (main clean again), log | git main | holdout for that interval now spent (correct) |
 
 ### 6.2 Invariants the ordering guarantees
-1. **Code on main ⟹ it is a candidate.** Merge happens *only* on a promote PASS. Failed hypotheses
-   never reach main; passing ones are importable before they are allocated. `code_hash` at promote
-   (worktree bytes) == on main after merge (additions-only files → trivial merge, same bytes).
-2. **One metered attempt per strategy.** Steps 1–2 are free scratch; the single authoritative promote
-   in step 3 is the only holdout burn and FDR draw. No explore-then-re-promote double-burn.
+1. **The registry never references code that isn't on main.** Merge (step 3) precedes the candidate-
+   minting promote (step 4); a FAIL reverts the merge (step 5b). There is no window — even across a
+   crash — where the DB holds a `candidate` whose code is absent from main. `code_hash` is path-
+   independent (computed from dotted module name + source text, not file path — `approvals.py:62–106`,
+   Codex-confirmed), so loading from main vs worktree yields the identical hash.
+2. **One metered attempt per strategy.** Steps 1–3 are free scratch; the single promote in step 4 is
+   the only holdout burn and FDR draw (single-use reservation refuses overlaps — `store.py:500–532`).
+   No double-burn.
 
-### 6.3 Breadth honesty (load-bearing, given no human)
-Because Codex self-approves, the gates must see the *true* search. Step 1 registers **every**
-hypothesis into the idea pool — including pre-screened-away ones — so funnel-wide breadth deflation
-accounts for the whole search, not just promoted survivors. (This exercises #126's windowed-idea-count
-wiring.) Cherry-picking the best K of N and promoting only those would otherwise undercount breadth
-by N/K.
+### 6.3 Breadth honesty (load-bearing, given no human — Codex finding #1)
+Because Codex self-approves, the gates must see the *true* search. **Correction from the first draft:**
+gate breadth is driven by `search_trials` from **`backtest sweep`** (`promotion.py:337`, `gates.py:477`,
+`search_breadth.py`), **not** by the idea pool — `windowed_idea_counts` is explicitly *not yet consumed*
+(#126, deferred). So honesty requires the research cycle to **express each hypothesis's parameter search
+as a `backtest sweep`** (step 1), so `search_trials` reflects what was actually tried; merely running a
+single backtest, or registering ideas, would undercount breadth and inflate significance. Across
+*separate* hypotheses, the funnel-wide LORD++ alpha-wealth ledger meters every promote (each draws
+budget), and `effective_funnel_breadth` folds in the windowed funnel total + family-lifetime breadth.
+(Optionally wiring #126's idea counts into the gate would tighten this further — out of scope here.)
 
 ### 6.4 Concurrency, idempotency, recovery
 - A **file lock** serializes research cycles and excludes the paper runtime from mutating the
   registry mid-promote (the DB already uses `BEGIN IMMEDIATE`; the lock guards the worktree/main).
-- Operates on **local main only** — no push (the `block-push-to-main` hook governs origin; the
-  runtime imports local). Push/PR of agent-authored code stays a separate human concern.
-- A crash mid-cycle leaves either a stranded worktree (cleaned on next start) or a burned holdout
-  with no candidate (correct — it was a real attempt). Merge is the last step and additions-only, so
-  there is no partial-merge state.
+- Operates on **local main only** — the operator never runs `git push`. **Caveat (Codex):**
+  `block-push-to-main` is a *Claude-process guardrail, not a git hook* (`.git/hooks` has only samples),
+  so a systemd job calling `git push` would bypass it entirely. The mitigation is simply that the
+  operator code contains no push; **if push is ever added, a real git `pre-push` hook must be installed
+  first.**
+- A crash mid-cycle leaves either a stranded worktree (cleaned on next start), a merged-but-unpromoted
+  strategy on main at `backtested` (harmless — not allocated; re-promotable since the holdout wasn't
+  burned), or a burned holdout with a minted candidate already on main (consistent). No state where a
+  candidate lacks code on main (§6.2).
 
-### 6.5 Family-audit guard (teeth, post-hoc)
-`research family-audit` runs at the **end of each cycle**: if it flags a paper/candidate strategy's
-family as breadth-evasion gaming (the cross-family pattern the per-promote classifier cannot see), it
-**benches that strategy to `dormant` and alerts**, reversing the autonomous allocation.
+### 6.5 Family-audit guard (teeth, post-hoc — Codex findings #4/#5)
+`research family-audit` is **read-only today** (writes nothing — `research_cmd.py:304–357`); the guard
+is NEW code that runs it at the **end of each cycle** and acts on a flagged family (the cross-family
+breadth-evasion pattern the per-promote classifier cannot see):
+- a flagged **candidate** → set a **quarantine flag** the auto-allocator respects (do not allocate).
+  We do **not** transition it — `candidate→dormant` is illegal (`lifecycle.py`).
+- a flagged **paper** strategy → **bench `paper→dormant`** (legal, reversible — pulls it from the book).
+- **alert** in both cases; a human then performs the #222 family consolidation (member reassignment).
 
 ## 7. Operating parameters (defaults — tunable config, not code)
 
@@ -222,9 +261,10 @@ Every job is a single-shot command, so most tests are one invocation against fix
 - Calendar gate + idempotency guard — holiday/weekend ⟹ no-op; double-fire ⟹ single trade.
 
 **Orchestration (merge-back driver, the risky unit)** — test around a **fake `codex`** stub (as
-#210 tests fake `docker`): PASS ⟹ code on main + allocated, `code_hash` stable across merge; FAIL ⟹
-branch discarded, main untouched, holdout spent; breadth honesty ⟹ every hypothesis lands in the
-idea pool; lock ⟹ concurrent cycles serialize; crash ⟹ stranded worktree cleaned next start.
+#210 tests fake `docker`): PASS ⟹ code on main + candidate minted + allocated, `code_hash` identical
+across merge; FAIL ⟹ **merge reverted**, main clean, holdout spent; breadth honesty ⟹ each hypothesis
+is promoted with a `search_trials` count matching its sweep (not 1); lock ⟹ concurrent cycles
+serialize; crash ⟹ stranded worktree cleaned next start, no candidate-without-code on main.
 
 **Integration / E2E** — full cycle on synthetic data + SimBroker with an **injected session clock**:
 ingest → fake-Codex cycle → candidate → allocate → tick × N → forward-promote, accelerated to ≥63
@@ -249,16 +289,19 @@ commit; add to the existing suite, never weaken a gate.
   change.
 - **Model C** — a Codex exception-supervisor invoked on breach/reconcile/quarantine anomalies.
 - **Pushing agent-authored code** to origin / opening PRs — currently local-main only.
-- **Dead-code housekeeping** — promote-FAIL discards the branch, so main is not polluted; revisit if
-  the idea pool or registry accumulates cruft.
+- **Dead-code housekeeping** — promote-FAIL reverts the merge, so main is not polluted; revisit if the
+  registry accumulates `backtested` cruft from crashes between merge and promote.
 
 ## 10. Risk register
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| Automated family creation evades breadth deflation (§3.2) | High | `family-audit` guard with teeth (§6.5) |
-| Self-approval promotes overfit noise | High | Authoritative-only metered promote + breadth honesty (§6.3); gates unweakened |
+| Automated family creation tears down #222's anti-gaming control (§3.2) | High | `family-audit` guard with teeth: quarantine flagged candidates, bench flagged paper→dormant, alert + human consolidation (§6.5) |
+| Self-approval promotes overfit noise | High | Merge-then-promote against authoritative DB; breadth measured via `backtest sweep` + funnel-wide LORD++ ledger (§6.3); gates unweakened |
+| Registry references code not on main | High→resolved | Merge precedes promote; FAIL reverts the merge; no candidate-without-code window (§6.2) |
+| Concurrent paper strategies over-leverage the account | High | `paper allocate` (Σ ≤ equity) is a hard prerequisite (§5 G1) |
 | Box reboots / sleeps (single point of failure) | Medium | Stateless single-shot jobs; resume on next fire; cloud lift later |
 | Concurrent research cycles corrupt worktree/main | Medium | File lock serializes cycles (§6.4) |
 | Double-trade on timer double-fire / restart | Medium | Session-idempotency guard (§5 Group 4) |
-| Accidental live trade | Critical | No live creds on the box; live path refuses |
+| A future `git push` bypasses `block-push-to-main` (Claude-only guardrail) | Medium | Operator never pushes; if added, install a real git `pre-push` hook first (§6.4) |
+| Accidental live trade | Critical | Live wall is cryptographically enforced (signature/cert/allocation/identity), not merely creds-absent (§5 G5) |
