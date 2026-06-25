@@ -264,22 +264,31 @@ def test_clear_staging_sweeps_old_dir_with_unheld_lease(tmp_path):
     assert not lock_path.exists()  # orphan marker cleaned too
 
 
-def test_clear_staging_fails_closed_when_lock_probe_errors(tmp_path):
-    # #255 (Codex GATE-2): _lock_held must FAIL CLOSED on a probe error that isn't "file absent".
-    # A .lock that is a directory makes os.open(O_RDWR) raise IsADirectoryError (an OSError, not
-    # FileNotFoundError) — cleanup must treat that as "can't prove abandoned" and spare the dir.
-    import os as _os
-    import time as _time
+def test_lock_held_fails_closed_on_probe_error(tmp_path, monkeypatch):
+    # #255 (Codex GATE-2): _lock_held must FAIL CLOSED on a probe error that isn't "file absent",
+    # so clear_staging never deletes a dir it can't prove abandoned. Unit-level + deterministic: an
+    # earlier clear_staging variant forced the error with a directory-named `.lock`, but that hit
+    # clear_staging's `is_dir()` branch and was iteration-order-dependent (green local, red in CI).
     store = DataStore(tmp_path)
-    staging = tmp_path / "snapshots" / "_staging"
-    dirpath = staging / "feed"
-    dirpath.mkdir(parents=True)
-    (staging / "feed.lock").mkdir()  # unprobeable marker (a dir, not a lock file)
-    old = _time.time() - 7200
-    for p in (dirpath, staging / "feed.lock"):
-        _os.utime(p, (old, old))
-    store.clear_staging()
-    assert dirpath.exists()  # spared: an unprobeable lease marker is not provably abandoned
+    lock = tmp_path / "x.lock"
+    lock.write_bytes(b"")
+
+    # A non-FileNotFound OSError from the flock probe (e.g. ENOLCK / unsupported fs) -> held.
+    def _flock_boom(*_a, **_k):
+        raise OSError("ENOLCK: locks not supported here")
+
+    monkeypatch.setattr("algua.data.store.fcntl.flock", _flock_boom)
+    assert store._lock_held(lock) is True
+
+    # An absent marker -> not held (sweepable); FileNotFoundError short-circuits before the probe.
+    assert store._lock_held(tmp_path / "absent.lock") is False
+
+    # A non-FileNotFound OSError from os.open itself (e.g. EACCES) -> held.
+    def _open_boom(*_a, **_k):
+        raise PermissionError("EACCES")
+
+    monkeypatch.setattr("algua.data.store.os.open", _open_boom)
+    assert store._lock_held(lock) is True
 
 
 def test_new_leased_staging_cleans_up_on_lock_failure(tmp_path, monkeypatch):
