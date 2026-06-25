@@ -1158,3 +1158,35 @@ def test_resume_all_ingests_before_warning(monkeypatch, tmp_path):
     assert payload["global_halt"] == "reset"
     # after ingest the offset fill landed -> strategy is flat -> NOT listed as not_flat
     assert "live_not_flat" not in payload
+
+
+def test_resume_all_survives_malformed_activity(monkeypatch, tmp_path):
+    # A malformed activity in the ingest stream must not crash resume-all (#250): it is quarantined
+    # and the command still emits a clean JSON result rather than a raw traceback.
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+    name = "cross_sectional_momentum"
+    _to_paper()
+    _seed_live_killed(tmp_path / "p.db", name, {"AAA": 5.0})
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        global_halt.engage(conn, reason="halt-all", actor="agent")
+
+    poison = [{"id": "bad-1", "activity_type": "FILL", "side": "hold", "qty": "5",
+               "price": "100", "symbol": "AAA", "order_id": "bo-x",
+               "transaction_time": "2023-01-02T00:00:00Z"}]
+    broker = _ReadOnlyLiveBroker(activities=poison, positions={"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._maybe_live_readonly", lambda: broker)
+
+    r = runner.invoke(app, ["paper", "resume-all"])
+    assert r.exit_code == 0, r.stdout
+    assert json.loads(r.stdout)["global_halt"] == "reset"
+    with closing(connect(get_settings().db_path)) as conn:
+        assert conn.execute(
+            "SELECT activity_id FROM live_activity_quarantine"
+        ).fetchone()["activity_id"] == "bad-1"

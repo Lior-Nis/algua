@@ -46,20 +46,47 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   agent: `--universe` is required (PIT — non-PIT fails closed); search breadth must be MEASURED via
   `backtest sweep` (declaring it with `--n-combos` is human-only); the holdout-Sharpe bar is
   DEFLATED by funnel-wide search breadth (multiple-testing defense); a minimum holdout-observations
-  floor (63) applies (underpowered holdouts fail closed). A passing run is the ONLY way an agent
-  reaches `candidate` — there is no raw `registry transition --to candidate` shortcut for an
-  agent (`--allow-non-pit`, `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition
-  are all human-only).
+  floor (63) applies (underpowered holdouts fail closed); a funnel-wide **LORD++ FDR alpha-wealth
+  ledger** (#220, schema v26) applies a SECOND tighten-only AND-check on measured runs — the
+  per-strategy DSR p-value (p = 1 − dsr_confidence) must ≤ α_t (LORD++ level, global stream);
+  FDR is an operating target (FDR_ALPHA=0.05, W0=0.025); declared/human breadth and missing
+  dsr_confidence skip FDR. A passing run is the ONLY way an agent reaches `candidate` — there is no
+  raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
+  `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).
+  **Family governance (#222):** at preflight, the strategy is empirically classified into a family
+  via code-ancestry + factor-lineage + return-correlation clustering; MERGE verdict → assign into the
+  incumbent family (inherits its breadth); PARENTAGE → new family but inherits the incumbent's
+  accumulated breadth via a parent edge; NOVEL → **agent fail-closed** (new family requires
+  `--new-family` + `--actor human`). Family-scoped lifetime breadth feeds the 3-way
+  `effective_funnel_breadth(own, windowed_total, family_lifetime_effective)` tighten-only max.
 - `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the
   `dormant` pool: re-runs walk-forward per dormant strategy and reports which ones' window/stability
   metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger
   rows, and transitions nothing. A pass is a prioritization signal for re-auditioning (`registry
   transition --to paper`), NOT a gate and NOT a guarantee of re-promotion/forward-gate clearance.
+- `uv run algua research family-audit` — ADVISORY cross-family gaming detector. Scans the family DAG
+  for separate families that empirically behave as one thesis (deliberate-split breadth evasion #222's
+  assignment-time clustering can't see), using return-correlation as the authoritative axis; ranks
+  flagged clusters by family-term breadth dodged and recommends a human-governed consolidation
+  (member reassignment). READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation —
+  a prioritization signal, not a gate.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
 - `uv run algua data ingest-universe NAME --symbols AAPL,MSFT --effective-date D` — record
   point-in-time universe membership.
+- `uv run algua data import-universe NAME --file constituents.csv` — bulk-import a PIT constituents
+  CSV (`symbol,add_date,drop_date`; add inclusive, drop exclusive; multiple rows/symbol for
+  re-additions, including delisted tickers) into the universe-snapshot timeline (one snapshot per
+  change date). Universes are IMMUTABLE — a same-date membership conflict aborts before any write
+  (corrections need a new name); an empty-membership change date is rejected (deferred limitation).
+- `uv run algua data import-delistings --file delistings.csv` — import per-symbol terminal prices
+  (`symbol,delisting_date,delisting_value`; value = per-share terminal proceeds in adj_close units,
+  strictly > 0) as a point-in-time delistings snapshot. Backtests opt in with `--delistings NAME`: a
+  held name whose bars end mid-backtest is realized at its terminal price and removed (no silent
+  survivorship drop); a held-into-gap name WITHOUT a record fails closed. `--assume-terminal-last-close`
+  realizes such a name at its last close instead, but is HUMAN-ONLY (rejected on the agent
+  `research promote` path).
 - `uv run algua data import-bars --vendor firstrate --raw-dir DIR --adjusted-dir DIR --as-of TS` —
   bulk-import local vendor files (FirstRateData: per-symbol unadjusted + adjusted), normalized to
   the bar-schema as one consolidated snapshot. Streamed (bounded RAM); `adj_close` from the adjusted
@@ -68,6 +95,17 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
   payload back from disk (full read-back) and check it against its record; emits per-snapshot
   JSON and exits non-zero if any snapshot is damaged.
+- `uv run algua factor list [--kind K]` — catalogue of known factors.
+- `uv run algua factor show <name>` — one factor's full spec.
+- `uv run algua factor eval <name> --symbols S,S --construction POLICY --demo` — evaluate ONE
+  standalone factor: PIT backtest + FDR-corrected rank IC/IR (#219 slice E). Emits an `fdr`
+  block: `breadth_benchmark_t`, `dsr_confidence`, **`significant`** (the honest verdict after
+  funnel-wide multiple-testing correction), and `n_dependents` (blast radius). Records the eval
+  in the `factor_evaluations` ledger (SCHEMA_VERSION 25) — `factor eval` is the ONLY agent path
+  to a multiple-testing-honest factor verdict. See `interpret-results` skill for how to read the
+  output. Factors are NEVER gate-tokened or live-pathed.
+- `uv run algua factor dependents <name>` — strategies that compose a factor (blast radius).
+- `uv run algua factor uses <strategy>` — factors a strategy composes.
 
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`

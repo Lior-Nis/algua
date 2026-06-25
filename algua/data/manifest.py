@@ -4,10 +4,11 @@ import fcntl
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from algua.data.files import fsync_dir
-from algua.data.models import SnapshotRecord
+from algua.data.models import Dataset, SnapshotRecord
 
 
 class ManifestLockReplacedError(RuntimeError):
@@ -36,7 +37,7 @@ class SnapshotManifest:
     def __init__(self, path: Path) -> None:
         self.path = path
 
-    def list_records(self, dataset: str | None = None) -> list[SnapshotRecord]:
+    def list_records(self, dataset: Dataset | None = None) -> list[SnapshotRecord]:
         records = self._read_all()
         if dataset is not None:
             records = [r for r in records if r.dataset == dataset]
@@ -48,7 +49,12 @@ class SnapshotManifest:
                 return rec
         return None
 
-    def append_if_absent(self, rec: SnapshotRecord) -> SnapshotRecord:
+    def append_if_absent(
+        self,
+        rec: SnapshotRecord,
+        *,
+        conflict_check: Callable[[list[SnapshotRecord], SnapshotRecord], None] | None = None,
+    ) -> SnapshotRecord:
         """Append `rec` unless a record with its snapshot_id is already committed; return the
         committed record (the caller's `rec`, or the concurrent winner's). Repairs any
         uncommitted tail (crash residue) before appending. The ONLY manifest write path.
@@ -66,9 +72,12 @@ class SnapshotManifest:
         try:
             raw = self.path.read_bytes() if self.path.exists() else b""
             committed = self._committed_prefix(raw)
-            for existing in self._parse_committed(committed.decode("utf-8")):
+            committed_records = self._parse_committed(committed.decode("utf-8"))
+            for existing in committed_records:
                 if existing.snapshot_id == rec.snapshot_id:
                     return existing
+            if conflict_check is not None:
+                conflict_check(committed_records, rec)  # raises to abort before any write
             self._clean_stale_repair_temps()
             if committed != raw:
                 self._repair(committed)

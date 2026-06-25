@@ -5,11 +5,10 @@ from datetime import UTC, datetime
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.cli._common import ok, registry_conn, utc
+from algua.cli._common import breach_payload, ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.cli.paper_cmd import _breach_payload, _tick_clock, _trip
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization
@@ -31,6 +30,7 @@ from algua.execution.order_state import (
     record_tick_snapshot,
     update_nav_peak,
 )
+from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.registry import allocations
 from algua.registry.allocations import AllocationError, active_allocation
@@ -43,8 +43,9 @@ from algua.registry.live_gate import (
 )
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
+from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
-from algua.strategies.loader import load_strategy
+from algua.strategies.loader import load_tradable_strategy
 
 live_app = typer.Typer(help="LIVE (real-money) trading — human-authorized strategies only",
                        no_args_is_help=True)
@@ -110,13 +111,7 @@ def _run_strategy_tick(  # noqa: PLR0913
     (trip + scoped flatten), snapshot persistence. Returns a result dict; raises typer.Exit(1) with
     an emitted breach/halt payload on TickHalted/RiskBreach (same behaviour as the single-strategy
     command)."""
-    strategy = load_strategy(name)
-    from algua.strategies.base import (
-        assert_tradable_without_fundamentals,
-        assert_tradable_without_news,
-    )
-    assert_tradable_without_fundamentals(strategy)
-    assert_tradable_without_news(strategy)
+    strategy = load_tradable_strategy(name)
 
     rec = SqliteStrategyRepository(conn).get(name)
     alloc = active_allocation(conn, rec.id)
@@ -155,10 +150,10 @@ def _run_strategy_tick(  # noqa: PLR0913
     except TickHalted as exc:
         audit_append(conn, actor="system", action="live_trade_tick_halted",
                      reason=str(exc), strategy=name)
-        emit(_breach_payload(str(exc), strategy=name, halted=True))
+        emit(breach_payload(str(exc), strategy=name, halted=True))
         raise typer.Exit(1) from exc
     except RiskBreach as exc:
-        _trip(conn, name, exc)
+        trip_for_breach(conn, name, exc)
         liquidation_submitted = True
         flatten_error = None
         try:
@@ -178,7 +173,7 @@ def _run_strategy_tick(  # noqa: PLR0913
             flatten_error = str(fexc)
             audit_append(conn, actor="system", action="flatten_failed",
                          reason=str(fexc), strategy=name)
-        payload = _breach_payload(exc.detail, kind=exc.kind,
+        payload = breach_payload(exc.detail, kind=exc.kind,
                                   liquidation_submitted=liquidation_submitted)
         if flatten_error is not None:
             payload["flatten_error"] = flatten_error
@@ -190,7 +185,7 @@ def _run_strategy_tick(  # noqa: PLR0913
         return {"strategy": name, "skipped": str(exc)}
     if result.peak_equity is not None:
         update_nav_peak(conn, name, result.peak_equity)
-        tick_ts, clock_source = _tick_clock(broker.clock)
+        tick_ts, clock_source = tick_clock(broker.clock)
         acct = broker.account()
         record_tick_snapshot(
             conn, name,
@@ -255,7 +250,7 @@ def run_all(
             emit(ok({"strategies": [], "note": "no live strategies"}))
             return
         if global_halt.is_engaged(conn):
-            emit(_breach_payload("global halt engaged", halted=True))
+            emit(breach_payload("global halt engaged", halted=True))
             raise typer.Exit(1)
         # re-verify each; skip + flag failures, keep one authorization for the account broker
         verified: list[tuple[str, LiveAuthorization]] = []

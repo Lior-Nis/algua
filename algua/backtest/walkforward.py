@@ -9,7 +9,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from algua.backtest.engine import BacktestError, build_portfolio
+from algua.backtest.delisting import DelistingRecord
+from algua.backtest.engine import (
+    BacktestError,
+    adj_grid,
+    build_portfolio,
+    fetch_symbols,
+    members_as_of,
+)
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
@@ -77,9 +84,66 @@ class WalkForwardResult:
     # PIT sidecar snapshot provenance (issue #132); None unless the strategy is needs_*.
     fundamentals_snapshot: str | None = None
     news_snapshot: str | None = None
+    # SENSITIVE — stronger than holdout_metrics: the raw OOS return vector lets a researcher
+    # identify which days their strategy failed and tune a later strategy to exploit the same
+    # holdout window. NEVER serialized: to_dict() excludes it; only research promote persists it
+    # (in promotion.run_gate), and only the sibling-only store read may surface it. (#221 Slice 1)
+    holdout_returns: tuple[list[float], list[str]] | None = None
+    # FULL-PERIOD equal-weighted cross-sectional daily return of the universe (#221 Slice 4) — the
+    # market/benchmark series for vol-tertile regime labeling. NOT sensitive, but bulky → excluded
+    # from to_dict (an internal gate input, like holdout_returns). None if the benchmark read fails.
+    market_returns: tuple[list[float], list[str]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        # holdout_returns is SENSITIVE — never serialized (#221 Slice 1).
+        # market_returns is bulky (full-period aggregate) — internal gate input (#221 Slice 4).
+        # Both are excluded so the raw vectors never appear in operator-facing output.
+        return {f.name: getattr(self, f.name)
+                for f in dataclasses.fields(self)
+                if f.name not in ("holdout_returns", "market_returns")}
+
+
+def _market_return_series(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    universe_by_date: Mapping[date, Collection[str]] | None,
+) -> tuple[list[float], list[str]] | None:
+    """Equal-weighted cross-sectional daily return of the universe (PIT: same provider/snapshot as
+    the backtest). Returns (returns, ISO-dates) over the FULL period, or None on any failure.
+
+    Uses the SAME provider and universe_by_date the backtest used (PIT-identical — a second read
+    of the same immutable snapshot). The series spans the FULL period (not just the holdout) so a
+    later 21-bar trailing vol has lookback for every holdout date (#221 Slice 4).
+    """
+    try:
+        symbols = fetch_symbols(strategy, universe_by_date)
+        bars = provider.get_bars(symbols, start, end, "1d")
+        adj = adj_grid(bars)                          # (dates x symbols) adj_close panel
+        daily = adj.pct_change()
+        if universe_by_date is not None:
+            # PIT masking: apply the SAME as-of membership the engine uses in _decision_weights
+            # so the benchmark never includes symbols before their effective-date join.
+            # Non-members at date t are set to NaN so pandas .mean(axis=1) skips them,
+            # correctly averaging only the as-of members at each bar. Reuses members_as_of
+            # (the engine's public as-of helper) — no reinvention of the masking logic.
+            masked = daily.copy()
+            for ts in daily.index:
+                members = members_as_of(universe_by_date, ts)
+                non_members = [c for c in daily.columns if c not in members]
+                if non_members:
+                    masked.loc[ts, non_members] = float("nan")
+            xs = masked.mean(axis=1).dropna()
+        else:
+            # Static universe: no masking needed — current behavior is correct.
+            xs = daily.mean(axis=1).dropna()
+        if xs.empty:
+            return None
+        return ([float(x) for x in xs.to_numpy()],
+                [str(idx.date()) for idx in xs.index])
+    except Exception:
+        return None
 
 
 def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, Any]:
@@ -108,6 +172,8 @@ def walk_forward(
     on_peek: Callable[[str], None] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout.
 
@@ -119,10 +185,21 @@ def walk_forward(
     BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
-    pf, _weights = build_portfolio(strategy, provider, start, end,
-                                   universe_by_date=universe_by_date,
-                                   fundamentals_provider=fundamentals_provider,
-                                   news_provider=news_provider)
+    # PIT sidecar providers (#132) are threaded straight into build_portfolio (= simulate, which
+    # consumes them); the `_reject_pit_sidecar` guard is removed here — unblocking needs_* in
+    # walk-forward is the point of #132 slice 4 (the engine still fails closed if a needs_*
+    # strategy is run without its provider).
+    pf, _weights, _forced = build_portfolio(
+        strategy, provider, start, end,
+        universe_by_date=universe_by_date,
+        fundamentals_provider=fundamentals_provider,
+        news_provider=news_provider,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
+    )
+    # Compute the full-period benchmark series immediately after build_portfolio (same provider +
+    # universe_by_date — PIT-identical, a second read of the same immutable snapshot). Never raises.
+    market_returns = _market_return_series(strategy, provider, start, end, universe_by_date)
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
 
@@ -148,6 +225,11 @@ def walk_forward(
     if on_peek is not None:
         on_peek(cfg_hash)
     holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
+    holdout_seg = returns.iloc[holdout[0]:holdout[1]]
+    holdout_returns = (
+        [float(x) for x in holdout_seg.to_numpy()],
+        [str(idx.date()) for idx in holdout_seg.index],
+    )
 
     return WalkForwardResult(
         strategy=strategy.name,
@@ -169,5 +251,7 @@ def walk_forward(
         news_snapshot=(
             getattr(news_provider, "snapshot_id", None)
             if strategy.config.needs_news else None),
+        holdout_returns=holdout_returns,
+        market_returns=market_returns,
         **prov,
     )

@@ -85,7 +85,7 @@ def test_read_bars_rejects_legacy_single_file_snapshot(tmp_path):
     from pathlib import Path
 
     from algua.data.manifest import SnapshotManifest
-    from algua.data.models import SnapshotMetadata, SnapshotRecord
+    from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
 
     store = DataStore(tmp_path)
     _ingest(store)
@@ -93,8 +93,8 @@ def test_read_bars_rejects_legacy_single_file_snapshot(tmp_path):
     legacy = SnapshotRecord(
         snapshot_id="legacyid00000000",
         metadata=SnapshotMetadata(
-            dataset="bars", provider="p", symbols=("AAA",), start="2024-07-01",
-            end="2024-07-01", as_of="2024-07-02T00:00:00+00:00", source="s", kind="bars",
+            dataset=Dataset.BARS, provider="p", symbols=("AAA",), start="2024-07-01",
+            end="2024-07-01", as_of="2024-07-02T00:00:00+00:00", source="s", kind=Kind.BARS,
             timeframe="1d", adjustment="none",
         ),
         row_count=1, content_hash="h",

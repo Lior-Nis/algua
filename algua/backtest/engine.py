@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import vectorbt as vbt
 
+from algua.backtest.delisting import DelistingExitError, DelistingRecord, apply_delisting_exits
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
@@ -27,6 +28,9 @@ from algua.strategies.base import LoadedStrategy
 
 _SUPPORTED_CADENCES = {"1d"}  # this slice rebalances on every daily bar only
 
+# Residual-position tolerance for the post-delisting-exit guarantee.
+POSITION_EPS = 1e-9
+
 # Fail-closed runtime parity guard: number of post-warmup bars at which the fast path is
 # re-verified against the canonical per-bar definition on every run that uses a signal_panel_fn.
 # Bounded + deterministic (evenly spread across the evaluated span) so the guard costs O(_PARITY_
@@ -39,7 +43,7 @@ class BacktestError(RuntimeError):
     pass
 
 
-def _members_as_of(
+def members_as_of(
     universe_by_date: Mapping[date, Collection[str]], t: pd.Timestamp
 ) -> frozenset[str]:
     """As-of-t membership: the snapshot with the greatest effective_date <= t.date().
@@ -54,6 +58,7 @@ def _members_as_of(
     if not eligible:
         return frozenset()
     return frozenset(universe_by_date[max(eligible)])
+
 
 
 def _assert_fundamentals_shape(frame: pd.DataFrame) -> None:
@@ -157,16 +162,21 @@ def _decision_weights(
 
     Point-in-time universe (`universe_by_date`): when provided, the strategy only ever sees the
     symbols that were as-of-t members (the snapshot with the greatest effective_date <= t),
-    eliminating survivorship bias. `None` reproduces the original static behavior exactly (the
-    full fetched panel is visible every bar). Empty as-of membership => that bar is flat. A weight
-    returned for a non-member is a strategy bug and raises `BacktestError`. As-of membership at t
-    uses only snapshots dated <= t, so the masking introduces no look-ahead.
+    eliminating survivorship bias. `None` is static mode: the operating universe (declared AND
+    available) is visible every bar — `simulate` projects `bars`/`adj` to it via
+    `_static_operating_view` before this loop, so an undeclared symbol can't enter the view (#208).
+    Empty as-of membership => that bar is flat. A weight returned for a non-member is a strategy bug
+    and raises `BacktestError`. As-of membership at t uses only snapshots dated <= t, so the masking
+    introduces no look-ahead.
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
     # Static operating universe = declared AND available: a declared symbol with no fetched price
     # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
     # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
+    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
 
     weights = pd.DataFrame(0.0, index=adj.index, columns=columns)
@@ -180,7 +190,7 @@ def _decision_weights(
             continue
         view = bars_sorted.iloc[:stop]
         if universe_by_date is not None:
-            members = _members_as_of(universe_by_date, t)
+            members = members_as_of(universe_by_date, t)
             if not members:
                 continue  # before the earliest effective date -> flat
             view = view[view["symbol"].isin(members)]
@@ -265,6 +275,9 @@ def _fast_weights(
     # Static operating universe = declared AND available: a declared symbol with no fetched price
     # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
     # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
+    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
     # Reindex the SCORES onto the simulation grid WITHOUT filling NaN (missing score != 0 score).
     scores = panel.reindex(index=adj.index, columns=columns)
@@ -422,15 +435,11 @@ def verify_signal_panel_parity(
     # Re-raise an existing BacktestError unchanged (divergence message preserved verbatim);
     # convert anything else to BacktestError so @json_errors always sees a known type.
     try:
-        adj = _adj_grid(bars)
-        # Same fail-closed guard as simulate(): an empty declared∩available universe would otherwise
-        # surface as a confusing out-of-universe `(allowed: [])` breach instead of this clear cause.
-        if strategy.universe and not (set(strategy.universe) & set(adj.columns)):
-            raise BacktestError(
-                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
-                f"universe {sorted(strategy.universe)} (fetched columns: "
-                f"{sorted(map(str, adj.columns))})"
-            )
+        adj = adj_grid(bars)
+        # Project to the operating universe identically to simulate()'s static path so the panel
+        # under test sees exactly what the runtime fast path sees (observation parity, #208). Also
+        # absorbs the empty-universe fail-closed guard.
+        bars, adj = _static_operating_view(strategy, bars, adj)
 
         fast = _fast_weights(strategy, bars, adj)
         # static: universe_by_date=None, fundamentals=None
@@ -466,7 +475,7 @@ def verify_signal_panel_parity(
         ) from exc
 
 
-def _fetch_symbols(
+def fetch_symbols(
     strategy: LoadedStrategy, universe_by_date: Mapping[date, Collection[str]] | None
 ) -> list[str]:
     """Symbols to fetch bars for.
@@ -484,12 +493,41 @@ def _fetch_symbols(
     return sorted(union)
 
 
-def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
+
+
+def adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     """The simulation grid: adj_close pivoted to (timestamp index x symbol columns), sorted by
     time. This index IS the bar date-index `vectorbt` simulates on and `pf.returns()` carries, so
     it is the single source of truth for both `build_portfolio` and `holdout_window`."""
     adj = bars.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
     return adj.sort_index()
+
+
+
+
+def _static_operating_view(
+    strategy: LoadedStrategy, bars: pd.DataFrame, adj: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Project the strategy-visible STATIC view to the operating universe (declared AND available)
+    so a misbehaving provider's undeclared symbols never reach the loop view, the fast-path
+    signal_panel, the weights/grid, or the fundamentals/news sidecars (observation parity, #208).
+
+    Fails closed when no declared symbol has fetched price data (empty operating universe) — this
+    absorbs #179's empty-intersection guard AND the empty-declared-universe case. The projection on
+    `adj` is COLUMN-ONLY (adj.index is untouched), so holdout_window's grid and the #192 single-use
+    holdout identity are unaffected. No-op for a compliant provider (adj.columns within universe).
+    """
+    universe = set(strategy.universe)
+    # Order-preserving intersection: keep adj's existing column order so a compliant provider is a
+    # STRICT no-op (no reorder, no NaN/reindex-fill since operating is a subset of adj.columns).
+    operating = [c for c in adj.columns if c in universe]
+    if not operating:
+        raise BacktestError(
+            f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
+            f"universe {sorted(strategy.universe)} (fetched columns: "
+            f"{sorted(map(str, adj.columns))})"
+        )
+    return bars[bars["symbol"].isin(operating)], adj.loc[:, operating]
 
 
 def holdout_window(
@@ -513,12 +551,12 @@ def holdout_window(
     if not 0.0 < holdout_frac < 1.0:
         raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
     try:
-        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         return start.date().isoformat(), end.date().isoformat()
-    idx = _adj_grid(bars).index
+    idx = adj_grid(bars).index
     n = len(idx)
     holdout_n = int(n * holdout_frac)
     if holdout_n < 1:
@@ -536,15 +574,22 @@ def simulate(
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
-) -> tuple[vbt.Portfolio, pd.DataFrame]:
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
+) -> tuple[vbt.Portfolio, pd.DataFrame, list[dict]]:
     """Fetch bars, compute pre-lag decision weights (per-bar loop, or the vectorized fast path when
     the strategy exposes a parity-guarded `signal_panel_fn` — see `_decision_weights_fast_or_loop`),
-    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift and
-    simulate. Returns (portfolio, effective-weights). The shift lives ONLY here — the panel fn (like
-    the loop) returns DECISION-time weights, never executable ones.
+    enforcing the shared long-only + gross-exposure risk checks; then apply the t->t+1 shift, the
+    delisting-aware exit overlay, and simulate. Returns (portfolio, executed-weights, forced-exits).
+    The shift lives ONLY here — the panel fn (like the loop) returns DECISION-time weights, never
+    executable ones.
 
-    This is the public simulation step: bars -> (portfolio, effective weights). Metrics are
-    computed separately (see algua.backtest.metrics). Shared by run() and walk_forward().
+    This is the public simulation step: bars -> (portfolio, executed weights, forced exits).
+    Metrics are computed separately (see algua.backtest.metrics). Shared by run()/walk_forward().
+
+    Delisting-aware exit (`delisting_records`): a position held past a symbol's last bar is realized
+    at the record's terminal price and removed (see `apply_delisting_exits`); a held-into-gap symbol
+    with no record fails closed unless `assume_terminal_last_close` (human-only).
 
     Point-in-time universe (`universe_by_date`): when provided, bars are fetched for the UNION of
     all ever-effective members and the per-bar decision is masked to as-of-t membership (see
@@ -556,22 +601,19 @@ def simulate(
             f"this slice rebalances daily only ({sorted(_SUPPORTED_CADENCES)})"
         )
     try:
-        bars = provider.get_bars(_fetch_symbols(strategy, universe_by_date), start, end, "1d")
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
     except Exception as exc:
         raise BacktestError(f"provider error: {exc}") from exc
     if bars.empty:
         raise BacktestError("provider returned no bars for the universe/period")
 
-    adj = _adj_grid(bars)
+    adj = adj_grid(bars)
 
     if universe_by_date is None:
-        operating_universe = set(strategy.universe) & set(adj.columns)
-        if strategy.universe and not operating_universe:
-            raise BacktestError(
-                f"no fetched price data for any symbol in strategy {strategy.name!r} declared "
-                f"universe {sorted(strategy.universe)} (fetched columns: "
-                f"{sorted(map(str, adj.columns))})"
-            )
+        # Static mode: project the strategy-visible view + grid to the operating universe so an
+        # undeclared symbol a misbehaving provider returned cannot influence in-universe decisions
+        # (observation parity, #208). PIT keeps its per-bar as-of mask instead.
+        bars, adj = _static_operating_view(strategy, bars, adj)
 
     fundamentals: pd.DataFrame | None = None
     if strategy.config.needs_fundamentals:
@@ -581,7 +623,7 @@ def simulate(
                 f"fundamentals_provider was supplied (fail closed)"
             )
         fundamentals = fundamentals_provider.get_fundamentals(
-            _fetch_symbols(strategy, universe_by_date), end
+            fetch_symbols(strategy, universe_by_date), end
         )
         _assert_fundamentals_shape(fundamentals)
 
@@ -592,7 +634,7 @@ def simulate(
                 f"strategy {strategy.name!r} declares needs_news but no news_provider was "
                 f"supplied (fail closed)"
             )
-        news = news_provider.get_news(_fetch_symbols(strategy, universe_by_date), end)
+        news = news_provider.get_news(fetch_symbols(strategy, universe_by_date), end)
         _assert_news_shape(news)
 
     weights = _decision_weights_fast_or_loop(
@@ -602,15 +644,43 @@ def simulate(
 
     lag = strategy.execution.decision_lag_bars
     weights_eff = weights.shift(lag).fillna(0.0)
+
+    try:
+        adj_exec, weights_exec, forced_exits = apply_delisting_exits(
+            adj, weights_eff, delisting_records,
+            assume_terminal_last_close=assume_terminal_last_close,
+        )
+    except DelistingExitError as exc:
+        raise BacktestError(str(exc)) from exc
+
+    # call_seq="auto" (sells before buys under cash_sharing) only when a forced exit needs the
+    # same-bar liquidation cash — keeps non-delisting backtests bit-identical to today.
+    extra = {"call_seq": "auto"} if forced_exits else {}
     pf = vbt.Portfolio.from_orders(
-        close=adj,
-        size=weights_eff,
+        close=adj_exec,
+        size=weights_exec,
         size_type="targetpercent",
         cash_sharing=True,
         group_by=True,
         freq="1D",
+        **extra,
     )
-    return pf, weights_eff
+
+    if forced_exits:
+        positions = pf.assets()
+        for fe in forced_exits:
+            sym = fe["symbol"]
+            bar = pd.Timestamp(fe["bar"])
+            after = positions[sym].loc[positions.index >= bar]
+            if bool((after.abs() > POSITION_EPS).any()):
+                raise BacktestError(
+                    f"delisting exit for {sym} left a residual position after {fe['bar']}"
+                )
+        returns = pf.returns()
+        if not bool(np.isfinite(returns.fillna(0.0)).all()):
+            raise BacktestError("non-finite returns after delisting exits")
+
+    return pf, weights_exec, forced_exits
 
 
 # build_portfolio is the explicit public alias of the simulation step. walk_forward and
@@ -630,15 +700,26 @@ def run(
     universe_snapshots: list[dict[str, str]] | None = None,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    delisting_snapshot: str | None = None,  # surfaced in BacktestResult provenance (#212)
+    assume_terminal_last_close: bool = False,
 ) -> BacktestResult:
-    pf, weights_eff = simulate(
+    pf, weights_eff, forced_exits = simulate(
         strategy, provider, start, end,
         universe_by_date=universe_by_date, fundamentals_provider=fundamentals_provider,
         news_provider=news_provider,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
     metrics = portfolio_metrics(pf, weights_eff)
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
+    # Surface daily returns for downstream correlation analysis (#222 Task 7).
+    returns = pf.returns()
+    if not bool(np.isfinite(returns.fillna(0.0)).all()):
+        returns_series: pd.Series | None = None  # fail-closed: non-finite returns not surfaced
+    else:
+        returns_series = returns
     return BacktestResult(
         strategy=strategy.name,
         metrics=metrics,
@@ -654,5 +735,8 @@ def run(
             getattr(news_provider, "snapshot_id", None)
             if strategy.config.needs_news else None
         ),
+        delisting_snapshot=delisting_snapshot,
+        forced_exits=forced_exits,
+        returns=returns_series,
         **prov,
     )

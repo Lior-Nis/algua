@@ -11,7 +11,12 @@ from algua.portfolio.construction import (
     get_construction_policy,
     validate_construction_params,
 )
-from algua.strategies.base import LoadedStrategy, StrategyConfig
+from algua.strategies.base import (
+    LoadedStrategy,
+    StrategyConfig,
+    assert_tradable_without_fundamentals,
+    assert_tradable_without_news,
+)
 
 
 class StrategyNotFound(LookupError):
@@ -111,6 +116,19 @@ def load_strategy(name: str) -> LoadedStrategy:
     return LoadedStrategy(
         config=config, signal_fn=module.signal, signal_panel_fn=panel_fn, construct_fn=construct_fn
     )
+
+
+def load_tradable_strategy(name: str) -> LoadedStrategy:
+    """Load a strategy AND assert it can trade off bars alone.
+
+    The shared paper/live preamble: a ``needs_fundamentals``/``needs_news`` strategy has no
+    paper/live data lane yet, so it must be refused before any order work. Kept beside
+    ``load_strategy`` because the tradability assertions are a strategies-layer concern.
+    """
+    strategy = load_strategy(name)
+    assert_tradable_without_fundamentals(strategy)
+    assert_tradable_without_news(strategy)
+    return strategy
 
 
 def list_strategies() -> list[str]:

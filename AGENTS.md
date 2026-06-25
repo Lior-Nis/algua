@@ -106,24 +106,44 @@ absences*, scoped to later sub-projects in the spec — do not "fix" them or rep
   real monitoring/alerting, production secrets (keyring/mounted vs `.env`), Docker/cloud deploy,
   kill-switch hardening.
 
+**Accepted residual exposures (threat-model).** These are understood, accepted trade-offs with a
+named mitigation — not defects to fix:
+- **The audit log is operational, not tamper-evident.** `algua/audit/log.py` records what happened;
+  it is not a cryptographic chain and a writer with DB access could rewrite it. Gate enforcement does
+  NOT trust audit rows — it lives in *recomputed* identities (code/config/dependency hashes,
+  re-verified signatures), so a forged audit row cannot let a strategy past a gate.
+- **The strategy runtime sandbox is deferred.** Authored strategy modules run in-process, so a
+  malicious module could do more than compute weights. The mitigation is that go-live approval hashes
+  the strategy's transitive **first-party** (`algua.*`) import closure into `code_hash`
+  (`algua/registry/approvals.py::compute_artifact_hashes`), so a prior approval can satisfy the live
+  gate only against the same statically-reachable first-party source a human reviewed (dynamic
+  `importlib` string imports and non-source data files are outside the closure). A true execution
+  sandbox is future live-hardening work.
+
+**Deployment hardening (enforce when deployment lands).** The signed-live-gate trust anchor
+`approvers/allowed_signers` is the root of go-live authority. In any real deployment it MUST NOT be
+writable by the runtime (agent/operator) user — only by the human who controls CODEOWNERS — else the
+runtime could enroll its own key and self-authorize. No deployment exists yet (see Docker/cloud deploy
+above), so this is a requirement to enforce at deploy time, not a code check today.
+
 If you believe something deferred is mis-scoped or risky, **flag it with reasoning** — don't build it.
 
 ---
 
-## 5. Known open issues you MAY fix (already triaged, low-risk)
+## 5. Foundation-era triage — now resolved (do NOT re-report)
 
-These were flagged in the foundation's final review as Minor and are in-scope:
-- **CLI DB connections aren't closed.** `_conn()` in `algua/cli/registry_cmd.py` opens a SQLite
-  connection per command and never closes it (harmless for a short-lived CLI, latent foot-gun).
-  Consider `contextlib.closing` / a context-managed helper.
-- **`transition` signature vs. coercion.** `algua/registry/store.py:transition` is annotated
-  `to: Stage, actor: Actor` but coerces with `Stage(to)`/`Actor(actor)`. Widen to `Stage | str` /
-  `Actor | str` or document why, so the signature doesn't lie.
-- **No CI yet.** There is a git remote (`origin`) but no GitHub Actions workflow running the gate.
-  Adding one (`pytest + ruff + mypy + lint-imports`) is welcome.
+The three Minor items flagged in the foundation's final review have all been fixed. They are kept
+here only so they are not re-reported as open:
+- **CLI DB connections aren't closed.** RESOLVED — `registry_conn()` (`algua/cli/_common.py`) is the
+  single connect→migrate→auto-close idiom, and every CLI command opens the registry through it; the
+  bare `_conn()` is gone.
+- **`transition` signature vs. coercion.** RESOLVED — the transition edge now lives in
+  `algua/registry/transitions.py::transition_strategy`, annotated `to: Stage | str, actor: Actor | str`,
+  so the signature no longer lies about its coercion.
+- **No CI yet.** RESOLVED — `.github/workflows/ci.yml` runs the full gate
+  (`pytest + ruff + mypy + lint-imports`) on every push and pull request.
 
-Finding *new* real issues beyond this list is exactly your job — this list just prevents
-re-reporting things already known.
+Finding *new* real issues beyond this list is exactly your job.
 
 ---
 

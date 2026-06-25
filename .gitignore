@@ -7,6 +7,7 @@ __pycache__/
 /data/
 /artifacts/
 /mlruns/
+/runs/
 *.db
 *.db-wal
 *.db-shm
@@ -14,3 +15,7 @@ __pycache__/
 .superpowers/
 
 .claude/worktrees/
+.worktrees/
+
+# Claude Code personal-local settings (per-user, not shared)
+.claude/settings.local.json

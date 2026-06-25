@@ -61,14 +61,25 @@ def _sweep_result() -> SweepResult:
     )
 
 
-def test_backtest_result_to_dict_matches_asdict():
+def test_backtest_result_to_dict_excludes_returns():
     r = _backtest_result()
-    assert r.to_dict() == dataclasses.asdict(r)
+    d = r.to_dict()
+    # to_dict() pops 'returns' because pd.Series is not JSON-serializable
+    assert "returns" not in d
+    expected = dataclasses.asdict(r)
+    expected.pop("returns", None)
+    assert d == expected
 
 
 def test_walkforward_result_to_dict_matches_asdict():
+    # holdout_returns is SENSITIVE and excluded from to_dict() (#221 Slice 1).
+    # market_returns is bulky (full-period aggregate) and excluded from to_dict() (#221 Slice 4).
+    # Strip both from the dataclasses.asdict reference so the invariant holds.
     r = _walkforward_result()
-    assert r.to_dict() == dataclasses.asdict(r)
+    expected = dataclasses.asdict(r)
+    expected.pop("holdout_returns", None)
+    expected.pop("market_returns", None)
+    assert r.to_dict() == expected
 
 
 def test_sweep_result_to_dict_matches_asdict():
@@ -78,10 +89,12 @@ def test_sweep_result_to_dict_matches_asdict():
 
 def test_backtest_result_to_dict_has_expected_keys():
     d = _backtest_result().to_dict()
+    # 'returns' is excluded from to_dict() (not JSON-serializable)
     assert set(d) == {
         "strategy", "metrics", "config_hash", "data_source", "timeframe",
         "period", "seed", "snapshot_id", "code_hash", "dependency_hash",
         "universe_name", "universe_snapshots", "fundamentals_snapshot", "news_snapshot",
+        "delisting_snapshot", "forced_exits",
     }
 
 
@@ -104,4 +117,5 @@ def test_sweep_result_to_dict_has_expected_keys():
         "rank_by", "ranked", "best", "code_hash", "dependency_hash",
         "universe_name", "universe_snapshots",
         "fundamentals_snapshot", "news_snapshot",
+        "trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann",
     }

@@ -102,18 +102,40 @@ def count_tabular_rows(path: Path) -> int | None:
     return None
 
 
-def frame_to_parquet_bytes(frame: pd.DataFrame) -> bytes:
+def frame_to_parquet_bytes(
+    frame: pd.DataFrame, metadata: dict[str, str] | None = None
+) -> bytes:
     """Serialize `frame` to canonical, reproducible parquet bytes.
 
-    Determinism is what makes the content hash a stable provenance key (issue #55): the same logical
-    dataset must produce byte-identical output across runs. We pin the arrow table directly (no
-    pandas index sidecar), disable the file-level pandas metadata blob (which can vary), and fix the
-    parquet writer/compression so two equal frames hash identically.
+    Determinism is what makes the content hash a stable provenance key (issue #55). We pin the arrow
+    table directly (no pandas index sidecar) and fix the writer/compression so two equal frames hash
+    identically. `metadata` (#181) is OPTIONAL self-describing schema key/value metadata; keys are
+    SORTED so the byte output is independent of dict insertion order. `None` (default) strips all
+    schema metadata exactly as before, so existing content-addressed callers are unchanged.
     """
-    table = pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(None)
+    table = pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(
+        None if metadata is None else {k: metadata[k] for k in sorted(metadata)}
+    )
     buffer = pa.BufferOutputStream()
     pq.write_table(table, buffer, compression="snappy", version="2.6")
     return buffer.getvalue().to_pybytes()
+
+
+def write_bytes_atomic(data: bytes, dest: Path) -> None:
+    """Write `data` to `dest` atomically via a same-dir temp + `os.replace` (#181): a reader never
+    sees a partially written file even if the process dies mid-write. No fsync — this is ephemeral
+    (a plotting input), not durable (cf. `write_bytes_snapshot`)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".emit-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, dest)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def write_bytes_snapshot(data: bytes, data_dir: Path, relative_path: Path) -> None:

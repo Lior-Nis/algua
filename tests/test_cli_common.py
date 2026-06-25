@@ -65,3 +65,11 @@ def test_resolve_eval_inputs_returns_quadruple():
     assert start_dt == datetime(2022, 1, 1, tzinfo=UTC)
     assert end_dt == datetime(2022, 12, 31, tzinfo=UTC)
     assert provider is not None
+
+
+def test_breach_payload_shape():
+    from algua.cli._common import breach_payload
+
+    p = breach_payload("boom", kind="drawdown", strategy="s")
+    assert p == {"ok": False, "kill_switch": "tripped", "error": "boom",
+                 "kind": "drawdown", "strategy": "s"}

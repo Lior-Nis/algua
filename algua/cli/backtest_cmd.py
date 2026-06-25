@@ -1,17 +1,21 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
+from pathlib import Path
 
+import numpy as np
+import pyarrow as pa
 import typer
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
-from algua.backtest.sweep import SweepResult, parse_grid, sweep
+from algua.backtest.result import BacktestResult, series_frame
+from algua.backtest.sweep import parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
     registry_conn,
+    resolve_delisting_inputs,
     resolve_eval_inputs,
     resolve_universe_inputs,
 )
@@ -19,8 +23,10 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.data.files import frame_to_parquet_bytes, write_bytes_atomic
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
+from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
@@ -36,6 +42,37 @@ def _track(call: Callable[[], str]) -> str:
         return call()
     except Exception as exc:  # noqa: BLE001 - tracking is a best-effort side effect
         raise BacktestError(f"mlflow tracking failed: {exc}") from exc
+
+
+def emit_series_file(result: BacktestResult, path: Path) -> dict:
+    """Write the backtest's daily return series to a deterministic, provenance-stamped parquet at
+    `path` and return the stdout `series` descriptor. Fail closed (#181): a `None`, empty, or
+    non-finite series raises BacktestError — never a partial/empty file."""
+    if (
+        result.returns is None
+        or len(result.returns) == 0
+        or not np.isfinite(result.returns.to_numpy(dtype=float)).all()
+    ):
+        raise BacktestError("backtest produced no finite return series; nothing to emit")
+    frame, metadata = series_frame(result)
+    try:
+        write_bytes_atomic(frame_to_parquet_bytes(frame, metadata), path)
+    except (OSError, pa.ArrowInvalid, Exception) as exc:
+        if isinstance(exc, BacktestError):
+            raise
+        raise BacktestError(f"failed to write series to {path}: {exc}") from exc
+    return {
+        "path": str(path), "n": int(len(frame)),
+        "code_hash": result.code_hash, "dependency_hash": result.dependency_hash,
+        "config_hash": result.config_hash, "snapshot_id": result.snapshot_id,
+        "seed": result.seed, "data_source": result.data_source,
+        "start": result.period["start"], "end": result.period["end"],
+        "timeframe": result.timeframe,
+        "universe_name": result.universe_name,
+        "fundamentals_snapshot": result.fundamentals_snapshot,
+        "news_snapshot": result.news_snapshot,
+        "delisting_snapshot": result.delisting_snapshot,
+    }
 
 
 @backtest_app.command("run")
@@ -55,12 +92,22 @@ def run(
     news_snapshot: str = typer.Option(
         None, "--news-snapshot",
         help="ingested news snapshot id (required for a needs_news strategy)"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
     register: bool = typer.Option(False, "--register", help="advance registry idea->backtested"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
+    emit_series: str = typer.Option(
+        None, "--emit-series",
+        help="write the daily return series to a parquet at PATH (for series plots)"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    delisting_records, delisting_snapshot_id = resolve_delisting_inputs(delistings, end_dt)
     if fundamentals_snapshot and not strategy.config.needs_fundamentals:
         raise ValueError(
             "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
@@ -85,6 +132,9 @@ def run(
         universe_name=universe, universe_snapshots=universe_prov,
         fundamentals_provider=fundamentals_provider,
         news_provider=news_provider,
+        delisting_records=delisting_records,
+        delisting_snapshot=delisting_snapshot_id,
+        assume_terminal_last_close=assume_terminal_last_close,
     )
 
     if register:
@@ -99,7 +149,26 @@ def run(
             )
             transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason)
 
+    # Persist return series for the return-correlation clustering axis (#222, Task 7).
+    # Only persists for registered strategies; silently skips otherwise.
+    if result.returns is not None:
+        with registry_conn() as conn:
+            repo = SqliteStrategyRepository(conn)
+            try:
+                repo.get(name)
+            except Exception:  # noqa: BLE001 — strategy not yet registered, skip
+                pass
+            else:
+                repo.persist_backtest_returns(
+                    name,
+                    start_dt.date().isoformat(),
+                    end_dt.date().isoformat(),
+                    result.returns,
+                )
+
     payload = result.to_dict()
+    if emit_series:
+        payload["series"] = emit_series_file(result, Path(emit_series))
     if track:
         payload["mlflow_run_id"] = _track(
             lambda: log_backtest(
@@ -128,6 +197,12 @@ def walk_forward_cmd(
     news_snapshot: str = typer.Option(
         None, "--news-snapshot",
         help="ingested news snapshot id (required for a needs_news strategy)"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Walk-forward (out-of-sample) evaluation: per-window metrics + stability.
@@ -157,12 +232,15 @@ def walk_forward_cmd(
         if news_snapshot
         else None
     )
+    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     result = walk_forward(strategy, provider, start_dt, end_dt,
                           windows=windows, holdout_frac=holdout_frac,
                           universe_by_date=universe_by_date,
                           universe_name=universe, universe_snapshots=universe_prov,
                           fundamentals_provider=fundamentals_provider,
-                          news_provider=news_provider)
+                          news_provider=news_provider,
+                          delisting_records=delisting_records,
+                          assume_terminal_last_close=assume_terminal_last_close)
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
@@ -196,6 +274,12 @@ def sweep_cmd(
     news_snapshot: str = typer.Option(
         None, "--news-snapshot",
         help="ingested news snapshot id (required for a needs_news strategy)"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
@@ -221,17 +305,21 @@ def sweep_cmd(
         if news_snapshot
         else None
     )
+    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     grid = parse_grid(param or [])
     result = sweep(strategy, provider, start_dt, end_dt,
                    grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by,
                    universe_by_date=universe_by_date,
                    universe_name=universe, universe_snapshots=universe_prov,
                    fundamentals_provider=fundamentals_provider,
-                   news_provider=news_provider)
+                   news_provider=news_provider,
+                   delisting_records=delisting_records,
+                   assume_terminal_last_close=assume_terminal_last_close)
     run_id = None
     if track:
         run_id = _track(lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
-    recorded = _record_search_breadth(name, result)
+    with registry_conn() as conn:
+        recorded = record_search_breadth(SqliteStrategyRepository(conn), name, result)
     payload = result.to_dict()
     payload["ranked"] = payload["ranked"][:top]
     # Surface the MEASURED breadth this sweep contributed (this sweep's n_combos) and the
@@ -241,18 +329,3 @@ def sweep_cmd(
     if run_id is not None:
         payload["mlflow_run_id"] = run_id
     emit(ok(payload))
-
-
-def _record_search_breadth(name: str, result: SweepResult) -> dict[str, int]:
-    """Record this sweep's measured breadth into the registry, keyed by strategy NAME.
-
-    Recorded UNCONDITIONALLY — even for a not-yet-registered strategy. Exploration precedes
-    registration: keying by name (not the registry id) means a pre-registration sweep still
-    counts toward the promotion breadth, so an agent can't sweep broadly first and then promote a
-    freshly-registered strategy under a smaller declared --n-combos. Returns the recorded count
-    plus the new cumulative family total for the emitted JSON.
-    """
-    with registry_conn() as conn:
-        repo = SqliteStrategyRepository(conn)
-        repo.record_search_trial(name, result.n_combos, json.dumps(result.grid, sort_keys=True))
-        return {"n_combos": result.n_combos, "cumulative": repo.total_search_combos(name)}

@@ -12,7 +12,9 @@ dependencies = [
     "yfinance>=1.4.1",
     "pyarrow>=15,<24",
     "vectorbt>=0.26",
+    "scipy>=1.11",  # #211 DSR evidence: norm.cdf/ppf in research.gates + skew/kurtosis in metrics
     "mlflow>=3.1",
+    "matplotlib>=3.8",  # #181 series plots (report-experiments); was transitive via mlflow
     "threadpoolctl>=3,<4",
 ]
 
@@ -126,6 +128,15 @@ source_modules = ["algua.backtest"]
 forbidden_modules = ["algua.research"]
 
 [[tool.importlinter.contracts]]
+# The dependency runs ONE way: the registry composes research (promotion gates, idea pool), never
+# the reverse. research is pure evaluation/scoring — it must not reach back into lifecycle state.
+# Stated as its own contract so the correct direction survives a future refactor (issue #170).
+name = "research never imports registry"
+type = "forbidden"
+source_modules = ["algua.research"]
+forbidden_modules = ["algua.registry"]
+
+[[tool.importlinter.contracts]]
 name = "execution / live / audit stay off the cli layer"
 type = "forbidden"
 source_modules = ["algua.execution", "algua.live", "algua.audit"]
@@ -202,3 +213,22 @@ name = "live and execution stay off the data lane"
 type = "forbidden"
 source_modules = ["algua.live", "algua.execution"]
 forbidden_modules = ["algua.data"]
+
+[[tool.importlinter.contracts]]
+# The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
+# the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
+# gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is
+# NOT listed, so command modules may still import it.
+name = "cli command modules are independent of one another (no cli->cli sibling imports)"
+type = "independence"
+modules = [
+    "algua.cli.backtest_cmd",
+    "algua.cli.data_cmd",
+    "algua.cli.factor_cmd",
+    "algua.cli.idea_cmd",
+    "algua.cli.live_cmd",
+    "algua.cli.paper_cmd",
+    "algua.cli.registry_cmd",
+    "algua.cli.research_cmd",
+    "algua.cli.strategy_cmd",
+]

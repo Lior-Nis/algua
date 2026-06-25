@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import math
+import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Protocol
 
-from algua.backtest.result import BacktestResult
+import numpy as np
+
+from algua.backtest.result import BacktestResult, series_frame
 from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
+from algua.data.files import frame_to_parquet_bytes
 
 # ---------------------------------------------------------------------------
 # Protocol (#45)
@@ -66,6 +71,29 @@ def _stamp_params(result: Any) -> dict[str, Any]:
     }
 
 
+def _log_series_artifact(result: BacktestResult) -> None:
+    """Log the backtest's daily return series as a `series.parquet` MLflow artifact (#181).
+
+    The report-experiments skill can then plot the LOGGED run's own series (no re-run, no
+    code/input drift). Only `log_backtest` calls this — `log_sweep`/`log_walk_forward` must
+    NOT, because their return vectors contain the reserved single-use holdout tail.
+    Best-effort: an absent/empty/non-finite series is skipped — do NOT raise."""
+    import mlflow
+
+    if (
+        result.returns is None
+        or len(result.returns) == 0
+        or not np.isfinite(result.returns.to_numpy(dtype=float)).all()
+    ):
+        return
+    frame, metadata = series_frame(result)
+    data = frame_to_parquet_bytes(frame, metadata)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "series.parquet"  # mlflow logs the artifact under its basename
+        p.write_bytes(data)
+        mlflow.log_artifact(str(p))
+
+
 @contextmanager
 def _run(experiment: str, tracking_uri: str) -> Generator[Any, None, None]:
     """Import mlflow, set tracking URI + experiment once, yield a started run."""
@@ -97,6 +125,7 @@ def log_backtest(result: BacktestResult, params: dict[str, Any], *, tracking_uri
             "timeframe": result.timeframe,
         })
         mlflow.log_dict(result.to_dict(), "result.json")
+        _log_series_artifact(result)  # logs series.parquet iff returns is non-empty (#181)
         return run.info.run_id
 
 

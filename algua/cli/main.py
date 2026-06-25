@@ -23,6 +23,11 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
 )
 from algua.cli.app import app, emit
 
+# Composition root: mount idea_app under research_app HERE (not inside idea_cmd) so no cli command
+# module imports a sibling. Typer builds the command tree lazily at get_command(app) inside main(),
+# so this only needs to run before that call. MUST stay after the `from algua.cli import (…)` block.
+research_cmd.research_app.add_typer(idea_cmd.idea_app, name="idea")
+
 __all__ = ["app", "main"]
 
 

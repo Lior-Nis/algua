@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 29
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -127,20 +127,25 @@ CREATE TABLE IF NOT EXISTS search_trials (
     strategy_name TEXT NOT NULL,
     n_combos INTEGER NOT NULL,
     grid_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    trial_sharpe_count INTEGER,
+    trial_sharpe_mean REAL,
+    trial_sharpe_var_ann REAL
 );
 CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_name);
+CREATE INDEX IF NOT EXISTS ix_search_trials_created_at ON search_trials(created_at);
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
--- holdout that was looked at (regardless of gate pass/fail — looking consumes it). A later promote
--- is REFUSED if its OOS interval [holdout_start, holdout_end] — the exact bars walk_forward burns
--- (#192) — overlaps a recorded row's interval for the same strategy+data identity, unless the
--- operator passes --allow-holdout-reuse (writes reused=1, auditable). A NULL interval matches
--- unconditionally (fail closed). period_* and holdout_frac are recorded as evidence only; matching
--- is on the INTERVAL, not on config_hash (re-gating the same OOS window with a tweaked config is
--- exactly the leak being closed). Data identity = snapshot_id when both sides have one, else
--- data_source. FK into strategies(id) — relational state, not an audit snapshot.
+-- holdout that was looked at (regardless of gate pass/fail — looking consumes it).
+-- Single-use key: (strategy_id, OOS interval [holdout_start, holdout_end]) — PROVENANCE-INDEPENDENT
+-- (#205). data_source/snapshot_id are recorded as EVIDENCE only, never matched on. A row is REFUSED
+-- if its OOS interval overlaps a prior reservation/burn for the strategy (the exact bars, #192),
+-- regardless of how the bars were reached, unless the operator passes --allow-holdout-reuse (writes
+-- reused=1, auditable). A NULL interval matches unconditionally (fail closed). period_* and
+-- holdout_frac are recorded as evidence only; matching is on the INTERVAL, not on config_hash
+-- (re-gating the same OOS window with a tweaked config is exactly the leak being closed). FK into
+-- strategies(id) — relational state, not an audit snapshot.
 CREATE TABLE IF NOT EXISTS holdout_evaluations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER NOT NULL REFERENCES strategies(id),
@@ -162,6 +167,28 @@ CREATE TABLE IF NOT EXISTS holdout_evaluations (
 );
 CREATE INDEX IF NOT EXISTS ix_holdout_evaluations_strategy
     ON holdout_evaluations(strategy_id);
+-- holdout_returns persists EXACTLY ONE out-of-sample per-period return vector per holdout burn
+-- (#221 Slice 1) — the heavy shared prerequisite for Phase-3 Slices 2/3/4 (bootstrap, N_eff,
+-- multi-regime). Grain is per-strategy-holdout, NOT per-combo: persisting per-combo vectors would
+-- re-open the single-use best-of-N surface sweep() is built to prevent. The FK ties each vector to
+-- the burn that produced it; UNIQUE(holdout_evaluation_id) prevents double-writes and makes a
+-- reconciliation job (re-running the deterministic walk-forward) safe. SENSITIVE: no CLI
+-- accessor and no "get my own vector" API may read returns_blob — sibling-only cross-strategy.
+CREATE TABLE IF NOT EXISTS holdout_returns (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    holdout_evaluation_id INTEGER NOT NULL REFERENCES holdout_evaluations(id),
+    strategy_id           INTEGER NOT NULL REFERENCES strategies(id),
+    holdout_start         TEXT    NOT NULL,   -- OOS interval identity (mirrors #192 / #205)
+    holdout_end           TEXT    NOT NULL,
+    n_bars                INTEGER NOT NULL,   -- length of stored vector; == holdout_metrics n_bars
+    returns_blob          BLOB    NOT NULL,   -- float64 per-period OOS returns, np.tobytes()
+    bar_dates_blob        BLOB    NOT NULL,   -- ISO-8601 bar dates, UTF-8 newline-delimited
+    created_at            TEXT    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_holdout_returns_eval ON holdout_returns(holdout_evaluation_id);
+CREATE INDEX IF NOT EXISTS ix_holdout_returns_strategy  ON holdout_returns(strategy_id);
+CREATE INDEX IF NOT EXISTS ix_holdout_returns_interval
+    ON holdout_returns(holdout_start, holdout_end);
 -- gate_evaluations records every promotion-gate evaluation (pass AND fail) for the audit trail,
 -- AND is the single-use, AGENT-ONLY token the BACKTESTED->CANDIDATE transition consumes (the
 -- shortlist gate, mirroring the live gate: trust the gate record, not the stage flag). A passing
@@ -295,6 +322,13 @@ CREATE TABLE IF NOT EXISTS live_fill_cursor (
     name    TEXT PRIMARY KEY,
     cursor  TEXT
 );
+CREATE TABLE IF NOT EXISTS live_activity_quarantine (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id  TEXT NOT NULL UNIQUE,
+    error        TEXT NOT NULL,
+    raw          TEXT NOT NULL,
+    quarantined_ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 CREATE TABLE IF NOT EXISTS live_reconcile_state (
     symbol           TEXT PRIMARY KEY,
     expected_qty     REAL NOT NULL,
@@ -389,6 +423,101 @@ CREATE TABLE IF NOT EXISTS forward_gate_evaluations (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_forward_gate_strategy ON forward_gate_evaluations(strategy_id);
+
+-- v25 (#219): factor-evaluation ledger for funnel-FDR accounting (slice E of #140).
+-- Records each `factor eval` invocation as a hypothesis test. Correction columns
+-- (n_hypotheses, dsr_confidence, significant) are NULL until finalize_factor_evaluation()
+-- writes them after the breadth + DSR pass — fail-closed: a NULL significant is never
+-- treated as a pass. hypothesis_hash deduplicates identical reruns (same factor identity
+-- + params + window), so breadth counts are honest across repeated runs.
+CREATE TABLE IF NOT EXISTS factor_evaluations (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    factor_name               TEXT    NOT NULL,
+    import_path               TEXT    NOT NULL,
+    code_hash                 TEXT    NOT NULL,
+    hypothesis_hash           TEXT    NOT NULL,
+    period_start              TEXT    NOT NULL,
+    period_end                TEXT    NOT NULL,
+    horizon                   INTEGER NOT NULL,
+    params_json               TEXT    NOT NULL DEFAULT '{}',
+    construction              TEXT    NOT NULL,
+    construction_params_json  TEXT    NOT NULL DEFAULT '{}',
+    n_obs                     INTEGER,
+    mean_ic                   REAL,
+    ic_ir                     REAL,
+    t_stat                    REAL,
+    ic_skew                   REAL,
+    ic_kurtosis               REAL,
+    n_dependents              INTEGER NOT NULL DEFAULT 0,
+    data_source               TEXT    NOT NULL,
+    snapshot_id               TEXT,
+    actor                     TEXT    NOT NULL DEFAULT 'agent',
+    created_at                TEXT    NOT NULL,
+    n_hypotheses              INTEGER,
+    dsr_confidence            REAL,
+    significant               INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_factor_evaluations_factor
+    ON factor_evaluations (factor_name);
+CREATE INDEX IF NOT EXISTS ix_factor_evaluations_created
+    ON factor_evaluations (created_at);
+CREATE INDEX IF NOT EXISTS ix_factor_evaluations_hypothesis
+    ON factor_evaluations (hypothesis_hash, created_at);
+-- v26 (#222): backtest_returns stores daily return series for return-correlation clustering.
+CREATE TABLE IF NOT EXISTS backtest_returns (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name  TEXT NOT NULL,
+    period_start   TEXT NOT NULL,
+    period_end     TEXT NOT NULL,
+    returns_json   BLOB NOT NULL,
+    created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_backtest_returns_strategy ON backtest_returns(strategy_name);
+-- v26 (#222): family registry tables.
+-- families: canonical family registry
+CREATE TABLE IF NOT EXISTS families (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT NOT NULL UNIQUE,
+    created_at       TEXT NOT NULL,
+    created_by_actor TEXT NOT NULL,
+    created_by_strategy TEXT
+);
+-- family_members: APPEND-ONLY (removed_at SET never DELETE; breadth never decreases)
+CREATE TABLE IF NOT EXISTS family_members (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    family_id       INTEGER NOT NULL REFERENCES families(id),
+    strategy_name   TEXT NOT NULL,
+    joined_at       TEXT NOT NULL,
+    joined_by_actor TEXT NOT NULL,
+    removed_at      TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy_family
+    ON family_members(strategy_name, family_id) WHERE removed_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_active
+    ON family_members(strategy_name) WHERE removed_at IS NULL;
+-- family_parents: parentage DAG (multi-parent; cycle-guarded at write time)
+CREATE TABLE IF NOT EXISTS family_parents (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    child_family_id  INTEGER NOT NULL REFERENCES families(id),
+    parent_family_id INTEGER NOT NULL REFERENCES families(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_family_parents
+    ON family_parents(child_family_id, parent_family_id);
+-- family_events: governance audit log
+CREATE TABLE IF NOT EXISTS family_events (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type              TEXT NOT NULL,
+    family_id               INTEGER REFERENCES families(id),
+    strategy_name           TEXT,
+    actor                   TEXT NOT NULL,
+    clustering_verdict      TEXT,
+    similarity_score        REAL,
+    clustering_version      TEXT,
+    clustering_config_json  TEXT,
+    axis_json               TEXT,
+    matched_family_id       INTEGER REFERENCES families(id),
+    created_at              TEXT NOT NULL
+);
 """
 
 
@@ -413,7 +542,6 @@ def migrate(conn: sqlite3.Connection) -> None:
     we only stamp it afterward as a schema-generation marker.
     """
     _migrate_shortlisted_to_candidate(conn)
-    _rekey_search_trials_to_name(conn)
     conn.executescript(_SCHEMA)
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
     _add_missing_columns(conn, "stage_transitions", {"dependency_hash": "TEXT"})
@@ -465,7 +593,42 @@ def migrate(conn: sqlite3.Connection) -> None:
         {"committed_at": "TEXT", "holdout_start": "TEXT", "holdout_end": "TEXT"},
     )
     _backfill_holdout_intervals(conn)
-    # v24 (#132): PIT sidecar snapshot provenance on the gate audit row. Additive nullable — legacy
+    # v24 (#211): trial-Sharpe dispersion columns for the DSR evidence layer. NULL on pre-existing
+    # rows — old sweep rows lack stats and the pooled accessor returns None (fail closed).
+    _add_missing_columns(conn, "search_trials", {
+        "trial_sharpe_count": "INTEGER",
+        "trial_sharpe_mean": "REAL",
+        "trial_sharpe_var_ann": "REAL",
+    })
+    # v25 (#219): factor_evaluations is a brand-new table — `executescript(_SCHEMA)` above
+    # creates it via `CREATE TABLE IF NOT EXISTS`. No _add_missing_columns needed.
+    # v26 (#220): FDR accounting columns for the LORD++ alpha-wealth ledger. NULL on pre-existing
+    # rows — legacy evaluations are excluded from the FDR stream by WHERE fdr_binding=1 (fail
+    # closed). The partial unique index is created AFTER the columns exist (it references
+    # fdr_test_index which isn't in the base DDL), so it lives here rather than in _SCHEMA.
+    _add_missing_columns(conn, "gate_evaluations", {
+        "fdr_binding": "INTEGER",
+        "fdr_p_value": "REAL",
+        "fdr_alpha_level": "REAL",
+        "fdr_rejected": "INTEGER",
+        "fdr_test_index": "INTEGER",
+    })
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_index"
+        " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1"
+    )
+    # v26 (#222): backtest_returns is a brand-new table; executescript creates it.
+    # v26 (#222): family registry tables (families/family_members/family_parents/family_events).
+    # All brand-new tables; executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
+    # No _add_missing_columns needed for new tables.
+    # v26 (#222): family breadth audit columns on gate_evaluations (Task 5).
+    _add_missing_columns(conn, "gate_evaluations", {
+        "family_id": "INTEGER",
+        "family_lifetime_effective": "INTEGER",
+    })
+    # v28 (#250): live_activity_quarantine is a brand-new dead-letter table; executescript(_SCHEMA)
+    # above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # v29 (#132): PIT sidecar snapshot provenance on the gate audit row. Additive nullable — legacy
     # rows stay NULL (no backfill; pre-#132 promotions had no PIT snapshot).
     _add_missing_columns(
         conn, "gate_evaluations",
@@ -510,40 +673,6 @@ def _migrate_shortlisted_to_candidate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "UPDATE stage_transitions SET to_stage='candidate' WHERE to_stage='shortlisted'"
             )
-
-
-def _rekey_search_trials_to_name(conn: sqlite3.Connection) -> None:
-    """Forward-migrate a dev DB whose ``search_trials`` is keyed by the old ``strategy_id`` FK to
-    the name-keyed table, carrying each row's breadth across by resolving the id to a strategy
-    name. Runs BEFORE the ``CREATE TABLE IF NOT EXISTS`` bootstrap (which would otherwise leave an
-    old-shaped table untouched). Idempotent: a no-op once the table is already name-keyed (or
-    absent — the bootstrap then creates it fresh)."""
-    table_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='search_trials'"
-    ).fetchone()
-    if table_exists is None:
-        return
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(search_trials)")}
-    if "strategy_name" in cols or "strategy_id" not in cols:
-        return  # already migrated (or some other shape) — leave it alone
-    # Rebuild the table name-keyed, joining through strategies to recover each row's name. Rows
-    # whose strategy_id no longer resolves are dropped (the strategy is gone; its breadth is moot).
-    conn.executescript(
-        """
-        ALTER TABLE search_trials RENAME TO _search_trials_old;
-        CREATE TABLE search_trials (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            strategy_name TEXT NOT NULL,
-            n_combos INTEGER NOT NULL,
-            grid_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)
-            SELECT s.name, o.n_combos, o.grid_json, o.created_at
-            FROM _search_trials_old o JOIN strategies s ON s.id = o.strategy_id;
-        DROP TABLE _search_trials_old;
-        """
-    )
 
 
 def _backfill_holdout_intervals(conn: sqlite3.Connection) -> None:

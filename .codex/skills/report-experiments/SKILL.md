@@ -33,16 +33,26 @@ Plots come ONLY from data MLflow already holds, so there's **no backtest re-run 
 - **Walk-forward:** per-window in-sample stability bars — from `result.json`'s `window_metrics`.
 - **Cross-run:** `mean_sharpe` across the strategy's tracked runs over time.
 
-**Deferred (out of scope):** equity curve, drawdown, rolling Sharpe, return distribution. They need
-the portfolio **return series**, which no CLI command emits today; producing it from a skill would
-mean reaching into `algua.backtest` internals (violates "never bypass the CLI"). The clean
-enablement is a future `backtest`-emits-series change — file it, don't hack around it.
+## v2 scope (series plots, #181)
+
+Four additional plots read the **`series.parquet` artifact** logged by a `--track`ed
+`backtest run` — no backtest re-run, no new CLI. The skill locates the best-matching
+`kind="backtest"` MLflow run (identity match on `config_hash` + `snapshot_id` against the
+walk-forward/sweep provenance, falling back to the newest run that has the artifact), downloads
+`series.parquet`, and renders:
+- **Equity curve** — cumulative product of daily returns (start = 1.0).
+- **Drawdown** — equity / running-peak (floored at 1.0) − 1.
+- **Rolling Sharpe (63d)** — 63-bar rolling annualised Sharpe (≈ one quarter).
+- **Return distribution** — histogram of daily returns (40 bins).
+
+These plots are **only** produced from a `backtest` run's logged artifact — never from a sweep or
+walk-forward (those don't log a return series; the single-use OOS holdout is never surfaced).
 
 ## Playbook
 
-0. **Preflight.** Confirm the plot lib is importable; it ships transitively via mlflow:
-   `uv run python -c "import matplotlib"` — if it fails, `uv add matplotlib` and retry. Resolve the
-   tracking store the way the platform does: `MLFLOW_TRACKING_URI` (default `mlruns`).
+0. **Preflight.** Confirm the plot lib is importable (it is a direct dependency):
+   `uv run python -c "import matplotlib"`. Resolve the tracking store the way the platform does:
+   `MLFLOW_TRACKING_URI` (default `mlruns`).
 1. **Pick the strategy + family.** `uv run algua registry show <name>` gives its `family` (for the
    `[[wikilink]]`). The strategy must have at least one **`--track`ed** sweep or walk-forward run; if
    not, run e.g. `uv run algua backtest sweep <name> --demo --param lookback=20,40,60 --param top_k=1,2 --track`
@@ -70,7 +80,7 @@ anything that *drives the system* still goes through `uv run algua ...`.
 #!/usr/bin/env python
 """Generate a curated, plotted experiment report for an algua strategy FROM MLflow-tracked data.
 MLflow stays the raw run store; this writes the curated, graph-linked layer into the kb vault. It
-pulls FROM MLflow and never re-stores runs. v1: tracked data only (no equity/drawdown series)."""
+pulls FROM MLflow and never re-stores runs. v2: tracked data + backtest series plots (#181)."""
 from __future__ import annotations
 
 import argparse
@@ -250,11 +260,97 @@ def plot_cross_run(strategy: str, runs: list, out: Path) -> str | None:
     return out.name
 
 
+def _series_provenance(uri: str, run, result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": run.info.run_id, "config_hash": result.get("config_hash"),
+        "dependency_hash": result.get("dependency_hash"), "snapshot_id": result.get("snapshot_id"),
+        "code_hash": result.get("code_hash"), "seed": result.get("seed"),
+        "period": result.get("period"),
+    }
+
+
+def _load_series(uri: str, run_id: str):
+    """Download + read the series.parquet artifact -> a [date, ret] DataFrame, or None on any
+    failure (missing/corrupt artifact => series plots are simply omitted)."""
+    import pandas as pd
+    try:
+        local = mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path="series.parquet", tracking_uri=uri)
+        df = pd.read_parquet(local)
+        return df if {"date", "ret"}.issubset(df.columns) and len(df) else None
+    except Exception as exc:
+        print(f"[warn] _load_series failed for run_id={run_id}: {exc}")
+        return None
+
+
+def _equity(ret):
+    return (1.0 + ret).cumprod()
+
+
+def plot_equity(df, strategy: str, out: Path) -> str | None:
+    eq = _equity(df["ret"])
+    fig, ax = plt.subplots()
+    ax.plot(range(len(eq)), eq.to_numpy())
+    ax.set_xlabel("bar")
+    ax.set_ylabel("equity (start=1.0)")
+    ax.set_title(f"{strategy} — equity curve")
+    ax.grid(True, alpha=0.3)
+    _savefig(fig, out)
+    return out.name
+
+
+def plot_drawdown(df, strategy: str, out: Path) -> str | None:
+    eq = _equity(df["ret"])
+    # Peak floored at starting capital (1.0) — matches the canonical max-drawdown in metrics.py.
+    dd = eq / eq.cummax().clip(lower=1.0) - 1.0
+    fig, ax = plt.subplots()
+    ax.fill_between(range(len(dd)), dd.to_numpy(), 0.0, color="#c44e52", alpha=0.6)
+    ax.set_xlabel("bar")
+    ax.set_ylabel("drawdown")
+    ax.set_title(f"{strategy} — drawdown")
+    ax.grid(True, alpha=0.3)
+    _savefig(fig, out)
+    return out.name
+
+
+def plot_rolling_sharpe(df, strategy: str, out: Path, window: int = 63) -> str | None:
+    import numpy as np
+    ret = df["ret"]
+    if len(ret) < window:
+        return None  # not enough observations for a single full window
+    mean = ret.rolling(window).mean()
+    std = ret.rolling(window).std()
+    # std == 0 (a flat window) -> Sharpe undefined: NaN (a gap), never a fake 0 or inf.
+    rs = (mean / std.replace(0.0, np.nan)) * np.sqrt(252.0)
+    fig, ax = plt.subplots()
+    ax.plot(range(len(rs)), rs.to_numpy())
+    ax.axhline(0, color="k", linewidth=0.8)
+    ax.set_xlabel("bar")
+    ax.set_ylabel(f"rolling Sharpe ({window}d, ann.)")
+    ax.set_title(f"{strategy} — rolling Sharpe (window={window})")
+    ax.grid(True, alpha=0.3)
+    _savefig(fig, out)
+    return out.name
+
+
+def plot_return_dist(df, strategy: str, out: Path) -> str | None:
+    fig, ax = plt.subplots()
+    ax.hist(df["ret"].to_numpy(), bins=40, color="#4c72b0")
+    ax.set_xlabel("daily return")
+    ax.set_ylabel("frequency")
+    ax.set_title(f"{strategy} — return distribution")
+    ax.grid(True, axis="y", alpha=0.3)
+    _savefig(fig, out)
+    return out.name
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("strategy")
     ap.add_argument("--kb", default="kb", help="vault root")
     ap.add_argument("--family", default=None, help="family slug for the [[wikilink]]")
+    ap.add_argument("--backtest-run-id", default=None,
+                    help="MLflow run_id of the backtest whose series.parquet to plot (#181)")
     args = ap.parse_args()
 
     uri = _uri()
@@ -307,12 +403,65 @@ def main() -> int:
     if fn:
         figs.append(("Cross-run leaderboard", fn))
 
+    # --- series plots (#181): read the LOGGED backtest's series.parquet artifact (no re-run) ---
+    bt_runs = [r for r in runs if r.data.tags.get("kind") == "backtest"]
+    chosen = None
+    chosen_res: dict[str, Any] = {}
+    chosen_df = None
+    explicit_id_given = bool(args.backtest_run_id)
+    if explicit_id_given:
+        chosen = next((r for r in bt_runs if r.info.run_id == args.backtest_run_id), None)
+        if chosen is not None:
+            chosen_res = _artifact_json(chosen.info.run_id, "result.json", uri) or {}
+            chosen_df = _load_series(uri, chosen.info.run_id)
+        if chosen is None or chosen_df is None:
+            # Terminal: explicit id given but not found/loadable — skip series plots entirely.
+            print(f"[warn] --backtest-run-id {args.backtest_run_id} not found among backtest"
+                  " runs with a series; skipping series plots")
+    if not explicit_id_given:
+        # Prefer a backtest whose identity matches the report's walk-forward (then sweep) run.
+        # For sweep runs, the best combo's hash is stored under best_config_hash (not config_hash).
+        ref = provenance.get("walk_forward") or provenance.get("sweep") or {}
+        ref_config = ref.get("config_hash") or ref.get("best_config_hash")
+        for r in bt_runs:
+            res = _artifact_json(r.info.run_id, "result.json", uri)
+            if res is None:
+                continue
+            df_candidate = _load_series(uri, r.info.run_id)
+            if df_candidate is None:
+                continue
+            if ref and (res.get("config_hash"), res.get("snapshot_id")) == (
+                    ref_config, ref.get("snapshot_id")):
+                chosen, chosen_res, chosen_df = r, res, df_candidate
+                break
+        if chosen is None:  # fall back to newest backtest with a series artifact
+            for r in bt_runs:
+                res = _artifact_json(r.info.run_id, "result.json", uri)
+                if res is None:
+                    continue
+                df_candidate = _load_series(uri, r.info.run_id)
+                if df_candidate is not None:
+                    chosen, chosen_res, chosen_df = r, res, df_candidate
+                    break
+    if chosen is not None and chosen_df is not None:
+        provenance["series"] = _series_provenance(uri, chosen, chosen_res)
+        for fn, name in (
+            (plot_equity(chosen_df, args.strategy, rdir / "series_equity.svg"), "Equity curve"),
+            (plot_drawdown(chosen_df, args.strategy, rdir / "series_drawdown.svg"), "Drawdown"),
+            (plot_rolling_sharpe(chosen_df, args.strategy, rdir / "series_rolling_sharpe.svg"),
+             "Rolling Sharpe (63d)"),
+            (plot_return_dist(chosen_df, args.strategy, rdir / "series_return_dist.svg"),
+             "Return distribution"),
+        ):
+            if fn:
+                figs.append((name, fn))
+
     fam = args.family
     lines = [
         f"# Experiment report — {args.strategy}",
         "",
         f"> Generated {stamp} from MLflow ({uri}). Curated/interpreted layer over the raw run store",
-        "> — pulls FROM MLflow, does not re-store runs. v1: tracked-data plots only.",
+        "> — pulls FROM MLflow, does not re-store runs. v2: tracked-data + backtest series plots.",
         "",
         f"Strategy: [[{args.strategy}]]" + (f" · Family: [[{fam}]]" if fam else ""),
         "",
@@ -346,5 +495,11 @@ if __name__ == "__main__":
 - It **degrades gracefully**: missing/corrupt artifacts are skipped (it falls to the next valid run
   of that kind); a heatmap needs a 2-param grid; cross-run needs ≥2 runs with `mean_sharpe`; missing
   pieces are simply omitted, never fatal.
+- **Series plots** are omitted entirely when no `--track`ed `backtest run` has a `series.parquet`
+  artifact (e.g. the run predates #181, or `--track` was not passed). No error is raised.
+- **Rolling Sharpe window = 63** (≈ one quarter). The first `window − 1` bars produce NaN (warm-up
+  period, rendered as a gap in the plot, never as a fake zero). A perfectly flat window where
+  `std == 0` also yields NaN rather than ±∞ or a spurious 0. If the series has fewer than 63 bars,
+  `plot_rolling_sharpe` returns `None` and the plot is omitted.
 - The `_Reading: TODO_` placeholders under each figure are your cue (step 3) — replace them. Don't
   commit a report still saying TODO.

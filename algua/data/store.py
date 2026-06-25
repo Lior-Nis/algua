@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import json
+import math
 import os
 import shutil
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -54,6 +56,9 @@ from algua.data.news_schema import (
 from algua.data.schema import empty_bars, to_bar_schema
 from algua.data.timeframes import validate_timeframe
 
+if TYPE_CHECKING:
+    from algua.backtest.delisting import DelistingRecord
+
 
 class SnapshotNotFound(LookupError):
     pass
@@ -73,7 +78,7 @@ class DataStore:
     def ingest_file(
         self,
         *,
-        dataset: str,
+        dataset: Dataset,
         provider: str,
         symbols: list[str],
         start: str,
@@ -81,7 +86,7 @@ class DataStore:
         as_of: str,
         source: str,
         file_path: Path,
-        kind: str = Kind.FILE.value,
+        kind: Kind = Kind.FILE,
         timeframe: str | None = None,
         adjustment: str | None = None,
         universe: str | None = None,
@@ -111,8 +116,7 @@ class DataStore:
             universe=universe,
             source_metadata=source_metadata,
         )
-        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir, lock_fd, lock_path = self._new_leased_staging()
         try:
             # Copy the external source ONCE, then hash/count THE STAGING COPY and publish that
             # exact artifact (#158): a source mutating mid-ingest can no longer commit bytes
@@ -147,7 +151,7 @@ class DataStore:
             )
             return self.manifest.append_if_absent(rec)
         finally:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            self._release_leased_staging(staging_dir, lock_fd, lock_path)
 
     def ingest_bars(
         self,
@@ -165,14 +169,14 @@ class DataStore:
     ) -> SnapshotRecord:
         validate_timeframe(timeframe)
         metadata = _metadata(
-            dataset=Dataset.BARS.value,
+            dataset=Dataset.BARS,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=source,
-            kind=Kind.BARS.value,
+            kind=Kind.BARS,
             timeframe=timeframe,
             adjustment=adjustment,
             source_metadata=source_metadata,
@@ -195,15 +199,14 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet_dataset",
         )
-        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir, lock_fd, lock_path = self._new_leased_staging()
         try:
             write_partitioned_bars(canon.sort_values(["symbol", "ts"]), staging_dir)
             return self._commit_bars_dir(
                 rec, staging_dir, expected_symbols={str(s) for s in canon["symbol"].unique()}
             )
         finally:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            self._release_leased_staging(staging_dir, lock_fd, lock_path)
 
     def _commit_bars_dir(
         self, rec: SnapshotRecord, staging_dir: Path, *, expected_symbols: set[str]
@@ -254,29 +257,143 @@ class DataStore:
         source: str,
         provider: str = "local",
         source_metadata: dict[str, str] | None = None,
+        require_immutable: bool = False,
     ) -> SnapshotRecord:
         clean_symbols = normalize_symbols(symbols)
         frame = pd.DataFrame(
             {"effective_date": effective_date, "universe": universe, "symbol": clean_symbols}
         )
         metadata = _metadata(
-            dataset=Dataset.UNIVERSES.value,
+            dataset=Dataset.UNIVERSES,
             provider=provider,
             symbols=clean_symbols,
             start=effective_date,
             end=effective_date,
             as_of=as_of,
             source=source,
-            kind=Kind.UNIVERSE.value,
+            kind=Kind.UNIVERSE,
             universe=universe,
             source_metadata=source_metadata,
         )
+
+        conflict_check = None
+        if require_immutable:
+            def conflict_check(committed, rec):  # noqa: E306
+                for other in committed:
+                    if (
+                        other.dataset == Dataset.UNIVERSES
+                        and other.metadata.universe == universe
+                        and other.metadata.start == effective_date
+                        and other.content_hash != rec.content_hash
+                    ):
+                        raise ValueError(
+                            f"universe {universe!r} already has a DIFFERENT membership on "
+                            f"{effective_date} (immutable; corrections require a new name)"
+                        )
+
         return self._ingest_parquet(
-            metadata=metadata, frame=frame, filename="universe.parquet"
+            metadata=metadata, frame=frame, filename="universe.parquet",
+            conflict_check=conflict_check,
         )
 
+    def ingest_delistings(
+        self,
+        *,
+        frame: pd.DataFrame,
+        as_of: str,
+        source: str,
+        provider: str = "local",
+    ) -> SnapshotRecord:
+        """Persist a point-in-time delistings snapshot: columns symbol, delisting_date,
+        delisting_value (per-share terminal price in adj_close units, strictly > 0).
+
+        Fails closed on value <= 0 / non-finite (zero-proceeds write-off deferred) and on a
+        duplicate (symbol, delisting_date) event."""
+        required = {"symbol", "delisting_date", "delisting_value"}
+        if not required.issubset(frame.columns):
+            raise ValueError(f"delistings frame must have columns {sorted(required)}")
+        clean = frame.copy()
+        clean["symbol"] = [s.strip().upper() for s in clean["symbol"].astype(str)]
+        clean["delisting_date"] = [
+            date.fromisoformat(str(d).strip()).isoformat() for d in clean["delisting_date"]
+        ]
+        clean["delisting_value"] = clean["delisting_value"].astype(float)
+        for v in clean["delisting_value"]:
+            if not (v > 0) or not math.isfinite(v):
+                raise ValueError(
+                    "delisting_value must be finite and > 0 (zero-proceeds write-off deferred)"
+                )
+        if bool(clean.duplicated(subset=["symbol", "delisting_date"]).any()):
+            raise ValueError("duplicate (symbol, delisting_date) delisting event")
+        symbols = normalize_symbols(list(clean["symbol"]))
+        metadata = _metadata(
+            dataset=Dataset.DELISTINGS,
+            provider=provider,
+            symbols=symbols,
+            start=min(clean["delisting_date"]),
+            end=max(clean["delisting_date"]),
+            as_of=as_of,
+            source=source,
+            kind=Kind.DELISTING,
+        )
+        return self._ingest_parquet(
+            metadata=metadata, frame=clean.reset_index(drop=True), filename="delistings.parquet"
+        )
+
+    def _latest_delistings_record(self, as_of: str | None) -> SnapshotRecord | None:
+        """Return the newest DELISTINGS snapshot record as-of `as_of` (or overall if None)."""
+        records = self.manifest.list_records(Dataset.DELISTINGS)
+        if as_of is not None:
+            records = [r for r in records if r.metadata.as_of <= as_of]
+        return max(records, key=lambda r: r.metadata.as_of) if records else None
+
+    def latest_delistings_snapshot_id(self, as_of: str | None = None) -> str | None:
+        """Return the snapshot_id of the newest DELISTINGS snapshot as-of `as_of`, or None."""
+        rec = self._latest_delistings_record(as_of)
+        return rec.snapshot_id if rec is not None else None
+
+    def _parse_delistings(self, rec: SnapshotRecord) -> dict[str, list[DelistingRecord]]:
+        from algua.backtest.delisting import (  # lazy: keep algua.data off algua.backtest
+            DelistingRecord,
+        )
+
+        frame = pd.read_parquet(self.data_dir / rec.data_path)
+        out: dict[str, list[DelistingRecord]] = {}
+        for row in frame.itertuples(index=False):
+            out.setdefault(str(row.symbol), []).append(
+                DelistingRecord(
+                    delisting_date=date.fromisoformat(str(row.delisting_date)),
+                    terminal_price=float(row.delisting_value),
+                    source=str(rec.metadata.source),
+                )
+            )
+        return out
+
+    def read_delistings(self, as_of: str | None = None) -> dict[str, list[DelistingRecord]]:
+        """Point-in-time delistings read: the latest DELISTINGS snapshot with metadata.as_of <=
+        `as_of` (or the latest overall when `as_of is None`). Returns
+        {symbol: list[DelistingRecord]} (multiple events per symbol allowed). Empty dict if none."""
+        latest = self._latest_delistings_record(as_of)
+        return self._parse_delistings(latest) if latest is not None else {}
+
+    def read_delistings_with_snapshot(
+        self, as_of: str | None = None
+    ) -> tuple[dict[str, list[DelistingRecord]], str | None]:
+        """Like `read_delistings` but returns the records AND the snapshot_id they came from,
+        selected from a SINGLE manifest read so the two can never disagree under a concurrent
+        ingest (the records and the stamped provenance id are guaranteed consistent)."""
+        latest = self._latest_delistings_record(as_of)
+        if latest is None:
+            return {}, None
+        return self._parse_delistings(latest), latest.snapshot_id
+
     def _ingest_parquet(
-        self, *, metadata: SnapshotMetadata, frame: pd.DataFrame, filename: str
+        self,
+        *,
+        metadata: SnapshotMetadata,
+        frame: pd.DataFrame,
+        filename: str,
+        conflict_check: Callable[[list[SnapshotRecord], SnapshotRecord], None] | None = None,
     ) -> SnapshotRecord:
         """Hash a frame to parquet, dedup on snapshot id, write it, and append the manifest record.
 
@@ -303,14 +420,19 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet",
         )
-        return self.manifest.append_if_absent(rec)
+        return self.manifest.append_if_absent(rec, conflict_check=conflict_check)
 
     def clear_staging(self, *, max_age_seconds: float = 3600.0) -> None:
-        """Remove stale streamed-import staging dirs (crash residue) older than `max_age_seconds`.
+        """Remove stale staging dirs (crash residue) older than `max_age_seconds`.
 
-        Age-based so a concurrent in-progress import (its own fresh UUID staging dir) is never
-        deleted out from under its writer. Each `ingest_bars_streamed` run already cleans its own
-        staging dir in a `finally`; this only sweeps residue left by a hard kill.
+        Age alone is unsafe: a staging dir's root mtime is set once at `mkdir` and does NOT refresh
+        as writes land in `symbol=<SYM>/` subdirs (or a long file copy), so a >1h in-flight import
+        looks "stale" and would be rmtree'd mid-write (#255). So an old dir is swept only when its
+        staging LEASE — an exclusive `flock` on the sibling `<uuid>.lock` marker, held for the
+        writer's lifetime by `_new_leased_staging` (used by EVERY staging writer) — is NOT held. The
+        lease auto-releases on the writer's death (even a hard kill), so true crash residue reads as
+        unheld and is swept; a live writer's dir reads as held and is spared. Each run also cleans
+        its own dir in a `finally`; this only sweeps what a hard kill left behind.
         """
         staging = self.data_dir / "snapshots" / "_staging"
         if not staging.exists():
@@ -318,10 +440,82 @@ class DataStore:
         cutoff = time.time() - max_age_seconds
         for child in staging.iterdir():
             try:
-                if child.stat().st_mtime < cutoff:
+                if child.stat().st_mtime >= cutoff:
+                    continue  # fresh — a just-started import may own it
+                if child.is_dir():
+                    if self._lock_held(staging / f"{child.name}.lock"):
+                        continue  # in-progress import holds the lease (#255)
                     shutil.rmtree(child, ignore_errors=True)
+                    (staging / f"{child.name}.lock").unlink(missing_ok=True)
+                elif child.suffix == ".lock":
+                    # An orphan lease marker (its staging dir already gone): clean it unless a dir
+                    # still pairs with it (handled above) or a writer still holds it.
+                    if (staging / child.stem).is_dir() or self._lock_held(child):
+                        continue
+                    child.unlink(missing_ok=True)
             except OSError:
                 continue
+
+    @staticmethod
+    def _lock_held(lock_path: Path) -> bool:
+        """True iff a live writer currently holds the exclusive `flock` on `lock_path` (an
+        in-progress staging writer). A non-blocking probe. FAIL CLOSED: only a genuinely absent
+        marker (`FileNotFoundError`) counts as not-held (sweepable); any other open/lock error
+        (ENOLCK, permission, unsupported flock, transient I/O) is treated as held, so cleanup never
+        deletes a dir it cannot prove is abandoned — leftover residue is recoverable, a deleted live
+        write is not. flock is freed by the kernel on the holder's death, so a crash is unheld."""
+        try:
+            fd = os.open(lock_path, os.O_RDWR)
+        except FileNotFoundError:
+            return False  # no lease marker — true crash residue or a pre-lease dir
+        except OSError:
+            return True  # can't even open it — refuse to sweep (fail closed)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True  # a writer holds it
+        except OSError:
+            return True  # lock probe failed — refuse to sweep (fail closed)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False  # acquired freely → not held
+        finally:
+            os.close(fd)
+
+    def _new_leased_staging(self) -> tuple[Path, int, Path]:
+        """Take an exclusive `flock` lease on a unique SIBLING `<uuid>.lock` marker, THEN create the
+        `_staging/<uuid>` dir under it — so there is never an unleased-dir window (#255). The marker
+        is a sibling (not inside the dir) so `_commit_bars_dir`/`os.replace` move a clean snapshot
+        dir. Used by EVERY staging writer so `clear_staging` can never rmtree any of them mid-write;
+        the lease is released by `_release_leased_staging` (caller's finally). The unique path means
+        LOCK_EX never contends; the kernel frees the lease on writer death. Self-cleaning: a failure
+        before the caller takes over closes the fd and removes the marker/dir, leaking nothing."""
+        staging_root = self.data_dir / "snapshots" / "_staging"
+        staging_root.mkdir(parents=True, exist_ok=True)
+        name = uuid.uuid4().hex
+        lock_path = staging_root / f"{name}.lock"
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            staging_dir = staging_root / name
+            staging_dir.mkdir()
+        except BaseException:
+            os.close(lock_fd)
+            lock_path.unlink(missing_ok=True)
+            shutil.rmtree(staging_root / name, ignore_errors=True)
+            raise
+        return staging_dir, lock_fd, lock_path
+
+    @staticmethod
+    def _release_leased_staging(staging_dir: Path, lock_fd: int, lock_path: Path) -> None:
+        """Release the lease and remove the staging dir + its sibling marker (idempotent — safe
+        after a successful commit moved the dir away). Pair with `_new_leased_staging` in a try."""
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        lock_path.unlink(missing_ok=True)
 
     def ingest_bars_streamed(
         self,
@@ -360,8 +554,9 @@ class DataStore:
         the requested endpoints); it does not detect interior gaps.
         """
         validate_timeframe(timeframe)
-        staging_dir = self.data_dir / "snapshots" / "_staging" / uuid.uuid4().hex
-        staging_dir.mkdir(parents=True, exist_ok=True)
+        # Lease the staging dir for the whole import so a concurrent clear_staging can't rmtree it
+        # mid-write — the staging-root mtime is set once at mkdir and never refreshes (#255).
+        staging_dir, lock_fd, lock_path = self._new_leased_staging()
         row_count = 0
         observed_min: pd.Timestamp | None = None
         observed_max: pd.Timestamp | None = None
@@ -414,14 +609,14 @@ class DataStore:
             meta_extra["content_hash_algorithm"] = BARS_STREAMED_HASH_ALGO
 
             metadata = _metadata(
-                dataset=Dataset.BARS.value,
+                dataset=Dataset.BARS,
                 provider=provider,
                 symbols=symbols,
                 start=observed_start,
                 end=observed_end,
                 as_of=as_of,
                 source=source,
-                kind=Kind.BARS.value,
+                kind=Kind.BARS,
                 timeframe=timeframe,
                 adjustment=adjustment,
                 source_metadata=meta_extra,
@@ -444,9 +639,9 @@ class DataStore:
             )
             return self._commit_bars_dir(rec, staging_dir, expected_symbols=seen_symbols_set)
         finally:
-            shutil.rmtree(staging_dir, ignore_errors=True)
+            self._release_leased_staging(staging_dir, lock_fd, lock_path)
 
-    def list_snapshots(self, dataset: str | None = None) -> list[SnapshotRecord]:
+    def list_snapshots(self, dataset: Dataset | None = None) -> list[SnapshotRecord]:
         return self.manifest.list_records(dataset)
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotRecord:
@@ -510,7 +705,7 @@ class DataStore:
         for rec in records:
             row: dict[str, Any] = {
                 "snapshot_id": rec.snapshot_id,
-                "dataset": rec.dataset,
+                "dataset": rec.dataset.value,
                 "storage_format": rec.storage_format,
                 "ok": True,
                 "error": None,
@@ -535,9 +730,10 @@ class DataStore:
         `[start, end)` filters down to the partitioned parquet dataset (issue #130). Any filter left
         as None is unbounded. Empty result => the contract's empty-but-typed frame."""
         rec = self.get_snapshot(snapshot_id)  # raises SnapshotNotFound
-        if rec.dataset != Dataset.BARS.value:
+        if rec.dataset != Dataset.BARS:
             raise ValueError(
-                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not {Dataset.BARS.value!r}"
+                f"snapshot {snapshot_id} is dataset {rec.dataset.value!r}, "
+                f"not {Dataset.BARS.value!r}"
             )
         if rec.storage_format != "parquet_dataset":
             raise ValueError(
@@ -579,14 +775,14 @@ class DataStore:
         start = canon["knowable_at"].min().date().isoformat()
         end = canon["knowable_at"].max().date().isoformat()
         metadata = _metadata(
-            dataset=Dataset.FUNDAMENTALS.value,
+            dataset=Dataset.FUNDAMENTALS,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=source,
-            kind=Kind.FUNDAMENTALS.value,
+            kind=Kind.FUNDAMENTALS,
             source_metadata=source_metadata,
         )
         content_hash = logical_fundamentals_hash(canon)
@@ -616,9 +812,9 @@ class DataStore:
         (fundamentals are far smaller than bars; partitioned pushdown is deferred). Re-normalizes
         on read so parquet dtype drift cannot escape the schema. Empty => empty_fundamentals()."""
         rec = self.get_snapshot(snapshot_id)
-        if rec.dataset != Dataset.FUNDAMENTALS.value:
+        if rec.dataset != Dataset.FUNDAMENTALS:
             raise ValueError(
-                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, "
+                f"snapshot {snapshot_id} is dataset {rec.dataset.value!r}, "
                 f"not {Dataset.FUNDAMENTALS.value!r}"
             )
         raw = pd.read_parquet(self.data_dir / rec.data_path)
@@ -665,14 +861,14 @@ class DataStore:
             "row_symbols": ",".join(symbols),
         }
         metadata = _metadata(
-            dataset=Dataset.NEWS.value,
+            dataset=Dataset.NEWS,
             provider=provider,
             symbols=symbols,
             start=start,
             end=end,
             as_of=as_of,
             source=provider,
-            kind=Kind.NEWS.value,
+            kind=Kind.NEWS,
             source_metadata=derived,
         )
         content_hash = logical_news_hash(canon)
@@ -698,9 +894,10 @@ class DataStore:
         Re-normalizes on read (idempotent) so parquet dtype drift cannot escape the schema.
         Empty => empty_news()."""
         rec = self.get_snapshot(snapshot_id)
-        if rec.dataset != Dataset.NEWS.value:
+        if rec.dataset != Dataset.NEWS:
             raise ValueError(
-                f"snapshot {snapshot_id} is dataset {rec.dataset!r}, not {Dataset.NEWS.value!r}"
+                f"snapshot {snapshot_id} is dataset {rec.dataset.value!r}, "
+                f"not {Dataset.NEWS.value!r}"
             )
         raw = pd.read_parquet(self.data_dir / rec.data_path)
         if symbols is not None:
@@ -726,7 +923,7 @@ class DataStore:
         """
         records = [
             rec
-            for rec in self.manifest.list_records(Dataset.UNIVERSES.value)
+            for rec in self.manifest.list_records(Dataset.UNIVERSES)
             if rec.metadata.universe == universe
         ]
         by_date: dict[date, UniverseSnapshot] = {}
@@ -750,9 +947,9 @@ class DataStore:
         datasets: dict[str, dict[str, Any]] = {}
         for rec in records:
             item = datasets.setdefault(
-                rec.dataset,
+                rec.dataset.value,
                 {
-                    "dataset": rec.dataset,
+                    "dataset": rec.dataset.value,
                     "snapshots": 0,
                     "symbols": set(),
                     "start": rec.start,
@@ -794,20 +991,19 @@ def normalize_symbols(symbols: list[str]) -> list[str]:
 
 def _metadata(
     *,
-    dataset: str,
+    dataset: Dataset,
     provider: str,
     symbols: list[str],
     start: str,
     end: str,
     as_of: str,
     source: str,
-    kind: str = Kind.FILE.value,
+    kind: Kind = Kind.FILE,
     timeframe: str | None = None,
     adjustment: str | None = None,
     universe: str | None = None,
     source_metadata: dict[str, str] | None = None,
 ) -> SnapshotMetadata:
-    _validate_non_empty("dataset", dataset)
     _validate_non_empty("provider", provider)
     _validate_non_empty("source", source)
     _validate_date_bounds(start, end)

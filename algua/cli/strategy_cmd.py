@@ -9,7 +9,6 @@ import typer
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.cli.registry_cmd import _kb_metadata
 from algua.config.settings import get_settings
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.knowledge.sync import (
@@ -22,7 +21,7 @@ from algua.knowledge.sync import (
     sync_strategy_doc,
 )
 from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
-from algua.registry.repository import StrategyNotFound
+from algua.registry.repository import StrategyNotFound, kb_metadata
 from algua.registry.store import SqliteStrategyRepository
 from algua.strategies.loader import list_strategies
 
@@ -156,7 +155,7 @@ def new(
                     fam_path.write_text(scaffold_family_doc(family))
                     fam_created = True
                 family_doc = str(fam_path)
-            sync_strategy_doc(settings, name, stage=rec.stage.value, metadata=_kb_metadata(rec))
+            sync_strategy_doc(settings, name, stage=rec.stage.value, metadata=kb_metadata(rec))
         except Exception as exc:
             repo.delete(name)
             # best-effort: remove half-written files so a retry isn't blocked
@@ -195,9 +194,9 @@ def doc(
         recs = {rec.name: rec for rec in SqliteStrategyRepository(conn).list_strategies()}
     stages = {n: r.stage.value for n, r in recs.items()}
     if all_ or name is None:
-        summary = sync_all(settings, stages, metadata={n: _kb_metadata(r) for n, r in recs.items()})
+        summary = sync_all(settings, stages, metadata={n: kb_metadata(r) for n, r in recs.items()})
     else:
-        meta = _kb_metadata(recs[name]) if name in recs else None
+        meta = kb_metadata(recs[name]) if name in recs else None
         if not sync_strategy_doc(settings, name, stage=stages.get(name), metadata=meta):
             raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
         # Keep the family roster consistent with this strategy's freshly-synced stage.

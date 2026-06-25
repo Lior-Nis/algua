@@ -44,9 +44,26 @@ class FactorSpec:
     module: str
     signature: str
     doc: str | None
+    standalone: bool = False
 
 
 _SPEC_ATTR = "__factor_spec__"
+
+
+def _assert_signal_shaped(fn: Callable[..., Any], name: str) -> None:
+    """A standalone-evaluable factor must be signal-shaped: exactly two POSITIONAL_OR_KEYWORD
+    params (view, params) and no *args/**kwargs. Structural arity check only — it cannot verify
+    semantics (it cannot tell (view, params) from (prices, lookback)); marking a factor standalone
+    is a deliberate author assertion. Fails closed on the obvious mistakes (transforms, varargs)."""
+    params = list(inspect.signature(fn).parameters.values())
+    ok = len(params) == 2 and all(
+        p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for p in params
+    )
+    if not ok:
+        raise ValueError(
+            f"factor {name!r} declares standalone=True but is not signal-shaped "
+            f"(view, params); got signature {inspect.signature(fn)}"
+        )
 
 
 def _first_nonempty_line(doc: str | None) -> str | None:
@@ -66,6 +83,7 @@ def factor(
     tags: Iterable[str] = (),
     kind: FactorKind = FactorKind.OTHER,
     data_needs: Iterable[DataCapability] | None = None,
+    standalone: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Annotate a pure factor function with discoverability metadata. PURE: it stamps a FactorSpec
     on the function as ``__factor_spec__`` and returns the function UNCHANGED (no wrapper) so
@@ -76,6 +94,8 @@ def factor(
 
     def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
         resolved_name = name or fn.__name__
+        if standalone:
+            _assert_signal_shaped(fn, resolved_name)
         doc = inspect.getdoc(fn)
         resolved_summary = summary or _first_nonempty_line(doc)
         if not resolved_summary:
@@ -92,6 +112,7 @@ def factor(
             module=fn.__module__,
             signature=str(inspect.signature(fn)),
             doc=doc,
+            standalone=standalone,
         )
         setattr(fn, _SPEC_ATTR, spec)
         return fn
@@ -155,6 +176,27 @@ def get_factor(name: str) -> FactorSpec:
 def all_factors() -> list[FactorSpec]:
     _ensure_loaded()
     return [_REGISTRY[k] for k in sorted(_REGISTRY)]
+
+
+def load_factor_callable(spec: FactorSpec) -> Callable[..., Any]:
+    """Resolve a FactorSpec back to its function object via ``import_path`` ("module:qualname").
+    The catalogue scan already imported the module, so this is import-safe. Fails closed
+    (``FactorNotFound``) unless the resolved object carries a stamped spec that EXACTLY matches the
+    one passed in — guarding against a spec whose import_path drifted off its function AND against a
+    forged/stale spec (e.g. one claiming ``standalone=True`` while pointing at a non-standalone
+    helper). Because the only real spec source is the registry's own immutable stamp, callers can
+    trust a resolved callable's metadata fields (``standalone`` included) without re-checking."""
+    module_name, _, qualname = spec.import_path.partition(":")
+    obj: Any = importlib.import_module(module_name)
+    for part in qualname.split("."):
+        try:
+            obj = getattr(obj, part)
+        except AttributeError:
+            raise FactorNotFound(spec.name) from None
+    resolved = getattr(obj, _SPEC_ATTR, None)
+    if resolved is None or resolved != spec:
+        raise FactorNotFound(spec.name)
+    return obj
 
 
 def filter_factors(

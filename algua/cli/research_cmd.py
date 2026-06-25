@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from itertools import combinations
 from typing import Any
 
 import typer
@@ -10,6 +12,7 @@ from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
     registry_conn,
+    resolve_delisting_inputs,
     resolve_eval_inputs,
     resolve_universe_inputs,
     select_provider,
@@ -24,6 +27,7 @@ from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsPro
 from algua.data.store import DataStore
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
+from algua.research import family_audit
 from algua.research.gates import GateCriteria
 from algua.strategies.loader import load_strategy
 
@@ -74,7 +78,21 @@ def promote(
         help="HUMAN-ONLY override: promote a non-PIT (survivorship-biased) backtest. Audited. "
              "Agents may not pass this.",
     ),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="HUMAN-ONLY: realize a held-into-gap name at its last close when no delisting record "
+             "exists. An agent must supply explicit delisting records; no-record-gap fails closed.",
+    ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
+    new_family: str = typer.Option(
+        None, "--new-family",
+        help="HUMAN-ONLY: slug for a new family when clustering verdict is NOVEL or PARENTAGE. "
+             "Ignored when the strategy is already assigned to a family. "
+             "Required for a human actor facing a NOVEL verdict.",
+    ),
 ) -> None:
     """Gate backtested->candidate on walk-forward holdout + stability; promote only on pass.
 
@@ -93,6 +111,16 @@ def promote(
         raise ValueError("--n-combos must be >= 1 when provided")
     if not 0.0 <= min_pct_positive <= 1.0:
         raise ValueError("--min-pct-positive must be in [0, 1]")
+    # HUMAN-ONLY guard (same mechanism as guard_agent_relaxations in promotion_preflight):
+    # --assume-terminal-last-close is a data-integrity relaxation that must never be granted to
+    # an agent. An agent must supply explicit delisting records; a held-into-gap name with no
+    # record fails closed on the agent path. Humans may pass the flag (and accept the cost).
+    if assume_terminal_last_close and actor_enum is not Actor.HUMAN:
+        raise ValueError(
+            "--assume-terminal-last-close is human-only (an agent must supply delisting records "
+            "via --delistings; a held-into-gap name without a record fails closed for the agent "
+            "path). Pass --actor human to accept the cost."
+        )
     # 1. Resolve inputs. The PIT universe is resolved up front alongside the other inputs (a bad
     # --universe refuses here, before any holdout is peeked at). The universe is intentionally NOT
     # part of the holdout-burn identity below (conservative: the same OOS data window is burned
@@ -130,6 +158,7 @@ def promote(
             raise ValueError(f"--fundamentals-snapshot {fundamentals_provider.snapshot_id!r} is "
                              f"dataset {rec.dataset!r}, not {Dataset.FUNDAMENTALS.value!r}")
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     data_source = type(provider).__name__
     snapshot_id = getattr(provider, "snapshot_id", None)
     period_start = start_dt.date().isoformat()
@@ -147,7 +176,8 @@ def promote(
         breadth = promotion_preflight(
             repo, name, actor=actor_enum, declared_combos=n_combos,
             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit,
-            provider=provider, start=start_dt, end=end_dt)
+            provider=provider, start=start_dt, end=end_dt,
+            new_family_slug=new_family)
         # Atomic holdout reservation (#161): claim the window under the write lock (fast SELECT +
         # INSERT a pending row), run walk_forward with NO lock held, then finalize on success /
         # release on a clean failure. The match identity is the data window and deliberately
@@ -159,8 +189,9 @@ def promote(
         holdout_start, holdout_end = holdout_window(
             strategy, provider, start_dt, end_dt,
             holdout_frac=holdout_frac, universe_by_date=universe_by_date)
+        sid = repo.get(name).id
         reservation_id, reused = repo.reserve_holdout(
-            repo.get(name).id, data_source=data_source, snapshot_id=snapshot_id,
+            sid, data_source=data_source, snapshot_id=snapshot_id,
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             holdout_start=holdout_start, holdout_end=holdout_end,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
@@ -170,12 +201,14 @@ def promote(
                 holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                 universe_name=universe, universe_snapshots=universe_prov,
                 fundamentals_provider=fundamentals_provider, news_provider=news_provider,
+                delisting_records=delisting_records,
+                assume_terminal_last_close=assume_terminal_last_close,
                 # Burn-on-peek: commit the reservation into a burn the instant BEFORE walk_forward
                 # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
                 # committed row, the except-release below is then correct for EVERY post-peek
                 # failure (incl. KeyboardInterrupt) — a computed holdout can never be released.
                 on_peek=lambda cfg: repo.finalize_holdout_reservation(
-                    reservation_id, config_hash=cfg),
+                    reservation_id, config_hash=cfg, strategy_id=sid),
             )
         except BaseException:
             # Pre-peek failure: the row is still pending, so release frees the window. Post-peek
@@ -191,6 +224,7 @@ def promote(
             universe_name=universe, universe_snapshots=universe_prov,
             period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
             data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
+            holdout_evaluation_id=reservation_id,
             reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
         decision, promoted = outcome.decision, outcome.promoted
 
@@ -314,4 +348,72 @@ def dormant_sweep(
                        "min_pct_positive": min_pct_positive},
         "total_dormant": len(dormant), "evaluated": evaluated,
         "passed": passed, "failed": failed, "skipped": skipped, "errors": errors,
+    }))
+
+
+@research_app.command("family-audit")
+@json_errors(ValueError, LookupError, sqlite3.OperationalError)
+def family_audit_cmd() -> None:
+    """ADVISORY cross-family gaming detector. Scans the family DAG for separate families that
+    empirically behave as one thesis (deliberate-split breadth evasion that #222's assignment-time
+    clustering can't see), ranks them by family-term breadth dodged, and recommends a human-governed
+    consolidation. READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation."""
+    started = time.monotonic()
+    with registry_conn() as conn:
+        # One connection = one consistent read snapshot for the whole scan (no writes).
+        repo = SqliteStrategyRepository(conn)
+        conn.execute("BEGIN")
+        profile_list = repo.all_families_with_member_profiles()
+        profiles = {fid: members for fid, members in profile_list}
+        fam_names = repo.family_names()
+
+        # Batch-load each distinct strategy's returns ONCE (O(M), not O(M^2)).
+        all_names = {m["name"] for members in profiles.values() for m in members}
+        returns = {name: repo.load_backtest_returns(name) for name in all_names}
+        returns = {k: v for k, v in returns.items() if v is not None}
+
+        # Pipeline step 1: similarity-only candidate edges.
+        candidate_edges = family_audit.flag_edges(profiles, returns)
+
+        # Step 2 (CLI I/O): pairwise union breadth for candidate pairs only + per-family breadth.
+        individual_breadth = {fid: repo.family_lifetime_combos(fid) for fid in profiles}
+        pair_breadth = {
+            frozenset({e.family_a, e.family_b}):
+                repo.lifetime_combos_for_families([e.family_a, e.family_b])
+            for e in candidate_edges
+        }
+
+        # Step 3: evasion skip + components.
+        components, kept = family_audit.build_components(
+            candidate_edges, pair_breadth=pair_breadth, individual_breadth=individual_breadth)
+
+        # Step 4 (CLI I/O): unified breadth per component.
+        component_breadth = {
+            comp: repo.lifetime_combos_for_families(list(comp)) for comp in components}
+
+        # Step 5: rank + assemble.
+        active_counts = {fid: len(members) for fid, members in profiles.items()}
+        clusters = family_audit.rank_clusters(
+            components, kept, candidate_edges, component_breadth=component_breadth,
+            individual_breadth=individual_breadth, family_names=fam_names,
+            active_counts=active_counts)
+        conn.rollback()
+
+    n_pairs = len(list(combinations(profiles, 2)))
+    emit(ok({
+        "note": ("ADVISORY cross-family gaming screen; NOT a gate. Flags separate families that "
+                 "behave as one thesis (return-correlation authoritative). Acting on a cluster "
+                 "is a human judgement: consolidate via member reassignment (--actor human). "
+                 "Mutates nothing."),
+        "clusters": clusters,
+        "n_families_scanned": len(profiles),
+        "n_pairs_total": n_pairs,
+        "n_pairs_flagged_or_inconclusive": len(candidate_edges),
+        "n_pairs_skipped_zero_evasion": len([e for e in candidate_edges if e.flagged]) - len(kept),
+        "wall_time_seconds": round(time.monotonic() - started, 3),
+        "config": {
+            "audit_flag_threshold": family_audit.AUDIT_FLAG_THRESHOLD,
+            "return_independent_threshold": family_audit.RETURN_INDEPENDENT_THRESHOLD,
+            "return_correlation_min_overlap": family_audit.RETURN_CORRELATION_MIN_OVERLAP,
+        },
     }))

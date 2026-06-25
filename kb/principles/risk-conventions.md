@@ -43,19 +43,32 @@ per-name* drawdown-based weight decay below. Don't conflate them.
 
 ## Weight-space conventions
 
-Each convention shapes the target weights your `compute_weights(view, params)` returns. `view` holds
-bars only **up to the current decision bar**; the engine applies the `t→t+1` lag centrally, so you
-return *decision-time* (pre-lag) weights and **never shift, and never read a future bar.** The snippets
-below operate strictly on info up to `t`.
+Post-#141 (PR #174), weight-space risk **composes across two layers**, and each convention below lives
+in one of them:
+
+- **Score-shaping — `signal(view, params)`.** Judgment about *how strong each score is*: conviction
+  sizing, slow-moving (turnover-aware) signals, decaying a name's score on drawdown or a dead thesis.
+  `signal` returns cross-sectional **scores** (higher = more attractive), not weights.
+- **Weights-from-scores — the named construction policy.** Judgment that turns scores into target
+  weights: selection, the weighting scheme (equal-, inverse-vol-, score-proportional-), and gross
+  normalization. You declare a policy in `CONFIG.construction`; a bespoke scheme is **added as a named
+  policy** in `algua/portfolio/construction.py`, never inlined.
+
+`view` holds bars only **up to the current decision bar**; the engine applies the `t→t+1` lag
+centrally, so both layers work in *decision-time* (pre-lag) terms and **never shift, and never read a
+future bar.** The snippets below operate strictly on info up to `t`; where a snippet normalizes scores
+into weights, that final step is the construction policy's, not the signal's.
 
 ### Conviction-scaled sizing
 Size by signal strength, not equal-weight by default. A stronger signal earns a larger target weight; a
 marginal one earns a small one. Equal-weighting throws away the information in *how* strong each signal
-is.
+is. **Composes across both layers:** emit the conviction in the **score** (`signal`), then pick a
+magnitude-weighting policy — `score_proportional_long` is the shipped version of the sketch below (it
+drops missing/non-finite scores and weights only the strictly-positive ones) — to turn it into weights.
 
 ```python
-raw = scores.clip(lower=0.0)            # scores: conviction per symbol, info up to t
-w = raw / raw.sum() if raw.sum() > 0 else raw * 0.0
+raw = scores.clip(lower=0.0)            # scores: conviction per symbol, info up to t (signal's job)
+w = raw / raw.sum() if raw.sum() > 0 else raw * 0.0   # scores → weights: the construction policy's job
 ```
 
 ### Inverse-volatility sizing
@@ -71,51 +84,58 @@ inv = 1.0 / vol.replace(0.0, pd.NA)
 w = (inv / inv.sum()).fillna(0.0)      # inverse-vol weights (sum to 1)
 ```
 
-This **normalizes** by inverse vol; it does not scale gross exposure to hit a target σ. True
-portfolio-**vol targeting** (levering up/down to a target volatility) is **judgment-only today** and a
-candidate for the portfolio-construction layer (#141) — and even then it must respect the hard gross /
-per-name caps, never bypass them.
+This **normalizes** by inverse vol; it does not scale gross exposure to hit a target σ. Inverse-vol
+sizing is a **weighting scheme**, so it belongs in a construction policy — but the starter library
+(`top_k_equal_weight`, `equal_weight_positive`, `score_proportional_long`) doesn't ship one, so it's a
+policy you **add** to `algua/portfolio/construction.py` and name in `CONFIG`. True portfolio-**vol
+targeting** (levering up/down to a target volatility) is **not a policy yet** — and even as one it must
+respect the hard gross / per-name caps, never bypass them.
 
 ### Drawdown-based weight decay
 The allocation-native "stop": as a name's drawdown-from-its-high grows, **decay its target weight
 toward zero** — cut the allocation rather than hold and hope. This is NOT a stop-loss order: there is no
 intrabar trigger and no same-bar fill. It uses only info available by the decision bar and rides the
-central `decision_lag_bars >= 1` lag like everything else.
+central `decision_lag_bars >= 1` lag like everything else. **Score-shaping:** decay the name's
+**score** in `signal` (the snippet's `base_w * scale` shape applies equally to a score), and the
+construction policy sizes off the decayed scores.
 
 ```python
 dd = 1.0 - close / close.cummax()      # close: a symbol's closes UP TO t
 scale = (1.0 - dd.iloc[-1] / decay_full_at).clip(0.0, 1.0)  # soft per-name threshold
-w = base_w * scale
+score = base_score * scale             # decay the score in signal; construction sizes off it
 ```
 
 `decay_full_at` is a **soft per-name** decay threshold you choose — not the hard equity breaker
 `check_drawdown` (above), which is account-level and enforced.
 
 ### Signal-invalidation
-When the condition that justified the position disappears, **decay the weight to zero** rather than
-holding it on inertia. A thesis that no longer holds is not a position to keep "until it comes back".
+When the condition that justified the position disappears, **decay the score toward "no opinion"**
+rather than holding the position on inertia. A thesis that no longer holds is not a position to keep
+"until it comes back". **Score-shaping:** drop the name from the score (a missing score is "not
+selectable"), so the construction policy stops weighting it — no weight math in `signal`.
 
 ```python
-w = base_w.where(thesis_holds, 0.0)    # thesis_holds: bool per symbol, info up to t
+score = base_score.where(thesis_holds)  # thesis_holds: bool per symbol, info up to t; else NaN = drop
 ```
 
 ### Turnover / transaction-cost awareness
 Weights are sticky for a reason: an edge that evaporates under realistic churn and costs is not an edge.
-The stateless lever you have inside `compute_weights` is to make the **signal itself** slow-moving —
-smooth or threshold the score so a marginal change doesn't thrash the book.
+The stateless lever you have inside `signal` is to make the **signal itself** slow-moving — smooth or
+threshold the score so a marginal change doesn't thrash the book.
 
-`compute_weights(view, params)` is **stateless per bar**: it receives no prior target weights. Do
-**not** read a previous weight, a broker position, or any module-global to band turnover — that smuggles
-in hidden state and breaks per-bar / backtest parity. Explicit previous-weight no-trade banding needs
-the prior decision weights threaded in, which belongs to the portfolio-construction layer (#141), not to
-a per-bar signal.
+`signal(view, params)` is **stateless per bar**: it receives no prior scores or weights. Do **not** read
+a previous weight, a broker position, or any module-global to band turnover — that smuggles in hidden
+state and breaks per-bar / backtest parity. Explicit previous-weight no-trade banding needs the prior
+decision weights threaded in, which belongs to a **construction policy** (the layer is built, but no
+turnover-banding policy ships yet), not to a per-bar signal.
 
 ### Exposure caps (per-name / per-sector / gross-net awareness)
 Be deliberate about concentration *before* the hard caps catch you: diversify across names, watch sector
 clustering, and stay aware of gross vs net. The **hard** versions — per-name |weight| and gross — are
 walls (#135, table above) and are non-negotiable; this convention is the *soft* judgment that keeps you
-well inside them. Per-sector and net-exposure caps are **not** walled today — they are yours to honor,
-and candidates for the #141 layer.
+well inside them. Per-sector and net-exposure caps are **not** walled today and are **not yet
+construction policies** — they are yours to honor, and natural additions to
+`algua/portfolio/construction.py`.
 
 ## The right yardstick (R:R is the wrong one)
 
@@ -132,13 +152,19 @@ trade-centric yardstick that doesn't describe a target-weight book. Judge a stra
 The promotion gate's thresholds and how to read them live in the `interpret-results` skill and the gate
 (#137); this note doesn't restate them.
 
-## Not a layer yet
+## The layer is built — what's a policy and what's still judgment
 
-These conventions are **per-strategy prose** today, applied by judgment inside each `compute_weights`.
-They are **not** a composable, enforceable portfolio-construction layer. #141 — *formalize portfolio
-construction as a distinct layer* — is where several of them (inverse-vol / vol-targeting, per-sector and
-net caps, previous-weight turnover banding) move from judgment into code. Until then, for the soft
-versions, **judgment is the only guard.**
+#141 — *formalize portfolio construction as a distinct layer* — **shipped** (PR #174): a strategy now
+returns **scores** from `signal`, and a **named, library-provided construction policy** maps scores →
+weights. The starter library is `top_k_equal_weight`, `equal_weight_positive`, and
+`score_proportional_long`; a bespoke weighting scheme is **added as a named policy** in
+`algua/portfolio/construction.py` (additions-only), not inlined.
+
+Some conventions above are now expressible as policies (selection, equal- / score-proportional
+weighting); others have **no starter policy yet** — inverse-vol sizing and vol-targeting, per-sector and
+net caps, and previous-weight turnover banding. For those, until a policy is added, the score-shaping
+you can do in `signal` plus deliberate judgment is the only guard. The #135 hard walls still run after
+construction regardless.
 
 ## Related principles
 

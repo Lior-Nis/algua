@@ -52,9 +52,12 @@ def test_factors_used_by_reports_module_granular():
         _drop("tmp_uses_strat", path)
 
 
-def test_cross_sectional_momentum_uses_no_catalogued_factor():
-    # The bundled strategy inlines its math and imports no catalogued factor.
-    assert factors_used_by("cross_sectional_momentum") == []
+def test_cross_sectional_momentum_uses_composed_factor():
+    # After composition (issue #140), the strategy delegates to xs_trailing_return.
+    used = {f.name for f in factors_used_by("cross_sectional_momentum")}
+    assert "xs_trailing_return" in used
+    # Module-granular: alphas.py imports indicators.py so both momentum + zscore are also reported.
+    assert {"momentum", "zscore"} <= used
 
 
 def test_dependents_of_lists_registered_importer(repo):

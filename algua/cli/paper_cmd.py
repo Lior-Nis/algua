@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
 from datetime import UTC, datetime
 
-import pandas as pd
 import typer
 
 from algua.audit.log import append as audit_append
 from algua.backtest.engine import BacktestError
 from algua.calendar.market_calendar import MarketCalendar
-from algua.cli._common import ok, registry_conn, utc
+from algua.cli._common import breach_payload, ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -42,11 +40,12 @@ from algua.execution.order_state import (
     update_peak_equity,
 )
 from algua.execution.sim_broker import SimBroker
+from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
-from algua.registry.repository import StrategyRecord
+from algua.registry.gating import load_gated_strategy
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
@@ -59,8 +58,8 @@ from algua.research.forward_gates import (
     ForwardGateCriteria,
 )
 from algua.risk import global_halt, kill_switch
+from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
-from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
@@ -125,71 +124,6 @@ def _live_strategy_flat(
     return is_flat, {"believed": own, "broker_unexplained": unexplained}
 
 
-def _load_gated_strategy(
-    conn: sqlite3.Connection, name: str, command: str,
-) -> tuple[LoadedStrategy, StrategyRecord]:
-    """Load a strategy and clear the two gates every trading command shares: it must be at the
-    PAPER or FORWARD_TESTED stage and its kill-switch must not be tripped. ``command`` only
-    colours the error text.
-
-    Returns ``(strategy, rec)`` so callers can read the registry record (e.g. ``rec.id``) without
-    a second DB round-trip.  A forward_tested strategy keeps accumulating evidence ticks while
-    awaiting the go-live signature, so it is treated the same as paper for trading purposes.
-
-    Centralises the stage + kill-switch preamble that ``run`` and ``trade-tick`` both need (an SRP
-    fix: the command bodies no longer hand-roll these checks). Commands that intentionally TRIP the
-    switch (kill/flatten) do their own, narrower gating instead.
-    """
-    strategy = load_strategy(name)
-    from algua.strategies.base import (
-        assert_tradable_without_fundamentals,
-        assert_tradable_without_news,
-    )
-    assert_tradable_without_fundamentals(strategy)
-    assert_tradable_without_news(strategy)
-    rec = SqliteStrategyRepository(conn).get(name)
-    if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
-        raise ValueError(
-            f"{name} is at stage '{rec.stage.value}'; "
-            f"{command} requires 'paper' or 'forward_tested'"
-        )
-    if global_halt.is_engaged(conn):
-        raise ValueError("global halt active; clear with 'algua paper resume-all'")
-    if kill_switch.is_tripped(conn, name):
-        raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
-    return strategy, rec
-
-
-def _tick_clock(clock: Callable[[], str]) -> tuple[str, str]:
-    """``(tick_ts, clock_source)`` for the evidence-tick stamp: the venue's clock normalized to a
-    UTC ISO timestamp (``clock_source="broker"``), or the local clock (``clock_source="local"``)
-    when the venue's is unusable. ValueError/TypeError cover a malformed or tz-naive venue
-    timestamp — that is a clock failure too, and it must never kill the tick record after orders
-    already went out. Shared by the paper and live lanes so their stamping semantics cannot drift.
-    """
-    try:
-        return pd.Timestamp(clock()).tz_convert("UTC").isoformat(), "broker"
-    except (BrokerError, ValueError, TypeError):
-        return datetime.now(UTC).isoformat(), "local"
-
-
-def _breach_payload(error: str, **extra: object) -> dict:
-    """A failure envelope for a tripped kill-switch: ``{"ok": false, "kill_switch": "tripped"...}``.
-
-    The shared skeleton of every paper-command halt/breach emit; callers pass the human-readable
-    ``error`` plus whatever variant keys (``kind``, ``strategy``, ``halted``, ...) that path adds.
-    """
-    return {"ok": False, "kill_switch": "tripped", "error": error, **extra}
-
-
-def _trip(conn: sqlite3.Connection, name: str, exc: RiskBreach) -> None:
-    """Trip the kill-switch for a risk breach and write the matching audit row (the shared half of
-    both commands' breach handling; the divergent emit/flatten stays in each caller)."""
-    kill_switch.trip(conn, name, reason=exc.detail, actor="system")
-    audit_append(conn, actor="system", action="kill_switch_trip",
-                 reason=f"{exc.kind}: {exc.detail}", strategy=name)
-
-
 def _strategy_held_symbols(
     conn: sqlite3.Connection, strategy: str, universe: list[str]
 ) -> list[str]:
@@ -221,14 +155,14 @@ def run(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy, _rec = _load_gated_strategy(conn, name, "paper run")
+        strategy, _rec = load_gated_strategy(conn, name, "paper run")
         provider = _select_provider(demo, snapshot)
         try:
             result = run_paper(strategy, SimBroker(cash=cash), provider,
                                utc(start), utc(end), max_drawdown=max_drawdown)
         except RiskBreach as exc:
-            _trip(conn, name, exc)
-            emit(_breach_payload(exc.detail, kind=exc.kind))
+            trip_for_breach(conn, name, exc)
+            emit(breach_payload(exc.detail, kind=exc.kind))
             raise typer.Exit(1) from exc
         persist_run(conn, result)
         audit_append(
@@ -312,7 +246,7 @@ def kill(
 
 
 @paper_app.command("resume")
-@json_errors(ValueError, BrokerError)
+@json_errors(ValueError, LookupError, BrokerError)
 def resume(name: str) -> None:
     """Reset (clear) a strategy's kill-switch so paper runs may resume. For a LIVE strategy,
     confirms the strategy is flat via broker-truth reconcile before allowing resume. Human
@@ -374,7 +308,7 @@ def trade_tick(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     with registry_conn() as conn:
-        strategy, rec = _load_gated_strategy(conn, name, "trade-tick")
+        strategy, rec = load_gated_strategy(conn, name, "trade-tick")
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
         identity = compute_artifact_hashes(name)
@@ -402,10 +336,10 @@ def trade_tick(
             # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
             audit_append(conn, actor="system", action="trade_tick_halted",
                          reason=str(exc), strategy=name)
-            emit(_breach_payload(str(exc), strategy=name, halted=True))
+            emit(breach_payload(str(exc), strategy=name, halted=True))
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
-            _trip(conn, name, exc)
+            trip_for_breach(conn, name, exc)
             liquidation_submitted = True
             flatten_error = None
             symbols = _strategy_held_symbols(conn, name, strategy.universe)
@@ -420,7 +354,7 @@ def trade_tick(
             else:
                 # Close succeeded: reset the derived belief so the next reconcile starts flat.
                 clear_derived_positions(conn, name)
-            payload = _breach_payload(exc.detail, kind=exc.kind,
+            payload = breach_payload(exc.detail, kind=exc.kind,
                                       liquidation_submitted=liquidation_submitted,
                                       closed_symbols=symbols)
             if flatten_error is not None:
@@ -429,7 +363,7 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
-            tick_ts, clock_source = _tick_clock(broker.clock)
+            tick_ts, clock_source = tick_clock(broker.clock)
             record_tick_snapshot(
                 conn, name,
                 tick_ts=tick_ts,
@@ -558,7 +492,7 @@ def flatten(
             broker.cancel_open_orders()
             broker.close_positions(symbols)
         except BrokerError as exc:
-            emit(_breach_payload(str(exc), strategy=name, liquidation_submitted=False))
+            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
         # Close succeeded: reset the derived belief so a later trade-tick reconcile starts flat.
         clear_derived_positions(conn, name)
@@ -591,7 +525,7 @@ def halt_all(
 
 
 @paper_app.command("resume-all")
-@json_errors(ValueError, BrokerError)
+@json_errors(ValueError, LookupError, BrokerError)
 def resume_all(
     actor: str = typer.Option("human", "--actor", help="human | agent"),
 ) -> None:
