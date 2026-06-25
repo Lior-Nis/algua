@@ -10,6 +10,7 @@ from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
     MIN_REGIME_OBSERVATIONS,
     MIN_REGIME_SHARPE,
+    MIN_REGIME_VOL,
     N_REGIMES,
     GateCriteria,
     RegimeSlice,
@@ -32,6 +33,7 @@ def test_constants():
     assert N_REGIMES == 3
     assert MIN_REGIME_OBSERVATIONS == 21
     assert MIN_REGIME_SHARPE == 0.0
+    assert MIN_REGIME_VOL == 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +153,72 @@ def test_zero_vol_regime_dropped_not_passed():
     assert res.n_surviving == 2
     assert res.per_regime_sharpes[0] is None  # dropped -> None
     assert res.n_attempted == 3
+
+
+def test_near_constant_nonzero_regime_dropped_not_rubber_stamped():
+    """#248: a constant-but-NONZERO series produces a catastrophic-cancellation residual vol
+    (~4e-19 — NOT exactly 0.0) and a Sharpe ~1e16. The old `== 0.0` drop let it through and counted
+    that ~1e16 Sharpe as a surviving pass; the MIN_REGIME_VOL floor must DROP it instead, so it
+    provides no false robustness signal.
+    """
+    import pandas as pd
+
+    from algua.backtest.metrics import metrics_from_returns
+    # The fixture genuinely has a tiny, NONZERO, sub-floor vol (and an absurd Sharpe) — i.e. it is
+    # exactly the case the exact-zero test failed open on.
+    m = metrics_from_returns(pd.Series([0.0001] * 30))
+    assert 0.0 < m["ann_volatility"] < MIN_REGIME_VOL
+    assert m["sharpe"] > 1e6
+
+    s = [
+        RegimeSlice(0, [0.0001] * 30, 30, None),       # constant nonzero -> residual vol -> DROP
+        RegimeSlice(1, [0.01, -0.01] * 15, 30, None),  # real vol -> survives
+        RegimeSlice(2, [0.02, -0.005] * 15, 30, None), # real vol -> survives
+    ]
+    res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
+    assert res.per_regime_sharpes[0] is None  # dropped, NOT counted as a ~1e16-Sharpe survivor
+    assert res.n_surviving == 2
+    assert res.passed is True  # two real regimes pass; the bogus +Sharpe regime is neither
+
+
+def test_near_constant_losing_regime_fails_closed_not_loosened():
+    """#248 (Codex GATE-2): a degenerate regime that LOST money must FAIL the gate, not be silently
+    dropped. The old `== 0.0` code kept its huge-NEGATIVE Sharpe, which failed `all(sh >= 0)`; an
+    unconditional drop would flip that to a pass (a LOOSENING). A sub-floor regime with negative
+    cumulative return forces passed=False, and its explosive Sharpe is never recorded (#268)."""
+    import pandas as pd
+
+    from algua.backtest.metrics import metrics_from_returns
+    m = metrics_from_returns(pd.Series([-0.0001] * 30))
+    assert 0.0 < m["ann_volatility"] < MIN_REGIME_VOL  # degenerate (sub-floor) vol
+    assert m["sharpe"] < -1e6                            # huge NEGATIVE Sharpe (a real steady loss)
+
+    s = [
+        RegimeSlice(0, [-0.0001] * 30, 30, None),      # constant LOSS -> degenerate -> must fail
+        RegimeSlice(1, [0.01, -0.01] * 15, 30, None),  # real vol -> would survive
+        RegimeSlice(2, [0.02, -0.005] * 15, 30, None), # real vol -> would survive
+    ]
+    res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
+    assert res.passed is False                  # fail closed on the degenerate loss (no loosening)
+    assert res.per_regime_sharpes[0] is None    # explosive -1e16 Sharpe never recorded (#268)
+
+
+def test_nan_bearing_degenerate_losing_regime_fails_closed():
+    """#248 (Codex round 2): the loss proxy must use the SAME NaN-cleaned series metrics does.
+    A NaN-bearing degenerate losing slice ([nan] + [-0.0001]*30) has a huge negative Sharpe after
+    dropna() (old code failed it), but a raw sum() is NaN -> NaN < 0 is False -> the loss check is
+    skipped and the gate could pass (a loosening). Using returns.dropna().sum() keeps it failing.
+    """
+    losing = [float("nan")] + [-0.0001] * 30
+    assert math.isnan(sum(losing))  # raw sum is NaN — the trap the proxy must avoid
+    s = [
+        RegimeSlice(0, losing, len(losing), None),     # NaN + steady loss -> degenerate -> fails
+        RegimeSlice(1, [0.01, -0.01] * 15, 30, None),
+        RegimeSlice(2, [0.02, -0.005] * 15, 30, None),
+    ]
+    res = regime_robustness_check(s, min_obs=21, min_sharpe=0.0)
+    assert res.passed is False
+    assert res.per_regime_sharpes[0] is None
 
 
 # ---------------------------------------------------------------------------
