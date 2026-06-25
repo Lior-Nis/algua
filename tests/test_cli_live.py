@@ -47,6 +47,65 @@ def test_run_all_no_live_strategies_is_noop(monkeypatch):
     assert json.loads(r.stdout)["strategies"] == []
 
 
+def test_run_all_no_authorized_returns_without_building_broker(monkeypatch):
+    # #253: the REAL authorization gate runs here (NOT monkeypatched). A live-stage strategy with no
+    # valid live_authorizations row must be skipped; with zero verified strategies, run-all returns
+    # "no authorized live strategies" and must NOT construct the broker or submit any order — the
+    # last barrier before live trading. (Every other run-all test fakes a passing auth, so this is
+    # the only coverage that the fail-closed wiring actually fails closed.)
+    _to_live("cross_sectional_momentum")  # stage=live, but no signed authorization row exists
+    built = {"broker": False}
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker",
+                        lambda auth: built.__setitem__("broker", True))
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["note"] == "no authorized live strategies"
+    assert payload["strategies"] == []
+    assert [s["strategy"] for s in payload["skipped"]] == ["cross_sectional_momentum"]
+    assert built["broker"] is False  # early return precedes broker construction (no trade)
+
+
+def test_run_all_skips_only_the_unauthorized_strategy(monkeypatch):
+    # #253 sibling: with a mix, the unauthorized strategy is skipped and the authorized one still
+    # trades — an unverified strategy must never leak into the traded set.
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.registry.live_gate import LiveAuthorizationError
+    _to_live("cross_sectional_momentum")  # the authorized one
+    # a second live-stage strategy with no authorization (registry-only; skipped before load)
+    assert runner.invoke(app, ["registry", "add", "phantom_live"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name='phantom_live'")
+        conn.commit()
+
+    def _selective(conn, repo, name, signers_path):
+        if name == "cross_sectional_momentum":
+            return _auth()
+        raise LiveAuthorizationError(f"{name}: no valid authorization")
+
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", _selective)
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick",
+                        lambda *a, **k: {"strategy": "cross_sectional_momentum", "submitted": []})
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    traded = [s["strategy"] for s in payload["strategies"]]
+    assert "cross_sectional_momentum" in traded
+    assert [s["strategy"] for s in payload["skipped"]] == ["phantom_live"]
+    assert "phantom_live" not in traded
+
+
 def test_run_all_halts_on_unexplained_reconcile_drift(monkeypatch):
     from algua.risk import global_halt
     _to_live()
