@@ -194,9 +194,17 @@ single backtest, or registering ideas, would undercount breadth and inflate sign
 budget), and `effective_funnel_breadth` folds in the windowed funnel total + family-lifetime breadth.
 (Optionally wiring #126's idea counts into the gate would tighten this further — out of scope here.)
 
+**Driver constraint (Codex verification):** within one cycle, the driver must record **all** hypotheses'
+sweeps **before** promoting any of them. `windowed_search_combos` sums `search_trials` across strategies
+(`store.py:700`), so if hypothesis A is promoted before B is swept, A's gate cannot see B's concurrent
+breadth. Sweep-all-then-promote-each within a cycle keeps the concurrent search honest.
+
 ### 6.4 Concurrency, idempotency, recovery
 - A **file lock** serializes research cycles and excludes the paper runtime from mutating the
   registry mid-promote (the DB already uses `BEGIN IMMEDIATE`; the lock guards the worktree/main).
+  **This lock + merge/revert driver is load-bearing (Codex):** it is the *only* enforcement of the
+  §6.2 ordering guarantee — no separate code-level race guard exists — so it must be implemented and
+  tested as a first-class unit, not treated as glue.
 - Operates on **local main only** — the operator never runs `git push`. **Caveat (Codex):**
   `block-push-to-main` is a *Claude-process guardrail, not a git hook* (`.git/hooks` has only samples),
   so a systemd job calling `git push` would bypass it entirely. The mitigation is simply that the
@@ -270,8 +278,10 @@ serialize; crash ⟹ stranded worktree cleaned next start, no candidate-without-
 ingest → fake-Codex cycle → candidate → allocate → tick × N → forward-promote, accelerated to ≥63
 sessions so `paper promote` fires without a 3-month wait.
 
-**Safety negative tests** — no live creds ⟹ live path refuses; holdout single-burn holds under the
-driver; promote runs against the authoritative DB (footgun guard satisfied, not tripped).
+**Safety negative tests** — the cryptographic live wall refuses the agent (no signature/cert/human
+actor — the real wall); separately, absent live creds block broker construction (defense-in-depth, not
+the wall itself); holdout single-burn holds under the driver; promote runs against the authoritative DB
+(footgun guard satisfied, not tripped).
 
 **Discipline** — TDD per unit; full gate (`pytest && ruff && mypy && lint-imports`) green before any
 commit; add to the existing suite, never weaken a gate.
