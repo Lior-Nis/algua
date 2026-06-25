@@ -191,6 +191,12 @@ def walk_forward_cmd(
         help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     windows: int = typer.Option(4, "--windows", help="number of equal out-of-sample windows"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
+    fundamentals_snapshot: str = typer.Option(
+        None, "--fundamentals-snapshot",
+        help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
+    news_snapshot: str = typer.Option(
+        None, "--news-snapshot",
+        help="ingested news snapshot id (required for a needs_news strategy)"),
     delistings: str = typer.Option(
         None, "--delistings",
         help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
@@ -208,11 +214,31 @@ def walk_forward_cmd(
     """
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError(
+            "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
+        )
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError(
+            "--news-snapshot was given but the strategy does not declare needs_news"
+        )
+    fundamentals_provider = (
+        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
+        if fundamentals_snapshot
+        else None
+    )
+    news_provider = (
+        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
+        if news_snapshot
+        else None
+    )
     delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     result = walk_forward(strategy, provider, start_dt, end_dt,
                           windows=windows, holdout_frac=holdout_frac,
                           universe_by_date=universe_by_date,
                           universe_name=universe, universe_snapshots=universe_prov,
+                          fundamentals_provider=fundamentals_provider,
+                          news_provider=news_provider,
                           delisting_records=delisting_records,
                           assume_terminal_last_close=assume_terminal_last_close)
     payload = result.to_dict()
@@ -242,6 +268,12 @@ def sweep_cmd(
     param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),
     rank_by: str = typer.Option("mean_sharpe", "--rank-by", help="mean_sharpe | min_sharpe"),
     top: int = typer.Option(20, "--top", help="max ranked rows to print"),
+    fundamentals_snapshot: str = typer.Option(
+        None, "--fundamentals-snapshot",
+        help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
+    news_snapshot: str = typer.Option(
+        None, "--news-snapshot",
+        help="ingested news snapshot id (required for a needs_news strategy)"),
     delistings: str = typer.Option(
         None, "--delistings",
         help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
@@ -255,12 +287,32 @@ def sweep_cmd(
         raise ValueError("--top must be >= 1")
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError(
+            "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
+        )
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError(
+            "--news-snapshot was given but the strategy does not declare needs_news"
+        )
+    fundamentals_provider = (
+        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
+        if fundamentals_snapshot
+        else None
+    )
+    news_provider = (
+        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
+        if news_snapshot
+        else None
+    )
     delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     grid = parse_grid(param or [])
     result = sweep(strategy, provider, start_dt, end_dt,
                    grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by,
                    universe_by_date=universe_by_date,
                    universe_name=universe, universe_snapshots=universe_prov,
+                   fundamentals_provider=fundamentals_provider,
+                   news_provider=news_provider,
                    delisting_records=delisting_records,
                    assume_terminal_last_close=assume_terminal_last_close)
     run_id = None

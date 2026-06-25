@@ -150,3 +150,52 @@ def test_pre_v23_holdout_rows_backfill_to_full_period(tmp_path):
     assert n_null == 0
     migrate(conn)  # idempotent
     conn.close()
+
+
+def test_pre_v24_gate_evaluations_gains_pit_snapshot_columns(tmp_path):
+    """A gate_evaluations table created WITHOUT fundamentals_snapshot/news_snapshot (pre-v24) gains
+    both via migrate; the legacy row reads NULL for each (#132 schema v24)."""
+    db = tmp_path / "r.db"
+    conn = connect(db)
+    # Minimal pre-v24 gate_evaluations: the column subset that predates the PIT-snapshot pair.
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS strategies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);"
+        "INSERT INTO strategies(id, name) VALUES (1, 's');"
+        "CREATE TABLE gate_evaluations ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " strategy_id INTEGER NOT NULL REFERENCES strategies(id),"
+        " passed INTEGER NOT NULL, n_funnel INTEGER NOT NULL,"
+        " own_lifetime_combos INTEGER NOT NULL, windowed_total_combos INTEGER NOT NULL,"
+        " funnel_window_days INTEGER NOT NULL, breadth_provenance TEXT NOT NULL,"
+        " pit_ok INTEGER NOT NULL, pit_override INTEGER NOT NULL DEFAULT 0,"
+        " holdout_n_bars INTEGER NOT NULL, min_holdout_observations INTEGER NOT NULL,"
+        " code_hash TEXT NOT NULL, config_hash TEXT NOT NULL, dependency_hash TEXT,"
+        " data_source TEXT NOT NULL, snapshot_id TEXT, period_start TEXT NOT NULL,"
+        " period_end TEXT NOT NULL, holdout_frac REAL NOT NULL, actor TEXT NOT NULL,"
+        " decision_json TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,"
+        " created_at TEXT NOT NULL);"
+    )
+    conn.execute("PRAGMA user_version=23")
+    conn.execute(
+        "INSERT INTO gate_evaluations"
+        "(strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+        " funnel_window_days, breadth_provenance, pit_ok, holdout_n_bars,"
+        " min_holdout_observations, code_hash, config_hash, data_source, period_start,"
+        " period_end, holdout_frac, actor, decision_json, created_at)"
+        " VALUES (1,1,9,9,9,90,'measured',1,100,63,'ch','cfg','demo','2022-01-01','2022-12-31',"
+        " 0.2,'agent','{}','2022-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(gate_evaluations)")}
+    assert {"fundamentals_snapshot", "news_snapshot"} <= cols
+    row = conn.execute(
+        "SELECT fundamentals_snapshot, news_snapshot FROM gate_evaluations"
+    ).fetchone()
+    assert row["fundamentals_snapshot"] is None
+    assert row["news_snapshot"] is None
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    migrate(conn)  # idempotent
+    conn.close()

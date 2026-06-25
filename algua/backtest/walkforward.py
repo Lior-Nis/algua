@@ -20,22 +20,10 @@ from algua.backtest.engine import (
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
-from algua.contracts.types import DataProvider
+from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
 from algua.strategies.base import LoadedStrategy
 
 _MIN_WINDOW_BARS = 5
-
-
-def _reject_pit_sidecar(strategy: LoadedStrategy, where: str) -> None:
-    """Fail closed (clearly) when a PIT-sidecar strategy reaches walk_forward/sweep: their provider
-    threading is deferred (#132), so without this they'd hit a confusing deep BacktestError. Covers
-    BOTH lanes — fundamentals (pre-existing rough edge) and news."""
-    if strategy.config.needs_fundamentals or strategy.config.needs_news:
-        kind = "needs_fundamentals" if strategy.config.needs_fundamentals else "needs_news"
-        raise BacktestError(
-            f"{kind} strategies are not supported in {where} yet (#132 follow-up): "
-            f"provider threading through {where} is deferred"
-        )
 
 
 def _segment_bounds(
@@ -93,6 +81,9 @@ class WalkForwardResult:
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
     universe_name: str | None = None
     universe_snapshots: list[dict[str, str]] | None = None
+    # PIT sidecar snapshot provenance (issue #132); None unless the strategy is needs_*.
+    fundamentals_snapshot: str | None = None
+    news_snapshot: str | None = None
     # SENSITIVE — stronger than holdout_metrics: the raw OOS return vector lets a researcher
     # identify which days their strategy failed and tune a later strategy to exploit the same
     # holdout window. NEVER serialized: to_dict() excludes it; only research promote persists it
@@ -179,6 +170,8 @@ def walk_forward(
     universe_name: str | None = None,
     universe_snapshots: list[dict[str, str]] | None = None,
     on_peek: Callable[[str], None] | None = None,
+    fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
     delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
     assume_terminal_last_close: bool = False,
 ) -> WalkForwardResult:
@@ -192,10 +185,15 @@ def walk_forward(
     BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
-    _reject_pit_sidecar(strategy, "walk-forward")
+    # PIT sidecar providers (#132) are threaded straight into build_portfolio (= simulate, which
+    # consumes them); the `_reject_pit_sidecar` guard is removed here — unblocking needs_* in
+    # walk-forward is the point of #132 slice 4 (the engine still fails closed if a needs_*
+    # strategy is run without its provider).
     pf, _weights, _forced = build_portfolio(
         strategy, provider, start, end,
         universe_by_date=universe_by_date,
+        fundamentals_provider=fundamentals_provider,
+        news_provider=news_provider,
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
     )
@@ -247,6 +245,12 @@ def walk_forward(
         stability=stability,
         universe_name=universe_name,
         universe_snapshots=universe_snapshots,
+        fundamentals_snapshot=(
+            getattr(fundamentals_provider, "snapshot_id", None)
+            if strategy.config.needs_fundamentals else None),
+        news_snapshot=(
+            getattr(news_provider, "snapshot_id", None)
+            if strategy.config.needs_news else None),
         holdout_returns=holdout_returns,
         market_returns=market_returns,
         **prov,

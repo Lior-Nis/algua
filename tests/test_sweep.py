@@ -98,6 +98,7 @@ def test_evaluate_combo_returns_record_without_holdout():
     assert set(rec["meta"]) == {
         "data_source", "snapshot_id", "timeframe", "seed", "code_hash",
         "dependency_hash", "period", "universe_name", "universe_snapshots",
+        "fundamentals_snapshot", "news_snapshot",
     }
 
 

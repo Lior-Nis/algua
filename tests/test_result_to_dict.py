@@ -105,6 +105,7 @@ def test_walkforward_result_to_dict_has_expected_keys():
         "seed", "period", "windows", "holdout_frac", "window_metrics",
         "holdout_metrics", "stability", "code_hash", "dependency_hash",
         "universe_name", "universe_snapshots",
+        "fundamentals_snapshot", "news_snapshot",
     }
 
 
@@ -115,5 +116,6 @@ def test_sweep_result_to_dict_has_expected_keys():
         "period", "windows", "holdout_frac", "grid", "n_combos",
         "rank_by", "ranked", "best", "code_hash", "dependency_hash",
         "universe_name", "universe_snapshots",
+        "fundamentals_snapshot", "news_snapshot",
         "trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann",
     }

@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -215,6 +215,8 @@ CREATE TABLE IF NOT EXISTS gate_evaluations (
     dependency_hash TEXT,
     data_source TEXT NOT NULL,
     snapshot_id TEXT,
+    fundamentals_snapshot TEXT,
+    news_snapshot TEXT,
     period_start TEXT NOT NULL,
     period_end TEXT NOT NULL,
     holdout_frac REAL NOT NULL,
@@ -626,6 +628,11 @@ def migrate(conn: sqlite3.Connection) -> None:
     })
     # v28 (#250): live_activity_quarantine is a brand-new dead-letter table; executescript(_SCHEMA)
     # above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # v29 (#132): PIT sidecar snapshot provenance on the gate audit row. Additive nullable — legacy
+    # rows stay NULL (no backfill; pre-#132 promotions had no PIT snapshot).
+    _add_missing_columns(
+        conn, "gate_evaluations",
+        {"fundamentals_snapshot": "TEXT", "news_snapshot": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

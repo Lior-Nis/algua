@@ -386,6 +386,8 @@ class StrategyRepository(Protocol):
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        fundamentals_snapshot: str | None = None,
+        news_snapshot: str | None = None,
         family_id: int | None = None,
         family_lifetime_effective: int | None = None,
     ) -> int:

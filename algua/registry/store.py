@@ -802,6 +802,8 @@ class SqliteStrategyRepository:
         holdout_frac: float,
         actor: str,
         decision_json: str,
+        fundamentals_snapshot: str | None = None,
+        news_snapshot: str | None = None,
         family_id: int | None = None,
         family_lifetime_effective: int | None = None,
     ) -> int:
@@ -814,13 +816,15 @@ class SqliteStrategyRepository:
                 " funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
                 " min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
-                " consumed, created_at, family_id, family_lifetime_effective)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
+                " fundamentals_snapshot, news_snapshot, consumed, created_at,"
+                " family_id, family_lifetime_effective)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)",
                 (strategy_id, int(passed), n_funnel, own_lifetime_combos, windowed_total_combos,
                  funnel_window_days, breadth_provenance, int(pit_ok), int(pit_override),
                  holdout_n_bars, min_holdout_observations, code_hash, config_hash, dependency_hash,
                  data_source, snapshot_id, period_start, period_end, holdout_frac, actor,
-                 decision_json, _now(), family_id, family_lifetime_effective),
+                 decision_json, fundamentals_snapshot, news_snapshot, _now(),
+                 family_id, family_lifetime_effective),
             )
         rowid = cur.lastrowid
         assert rowid is not None
@@ -1148,8 +1152,9 @@ class SqliteStrategyRepository:
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
                 " consumed, created_at,"
                 " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,"
-                " family_id, family_lifetime_effective)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " family_id, family_lifetime_effective,"
+                " fundamentals_snapshot, news_snapshot)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 # Agent passing rows are born-consumed: the stage has already advanced inside
                 # this transaction, so the token is spent. Leaving consumed=0 would let a
                 # future `registry transition --to candidate --actor agent` reuse the old row
@@ -1170,7 +1175,8 @@ class SqliteStrategyRepository:
                  alpha_t if fdr_binding else None,
                  int(fdr_rejected) if fdr_rejected is not None else None,
                  t_next if fdr_binding else None,
-                 gate_row.get("family_id"), gate_row.get("family_lifetime_effective")),
+                 gate_row.get("family_id"), gate_row.get("family_lifetime_effective"),
+                 gate_row.get("fundamentals_snapshot"), gate_row.get("news_snapshot")),
             )
             gate_id = cur.lastrowid
             assert gate_id is not None

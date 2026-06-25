@@ -20,7 +20,11 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.data.models import Dataset
+from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
+from algua.data.store import DataStore
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
 from algua.research import family_audit
@@ -43,6 +47,12 @@ def promote(
     end: str = typer.Option("2023-12-31", "--end"),
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="backtest an ingested bars snapshot id"),
+    fundamentals_snapshot: str = typer.Option(
+        None, "--fundamentals-snapshot",
+        help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
+    news_snapshot: str = typer.Option(
+        None, "--news-snapshot",
+        help="ingested news snapshot id (required for a needs_news strategy)"),
     universe: str = typer.Option(
         None, "--universe",
         help="point-in-time universe name (opt into survivorship-bias-free membership)"),
@@ -116,6 +126,37 @@ def promote(
     # part of the holdout-burn identity below (conservative: the same OOS data window is burned
     # regardless of universe).
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    # PIT sidecar guards (misuse + early fail-closed) BEFORE any holdout reservation/peek: a
+    # needs_X strategy without its snapshot must refuse before reserve_holdout touches the window.
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError("--fundamentals-snapshot was given but the strategy does not declare "
+                         "needs_fundamentals")
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError("--news-snapshot was given but the strategy does not declare needs_news")
+    if strategy.config.needs_fundamentals and not fundamentals_snapshot:
+        raise ValueError("strategy declares needs_fundamentals; pass --fundamentals-snapshot")
+    if strategy.config.needs_news and not news_snapshot:
+        raise ValueError("strategy declares needs_news; pass --news-snapshot")
+    fundamentals_provider = (
+        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
+        if fundamentals_snapshot else None)
+    news_provider = (
+        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
+        if news_snapshot else None)
+    # Fail fast on a missing/wrong-kind PIT snapshot BEFORE any holdout reservation, so a typo'd
+    # snapshot id can never strand a pending reservation (#132 GATE-2). get_snapshot raises
+    # SnapshotNotFound (LookupError) on a missing id; the dataset-kind check adds the wrong-kind
+    # case. Both surface as JSON via @json_errors and both precede reserve_holdout.
+    if news_provider is not None:
+        rec = news_provider.store.get_snapshot(news_provider.snapshot_id)
+        if rec.dataset != Dataset.NEWS.value:
+            raise ValueError(f"--news-snapshot {news_provider.snapshot_id!r} is dataset "
+                             f"{rec.dataset!r}, not {Dataset.NEWS.value!r}")
+    if fundamentals_provider is not None:
+        rec = fundamentals_provider.store.get_snapshot(fundamentals_provider.snapshot_id)
+        if rec.dataset != Dataset.FUNDAMENTALS.value:
+            raise ValueError(f"--fundamentals-snapshot {fundamentals_provider.snapshot_id!r} is "
+                             f"dataset {rec.dataset!r}, not {Dataset.FUNDAMENTALS.value!r}")
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     data_source = type(provider).__name__
@@ -159,6 +200,7 @@ def promote(
                 strategy, provider, start_dt, end_dt, windows=windows,
                 holdout_frac=holdout_frac, universe_by_date=universe_by_date,
                 universe_name=universe, universe_snapshots=universe_prov,
+                fundamentals_provider=fundamentals_provider, news_provider=news_provider,
                 delisting_records=delisting_records,
                 assume_terminal_last_close=assume_terminal_last_close,
                 # Burn-on-peek: commit the reservation into a burn the instant BEFORE walk_forward
@@ -197,6 +239,8 @@ def promote(
         "stability": wf.stability,
         "universe_name": wf.universe_name,
         "universe_snapshots": wf.universe_snapshots,
+        "fundamentals_snapshot": wf.fundamentals_snapshot,
+        "news_snapshot": wf.news_snapshot,
     }
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
@@ -252,14 +296,20 @@ def dormant_sweep(
     for rec in dormant:
         try:
             strategy = load_strategy(rec.name)
-            # walk_forward rejects PIT sidecars (fundamentals/news) that its lane can't thread yet —
-            # skip those strategies with a named reason rather than letting them land in errors[].
+            # walk_forward CAN thread PIT sidecars now (#132), but dormant-sweep takes a single
+            # --snapshot and cannot carry a per-strategy fundamentals/news snapshot across a
+            # heterogeneous pool — so skip PIT strategies here with an accurate reason rather than
+            # letting them land in errors[]. Re-audition them individually instead.
             sidecar = next(
                 (flag for flag in ("needs_fundamentals", "needs_news")
                  if getattr(strategy.config, flag, False)), None)
             if sidecar is not None:
-                skipped.append({"strategy": rec.name,
-                                "reason": f"{sidecar}: walk-forward lane not wired"})
+                snap_flag = "fundamentals" if sidecar == "needs_fundamentals" else "news"
+                skipped.append({
+                    "strategy": rec.name,
+                    "reason": f"{sidecar}: dormant-sweep takes no per-strategy PIT snapshot — "
+                              f"re-audition individually via "
+                              f"backtest walk-forward/research promote --{snap_flag}-snapshot"})
                 continue
             wf = walk_forward(
                 strategy, provider, start_dt, end_dt, windows=windows,
