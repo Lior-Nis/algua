@@ -103,6 +103,16 @@ def _alpaca_live_broker(authorization: LiveAuthorization) -> AlpacaLiveBroker:
                             base_url=s.alpaca_live_url)
 
 
+def _still_live_allocated(conn, name: str) -> bool:
+    """True iff `name` is still Stage.LIVE with an active allocation. Re-read at submit time so a
+    `live -> dormant` bench committed MID-CYCLE (which atomically revokes the allocation, #247)
+    aborts further orders instead of orphaning a position on a now-dormant strategy that run-all —
+    iterating only Stage.LIVE — will never flatten (#281). Mirrors the #21 re-read-the-kill-switch-
+    before-submit discipline; broader than dormant (any non-LIVE transition mid-cycle halts too)."""
+    rec = SqliteStrategyRepository(conn).get(name)
+    return rec.stage is Stage.LIVE and active_allocation(conn, rec.id) is not None
+
+
 def _run_strategy_tick(  # noqa: PLR0913
     conn, name: str, authorization, broker, provider, max_drawdown,
     start: str = "2023-01-01", end: str = "2023-12-31", reserve_buy=None, cancel=None,
@@ -140,7 +150,8 @@ def _run_strategy_tick(  # noqa: PLR0913
         client_order_id_for=client_order_id, on_submitted=_persist, cancel=cancel,
         live_snapshot=_live_snap, live_positions=lambda: believed_positions(conn, name),
         should_halt=lambda: (kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn)
-                             or not authorization_active(conn, authorization)),
+                             or not authorization_active(conn, authorization)
+                             or not _still_live_allocated(conn, name)),
         peak_equity=get_nav_peak(conn, name),
         reserve_buy=reserve_buy,
     )

@@ -106,6 +106,91 @@ def test_run_all_skips_only_the_unauthorized_strategy(monkeypatch):
     assert "phantom_live" not in traded
 
 
+def _allocate(name="cross_sectional_momentum", capital=10_000.0):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry import allocations
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        allocations.allocate(conn, SqliteStrategyRepository(conn).get(name).id,
+                             capital=capital, actor="human", account_equity=50_000.0)
+
+
+def _bench_to_dormant(name="cross_sectional_momentum"):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.registry.transitions import transition_strategy
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        transition_strategy(SqliteStrategyRepository(conn), name, Stage.DORMANT, Actor.AGENT,
+                            reason="benched mid-cycle")
+
+
+def test_still_live_allocated_false_after_bench(monkeypatch):
+    # #281: the submit-time guard reflects a live->dormant bench (stage flips + allocation revoked).
+    from contextlib import closing
+
+    from algua.cli.live_cmd import _still_live_allocated
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    _to_live()
+    _allocate()
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert _still_live_allocated(conn, "cross_sectional_momentum") is True
+    _bench_to_dormant()
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert _still_live_allocated(conn, "cross_sectional_momentum") is False
+
+
+def test_run_all_halts_strategy_benched_to_dormant_mid_cycle(monkeypatch):
+    # #281: a live->dormant bench landing MID-CYCLE must halt the tick via should_halt — never
+    # submit/persist an order for the now-dormant strategy (which run-all, iterating Stage.LIVE,
+    # would never flatten). Simulate the concurrent bench committing inside run_tick.
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.live.live_loop import TickHalted
+    from algua.registry.db import connect, migrate
+    _to_live()
+    _allocate()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 100_000.0)
+
+    seen = {}
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        _bench_to_dormant()  # concurrent live->dormant bench commits mid-tick (revokes allocation)
+        seen["halt"] = hooks.should_halt()
+        if seen["halt"]:
+            raise TickHalted("benched mid-cycle")
+        raise AssertionError("should_halt must trip after a mid-cycle bench")  # would-be order path
+
+    monkeypatch.setattr("algua.cli.live_cmd.run_tick", _fake_run_tick)
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert seen["halt"] is True          # the submit-time guard saw the mid-cycle bench
+    assert r.exit_code == 1              # halted -> the cycle aborts (no orders)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        n = conn.execute("SELECT COUNT(*) FROM live_orders WHERE strategy=?",
+                         ("cross_sectional_momentum",)).fetchone()[0]
+    assert n == 0  # no order persisted for the now-dormant strategy
+
+
 def test_run_all_halts_on_unexplained_reconcile_drift(monkeypatch):
     from algua.risk import global_halt
     _to_live()
