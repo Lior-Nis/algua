@@ -80,13 +80,16 @@ The trade-tick flow:
    (#250), not fatal.
 2. **`run_tick` reconciles** the lane-supplied **venue belief** — a hook
    `venue_belief: Callable[[], dict] | None` that returns `paper_believed_positions(conn, name)`
-   (Σ this strategy's own `paper_venue_fills`, signed, nonzero) — against the broker's
-   **whole-account** net (`broker.get_positions()` — `/v2/positions`, read inside `run_tick`
-   immediately before its sizing snapshot, so a held-but-dropped symbol out of the universe is
-   still compared). Comparison is **per symbol over the union, with a `1e-6` tolerance**
-   (fractional Alpaca fills summed as float must not exact-compare). A residual beyond tolerance →
-   `RiskBreach("reconcile")` → trip + strategy-scoped flatten (S4). Result carries
-   `reconcile_ok`.
+   (Σ this strategy's own `paper_venue_fills`, signed, nonzero) — against **`positions_before`,
+   the SAME sizing snapshot** (`snap.qtys`, nonzero) `run_tick` already takes for the tick. No
+   separate `broker.get_positions()` call: `snapshot(universe)` keys are
+   `union(universe, every held symbol)` (`alpaca_broker.py` snapshot), so `snap.qtys` already
+   includes held-but-dropped (out-of-universe) positions — reconcile and sizing read **one**
+   snapshot, eliminating the get_positions/snapshot TOCTOU (Codex GATE-1-r3 HIGH). Comparison is
+   **per symbol over the union, with a `1e-6` tolerance** (fractional Alpaca fills summed as float
+   must not exact-compare), replacing the old exact `derived == positions_before`. A residual
+   beyond tolerance → `RiskBreach("reconcile")` → trip + strategy-scoped flatten (S4). Result
+   carries `reconcile_ok`.
 
 The old exact-equality `derived_positions` branch is **replaced** by this tolerance comparison
 against the whole-account book; `TickResult.reconcile_ok` is **kept** (live still stamps it from
@@ -283,11 +286,12 @@ venue ledger is the belief, driven flat by real offset fills, not a DELETE.
   `_classify_activities` onto `paper_venue_orders`. Ordered first so the reconcile can rely on
   reliably-attributable venue fills.
 - **S3 — single-tenant reconcile.** Add the `venue_belief` hook; in `run_tick`, reconcile the
-  belief vs whole-account `broker.get_positions()` with `1e-6` tolerance (replacing the
-  exact-equality `derived_positions` branch); keep `TickResult.reconcile_ok`; remove
-  `clear_derived_positions` (retain sim `derive_positions`). End-to-end test: fill at venue → next
-  tick reconciles clean (the phantom-flatten regression); orphan/manual holding trips fail-closed;
-  a fractional fill within tolerance does not trip; a held-but-dropped symbol is still reconciled.
+  belief vs `positions_before` (the same `snap.qtys` sizing snapshot) with a `1e-6` union
+  tolerance (replacing the exact-equality `derived_positions` branch — one snapshot, no TOCTOU);
+  keep `TickResult.reconcile_ok`; remove `clear_derived_positions` (retain sim `derive_positions`).
+  End-to-end test: fill at venue → next tick reconciles clean (the phantom-flatten regression);
+  orphan/manual holding trips fail-closed; a fractional fill within tolerance does not trip; a
+  held-but-dropped symbol (in `snap.qtys` via the held-union) is still reconciled.
 - **S4 — offset flatten + fail-closed evidence.** Strategy-scoped `submit_offset` flatten in the
   breach handler + `flatten` (sub-tolerance qty skipped, never backfills `"noop"`); "liquidation
   submitted" semantics; ingestion-failure aborts the tick with no snapshot (no `reconcile_ok=True`).
@@ -315,7 +319,7 @@ ship in **one PR** (maintainer scope decision), reviewed as one diff at GATE 2.
 
 Tests must not monkeypatch `run_tick`/`trade-tick` wholesale (the gap #249 calls out): the
 reconcile path is exercised with a fake paper broker whose `account_activities_window` /
-`get_positions` are scripted.
+`snapshot` (and `submit_offset` for S4) are scripted.
 
 ## Out of scope (deferred)
 
