@@ -290,11 +290,16 @@ class _AlpacaBroker:
         """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long
         (signed_qty>0), buy them back if short (<0). Used by per-strategy liquidation — sized to the
         strategy's ledger qty so the account net moves by exactly this strategy's contribution."""
-        qty = abs(signed_qty)
-        if qty == 0.0:
+        # Format qty as fixed-point Decimal (mirrors the notional path), NOT format(qty,'g') — that
+        # rounds to 6 sig figs and can emit scientific notation (e.g. '1e+06') for a large/fraction
+        # believed qty (#269). believed qty is summed from broker fills as a float, so quantize to
+        # Alpaca's max fractional precision (9 dp) to shed float noise; a residual that rounds to
+        # zero (already flat) is a noop, not a malformed zero-qty order.
+        qty = Decimal(str(abs(signed_qty))).quantize(Decimal("1e-9"))
+        if qty == 0:
             return "noop"
         body: dict[str, Any] = {
-            "symbol": symbol, "qty": format(qty, "g"),
+            "symbol": symbol, "qty": format(qty.normalize(), "f"),
             "side": "sell" if signed_qty > 0 else "buy",
             "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
         }

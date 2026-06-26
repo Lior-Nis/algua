@@ -518,6 +518,32 @@ def test_submit_offset_posts_qty_order(monkeypatch):
     assert fake.posted[1]["side"] == "buy" and fake.posted[1]["qty"] == "3"
 
 
+def test_submit_offset_qty_precise_no_scientific_notation(monkeypatch):
+    # #269: the offset qty must be exact fixed-point, never `format(qty,'g')` (6 sig figs /
+    # scientific notation). A fractional believed qty must flatten in full, and a large qty must
+    # not render as '2.5e+06'.
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "off"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    b = _broker()
+    b.submit_offset("AAA", 12.345678901, "c1")     # fractional (9 dp) -> kept in full
+    assert fake.posted[-1]["qty"] == "12.345678901"
+    b.submit_offset("BBB", 2_500_000.0, "c2")      # large -> NOT '2.5e+06'
+    assert fake.posted[-1]["qty"] == "2500000"
+    b.submit_offset("CCC", 0.000123456, "c3")      # small -> full precision, no sci notation
+    assert fake.posted[-1]["qty"] == "0.000123456"
+    b.submit_offset("DDD", 0.1 + 0.2, "c4")        # float-sum noise -> flattens to 0.3 (9 dp)
+    assert fake.posted[-1]["qty"] == "0.3"
+
+
+def test_submit_offset_subnano_residual_is_noop(monkeypatch):
+    # #269: a believed residual below Alpaca's 9-dp precision is effectively flat — return noop,
+    # never POST a malformed qty='0' order. No HTTP call is made.
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "off"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    assert _broker().submit_offset("AAA", 1e-12, "c") == "noop"
+    assert fake.posted == []
+
+
 def test_submit_sized_reserve_trims_buy(monkeypatch):
     fake = _FakeRequests(
         {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
