@@ -43,6 +43,8 @@ from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
+from algua.registry import allocations
+from algua.registry.allocations import AllocationError
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
@@ -563,3 +565,29 @@ def resume_all(
             "the above live strategies are not flat; re-flatten each before resuming individually"
         )
     emit(ok(result))
+
+
+def _paper_account_equity() -> float:
+    """Paper account equity = the Σ-allocation cap. Read once from the broker (read-only)."""
+    return float(_alpaca_broker_from_settings().account().equity)
+
+
+@paper_app.command("allocate")
+@json_errors(ValueError, LookupError, AllocationError, BrokerError)
+def allocate(
+    name: str,
+    capital: float = typer.Option(..., "--capital", help="paper capital base $"),
+) -> None:
+    """Set a paper strategy's capital base (its fixed sizing denominator). Enforces that the sum of
+    all active paper allocations does not exceed paper-account equity. Allocate AFTER the strategy
+    has reached the `paper` stage. (Paper-only box: no live allocations coexist in this table.)"""
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
+        if rec.stage is not Stage.PAPER:
+            raise ValueError(
+                f"can only allocate paper capital to a paper-stage strategy; "
+                f"{name!r} is at stage {rec.stage.value}"
+            )
+        allocations.allocate(conn, rec.id, capital=capital, actor="agent",
+                             account_equity=_paper_account_equity())
+    emit(ok({"strategy": name, "capital": capital}))

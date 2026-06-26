@@ -1158,3 +1158,71 @@ def test_resume_all_ingests_before_warning(monkeypatch, tmp_path):
     assert payload["global_halt"] == "reset"
     # after ingest the offset fill landed -> strategy is flat -> NOT listed as not_flat
     assert "live_not_flat" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Task 2: `paper allocate` — per-strategy capital base, Σ ≤ paper equity
+# ---------------------------------------------------------------------------
+
+def _paper_strategy(name="alpha"):
+    # Promote a fresh strategy all the way to the `paper` stage via the repository, so allocate has
+    # a legal target. Uses the same repo/transition helpers the other paper tests use.
+    from algua.cli._common import registry_conn
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.registry.transitions import transition_strategy
+
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(name)
+        for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER):
+            transition_strategy(repo, name, to, Actor.HUMAN, reason="test setup")
+    return name
+
+
+def test_paper_allocate_sets_active_allocation(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=50_000.0, cash=50_000.0, buying_power=50_000.0,
+                                  account_id="paper-1"),
+    )
+    name = _paper_strategy()
+    result = runner.invoke(app, ["paper", "allocate", name, "--capital", "10000"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["capital"] == 10_000.0
+
+
+def test_paper_allocate_rejects_non_paper_stage(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=50_000.0, cash=50_000.0, buying_power=50_000.0,
+                                  account_id="paper-1"),
+    )
+    from algua.cli._common import registry_conn
+    from algua.registry.store import SqliteStrategyRepository
+    with registry_conn() as conn:
+        SqliteStrategyRepository(conn).add("idea_only")  # stays at `idea`
+    result = runner.invoke(app, ["paper", "allocate", "idea_only", "--capital", "1000"])
+    assert result.exit_code != 0
+    assert json.loads(result.output)["ok"] is False
+
+
+def test_paper_allocate_sum_capped_at_equity(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=50_000.0, cash=50_000.0, buying_power=50_000.0,
+                                  account_id="paper-1"),
+    )
+    a, b = _paper_strategy("a"), _paper_strategy("b")
+    assert runner.invoke(app, ["paper", "allocate", a, "--capital", "40000"]).exit_code == 0
+    over = runner.invoke(app, ["paper", "allocate", b, "--capital", "20000"])
+    assert over.exit_code != 0
+    assert "exceeds" in over.output
