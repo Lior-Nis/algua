@@ -18,11 +18,13 @@ def _firstrate_dirs(tmp_path):
     adj = tmp_path / "adj"
     raw.mkdir()
     adj.mkdir()
-    for sym, rprice, aprice in [("AAPL", 100, 50), ("MSFT", 200, 180)]:
+    # Single-bar files: the only bar IS the adjustment anchor, so a back-adjusted series has
+    # adj_close == raw close there (adj != raw on the anchor bar = mis-scaled, now rejected #265).
+    for sym, price in [("AAPL", 100), ("MSFT", 200)]:
         (raw / f"{sym}_full_1day_UNADJUSTED.txt").write_text(
-            f"2024-07-01,{rprice},{rprice},{rprice},{rprice},10\n", encoding="utf-8")
+            f"2024-07-01,{price},{price},{price},{price},10\n", encoding="utf-8")
         (adj / f"{sym}_full_1day_adjsplitdiv.txt").write_text(
-            f"2024-07-01,{aprice},{aprice},{aprice},{aprice},10\n", encoding="utf-8")
+            f"2024-07-01,{price},{price},{price},{price},10\n", encoding="utf-8")
     return raw, adj
 
 
@@ -67,7 +69,8 @@ def test_import_bars_intraday_roundtrip(tmp_path):
         "2024-07-01 09:30:00,100,110,95,105,10\n2024-07-01 09:31:00,105,120,100,115,20\n",
         encoding="utf-8")
     (adj / "AAPL_full_1min_adjsplitdiv.txt").write_text(
-        "2024-07-01 09:30:00,50,55,47,52,10\n2024-07-01 09:31:00,52,60,50,57,20\n",
+        # anchored at the last bar (adj close == raw close 115); older bar carries adjustment (#265)
+        "2024-07-01 09:30:00,50,55,47,52,10\n2024-07-01 09:31:00,52,120,50,115,20\n",
         encoding="utf-8")
     result = runner.invoke(app, [
         "data", "import-bars", "--vendor", "firstrate",

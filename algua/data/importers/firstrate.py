@@ -8,6 +8,7 @@ import pandas as pd
 import pytz
 
 from algua.data.contracts import FirstRateImportRequest, ImportRequest, ProviderBars
+from algua.data.corpactions import check_adj_close_anchored
 from algua.data.store import normalize_symbols
 from algua.data.timeframes import is_intraday, validate_timeframe
 
@@ -229,6 +230,16 @@ class FirstRateImporter:
         frame = merged[
             ["ts", "symbol", "open", "high", "low", "close", "adj_close", "volume"]
         ].sort_values("ts").reset_index(drop=True)
+        # Reject a globally mis-scaled / mis-anchored vendor adjusted series (e.g. cents vs dollars)
+        # (#265): a FirstRate per-symbol file is a full back-adjusted series whose LAST bar is the
+        # anchor (adj_close == close), so the no-events anchored check is valid here. The full
+        # event-consistency check needs a corporate-action event set we don't have at import; the
+        # Alpaca provider can't use even this (its windowed fetch isn't anchored at the window end).
+        idx = pd.DatetimeIndex(frame["ts"])
+        check_adj_close_anchored(
+            pd.Series(frame["close"].to_numpy(), index=idx),
+            pd.Series(frame["adj_close"].to_numpy(), index=idx),
+        )
         return ProviderBars(
             frame=frame,
             source_metadata={
