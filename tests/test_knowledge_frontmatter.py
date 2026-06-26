@@ -25,6 +25,43 @@ def test_render_then_parse_is_stable():
     assert again_body == body
 
 
+def test_parse_ignores_delimiter_substring_inside_value():
+    # #252: a bare `---` inside a YAML value is NOT the closing delimiter. The old split('---', 2)
+    # truncated the frontmatter here and spilled the rest into the body.
+    text = "---\nname: x\ndescription: a---b\ntags:\n- kept\n---\nthe body\n"
+    fm, body = parse_doc(text)
+    assert fm == {"name": "x", "description": "a---b", "tags": ["kept"]}
+    assert body == "the body\n"
+
+
+def test_render_then_parse_round_trips_value_with_delimiter():
+    # #252: the self-compounding case — a `--description "a---b"` must survive a render→sync→parse
+    # cycle with tags kept, description intact, and no YAML spilled into the prose.
+    fm = {"name": "x", "tags": ["kept"], "description": "a---b"}
+    body = "claim\n"
+    again_fm, again_body = parse_doc(render_doc(fm, body))
+    assert again_fm == fm
+    assert again_body == body
+
+
+def test_round_trips_value_and_body_each_containing_a_delimiter_line():
+    # An interior `---` LINE in a value, and a `---` horizontal-rule line in the body, both survive.
+    fm = {"name": "x", "description": "before\n---\nafter", "tags": ["k"]}
+    body = "intro\n\n---\n\nmore\n"
+    again_fm, again_body = parse_doc(render_doc(fm, body))
+    assert again_fm == fm
+    assert again_body == body
+
+
+def test_parse_no_closing_delimiter_is_not_frontmatter():
+    # A leading `---` with no closing delimiter line (e.g. a doc opening with a rule) is body, not
+    # a half-parsed frontmatter block.
+    text = "---\njust a dangling opener and prose\nno closing line\n"
+    fm, body = parse_doc(text)
+    assert fm == {}
+    assert body == text
+
+
 def test_replace_block_replaces_between_markers():
     text = "before\n<!-- ALGUA:RESULTS -->\nold\n<!-- /ALGUA:RESULTS -->\nafter\n"
     out = replace_block(text, "RESULTS", "new content")
