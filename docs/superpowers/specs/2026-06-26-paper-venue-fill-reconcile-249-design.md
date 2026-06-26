@@ -61,33 +61,56 @@ operator's correct response is one strategy per paper account.
 
 ## Architecture
 
-### Reconcile, in the lane (not in `run_tick`)
+### Reconcile, inside `run_tick`'s snapshot boundary (fed by the venue belief)
 
-`run_tick`'s `derived_positions` reconcile branch is set by **exactly one caller** — paper
-`trade-tick` (`paper_cmd.py:330`); the live lane reconciles in its own CLI loop and never sets
-it. The paper reconcile moves to the same place, mirroring the live lane:
+`run_tick`'s reconcile branch is set by **exactly one caller** — paper `trade-tick`
+(`paper_cmd.py:330`); the live lane reconciles in its own CLI loop and never sets it (verified:
+`derived_positions` has one setter). We keep the reconcile **inside `run_tick`** rather than
+moving it to the lane, because moving it would create a pre-trade TOCTOU: a lane-level
+`get_positions()` reconcile followed by `run_tick`'s *separate* `broker.snapshot()` for sizing
+lets a fill/manual change between the two calls trade on unreconciled state (Codex GATE-1-r2
+HIGH). Keeping it in `run_tick` holds reconcile + sizing within one pre-submit critical section.
 
-Before deciding/submitting, `trade-tick`:
+The trade-tick flow:
 
-1. **Ingests** the paper venue's activities into `paper_venue_fills` via the paginated,
-   fail-closed `account_activities_window` path (bounded by the persisted cursor → broker clock).
-   A transport/pagination failure raises → the tick aborts with **no snapshot recorded** (so it
-   never stamps `reconcile_ok = True`); a single malformed activity is quarantined (#250), not
-   fatal.
-2. **Reconciles** `paper_believed_positions(conn, name)` (Σ this strategy's own
-   `paper_venue_fills`, signed, nonzero) against the broker's **whole-account** net
-   (`broker.get_positions()` — `/v2/positions`, NOT the universe-scoped `snapshot`, so a
-   held-but-dropped symbol is still compared), **per symbol over the union, with a `1e-6
-   tolerance**` (fractional Alpaca fills summed as float must not exact-compare). A residual
-   beyond tolerance → `RiskBreach("reconcile")` → trip + strategy-scoped flatten (S4).
-3. The lane-computed `reconcile_ok` is what is stamped onto the tick snapshot.
+1. **Lane ingests** the paper venue's activities into `paper_venue_fills` via the paginated,
+   fail-closed `account_activities_window` path (see *Cursor* below) **before** calling
+   `run_tick`. A transport/pagination failure raises → the tick aborts with **no snapshot
+   recorded** (never stamps `reconcile_ok = True`); a single malformed activity is quarantined
+   (#250), not fatal.
+2. **`run_tick` reconciles** the lane-supplied **venue belief** — a hook
+   `venue_belief: Callable[[], dict] | None` that returns `paper_believed_positions(conn, name)`
+   (Σ this strategy's own `paper_venue_fills`, signed, nonzero) — against the broker's
+   **whole-account** net (`broker.get_positions()` — `/v2/positions`, read inside `run_tick`
+   immediately before its sizing snapshot, so a held-but-dropped symbol out of the universe is
+   still compared). Comparison is **per symbol over the union, with a `1e-6` tolerance**
+   (fractional Alpaca fills summed as float must not exact-compare). A residual beyond tolerance →
+   `RiskBreach("reconcile")` → trip + strategy-scoped flatten (S4). Result carries
+   `reconcile_ok`.
 
-`run_tick`'s now-dead `derived_positions` field + reconcile branch + `TickResult.reconcile_ok`,
-and the sim-fed `derive_positions`/`clear_derived_positions` helpers, are **removed** (no caller
-remains; no-cruft). The exact-equality footgun is deleted with them.
+The old exact-equality `derived_positions` branch is **replaced** by this tolerance comparison
+against the whole-account book; `TickResult.reconcile_ok` is **kept** (live still stamps it from
+its own reconcile — Codex r2 MEDIUM). When `venue_belief` is not supplied (live, sim), the branch
+is skipped exactly as `derived_positions=None` is today. The sim-fed `derive_positions` is
+**retained** for the SimBroker `paper show` view (Codex r2 MEDIUM); only `clear_derived_positions`
+(the #163 band-aid) is removed — the offset flatten replaces it.
 
 > Tolerance lives in one place: `_RECONCILE_TOL = 1e-6` already exists in `paper_cmd.py` (used by
-> the live resume reconcile) — reuse it.
+> the live resume reconcile) — promote it to where `run_tick` can reuse it.
+
+### Cursor (paper ingest is broker-time high-water, not activity-id)
+
+Live `ingest_activities` advances the cursor to `max(activity_id)` and re-fetches via the
+single-page `account_activities(after=id)`. Paper needs the **exhaustive** paginated
+`account_activities_window(after, until)` (which is *time*-bounded, not id-bounded). So the paper
+cursor is a **broker-time high-water**: the lane fetches
+`account_activities_window(after=cursor_ts, until=broker.clock())`, and on success persists
+`until` (the broker clock) as the new cursor. The window deliberately **overlaps** the previous
+`until`; dedup by `activity_id` (UNIQUE) makes the replay idempotent (Codex r2 MEDIUM — cursor
+semantics defined). `ingest_activities` therefore takes an explicit `cursor_value` (the paper
+timestamp) instead of deriving `max(activity_id)`; the live call passes `None` and keeps the
+id-based advance. The cursor is initialized fail-closed (first ingest fetches from a far-past
+bound / the strategy's first venue order ts), so no fill is skipped.
 
 ### Fail-closed evidence (invariant)
 
@@ -187,13 +210,25 @@ interpolation cannot be an injection vector — the allowlist is *enforced*, not
 
 `paper_believed_positions(conn, strategy)` = `believed_positions(conn, strategy, LedgerKind.PAPER)`.
 
-### Crash-safe order recording (S3)
+### Crash-safe order recording
 
-The wall-clock `on_submitted` path adopts the live pattern against `paper_venue_orders`:
-`record_paper_venue_order` (intent, keyed by `client_order_id`, status `submitted`, written
-*before* the broker call) → broker submit → `backfill_paper_venue_broker_order_id` (attaches the
-`broker_order_id` on accept, back-attributing any fill already ingested under that broker id while
-`strategy` was NULL). A crash between venue-accept and record can no longer orphan a fill.
+**A new `run_tick` hook is required.** `run_tick` submits *then* calls `on_submitted`
+(`live_loop.py:215`) — a post-accept hook, so "record before submit" is **not** achievable
+through it (Codex r2 HIGH; live has the same post-submit window today). Add a pre-submit hook
+`before_submit(intent, client_order_id) -> None` fired immediately **before**
+`broker.submit_sized`. The wall-clock lane records intent there; the existing `on_submitted`
+backfills the broker id after accept:
+
+- `before_submit`: `record_paper_venue_order` (intent into `paper_venue_orders`, keyed by
+  `client_order_id`, status `submitted`) — written before the broker call.
+- broker `submit_sized` returns the `broker_order_id`.
+- `on_submitted`: `backfill_paper_venue_broker_order_id(client_order_id, broker_order_id)` —
+  attaches the broker id, back-attributing any fill already ingested under it while `strategy`
+  was NULL.
+
+A crash between venue-accept and record can no longer orphan a fill: the intent row exists before
+the order is ever sent. (Live can adopt `before_submit` later; closing live's window is out of
+scope for #249.)
 
 **Readers that move to the venue ledger** (the wall-clock lane's source of truth becomes
 `paper_venue_orders`/`paper_venue_fills`, not `paper_orders`):
@@ -219,38 +254,45 @@ never liquidates a co-tenant/sibling (defense even though evidence is single-ten
 ```python
 ingest_activities(conn, paginated_paper_activities(...), LedgerKind.PAPER)   # refresh belief
 for sym, qty in paper_believed_positions(conn, name).items():
+    if abs(qty) <= _RECONCILE_TOL:        # submit_offset would return "noop"; skip (Codex r2 MEDIUM)
+        continue
     coid = client_order_id(name, decision_ts, f"offset-{sym}")
     record_paper_venue_order(conn, name, sym, "sell" if qty > 0 else "buy", ..., coid)
     oid = broker.submit_offset(sym, qty, coid)
-    backfill_paper_venue_broker_order_id(conn, coid, oid)
+    backfill_paper_venue_broker_order_id(conn, coid, oid)   # oid is a real id, never "noop"
 ```
+
+Filtering sub-tolerance qty before submit guarantees `submit_offset` never returns the sentinel
+`"noop"`, so a fake `"noop"` broker id can't be backfilled and collide on the partial-unique
+`broker_order_id` index.
 
 Reports `liquidation_submitted: True` (not "flat"): the belief reaches flat only after the offset
 fills are ingested on a later tick. The `clear_derived_positions` #163 band-aid is removed — the
 venue ledger is the belief, driven flat by real offset fills, not a DELETE.
 
-## Slices (S3 before S2 — Codex L12: don't wire the reconcile before crash-safe recording exists)
+## Slices (crash-safe recording S2 BEFORE the reconcile S3 — Codex: don't wire the reconcile before venue fills are reliably attributable)
 
 - **S1 — ledger foundation.** Schema (5 tables, v30); `LedgerKind`/`LedgerTables` seam +
-  generalized `ingest_activities`/`believed_positions`/`fill_cursor` with all live call sites
-  threaded to `LedgerKind.LIVE`; `paper_believed_positions`; a paginated fail-closed paper ingest
-  helper. No behavior change yet. Unit-tested (dedup, backfill, quarantine, pagination fail-closed,
-  belief).
+  generalized `ingest_activities`/`believed_positions`/`fill_cursor` (with the explicit
+  `cursor_value`) and all live call sites threaded to `LedgerKind.LIVE`; `paper_believed_positions`;
+  a paginated fail-closed paper ingest helper (broker-time high-water cursor). No behavior change
+  yet. Unit-tested (dedup, backfill, quarantine, pagination fail-closed, belief, cursor overlap).
 - **S2 — crash-safe venue order recording.** `paper_venue_orders`; `record_paper_venue_order` +
-  `backfill_paper_venue_broker_order_id`; switch the wall-clock `on_submitted` to
-  record-before-submit; move `_strategy_held_symbols` + the forward gate's `_classify_activities`
-  onto `paper_venue_orders`. (Formerly "S3"; ordered first so the reconcile in S3 can rely on
-  reliably-attributable venue fills.)
-- **S3 — single-tenant reconcile.** Move the reconcile into `trade-tick` (ingest → belief vs
-  `broker.get_positions()` with tolerance); remove `run_tick`'s `derived_positions` branch +
-  `TickResult.reconcile_ok` + `derive_positions`/`clear_derived_positions`; stamp the
-  lane-computed `reconcile_ok`. End-to-end test: fill at venue → next tick reconciles clean (the
-  phantom-flatten regression); orphan/manual holding trips fail-closed; fractional fill within
-  tolerance does not trip.
+  `backfill_paper_venue_broker_order_id`; add the `before_submit` hook to `run_tick` and record
+  intent there (backfill in `on_submitted`); move `_strategy_held_symbols` + the forward gate's
+  `_classify_activities` onto `paper_venue_orders`. Ordered first so the reconcile can rely on
+  reliably-attributable venue fills.
+- **S3 — single-tenant reconcile.** Add the `venue_belief` hook; in `run_tick`, reconcile the
+  belief vs whole-account `broker.get_positions()` with `1e-6` tolerance (replacing the
+  exact-equality `derived_positions` branch); keep `TickResult.reconcile_ok`; remove
+  `clear_derived_positions` (retain sim `derive_positions`). End-to-end test: fill at venue → next
+  tick reconciles clean (the phantom-flatten regression); orphan/manual holding trips fail-closed;
+  a fractional fill within tolerance does not trip; a held-but-dropped symbol is still reconciled.
 - **S4 — offset flatten + fail-closed evidence.** Strategy-scoped `submit_offset` flatten in the
-  breach handler + `flatten`; "liquidation submitted" semantics; ingestion-failure aborts the tick
-  with no snapshot (no `reconcile_ok=True`). Test: breach liquidates only the strategy's own
-  symbols; a failed ingest fabricates no passing reconcile tick.
+  breach handler + `flatten` (sub-tolerance qty skipped, never backfills `"noop"`); "liquidation
+  submitted" semantics; ingestion-failure aborts the tick with no snapshot (no `reconcile_ok=True`).
+  Test: breach liquidates only the strategy's own symbols; a failed ingest fabricates no passing
+  reconcile tick.
 
 Each slice keeps the gate green
 (`uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`). All four
