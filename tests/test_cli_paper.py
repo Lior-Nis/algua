@@ -1226,3 +1226,53 @@ def test_paper_allocate_sum_capped_at_equity(monkeypatch):
     over = runner.invoke(app, ["paper", "allocate", b, "--capital", "20000"])
     assert over.exit_code != 0
     assert "exceeds" in over.output
+
+
+def test_paper_allocate_rejects_unknown_strategy(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=50_000.0, cash=50_000.0, buying_power=50_000.0,
+                                  account_id="paper-1"),
+    )
+    result = runner.invoke(app, ["paper", "allocate", "nonexistent", "--capital", "1000"])
+    assert result.exit_code != 0
+    assert json.loads(result.output)["ok"] is False
+
+
+def test_paper_allocate_reallocation_does_not_double_count(monkeypatch):
+    from algua.cli._common import registry_conn
+    from algua.registry import allocations
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=50_000.0, cash=50_000.0, buying_power=50_000.0,
+                                  account_id="paper-1"),
+    )
+    name = _paper_strategy("realloc_test")
+    result1 = runner.invoke(app, ["paper", "allocate", name, "--capital", "10000"])
+    assert result1.exit_code == 0
+    result2 = runner.invoke(app, ["paper", "allocate", name, "--capital", "20000"])
+    assert result2.exit_code == 0
+    with registry_conn() as conn:
+        total = allocations.total_allocated(conn)
+    assert total == 20_000.0
+
+
+def test_paper_allocate_rejects_non_positive_capital(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.AlpacaPaperBroker.account",
+        lambda self: AccountState(equity=50_000.0, cash=50_000.0, buying_power=50_000.0,
+                                  account_id="paper-1"),
+    )
+    name = _paper_strategy("non_positive_test")
+    result = runner.invoke(app, ["paper", "allocate", name, "--capital=-1000"])
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "positive" in result.output
