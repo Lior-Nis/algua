@@ -113,19 +113,21 @@ def back_adjust(raw: pd.DataFrame, events: Iterable[CorporateAction]) -> pd.Data
     )
 
 
-def check_adj_close_consistent(
+def check_adj_close_anchored(
     raw_close: pd.Series,
     vendor_adj: pd.Series,
-    events: Iterable[CorporateAction],
     *,
     rtol: float = 1e-3,
     atol: float = 5e-3,
 ) -> None:
-    """Assert a vendor-supplied `adj_close` is consistent with `events`. Raise `ValueError` if not.
+    """Structural (NO-events) subset of `check_adj_close_consistent`: assert `vendor_adj` is finite,
+    positive, index-aligned with `raw_close`, and ANCHORED at the last bar (adj/raw ≈ 1.0). Catches
+    a globally mis-scaled / mis-anchored adjusted series (e.g. cents vs dollars) with no event list.
 
-    Precondition: a FULL symbol series through the vendor's adjustment anchor (the last bar is the
-    most recent), not an arbitrary mid-history slice. Reverse-split-safe; a gross-error / mis-units
-    detector, not a penny-level dividend-parity certifier. See the design spec.
+    PRECONDITION: a FULL symbol series through the vendor's adjustment anchor — the last bar is the
+    most recent, where a back-adjusted series has adj_close == raw close. A windowed series whose
+    last bar is NOT the anchor (e.g. Alpaca `adjustment=all` over [start, end] with events after
+    `end`) would false-positive, so do NOT apply this to such a series. Raises `ValueError`.
     """
     for name, series in (("raw_close", raw_close), ("vendor_adj", vendor_adj)):
         if not isinstance(series.index, pd.DatetimeIndex) or str(series.index.tz) != "UTC":
@@ -143,19 +145,40 @@ def check_adj_close_consistent(
         raise ValueError("vendor_adj must be finite and > 0")
     if len(index) == 0:
         return
+    implied = va / rc
+    if not math.isclose(implied[-1], 1.0, rel_tol=rtol, abs_tol=atol):
+        raise ValueError(
+            f"vendor adj_close not anchored at the last bar: adj/raw = {implied[-1]:.6f} != 1.0 "
+            f"(globally mis-scaled series, e.g. cents vs dollars?). The check requires a full "
+            f"series through the vendor's adjustment horizon."
+        )
 
+
+def check_adj_close_consistent(
+    raw_close: pd.Series,
+    vendor_adj: pd.Series,
+    events: Iterable[CorporateAction],
+    *,
+    rtol: float = 1e-3,
+    atol: float = 5e-3,
+) -> None:
+    """Assert a vendor-supplied `adj_close` is consistent with `events`. Raise `ValueError` if not.
+
+    Precondition: a FULL symbol series through the vendor's adjustment anchor (the last bar is the
+    most recent), not an arbitrary mid-history slice. Reverse-split-safe; a gross-error / mis-units
+    detector, not a penny-level dividend-parity certifier. See the design spec.
+    """
+    # Structural + anchored checks first (index/finite/positive/anchor), then the event check.
+    check_adj_close_anchored(raw_close, vendor_adj, rtol=rtol, atol=atol)
+    index = raw_close.index
+    if len(index) == 0:
+        return
+    rc = raw_close.to_numpy(dtype="float64")
+    va = vendor_adj.to_numpy(dtype="float64")
     factor = back_adjust(pd.DataFrame({"ts": index, "close": rc}), events)[
         "adj_factor"
     ].to_numpy(dtype="float64")
     implied = va / rc
-
-    if not math.isclose(implied[-1], 1.0, rel_tol=rtol, abs_tol=atol):
-        raise ValueError(
-            f"vendor adj_close not anchored at the last bar: adj/raw = {implied[-1]:.6f} != 1.0 "
-            f"(globally mis-scaled series, e.g. cents vs dollars?). The validator requires a full "
-            f"series through the vendor's adjustment horizon."
-        )
-
     bad = ~np.isclose(factor, implied, rtol=rtol, atol=atol)
     if bad.any():
         dates = [str(d.date()) for d in index[bad]]

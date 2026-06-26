@@ -149,16 +149,35 @@ def test_import_merges_raw_and_adjusted(tmp_path):
     _write_pair(
         raw, adj, "AAPL",
         ["2024-07-01,100,110,95,105,1000\n", "2024-07-02,105,120,100,115,2000\n"],
-        ["2024-07-01,50,55,47,52,1000\n", "2024-07-02,52,60,50,57,2000\n"],
+        # Adjusted series ANCHORED at the last bar (adj close == raw close 115) — a back-adjusted
+        # full series; the older bar carries the adjustment (52 vs raw 105). Only `close` is used as
+        # adj_close, so the other adjusted columns are irrelevant. (#265)
+        ["2024-07-01,50,55,47,52,1000\n", "2024-07-02,52,120,50,115,2000\n"],
     )
     req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
     chunks = list(FirstRateImporter().import_bars(req))
     assert len(chunks) == 1
     frame = chunks[0].frame
-    row = frame.set_index("ts").loc[pd.Timestamp("2024-07-01", tz="UTC")]
-    assert row["close"] == 105.0
-    assert row["adj_close"] == 52.0
+    rows = frame.set_index("ts")
+    assert rows.loc[pd.Timestamp("2024-07-01", tz="UTC"), "close"] == 105.0
+    assert rows.loc[pd.Timestamp("2024-07-01", tz="UTC"), "adj_close"] == 52.0
+    assert rows.loc[pd.Timestamp("2024-07-02", tz="UTC"), "adj_close"] == 115.0  # anchored
     validate_bars(to_bar_schema(frame))
+
+
+def test_import_rejects_mis_scaled_adjusted_series(tmp_path):
+    # #265: a globally mis-scaled vendor adjusted series (e.g. cents vs dollars — adj ~= 100x raw,
+    # not anchored at the last bar) is now rejected at import via check_adj_close_anchored, instead
+    # of silently corrupting returns. Raw last close=115; adjusted last=5750 (cents) -> reject.
+    raw, adj = _firstrate_dirs(tmp_path)
+    _write_pair(
+        raw, adj, "AAPL",
+        ["2024-07-01,100,110,95,105,1000\n", "2024-07-02,105,120,100,115,2000\n"],
+        ["2024-07-01,5200,5500,4700,5200,1000\n", "2024-07-02,5200,12000,5000,5750,2000\n"],
+    )
+    req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
+    with pytest.raises(ValueError, match="not anchored at the last bar"):
+        list(FirstRateImporter().import_bars(req))
 
 
 def test_import_yields_symbols_sorted(tmp_path):
@@ -233,7 +252,8 @@ def test_intraday_import_merges_and_localizes(tmp_path):
     _write_intraday_pair(
         raw, adj, "AAPL",
         ["2024-07-01 09:30:00,100,110,95,105,1000\n", "2024-07-01 09:31:00,105,120,100,115,2000\n"],
-        ["2024-07-01 09:30:00,50,55,47,52,1000\n", "2024-07-01 09:31:00,52,60,50,57,2000\n"],
+        # anchored at the last bar (adj close == raw close 115); older bar carries adjustment (#265)
+        ["2024-07-01 09:30:00,50,55,47,52,1000\n", "2024-07-01 09:31:00,52,120,50,115,2000\n"],
     )
     req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj, timeframe="1m")
     chunks = list(FirstRateImporter().import_bars(req))
