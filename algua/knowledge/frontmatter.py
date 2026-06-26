@@ -1,24 +1,29 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import yaml
 
 _DELIM = "---"
+# Frontmatter is delimited by `---` on its OWN line, opening and closing. Matching the bare `---`
+# SUBSTRING (the old text.split('---', 2)) split inside YAML values too — a description like
+# 'a---b' truncated the frontmatter and spilled raw YAML into the body on the next sync (#252).
+# The closing delimiter is a `---` line followed by a newline OR end-of-doc; the optional newline
+# is then consumed so the body excludes it (matching the old leading-newline strip).
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---(?:\n|\Z)(.*)\Z", re.DOTALL)
 
 
 def parse_doc(text: str) -> tuple[dict[str, Any], str]:
-    """Split a markdown doc into (frontmatter dict, body). Empty dict if no frontmatter."""
-    if not text.startswith(_DELIM):
+    """Split a markdown doc into (frontmatter dict, body). Empty dict if no frontmatter.
+
+    Frontmatter is the block between an opening `---` line and the first subsequent `---` line;
+    a `---` appearing INSIDE a YAML value (or in the body) is never treated as the delimiter."""
+    m = _FRONTMATTER_RE.match(text)
+    if m is None:
         return {}, text
-    parts = text.split(_DELIM, 2)
-    if len(parts) < 3:
-        return {}, text
-    fm = yaml.safe_load(parts[1]) or {}
-    body = parts[2]
-    if body.startswith("\n"):
-        body = body[1:]
-    return fm, body
+    fm = yaml.safe_load(m.group(1)) or {}
+    return fm, m.group(2)
 
 
 def render_doc(frontmatter: dict[str, Any], body: str) -> str:
