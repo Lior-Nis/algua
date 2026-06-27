@@ -559,7 +559,8 @@ def flatten(
         # Fail SAFE on ANY liquidation error (not only BrokerError) so the emergency flatten always
         # emits a structured payload instead of crashing with an unstructured traceback (GATE-2).
         except Exception as exc:
-            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
+            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False,
+                                offsets_submitted=n_offsets))
             raise typer.Exit(1) from exc
     # liquidation_submitted reflects whether any offset order ACTUALLY went out (GATE-2 HIGH): a
     # strategy already flat (no believed positions) submits none, so report False rather than imply
