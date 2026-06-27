@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION == 30
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -366,7 +366,7 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
     migrate(c2)
     cols = {row["name"] for row in c2.execute("PRAGMA table_info(search_trials)")}
     assert {"trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 30
     c2.close()
 
 
@@ -376,7 +376,7 @@ def test_v26_adds_fdr_columns_to_gate_evaluations(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)")}
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
             "fdr_test_index"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 30
 
 
 def test_v26_fdr_partial_unique_index_exists(tmp_path):
@@ -398,7 +398,7 @@ def test_v26_migration_is_idempotent(tmp_path):
     cols = {r["name"] for r in c2.execute("PRAGMA table_info(gate_evaluations)")}
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
             "fdr_test_index"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 30
     c2.close()
 
 
@@ -415,7 +415,7 @@ def test_v28_upgrade_adds_quarantine_table(tmp_path):
     migrate(c2)
     tables = {r["name"] for r in c2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "live_activity_quarantine" in tables
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 30
     c2.close()
 
 
@@ -444,3 +444,21 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
     row = conn.execute("SELECT fdr_binding, fdr_test_index FROM gate_evaluations").fetchone()
     assert row["fdr_binding"] is None
     assert row["fdr_test_index"] is None
+
+
+def test_paper_venue_tables_created_at_v30(tmp_path):
+    assert SCHEMA_VERSION == 30
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.row_factory = sqlite3.Row
+    migrate(conn)
+    names = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"paper_venue_orders", "paper_venue_fills", "paper_venue_activities",
+            "paper_venue_fill_cursor", "paper_venue_activity_quarantine"} <= names
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 30
+    # partial-unique broker_order_id index allows many NULLs, one non-null owner
+    conn.execute("INSERT INTO paper_venue_orders(strategy,symbol,side,client_order_id,"
+                 "strategy_id,status,submitted_ts) VALUES ('s','AAA','buy','c1',1,'submitted','t')")
+    conn.execute("INSERT INTO paper_venue_orders(strategy,symbol,side,client_order_id,"
+                 "strategy_id,status,submitted_ts) VALUES ('s','AAA','buy','c2',1,'submitted','t')")
+    conn.commit()  # two NULL broker ids OK
