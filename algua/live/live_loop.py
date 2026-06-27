@@ -11,6 +11,8 @@ from algua.live.paper_loop import decide
 from algua.risk.limits import WEIGHT_TOL, RiskBreach, check_drawdown
 from algua.strategies.base import LoadedStrategy
 
+_RECONCILE_TOL = 1e-6
+
 
 def _positions(broker: _AlpacaBroker) -> dict[str, float]:
     """Current broker positions as {symbol: qty} — used only on early-return paths (no decision),
@@ -69,10 +71,9 @@ class TickHooks:
     should_halt: Callable[[], bool] | None = None
     cancel: Callable[[], None] | None = None
     peak_equity: float | None = None
-    # None == hook not supplied (pure decide+submit path, no reconcile). A supplied dict — even an
-    # EMPTY one — means "the DB says we hold this"; an empty DB against a held broker book is the
-    # drift case we must catch, so reconcile is unconditional once the hook is present (#18).
-    derived_positions: dict[str, float] | None = None
+    # lane-supplied per-strategy belief (paper_venue_fills); reconciled vs positions_before with
+    # tolerance. None = no reconcile (live/sim).
+    venue_belief: Callable[[], dict[str, float]] | None = None
     # live_snapshot(bars) -> (SizingSnapshot, nav): supplies the ledger-backed sizing snapshot + NAV
     # (live path). When set, sizing is off the snapshot equity and drawdown off NAV (not account
     # equity). Paper passes None -> broker.snapshot + equity for both (unchanged).
@@ -168,19 +169,26 @@ def run_tick(
     # shared decide() compares targets against what the broker actually holds, not a re-read (#23).
     current_weights = {s: mv / snap.equity for s, mv in snap.market_values.items() if mv != 0.0}
 
-    # Reconcile DB-derived positions against the broker's pre-submit state (#18): a drift means a
-    # prior tick's orders never persisted (or vice versa) — halt before compounding it. Reconcile
-    # whenever the hook is supplied (derived_positions is not None), INCLUDING when it is empty: an
-    # empty DB against a held broker book is exactly the drift we must catch.
+    # Reconcile the lane-supplied venue belief against the broker's pre-submit snapshot (#249):
+    # a drift means an attributed fill and a broker position diverge — halt before compounding it.
+    # Reconcile whenever the hook is supplied (venue_belief is not None), INCLUDING when it returns
+    # an empty dict: an empty belief against a held broker book is exactly the drift we must catch.
+    # Tolerance (_RECONCILE_TOL) absorbs floating-point residuals from fill arithmetic so that
+    # sub-nano differences don't trip false positives (#249).
     reconcile_ok = True
-    if hooks.derived_positions is not None:
-        derived = {s: q for s, q in hooks.derived_positions.items() if q != 0.0}
-        reconcile_ok = derived == positions_before
-        if not reconcile_ok:
+    if hooks.venue_belief is not None:
+        belief = {s: q for s, q in hooks.venue_belief().items() if q != 0.0}
+        all_symbols = set(belief) | set(positions_before)
+        drift = [
+            s for s in all_symbols
+            if abs(belief.get(s, 0.0) - positions_before.get(s, 0.0)) > _RECONCILE_TOL
+        ]
+        if drift:
+            reconcile_ok = False
             raise RiskBreach(
                 "reconcile",
-                f"DB-derived positions {hooks.derived_positions} disagree with broker "
-                f"{positions_before} before tick — refusing to trade on inconsistent state",
+                f"venue belief {belief} disagrees with positions_before {positions_before} "
+                f"before tick — refusing to trade on inconsistent state",
             )
 
     # Validate REALIZED gross exposure from the snapshot BEFORE cancelling/submitting (#27): if the

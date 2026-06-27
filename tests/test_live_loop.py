@@ -327,10 +327,10 @@ def test_run_tick_non_positive_equity_breaches_before_trading(equity):
 
 
 def test_run_tick_reconcile_mismatch_raises():
-    # #18: DB-derived positions disagreeing with the broker's pre-submit book halts the tick.
+    # #18/#249: venue_belief disagrees with the broker's pre-submit book — halts the tick.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    hooks = TickHooks(derived_positions={"AAA": 999.0})  # DB thinks we hold far more
+    hooks = TickHooks(venue_belief=lambda: {"AAA": 999.0})  # belief says far more than broker holds
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
                  hooks=hooks)
@@ -338,11 +338,11 @@ def test_run_tick_reconcile_mismatch_raises():
 
 
 def test_run_tick_reconcile_empty_db_vs_held_broker_raises():
-    # #18 drift: the DB lost its record (empty derived) while the broker still holds positions.
+    # #18/#249 drift: the belief is empty while the broker still holds positions.
     # Supplying the hook (even empty) must reconcile and halt, not skip on empty.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    hooks = TickHooks(derived_positions={})  # DB says flat, broker holds 10 -> drift
+    hooks = TickHooks(venue_belief=lambda: {})  # belief says flat, broker holds 10 -> drift
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
                  hooks=hooks)
@@ -351,8 +351,8 @@ def test_run_tick_reconcile_empty_db_vs_held_broker_raises():
 
 
 def test_run_tick_no_reconcile_hook_does_not_compare():
-    # No derived_positions hook supplied: the loop must not attempt reconcile (back-compat for the
-    # pure decide+submit path) and trades normally.
+    # No venue_belief hook supplied: the loop must not attempt reconcile (pure decide+submit path)
+    # and trades normally.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
@@ -491,3 +491,24 @@ def test_before_submit_fires_before_submit():
     assert calls and calls[0] == ("before", "cid")         # before_submit fired first
     assert ("submit", "cid") in calls                      # broker submit also ran
     assert calls.index(("before", "cid")) < calls.index(("submit", "cid"))  # strict ordering
+
+
+def test_reconcile_tolerates_fractional_residual():
+    # #249: venue_belief {AAA: 5.0}; broker snapshot qtys {AAA: 5.0 + 4e-7} -> within 1e-6 ->
+    # no breach. Floating-point residuals from fill arithmetic must not trip a false positive.
+    broker = _FakeBroker(positions={"AAA": 5.0 + 4e-7}, equity=100_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      hooks=TickHooks(venue_belief=lambda: {"AAA": 5.0}))
+    assert result.reconcile_ok is True
+
+
+def test_reconcile_trips_on_unexplained_holding():
+    # #249: venue_belief {} (nothing attributed); broker holds {AAA: 5.0} -> drift > tol ->
+    # RiskBreach('reconcile'). Supplying the hook even with an empty belief must reconcile.
+    broker = _FakeBroker(positions={"AAA": 5.0}, equity=100_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=TickHooks(venue_belief=lambda: {}))
+    assert ei.value.kind == "reconcile"

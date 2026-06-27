@@ -43,7 +43,7 @@ from algua.execution.order_state import (
 )
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
-from algua.live.live_loop import TickHalted, TickHooks, run_tick
+from algua.live.live_loop import _RECONCILE_TOL, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
@@ -79,7 +79,6 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-_RECONCILE_TOL = 1e-6
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
 
 
@@ -353,7 +352,6 @@ def trade_tick(
             # aborts before any order goes out (#21).
             should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
             peak_equity=get_peak_equity(conn, name),
-            derived_positions=derive_positions(conn, name),
         )
         try:
             result = run_tick(strategy, broker, provider, utc(start), utc(end),
