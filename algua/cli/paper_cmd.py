@@ -29,7 +29,6 @@ from algua.execution.live_reconcile import attributed_live_net
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
-    clear_derived_positions,
     clear_nav_peak,
     clear_peak_equity,
     client_order_id,
@@ -138,22 +137,6 @@ def _live_strategy_flat(
     }
     is_flat = (not own) and (not unexplained)
     return is_flat, {"believed": own, "broker_unexplained": unexplained}
-
-
-def _strategy_held_symbols(
-    conn: sqlite3.Connection, strategy: str, universe: list[str]
-) -> list[str]:
-    """Universe ∪ every symbol THIS strategy has submitted a wall-clock paper order for — so a
-    held-but-dropped symbol (traded before its universe changed) is still exited, WITHOUT closing a
-    sibling's positions on a shared paper account. Closing a flat name is a 404 no-op, so
-    over-including never-filled names is harmless.
-
-    The source is paper_venue_orders (the crash-safe wall-clock intent ledger introduced in #249),
-    not paper_orders (the sim-broker path written by persist_run)."""
-    rows = conn.execute(
-        "SELECT DISTINCT symbol FROM paper_venue_orders WHERE strategy = ?", (strategy,)
-    ).fetchall()
-    return sorted(set(universe) | {r["symbol"] for r in rows})
 
 
 @paper_app.command("run")
@@ -369,21 +352,25 @@ def trade_tick(
             trip_for_breach(conn, name, exc)
             liquidation_submitted = True
             flatten_error = None
-            symbols = _strategy_held_symbols(conn, name, strategy.universe)
             try:
                 broker.cancel_open_orders()
-                broker.close_positions(symbols)
+                _ingest_paper_venue(conn, broker)
+                for sym, qty in paper_believed_positions(conn, name).items():
+                    if abs(qty) <= _RECONCILE_TOL:
+                        continue
+                    coid = client_order_id(name, datetime.now(UTC), sym)
+                    record_paper_venue_order(conn, name, sym,
+                                             "sell" if qty > 0 else "buy", None,
+                                             coid, strategy_id=rec.id)
+                    oid = broker.submit_offset(sym, qty, coid)
+                    backfill_paper_venue_broker_order_id(conn, coid, oid)
             except BrokerError as fexc:
                 liquidation_submitted = False
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
-            else:
-                # Close succeeded: reset the derived belief so the next reconcile starts flat.
-                clear_derived_positions(conn, name)
             payload = breach_payload(exc.detail, kind=exc.kind,
-                                      liquidation_submitted=liquidation_submitted,
-                                      closed_symbols=symbols)
+                                      liquidation_submitted=liquidation_submitted)
             if flatten_error is not None:
                 payload["flatten_error"] = flatten_error
             emit(payload)
@@ -499,9 +486,9 @@ def flatten(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
-    """Emergency: close this strategy's paper positions (its own held + universe symbols) and trip
-    its kill-switch."""
-    strategy = load_strategy(name)
+    """Emergency: close this strategy's believed paper positions and trip its kill-switch.
+    The offset loop iterates paper_believed_positions (strategy-attributed paper_venue_fills),
+    so sibling positions on the shared account are never touched."""
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
         # A forward_tested strategy still holds paper positions while awaiting the go-live
@@ -514,18 +501,23 @@ def flatten(
         # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
         kill_switch.trip(conn, name, reason="flatten", actor=actor)
         audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
-        symbols = _strategy_held_symbols(conn, name, strategy.universe)
         try:
             broker.cancel_open_orders()
-            broker.close_positions(symbols)
+            _ingest_paper_venue(conn, broker)
+            for sym, qty in paper_believed_positions(conn, name).items():
+                if abs(qty) <= _RECONCILE_TOL:
+                    continue
+                coid = client_order_id(name, datetime.now(UTC), sym)
+                record_paper_venue_order(conn, name, sym,
+                                         "sell" if qty > 0 else "buy", None,
+                                         coid, strategy_id=rec.id)
+                oid = broker.submit_offset(sym, qty, coid)
+                backfill_paper_venue_broker_order_id(conn, coid, oid)
         except BrokerError as exc:
             emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
-        # Close succeeded: reset the derived belief so a later trade-tick reconcile starts flat.
-        clear_derived_positions(conn, name)
-    # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
-    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True,
-             "closed_symbols": symbols}))
+    # liquidation_submitted: offset orders accepted; fills land async (may be next open).
+    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))
 
 
 @paper_app.command("halt-all")

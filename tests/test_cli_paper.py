@@ -257,11 +257,9 @@ def test_trade_tick_venue_order_recording(monkeypatch):
     """After a trade-tick that submits one order:
     - a paper_venue_orders row exists with client_order_id (pre-submit intent, crash-safe)
     - broker_order_id is backfilled (post-submit accept)
-    - _strategy_held_symbols includes a venue-ordered symbol no longer in the universe.
     """
     from contextlib import closing
 
-    from algua.cli.paper_cmd import _strategy_held_symbols
     from algua.config.settings import get_settings
     from algua.contracts.types import OrderIntent, Side
     from algua.registry.db import connect, migrate
@@ -302,48 +300,85 @@ def test_trade_tick_venue_order_recording(monkeypatch):
             "WHERE strategy = 'cross_sectional_momentum' AND symbol = ?",
             (dropped_sym,),
         ).fetchone()
-        # _strategy_held_symbols must include the venue-ordered symbol (universe=[])
-        held = _strategy_held_symbols(conn, "cross_sectional_momentum", universe=[])
 
     assert row is not None, "paper_venue_orders intent row missing"
     assert row["client_order_id"] == "c-venue-1"
     assert row["broker_order_id"] == "o-venue-1"
-    assert dropped_sym in held, f"{dropped_sym!r} not in held symbols {held!r}"
 
 
 class _FlattenBroker:
     def __init__(self, fail=False):
         self.fail = fail
         self.cancelled = False
-        self.closed_symbols = None
+        self.offset_calls: list = []   # (sym, qty, coid) tuples
 
     def cancel_open_orders(self):
         self.cancelled = True
 
-    def close_positions(self, symbols):
+    def clock(self):
+        return "2023-06-01T14:00:00+00:00"
+
+    def account_activities_window(self, after, until):
+        return []
+
+    def submit_offset(self, sym, qty, coid):
         if self.fail:
-            raise BrokerError("alpaca failed to close some positions: [...]")
-        self.closed_symbols = list(symbols)
+            raise BrokerError("alpaca failed to submit offset: [...]")
+        self.offset_calls.append((sym, qty, coid))
+        return f"o-offset-{sym}"
 
 
-def test_paper_flatten_closes_and_trips(monkeypatch):
+def test_paper_strategy_scoped_offset_flatten(monkeypatch, tmp_path):
+    """Core sibling-isolation contract (#249 Task 10):
+    - flatten on strategy A believed-holding {AAA: 5} submits exactly submit_offset("AAA", 5, ...)
+    - sibling SIB (held by sibling_strat in paper_venue_fills) is NEVER offset
+    - payload reports liquidation_submitted: True
+    - a believed qty <= 1e-6 is skipped (no submit_offset call)
+    """
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    db = tmp_path / "p.db"
+    # strategy A holds AAA (qty=5) and a near-zero residual sub-tol position
+    _seed_paper_venue_fill(db, "cross_sectional_momentum", "AAA", qty=5.0)
+    _seed_paper_venue_fill(db, "cross_sectional_momentum", "NEARZERO", qty=5e-7)
+    # sibling holds SIB — must never be touched by the strategy A flatten
+    _seed_paper_venue_fill(db, "sibling_strat", "SIB", qty=10.0)
+
+    broker = _FlattenBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["liquidation_submitted"] is True
+    assert payload["kill_switch"] == "tripped"
+
+    offset_syms = [sym for sym, _, _ in broker.offset_calls]
+    assert "AAA" in offset_syms           # believed position IS offset
+    assert "SIB" not in offset_syms       # sibling's symbol is NEVER offset
+    assert "NEARZERO" not in offset_syms  # sub-tolerance qty is skipped
+
+
+def test_paper_flatten_closes_and_trips(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    # seed a paper-venue fill so paper_believed_positions returns something to offset
+    _seed_paper_venue_fill(tmp_path / "p.db", "cross_sectional_momentum", "AAA")
     broker = _FlattenBroker()
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
     result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["liquidation_submitted"] is True and payload["kill_switch"] == "tripped"
-    # scoped to the strategy's universe (a symbol list), not an account-wide close
+    # scoped to the strategy's believed positions via paper_venue_fills, not account-wide close
     assert broker.cancelled is True
-    assert isinstance(broker.closed_symbols, list) and broker.closed_symbols
+    assert any(sym == "AAA" for sym, _, _ in broker.offset_calls)
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["kill_switch"]["tripped"] is True
 
 
-def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch):
+def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch, tmp_path):
     """A certified forward_tested strategy still holds paper positions while awaiting the go-live
     signature — emergency flatten must work there too (#124 GATE-2)."""
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
@@ -354,6 +389,8 @@ def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch):
         app, ["registry", "transition", name, "--to", "forward_tested",
               "--actor", "human", "--reason", "gate passed"]
     ).exit_code == 0
+    # seed a paper-venue fill so paper_believed_positions returns something to offset
+    _seed_paper_venue_fill(tmp_path / "p.db", name, "AAA")
     broker = _FlattenBroker()
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
     result = runner.invoke(app, ["paper", "flatten", name])
@@ -361,7 +398,7 @@ def test_paper_flatten_allowed_at_forward_tested_stage(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["liquidation_submitted"] is True and payload["kill_switch"] == "tripped"
     assert broker.cancelled is True
-    assert isinstance(broker.closed_symbols, list) and broker.closed_symbols
+    assert any(sym == "AAA" for sym, _, _ in broker.offset_calls)
     show = json.loads(runner.invoke(app, ["paper", "show", name]).stdout)
     assert show["kill_switch"]["tripped"] is True
 
@@ -375,10 +412,12 @@ def test_paper_flatten_rejects_non_paper_stage(monkeypatch):
     assert json.loads(result.stdout)["ok"] is False
 
 
-def test_paper_flatten_close_failure_stays_tripped(monkeypatch):
+def test_paper_flatten_close_failure_stays_tripped(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    # seed a fill so the offset loop runs and submit_offset(fail=True) raises BrokerError
+    _seed_paper_venue_fill(tmp_path / "p.db", "cross_sectional_momentum", "AAA")
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
                         lambda: _FlattenBroker(fail=True))
     result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
@@ -595,10 +634,26 @@ def _seed_paper_order(db_path, strategy, symbol):
         conn.commit()
 
 
+def _seed_paper_venue_fill(db_path, strategy, symbol, qty=5.0):
+    """Seed a paper_venue_fills row so paper_believed_positions returns the given qty for tests.
+    This is the paper-ledger analogue of seeding live_fills for the live lane."""
+    from contextlib import closing
+
+    from algua.registry.db import connect, migrate
+    with closing(connect(db_path)) as conn:
+        migrate(conn)
+        conn.execute(
+            "INSERT INTO paper_venue_fills"
+            "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (f"fill-{strategy}-{symbol}", f"boid-{strategy}-{symbol}",
+             strategy, symbol, qty, 100.0, "2023-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+
 def _seed_paper_venue_order(db_path, strategy, symbol):
-    """Seed a paper_venue_orders row simulating a wall-clock trade-tick submission.
-    Used to test that _strategy_held_symbols picks up venue-ordered (but possibly dropped)
-    symbols after the wall-clock lane moved from paper_orders to paper_venue_orders."""
+    """Seed a paper_venue_orders row simulating a wall-clock trade-tick submission."""
     from contextlib import closing
 
     from algua.registry.db import connect, migrate
@@ -620,29 +675,29 @@ def _seed_paper_venue_order(db_path, strategy, symbol):
 
 
 def test_paper_flatten_closes_dropped_symbol_not_siblings(monkeypatch, tmp_path):
+    """The flatten offset loop iterates paper_believed_positions (paper_venue_fills attributed
+    to THIS strategy), so it offsets ZZZ (held by this strategy) but never touches SIB
+    (held by sibling_strat on the same account)."""
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
     db = tmp_path / "p.db"
-    # the strategy holds ZZZ (a symbol no longer in its universe); a SIBLING holds SIB.
-    # _seed_paper_order: paper_orders+paper_fills (derive_positions / clear_derived_positions).
-    # _seed_paper_venue_order: paper_venue_orders (_strategy_held_symbols, wall-clock lane).
-    _seed_paper_order(db, "cross_sectional_momentum", "ZZZ")
-    _seed_paper_venue_order(db, "cross_sectional_momentum", "ZZZ")
-    _seed_paper_order(db, "sibling_strat", "SIB")
-    _seed_paper_venue_order(db, "sibling_strat", "SIB")
+    # cross_sectional_momentum holds ZZZ via paper_venue_fills; sibling_strat holds SIB.
+    # The offset loop only iterates cross_sectional_momentum's believed positions — SIB is
+    # invisible to it because it is not attributed to this strategy in paper_venue_fills.
+    _seed_paper_venue_fill(db, "cross_sectional_momentum", "ZZZ")
+    _seed_paper_venue_fill(db, "sibling_strat", "SIB")
 
     broker = _FlattenBroker()
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
     result = runner.invoke(app, ["paper", "flatten", "cross_sectional_momentum"])
     assert result.exit_code == 0, result.stdout
 
-    closed = set(broker.closed_symbols)
-    assert "ZZZ" in closed                     # held-but-dropped symbol IS closed
-    assert "SIB" not in closed                 # sibling's symbol is NOT closed
-    assert "ZZZ" in json.loads(result.stdout)["closed_symbols"]
+    offset_syms = [sym for sym, _, _ in broker.offset_calls]
+    assert "ZZZ" in offset_syms           # held-but-dropped symbol IS offset
+    assert "SIB" not in offset_syms       # sibling's symbol is NOT offset
 
-    # the strategy's derived belief is reset to flat after the close
+    # paper_fills (derive_positions) is empty — no sim run was seeded — so show returns flat
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["positions"] == {}
 
@@ -1140,22 +1195,23 @@ def test_paper_promote_missing_creds_json_error(monkeypatch):
 
 
 def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch, tmp_path):
+    """On a RiskBreach, the handler submits strategy-scoped submit_offset calls for each symbol
+    in paper_believed_positions (paper_venue_fills). A held-but-dropped symbol (ZZZ, not in
+    universe) is offset; paper show reflects derive_positions (paper_fills) which is empty."""
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
-    # the strategy holds ZZZ, a symbol no longer in its universe.
-    # paper_orders+paper_fills for derive_positions / clear_derived_positions;
-    # paper_venue_orders for _strategy_held_symbols (wall-clock lane).
-    _seed_paper_order(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
-    _seed_paper_venue_order(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
+    # seed a paper_venue_fills row so paper_believed_positions returns ZZZ:5
+    _seed_paper_venue_fill(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
 
     class _BreachTickBroker(_MinimalBroker):
         def __init__(self):
-            self.closed_symbols = None
+            self.offset_calls: list = []   # (sym, qty, coid) tuples
         def cancel_open_orders(self):
             pass
-        def close_positions(self, symbols):
-            self.closed_symbols = list(symbols)
+        def submit_offset(self, sym, qty, coid):
+            self.offset_calls.append((sym, qty, coid))
+            return f"o-offset-{sym}"
 
     broker = _BreachTickBroker()
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
@@ -1167,9 +1223,11 @@ def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["kind"] == "drawdown" and payload["kill_switch"] == "tripped"
-    assert "ZZZ" in payload["closed_symbols"]      # held-but-dropped symbol was flattened
-    assert "ZZZ" in broker.closed_symbols
-    # belief cleared after the successful flatten
+    assert payload["liquidation_submitted"] is True
+    # ZZZ was in paper_believed_positions → exactly one submit_offset call for it
+    offset_syms = [sym for sym, _, _ in broker.offset_calls]
+    assert offset_syms == ["ZZZ"]
+    # paper show: paper_fills (derive_positions) is empty → positions is {}
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert show["positions"] == {}
 
