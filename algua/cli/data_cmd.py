@@ -255,7 +255,6 @@ def import_universe(
             effective_date=effective_date.isoformat(),
             as_of=stamp,
             source=source,
-            require_immutable=True,
         )
     emit(ok({
         "universe": universe,
