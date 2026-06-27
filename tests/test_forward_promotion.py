@@ -15,7 +15,11 @@ import pytest
 
 from algua.backtest.metrics import metrics_from_returns
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
-from algua.execution.order_state import record_submitted_order, record_tick_snapshot
+from algua.execution.live_ledger import (
+    backfill_paper_venue_broker_order_id,
+    record_paper_venue_order,
+)
+from algua.execution.order_state import record_tick_snapshot
 from algua.registry.db import connect, migrate
 from algua.registry.forward_promotion import (
     EXTERNAL_CAPITAL_TYPES,
@@ -507,10 +511,10 @@ def test_dividend_interest_fee_pass(conn):
     assert res.evidence.n_unattributable_fills == 0
 
 
-def test_fill_matched_to_own_paper_order_passes(conn):
+def test_fill_matched_to_own_paper_venue_order_passes(conn):
     _three_admissible(conn)
-    record_submitted_order(conn, "s", "AAA", "buy", 0.5, _ts(date(2026, 6, 10)), "ord-1",
-                           strategy_id=1)
+    record_paper_venue_order(conn, "s", "AAA", "buy", None, "coid-1", strategy_id=1)
+    backfill_paper_venue_broker_order_id(conn, "coid-1", "ord-1")
     res = assemble(
         conn, activities=lambda a, u: [{"activity_type": "FILL", "order_id": "ord-1"}])
     assert res.evidence.n_unattributable_fills == 0
@@ -519,8 +523,8 @@ def test_fill_matched_to_own_paper_order_passes(conn):
 def test_unmatched_fill_counts(conn):
     _three_admissible(conn)
     # An order recorded for ANOTHER strategy_id must not attribute this fill.
-    record_submitted_order(conn, "other", "AAA", "buy", 0.5, _ts(date(2026, 6, 10)), "ord-2",
-                           strategy_id=2)
+    record_paper_venue_order(conn, "other", "AAA", "buy", None, "coid-2", strategy_id=2)
+    backfill_paper_venue_broker_order_id(conn, "coid-2", "ord-2")
     res = assemble(
         conn, activities=lambda a, u: [{"activity_type": "FILL", "order_id": "ord-2"}])
     assert res.evidence.n_unattributable_fills == 1

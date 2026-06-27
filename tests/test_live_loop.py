@@ -5,7 +5,7 @@ import pytest
 
 from algua.contracts.types import ExecutionContract
 from algua.execution.alpaca_broker import BrokerError, TickSnapshot
-from algua.execution.order_state import record_submitted_order
+from algua.execution.live_ledger import record_paper_venue_order
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.registry.db import connect, migrate
 from algua.risk.limits import RiskBreach
@@ -175,11 +175,12 @@ class _DedupBroker(_FakeBroker):
         return oid
 
 
-def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
-    # #166 gap 3: the LIVE replay equivalent of order_state idempotency. A crash/retry replays the
-    # same tick: the deterministic client_order_id makes Alpaca return the SAME broker_order_id, and
-    # on_submitted -> record_submitted_order must INSERT OR IGNORE so the replay leaves exactly one
-    # paper_orders row (not a duplicate). Covers the live loop wiring, not just the bare DB writer.
+def test_live_replay_record_paper_venue_order_is_idempotent(tmp_path):
+    # #166 gap 3 / #249: the LIVE replay equivalent of order_state idempotency. A crash/retry
+    # replays the same tick: the deterministic client_order_id makes Alpaca return the SAME
+    # broker_order_id, and on_submitted -> record_paper_venue_order must INSERT OR IGNORE (on the
+    # client_order_id UNIQUE index) so the replay leaves exactly one paper_venue_orders row (not a
+    # duplicate). Covers the live loop wiring, not just the bare DB writer.
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     broker = _DedupBroker()
@@ -188,9 +189,9 @@ def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
     now = datetime(2023, 1, 5, tzinfo=UTC)   # all three sessions fully closed -> stable decision_ts
     hooks = TickHooks(
         client_order_id_for=lambda s, ts, sym: f"{s}-{sym}",  # deterministic across the replay
-        on_submitted=lambda o: record_submitted_order(
+        on_submitted=lambda o: record_paper_venue_order(
             conn, strat.name, o.symbol, o.side, o.target_weight,
-            o.decision_ts.isoformat(), o.order_id, strategy_id=1,
+            o.client_order_id, strategy_id=1,
         ),
     )
 
@@ -201,9 +202,9 @@ def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
     # loop ever stopped sending it, _DedupBroker would mint two distinct ids -> two rows -> failure.
     assert broker.client_order_ids == ["cfg-AAA", "cfg-AAA"]
     rows = conn.execute(
-        "SELECT broker_order_id FROM paper_orders WHERE strategy = ?", (strat.name,)
+        "SELECT client_order_id FROM paper_venue_orders WHERE strategy = ?", (strat.name,)
     ).fetchall()
-    assert len(rows) == 1 and rows[0]["broker_order_id"] == "order-1"  # one row, not duplicated
+    assert len(rows) == 1 and rows[0]["client_order_id"] == "cfg-AAA"  # one row, not duplicated
 
 
 def test_run_tick_live_snapshot_equity_flows_into_order_notional(monkeypatch):
