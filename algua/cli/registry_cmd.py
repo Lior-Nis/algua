@@ -159,6 +159,12 @@ def transition(
         rec = transition_strategy(repo, name, target, Actor(actor), reason,
                                   approval_verifier=verifier)
         if target is Stage.LIVE:
+            # On the CLI live path the SSH signature IS the approval: the real wall is the
+            # verify_and_consume signature check above + the live_authorizations row it writes,
+            # re-verified against the trust anchor at trade time. This record_approval/approvals row
+            # is AUDIT-ONLY — nothing on the production live path reads it (#273). Kept because
+            # _default_approval_verifier/has_valid_approval still back programmatic (non-CLI)
+            # transition calls, so the approvals mechanism is not fully dead.
             record_approval(repo, name, approver["id"])
     emit(ok({"name": rec.name, "stage": rec.stage.value}))
 
