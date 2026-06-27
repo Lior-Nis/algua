@@ -187,6 +187,54 @@ def test_apply_transition_rolls_back_authorization_when_cas_fails(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0
 
 
+def test_apply_transition_consume_rechecks_identity(tmp_path):
+    """#254: the atomic consume re-asserts the full identity predicate, so a pending authorization
+    can't be applied against a drifted identity (consume matches 0 rows -> rollback)."""
+    import dataclasses
+
+    import pytest
+
+    from algua.contracts.lifecycle import Actor, Stage, TransitionError
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = _conn(tmp_path)
+    repo = SqliteStrategyRepository(conn)
+    now = datetime(2026, 6, 5, tzinfo=UTC)
+    issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers(tmp_path, "lior", pub)
+    sig = _sign(key, issued["challenge"], tmp_path)
+    pending = live_gate.verify_pending(conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now)
+    assert pending is not None
+    rec = dataclasses.replace(repo.get("s"), stage=Stage.FORWARD_TESTED)
+    # The DB stage is 'paper' (so the CAS would also miss), but the consume's identity recheck
+    # fires FIRST: code_hash 'DRIFTED' != the challenge's 'ch' -> 0 rows -> rollback.
+    with pytest.raises(TransitionError):
+        repo.apply_transition(rec, Stage.LIVE, Actor.HUMAN, "go",
+                              code_hash="DRIFTED", config_hash="cfg", dependency_hash="dep",
+                              live_authorization=pending)
+    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "dep", now=now) is not None
+    assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0
+
+
+def test_apply_transition_rejects_live_authorization_on_non_live_edge(tmp_path):
+    """#254 defense in depth: the repo refuses a live_authorization on any edge that isn't a
+    human transition to LIVE, so the invariant doesn't rest on transition_strategy alone."""
+    import pytest
+
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.contracts.types import PendingLiveAuthorization
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = _conn(tmp_path)
+    repo = SqliteStrategyRepository(conn)
+    bogus = PendingLiveAuthorization(nonce="n", expires_at="2099-01-01T00:00:00+00:00",
+                                     principal="lior", signature_b64="x")
+    rec = repo.get("s")  # stage 'paper'
+    with pytest.raises(ValueError, match="only valid for a human transition to live"):
+        repo.apply_transition(rec, Stage.CANDIDATE, Actor.HUMAN, "x", live_authorization=bogus)
+
+
 def _live_strategy(conn, stage="live"):
     conn.execute("UPDATE strategies SET stage=? WHERE id=1", (stage,))
     conn.commit()

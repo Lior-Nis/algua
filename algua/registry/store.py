@@ -315,6 +315,12 @@ class SqliteStrategyRepository:
             # The go-live authorization (paper/forward->live) and the bench wind-down
             # (live->dormant) are different edges; they can never co-occur.
             raise ValueError("live_authorization is incompatible with revoke_allocation")
+        if live_authorization is not None and not (to is Stage.LIVE and actor is Actor.HUMAN):
+            # Defense in depth: the go-live authorization write belongs ONLY to a human
+            # paper/forward->live transition, so the security invariant doesn't rest on
+            # transition_strategy being the sole caller (codex #254 review).
+            raise ValueError(
+                "live_authorization is only valid for a human transition to live")
         if revoke_allocation:
             # Bench wind-down (#125/#247): the live->dormant flatness check, the allocation revoke,
             # and the stage CAS must be ONE atomic critical section. Enforcing flatness in a
@@ -383,14 +389,22 @@ class SqliteStrategyRepository:
             # was already verified (no DB writes) in live_gate.verify_pending. We deliberately do
             # NOT store the challenge text — trade-time verification rebuilds the signed payload
             # from the recomputed identity, never from agent-writable bytes (codex CRITICAL).
+            # The consume re-asserts the FULL pending-challenge predicate (strategy + recomputed
+            # identity + unexpired + unconsumed) at consume time — mirroring the forward-gate
+            # consume — so a signature verified just before expiry, or against a drifted identity,
+            # cannot be applied here (closing the validate-then-consume gap; codex #254 review).
             cur = self._conn.execute(
-                "UPDATE live_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
-                (now, live_authorization.nonce),
+                "UPDATE live_challenges SET consumed_at=?"
+                " WHERE nonce=? AND consumed_at IS NULL AND strategy_id=?"
+                " AND code_hash=? AND config_hash=? AND dependency_hash IS ? AND expires_at > ?",
+                (now, live_authorization.nonce, rec.id, code_hash, config_hash, dependency_hash,
+                 now),
             )
             if cur.rowcount != 1:
                 raise TransitionError(
-                    "go-live challenge is not consumable (already consumed or missing); "
-                    "request a fresh challenge and re-sign")
+                    "go-live challenge is not consumable for this strategy+identity (already "
+                    "consumed, missing, identity-drifted, or expired); request a fresh challenge "
+                    "and re-sign")
             self._conn.execute(
                 "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash,"
                 " dependency_hash, nonce, expires_at, signature, principal, authorized_at)"
