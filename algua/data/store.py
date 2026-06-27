@@ -276,8 +276,11 @@ class DataStore:
         )
 
         # Universes are immutable on EVERY ingest path (#263): a same-(universe, effective_date)
-        # change with different membership aborts before any write, not just later at read time.
-        # Corrections require a new universe name.
+        # change with different membership aborts at the manifest commit (append_if_absent, under
+        # the manifest lock so it is race-safe), so no conflicting record is ever committed — not
+        # just caught later at read time. (A rejected ingest may leave an inert orphan parquet that
+        # the manifest never references — the shared _ingest_parquet publish-then-commit behavior;
+        # it feeds no read.) Corrections require a new universe name.
         def conflict_check(committed, rec):
             for other in committed:
                 if (
