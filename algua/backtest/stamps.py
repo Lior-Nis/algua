@@ -29,14 +29,25 @@ def _code_hash() -> str | None:
     if not status:  # b"" => genuinely clean
         return head
     dirty_hash = _dirty_workspace_hash(status)
+    if dirty_hash is None:
+        # An input to the dirty-tree hash (diff / ls-files) was unavailable — the same
+        # principle as above: don't emit a confident dirty stamp from incomplete evidence.
+        return None
     return f"{head}-dirty-{dirty_hash[:16]}"
 
 
-def _dirty_workspace_hash(status: bytes) -> str:
+def _dirty_workspace_hash(status: bytes) -> str | None:
+    # If any dirty-tree input is unavailable (timeout/error -> None), return None rather than
+    # treating it as empty, which would hash incomplete evidence into a confident stamp (#256).
+    diff = _git_bytes(["diff", "HEAD", "--binary"])
+    if diff is None:
+        return None
+    untracked = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"])
+    if untracked is None:
+        return None
     digest = hashlib.sha256()
     digest.update(status)
-    digest.update(_git_bytes(["diff", "HEAD", "--binary"]) or b"")
-    untracked = _git_bytes(["ls-files", "--others", "--exclude-standard", "-z"]) or b""
+    digest.update(diff)
     for raw_path in untracked.split(b"\0"):
         if not raw_path:
             continue
