@@ -79,6 +79,19 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
 
 
 _RECONCILE_TOL = 1e-6
+_PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
+
+
+def _ingest_paper_venue(conn: sqlite3.Connection, broker: object) -> None:
+    """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
+
+    Cursor is a broker-time high-water: fetch (cursor, broker.clock()] via the paginated
+    account_activities_window (raises on a partial page), dedup by activity_id, then persist the
+    `until` clock as the new cursor in the SAME ingest transaction."""
+    after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
+    until = broker.clock()  # type: ignore[attr-defined]
+    acts = broker.account_activities_window(after, until)  # type: ignore[attr-defined]
+    ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
 
 
 def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
