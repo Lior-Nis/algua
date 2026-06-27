@@ -458,6 +458,25 @@ def test_update_metadata_unknown_parent_raises(tmp_path):
         repo.update_metadata("a", derived_from="ghost")
 
 
+def test_get_unknown_strategy_error_is_self_identifying(tmp_path):
+    """get() on a missing strategy renders a self-describing message, not the bare name (#271).
+
+    The CLI surfaces str(exc) as the JSON error; a bare '<name>' is indistinguishable from
+    any other bare-string error, so the message must name the failure mode.
+    """
+    import pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.repository import StrategyNotFound
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    with pytest.raises(StrategyNotFound, match="strategy not found: ghost"):
+        repo.get("ghost")
+
+
 # ---------------------------------------------------------------------------
 # Task 9: list_strategies filter params
 # ---------------------------------------------------------------------------

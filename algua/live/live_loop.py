@@ -196,6 +196,13 @@ def run_tick(
     # after. The target-weight gross check in decide() can't catch a book that drifted across ticks.
     realized_gross = sum(abs(w) for w in current_weights.values())
     check_gross_exposure_realized(realized_gross, strategy.execution.max_gross_exposure)
+    # NOTE (#251): only realized GROSS is re-checked here. The per-symbol concentration cap and
+    # short policy are enforced on TARGET weights inside decide()/validate_decision_weights, not on
+    # realized positions — so a held name that drifts past max_weight_per_symbol on a realized basis
+    # while gross stays in-bounds is NOT tripped here. This is a DELIBERATE deferral ("Realized
+    # per-symbol cap in live", in the risk-walls-concentration-cap-design spec under
+    # docs/superpowers/specs/), not an oversight; add a realized check here if it becomes a hard
+    # live invariant.
 
     weights, intents = decide(strategy, bars.loc[:t], current_weights, t)
 

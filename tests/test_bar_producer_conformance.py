@@ -8,9 +8,12 @@ def _write_pair(raw, adj, sym, price):
     (raw / f"{sym}_full_1day_UNADJUSTED.txt").write_text(
         f"2024-07-01,{price},{price},{price},{price},10\n"
         f"2024-07-02,{price},{price},{price},{price},10\n", encoding="utf-8")
+    # Adjusted series ANCHORED at the last bar (adj close == raw close `price`); the older bar
+    # carries the split adjustment (price/2). A back-adjusted full series is anchored at its most
+    # recent bar, which #265's import-time check now enforces.
     (adj / f"{sym}_full_1day_adjsplitdiv.txt").write_text(
         f"2024-07-01,{price / 2},{price / 2},{price / 2},{price / 2},10\n"
-        f"2024-07-02,{price / 2},{price / 2},{price / 2},{price / 2},10\n", encoding="utf-8")
+        f"2024-07-02,{price},{price},{price},{price},10\n", encoding="utf-8")
 
 
 def _dirs(tmp_path, name):

@@ -253,11 +253,13 @@ def kill(
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """Manually trip the kill-switch for a strategy (halts paper runs until reset)."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch
     with registry_conn() as conn:
         # reject unknown/mistyped names before tripping a switch
         SqliteStrategyRepository(conn).get(name)
-        kill_switch.trip(conn, name, reason=reason, actor=actor)
-        audit_append(conn, actor=actor, action="kill_switch_trip", reason=reason, strategy=name)
+        kill_switch.trip(conn, name, reason=reason, actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="kill_switch_trip",
+                     reason=reason, strategy=name)
     emit(ok({"strategy": name, "kill_switch": "tripped", "reason": reason}))
 
 
@@ -391,7 +393,10 @@ def trade_tick(
                                              coid, strategy_id=rec.id)
                     oid = broker.submit_offset(sym, qty, coid)
                     backfill_paper_venue_broker_order_id(conn, coid, oid)
-            except BrokerError as fexc:
+            # Fail SAFE on ANY liquidation error (not only BrokerError): a non-BrokerError from the
+            # venue ingest/offset path must still report a structured liquidation_submitted=False
+            # rather than crash the breach handler with an unstructured traceback (GATE-2).
+            except Exception as fexc:
                 liquidation_submitted = False
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
@@ -515,6 +520,7 @@ def flatten(
     """Emergency: close this strategy's believed paper positions and trip its kill-switch.
     The offset loop iterates paper_believed_positions (strategy-attributed paper_venue_fills),
     so sibling positions on the shared account are never touched."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch (#259)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
         # A forward_tested strategy still holds paper positions while awaiting the go-live
@@ -525,8 +531,9 @@ def flatten(
                 "flatten requires 'paper' or 'forward_tested'")
         broker = _alpaca_broker_from_settings()
         # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
-        kill_switch.trip(conn, name, reason="flatten", actor=actor)
-        audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
+        kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="flatten",
+                     reason="manual flatten", strategy=name)
         try:
             broker.cancel_open_orders()
             flat_ts, _ = tick_clock(broker.clock)
@@ -540,7 +547,9 @@ def flatten(
                                          coid, strategy_id=rec.id)
                 oid = broker.submit_offset(sym, qty, coid)
                 backfill_paper_venue_broker_order_id(conn, coid, oid)
-        except BrokerError as exc:
+        # Fail SAFE on ANY liquidation error (not only BrokerError) so the emergency flatten always
+        # emits a structured payload instead of crashing with an unstructured traceback (GATE-2).
+        except Exception as exc:
             emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
     # liquidation_submitted: offset orders accepted; fills land async (may be next open).
@@ -554,11 +563,12 @@ def halt_all(
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """ACCOUNT-WIDE emergency: engage the global halt and flatten the ENTIRE Alpaca account."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before engaging the halt
     with registry_conn() as conn:
         broker = _alpaca_broker_from_settings()
         # Engage first (fail-safe): all trading is stopped even if the close call then fails.
-        global_halt.engage(conn, reason=reason, actor=actor)
-        audit_append(conn, actor=actor, action="halt_all", reason=reason, strategy=None)
+        global_halt.engage(conn, reason=reason, actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="halt_all", reason=reason, strategy=None)
         try:
             broker.close_all_positions()
         except BrokerError as exc:
@@ -573,10 +583,14 @@ def halt_all(
 @paper_app.command("resume-all")
 @json_errors(ValueError, LookupError, BrokerError)
 def resume_all(
-    actor: str = typer.Option("human", "--actor", help="human | agent"),
+    # Default 'agent' to match the sibling halt commands (kill/flatten/halt-all): resume-all is
+    # not enforced human-only and an agent can legitimately invoke it, so a 'human' default would
+    # mislabel the (non-load-bearing) audit row when an agent uses the default (#272).
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
     to cash). Per-strategy kill-switches are left untouched."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching the halt
     with registry_conn() as conn:
         was_set = global_halt.is_engaged(conn)
         # Flag any LIVE strategies that still carry a ledger position (partial-fill residual): they
@@ -595,7 +609,7 @@ def resume_all(
             r["name"] for r in live_rows if believed_positions(conn, r["name"], LedgerKind.LIVE)
         ]
         if was_set:
-            audit_append(conn, actor=actor, action="resume_all",
+            audit_append(conn, actor=actor_enum.value, action="resume_all",
                          reason="clear global halt; re-base all drawdown peaks", strategy=None)
             # Re-base peaks first, clear the halt LAST so the un-halt is the final write (#109).
             # Clear BOTH the paper (account-equity) and live (NAV) peak tables so resumed strategies

@@ -187,7 +187,10 @@ def test_ca_same_event_id_across_symbols_kept(tmp_path):
     assert len(ev["AAPL"]) == 1 and len(ev["MSFT"]) == 1
 
 
-def test_ca_no_event_id_exact_dup_dropped(tmp_path):
+def test_ca_no_event_id_exact_dup_raises(tmp_path):
+    # Without event_id, a same-(ex_date, value) duplicate is ambiguous (genuine repeat vs two
+    # distinct same-date distributions) and would silently under-adjust adj_close, so fail
+    # closed loudly and point the operator at event_id (#264).
     p = tmp_path / "ca.parquet"
     _write_ca(
         p,
@@ -196,7 +199,23 @@ def test_ca_no_event_id_exact_dup_dropped(tmp_path):
             {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5},
         ],
     )
-    assert len(parse_databento_corp_actions(p)["AAPL"]) == 1
+    with pytest.raises(ValueError, match="event_id"):
+        parse_databento_corp_actions(p)
+
+
+def test_ca_no_event_id_distinct_rows_kept(tmp_path):
+    # The raise is confined to EXACT-tuple duplicates: legitimate no-event_id rows that differ in
+    # value or kind on the same ex_date are NOT duplicates and must still pass (#264).
+    p = tmp_path / "ca.parquet"
+    _write_ca(
+        p,
+        [
+            {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5},
+            {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.7},
+            {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "split", "value": 2.0},
+        ],
+    )
+    assert len(parse_databento_corp_actions(p)["AAPL"]) == 3
 
 
 def _run(raw_dir: Path, ca: Path, **kw):

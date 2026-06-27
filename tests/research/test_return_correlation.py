@@ -1,6 +1,7 @@
 """Tests for Task 7 (#222): backtest returns persistence + return-correlation axis."""
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -125,6 +126,36 @@ def test_load_backtest_returns_most_recent(store):
     loaded = store.load_backtest_returns("strat")
     assert loaded is not None
     assert len(loaded) == 3
+
+
+def test_load_backtest_returns_same_timestamp_id_tiebreak(store):
+    """Two rows with identical created_at -> the higher id (later insert) wins (#257).
+
+    created_at alone is not a deterministic ordering key (microsecond timestamps can
+    collide for back-to-back runs); the id DESC tiebreak makes 'latest' well-defined.
+    """
+    ts = "2023-06-01T00:00:00+00:00"
+    first = json.dumps([["2023-06-01", 0.01], ["2023-06-02", 0.02]])
+    second = json.dumps([["2023-06-01", 0.05], ["2023-06-02", 0.06], ["2023-06-03", 0.07]])
+    # Insert both rows with the SAME created_at so only the id can break the tie.
+    store._conn.execute(
+        "INSERT INTO backtest_returns"
+        " (strategy_name, period_start, period_end, returns_json, created_at)"
+        " VALUES (?,?,?,?,?)",
+        ("strat", "2023-06-01", "2023-06-03", first, ts),
+    )
+    store._conn.execute(
+        "INSERT INTO backtest_returns"
+        " (strategy_name, period_start, period_end, returns_json, created_at)"
+        " VALUES (?,?,?,?,?)",
+        ("strat", "2023-06-01", "2023-06-04", second, ts),
+    )
+    store._conn.commit()
+    loaded = store.load_backtest_returns("strat")
+    assert loaded is not None
+    # The later-inserted (higher id) row deterministically wins the tie.
+    assert len(loaded) == 3
+    assert list(loaded.values) == pytest.approx([0.05, 0.06, 0.07])
 
 
 # ---------------------------------------------------------------------------

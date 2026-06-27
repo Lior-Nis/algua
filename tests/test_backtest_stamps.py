@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from algua.backtest import stamps
 
 
@@ -42,3 +44,48 @@ def test_code_hash_is_head_when_workspace_is_clean(monkeypatch):
     monkeypatch.setattr(stamps, "_git_bytes", git_bytes)
 
     assert stamps.runtime_stamps()["code_hash"] == head
+
+
+def test_code_hash_none_when_git_status_unavailable(monkeypatch):
+    """A git status timeout/error (None) must NOT be equated with a clean workspace (#256).
+
+    rev-parse HEAD succeeds but status is unavailable -> the stamp degrades to None
+    (unknown), never to the bare clean HEAD that would mislabel a dirty tree as clean.
+    """
+    head = "abc123"
+
+    def git_bytes(args: list[str]) -> bytes | None:
+        if args == ["rev-parse", "HEAD"]:
+            return f"{head}\n".encode()
+        if args == ["status", "--porcelain=v1", "-z", "--untracked-files=all"]:
+            return None  # subprocess timed out / git unavailable
+        raise AssertionError(args)
+
+    monkeypatch.setattr(stamps, "_git_bytes", git_bytes)
+
+    assert stamps.runtime_stamps()["code_hash"] is None
+
+
+@pytest.mark.parametrize("unavailable", ["diff", "ls-files"])
+def test_code_hash_none_when_dirty_tree_input_unavailable(monkeypatch, unavailable):
+    """status reports dirty, but a dirty-tree input (diff/ls-files) is unavailable (#256).
+
+    Hashing incomplete evidence into a HEAD-dirty-... stamp would be falsely confident, so
+    the stamp degrades to None instead.
+    """
+    head = "abc123"
+
+    def git_bytes(args: list[str]) -> bytes | None:
+        if args == ["rev-parse", "HEAD"]:
+            return f"{head}\n".encode()
+        if args == ["status", "--porcelain=v1", "-z", "--untracked-files=all"]:
+            return b" M algua/backtest/engine.py\0"
+        if args == ["diff", "HEAD", "--binary"]:
+            return None if unavailable == "diff" else b"diff ...\n"
+        if args == ["ls-files", "--others", "--exclude-standard", "-z"]:
+            return None if unavailable == "ls-files" else b""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(stamps, "_git_bytes", git_bytes)
+
+    assert stamps.runtime_stamps()["code_hash"] is None

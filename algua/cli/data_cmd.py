@@ -230,8 +230,9 @@ def import_universe(
 ) -> None:
     """Bulk-import a constituents CSV into the universe-snapshot timeline (one snapshot per change
     date; add inclusive, drop exclusive, multiple rows/symbol for re-additions). Universes are
-    IMMUTABLE: a same-date membership conflict aborts before any write (corrections need a new
-    name). Empty-membership change dates are rejected (deferred limitation)."""
+    IMMUTABLE: a same-date membership conflict aborts before committing a conflicting manifest
+    record (corrections need a new name). Empty-membership change dates are rejected (deferred
+    limitation)."""
     with file.expanduser().open(newline="", encoding="utf-8-sig") as fh:
         rows = list(csv.DictReader(fh))
     intervals = parse_constituents_rows(rows)
@@ -255,7 +256,6 @@ def import_universe(
             effective_date=effective_date.isoformat(),
             as_of=stamp,
             source=source,
-            require_immutable=True,
         )
     emit(ok({
         "universe": universe,
@@ -395,6 +395,10 @@ def inspect(
     summary: bool = typer.Option(False, "--summary", help="summarize available datasets"),
 ) -> None:
     """Inspect recorded point-in-time data snapshots."""
+    # Mutually exclusive selectors: reject an ambiguous invocation rather than silently
+    # resolving by return-order precedence (which can mask a mistaken query).
+    if sum((summary, snapshot_id is not None, dataset is not None)) > 1:
+        raise ValueError("pass only one of --summary, --snapshot-id, or --dataset")
     ds = _store()
     if summary:
         emit(ds.summary())

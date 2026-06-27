@@ -80,13 +80,23 @@ def _combos(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
 
 
 def _coerce(value: str) -> Any:
-    """Coerce a grid value string to int, then float, else leave as str."""
-    for cast in (int, float):
-        try:
-            return cast(value)
-        except ValueError:
-            continue
-    return value
+    """Coerce a grid value string to int, then float, else leave as str.
+
+    Non-finite floats ('inf'/'nan'/'-inf'/'1e400') are rejected here with a clear message
+    rather than coerced and carried downstream, where they only surface as an opaque
+    JSON-serialization failure in config_hash (json.dumps(allow_nan=False)) (#258).
+    """
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        f = float(value)
+    except ValueError:
+        return value
+    if not math.isfinite(f):
+        raise ValueError(f"non-finite grid value: {value!r}")
+    return f
 
 
 def _coerce_values(values: list[Any]) -> list[Any]:

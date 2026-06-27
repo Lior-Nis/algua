@@ -140,6 +140,28 @@ def test_kill_rejects_unknown_strategy():
     assert json.loads(result.stdout)["ok"] is False
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["paper", "kill", "whatever", "--reason", "x", "--actor", "humn"],
+        ["paper", "flatten", "whatever", "--actor", "humn"],
+        ["paper", "halt-all", "--reason", "x", "--actor", "humn"],
+        ["paper", "resume-all", "--actor", "humn"],
+    ],
+)
+def test_operational_commands_reject_bad_actor(argv):
+    """A typo'd --actor fails closed via Actor() coercion before any switch/halt is touched (#259).
+
+    The coercion is the first line of each command body, so an invalid actor is rejected
+    before the DB/broker is reached — no mis-attributed audit/kill-switch row is written.
+    """
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "humn" in payload["error"]  # the bad actor token surfaces, not an unrelated failure
+
+
 def test_paper_account_missing_creds_errors(monkeypatch):
     # Empty env vars override any local .env (env > .env in pydantic-settings) so this stays
     # hermetic even on a developer machine that has real Alpaca keys in .env.
@@ -576,6 +598,29 @@ def test_resume_all_clears_and_wipes_peaks_but_keeps_strategy_switch(monkeypatch
         assert global_halt.is_engaged(conn) is False
         assert get_peak_equity(conn, "cross_sectional_momentum") is None  # peaks wiped
         assert kill_switch.is_tripped(conn, "cross_sectional_momentum") is True  # untouched
+
+
+def test_resume_all_default_actor_is_agent_in_audit():
+    """resume-all's default --actor is 'agent' (matching its sibling halt commands), so the
+    audit row isn't mislabeled 'human' when an agent invokes it with the default (#272)."""
+    from contextlib import closing
+
+    from algua.audit import log as audit_log
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        global_halt.engage(conn, reason="x", actor="human")
+    result = runner.invoke(app, ["paper", "resume-all"])  # no --actor: use the default
+    assert result.exit_code == 0, result.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rows = audit_log.read(conn)
+        resume_rows = [r for r in rows if r["action"] == "resume_all"]
+        assert resume_rows, "expected a resume_all audit row"
+        assert resume_rows[0]["actor"] == "agent"
 
 
 def _engage_global_halt():

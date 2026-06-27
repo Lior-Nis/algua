@@ -137,7 +137,7 @@ class SqliteStrategyRepository:
             "SELECT * FROM strategies WHERE name = ?", (name,)
         ).fetchone()
         if row is None:
-            raise StrategyNotFound(name)
+            raise StrategyNotFound(f"strategy not found: {name}")
         return _row_to_record(row)
 
     def update_metadata(
@@ -1369,7 +1369,7 @@ class SqliteStrategyRepository:
 
         row = self._conn.execute(
             "SELECT returns_json FROM backtest_returns WHERE strategy_name = ?"
-            " ORDER BY created_at DESC LIMIT 1",
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
             (strategy_name,),
         ).fetchone()
         if row is None:

@@ -6,7 +6,7 @@ from algua.data.store import DataStore
 def _ingest(store, syms, eff):
     return store.ingest_universe(
         universe="SP500", symbols=syms, effective_date=eff,
-        as_of="2026-01-01T00:00:00+00:00", source="test", require_immutable=True,
+        as_of="2026-01-01T00:00:00+00:00", source="test",
     )
 
 
@@ -17,7 +17,7 @@ def test_same_date_same_membership_is_idempotent(tmp_path):
     assert a.snapshot_id == b.snapshot_id  # content-hash dedup
 
 
-def test_same_date_different_membership_rejected_before_write(tmp_path):
+def test_same_date_different_membership_rejected_before_manifest_commit(tmp_path):
     store = DataStore(tmp_path)
     _ingest(store, ["AAPL", "MSFT"], "2000-01-01")
     before = store.data_dir.joinpath("manifest.jsonl").read_text()
@@ -27,9 +27,23 @@ def test_same_date_different_membership_rejected_before_write(tmp_path):
     assert before == after  # rejected import left the manifest unmutated
 
 
-def test_non_immutable_path_unaffected(tmp_path):
+def test_immutability_enforced_on_plain_ingest_path(tmp_path):
+    """#263: immutability is now unconditional — the plain ingest_universe path (no longer a
+    require_immutable flag) rejects a same-date different-membership change at the manifest commit,
+    just like the bulk import path: no conflicting record is committed and the read is unchanged."""
     store = DataStore(tmp_path)
     store.ingest_universe(
         universe="U", symbols=["A"], effective_date="2000-01-01",
         as_of="2026-01-01T00:00:00+00:00", source="test",
-    )  # require_immutable defaults False — no conflict checking
+    )
+    before = store.data_dir.joinpath("manifest.jsonl").read_text()
+    with pytest.raises(ValueError, match="immutab|conflict|differ"):
+        store.ingest_universe(
+            universe="U", symbols=["A", "B"], effective_date="2000-01-01",
+            as_of="2026-01-01T00:00:00+00:00", source="test",
+        )
+    # The manifest (what reads consume) is unchanged, and the as-of read still returns the
+    # original membership — the rejected ingest committed no conflicting record.
+    assert store.data_dir.joinpath("manifest.jsonl").read_text() == before
+    timeline = store.read_universe("U")
+    assert len(timeline) == 1 and timeline[0].symbols == frozenset({"A"})

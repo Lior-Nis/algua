@@ -459,16 +459,24 @@ def test_read_universe_empty_for_unknown_name(tmp_path):
 
 def test_read_universe_rejects_ambiguous_duplicate_effective_date(tmp_path):
     # Two snapshots for the SAME name + SAME effective_date but DIFFERENT membership =>
-    # the as-of-date answer is ambiguous; refuse rather than silently pick one.
+    # the as-of-date answer is ambiguous; refuse rather than silently pick one. Since ingest is
+    # now unconditionally immutable (#263), this conflicting pair can only arise from a legacy /
+    # hand-edited manifest, so we seed it via the low-level _ingest_parquet (bypassing the guard)
+    # to prove read_universe still fails closed as defense in depth.
+    from algua.data.models import Kind
+    from algua.data.store import _metadata
     store = DataStore(tmp_path / "data")
     store.ingest_universe(
         universe="core", symbols=["AAPL"], effective_date="2026-01-01",
         as_of="2026-01-02T00:00:00+00:00", source="manual",
     )
-    store.ingest_universe(
-        universe="core", symbols=["MSFT"], effective_date="2026-01-01",
-        as_of="2026-01-03T00:00:00+00:00", source="manual",
+    meta = _metadata(
+        dataset=Dataset.UNIVERSES, provider="local", symbols=["MSFT"],
+        start="2026-01-01", end="2026-01-01", as_of="2026-01-03T00:00:00+00:00",
+        source="manual", kind=Kind.UNIVERSE, universe="core",
     )
+    frame = pd.DataFrame({"effective_date": "2026-01-01", "universe": "core", "symbol": ["MSFT"]})
+    store._ingest_parquet(metadata=meta, frame=frame, filename="universe.parquet")
     with pytest.raises(ValueError, match="ambiguous"):
         store.read_universe("core")
 
