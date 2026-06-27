@@ -217,9 +217,9 @@ file and re-running `back_adjust`; the hash lets an operator confirm they have t
 - **De-dup:** with `event_id`, a duplicate-`(symbol, event_id)` row is dropped (factor unchanged vs
   the de-duped set); a blank/missing `event_id` when the column exists → raises; same `(symbol,
   event_id)` with **differing** economics → raises; the **same `event_id` across two different
-  symbols** keeps both (no cross-symbol drop); without `event_id`, an exact full-row duplicate is
-  dropped, and two distinct same-value same-date dividends **with distinct `event_id`** are both kept
-  (summed).
+  symbols** keeps both (no cross-symbol drop); without `event_id`, an exact full-row duplicate
+  **raises** (#264), and two distinct same-value same-date dividends **with distinct `event_id`** are
+  both kept (summed).
 - **Adapter validation (row-level):** `kind` case/whitespace normalized (`"Split "`→split); unknown
   `kind` → raises naming the value; `value` NaN/±inf/≤0 → raises naming the row; non-midnight or
   tz-aware non-UTC `ex_date` → raises.

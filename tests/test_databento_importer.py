@@ -203,6 +203,21 @@ def test_ca_no_event_id_exact_dup_raises(tmp_path):
         parse_databento_corp_actions(p)
 
 
+def test_ca_no_event_id_distinct_rows_kept(tmp_path):
+    # The raise is confined to EXACT-tuple duplicates: legitimate no-event_id rows that differ in
+    # value or kind on the same ex_date are NOT duplicates and must still pass (#264).
+    p = tmp_path / "ca.parquet"
+    _write_ca(
+        p,
+        [
+            {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.5},
+            {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "dividend", "value": 0.7},
+            {"symbol": "AAPL", "ex_date": "2024-02-01", "kind": "split", "value": 2.0},
+        ],
+    )
+    assert len(parse_databento_corp_actions(p)["AAPL"]) == 3
+
+
 def _run(raw_dir: Path, ca: Path, **kw):
     req = DatabentoImportRequest(raw_dir=raw_dir, corp_actions_path=ca, **kw)
     return list(DatabentoImporter().import_bars(req))

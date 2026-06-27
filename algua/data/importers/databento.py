@@ -97,8 +97,10 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
     Row-level validation (kind in {split,dividend}; value finite > 0; ex_date → UTC midnight)
     with messages naming the row, then source de-duplication: by `(symbol, event_id)` when the
     optional `event_id` column is present (all rows must then carry a non-blank id; same key +
-    differing economics → raise), else by exact full row. Surviving events flow to `back_adjust`,
-    which aggregates same-date ones.
+    differing economics → raise). WITHOUT `event_id`, an exact full-row duplicate
+    `(symbol, ex_date, kind, value)` instead RAISES — it is indistinguishable from two genuine
+    same-date distributions and silently dropping it would under-adjust adj_close (#264); only
+    distinct rows survive. Surviving events flow to `back_adjust`, which aggregates same-date ones.
     """
     frame = pd.read_parquet(path)
     frame.columns = [str(c).strip().lower() for c in frame.columns]
