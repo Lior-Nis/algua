@@ -97,8 +97,10 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
     Row-level validation (kind in {split,dividend}; value finite > 0; ex_date → UTC midnight)
     with messages naming the row, then source de-duplication: by `(symbol, event_id)` when the
     optional `event_id` column is present (all rows must then carry a non-blank id; same key +
-    differing economics → raise), else by exact full row. Surviving events flow to `back_adjust`,
-    which aggregates same-date ones.
+    differing economics → raise). WITHOUT `event_id`, an exact full-row duplicate
+    `(symbol, ex_date, kind, value)` instead RAISES — it is indistinguishable from two genuine
+    same-date distributions and silently dropping it would under-adjust adj_close (#264); only
+    distinct rows survive. Surviving events flow to `back_adjust`, which aggregates same-date ones.
     """
     frame = pd.read_parquet(path)
     frame.columns = [str(c).strip().lower() for c in frame.columns]
@@ -155,7 +157,17 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
         for symbol, ex_date, kind, value, _eid in parsed:
             row_key = (symbol, ex_date, kind, value)
             if row_key in seen_set:
-                continue
+                # Without event_id we can't tell a genuinely-repeated source row from two
+                # distinct same-ex-date same-value distributions. Silently collapsing them would
+                # under-count the distribution and under-adjust adj_close (corpactions SUMS
+                # distinct events), so fail closed loudly rather than silently (#264). The
+                # event_id path keys uniquely and is the remedy.
+                raise ValueError(
+                    f"{path.name}: {symbol} has duplicate {kind} rows with identical "
+                    f"(ex_date={ex_date.date()}, value={value}) and no event_id to disambiguate "
+                    f"them; two genuine same-date distributions would be silently collapsed "
+                    f"(under-adjusting adj_close). Add an event_id column to disambiguate."
+                )
             seen_set.add(row_key)
             surviving.append((symbol, ex_date, kind, value))
 

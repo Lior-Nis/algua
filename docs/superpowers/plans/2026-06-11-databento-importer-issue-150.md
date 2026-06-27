@@ -280,6 +280,12 @@ git commit -m "feat(data): Databento canonical raw-OHLC parser (#150)"
 
 ### Task 3: Databento CA-events parser (typed events + dedup hygiene)
 
+> **Superseded by #264 (2026-06-27):** the no-`event_id` exact-full-row-duplicate path below now
+> **raises** instead of silently dropping (silent drop under-adjusted `adj_close`). The sample
+> test (`test_ca_no_event_id_exact_dup_dropped`), parser docstring, and `continue` in the sample
+> implementation in this historical plan reflect the original drop design — see the current code,
+> the design spec, and `test_ca_no_event_id_exact_dup_raises` for the shipped raise behavior.
+
 **Files:**
 - Modify: `algua/data/importers/databento.py`
 - Test: `tests/test_databento_importer.py`
