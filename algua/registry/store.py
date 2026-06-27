@@ -137,7 +137,7 @@ class SqliteStrategyRepository:
             "SELECT * FROM strategies WHERE name = ?", (name,)
         ).fetchone()
         if row is None:
-            raise StrategyNotFound(name)
+            raise StrategyNotFound(f"strategy not found: {name}")
         return _row_to_record(row)
 
     def update_metadata(
