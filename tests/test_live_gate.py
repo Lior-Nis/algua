@@ -98,7 +98,23 @@ def test_verify_signature_missing_anchor_raises(tmp_path):
         live_gate.verify_signature(tmp_path / "nope", "payload", b"sig")
 
 
-def test_verify_and_consume_writes_live_authorization(tmp_path):
+def _record_authorization(conn, pending, *, code="ch", cfg="cfg", dep="dep",
+                          now=datetime(2026, 6, 5, tzinfo=UTC)):
+    """Mimic the consume + live_authorizations insert that apply_transition now performs atomically
+    with the stage CAS (#254), so the trade-time tests can seed an authorization from a
+    verify_pending result without driving a full transition."""
+    conn.execute("UPDATE live_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
+                 (now.isoformat(), pending.nonce))
+    conn.execute(
+        "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash, dependency_hash, "
+        "nonce, expires_at, signature, principal, authorized_at) VALUES (1,?,?,?,?,?,?,?,?)",
+        (code, cfg, dep, pending.nonce, pending.expires_at, pending.signature_b64,
+         pending.principal, now.isoformat()),
+    )
+    conn.commit()
+
+
+def test_verify_pending_then_record_writes_live_authorization(tmp_path):
     import base64
 
     conn = _conn(tmp_path)
@@ -107,10 +123,12 @@ def test_verify_and_consume_writes_live_authorization(tmp_path):
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers(tmp_path, "lior", pub)
     sig = _sign(key, issued["challenge"], tmp_path)
-    principal = live_gate.verify_and_consume(
-        conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now
-    )
-    assert principal == "lior"
+    pending = live_gate.verify_pending(conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now)
+    assert pending is not None and pending.principal == "lior"
+    # verify_pending performs NO writes (#254): nothing is consumed/recorded until apply_transition.
+    assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0
+    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "dep", now=now) is not None
+    _record_authorization(conn, pending, now=now)
     row = conn.execute("SELECT * FROM live_authorizations WHERE strategy_id=1").fetchone()
     assert row is not None
     assert row["code_hash"] == "ch" and row["config_hash"] == "cfg"
@@ -123,7 +141,7 @@ def test_verify_and_consume_writes_live_authorization(tmp_path):
     assert live_gate.verify_signature(signers, rebuilt, sig_bytes) == "lior"
 
 
-def test_verify_and_consume_no_authorization_on_bad_signature(tmp_path):
+def test_verify_pending_returns_none_on_bad_signature(tmp_path):
     conn = _conn(tmp_path)
     now = datetime(2026, 6, 5, tzinfo=UTC)
     issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
@@ -131,9 +149,41 @@ def test_verify_and_consume_no_authorization_on_bad_signature(tmp_path):
     _ok, other_pub = _make_key(tmp_path, "other")
     signers = _allowed_signers(tmp_path, "lior", other_pub)  # different key enrolled
     sig = _sign(key, issued["challenge"], tmp_path)
-    assert live_gate.verify_and_consume(
+    assert live_gate.verify_pending(
         conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now
     ) is None
+    assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0
+
+
+def test_apply_transition_rolls_back_authorization_when_cas_fails(tmp_path):
+    """#254: the challenge consume + authorization insert are atomic with the stage CAS. If the
+    CAS misses (a concurrent stage change), the whole transition rolls back — the nonce is NOT
+    burned and no orphan authorization row remains."""
+    import dataclasses
+
+    import pytest
+
+    from algua.contracts.lifecycle import Actor, Stage, TransitionError
+    from algua.registry.store import SqliteStrategyRepository
+
+    conn = _conn(tmp_path)  # strategy id=1, stage 'paper'
+    repo = SqliteStrategyRepository(conn)
+    now = datetime(2026, 6, 5, tzinfo=UTC)
+    issued = live_gate.issue_challenge(conn, 1, "s", "ch", "cfg", "dep", now=now)
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers(tmp_path, "lior", pub)
+    sig = _sign(key, issued["challenge"], tmp_path)
+    pending = live_gate.verify_pending(conn, "s", 1, "ch", "cfg", "dep", sig, signers, now=now)
+    assert pending is not None
+    # Hand apply_transition a STALE rec (claims FORWARD_TESTED) so the CAS WHERE stage=... matches
+    # 0 rows (the DB row is 'paper') and the transaction raises + rolls back.
+    stale = dataclasses.replace(repo.get("s"), stage=Stage.FORWARD_TESTED)
+    with pytest.raises(TransitionError):
+        repo.apply_transition(stale, Stage.LIVE, Actor.HUMAN, "go",
+                              code_hash="ch", config_hash="cfg", dependency_hash="dep",
+                              live_authorization=pending)
+    # Rolled back: the challenge is still consumable and no authorization row was written.
+    assert live_gate.find_pending_challenge(conn, 1, "ch", "cfg", "dep", now=now) is not None
     assert conn.execute("SELECT COUNT(*) FROM live_authorizations").fetchone()[0] == 0
 
 
@@ -145,11 +195,12 @@ def _live_strategy(conn, stage="live"):
 def _seed_authorization(conn, tmp_path, *, code="ch", cfg="cfg", dep="dep", principal="lior"):
     key, pub = _make_key(tmp_path)
     signers = _allowed_signers(tmp_path, principal, pub)
-    issued = live_gate.issue_challenge(conn, 1, "s", code, cfg, dep,
-                                       now=datetime(2026, 6, 5, tzinfo=UTC))
+    now = datetime(2026, 6, 5, tzinfo=UTC)
+    issued = live_gate.issue_challenge(conn, 1, "s", code, cfg, dep, now=now)
     sig = _sign(key, issued["challenge"], tmp_path)
-    live_gate.verify_and_consume(conn, "s", 1, code, cfg, dep, sig, signers,
-                                 now=datetime(2026, 6, 5, tzinfo=UTC))
+    pending = live_gate.verify_pending(conn, "s", 1, code, cfg, dep, sig, signers, now=now)
+    assert pending is not None
+    _record_authorization(conn, pending, code=code, cfg=cfg, dep=dep, now=now)
     return signers
 
 

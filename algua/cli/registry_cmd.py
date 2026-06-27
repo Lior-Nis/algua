@@ -11,6 +11,7 @@ from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
+from algua.contracts.types import PendingLiveAuthorization
 from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
@@ -146,13 +147,16 @@ def transition(
         if target is Stage.LIVE:
             sig_bytes = Path(signature).read_bytes()
 
-            def _verify(_repo: object, sid: int, ch: str, cfg: str, dep: str | None) -> bool:
-                principal = live_gate.verify_and_consume(
+            def _verify(_repo: object, sid: int, ch: str, cfg: str,
+                        dep: str | None) -> PendingLiveAuthorization | bool:
+                # Verify the signature (no DB writes); the challenge consume + authorization insert
+                # are performed atomically with the stage CAS inside apply_transition (#254).
+                pending = live_gate.verify_pending(
                     conn, name, sid, ch, cfg, dep, sig_bytes, ALLOWED_SIGNERS_PATH)
-                if principal is None:
+                if pending is None:
                     return False
-                approver["id"] = principal
-                return True
+                approver["id"] = pending.principal
+                return pending
 
             verifier = _verify
 

@@ -165,3 +165,16 @@ class LiveAuthorization:
     dependency_hash: str | None
     principal: str
     authorized_at: str
+
+
+@dataclass(frozen=True)
+class PendingLiveAuthorization:
+    """A go-live signature that has been verified but NOT yet recorded. It carries everything
+    needed to consume the challenge + write the `live_authorizations` row, so those writes can be
+    performed ATOMICALLY with the stage CAS in a single transaction (#254) instead of committed
+    separately before the transition. `signature_b64` is the base64-encoded raw SSH signature."""
+
+    nonce: str
+    expires_at: str
+    principal: str
+    signature_b64: str
