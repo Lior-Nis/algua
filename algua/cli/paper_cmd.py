@@ -21,6 +21,7 @@ from algua.execution.live_ledger import (
     believed_positions,
     fill_cursor,
     ingest_activities,
+    paper_believed_positions,
     record_paper_venue_order,
     strategy_live_symbols,
 )
@@ -331,6 +332,7 @@ def trade_tick(
         provider = _select_provider(False, snapshot)
         identity = compute_artifact_hashes(name)
         acct = broker.account()
+        _ingest_paper_venue(conn, broker)
 
         hooks = TickHooks(
             client_order_id_for=client_order_id,
@@ -352,6 +354,7 @@ def trade_tick(
             # aborts before any order goes out (#21).
             should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
             peak_equity=get_peak_equity(conn, name),
+            venue_belief=lambda: paper_believed_positions(conn, name),
         )
         try:
             result = run_tick(strategy, broker, provider, utc(start), utc(end),

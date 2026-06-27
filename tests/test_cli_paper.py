@@ -202,6 +202,9 @@ class _MinimalBroker:
     def clock(self):
         return "2023-06-01T14:00:00+00:00"
 
+    def account_activities_window(self, after, until):
+        return []
+
 
 def test_trade_tick_submits_and_persists(monkeypatch):
     from contextlib import closing
@@ -797,6 +800,9 @@ def test_trade_tick_persists_provenance(monkeypatch):
             return AccountState(equity=50_000.0, cash=10_000.0, buying_power=40_000.0,
                                 account_id="acct-xyz")
 
+        def account_activities_window(self, after, until):
+            return []
+
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FakeBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
@@ -867,6 +873,9 @@ def test_trade_tick_unusable_broker_clock_falls_back_to_local(monkeypatch, bad_c
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _ClockFailBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
+    # Skip venue ingest: this test is about tick_clock fallback, not the paper ingest path.
+    # A bad clock that raises in broker.clock() would fail _ingest_paper_venue before run_tick.
+    monkeypatch.setattr("algua.cli.paper_cmd._ingest_paper_venue", lambda conn, broker: None)
 
     result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", "snap1"])
     assert result.exit_code == 0, result.stdout
