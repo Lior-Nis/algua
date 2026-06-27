@@ -27,7 +27,9 @@ def test_trip_for_breach_records_non_drawdown_kind(tmp_path):
     assert kill_switch.is_tripped(conn, "s") is True
     rows = audit.read(conn, strategy="s")
     trips = [r for r in rows if r["action"] == "kill_switch_trip"]
-    assert any(r["reason"].startswith("gross_exposure:") for r in trips)
+    # Exact match: the reason must carry both kind AND detail (the f"{kind}: {detail}" contract),
+    # so a dropped/corrupted detail can't slip through a prefix-only check.
+    assert any(r["reason"] == "gross_exposure: gross 1.5 exceeds 1.0" for r in trips)
 
 
 def test_trip_for_breach_retrip_is_idempotent(tmp_path):
@@ -37,5 +39,8 @@ def test_trip_for_breach_retrip_is_idempotent(tmp_path):
     trip_for_breach(conn, "s", RiskBreach("drawdown", "first breach"))
     trip_for_breach(conn, "s", RiskBreach("gross_exposure", "second breach"))
     assert kill_switch.is_tripped(conn, "s") is True
+    # The kill-switch row is upserted (ON CONFLICT DO UPDATE), so the SECOND trip's reason must
+    # win — proving the re-trip actually wrote, not silently no-op'd while only the audit appended.
+    assert kill_switch.get(conn, "s")["reason"] == "second breach"
     trips = [r for r in audit.read(conn, strategy="s") if r["action"] == "kill_switch_trip"]
     assert len(trips) == 2  # audit appends one row per trip — both breaches are recorded
