@@ -340,3 +340,109 @@ def test_trade_tick_survives_broker_clock_failure(monkeypatch, tmp_path):
     assert snap is not None
     assert snap["clock_source"] == "local", "clock failure must fall back to local, never abort"
     assert snap["tick_ts"]  # a valid local timestamp was written
+
+
+# ---------------------------------------------------------------------------
+# Review-round fixes: FIX #1 (flatten resilient clock) + FIX #3 (non-BrokerError fail-closed)
+# ---------------------------------------------------------------------------
+
+def test_trade_tick_fails_closed_on_non_brokererror_ingest_failure(monkeypatch, tmp_path):
+    """Non-BrokerError (RuntimeError) from account_activities_window → exit 1; no snapshot.
+
+    FIX #3: the normal-path ingest catch is widened to Exception so a RuntimeError / OSError /
+    JSONDecodeError from the broker transport also exits non-zero and emits a structured payload
+    rather than crashing with an unhandled traceback (and skipping the audit_append).
+    """
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.order_state import latest_tick_snapshot
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    class _RuntimeFailBroker:
+        def clock(self) -> str:
+            return "2024-01-15T14:00:00Z"
+
+        def account(self) -> AccountState:
+            return AccountState(equity=100_000.0, cash=100_000.0,
+                                buying_power=100_000.0, account_id="rt-fail-acct")
+
+        def account_activities_window(self, after: str, until: str) -> list:
+            raise RuntimeError("JSON decode error from broker transport")
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _RuntimeFailBroker())
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snapshot: object())
+
+    result = runner.invoke(app, ["paper", "trade-tick", _NAME, "--snapshot", "snap1",
+                                 "--start", _START, "--end", _END])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["kind"] == "venue_ingest_failed"
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        snap = latest_tick_snapshot(conn, _NAME)
+    assert snap is None, "tick snapshot must NOT be recorded when venue ingest fails"
+
+
+def test_flatten_still_offsets_when_broker_clock_raises(monkeypatch, tmp_path):
+    """FIX #1: flatten's ingest now uses tick_clock (resilient fallback), so a BrokerError
+    from broker.clock() does NOT abort the offset loop — the position is still liquidated.
+    """
+    from contextlib import closing
+
+    from algua.execution.alpaca_broker import BrokerError
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    # Seed a believed position so the offset loop has something to liquidate
+    with closing(connect(tmp_path / "p.db")) as conn:
+        migrate(conn)
+        conn.execute(
+            "INSERT INTO paper_venue_fills"
+            "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
+            " VALUES (?,?,?,?,?,?,?)",
+            ("fill-a1", "boid-a1", _NAME, "AAA", 5.0, 100.0, "2024-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+    offset_calls: list = []
+
+    class _ClockDownBroker:
+        def clock(self) -> str:
+            raise BrokerError("clock outage")
+
+        def account_activities_window(self, after: str, until: str) -> list:
+            return []
+
+        def cancel_open_orders(self) -> None:
+            pass
+
+        def submit_offset(self, sym: str, qty: float, coid: str) -> str:
+            offset_calls.append((sym, qty, coid))
+            return f"o-{sym}"
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _ClockDownBroker())
+
+    result = runner.invoke(app, ["paper", "flatten", _NAME])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["liquidation_submitted"] is True
+    assert any(sym == "AAA" for sym, _, _ in offset_calls), (
+        "clock outage must not abort the offset loop — submit_offset must still be called"
+    )

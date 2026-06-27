@@ -323,7 +323,7 @@ def trade_tick(
         tick_ts, clock_source = tick_clock(broker.clock)
         try:
             _ingest_paper_venue(conn, broker, tick_ts)
-        except BrokerError as exc:
+        except Exception as exc:   # fail closed on ANY ingest/transport error, not just BrokerError
             audit_append(conn, actor="system", action="venue_ingest_failed",
                          reason=str(exc), strategy=name)
             emit(breach_payload(str(exc), strategy=name, kind="venue_ingest_failed"))
@@ -366,7 +366,11 @@ def trade_tick(
             flatten_error = None
             try:
                 broker.cancel_open_orders()
-                _ingest_paper_venue(conn, broker, tick_ts)
+                # Re-ingest up to NOW (not the stale top-of-tick ts) so fills that landed during
+                # this tick are reflected in the belief the offset loop liquidates. tick_clock keeps
+                # this resilient to a broker-clock outage (local fallback).
+                breach_ts, _ = tick_clock(broker.clock)
+                _ingest_paper_venue(conn, broker, breach_ts)
                 for sym, qty in paper_believed_positions(conn, name).items():
                     if abs(qty) <= _RECONCILE_TOL:
                         continue
@@ -514,7 +518,8 @@ def flatten(
         audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
         try:
             broker.cancel_open_orders()
-            _ingest_paper_venue(conn, broker, broker.clock())
+            flat_ts, _ = tick_clock(broker.clock)
+            _ingest_paper_venue(conn, broker, flat_ts)
             for sym, qty in paper_believed_positions(conn, name).items():
                 if abs(qty) <= _RECONCILE_TOL:
                     continue
