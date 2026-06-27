@@ -33,5 +33,9 @@ def signal(view: pd.DataFrame, params: dict[str, Any], fundamentals: pd.DataFram
     rows = fundamentals[fundamentals["metric"] == metric]
     if rows.empty:
         return pd.Series(dtype="float64")
+    # Take the POSITIONAL last row per symbol after sorting — not groupby(...).last(), which
+    # SKIPS nulls and would fall back to an older period when the newest period's value is NaN
+    # ('reported-but-unavailable' is a valid contract value). The newest period's actual value
+    # (incl. NaN -> a non-positive score, so the name isn't held) must win.
     ordered = rows.sort_values("fiscal_period_end", kind="stable")
-    return ordered.groupby("symbol")["value"].last()
+    return ordered.drop_duplicates("symbol", keep="last").set_index("symbol")["value"]
