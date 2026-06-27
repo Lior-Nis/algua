@@ -95,6 +95,52 @@ def record_live_order(
     conn.commit()
 
 
+def record_paper_venue_order(
+    conn: sqlite3.Connection,
+    strategy: str,
+    symbol: str,
+    side: str,
+    intended_notional: float | None,
+    client_order_id: str,
+    *,
+    strategy_id: int,
+) -> None:
+    """Record a paper venue order at submit time, keyed by client_order_id. A retry that re-submits
+    the same client_order_id is a no-op (INSERT OR IGNORE on the UNIQUE column). strategy_id is
+    required for forward-gate attribution."""
+    conn.execute(
+        "INSERT OR IGNORE INTO paper_venue_orders"
+        "(strategy, symbol, side, intended_notional, client_order_id,"
+        " strategy_id, status, submitted_ts)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (strategy, symbol, side, intended_notional, client_order_id, strategy_id, "submitted",
+         datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def backfill_paper_venue_broker_order_id(
+    conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
+) -> None:
+    """Attach the broker's order id to a paper venue order once the broker accepts it. Also
+    back-attributes any fills already ingested under this broker order id while the mapping was
+    missing (strategy was NULL), so an early fill is never orphaned in the books."""
+    row = conn.execute(
+        "SELECT strategy FROM paper_venue_orders WHERE client_order_id = ?", (client_order_id,)
+    ).fetchone()
+    conn.execute(
+        "UPDATE paper_venue_orders SET broker_order_id = ? WHERE client_order_id = ?",
+        (broker_order_id, client_order_id),
+    )
+    if row is not None:
+        conn.execute(
+            "UPDATE paper_venue_fills SET strategy = ?"
+            " WHERE broker_order_id = ? AND strategy IS NULL",
+            (row["strategy"], broker_order_id),
+        )
+    conn.commit()
+
+
 def backfill_broker_order_id(
     conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
 ) -> None:

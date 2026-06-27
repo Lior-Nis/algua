@@ -2,10 +2,12 @@ import sqlite3
 
 from algua.execution.live_ledger import (
     LedgerKind,
+    backfill_paper_venue_broker_order_id,
     believed_positions,
     fill_cursor,
     ingest_activities,
     paper_believed_positions,
+    record_paper_venue_order,
 )
 from algua.registry.db import migrate
 
@@ -64,3 +66,22 @@ def test_paper_ingest_quarantines_malformed(tmp_path):
     ingest_activities(c, [bad], LedgerKind.PAPER, cursor_value="t1")
     assert c.execute("SELECT COUNT(*) FROM paper_venue_activity_quarantine").fetchone()[0] == 1
     assert fill_cursor(c, LedgerKind.PAPER) == "t1"  # cursor still advanced past poison
+
+
+def test_record_then_backfill_attributes_early_fill(tmp_path):
+    c = sqlite3.connect(tmp_path / "r.db")
+    c.row_factory = sqlite3.Row
+    migrate(c)
+    # intent recorded BEFORE submit (no broker id yet)
+    record_paper_venue_order(c, "s", "AAA", "buy", 100.0, "c1", strategy_id=1)
+    # a fill arrives under broker id o1 while the mapping is still missing -> strategy NULL
+    ingest_activities(
+        c,
+        [{"id": "a1", "activity_type": "FILL", "side": "buy", "qty": 5, "price": 10.0,
+          "symbol": "AAA", "order_id": "o1", "transaction_time": "t"}],
+        LedgerKind.PAPER,
+        cursor_value="t1",
+    )
+    assert paper_believed_positions(c, "s") == {}          # not yet attributed
+    backfill_paper_venue_broker_order_id(c, "c1", "o1")    # mapping lands
+    assert paper_believed_positions(c, "s") == {"AAA": 5.0}  # back-attributed
