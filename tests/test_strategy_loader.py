@@ -71,6 +71,29 @@ def test_loader_rejects_unknown_construction():
         mod_path.unlink()
 
 
+def test_loader_rejects_config_name_mismatch():
+    """A module whose CONFIG.name differs from the file/registry stem fails closed (#275),
+    so a strategy's identity can't silently fragment across MLflow/docs/registry."""
+    import algua.strategies.momentum as fam
+    mod_path = Path(fam.__path__[0]) / "tmp_name_mismatch.py"
+    mod_path.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        # CONFIG.name deliberately != the file stem 'tmp_name_mismatch'
+        "CONFIG = StrategyConfig(name='some_other_name', universe=['A'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        with pytest.raises(StrategyNotFound, match="must match"):
+            load_strategy("tmp_name_mismatch")
+    finally:
+        mod_path.unlink()
+
+
 def test_load_by_bare_name_across_families(tmp_path):
     # Both bundled strategies resolve by bare name regardless of which family dir they live in.
     assert load_strategy("cross_sectional_momentum").name == "cross_sectional_momentum"

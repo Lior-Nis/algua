@@ -66,6 +66,14 @@ def load_strategy(name: str) -> LoadedStrategy:
         raise StrategyNotFound(f"{name} is missing CONFIG or signal")
 
     config = module.CONFIG
+    # One name per strategy, enforced at the single load chokepoint: a hand-edited
+    # CONFIG.name that diverges from the filesystem/registry name would silently fragment
+    # the strategy's identity across MLflow, docs, and the registry (#275).
+    if config.name != name:
+        raise StrategyNotFound(
+            f"{name}: CONFIG.name is {config.name!r} but the module was loaded as {name!r}; "
+            f"they must match"
+        )
     try:
         construct_fn = get_construction_policy(config.construction)
         validate_construction_params(config.construction, config.construction_params)
