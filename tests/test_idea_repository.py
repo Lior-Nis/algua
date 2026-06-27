@@ -39,6 +39,14 @@ def test_get_missing_raises(tmp_path):
         repo.get(999)
 
 
+def test_add_rejects_authored_status(tmp_path):
+    """add() always inserts a NULL strategy link, so creating an AUTHORED idea here would
+    violate the AUTHORED<->authored_strategy_id invariant set_status enforces (#267)."""
+    repo, _ = _conns(tmp_path)
+    with pytest.raises(ValueError, match="cannot create an AUTHORED idea"):
+        _add(repo, status=IdeaStatus.AUTHORED)
+
+
 def test_list_filters_by_status_and_family(tmp_path):
     repo, _ = _conns(tmp_path)
     _add(repo, title="a", family="vol")

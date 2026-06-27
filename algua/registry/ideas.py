@@ -78,6 +78,15 @@ class IdeaRepository:
         source_note: str | None, required_data: list[DataCapability], status: IdeaStatus,
         duplicate_of_idea_id: int | None = None, override_reason: str | None = None,
     ) -> Idea:
+        # add() always inserts authored_strategy_id=None, so an AUTHORED idea created here would
+        # violate the AUTHORED<->authored_strategy_id invariant set_status enforces (and silently
+        # defeat the refuted-wall join in find_collisions). Authoring goes through
+        # set_status(to=AUTHORED, authored_strategy_id=...); reject it at this write site (#267).
+        if status is IdeaStatus.AUTHORED:
+            raise ValueError(
+                "add() cannot create an AUTHORED idea (it has no strategy link); "
+                "author via set_status(to=AUTHORED, authored_strategy_id=...)"
+            )
         sig = signature(title, hypothesis)
         now = _now()
         with self._conn:
