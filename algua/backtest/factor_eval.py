@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats as _stats
 
+from algua.backtest.engine import members_as_of
 from algua.backtest.engine import run as run_backtest
 from algua.contracts.types import DataProvider, ExecutionContract
 from algua.features.catalogue import FactorSpec, load_factor_callable
@@ -146,6 +147,22 @@ def score_panel(strategy: LoadedStrategy, bars: pd.DataFrame) -> pd.DataFrame:
     return panel.reindex(columns=_adj_grid(bars_sorted).columns)
 
 
+def mask_panel_to_members(
+    panel: pd.DataFrame, universe_by_date: Mapping[date, Collection[str]]
+) -> pd.DataFrame:
+    """NaN out each timestamp's scores for symbols NOT in the PIT universe as of that date, so the
+    IC cross-section is built over the same survivorship-clean membership the engine enforces in the
+    backtest (#261). Uses the engine's `members_as_of` (greatest effective_date <= t, no
+    look-ahead); `factor_ic` then drops the NaN'd non-members from each cross-section."""
+    masked = panel.copy()
+    for t in masked.index:
+        members = members_as_of(universe_by_date, t)
+        non_members = [c for c in masked.columns if c not in members]
+        if non_members:
+            masked.loc[t, non_members] = np.nan
+    return masked
+
+
 def forward_returns(adj: pd.DataFrame, *, lag: int, horizon: int) -> pd.DataFrame:
     """Per-symbol forward return realized AFTER the decision lag: a score known at t is tradable at
     t+lag, so the label is adj_{t+lag+horizon} / adj_{t+lag} - 1. The trailing (lag+horizon) rows
@@ -196,8 +213,9 @@ def evaluate_factor(
     universe_snapshots: list[dict[str, str]] | None = None,
 ) -> FactorEvalResult:
     """Evaluate one standalone factor: a real PIT backtest (existing engine) + rank IC/IR over the
-    same fetched bars. IC is computed over the declared `symbols` (static); the backtest block
-    honors `--universe` PIT membership via the engine. Touches no registry/holdout/gate."""
+    same fetched bars. When `universe_by_date` (PIT) is supplied, the IC cross-section is masked to
+    as-of members so it is survivorship-clean like the backtest (#261); without it, IC spans the
+    full declared `symbols`. Touches no registry/holdout/gate."""
     if horizon < 1:
         raise ValueError(f"horizon must be >= 1, got {horizon}")
     strategy = build_factor_strategy(
@@ -211,6 +229,10 @@ def evaluate_factor(
     )
     bars = provider.get_bars(sorted(set(symbols)), start, end, "1d")
     panel = score_panel(strategy, bars)
+    if universe_by_date is not None:
+        # Match the PIT backtest: restrict the IC cross-section to as-of members so the reported
+        # rank IC/IR is survivorship-clean, not computed over the full static declared set (#261).
+        panel = mask_panel_to_members(panel, universe_by_date)
     fwd = forward_returns(
         _adj_grid(bars), lag=strategy.execution.decision_lag_bars, horizon=horizon
     )

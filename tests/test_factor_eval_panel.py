@@ -1,7 +1,14 @@
+from datetime import date
+
 import pandas as pd
 import pytest
 
-from algua.backtest.factor_eval import build_factor_strategy, forward_returns, score_panel
+from algua.backtest.factor_eval import (
+    build_factor_strategy,
+    forward_returns,
+    mask_panel_to_members,
+    score_panel,
+)
 from algua.features.catalogue import get_factor
 
 
@@ -37,3 +44,21 @@ def test_forward_returns_offset_by_lag_and_horizon():
     assert fwd.loc[t0, "AAA"] == pytest.approx(adj["AAA"].iloc[2] / adj["AAA"].iloc[1] - 1)
     # the last (lag+horizon) rows have no future bar -> NaN
     assert fwd.iloc[-1].isna().all()
+
+
+def test_mask_panel_to_members_nans_non_members_pit():
+    """#261: scores for symbols not in the as-of PIT universe are NaN'd per timestamp, so the IC
+    cross-section matches the survivorship-clean backtest membership (no look-ahead)."""
+    idx = pd.date_range("2023-01-01", periods=3, freq="D")
+    panel = pd.DataFrame({"AAA": [1.0, 2.0, 3.0], "BBB": [4.0, 5.0, 6.0]}, index=idx)
+    # AAA is a member throughout; BBB only joins on 2023-01-02.
+    universe_by_date = {date(2023, 1, 1): ["AAA"], date(2023, 1, 2): ["AAA", "BBB"]}
+    masked = mask_panel_to_members(panel, universe_by_date)
+    # Day 1: only AAA is a member -> BBB is masked out; AAA kept.
+    assert masked.loc[idx[0], "AAA"] == 1.0
+    assert pd.isna(masked.loc[idx[0], "BBB"])
+    # Day 2+: both members -> both kept.
+    assert masked.loc[idx[1], "BBB"] == 5.0
+    assert masked.loc[idx[2], "AAA"] == 3.0
+    # the original panel is not mutated
+    assert panel.loc[idx[0], "BBB"] == 4.0
