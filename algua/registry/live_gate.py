@@ -9,7 +9,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from algua.contracts.types import LiveAuthorization
+from algua.contracts.types import LiveAuthorization, PendingLiveAuthorization
 from algua.registry.repository import StrategyRepository
 
 _NAMESPACE = "algua-go-live"
@@ -117,11 +117,18 @@ def verify_signature(allowed_signers_path: Path, payload: str, signature: bytes)
         return principal if verified.returncode == 0 else None
 
 
-def verify_and_consume(conn: sqlite3.Connection, strategy: str, strategy_id: int, code_hash: str,
-                       config_hash: str, dependency_hash: str | None, signature: bytes,
-                       allowed_signers_path: Path, *, now: datetime | None = None) -> str | None:
-    """Find the pending challenge for this artifact, verify the signature over its exact payload,
-    and atomically consume it. Returns the approver principal on success, else None."""
+def verify_pending(conn: sqlite3.Connection, strategy: str, strategy_id: int, code_hash: str,
+                   config_hash: str, dependency_hash: str | None, signature: bytes,
+                   allowed_signers_path: Path, *,
+                   now: datetime | None = None) -> PendingLiveAuthorization | None:
+    """Find the pending challenge for this artifact and verify the signature over its exact
+    payload. Returns a `PendingLiveAuthorization` carrying what to persist, or None on failure.
+
+    Performs NO writes: the challenge consume + `live_authorizations` insert are deferred to the
+    SAME transaction as the stage CAS (see `apply_transition(live_authorization=...)`), so a
+    raced/failed go-live can't burn the nonce or leave an orphan authorization row (#254). The
+    signature itself is verified here (a slow ssh-keygen subprocess) BEFORE that write lock, so the
+    crypto check never holds a transaction open."""
     now = now or _now()
     row = find_pending_challenge(conn, strategy_id, code_hash, config_hash, dependency_hash,
                                  now=now)
@@ -132,20 +139,12 @@ def verify_and_consume(conn: sqlite3.Connection, strategy: str, strategy_id: int
     principal = verify_signature(allowed_signers_path, payload, signature)
     if principal is None:
         return None
-    if not consume_challenge(conn, row["nonce"], now=now):
-        return None
-    # Persist the durable proof of this go-live: the identity, the nonce+expires_at (so the exact
-    # signed payload can be REBUILT from a recomputed identity at trade time), the signature, and
-    # the approver. We deliberately do NOT store the challenge text — trade-time verification must
-    # rebuild it from the recomputed identity, never trust agent-writable bytes (codex CRITICAL).
-    conn.execute(
-        "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash, dependency_hash, "
-        "nonce, expires_at, signature, principal, authorized_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (strategy_id, code_hash, config_hash, dependency_hash, row["nonce"], row["expires_at"],
-         base64.b64encode(signature).decode(), principal, now.isoformat()),
+    return PendingLiveAuthorization(
+        nonce=row["nonce"],
+        expires_at=row["expires_at"],
+        principal=principal,
+        signature_b64=base64.b64encode(signature).decode(),
     )
-    conn.commit()
-    return principal
 
 
 class LiveAuthorizationError(RuntimeError):

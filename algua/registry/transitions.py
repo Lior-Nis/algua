@@ -5,9 +5,15 @@ from datetime import UTC, datetime
 from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
+from algua.contracts.types import PendingLiveAuthorization
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
 
-ApprovalVerifier = Callable[[StrategyRepository, int, str, str, str | None], bool]
+# (repo, strategy_id, code_hash, config_hash, dependency_hash) -> approval result. Truthy =
+# approved. The signed-challenge (CLI) path returns a ``PendingLiveAuthorization`` to be recorded
+# ATOMICALLY with the stage CAS (#254); the legacy approvals-row path (``has_valid_approval``)
+# returns a bool (True = approved with nothing to persist). Falsy (False/None) = denied.
+ApprovalVerifier = Callable[
+    [StrategyRepository, int, str, str, str | None], "PendingLiveAuthorization | bool"]
 # (repo, name, strategy_id, identity) -> certificate summary; raises TransitionError on any
 # refusal. ``identity`` is the live gate's ONE recomputed identity — the verifier judges against
 # it instead of recomputing, so the certificate and approval checks can never drift (#124 GATE-2).
@@ -36,8 +42,9 @@ def transition_strategy(
     consume_gate_id: int | None = None
     consume_forward_gate_id: int | None = None
     revoke_allocation = False
+    live_authorization: PendingLiveAuthorization | None = None
     if target == Stage.LIVE:
-        identity = _validate_live_gate(
+        identity, live_authorization = _validate_live_gate(
             repo=repo,
             name=name,
             strategy_id=rec.id,
@@ -82,6 +89,7 @@ def transition_strategy(
         consume_gate_id=consume_gate_id,
         consume_forward_gate_id=consume_forward_gate_id,
         revoke_allocation=revoke_allocation,
+        live_authorization=live_authorization,
     )
 
 
@@ -93,7 +101,7 @@ def _validate_live_gate(
     actor: Actor,
     approval_verifier: ApprovalVerifier | None,
     forward_certificate_verifier: ForwardCertificateVerifier | None,
-) -> ArtifactIdentity:
+) -> tuple[ArtifactIdentity, PendingLiveAuthorization | None]:
     """Enforce the human-only live wall against the *recomputed* artifact identity.
 
     Wall ordering (#124): actor -> forward certificate -> approval. The certificate is the
@@ -113,15 +121,19 @@ def _validate_live_gate(
     (forward_certificate_verifier or _default_forward_certificate_verifier())(
         repo, name, strategy_id, identity)
     verifier = approval_verifier or _default_approval_verifier()
-    if not verifier(
+    result = verifier(
         repo,
         strategy_id,
         identity.code_hash,
         identity.config_hash,
         identity.dependency_hash,
-    ):
+    )
+    if not result:  # False / None => denied
         raise TransitionError("no matching human approval for this code+config+dependency")
-    return identity
+    # The signed-challenge path returns the authorization to persist atomically with the stage CAS;
+    # the legacy approvals-row path returns True (approved, nothing to persist) (#254).
+    pending = result if isinstance(result, PendingLiveAuthorization) else None
+    return identity, pending
 
 
 def _validate_shortlist_gate(*, repo: StrategyRepository, name: str, strategy_id: int) -> int:

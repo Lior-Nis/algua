@@ -6,6 +6,7 @@ from typing import Any, NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
+from algua.contracts.types import PendingLiveAuthorization
 
 
 class FdrGateOutcome(NamedTuple):
@@ -207,6 +208,7 @@ class StrategyRepository(Protocol):
         consume_gate_id: int | None = None,
         consume_forward_gate_id: int | None = None,
         revoke_allocation: bool = False,
+        live_authorization: PendingLiveAuthorization | None = None,
     ) -> StrategyRecord:
         """Atomically advance ``rec`` to ``to``, append a transition row, return the new state.
 

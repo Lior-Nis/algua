@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
+from algua.contracts.types import PendingLiveAuthorization
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     FdrGateOutcome,
@@ -304,11 +305,22 @@ class SqliteStrategyRepository:
         consume_gate_id: int | None = None,
         consume_forward_gate_id: int | None = None,
         revoke_allocation: bool = False,
+        live_authorization: PendingLiveAuthorization | None = None,
     ) -> StrategyRecord:
         if consume_gate_id is not None and consume_forward_gate_id is not None:
             raise ValueError(
                 "at most one of consume_gate_id/consume_forward_gate_id may be set — a single"
                 " transition spends a single token")
+        if live_authorization is not None and revoke_allocation:
+            # The go-live authorization (paper/forward->live) and the bench wind-down
+            # (live->dormant) are different edges; they can never co-occur.
+            raise ValueError("live_authorization is incompatible with revoke_allocation")
+        if live_authorization is not None and not (to is Stage.LIVE and actor is Actor.HUMAN):
+            # Defense in depth: the go-live authorization write belongs ONLY to a human
+            # paper/forward->live transition, so the security invariant doesn't rest on
+            # transition_strategy being the sole caller (codex #254 review).
+            raise ValueError(
+                "live_authorization is only valid for a human transition to live")
         if revoke_allocation:
             # Bench wind-down (#125/#247): the live->dormant flatness check, the allocation revoke,
             # and the stage CAS must be ONE atomic critical section. Enforcing flatness in a
@@ -337,7 +349,7 @@ class SqliteStrategyRepository:
             return self._apply_transition_locked(
                 rec, to, actor, reason, code_hash, config_hash, dependency_hash,
                 consume_gate_id, consume_forward_gate_id, _now(),
-                revoke_allocation=False)
+                revoke_allocation=False, live_authorization=live_authorization)
 
     def _assert_flat_for_bench(self, name: str) -> None:
         """Re-check live flatness INSIDE the bench transaction (#247): with the BEGIN IMMEDIATE
@@ -363,12 +375,44 @@ class SqliteStrategyRepository:
         now: str,
         *,
         revoke_allocation: bool = False,
+        live_authorization: PendingLiveAuthorization | None = None,
     ) -> StrategyRecord:
         """``apply_transition``'s body, WITHOUT opening a transaction: the caller owns the
         ``with self._conn:`` scope, so a composite write (e.g.
         ``record_forward_pass_and_promote``) can put extra statements in the SAME transaction
         as the token consume + stage CAS + transition INSERT."""
         from_stage = rec.stage
+        if live_authorization is not None:
+            # Go-live signature path (#254): consume the challenge and write the live_authorizations
+            # row in THIS transaction with the stage CAS below, so a raced/failed transition rolls
+            # back BOTH — never burning the nonce or leaving an orphan authorization. The signature
+            # was already verified (no DB writes) in live_gate.verify_pending. We deliberately do
+            # NOT store the challenge text — trade-time verification rebuilds the signed payload
+            # from the recomputed identity, never from agent-writable bytes (codex CRITICAL).
+            # The consume re-asserts the FULL pending-challenge predicate (strategy + recomputed
+            # identity + unexpired + unconsumed) at consume time — mirroring the forward-gate
+            # consume — so a signature verified just before expiry, or against a drifted identity,
+            # cannot be applied here (closing the validate-then-consume gap; codex #254 review).
+            cur = self._conn.execute(
+                "UPDATE live_challenges SET consumed_at=?"
+                " WHERE nonce=? AND consumed_at IS NULL AND strategy_id=?"
+                " AND code_hash=? AND config_hash=? AND dependency_hash IS ? AND expires_at > ?",
+                (now, live_authorization.nonce, rec.id, code_hash, config_hash, dependency_hash,
+                 now),
+            )
+            if cur.rowcount != 1:
+                raise TransitionError(
+                    "go-live challenge is not consumable for this strategy+identity (already "
+                    "consumed, missing, identity-drifted, or expired); request a fresh challenge "
+                    "and re-sign")
+            self._conn.execute(
+                "INSERT INTO live_authorizations(strategy_id, code_hash, config_hash,"
+                " dependency_hash, nonce, expires_at, signature, principal, authorized_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (rec.id, code_hash, config_hash, dependency_hash, live_authorization.nonce,
+                 live_authorization.expires_at, live_authorization.signature_b64,
+                 live_authorization.principal, now),
+            )
         if consume_gate_id is not None:
             # Single-use, atomic with the stage change: flipping the token, the stage UPDATE,
             # and the transition INSERT all live in this one transaction. If the token row was
