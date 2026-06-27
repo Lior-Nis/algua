@@ -17,9 +17,11 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.live_ledger import (
     LedgerKind,
+    backfill_paper_venue_broker_order_id,
     believed_positions,
     fill_cursor,
     ingest_activities,
+    record_paper_venue_order,
     strategy_live_symbols,
 )
 from algua.execution.live_reconcile import attributed_live_net
@@ -36,13 +38,12 @@ from algua.execution.order_state import (
     latest_tick_snapshot,
     persist_run,
     recent_orders,
-    record_submitted_order,
     record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
-from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.live.live_loop import TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
@@ -142,12 +143,15 @@ def _live_strategy_flat(
 def _strategy_held_symbols(
     conn: sqlite3.Connection, strategy: str, universe: list[str]
 ) -> list[str]:
-    """Universe ∪ every symbol THIS strategy has submitted a paper order for — so a held-but-dropped
-    symbol (traded before its universe changed) is still exited, WITHOUT closing a sibling's
-    positions on a shared paper account. Closing a flat name is a 404 no-op, so over-including
-    never-filled names is harmless."""
+    """Universe ∪ every symbol THIS strategy has submitted a wall-clock paper order for — so a
+    held-but-dropped symbol (traded before its universe changed) is still exited, WITHOUT closing a
+    sibling's positions on a shared paper account. Closing a flat name is a 404 no-op, so
+    over-including never-filled names is harmless.
+
+    The source is paper_venue_orders (the crash-safe wall-clock intent ledger introduced in #249),
+    not paper_orders (the sim-broker path written by persist_run)."""
     rows = conn.execute(
-        "SELECT DISTINCT symbol FROM paper_orders WHERE strategy = ?", (strategy,)
+        "SELECT DISTINCT symbol FROM paper_venue_orders WHERE strategy = ?", (strategy,)
     ).fetchall()
     return sorted(set(universe) | {r["symbol"] for r in rows})
 
@@ -329,15 +333,22 @@ def trade_tick(
         identity = compute_artifact_hashes(name)
         acct = broker.account()
 
-        def _persist(record: SubmittedOrder) -> None:
-            # Persist each accepted order immediately so a mid-loop death can't lose it (#18).
-            record_submitted_order(conn, name, record.symbol, record.side, record.target_weight,
-                                   record.decision_ts.isoformat(), record.order_id,
-                                   strategy_id=rec.id)
-
         hooks = TickHooks(
             client_order_id_for=client_order_id,
-            on_submitted=_persist,
+            # Record intent crash-safely BEFORE the broker call so a mid-submit death leaves a
+            # traceable row in the ledger (#249). The client_order_id is the durable identity.
+            # coid is str | None per TickHooks typing; None means no coid was generated (the
+            # paper path always supplies client_order_id_for, so coid is never None here, but the
+            # guard satisfies mypy and is correct in general).
+            before_submit=lambda intent, coid: (
+                record_paper_venue_order(conn, name, intent.symbol, intent.side.value, None,
+                                         coid, strategy_id=rec.id)
+                if coid is not None else None
+            ),
+            # Backfill the broker-assigned order id AFTER the broker accepts so fills can be
+            # attributed back to this strategy via broker_order_id (#249).
+            on_submitted=lambda rec_: backfill_paper_venue_broker_order_id(
+                conn, rec_.client_order_id, rec_.order_id),
             # Re-read the switch from the DB right before submit so an externally-tripped switch
             # aborts before any order goes out (#21).
             should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),

@@ -204,10 +204,17 @@ class _MinimalBroker:
 
 
 def test_trade_tick_submits_and_persists(monkeypatch):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.contracts.types import OrderIntent, Side
+    from algua.registry.db import connect, migrate
+
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
     ts = datetime(2023, 6, 1, tzinfo=UTC)
+    intent = OrderIntent(symbol="AAA", side=Side.BUY, target_weight=1.0, decision_ts=ts)
     fake_result = TickResult(
         decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
         submitted=[{"symbol": "AAA", "side": "buy", "target_weight": 1.0, "order_id": "o-1",
@@ -216,7 +223,8 @@ def test_trade_tick_submits_and_persists(monkeypatch):
     )
 
     def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
-        # exercise the immediate-persist hook the CLI wires up (#18)
+        # exercise the intent-before-submit hook (#249) then the broker-id backfill hook (#18)
+        hooks.before_submit(intent, "c-1")
         hooks.on_submitted(SubmittedOrder(symbol="AAA", side="buy", target_weight=1.0,
                                           order_id="o-1", client_order_id="c-1", decision_ts=ts))
         return fake_result
@@ -230,8 +238,74 @@ def test_trade_tick_submits_and_persists(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True  # success envelope discriminator
     assert payload["submitted"][0]["order_id"] == "o-1"
-    show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
-    assert show["n_orders"] == 1
+    # wall-clock orders now go into paper_venue_orders (not paper_orders)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT client_order_id, broker_order_id FROM paper_venue_orders "
+            "WHERE strategy = 'cross_sectional_momentum' AND symbol = 'AAA'"
+        ).fetchone()
+    assert row is not None, "paper_venue_orders row missing after trade-tick"
+    assert row["client_order_id"] == "c-1"
+    assert row["broker_order_id"] == "o-1"
+
+
+def test_trade_tick_venue_order_recording(monkeypatch):
+    """After a trade-tick that submits one order:
+    - a paper_venue_orders row exists with client_order_id (pre-submit intent, crash-safe)
+    - broker_order_id is backfilled (post-submit accept)
+    - _strategy_held_symbols includes a venue-ordered symbol no longer in the universe.
+    """
+    from contextlib import closing
+
+    from algua.cli.paper_cmd import _strategy_held_symbols
+    from algua.config.settings import get_settings
+    from algua.contracts.types import OrderIntent, Side
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    ts = datetime(2023, 6, 1, tzinfo=UTC)
+    dropped_sym = "ZZZ"  # NOT in cross_sectional_momentum's universe
+    fake_intent = OrderIntent(symbol=dropped_sym, side=Side.BUY, target_weight=0.1, decision_ts=ts)
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        # Fire before_submit (intent recording) BEFORE broker call, then on_submitted (backfill).
+        hooks.before_submit(fake_intent, "c-venue-1")
+        hooks.on_submitted(SubmittedOrder(symbol=dropped_sym, side="buy", target_weight=0.1,
+                                          order_id="o-venue-1", client_order_id="c-venue-1",
+                                          decision_ts=ts))
+        return TickResult(
+            decision_ts=ts, target_weights={dropped_sym: 0.1}, positions_before={},
+            submitted=[{"symbol": dropped_sym, "side": "buy", "target_weight": 0.1,
+                        "order_id": "o-venue-1", "client_order_id": "c-venue-1"}],
+            peak_equity=100_000.0,
+        )
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT client_order_id, broker_order_id FROM paper_venue_orders "
+            "WHERE strategy = 'cross_sectional_momentum' AND symbol = ?",
+            (dropped_sym,),
+        ).fetchone()
+        # _strategy_held_symbols must include the venue-ordered symbol (universe=[])
+        held = _strategy_held_symbols(conn, "cross_sectional_momentum", universe=[])
+
+    assert row is not None, "paper_venue_orders intent row missing"
+    assert row["client_order_id"] == "c-venue-1"
+    assert row["broker_order_id"] == "o-venue-1"
+    assert dropped_sym in held, f"{dropped_sym!r} not in held symbols {held!r}"
 
 
 class _FlattenBroker:
@@ -518,14 +592,42 @@ def _seed_paper_order(db_path, strategy, symbol):
         conn.commit()
 
 
+def _seed_paper_venue_order(db_path, strategy, symbol):
+    """Seed a paper_venue_orders row simulating a wall-clock trade-tick submission.
+    Used to test that _strategy_held_symbols picks up venue-ordered (but possibly dropped)
+    symbols after the wall-clock lane moved from paper_orders to paper_venue_orders."""
+    from contextlib import closing
+
+    from algua.registry.db import connect, migrate
+    with closing(connect(db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT id FROM strategies WHERE name = ?", (strategy,)
+        ).fetchone()
+        strategy_id = row["id"] if row else 1
+        conn.execute(
+            "INSERT OR IGNORE INTO paper_venue_orders"
+            "(strategy, symbol, side, intended_notional, client_order_id, broker_order_id,"
+            " strategy_id, status, submitted_ts) VALUES (?,?,?,?,?,?,?,?,?)",
+            (strategy, symbol, "buy", None, f"coid-{strategy}-{symbol}",
+             f"boid-{strategy}-{symbol}", strategy_id, "submitted",
+             "2023-01-01T00:00:00Z"),
+        )
+        conn.commit()
+
+
 def test_paper_flatten_closes_dropped_symbol_not_siblings(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
     db = tmp_path / "p.db"
-    # the strategy holds ZZZ (a symbol no longer in its universe); a SIBLING strategy holds SIB
+    # the strategy holds ZZZ (a symbol no longer in its universe); a SIBLING holds SIB.
+    # _seed_paper_order: paper_orders+paper_fills (derive_positions / clear_derived_positions).
+    # _seed_paper_venue_order: paper_venue_orders (_strategy_held_symbols, wall-clock lane).
     _seed_paper_order(db, "cross_sectional_momentum", "ZZZ")
+    _seed_paper_venue_order(db, "cross_sectional_momentum", "ZZZ")
     _seed_paper_order(db, "sibling_strat", "SIB")
+    _seed_paper_venue_order(db, "sibling_strat", "SIB")
 
     broker = _FlattenBroker()
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
@@ -1032,8 +1134,11 @@ def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
-    # the strategy holds ZZZ, a symbol no longer in its universe
+    # the strategy holds ZZZ, a symbol no longer in its universe.
+    # paper_orders+paper_fills for derive_positions / clear_derived_positions;
+    # paper_venue_orders for _strategy_held_symbols (wall-clock lane).
     _seed_paper_order(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
+    _seed_paper_venue_order(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
 
     class _BreachTickBroker(_MinimalBroker):
         def __init__(self):
