@@ -313,6 +313,50 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
         assert row["side"] == "sell" and row["broker_order_id"] == "off"
 
 
+def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
+    # #270: when a LATER strategy breaches, run-all must still surface the siblings already ticked
+    # this cycle in one envelope (not discard them by emitting only the breach payload).
+    from contextlib import closing
+
+    from algua.cli._common import breach_payload
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    _to_live("cross_sectional_momentum")
+    # A second live strategy row (the module is never loaded — verify_live_authorization and
+    # _run_strategy_tick are both mocked; we only need two rows for repo.list_strategies(LIVE)).
+    assert runner.invoke(app, ["registry", "add", "second_live"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name='second_live'")
+        conn.commit()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 100_000.0)
+
+    calls: list[str] = []
+
+    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
+                   reserve_buy=None, cancel=None):
+        calls.append(name)
+        if len(calls) == 1:
+            return {"strategy": name, "venue": "live", "submitted": []}  # first ticks clean
+        return breach_payload("dd", strategy=name, kind="drawdown")       # second breaches
+
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    strategies = payload["strategies"]
+    assert len(strategies) == 2  # the clean sibling is preserved ALONGSIDE the breaching one
+    assert strategies[0].get("ok") is not False and strategies[0]["strategy"] == calls[0]
+    assert strategies[1]["ok"] is False and strategies[1]["error"] == "dd"
+    assert strategies[1]["strategy"] == calls[1]
+
+
 def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
     _to_live()
     captured = {}
