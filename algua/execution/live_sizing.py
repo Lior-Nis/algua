@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from algua.execution.live_ledger import believed_positions, position_pnl
+from algua.execution.live_ledger import LedgerKind, believed_positions, position_pnl
 
 
 class LiveSizingError(ValueError):
@@ -40,7 +40,7 @@ def build_live_sizing_snapshot(
     bars: pd.DataFrame,
     universe: list[str],
 ) -> tuple[SizingSnapshot, float]:
-    held = believed_positions(conn, strategy)          # {symbol: signed qty}, nonzero only
+    held = believed_positions(conn, strategy, LedgerKind.LIVE)  # {symbol: signed qty}, nonzero only
     marks = _latest_marks(bars)
     symbols = set(universe) | set(held)
 

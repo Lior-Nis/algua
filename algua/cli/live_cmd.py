@@ -15,6 +15,7 @@ from algua.contracts.types import LiveAuthorization
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
 from algua.execution.live_ledger import (
+    LedgerKind,
     backfill_broker_order_id,
     believed_positions,
     fill_cursor,
@@ -138,7 +139,8 @@ def _run_strategy_tick(  # noqa: PLR0913
 
     hooks = TickHooks(
         client_order_id_for=client_order_id, on_submitted=_persist, cancel=cancel,
-        live_snapshot=_live_snap, live_positions=lambda: believed_positions(conn, name),
+        live_snapshot=_live_snap,
+        live_positions=lambda: believed_positions(conn, name, LedgerKind.LIVE),
         should_halt=lambda: (kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn)
                              or not authorization_active(conn, authorization)),
         peak_equity=get_nav_peak(conn, name),
@@ -158,8 +160,9 @@ def _run_strategy_tick(  # noqa: PLR0913
         flatten_error = None
         try:
             _scoped_cancel(conn, broker, name)                       # cancel only our orders
-            ingest_activities(conn, _broker_account_activities(broker, fill_cursor(conn)))
-            for sym, qty in believed_positions(conn, name).items():  # fresh believed qty
+            cursor = fill_cursor(conn, LedgerKind.LIVE)
+            ingest_activities(conn, _broker_account_activities(broker, cursor), LedgerKind.LIVE)
+            for sym, qty in believed_positions(conn, name, LedgerKind.LIVE).items():  # fresh qty
                 # RECORD the offset in the books (+ backfill) so its fill attributes back to this
                 # strategy and believed_positions drops to flat — else the resume gate would block
                 # resume forever (codex CRITICAL). The kill-switch (just tripped) prevents a re-run
@@ -273,7 +276,8 @@ def run_all(
         broker = _alpaca_live_broker(verified[0][1])
         provider = _select_provider(False, snapshot)
         # ingest fills, then reconcile the account before trading
-        ingest_activities(conn, _broker_account_activities(broker, fill_cursor(conn)))
+        cursor = fill_cursor(conn, LedgerKind.LIVE)
+        ingest_activities(conn, _broker_account_activities(broker, cursor), LedgerKind.LIVE)
         cycle = live_reconcile.next_cycle(conn)
         recon = live_reconcile.reconcile(
             conn, _broker_net_positions(broker), cycle,

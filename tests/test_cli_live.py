@@ -90,8 +90,8 @@ def test_run_all_skips_only_the_unauthorized_strategy(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", _selective)
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
     monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
-    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
-    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
     monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
     monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
@@ -113,8 +113,8 @@ def test_run_all_halts_on_unexplained_reconcile_drift(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
     monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
     # broker activities -> none; positions -> an unexplained holding the books don't have
-    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
-    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
     monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
     monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {"ZZZ": 99.0})
     # --grace-cycles 0 forces the mismatch straight to unexplained -> assert global halt engaged
@@ -136,8 +136,8 @@ def test_run_all_ticks_strategy_when_clean(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
     monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
-    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts: None)
-    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn: None)
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
     monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
     monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
@@ -205,7 +205,7 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
     monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
     monkeypatch.setattr("algua.cli.live_cmd.believed_positions",
-                        lambda conn, name: {"AAA": 5.0})  # strategy believes it holds 5 AAA
+                        lambda conn, name, kind: {"AAA": 5.0})  # strategy believes it holds 5 AAA
     monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
                         lambda conn, sid: {"capital": 10_000.0})
     monkeypatch.setattr("algua.cli.live_cmd.run_tick",
@@ -402,14 +402,14 @@ def test_breach_flatten_resume_end_to_end(monkeypatch):
     from contextlib import closing
 
     from algua.config.settings import get_settings
-    from algua.execution.live_ledger import believed_positions
+    from algua.execution.live_ledger import LedgerKind, believed_positions
     from algua.registry.db import connect, migrate
     from algua.risk import kill_switch
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         assert kill_switch.is_tripped(conn, name)
         # operator-trap: offset fills have NOT been ingested yet -> belief still non-flat
-        assert believed_positions(conn, name) == {"AAA": 5.0, "ZZZ": 3.0}
+        assert believed_positions(conn, name, LedgerKind.LIVE) == {"AAA": 5.0, "ZZZ": 3.0}
 
     # 2) resume ingests the offset fills, reconciles to flat, clears the kill-switch (zero drift)
     r2 = runner.invoke(app, ["paper", "resume", name])
@@ -418,7 +418,7 @@ def test_breach_flatten_resume_end_to_end(monkeypatch):
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         assert not kill_switch.is_tripped(conn, name)
-        assert believed_positions(conn, name) == {}   # ledger flat after resume
+        assert believed_positions(conn, name, LedgerKind.LIVE) == {}   # ledger flat after resume
 
 
 def test_resume_sibling_holds_same_symbol_does_not_block(monkeypatch):

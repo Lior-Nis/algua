@@ -116,9 +116,9 @@ def test_bench_takes_write_lock_before_flatness_read(tmp_path, monkeypatch):
         read_seen = {"v": False}
         real = live_ledger.believed_positions
 
-        def _spy(c, n):
+        def _spy(c, n, kind):
             read_seen["v"] = True
-            return real(c, n)
+            return real(c, n, kind)
 
         monkeypatch.setattr(live_ledger, "believed_positions", _spy)
         with pytest.raises(sqlite3.OperationalError, match="locked"):

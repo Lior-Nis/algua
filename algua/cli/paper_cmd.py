@@ -16,6 +16,7 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.live_ledger import (
+    LedgerKind,
     believed_positions,
     fill_cursor,
     ingest_activities,
@@ -109,8 +110,9 @@ def _live_strategy_flat(
     books' LIVE-attributed net) in any symbol it is responsible for. A sibling LIVE strategy that
     legitimately holds the same symbol explains the broker qty and does not block resume; an orphan
     (unattributed/manual) or non-live holding does NOT explain it, so it fails closed (refuse)."""
-    ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))  # type: ignore[attr-defined]
-    own = believed_positions(conn, name)
+    cursor = fill_cursor(conn, LedgerKind.LIVE)
+    ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)  # type: ignore[attr-defined]
+    own = believed_positions(conn, name, LedgerKind.LIVE)
     broker_net = {s: float(q) for s, q in broker.get_positions().items()  # type: ignore[attr-defined]
                   if float(q) != 0.0}
     expected = attributed_live_net(conn)
@@ -192,7 +194,7 @@ def show(name: str) -> None:
         n_orders = count_orders(conn, name)
         if rec.stage is Stage.LIVE:
             from algua.execution.order_state import get_nav_peak
-            positions = believed_positions(conn, name)
+            positions = believed_positions(conn, name, LedgerKind.LIVE)
             peak = get_nav_peak(conn, name)
         else:
             positions = derive_positions(conn, name)
@@ -543,9 +545,10 @@ def resume_all(
             broker = _maybe_live_readonly()
             if broker is not None:
                 # account-wide ingest so not_flat reflects post-ingest belief (landed offset fills)
-                ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))
+                cursor = fill_cursor(conn, LedgerKind.LIVE)
+                ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)
         not_flat = [
-            r["name"] for r in live_rows if believed_positions(conn, r["name"])
+            r["name"] for r in live_rows if believed_positions(conn, r["name"], LedgerKind.LIVE)
         ]
         if was_set:
             audit_append(conn, actor=actor, action="resume_all",

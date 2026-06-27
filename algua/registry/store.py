@@ -344,8 +344,8 @@ class SqliteStrategyRepository:
         write lock held, no concurrent fill can commit between this check and the revoke+CAS, so a
         live strategy cannot go dormant while holding an open (and thus orphaned) position.
         believed_positions is imported lazily — the registry->execution pattern transitions uses."""
-        from algua.execution.live_ledger import believed_positions
-        if believed_positions(self._conn, name):
+        from algua.execution.live_ledger import LedgerKind, believed_positions
+        if believed_positions(self._conn, name, LedgerKind.LIVE):
             raise TransitionError(
                 f"{name} is not flat (open live positions); flatten before benching to dormant")
 
