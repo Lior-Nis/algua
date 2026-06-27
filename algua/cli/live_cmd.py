@@ -118,9 +118,10 @@ def _run_strategy_tick(  # noqa: PLR0913
     start: str = "2023-01-01", end: str = "2023-12-31", reserve_buy=None, cancel=None,
 ) -> dict:
     """Drive ONE strategy's live tick: hooks (incl. the scoped `cancel`), run_tick, breach handling
-    (trip + scoped flatten), snapshot persistence. Returns a result dict; raises typer.Exit(1) with
-    an emitted breach/halt payload on TickHalted/RiskBreach (same behaviour as the single-strategy
-    command)."""
+    (trip + scoped flatten), snapshot persistence. ALWAYS returns a per-strategy result dict — on
+    TickHalted/RiskBreach it still performs the side-effects (trip + scoped flatten + audit) and
+    returns a breach/halt marker (`{"ok": False, ...}`) instead of emitting+exiting, so run-all can
+    surface the already-ticked siblings alongside the breaching strategy in one envelope (#270)."""
     strategy = load_tradable_strategy(name)
 
     rec = SqliteStrategyRepository(conn).get(name)
@@ -161,8 +162,7 @@ def _run_strategy_tick(  # noqa: PLR0913
     except TickHalted as exc:
         audit_append(conn, actor="system", action="live_trade_tick_halted",
                      reason=str(exc), strategy=name)
-        emit(breach_payload(str(exc), strategy=name, halted=True))
-        raise typer.Exit(1) from exc
+        return breach_payload(str(exc), strategy=name, halted=True)
     except RiskBreach as exc:
         trip_for_breach(conn, name, exc)
         liquidation_submitted = True
@@ -184,12 +184,11 @@ def _run_strategy_tick(  # noqa: PLR0913
             flatten_error = str(fexc)
             audit_append(conn, actor="system", action="flatten_failed",
                          reason=str(fexc), strategy=name)
-        payload = breach_payload(exc.detail, kind=exc.kind,
+        payload = breach_payload(exc.detail, strategy=name, kind=exc.kind,
                                   liquidation_submitted=liquidation_submitted)
         if flatten_error is not None:
             payload["flatten_error"] = flatten_error
-        emit(payload)
-        raise typer.Exit(1) from exc
+        return payload
     except LiveSizingError as exc:        # fail-closed mark -> skip this strategy, don't trade
         audit_append(conn, actor="system", action="live_sizing_skipped",
                      reason=str(exc), strategy=name)
@@ -324,14 +323,26 @@ def run_all(
             return _reserve
 
         results = []
+        breached = False
         for name, authorization in verified:
-            results.append(_run_strategy_tick(
+            result = _run_strategy_tick(
                 conn, name, authorization, broker, provider, max_drawdown,
                 start=start, end=end,
                 reserve_buy=_reserve_for(name),
                 cancel=lambda n=name: _scoped_cancel(conn, broker, n),
-            ))
-    emit(ok({"reconcile": recon_payload, "skipped": skipped, "strategies": results}))
+            )
+            results.append(result)
+            if result.get("ok") is False:  # breach/halt marker: stop, but keep prior results
+                breached = True
+                break
+    envelope = {"reconcile": recon_payload, "skipped": skipped, "strategies": results}
+    if breached:
+        # A strategy breached/halted (already tripped + scoped-flattened): surface the breaching
+        # strategy AND every sibling already ticked this cycle in one envelope, then exit non-zero
+        # (#270) — don't discard the prior results by emitting only the breach payload.
+        emit({"ok": False, **envelope})
+        raise typer.Exit(1)
+    emit(ok(envelope))
 
 
 def _scoped_cancel(conn, broker, strategy: str) -> None:
