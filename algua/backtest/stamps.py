@@ -22,7 +22,11 @@ def _code_hash() -> str | None:
     if head is None:
         return None
     status = _git_bytes(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-    if not status:
+    if status is None:
+        # git status was unavailable (timeout/error) — DON'T equate that with a clean
+        # workspace, or a dirty tree would be silently stamped as the bare clean HEAD (#256).
+        return None
+    if not status:  # b"" => genuinely clean
         return head
     dirty_hash = _dirty_workspace_hash(status)
     return f"{head}-dirty-{dirty_hash[:16]}"
