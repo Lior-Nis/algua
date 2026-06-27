@@ -17,7 +17,7 @@ def test_same_date_same_membership_is_idempotent(tmp_path):
     assert a.snapshot_id == b.snapshot_id  # content-hash dedup
 
 
-def test_same_date_different_membership_rejected_before_write(tmp_path):
+def test_same_date_different_membership_rejected_before_manifest_commit(tmp_path):
     store = DataStore(tmp_path)
     _ingest(store, ["AAPL", "MSFT"], "2000-01-01")
     before = store.data_dir.joinpath("manifest.jsonl").read_text()
