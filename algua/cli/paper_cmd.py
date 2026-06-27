@@ -82,14 +82,17 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
 
 
-def _ingest_paper_venue(conn: sqlite3.Connection, broker: object) -> None:
+def _ingest_paper_venue(conn: sqlite3.Connection, broker: object, until: str) -> None:
     """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
 
-    Cursor is a broker-time high-water: fetch (cursor, broker.clock()] via the paginated
+    Cursor is a broker-time high-water: fetch (cursor, until] via the paginated
     account_activities_window (raises on a partial page), dedup by activity_id, then persist the
-    `until` clock as the new cursor in the SAME ingest transaction."""
+    `until` value as the new cursor in the SAME ingest transaction.
+
+    The caller is responsible for resolving `until` (e.g. from tick_clock or broker.clock())
+    before calling — this function never calls broker.clock() itself so that a clock failure
+    stays in the caller's hands (resilient fallback vs. fail-closed, per call site)."""
     after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
-    until = broker.clock()  # type: ignore[attr-defined]
     acts = broker.account_activities_window(after, until)  # type: ignore[attr-defined]
     ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
 
@@ -315,7 +318,16 @@ def trade_tick(
         provider = _select_provider(False, snapshot)
         identity = compute_artifact_hashes(name)
         acct = broker.account()
-        _ingest_paper_venue(conn, broker)
+        # Resolve the venue clock ONCE (resilient: clock failure falls back to local clock so the
+        # tick still proceeds) and use the resolved ts as the window upper bound for ingest.
+        tick_ts, clock_source = tick_clock(broker.clock)
+        try:
+            _ingest_paper_venue(conn, broker, tick_ts)
+        except BrokerError as exc:
+            audit_append(conn, actor="system", action="venue_ingest_failed",
+                         reason=str(exc), strategy=name)
+            emit(breach_payload(str(exc), strategy=name, kind="venue_ingest_failed"))
+            raise typer.Exit(1) from exc
 
         hooks = TickHooks(
             client_order_id_for=client_order_id,
@@ -354,7 +366,7 @@ def trade_tick(
             flatten_error = None
             try:
                 broker.cancel_open_orders()
-                _ingest_paper_venue(conn, broker)
+                _ingest_paper_venue(conn, broker, tick_ts)
                 for sym, qty in paper_believed_positions(conn, name).items():
                     if abs(qty) <= _RECONCILE_TOL:
                         continue
@@ -377,7 +389,6 @@ def trade_tick(
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
-            tick_ts, clock_source = tick_clock(broker.clock)
             record_tick_snapshot(
                 conn, name,
                 tick_ts=tick_ts,
@@ -503,7 +514,7 @@ def flatten(
         audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
         try:
             broker.cancel_open_orders()
-            _ingest_paper_venue(conn, broker)
+            _ingest_paper_venue(conn, broker, broker.clock())
             for sym, qty in paper_believed_positions(conn, name).items():
                 if abs(qty) <= _RECONCILE_TOL:
                     continue

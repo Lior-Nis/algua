@@ -67,7 +67,7 @@ def test_ingest_uses_far_past_first_then_advances_cursor(tmp_path):
     )
     c.commit()
     broker = FakeBroker({_FAR_PAST: [_fill("a1", "AAA", 5, "buy", "o1")]})
-    _ingest_paper_venue(c, broker)
+    _ingest_paper_venue(c, broker, broker.clock())
     assert paper_believed_positions(c, "s") == {"AAA": 5.0}
     assert fill_cursor(c, LedgerKind.PAPER) == "2026-01-02T00:00:00Z"  # = until (broker clock)
 
@@ -76,7 +76,7 @@ def test_ingest_fails_closed_on_transport_error(tmp_path):
     c = _conn(tmp_path)
     broker = FakeBroker({_FAR_PAST: RuntimeError("503")})
     with pytest.raises(RuntimeError):
-        _ingest_paper_venue(c, broker)
+        _ingest_paper_venue(c, broker, broker.clock())
     assert fill_cursor(c, LedgerKind.PAPER) is None  # cursor must NOT advance on failure
 
 
@@ -226,3 +226,117 @@ def test_trade_tick_trips_on_orphan_holding(monkeypatch, tmp_path):
     assert payload["ok"] is False
     assert payload["kind"] == "reconcile"
     assert payload["kill_switch"] == "tripped"
+
+
+# ---------------------------------------------------------------------------
+# Task-11: fail-closed evidence + clock-resilience (venue ingest refactor)
+# ---------------------------------------------------------------------------
+
+def test_trade_tick_fails_closed_on_ingest_fetch_failure(monkeypatch, tmp_path):
+    """Venue fetch failure → exit 1 before run_tick; no tick snapshot recorded.
+
+    Task 11: fail-closed evidence — if account_activities_window raises BrokerError,
+    trade_tick must exit non-zero AND record NO tick snapshot (reconcile_ok=True is
+    never fabricated for a tick whose fill-state is unknown).
+    """
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.order_state import latest_tick_snapshot
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    class _IngestFailBroker:
+        def clock(self) -> str:
+            return "2024-01-15T14:00:00Z"
+
+        def account(self) -> AccountState:
+            return AccountState(equity=100_000.0, cash=100_000.0,
+                                buying_power=100_000.0, account_id="fail-acct")
+
+        def account_activities_window(self, after: str, until: str) -> list:
+            raise BrokerError("transport error: 503 Service Unavailable")
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _IngestFailBroker())
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snapshot: object())
+    # run_tick must NOT be reached — the fail-closed exit happens before it
+
+    result = runner.invoke(app, ["paper", "trade-tick", _NAME, "--snapshot", "snap1",
+                                 "--start", _START, "--end", _END])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["kind"] == "venue_ingest_failed"
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        snap = latest_tick_snapshot(conn, _NAME)
+    assert snap is None, "tick snapshot must NOT be recorded when venue ingest fails"
+
+
+def test_trade_tick_survives_broker_clock_failure(monkeypatch, tmp_path):
+    """broker.clock() failure falls back to local timestamp; tick does NOT abort.
+
+    Task 11 / clock-resilience: tick_clock catches broker.clock() failures and returns
+    a local timestamp, which is then used as the window upper-bound for ingest.
+    account_activities_window returns [] → ingest succeeds → tick proceeds → snapshot
+    records clock_source='local'.
+    """
+    from contextlib import closing
+    from datetime import UTC, datetime
+
+    from algua.config.settings import get_settings
+    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.order_state import latest_tick_snapshot
+    from algua.live.live_loop import TickResult
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+
+    class _ClockFailBroker:
+        def clock(self) -> str:
+            raise BrokerError("clock endpoint down")
+
+        def account(self) -> AccountState:
+            return AccountState(equity=50_000.0, cash=10_000.0,
+                                buying_power=40_000.0, account_id="acct-cf")
+
+        def account_activities_window(self, after: str, until: str) -> list:
+            return []
+
+    fake_result = TickResult(
+        decision_ts=datetime(2024, 1, 15, 14, 0, 0, tzinfo=UTC),
+        target_weights={},
+        positions_before={},
+        submitted=[],
+        equity=50_000.0,
+        peak_equity=50_000.0,
+    )
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _ClockFailBroker())
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
+
+    result = runner.invoke(app, ["paper", "trade-tick", _NAME, "--snapshot", "snap1",
+                                 "--start", _START, "--end", _END])
+    assert result.exit_code == 0, result.stdout
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        snap = latest_tick_snapshot(conn, _NAME)
+    assert snap is not None
+    assert snap["clock_source"] == "local", "clock failure must fall back to local, never abort"
+    assert snap["tick_ts"]  # a valid local timestamp was written
