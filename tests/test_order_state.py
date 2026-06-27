@@ -1,4 +1,3 @@
-from contextlib import closing
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -7,7 +6,6 @@ import pytest
 from algua.contracts.types import OrderIntent, Side
 from algua.execution.order_state import (
     clear_all_peaks,
-    clear_derived_positions,
     clear_peak_equity,
     client_order_id,
     count_orders,
@@ -297,20 +295,3 @@ def _seed_fill(conn, strategy, symbol, qty):
     conn.commit()
 
 
-def test_clear_derived_positions_zeros_only_target_strategy(tmp_path):
-    db = tmp_path / "p.db"
-    with closing(connect(db)) as conn:
-        migrate(conn)
-        _seed_fill(conn, "alpha", "AAA", 5.0)
-        _seed_fill(conn, "beta", "BBB", 3.0)
-        assert derive_positions(conn, "alpha") == {"AAA": 5.0}
-
-        clear_derived_positions(conn, "alpha")
-
-        assert derive_positions(conn, "alpha") == {}        # alpha belief gone
-        assert derive_positions(conn, "beta") == {"BBB": 3.0}  # sibling untouched
-        # paper_orders rows are kept (audit trail / symbol source)
-        n = conn.execute(
-            "SELECT COUNT(*) FROM paper_orders WHERE strategy='alpha'"
-        ).fetchone()[0]
-        assert n == 1

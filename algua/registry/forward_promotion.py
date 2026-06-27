@@ -150,7 +150,7 @@ def _classify_activities(
         elif activity_type == "FILL":
             order_id = act.get("order_id")
             matched = order_id is not None and conn.execute(
-                "SELECT 1 FROM paper_orders WHERE strategy_id = ? AND broker_order_id = ?",
+                "SELECT 1 FROM paper_venue_orders WHERE strategy_id = ? AND broker_order_id = ?",
                 (strategy_id, order_id),
             ).fetchone() is not None
             if not matched:

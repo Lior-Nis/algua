@@ -16,32 +16,36 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.live_ledger import (
+    LedgerKind,
+    backfill_paper_venue_broker_order_id,
     believed_positions,
     fill_cursor,
     ingest_activities,
+    paper_believed_positions,
+    record_paper_venue_order,
     strategy_live_symbols,
 )
 from algua.execution.live_reconcile import attributed_live_net
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
-    clear_derived_positions,
     clear_nav_peak,
     clear_peak_equity,
     client_order_id,
     count_orders,
+    count_venue_orders,
     derive_positions,
     get_peak_equity,
     latest_tick_snapshot,
     persist_run,
     recent_orders,
-    record_submitted_order,
+    recent_venue_orders,
     record_tick_snapshot,
     update_peak_equity,
 )
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
-from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.live.live_loop import _RECONCILE_TOL, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
@@ -77,7 +81,22 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-_RECONCILE_TOL = 1e-6
+_PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
+
+
+def _ingest_paper_venue(conn: sqlite3.Connection, broker: object, until: str) -> None:
+    """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
+
+    Cursor is a broker-time high-water: fetch (cursor, until] via the paginated
+    account_activities_window (raises on a partial page), dedup by activity_id, then persist the
+    `until` value as the new cursor in the SAME ingest transaction.
+
+    The caller is responsible for resolving `until` (e.g. from tick_clock or broker.clock())
+    before calling — this function never calls broker.clock() itself so that a clock failure
+    stays in the caller's hands (resilient fallback vs. fail-closed, per call site)."""
+    after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
+    acts = broker.account_activities_window(after, until)  # type: ignore[attr-defined]
+    ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
 
 
 def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
@@ -109,8 +128,9 @@ def _live_strategy_flat(
     books' LIVE-attributed net) in any symbol it is responsible for. A sibling LIVE strategy that
     legitimately holds the same symbol explains the broker qty and does not block resume; an orphan
     (unattributed/manual) or non-live holding does NOT explain it, so it fails closed (refuse)."""
-    ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))  # type: ignore[attr-defined]
-    own = believed_positions(conn, name)
+    cursor = fill_cursor(conn, LedgerKind.LIVE)
+    ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)  # type: ignore[attr-defined]
+    own = believed_positions(conn, name, LedgerKind.LIVE)
     broker_net = {s: float(q) for s, q in broker.get_positions().items()  # type: ignore[attr-defined]
                   if float(q) != 0.0}
     expected = attributed_live_net(conn)
@@ -122,19 +142,6 @@ def _live_strategy_flat(
     }
     is_flat = (not own) and (not unexplained)
     return is_flat, {"believed": own, "broker_unexplained": unexplained}
-
-
-def _strategy_held_symbols(
-    conn: sqlite3.Connection, strategy: str, universe: list[str]
-) -> list[str]:
-    """Universe ∪ every symbol THIS strategy has submitted a paper order for — so a held-but-dropped
-    symbol (traded before its universe changed) is still exited, WITHOUT closing a sibling's
-    positions on a shared paper account. Closing a flat name is a 404 no-op, so over-including
-    never-filled names is harmless."""
-    rows = conn.execute(
-        "SELECT DISTINCT symbol FROM paper_orders WHERE strategy = ?", (strategy,)
-    ).fetchall()
-    return sorted(set(universe) | {r["symbol"] for r in rows})
 
 
 @paper_app.command("run")
@@ -189,18 +196,27 @@ def show(name: str) -> None:
     recent orders, and a health rollup. A pure read of persisted state (no broker call)."""
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
-        n_orders = count_orders(conn, name)
         if rec.stage is Stage.LIVE:
             from algua.execution.order_state import get_nav_peak
-            positions = believed_positions(conn, name)
+            positions = believed_positions(conn, name, LedgerKind.LIVE)
             peak = get_nav_peak(conn, name)
+            n_orders = count_orders(conn, name)
+            orders = recent_orders(conn, name, 10)
+        elif conn.execute(
+            "SELECT 1 FROM paper_venue_orders WHERE strategy = ? LIMIT 1", (name,)
+        ).fetchone() is not None:
+            positions = paper_believed_positions(conn, name)
+            peak = get_peak_equity(conn, name)
+            n_orders = count_venue_orders(conn, name)
+            orders = recent_venue_orders(conn, name, 10)
         else:
             positions = derive_positions(conn, name)
             peak = get_peak_equity(conn, name)
+            n_orders = count_orders(conn, name)
+            orders = recent_orders(conn, name, 10)
         ks = kill_switch.get(conn, name)
         halted_globally = global_halt.is_engaged(conn)
         last = latest_tick_snapshot(conn, name)
-        orders = recent_orders(conn, name, 10)
     tripped = ks is not None
     last_equity = last["equity"] if last else None
     drawdown = (
@@ -315,21 +331,38 @@ def trade_tick(
         provider = _select_provider(False, snapshot)
         identity = compute_artifact_hashes(name)
         acct = broker.account()
-
-        def _persist(record: SubmittedOrder) -> None:
-            # Persist each accepted order immediately so a mid-loop death can't lose it (#18).
-            record_submitted_order(conn, name, record.symbol, record.side, record.target_weight,
-                                   record.decision_ts.isoformat(), record.order_id,
-                                   strategy_id=rec.id)
+        # Resolve the venue clock ONCE (resilient: clock failure falls back to local clock so the
+        # tick still proceeds) and use the resolved ts as the window upper bound for ingest.
+        tick_ts, clock_source = tick_clock(broker.clock)
+        try:
+            _ingest_paper_venue(conn, broker, tick_ts)
+        except Exception as exc:   # fail closed on ANY ingest/transport error, not just BrokerError
+            audit_append(conn, actor="system", action="venue_ingest_failed",
+                         reason=str(exc), strategy=name)
+            emit(breach_payload(str(exc), strategy=name, kind="venue_ingest_failed"))
+            raise typer.Exit(1) from exc
 
         hooks = TickHooks(
             client_order_id_for=client_order_id,
-            on_submitted=_persist,
+            # Record intent crash-safely BEFORE the broker call so a mid-submit death leaves a
+            # traceable row in the ledger (#249). The client_order_id is the durable identity.
+            # coid is str | None per TickHooks typing; None means no coid was generated (the
+            # paper path always supplies client_order_id_for, so coid is never None here, but the
+            # guard satisfies mypy and is correct in general).
+            before_submit=lambda intent, coid: (
+                record_paper_venue_order(conn, name, intent.symbol, intent.side.value, None,
+                                         coid, strategy_id=rec.id)
+                if coid is not None else None
+            ),
+            # Backfill the broker-assigned order id AFTER the broker accepts so fills can be
+            # attributed back to this strategy via broker_order_id (#249).
+            on_submitted=lambda rec_: backfill_paper_venue_broker_order_id(
+                conn, rec_.client_order_id, rec_.order_id),
             # Re-read the switch from the DB right before submit so an externally-tripped switch
             # aborts before any order goes out (#21).
             should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
             peak_equity=get_peak_equity(conn, name),
-            derived_positions=derive_positions(conn, name),
+            venue_belief=lambda: paper_believed_positions(conn, name),
         )
         try:
             result = run_tick(strategy, broker, provider, utc(start), utc(end),
@@ -342,30 +375,47 @@ def trade_tick(
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
             trip_for_breach(conn, name, exc)
-            liquidation_submitted = True
+            n_offsets = 0
+            liquidation_submitted = False
             flatten_error = None
-            symbols = _strategy_held_symbols(conn, name, strategy.universe)
             try:
                 broker.cancel_open_orders()
-                broker.close_positions(symbols)
-            except BrokerError as fexc:
+                # Re-ingest up to NOW (not the stale top-of-tick ts) so fills that landed during
+                # this tick are reflected in the belief the offset loop liquidates. tick_clock keeps
+                # this resilient to a broker-clock outage (local fallback).
+                breach_ts, _ = tick_clock(broker.clock)
+                _ingest_paper_venue(conn, broker, breach_ts)
+                for sym, qty in paper_believed_positions(conn, name).items():
+                    if abs(qty) <= _RECONCILE_TOL:
+                        continue
+                    coid = client_order_id(name, datetime.now(UTC), sym)
+                    record_paper_venue_order(conn, name, sym,
+                                             "sell" if qty > 0 else "buy", None,
+                                             coid, strategy_id=rec.id)
+                    oid = broker.submit_offset(sym, qty, coid)
+                    backfill_paper_venue_broker_order_id(conn, coid, oid)
+                    n_offsets += 1
+                # Honest signal (GATE-2 HIGH): True ONLY if at least one offset order actually
+                # went out. A breach whose broker residual is an orphan we don't own (belief flat)
+                # submits nothing — report False so the operator knows the position is untouched.
+                liquidation_submitted = n_offsets > 0
+            # Fail SAFE on ANY liquidation error (not only BrokerError): a non-BrokerError from the
+            # venue ingest/offset path must still report a structured liquidation_submitted=False
+            # rather than crash the breach handler with an unstructured traceback (GATE-2).
+            except Exception as fexc:
                 liquidation_submitted = False
                 flatten_error = str(fexc)
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
-            else:
-                # Close succeeded: reset the derived belief so the next reconcile starts flat.
-                clear_derived_positions(conn, name)
             payload = breach_payload(exc.detail, kind=exc.kind,
                                       liquidation_submitted=liquidation_submitted,
-                                      closed_symbols=symbols)
+                                      offsets_submitted=n_offsets)
             if flatten_error is not None:
                 payload["flatten_error"] = flatten_error
             emit(payload)
             raise typer.Exit(1) from exc
         if result.peak_equity is not None:
             update_peak_equity(conn, name, result.peak_equity)
-            tick_ts, clock_source = tick_clock(broker.clock)
             record_tick_snapshot(
                 conn, name,
                 tick_ts=tick_ts,
@@ -474,10 +524,10 @@ def flatten(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
-    """Emergency: close this strategy's paper positions (its own held + universe symbols) and trip
-    its kill-switch."""
-    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch
-    strategy = load_strategy(name)
+    """Emergency: close this strategy's believed paper positions and trip its kill-switch.
+    The offset loop iterates paper_believed_positions (strategy-attributed paper_venue_fills),
+    so sibling positions on the shared account are never touched."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch (#259)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
         # A forward_tested strategy still holds paper positions while awaiting the go-live
@@ -491,18 +541,32 @@ def flatten(
         kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
         audit_append(conn, actor=actor_enum.value, action="flatten",
                      reason="manual flatten", strategy=name)
-        symbols = _strategy_held_symbols(conn, name, strategy.universe)
+        n_offsets = 0
         try:
             broker.cancel_open_orders()
-            broker.close_positions(symbols)
-        except BrokerError as exc:
-            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
+            flat_ts, _ = tick_clock(broker.clock)
+            _ingest_paper_venue(conn, broker, flat_ts)
+            for sym, qty in paper_believed_positions(conn, name).items():
+                if abs(qty) <= _RECONCILE_TOL:
+                    continue
+                coid = client_order_id(name, datetime.now(UTC), sym)
+                record_paper_venue_order(conn, name, sym,
+                                         "sell" if qty > 0 else "buy", None,
+                                         coid, strategy_id=rec.id)
+                oid = broker.submit_offset(sym, qty, coid)
+                backfill_paper_venue_broker_order_id(conn, coid, oid)
+                n_offsets += 1
+        # Fail SAFE on ANY liquidation error (not only BrokerError) so the emergency flatten always
+        # emits a structured payload instead of crashing with an unstructured traceback (GATE-2).
+        except Exception as exc:
+            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False,
+                                offsets_submitted=n_offsets))
             raise typer.Exit(1) from exc
-        # Close succeeded: reset the derived belief so a later trade-tick reconcile starts flat.
-        clear_derived_positions(conn, name)
-    # liquidation_submitted: Alpaca accepted the close orders; fills land async (may be next open).
-    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True,
-             "closed_symbols": symbols}))
+    # liquidation_submitted reflects whether any offset order ACTUALLY went out (GATE-2 HIGH): a
+    # strategy already flat (no believed positions) submits none, so report False rather than imply
+    # a liquidation that never happened. Accepted offset fills land async (may be next open).
+    emit(ok({"strategy": name, "kill_switch": "tripped",
+             "liquidation_submitted": n_offsets > 0, "offsets_submitted": n_offsets}))
 
 
 @paper_app.command("halt-all")
@@ -552,9 +616,10 @@ def resume_all(
             broker = _maybe_live_readonly()
             if broker is not None:
                 # account-wide ingest so not_flat reflects post-ingest belief (landed offset fills)
-                ingest_activities(conn, broker.account_activities(after=fill_cursor(conn)))
+                cursor = fill_cursor(conn, LedgerKind.LIVE)
+                ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)
         not_flat = [
-            r["name"] for r in live_rows if believed_positions(conn, r["name"])
+            r["name"] for r in live_rows if believed_positions(conn, r["name"], LedgerKind.LIVE)
         ]
         if was_set:
             audit_append(conn, actor=actor_enum.value, action="resume_all",

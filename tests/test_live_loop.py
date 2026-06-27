@@ -5,7 +5,7 @@ import pytest
 
 from algua.contracts.types import ExecutionContract
 from algua.execution.alpaca_broker import BrokerError, TickSnapshot
-from algua.execution.order_state import record_submitted_order
+from algua.execution.live_ledger import record_paper_venue_order
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.registry.db import connect, migrate
 from algua.risk.limits import RiskBreach
@@ -175,11 +175,12 @@ class _DedupBroker(_FakeBroker):
         return oid
 
 
-def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
-    # #166 gap 3: the LIVE replay equivalent of order_state idempotency. A crash/retry replays the
-    # same tick: the deterministic client_order_id makes Alpaca return the SAME broker_order_id, and
-    # on_submitted -> record_submitted_order must INSERT OR IGNORE so the replay leaves exactly one
-    # paper_orders row (not a duplicate). Covers the live loop wiring, not just the bare DB writer.
+def test_live_replay_record_paper_venue_order_is_idempotent(tmp_path):
+    # #166 gap 3 / #249: the LIVE replay equivalent of order_state idempotency. A crash/retry
+    # replays the same tick: the deterministic client_order_id makes Alpaca return the SAME
+    # broker_order_id, and on_submitted -> record_paper_venue_order must INSERT OR IGNORE (on the
+    # client_order_id UNIQUE index) so the replay leaves exactly one paper_venue_orders row (not a
+    # duplicate). Covers the live loop wiring, not just the bare DB writer.
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     broker = _DedupBroker()
@@ -188,9 +189,9 @@ def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
     now = datetime(2023, 1, 5, tzinfo=UTC)   # all three sessions fully closed -> stable decision_ts
     hooks = TickHooks(
         client_order_id_for=lambda s, ts, sym: f"{s}-{sym}",  # deterministic across the replay
-        on_submitted=lambda o: record_submitted_order(
+        on_submitted=lambda o: record_paper_venue_order(
             conn, strat.name, o.symbol, o.side, o.target_weight,
-            o.decision_ts.isoformat(), o.order_id, strategy_id=1,
+            o.client_order_id, strategy_id=1,
         ),
     )
 
@@ -201,9 +202,9 @@ def test_live_replay_record_submitted_order_is_idempotent(tmp_path):
     # loop ever stopped sending it, _DedupBroker would mint two distinct ids -> two rows -> failure.
     assert broker.client_order_ids == ["cfg-AAA", "cfg-AAA"]
     rows = conn.execute(
-        "SELECT broker_order_id FROM paper_orders WHERE strategy = ?", (strat.name,)
+        "SELECT client_order_id FROM paper_venue_orders WHERE strategy = ?", (strat.name,)
     ).fetchall()
-    assert len(rows) == 1 and rows[0]["broker_order_id"] == "order-1"  # one row, not duplicated
+    assert len(rows) == 1 and rows[0]["client_order_id"] == "cfg-AAA"  # one row, not duplicated
 
 
 def test_run_tick_live_snapshot_equity_flows_into_order_notional(monkeypatch):
@@ -326,10 +327,10 @@ def test_run_tick_non_positive_equity_breaches_before_trading(equity):
 
 
 def test_run_tick_reconcile_mismatch_raises():
-    # #18: DB-derived positions disagreeing with the broker's pre-submit book halts the tick.
+    # #18/#249: venue_belief disagrees with the broker's pre-submit book — halts the tick.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    hooks = TickHooks(derived_positions={"AAA": 999.0})  # DB thinks we hold far more
+    hooks = TickHooks(venue_belief=lambda: {"AAA": 999.0})  # belief says far more than broker holds
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
                  hooks=hooks)
@@ -337,11 +338,11 @@ def test_run_tick_reconcile_mismatch_raises():
 
 
 def test_run_tick_reconcile_empty_db_vs_held_broker_raises():
-    # #18 drift: the DB lost its record (empty derived) while the broker still holds positions.
+    # #18/#249 drift: the belief is empty while the broker still holds positions.
     # Supplying the hook (even empty) must reconcile and halt, not skip on empty.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    hooks = TickHooks(derived_positions={})  # DB says flat, broker holds 10 -> drift
+    hooks = TickHooks(venue_belief=lambda: {})  # belief says flat, broker holds 10 -> drift
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
                  hooks=hooks)
@@ -350,8 +351,8 @@ def test_run_tick_reconcile_empty_db_vs_held_broker_raises():
 
 
 def test_run_tick_no_reconcile_hook_does_not_compare():
-    # No derived_positions hook supplied: the loop must not attempt reconcile (back-compat for the
-    # pure decide+submit path) and trades normally.
+    # No venue_belief hook supplied: the loop must not attempt reconcile (pure decide+submit path)
+    # and trades normally.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
@@ -469,3 +470,45 @@ def test_run_tick_threads_reserve_buy_to_submit_sized():
     run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
              DATES[0], DATES[-1], hooks=hooks)
     assert seen["reserve"] is hooks.reserve_buy   # run_tick forwarded the hook
+
+
+def test_before_submit_fires_before_submit():
+    # #249: before_submit hook fires with (intent, coid) BEFORE broker.submit_sized is called;
+    # the ordering guarantee is what makes crash-safe intent recording possible.
+    calls = []
+    broker = _FakeBroker()
+    orig_submit = broker.submit_sized
+    broker.submit_sized = lambda intent, snap, coid=None, reserve=None: (
+        calls.append(("submit", coid)) or orig_submit(intent, snap, coid)
+    )
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(
+        client_order_id_for=lambda s, t, sym: "cid",
+        before_submit=lambda intent, coid: calls.append(("before", coid)),
+    )
+    run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+             hooks=hooks)
+    assert calls and calls[0] == ("before", "cid")         # before_submit fired first
+    assert ("submit", "cid") in calls                      # broker submit also ran
+    assert calls.index(("before", "cid")) < calls.index(("submit", "cid"))  # strict ordering
+
+
+def test_reconcile_tolerates_fractional_residual():
+    # #249: venue_belief {AAA: 5.0}; broker snapshot qtys {AAA: 5.0 + 4e-7} -> within 1e-6 ->
+    # no breach. Floating-point residuals from fill arithmetic must not trip a false positive.
+    broker = _FakeBroker(positions={"AAA": 5.0 + 4e-7}, equity=100_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      hooks=TickHooks(venue_belief=lambda: {"AAA": 5.0}))
+    assert result.reconcile_ok is True
+
+
+def test_reconcile_trips_on_unexplained_holding():
+    # #249: venue_belief {} (nothing attributed); broker holds {AAA: 5.0} -> drift > tol ->
+    # RiskBreach('reconcile'). Supplying the hook even with an empty belief must reconcile.
+    broker = _FakeBroker(positions={"AAA": 5.0}, equity=100_000.0)
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 hooks=TickHooks(venue_belief=lambda: {}))
+    assert ei.value.kind == "reconcile"

@@ -7,6 +7,33 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
+
+
+@dataclass(frozen=True)
+class LedgerTables:
+    fills: str
+    activities: str
+    cursor: str
+    orders: str
+    quarantine: str
+
+
+class LedgerKind(Enum):
+    LIVE = "live"
+    PAPER = "paper"
+
+
+_TABLES = {
+    LedgerKind.LIVE: LedgerTables(
+        "live_fills", "live_activities", "live_fill_cursor",
+        "live_orders", "live_activity_quarantine",
+    ),
+    LedgerKind.PAPER: LedgerTables(
+        "paper_venue_fills", "paper_venue_activities", "paper_venue_fill_cursor",
+        "paper_venue_orders", "paper_venue_activity_quarantine",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +95,52 @@ def record_live_order(
     conn.commit()
 
 
+def record_paper_venue_order(
+    conn: sqlite3.Connection,
+    strategy: str,
+    symbol: str,
+    side: str,
+    intended_notional: float | None,
+    client_order_id: str,
+    *,
+    strategy_id: int,
+) -> None:
+    """Record a paper venue order at submit time, keyed by client_order_id. A retry that re-submits
+    the same client_order_id is a no-op (INSERT OR IGNORE on the UNIQUE column). strategy_id is
+    required for forward-gate attribution."""
+    conn.execute(
+        "INSERT OR IGNORE INTO paper_venue_orders"
+        "(strategy, symbol, side, intended_notional, client_order_id,"
+        " strategy_id, status, submitted_ts)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        (strategy, symbol, side, intended_notional, client_order_id, strategy_id, "submitted",
+         datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+def backfill_paper_venue_broker_order_id(
+    conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
+) -> None:
+    """Attach the broker's order id to a paper venue order once the broker accepts it. Also
+    back-attributes any fills already ingested under this broker order id while the mapping was
+    missing (strategy was NULL), so an early fill is never orphaned in the books."""
+    row = conn.execute(
+        "SELECT strategy FROM paper_venue_orders WHERE client_order_id = ?", (client_order_id,)
+    ).fetchone()
+    conn.execute(
+        "UPDATE paper_venue_orders SET broker_order_id = ? WHERE client_order_id = ?",
+        (broker_order_id, client_order_id),
+    )
+    if row is not None:
+        conn.execute(
+            "UPDATE paper_venue_fills SET strategy = ?"
+            " WHERE broker_order_id = ? AND strategy IS NULL",
+            (row["strategy"], broker_order_id),
+        )
+    conn.commit()
+
+
 def backfill_broker_order_id(
     conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
 ) -> None:
@@ -90,13 +163,21 @@ def backfill_broker_order_id(
     conn.commit()
 
 
-def believed_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float]:
-    """Per-symbol signed net position for a strategy = Σ its own live_fills.qty (nonzero only)."""
+def believed_positions(
+    conn: sqlite3.Connection, strategy: str, kind: LedgerKind
+) -> dict[str, float]:
+    """Per-symbol signed net position for a strategy = Σ its own fills.qty (nonzero only)."""
+    t = _TABLES[kind]
     rows = conn.execute(
-        "SELECT symbol, SUM(qty) AS q FROM live_fills WHERE strategy = ? GROUP BY symbol",
+        f"SELECT symbol, SUM(qty) AS q FROM {t.fills} WHERE strategy = ? GROUP BY symbol",
         (strategy,),
     ).fetchall()
     return {r["symbol"]: float(r["q"]) for r in rows if float(r["q"]) != 0.0}
+
+
+def paper_believed_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float]:
+    """Convenience alias: believed_positions for the paper ledger."""
+    return believed_positions(conn, strategy, LedgerKind.PAPER)
 
 
 def strategy_live_symbols(conn: sqlite3.Connection, strategy: str) -> set[str]:
@@ -140,32 +221,43 @@ def strategy_nav(
     return total
 
 
-def fill_cursor(conn: sqlite3.Connection) -> str | None:
+def fill_cursor(conn: sqlite3.Connection, kind: LedgerKind) -> str | None:
+    t = _TABLES[kind]
     row = conn.execute(
-        "SELECT cursor FROM live_fill_cursor WHERE name = 'activities'"
+        f"SELECT cursor FROM {t.cursor} WHERE name = 'activities'"
     ).fetchone()
     return row["cursor"] if row else None
 
 
-def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
-    """Idempotently record a batch of Alpaca activities and advance the cursor in ONE transaction.
+def ingest_activities(
+    conn: sqlite3.Connection,
+    activities: list[dict],
+    kind: LedgerKind,
+    *,
+    cursor_value: str | None = None,
+) -> None:
+    """Idempotently record a batch of broker activities and advance the cursor in ONE transaction.
 
-    FILL activities become signed `live_fills` rows (buy +qty, sell -qty), attributed to a strategy
-    via order_id -> live_orders.broker_order_id; non-fill activities become `live_activities` rows.
+    FILL activities become signed fills rows (buy +qty, sell -qty), attributed to a strategy
+    via order_id -> orders.broker_order_id; non-fill activities become activities rows.
     Dedupe is by `activity_id` (UNIQUE), so re-pulling an overlap window never double-counts; a
     re-pull DOES back-fill a previously-missing strategy/broker_order_id (COALESCE on conflict), so
     a fill ingested before its order mapping existed is attributed once the mapping lands. The
-    cursor advances to the max activity id seen, in the same transaction as the inserts, so a crash
-    leaves books and cursor consistent (overlap replay re-dedupes).
+    cursor advances in the same transaction as the inserts, so a crash leaves books and cursor
+    consistent (overlap replay re-dedupes).
+
+    When `cursor_value` is provided (paper path), it is stored as the cursor regardless of the
+    activity ids seen. When `None` (live path), `max(activity_id)` is stored as today.
 
     A single malformed activity must NOT wedge the loop: a shape error (`ValueError`/`KeyError`/
-    `TypeError`) dead-letters that one activity into `live_activity_quarantine` and processing
-    continues, so the cursor still advances PAST the poison item and the next cycle does not
-    re-fetch it forever (#250). Quarantining is recoverable — the raw payload is preserved for human
-    triage, and a quarantined fill the book is now missing still surfaces as broker-vs-ledger drift
-    at the reconcile guard (fail-closed backstop). Real infrastructure errors (e.g. `sqlite3.Error`)
-    are NOT shape errors: they propagate and roll back the whole batch, preserving the old
+    `TypeError`) dead-letters that one activity into the quarantine table and processing continues,
+    so the cursor still advances PAST the poison item and the next cycle does not re-fetch it
+    forever (#250). Quarantining is recoverable — the raw payload is preserved for human triage,
+    and a quarantined fill the book is now missing still surfaces as broker-vs-ledger drift at the
+    reconcile guard (fail-closed backstop). Real infrastructure errors (e.g. `sqlite3.Error`) are
+    NOT shape errors: they propagate and roll back the whole batch, preserving the old
     all-or-nothing fail-closed behavior."""
+    t = _TABLES[kind]
     try:
         max_id: str | None = None
         for act in activities:
@@ -177,15 +269,16 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
                 raise ValueError(f"activity missing 'id'; cannot advance cursor: {act!r}")
             aid = str(act["id"])
             try:
-                _ingest_one_activity(conn, act, aid)
+                _ingest_one_activity(conn, act, aid, kind)
             except (ValueError, KeyError, TypeError) as exc:
-                _quarantine_activity(conn, aid, act, exc)
+                _quarantine_activity(conn, aid, act, exc, kind)
             max_id = aid if max_id is None or aid > max_id else max_id
-        if max_id is not None:
+        cursor_to_store = cursor_value if cursor_value is not None else max_id
+        if cursor_to_store is not None:
             conn.execute(
-                "INSERT INTO live_fill_cursor(name, cursor) VALUES ('activities', ?) "
+                f"INSERT INTO {t.cursor}(name, cursor) VALUES ('activities', ?) "
                 "ON CONFLICT(name) DO UPDATE SET cursor = excluded.cursor",
-                (max_id,),
+                (cursor_to_store,),
             )
         conn.commit()
     except Exception:
@@ -193,9 +286,12 @@ def ingest_activities(conn: sqlite3.Connection, activities: list[dict]) -> None:
         raise
 
 
-def _ingest_one_activity(conn: sqlite3.Connection, act: dict, aid: str) -> None:
-    """Record one activity (FILL -> signed `live_fills`, else -> `live_activities`). Raises a shape
+def _ingest_one_activity(
+    conn: sqlite3.Connection, act: dict, aid: str, kind: LedgerKind
+) -> None:
+    """Record one activity (FILL -> signed fills table, else -> activities table). Raises a shape
     error (`ValueError`/`KeyError`/`TypeError`) on a malformed activity; caller quarantines it."""
+    t = _TABLES[kind]
     if act.get("activity_type") == "FILL":
         side = act.get("side")
         if side not in {"buy", "sell"}:
@@ -207,15 +303,15 @@ def _ingest_one_activity(conn: sqlite3.Connection, act: dict, aid: str) -> None:
         signed = qty if side == "buy" else -qty
         boid = act.get("order_id")
         strat_row = conn.execute(
-            "SELECT strategy FROM live_orders WHERE broker_order_id = ?", (boid,)
+            f"SELECT strategy FROM {t.orders} WHERE broker_order_id = ?", (boid,)
         ).fetchone()
         conn.execute(
-            "INSERT INTO live_fills"
+            f"INSERT INTO {t.fills}"
             "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
             " VALUES (?,?,?,?,?,?,?)"
-            " ON CONFLICT(activity_id) DO UPDATE SET"
-            "  strategy = COALESCE(live_fills.strategy, excluded.strategy),"
-            "  broker_order_id = COALESCE(live_fills.broker_order_id,"
+            f" ON CONFLICT(activity_id) DO UPDATE SET"
+            f"  strategy = COALESCE({t.fills}.strategy, excluded.strategy),"
+            f"  broker_order_id = COALESCE({t.fills}.broker_order_id,"
             "                             excluded.broker_order_id)",
             (
                 aid, boid,
@@ -226,7 +322,7 @@ def _ingest_one_activity(conn: sqlite3.Connection, act: dict, aid: str) -> None:
         )
     else:
         conn.execute(
-            "INSERT OR IGNORE INTO live_activities"
+            f"INSERT OR IGNORE INTO {t.activities}"
             "(activity_id, type, symbol, amount, ts, raw) VALUES (?,?,?,?,?,?)",
             (
                 aid, act.get("activity_type", "UNKNOWN"), act.get("symbol"),
@@ -238,17 +334,18 @@ def _ingest_one_activity(conn: sqlite3.Connection, act: dict, aid: str) -> None:
 
 
 def _quarantine_activity(
-    conn: sqlite3.Connection, aid: str, act: dict, exc: Exception
+    conn: sqlite3.Connection, aid: str, act: dict, exc: Exception, kind: LedgerKind
 ) -> None:
     """Dead-letter a malformed (but id-bearing) activity so the loop can advance past it (#250).
     Dedup is by `activity_id` (INSERT OR IGNORE), so re-pulling an overlap window never
     double-quarantines the same item. Id-less activities never reach here — they fail closed."""
+    t = _TABLES[kind]
     try:
         raw = json.dumps(act, default=str)
     except (TypeError, ValueError):
         raw = repr(act)
     conn.execute(
-        "INSERT OR IGNORE INTO live_activity_quarantine(activity_id, error, raw) VALUES (?,?,?)",
+        f"INSERT OR IGNORE INTO {t.quarantine}(activity_id, error, raw) VALUES (?,?,?)",
         (aid, f"{type(exc).__name__}: {exc}", raw),
     )
 

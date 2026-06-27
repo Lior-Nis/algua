@@ -47,12 +47,12 @@ def test_backfill_back_attributes_fill_ingested_before_order_mapping(tmp_path):
     L.ingest_activities(conn, [{
         "id": "act-1", "activity_type": "FILL", "side": "buy", "qty": "10", "price": "100",
         "order_id": "broker-9", "symbol": "AAA", "transaction_time": "2026-06-06T00:00:00+00:00",
-    }])
+    }], L.LedgerKind.LIVE)
     pre = conn.execute(
         "SELECT strategy FROM live_fills WHERE broker_order_id='broker-9'"
     ).fetchone()
     assert pre["strategy"] is None                    # orphaned: no strategy maps it yet
-    assert L.believed_positions(conn, "s1") == {}     # s1's books don't see the orphan fill
+    assert L.believed_positions(conn, "s1", L.LedgerKind.LIVE) == {}  # s1 doesn't see the orphan
 
     # 2. The order record lands late (submit recorded its client_order_id), then the broker id
     #    is backfilled — which must back-attribute the already-ingested fill to s1.
@@ -63,7 +63,7 @@ def test_backfill_back_attributes_fill_ingested_before_order_mapping(tmp_path):
         "SELECT strategy FROM live_fills WHERE broker_order_id='broker-9'"
     ).fetchone()
     assert post["strategy"] == "s1"                    # attribution attached, fill not orphaned
-    assert L.believed_positions(conn, "s1") == {"AAA": 10.0}
+    assert L.believed_positions(conn, "s1", L.LedgerKind.LIVE) == {"AAA": 10.0}
 
     # 3. Reconcile against the broker's matching net shows zero drift (clean, no halt).
     result = R.reconcile(conn, broker_net={"AAA": 10.0}, cycle=1)
@@ -75,7 +75,7 @@ def test_believed_positions_sums_signed_fills(tmp_path):
     _fill(conn, "a1", "s1", "AAA", 10.0, 100.0)
     _fill(conn, "a2", "s1", "AAA", -4.0, 110.0)
     _fill(conn, "a3", "s1", "BBB", 5.0, 50.0)
-    assert L.believed_positions(conn, "s1") == {"AAA": 6.0, "BBB": 5.0}
+    assert L.believed_positions(conn, "s1", L.LedgerKind.LIVE) == {"AAA": 6.0, "BBB": 5.0}
 
 
 def test_strategy_nav(tmp_path):

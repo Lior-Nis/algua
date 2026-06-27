@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -329,6 +329,44 @@ CREATE TABLE IF NOT EXISTS live_activity_quarantine (
     raw          TEXT NOT NULL,
     quarantined_ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS paper_venue_orders (        -- crash-safe intent + attribution
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy          TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    side              TEXT NOT NULL,
+    intended_notional REAL,
+    client_order_id   TEXT NOT NULL UNIQUE,             -- durable identity; idempotent re-submit
+    broker_order_id   TEXT,                             -- backfilled on broker accept
+    strategy_id       INTEGER NOT NULL,                 -- attribution for the forward gate
+    status            TEXT NOT NULL,
+    submitted_ts      TEXT NOT NULL
+);
+-- exactly one order may own a broker id (the fill-attribution key); many pre-backfill NULLs allowed
+CREATE UNIQUE INDEX IF NOT EXISTS ux_paper_venue_orders_broker_order_id
+    ON paper_venue_orders(broker_order_id) WHERE broker_order_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS paper_venue_fills (          -- signed fills (≈ live_fills)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id TEXT NOT NULL UNIQUE,
+    broker_order_id TEXT,
+    strategy TEXT,                                       -- nullable: orphan / pre-backfill
+    symbol TEXT NOT NULL,
+    qty REAL NOT NULL CHECK(qty != 0),
+    price REAL NOT NULL CHECK(price > 0),
+    fill_ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_paper_venue_fills_strategy_symbol
+    ON paper_venue_fills(strategy, symbol);
+CREATE TABLE IF NOT EXISTS paper_venue_activities (     -- non-fill (cash/div) rows
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL, symbol TEXT, amount REAL, ts TEXT, raw TEXT
+);
+CREATE TABLE IF NOT EXISTS paper_venue_fill_cursor (    -- ingestion cursor (≈ live_fill_cursor)
+    name TEXT PRIMARY KEY, cursor TEXT
+);
+CREATE TABLE IF NOT EXISTS paper_venue_activity_quarantine ( -- #250 dead-letter
+    activity_id TEXT PRIMARY KEY, error TEXT NOT NULL, raw TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS live_reconcile_state (
     symbol           TEXT PRIMARY KEY,
     expected_qty     REAL NOT NULL,
@@ -633,6 +671,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     _add_missing_columns(
         conn, "gate_evaluations",
         {"fundamentals_snapshot": "TEXT", "news_snapshot": "TEXT"})
+    # v30 (#249): paper_venue_* (orders/fills/activities/cursor/quarantine) are brand-new tables;
+    # executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

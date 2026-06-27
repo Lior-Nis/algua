@@ -95,19 +95,6 @@ def derive_positions(conn: sqlite3.Connection, strategy: str) -> dict[str, float
     return {r["symbol"]: float(r["qty"]) for r in rows if float(r["qty"]) != 0.0}
 
 
-def clear_derived_positions(conn: sqlite3.Connection, strategy: str) -> None:
-    """Zero a strategy's DERIVED paper belief by dropping its fills (the source `derive_positions`
-    sums), keeping its `paper_orders` rows as the audit trail and the flatten symbol source. Used
-    after a successful paper flatten so a subsequent `trade-tick` reconcile starts from flat
-    instead of re-tripping on stale simulated positions. Mirrors `persist_run`'s leading DELETE."""
-    conn.execute(
-        "DELETE FROM paper_fills WHERE order_id IN "
-        "(SELECT id FROM paper_orders WHERE strategy = ?)",
-        (strategy,),
-    )
-    conn.commit()
-
-
 def record_submitted_order(
     conn: sqlite3.Connection, strategy: str, symbol: str, side: str,
     target_weight: float, decision_ts: str | None, broker_order_id: str,
@@ -268,6 +255,24 @@ def recent_orders(conn: sqlite3.Connection, strategy: str, limit: int = 10) -> l
     """The most recent paper_orders rows for a strategy, newest first."""
     rows = conn.execute(
         "SELECT symbol, side, status, broker_order_id, submitted_ts FROM paper_orders "
+        "WHERE strategy = ? ORDER BY id DESC LIMIT ?", (strategy, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_venue_orders(conn: sqlite3.Connection, strategy: str) -> int:
+    """Number of paper_venue_orders rows for a strategy (the venue-lane order count)."""
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM paper_venue_orders WHERE strategy = ?", (strategy,)
+        ).fetchone()[0]
+    )
+
+
+def recent_venue_orders(conn: sqlite3.Connection, strategy: str, limit: int = 10) -> list[dict]:
+    """The most recent paper_venue_orders rows for a strategy, newest first."""
+    rows = conn.execute(
+        "SELECT symbol, side, status, broker_order_id, submitted_ts FROM paper_venue_orders "
         "WHERE strategy = ? ORDER BY id DESC LIMIT ?", (strategy, limit),
     ).fetchall()
     return [dict(r) for r in rows]
