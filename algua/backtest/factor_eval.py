@@ -130,37 +130,38 @@ def _adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def score_panel(strategy: LoadedStrategy, bars: pd.DataFrame) -> pd.DataFrame:
+def score_panel(
+    strategy: LoadedStrategy,
+    bars: pd.DataFrame,
+    *,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+) -> pd.DataFrame:
     """The factor's cross-sectional scores at every decision bar, PIT (data <= t only).
 
     For each timestamp t on the grid, calls the factor over the expanding window ending at t (the
     same expanding `view` the engine's per-bar loop uses), so a score at t can never see a bar
     after t. Returns a (timestamp x symbol) frame; bars before the factor has enough history
-    contribute an all-NaN row."""
+    contribute an all-NaN row.
+
+    When `universe_by_date` is supplied, the view is restricted to `members_as_of(t)` BEFORE the
+    factor runs — exactly as the engine does (engine.py) — so a cross-sectional factor's member
+    scores are computed from member-only data, never contaminated by non-members that merely happen
+    to be in the fetched static panel (#261). No look-ahead: the as-of rule uses only dates <= t."""
     bars_sorted = bars.sort_index()
     grid = _adj_grid(bars_sorted).index
     end_pos = bars_sorted.index.searchsorted(grid, side="right")
     rows: dict[pd.Timestamp, pd.Series] = {}
     for t, stop in zip(grid, end_pos, strict=True):
-        rows[t] = strategy.signal(bars_sorted.iloc[:stop])
+        view = bars_sorted.iloc[:stop]
+        if universe_by_date is not None:
+            members = members_as_of(universe_by_date, t)
+            view = view[view["symbol"].isin(members)]
+            if view.empty:  # before the earliest effective date, or no member bars yet -> flat
+                rows[t] = pd.Series(dtype="float64")
+                continue
+        rows[t] = strategy.signal(view)
     panel = pd.DataFrame.from_dict(rows, orient="index")
     return panel.reindex(columns=_adj_grid(bars_sorted).columns)
-
-
-def mask_panel_to_members(
-    panel: pd.DataFrame, universe_by_date: Mapping[date, Collection[str]]
-) -> pd.DataFrame:
-    """NaN out each timestamp's scores for symbols NOT in the PIT universe as of that date, so the
-    IC cross-section is built over the same survivorship-clean membership the engine enforces in the
-    backtest (#261). Uses the engine's `members_as_of` (greatest effective_date <= t, no
-    look-ahead); `factor_ic` then drops the NaN'd non-members from each cross-section."""
-    masked = panel.copy()
-    for t in masked.index:
-        members = members_as_of(universe_by_date, t)
-        non_members = [c for c in masked.columns if c not in members]
-        if non_members:
-            masked.loc[t, non_members] = np.nan
-    return masked
 
 
 def forward_returns(adj: pd.DataFrame, *, lag: int, horizon: int) -> pd.DataFrame:
@@ -228,11 +229,10 @@ def evaluate_factor(
         universe_snapshots=universe_snapshots,
     )
     bars = provider.get_bars(sorted(set(symbols)), start, end, "1d")
-    panel = score_panel(strategy, bars)
-    if universe_by_date is not None:
-        # Match the PIT backtest: restrict the IC cross-section to as-of members so the reported
-        # rank IC/IR is survivorship-clean, not computed over the full static declared set (#261).
-        panel = mask_panel_to_members(panel, universe_by_date)
+    # Match the PIT backtest: score over as-of members only, so the reported rank IC/IR is
+    # survivorship-clean (and cross-sectional factors aren't contaminated by non-members), not
+    # computed over the full static declared set (#261).
+    panel = score_panel(strategy, bars, universe_by_date=universe_by_date)
     fwd = forward_returns(
         _adj_grid(bars), lag=strategy.execution.decision_lag_bars, horizon=horizon
     )

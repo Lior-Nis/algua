@@ -6,7 +6,6 @@ import pytest
 from algua.backtest.factor_eval import (
     build_factor_strategy,
     forward_returns,
-    mask_panel_to_members,
     score_panel,
 )
 from algua.features.catalogue import get_factor
@@ -46,19 +45,31 @@ def test_forward_returns_offset_by_lag_and_horizon():
     assert fwd.iloc[-1].isna().all()
 
 
-def test_mask_panel_to_members_nans_non_members_pit():
-    """#261: scores for symbols not in the as-of PIT universe are NaN'd per timestamp, so the IC
-    cross-section matches the survivorship-clean backtest membership (no look-ahead)."""
-    idx = pd.date_range("2023-01-01", periods=3, freq="D")
-    panel = pd.DataFrame({"AAA": [1.0, 2.0, 3.0], "BBB": [4.0, 5.0, 6.0]}, index=idx)
-    # AAA is a member throughout; BBB only joins on 2023-01-02.
-    universe_by_date = {date(2023, 1, 1): ["AAA"], date(2023, 1, 2): ["AAA", "BBB"]}
-    masked = mask_panel_to_members(panel, universe_by_date)
-    # Day 1: only AAA is a member -> BBB is masked out; AAA kept.
-    assert masked.loc[idx[0], "AAA"] == 1.0
-    assert pd.isna(masked.loc[idx[0], "BBB"])
-    # Day 2+: both members -> both kept.
-    assert masked.loc[idx[1], "BBB"] == 5.0
-    assert masked.loc[idx[2], "AAA"] == 3.0
-    # the original panel is not mutated
-    assert panel.loc[idx[0], "BBB"] == 4.0
+class _XSDemean:
+    """A genuinely cross-sectional factor: each symbol's score = its latest adj_close minus the
+    cross-sectional MEAN of the view. A member's score therefore depends on WHICH symbols are in
+    the input view — so output-only masking would leave it contaminated by non-members."""
+
+    def signal(self, view: pd.DataFrame) -> pd.Series:
+        wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+        last = wide.iloc[-1]
+        return last - last.mean()
+
+
+def test_score_panel_pit_filters_view_not_just_output():
+    """#261: with universe_by_date, the view is restricted to as-of members BEFORE scoring, so a
+    cross-sectional factor's member scores are computed from member-only data (not just masked
+    afterward) — matching the engine. Non-members are absent (NaN) from the panel."""
+    rows = []
+    for ts in pd.date_range("2023-01-01", periods=2, freq="D"):
+        rows += [(ts, "AAA", 100.0), (ts, "BBB", 200.0), (ts, "CCC", 900.0)]
+    bars = pd.DataFrame(rows, columns=["timestamp", "symbol", "adj_close"]).set_index("timestamp")
+    universe_by_date = {date(2023, 1, 1): ["AAA", "BBB"]}  # CCC is NOT a member
+    panel = score_panel(_XSDemean(), bars, universe_by_date=universe_by_date)
+    t = panel.index[-1]
+    # CCC is a non-member -> absent from the scored view -> NaN in the panel.
+    assert pd.isna(panel.loc[t, "CCC"])
+    # AAA's score is demeaned over {AAA, BBB} only (mean 150), NOT {AAA, BBB, CCC} (mean 400):
+    # contamination by CCC (900) would have given 100 - 400 = -300.
+    assert panel.loc[t, "AAA"] == pytest.approx(100.0 - 150.0)
+    assert panel.loc[t, "BBB"] == pytest.approx(200.0 - 150.0)
