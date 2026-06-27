@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
 from algua.live.paper_loop import decide
 from algua.risk.limits import WEIGHT_TOL, RiskBreach, check_drawdown
@@ -83,6 +84,10 @@ class TickHooks:
     # caps a BUY's notional to the shared per-cycle pool, returning 0 to skip the order entirely.
     # Sells are never consulted. None == no reservation (paper and any non-reserved path).
     reserve_buy: Callable[[str, float], float] | None = None
+    # before_submit(intent, coid): fires IMMEDIATELY BEFORE broker.submit_sized for each intent so
+    # the paper lane can record order intent in a crash-safe ledger before the broker call (#249).
+    # Live/sim callers that do not supply this hook are unaffected (None -> skipped).
+    before_submit: Callable[[OrderIntent, str | None], None] | None = None
 
 
 class TickHalted(RuntimeError):
@@ -205,6 +210,8 @@ def run_tick(
             hooks.client_order_id_for(strategy.name, t, intent.symbol)
             if hooks.client_order_id_for is not None else None
         )
+        if hooks.before_submit is not None:
+            hooks.before_submit(intent, coid)
         order_id = broker.submit_sized(intent, snap, coid, reserve=hooks.reserve_buy)
         if order_id in ("noop", "skipped"):
             continue

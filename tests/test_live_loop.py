@@ -469,3 +469,24 @@ def test_run_tick_threads_reserve_buy_to_submit_sized():
     run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
              DATES[0], DATES[-1], hooks=hooks)
     assert seen["reserve"] is hooks.reserve_buy   # run_tick forwarded the hook
+
+
+def test_before_submit_fires_before_submit():
+    # #249: before_submit hook fires with (intent, coid) BEFORE broker.submit_sized is called;
+    # the ordering guarantee is what makes crash-safe intent recording possible.
+    calls = []
+    broker = _FakeBroker()
+    orig_submit = broker.submit_sized
+    broker.submit_sized = lambda intent, snap, coid=None, reserve=None: (
+        calls.append(("submit", coid)) or orig_submit(intent, snap, coid)
+    )
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    hooks = TickHooks(
+        client_order_id_for=lambda s, t, sym: "cid",
+        before_submit=lambda intent, coid: calls.append(("before", coid)),
+    )
+    run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+             hooks=hooks)
+    assert calls and calls[0] == ("before", "cid")         # before_submit fired first
+    assert ("submit", "cid") in calls                      # broker submit also ran
+    assert calls.index(("before", "cid")) < calls.index(("submit", "cid"))  # strict ordering
