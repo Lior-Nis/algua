@@ -484,6 +484,29 @@ def test_resume_all_clears_and_wipes_peaks_but_keeps_strategy_switch(monkeypatch
         assert kill_switch.is_tripped(conn, "cross_sectional_momentum") is True  # untouched
 
 
+def test_resume_all_default_actor_is_agent_in_audit():
+    """resume-all's default --actor is 'agent' (matching its sibling halt commands), so the
+    audit row isn't mislabeled 'human' when an agent invokes it with the default (#272)."""
+    from contextlib import closing
+
+    from algua.audit import log as audit_log
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        global_halt.engage(conn, reason="x", actor="human")
+    result = runner.invoke(app, ["paper", "resume-all"])  # no --actor: use the default
+    assert result.exit_code == 0, result.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rows = audit_log.read(conn)
+        resume_rows = [r for r in rows if r["action"] == "resume_all"]
+        assert resume_rows, "expected a resume_all audit row"
+        assert resume_rows[0]["actor"] == "agent"
+
+
 def _engage_global_halt():
     from contextlib import closing
 

@@ -532,7 +532,10 @@ def halt_all(
 @paper_app.command("resume-all")
 @json_errors(ValueError, LookupError, BrokerError)
 def resume_all(
-    actor: str = typer.Option("human", "--actor", help="human | agent"),
+    # Default 'agent' to match the sibling halt commands (kill/flatten/halt-all): resume-all is
+    # not enforced human-only and an agent can legitimately invoke it, so a 'human' default would
+    # mislabel the (non-load-bearing) audit row when an agent uses the default (#272).
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
     to cash). Per-strategy kill-switches are left untouched."""
