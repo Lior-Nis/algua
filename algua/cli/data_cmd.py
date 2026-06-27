@@ -395,6 +395,10 @@ def inspect(
     summary: bool = typer.Option(False, "--summary", help="summarize available datasets"),
 ) -> None:
     """Inspect recorded point-in-time data snapshots."""
+    # Mutually exclusive selectors: reject an ambiguous invocation rather than silently
+    # resolving by return-order precedence (which can mask a mistaken query).
+    if sum((summary, snapshot_id is not None, dataset is not None)) > 1:
+        raise ValueError("pass only one of --summary, --snapshot-id, or --dataset")
     ds = _store()
     if summary:
         emit(ds.summary())
