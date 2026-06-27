@@ -697,9 +697,11 @@ def test_paper_flatten_closes_dropped_symbol_not_siblings(monkeypatch, tmp_path)
     assert "ZZZ" in offset_syms           # held-but-dropped symbol IS offset
     assert "SIB" not in offset_syms       # sibling's symbol is NOT offset
 
-    # paper_fills (derive_positions) is empty — no sim run was seeded — so show returns flat
+    # flatten submits an offset order → paper_venue_orders has a row → show uses venue belief.
+    # The fake broker never ingests fills, so the offset fill hasn't landed:
+    # paper_believed_positions still shows ZZZ:5.0 (initial seeded fill). SIB not in our books.
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
-    assert show["positions"] == {}
+    assert show["positions"] == {"ZZZ": 5.0}
 
 
 # ---------------------------------------------------------------------------
@@ -1227,9 +1229,11 @@ def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch
     # ZZZ was in paper_believed_positions → exactly one submit_offset call for it
     offset_syms = [sym for sym, _, _ in broker.offset_calls]
     assert offset_syms == ["ZZZ"]
-    # paper show: paper_fills (derive_positions) is empty → positions is {}
+    # breach handler submits an offset order → paper_venue_orders has a row → show uses venue
+    # belief. The fake broker never ingests fills, so the offset fill hasn't landed:
+    # paper_believed_positions still shows ZZZ:5.0 (the initial seeded fill).
     show = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
-    assert show["positions"] == {}
+    assert show["positions"] == {"ZZZ": 5.0}
 
 
 # ---------------------------------------------------------------------------
@@ -1362,3 +1366,57 @@ def test_resume_all_survives_malformed_activity(monkeypatch, tmp_path):
         assert conn.execute(
             "SELECT activity_id FROM live_activity_quarantine"
         ).fetchone()["activity_id"] == "bad-1"
+
+
+# ---------------------------------------------------------------------------
+# Task 12 (#249): paper show — venue vs sim branch
+# ---------------------------------------------------------------------------
+
+def test_show_venue_strategy_reports_venue_positions(tmp_path):
+    """A strategy with paper_venue_orders (wall-clock traded) → paper show uses
+    paper_believed_positions (venue ledger) and venue order count, NOT the sim view."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+
+    _to_paper()
+    db = tmp_path / "p.db"
+    # Seed a venue fill so paper_believed_positions returns AAA:5
+    _seed_paper_venue_fill(db, "cross_sectional_momentum", "AAA", qty=5.0)
+    # Seed a venue order row — this is what the probe SELECT sees
+    _seed_paper_venue_order(db, "cross_sectional_momentum", "AAA")
+
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["ok"] is True
+    # Positions come from paper_believed_positions (paper_venue_fills), not sim derive_positions
+    assert payload["positions"] == {"AAA": 5.0}
+    # n_orders counts paper_venue_orders
+    assert payload["n_orders"] == 1
+    # recent_orders comes from the venue lane
+    assert len(payload["recent_orders"]) == 1
+    assert payload["recent_orders"][0]["symbol"] == "AAA"
+
+    # Confirm: no sim fills were seeded, so derive_positions would return {} — venue path differs
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        from algua.execution.order_state import derive_positions
+        assert derive_positions(conn, "cross_sectional_momentum") == {}
+
+
+def test_show_sim_strategy_still_reports_sim_positions():
+    """A strategy with ONLY sim paper_orders/paper_fills (no venue orders) → paper show uses
+    derive_positions (the sim view), not the venue ledger."""
+    _to_paper()
+    # Run the sim broker to seed paper_orders + paper_fills
+    result = runner.invoke(app, ["paper", "run", "cross_sectional_momentum", "--demo",
+                                 "--start", "2022-01-01", "--end", "2023-12-31"])
+    assert result.exit_code == 0, result.stdout
+    sim_n_orders = json.loads(result.stdout)["orders"]
+
+    payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
+    assert payload["ok"] is True
+    # n_orders is from the sim paper_orders table (no venue orders seeded)
+    assert payload["n_orders"] == sim_n_orders
+    # recent_orders comes from sim paper_orders
+    assert len(payload["recent_orders"]) <= 10

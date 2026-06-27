@@ -258,3 +258,21 @@ def recent_orders(conn: sqlite3.Connection, strategy: str, limit: int = 10) -> l
         "WHERE strategy = ? ORDER BY id DESC LIMIT ?", (strategy, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def count_venue_orders(conn: sqlite3.Connection, strategy: str) -> int:
+    """Number of paper_venue_orders rows for a strategy (the venue-lane order count)."""
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM paper_venue_orders WHERE strategy = ?", (strategy,)
+        ).fetchone()[0]
+    )
+
+
+def recent_venue_orders(conn: sqlite3.Connection, strategy: str, limit: int = 10) -> list[dict]:
+    """The most recent paper_venue_orders rows for a strategy, newest first."""
+    rows = conn.execute(
+        "SELECT symbol, side, status, broker_order_id, submitted_ts FROM paper_venue_orders "
+        "WHERE strategy = ? ORDER BY id DESC LIMIT ?", (strategy, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]

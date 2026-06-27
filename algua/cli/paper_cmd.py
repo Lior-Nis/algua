@@ -33,11 +33,13 @@ from algua.execution.order_state import (
     clear_peak_equity,
     client_order_id,
     count_orders,
+    count_venue_orders,
     derive_positions,
     get_peak_equity,
     latest_tick_snapshot,
     persist_run,
     recent_orders,
+    recent_venue_orders,
     record_tick_snapshot,
     update_peak_equity,
 )
@@ -194,18 +196,27 @@ def show(name: str) -> None:
     recent orders, and a health rollup. A pure read of persisted state (no broker call)."""
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
-        n_orders = count_orders(conn, name)
         if rec.stage is Stage.LIVE:
             from algua.execution.order_state import get_nav_peak
             positions = believed_positions(conn, name, LedgerKind.LIVE)
             peak = get_nav_peak(conn, name)
+            n_orders = count_orders(conn, name)
+            orders = recent_orders(conn, name, 10)
+        elif conn.execute(
+            "SELECT 1 FROM paper_venue_orders WHERE strategy = ? LIMIT 1", (name,)
+        ).fetchone() is not None:
+            positions = paper_believed_positions(conn, name)
+            peak = get_peak_equity(conn, name)
+            n_orders = count_venue_orders(conn, name)
+            orders = recent_venue_orders(conn, name, 10)
         else:
             positions = derive_positions(conn, name)
             peak = get_peak_equity(conn, name)
+            n_orders = count_orders(conn, name)
+            orders = recent_orders(conn, name, 10)
         ks = kill_switch.get(conn, name)
         halted_globally = global_halt.is_engaged(conn)
         last = latest_tick_snapshot(conn, name)
-        orders = recent_orders(conn, name, 10)
     tripped = ks is not None
     last_equity = last["equity"] if last else None
     drawdown = (
