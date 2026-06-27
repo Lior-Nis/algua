@@ -257,7 +257,6 @@ class DataStore:
         source: str,
         provider: str = "local",
         source_metadata: dict[str, str] | None = None,
-        require_immutable: bool = False,
     ) -> SnapshotRecord:
         clean_symbols = normalize_symbols(symbols)
         frame = pd.DataFrame(
@@ -276,20 +275,24 @@ class DataStore:
             source_metadata=source_metadata,
         )
 
-        conflict_check = None
-        if require_immutable:
-            def conflict_check(committed, rec):  # noqa: E306
-                for other in committed:
-                    if (
-                        other.dataset == Dataset.UNIVERSES
-                        and other.metadata.universe == universe
-                        and other.metadata.start == effective_date
-                        and other.content_hash != rec.content_hash
-                    ):
-                        raise ValueError(
-                            f"universe {universe!r} already has a DIFFERENT membership on "
-                            f"{effective_date} (immutable; corrections require a new name)"
-                        )
+        # Universes are immutable on EVERY ingest path (#263): a same-(universe, effective_date)
+        # change with different membership aborts at the manifest commit (append_if_absent, under
+        # the manifest lock so it is race-safe), so no conflicting record is ever committed — not
+        # just caught later at read time. (A rejected ingest may leave an inert orphan parquet that
+        # the manifest never references — the shared _ingest_parquet publish-then-commit behavior;
+        # it feeds no read.) Corrections require a new universe name.
+        def conflict_check(committed, rec):
+            for other in committed:
+                if (
+                    other.dataset == Dataset.UNIVERSES
+                    and other.metadata.universe == universe
+                    and other.metadata.start == effective_date
+                    and other.content_hash != rec.content_hash
+                ):
+                    raise ValueError(
+                        f"universe {universe!r} already has a DIFFERENT membership on "
+                        f"{effective_date} (immutable; corrections require a new name)"
+                    )
 
         return self._ingest_parquet(
             metadata=metadata, frame=frame, filename="universe.parquet",
