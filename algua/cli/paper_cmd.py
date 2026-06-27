@@ -375,7 +375,8 @@ def trade_tick(
             raise typer.Exit(1) from exc
         except RiskBreach as exc:
             trip_for_breach(conn, name, exc)
-            liquidation_submitted = True
+            n_offsets = 0
+            liquidation_submitted = False
             flatten_error = None
             try:
                 broker.cancel_open_orders()
@@ -393,6 +394,11 @@ def trade_tick(
                                              coid, strategy_id=rec.id)
                     oid = broker.submit_offset(sym, qty, coid)
                     backfill_paper_venue_broker_order_id(conn, coid, oid)
+                    n_offsets += 1
+                # Honest signal (GATE-2 HIGH): True ONLY if at least one offset order actually
+                # went out. A breach whose broker residual is an orphan we don't own (belief flat)
+                # submits nothing — report False so the operator knows the position is untouched.
+                liquidation_submitted = n_offsets > 0
             # Fail SAFE on ANY liquidation error (not only BrokerError): a non-BrokerError from the
             # venue ingest/offset path must still report a structured liquidation_submitted=False
             # rather than crash the breach handler with an unstructured traceback (GATE-2).
@@ -402,7 +408,8 @@ def trade_tick(
                 audit_append(conn, actor="system", action="flatten_failed",
                              reason=str(fexc), strategy=name)
             payload = breach_payload(exc.detail, kind=exc.kind,
-                                      liquidation_submitted=liquidation_submitted)
+                                      liquidation_submitted=liquidation_submitted,
+                                      offsets_submitted=n_offsets)
             if flatten_error is not None:
                 payload["flatten_error"] = flatten_error
             emit(payload)
@@ -534,6 +541,7 @@ def flatten(
         kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
         audit_append(conn, actor=actor_enum.value, action="flatten",
                      reason="manual flatten", strategy=name)
+        n_offsets = 0
         try:
             broker.cancel_open_orders()
             flat_ts, _ = tick_clock(broker.clock)
@@ -547,13 +555,17 @@ def flatten(
                                          coid, strategy_id=rec.id)
                 oid = broker.submit_offset(sym, qty, coid)
                 backfill_paper_venue_broker_order_id(conn, coid, oid)
+                n_offsets += 1
         # Fail SAFE on ANY liquidation error (not only BrokerError) so the emergency flatten always
         # emits a structured payload instead of crashing with an unstructured traceback (GATE-2).
         except Exception as exc:
             emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False))
             raise typer.Exit(1) from exc
-    # liquidation_submitted: offset orders accepted; fills land async (may be next open).
-    emit(ok({"strategy": name, "kill_switch": "tripped", "liquidation_submitted": True}))
+    # liquidation_submitted reflects whether any offset order ACTUALLY went out (GATE-2 HIGH): a
+    # strategy already flat (no believed positions) submits none, so report False rather than imply
+    # a liquidation that never happened. Accepted offset fills land async (may be next open).
+    emit(ok({"strategy": name, "kill_switch": "tripped",
+             "liquidation_submitted": n_offsets > 0, "offsets_submitted": n_offsets}))
 
 
 @paper_app.command("halt-all")

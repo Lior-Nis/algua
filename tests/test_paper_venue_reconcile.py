@@ -226,6 +226,11 @@ def test_trade_tick_trips_on_orphan_holding(monkeypatch, tmp_path):
     assert payload["ok"] is False
     assert payload["kind"] == "reconcile"
     assert payload["kill_switch"] == "tripped"
+    # GATE-2 HIGH: the breach residual is an ORPHAN the strategy does not own (belief is flat), so
+    # the offset loop submits nothing. The payload must say so honestly — not claim a liquidation
+    # that never went out while the broker position stays untouched.
+    assert payload["offsets_submitted"] == 0
+    assert payload["liquidation_submitted"] is False
 
 
 # ---------------------------------------------------------------------------
