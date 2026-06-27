@@ -88,6 +88,25 @@ def test_data_inspect_rejects_unknown_dataset_filter():
     assert json.loads(result.stdout)["ok"] is False
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["data", "inspect", "--summary", "--snapshot-id", "x"],
+        ["data", "inspect", "--summary", "--dataset", "daily-bars"],
+        ["data", "inspect", "--snapshot-id", "x", "--dataset", "daily-bars"],
+        ["data", "inspect", "--summary", "--snapshot-id", "x", "--dataset", "daily-bars"],
+    ],
+)
+def test_data_inspect_rejects_multiple_selectors(argv):
+    """Passing >1 of --summary/--snapshot-id/--dataset fails closed instead of silently
+    resolving by return-order precedence (#260)."""
+    result = runner.invoke(app, argv)
+    assert result.exit_code != 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "only one of" in payload["error"]
+
+
 def test_data_ingest_bars_with_provider(monkeypatch):
     from algua.cli import data_cmd
 
