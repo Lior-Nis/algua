@@ -155,10 +155,11 @@ dividend; Codex/OpenCode CRITICAL) are correct and **must not be rejected**. The
   sharing a key: if their economics `(ex_date, kind, value)` are **identical**, keep one (true
   duplicate); if they **differ**, **raise** naming the rows — same id with different economics is
   corrupt source data, not something to silently pick from.
-- **`event_id` absent → drop exact full-row duplicates** `(symbol, ex_date, kind, value)`, a
-  best-effort guard against a torn/double-listed feed. **Documented limitation:** two *genuinely
-  distinct* same-`(ex_date, kind, value)` events are indistinguishable from a duplicate without
-  `event_id`, so one would be dropped — supply `event_id` for that rare case.
+- **`event_id` absent → an exact full-row duplicate** `(symbol, ex_date, kind, value)` **raises**
+  (#264). Two *genuinely distinct* same-`(ex_date, kind, value)` events are indistinguishable from a
+  torn/double-listed feed without `event_id`, and silently dropping one would under-count the
+  distribution and under-adjust `adj_close` (`back_adjust` SUMS distinct same-date events). Failing
+  closed surfaces the ambiguity loudly — supply `event_id` to disambiguate that rare case.
 - All surviving distinct events flow to `back_adjust`, which composes same-date ones correctly.
 
 ## CLI (`data import-bars`)

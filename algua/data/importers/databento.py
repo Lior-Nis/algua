@@ -155,7 +155,17 @@ def parse_databento_corp_actions(path: Path) -> dict[str, list[CorporateAction]]
         for symbol, ex_date, kind, value, _eid in parsed:
             row_key = (symbol, ex_date, kind, value)
             if row_key in seen_set:
-                continue
+                # Without event_id we can't tell a genuinely-repeated source row from two
+                # distinct same-ex-date same-value distributions. Silently collapsing them would
+                # under-count the distribution and under-adjust adj_close (corpactions SUMS
+                # distinct events), so fail closed loudly rather than silently (#264). The
+                # event_id path keys uniquely and is the remedy.
+                raise ValueError(
+                    f"{path.name}: {symbol} has duplicate {kind} rows with identical "
+                    f"(ex_date={ex_date.date()}, value={value}) and no event_id to disambiguate "
+                    f"them; two genuine same-date distributions would be silently collapsed "
+                    f"(under-adjusting adj_close). Add an event_id column to disambiguate."
+                )
             seen_set.add(row_key)
             surviving.append((symbol, ex_date, kind, value))
 
