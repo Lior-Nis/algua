@@ -140,6 +140,28 @@ def test_kill_rejects_unknown_strategy():
     assert json.loads(result.stdout)["ok"] is False
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["paper", "kill", "whatever", "--reason", "x", "--actor", "humn"],
+        ["paper", "flatten", "whatever", "--actor", "humn"],
+        ["paper", "halt-all", "--reason", "x", "--actor", "humn"],
+        ["paper", "resume-all", "--actor", "humn"],
+    ],
+)
+def test_operational_commands_reject_bad_actor(argv):
+    """A typo'd --actor fails closed via Actor() coercion before any switch/halt is touched (#259).
+
+    The coercion is the first line of each command body, so an invalid actor is rejected
+    before the DB/broker is reached — no mis-attributed audit/kill-switch row is written.
+    """
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "humn" in payload["error"]  # the bad actor token surfaces, not an unrelated failure
+
+
 def test_paper_account_missing_creds_errors(monkeypatch):
     # Empty env vars override any local .env (env > .env in pydantic-settings) so this stays
     # hermetic even on a developer machine that has real Alpaca keys in .env.

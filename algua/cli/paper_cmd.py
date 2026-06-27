@@ -237,11 +237,13 @@ def kill(
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """Manually trip the kill-switch for a strategy (halts paper runs until reset)."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch
     with registry_conn() as conn:
         # reject unknown/mistyped names before tripping a switch
         SqliteStrategyRepository(conn).get(name)
-        kill_switch.trip(conn, name, reason=reason, actor=actor)
-        audit_append(conn, actor=actor, action="kill_switch_trip", reason=reason, strategy=name)
+        kill_switch.trip(conn, name, reason=reason, actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="kill_switch_trip",
+                     reason=reason, strategy=name)
     emit(ok({"strategy": name, "kill_switch": "tripped", "reason": reason}))
 
 
@@ -474,6 +476,7 @@ def flatten(
 ) -> None:
     """Emergency: close this strategy's paper positions (its own held + universe symbols) and trip
     its kill-switch."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch
     strategy = load_strategy(name)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
@@ -485,8 +488,9 @@ def flatten(
                 "flatten requires 'paper' or 'forward_tested'")
         broker = _alpaca_broker_from_settings()
         # Halt first (fail-safe): the strategy is stopped even if the close call then fails.
-        kill_switch.trip(conn, name, reason="flatten", actor=actor)
-        audit_append(conn, actor=actor, action="flatten", reason="manual flatten", strategy=name)
+        kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="flatten",
+                     reason="manual flatten", strategy=name)
         symbols = _strategy_held_symbols(conn, name, strategy.universe)
         try:
             broker.cancel_open_orders()
@@ -508,11 +512,12 @@ def halt_all(
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
 ) -> None:
     """ACCOUNT-WIDE emergency: engage the global halt and flatten the ENTIRE Alpaca account."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before engaging the halt
     with registry_conn() as conn:
         broker = _alpaca_broker_from_settings()
         # Engage first (fail-safe): all trading is stopped even if the close call then fails.
-        global_halt.engage(conn, reason=reason, actor=actor)
-        audit_append(conn, actor=actor, action="halt_all", reason=reason, strategy=None)
+        global_halt.engage(conn, reason=reason, actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="halt_all", reason=reason, strategy=None)
         try:
             broker.close_all_positions()
         except BrokerError as exc:
@@ -531,6 +536,7 @@ def resume_all(
 ) -> None:
     """Clear the global halt and re-base every strategy's drawdown peak (the account was flattened
     to cash). Per-strategy kill-switches are left untouched."""
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching the halt
     with registry_conn() as conn:
         was_set = global_halt.is_engaged(conn)
         # Flag any LIVE strategies that still carry a ledger position (partial-fill residual): they
@@ -548,7 +554,7 @@ def resume_all(
             r["name"] for r in live_rows if believed_positions(conn, r["name"])
         ]
         if was_set:
-            audit_append(conn, actor=actor, action="resume_all",
+            audit_append(conn, actor=actor_enum.value, action="resume_all",
                          reason="clear global halt; re-base all drawdown peaks", strategy=None)
             # Re-base peaks first, clear the halt LAST so the un-halt is the final write (#109).
             # Clear BOTH the paper (account-equity) and live (NAV) peak tables so resumed strategies
