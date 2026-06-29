@@ -5,6 +5,7 @@ from algua.execution.live_ledger import (
     backfill_paper_venue_broker_order_id,
     believed_positions,
     fill_cursor,
+    fills_table,
     ingest_activities,
     paper_believed_positions,
     record_paper_venue_order,
@@ -85,3 +86,8 @@ def test_record_then_backfill_attributes_early_fill(tmp_path):
     assert paper_believed_positions(c, "s") == {}          # not yet attributed
     backfill_paper_venue_broker_order_id(c, "c1", "o1")    # mapping lands
     assert paper_believed_positions(c, "s") == {"AAA": 5.0}  # back-attributed
+
+
+def test_fills_table_returns_per_kind_table():
+    assert fills_table(LedgerKind.LIVE) == "live_fills"
+    assert fills_table(LedgerKind.PAPER) == "paper_venue_fills"

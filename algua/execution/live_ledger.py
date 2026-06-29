@@ -36,6 +36,12 @@ _TABLES = {
 }
 
 
+def fills_table(kind: LedgerKind) -> str:
+    """The fills table name for a ledger kind (live_fills / paper_venue_fills). Lets callers read a
+    kind's fills without importing the private _TABLES mapping."""
+    return _TABLES[kind].fills
+
+
 @dataclass(frozen=True)
 class PositionPnl:
     qty: float          # signed net position
