@@ -1,8 +1,8 @@
-"""The ledger-backed sizing view for a LIVE strategy (its virtual subaccount). Equity is the SIZING
-denominator = min(allocation, NAV); NAV (allocation + realized + unrealized) is the drawdown basis.
-Marks are the latest closed bar; a held symbol with no usable mark FAILS CLOSED (the loop skips the
-strategy) rather than falling back to average cost — which would hide a loss and suppress the
-drawdown breaker."""
+"""The ledger-backed sizing view for a strategy's virtual subaccount (live or paper). Equity is the
+SIZING denominator = min(allocation, NAV); NAV (allocation + realized + unrealized) is the drawdown
+basis. Marks are the latest closed bar; a held symbol with no usable mark FAILS CLOSED (the loop
+skips the strategy) rather than falling back to average cost — which would hide a loss and suppress
+the drawdown breaker."""
 from __future__ import annotations
 
 import sqlite3
