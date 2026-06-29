@@ -32,7 +32,9 @@ def account_expected_net(conn: sqlite3.Connection) -> dict[str, float]:
 def attributed_live_net(conn: sqlite3.Connection) -> dict[str, float]:
     """The books' expected net per symbol counting ONLY fills attributed to a CURRENTLY-LIVE
     strategy. Orphan fills (strategy IS NULL) and non-live fills are EXCLUDED, so they can never
-    'explain' a broker position. Zero nets are omitted."""
+    'explain' a broker position. Used by the resume reconcile: an unattributed broker holding leaves
+    an UNexplained residual and fails closed (resume refuses) rather than being silently cancelled
+    out by an orphan fill of the same symbol. Zero nets are omitted."""
     rows = conn.execute(
         "SELECT f.symbol AS symbol, SUM(f.qty) AS q FROM live_fills f "
         "JOIN strategies s ON s.name = f.strategy AND s.stage = 'live' "
