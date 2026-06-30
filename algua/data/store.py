@@ -181,7 +181,11 @@ class DataStore:
             adjustment=adjustment,
             source_metadata=source_metadata,
         )
-        canon = to_bar_schema(frame).reset_index().rename(columns={"timestamp": "ts"})
+        canon = (
+            to_bar_schema(frame, timeframe=timeframe)
+            .reset_index()
+            .rename(columns={"timestamp": "ts"})
+        )
         content_hash = logical_bars_hash(canon)
         snapshot_id = _snapshot_id(metadata, content_hash)
 
@@ -568,7 +572,9 @@ class DataStore:
         try:
             for chunk in chunks:
                 chunk_canon = (
-                    to_bar_schema(chunk).reset_index().rename(columns={"timestamp": "ts"})
+                    to_bar_schema(chunk, timeframe=timeframe)
+                    .reset_index()
+                    .rename(columns={"timestamp": "ts"})
                 )
                 chunk_symbols = set(chunk_canon["symbol"].unique())
                 clash = chunk_symbols & seen_symbols_set
@@ -748,7 +754,9 @@ class DataStore:
         )
         if raw.empty:
             return empty_bars()
-        return to_bar_schema(raw)
+        # rec.metadata.timeframe may be None for a legacy snapshot that recorded no timeframe; that
+        # skips only the daily UTC-midnight check (ingest is the gate), not the rest of the schema.
+        return to_bar_schema(raw, timeframe=rec.metadata.timeframe)
 
     def ingest_fundamentals(
         self,

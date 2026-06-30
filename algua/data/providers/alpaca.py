@@ -8,6 +8,7 @@ import requests
 
 from algua.data.contracts import BarProvider, BarRequest, ProviderBars
 from algua.data.providers.errors import ProviderError
+from algua.data.timeframes import is_intraday
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 MAX_ATTEMPTS = 4
@@ -44,6 +45,9 @@ class AlpacaBarProvider(BarProvider):
             columns={"close": "adj_close"}
         )
 
+        # Match raw vs adjusted on the ORIGINAL provider timestamps, BEFORE any daily flooring, so a
+        # genuine raw/adjusted anchor drift (different `t` for the same session) still trips this
+        # integrity check rather than being masked once both are floored to UTC midnight (#262).
         raw_keys = set(map(tuple, raw_frame[["ts", "symbol"]].itertuples(index=False)))
         adjusted_keys = set(map(tuple, adjusted_frame[["ts", "symbol"]].itertuples(index=False)))
         if raw_keys != adjusted_keys:
@@ -58,6 +62,7 @@ class AlpacaBarProvider(BarProvider):
         frame = raw_frame.merge(adjusted_frame, on=["ts", "symbol"], how="inner")
         if frame.empty:
             raise ProviderError("provider returned no overlapping raw/adjusted bars")
+        frame = _canonicalize_daily_ts(frame, request.timeframe)
         return ProviderBars(
             frame=frame,
             source_metadata={
@@ -143,3 +148,27 @@ def _normalize_alpaca(payload: dict[str, Any]) -> pd.DataFrame:
     if frame.empty:
         raise ProviderError("provider returned no bars")
     return frame.sort_values(["symbol", "ts"]).reset_index(drop=True)
+
+
+def _canonicalize_daily_ts(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Floor a daily ('1d') Alpaca frame's `ts` to the canonical UTC-midnight session date.
+
+    Alpaca stamps a daily bar at the session-start UTC instant (e.g. …T05:00:00Z), not UTC
+    midnight; the frozen bar-schema pins daily timestamps to the session date at UTC midnight and
+    the ingest rail now fails closed on a non-midnight 1d bar (#262). yfinance already lands on
+    midnight. Intraday frames are returned untouched (their bars are not clock-aligned by contract).
+
+    Flooring runs AFTER the raw/adjusted key match + merge, so it can only collapse rows within one
+    already-reconciled frame; we still reject any resulting duplicate `(ts, symbol)` defensively."""
+    if is_intraday(timeframe):
+        return frame
+    floored = frame.copy()
+    floored["ts"] = pd.to_datetime(floored["ts"], errors="raise", utc=True).dt.normalize()
+    if floored[["ts", "symbol"]].duplicated().any():
+        dups = floored.loc[floored[["ts", "symbol"]].duplicated(keep=False), ["ts", "symbol"]]
+        offenders = sorted({f"{r.symbol}@{r.ts.date()}" for r in dups.itertuples(index=False)})
+        raise ProviderError(
+            "daily bars collapse to duplicate (UTC-midnight date, symbol) after canonicalization; "
+            "refusing ambiguous snapshot: " + ", ".join(offenders)
+        )
+    return floored.sort_values(["symbol", "ts"]).reset_index(drop=True)

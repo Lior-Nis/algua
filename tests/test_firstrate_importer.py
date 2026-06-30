@@ -162,7 +162,7 @@ def test_import_merges_raw_and_adjusted(tmp_path):
     assert rows.loc[pd.Timestamp("2024-07-01", tz="UTC"), "close"] == 105.0
     assert rows.loc[pd.Timestamp("2024-07-01", tz="UTC"), "adj_close"] == 52.0
     assert rows.loc[pd.Timestamp("2024-07-02", tz="UTC"), "adj_close"] == 115.0  # anchored
-    validate_bars(to_bar_schema(frame))
+    validate_bars(to_bar_schema(frame, timeframe="1d"))
 
 
 def test_import_rejects_mis_scaled_adjusted_series(tmp_path):
@@ -262,7 +262,7 @@ def test_intraday_import_merges_and_localizes(tmp_path):
     row = frame.set_index("ts").loc[pd.Timestamp("2024-07-01 13:30:00", tz="UTC")]
     assert row["close"] == 105.0
     assert row["adj_close"] == 52.0
-    validate_bars(to_bar_schema(frame))
+    validate_bars(to_bar_schema(frame, timeframe="1m"))
 
 
 def test_intraday_import_30m(tmp_path):
@@ -278,7 +278,7 @@ def test_intraday_import_30m(tmp_path):
         pd.Timestamp("2024-07-01 13:30:00", tz="UTC"),
         pd.Timestamp("2024-07-01 14:00:00", tz="UTC"),
     ]
-    validate_bars(to_bar_schema(frame))
+    validate_bars(to_bar_schema(frame, timeframe="30m"))
 
 
 def test_intraday_duplicate_message_shows_full_timestamp(tmp_path):
