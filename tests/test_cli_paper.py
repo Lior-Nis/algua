@@ -1632,8 +1632,42 @@ def test_trade_tick_defers_on_unattributable_holding(monkeypatch, tmp_path):
     result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
                                  "--start", "2026-01-01", "--end", "2026-02-01"])
     payload = json.loads(result.output)
-    assert payload.get("traded") is False or payload.get("deferred") is True
+    assert payload.get("traded") is False
+    assert payload.get("deferred") is True
     assert broker.submitted == []   # nothing traded on an unreconciled account
+
+
+def test_trade_tick_halts_after_grace_expiry(monkeypatch, tmp_path):
+    # After DEFAULT_GRACE_CYCLES (=3) the persistent unattributable holding escalates from
+    # deferred to halt.  Invocations 1-3 defer (exit 0); invocation 4 hits
+    # cycle - first_seen == 3 >= 3, engages the global halt, and exits non-zero.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0,
+                              positions={"ZZZ": 5.0}, marks={"AAA": 100.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    args = ["paper", "trade-tick", name, "--snapshot", _SNAP,
+            "--start", "2026-01-01", "--end", "2026-02-01"]
+
+    # Cycles 1-3: mismatch is "pending" (within the grace window) -> defer, exit 0.
+    for i in range(3):
+        r = runner.invoke(app, args)
+        assert r.exit_code == 0, f"cycle {i + 1} unexpectedly non-zero: {r.output}"
+        p = json.loads(r.output)
+        assert p.get("deferred") is True, f"cycle {i + 1} did not defer"
+
+    # Cycle 4: cycle - first_seen == 3 >= DEFAULT_GRACE_CYCLES -> unexplained -> halt.
+    result = runner.invoke(app, args)
+    assert result.exit_code != 0, f"expected halt exit-code, got 0: {result.output}"
+    payload = json.loads(result.output)
+    assert payload.get("halted") is True
+
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is True
 
 
 def test_trade_tick_breach_trips_and_scoped_flattens(monkeypatch, tmp_path):
