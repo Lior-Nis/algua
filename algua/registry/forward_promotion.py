@@ -265,22 +265,16 @@ def assemble_forward_evidence(
             (name, window_start_recorded_at),
         ).fetchone()[0]
 
-    # 7. Single tenant: the admissible ticks must share ONE account, and no other strategy may
-    # have paper-lane ticks on that account inside [first admissible recorded_at, now].
+    # 7. Single account: the admissible ticks must all share ONE account (mixed-account evidence
+    # is a tenancy violation). Siblings on the same account are ALLOWED: the multi-tenant book
+    # attributes each strategy's return series via its own per-strategy NAV ticks (#314/#316a-b)
+    # and account-level fill attribution (_classify_activities), so a sibling cannot contaminate
+    # it.
     account_id: str | None = None
-    single_tenant_ok = True
+    single_account_ok = True
     if admissible:
         account_id = admissible[-1]["account_id"]
-        distinct_accounts = {row["account_id"] for row in admissible}
-        if len(distinct_accounts) > 1:
-            single_tenant_ok = False  # mixed-account evidence is itself a tenancy violation
-        else:
-            n_siblings = conn.execute(
-                "SELECT COUNT(*) FROM tick_snapshots WHERE lane='paper' AND account_id=?"
-                " AND strategy_id != ? AND recorded_at >= ? AND recorded_at <= ?",
-                (account_id, strategy_id, admissible[0]["recorded_at"], now_iso),
-            ).fetchone()[0]
-            single_tenant_ok = n_siblings == 0
+        single_account_ok = len({row["account_id"] for row in admissible}) == 1
 
     # 8. Concurrency breadth (recorded, not yet enforced): distinct strategies with ANY
     # paper-lane ticks overlapping the window — failed/inadmissible siblings still inflated
@@ -308,8 +302,9 @@ def assemble_forward_evidence(
         # Alpaca's activities `after` bound is EXCLUSIVE: an external deposit stamped at
         # EXACTLY the first-tick instant would escape an `after == first_tick_ts` window, so
         # widen the start 1s earlier. The overlap errs fail-closed — an extra pre-window
-        # capital movement can only FAIL the gate, never pass it; pre-window FILLs from this
-        # strategy's own orders remain attributable.
+        # capital movement can only FAIL the gate, never pass it; pre-window FILLs from ANY
+        # paper-book strategy's order on this account remain attributable (account-level
+        # attribution).
         first_tick_dt = _parse_dt(admissible[0]["tick_ts"])
         assert first_tick_dt is not None  # admissibility already proved it parses
         window_after = (first_tick_dt - timedelta(seconds=1)).isoformat()
@@ -334,7 +329,7 @@ def assemble_forward_evidence(
         kill_switch_tripped=kill_switch_tripped,
         global_halt_engaged=global_halt_engaged,
         n_kill_trips_in_window=int(n_kill_trips_in_window),
-        single_tenant_ok=single_tenant_ok,
+        single_account_ok=single_account_ok,
         activities_ok=activities_ok,
         n_external_cash_flows=n_external_cash_flows,
         n_unattributable_fills=n_unattributable_fills,
@@ -448,8 +443,8 @@ def verify_forward_certificate(
     # Alpaca's activities `after` bound is EXCLUSIVE: a capital movement stamped at EXACTLY
     # the certification instant would escape an `after == created_at` window, so widen the
     # start 1s earlier. The overlap errs fail-closed — an extra pre-window movement can only
-    # FAIL the wall, never pass it; pre-window FILLs from this strategy's own orders remain
-    # attributable.
+    # FAIL the wall, never pass it; pre-window FILLs from ANY paper-book strategy's order on
+    # this account remain attributable (account-level attribution).
     window_after = (datetime.fromisoformat(row["created_at"]) - timedelta(seconds=1)).isoformat()
     try:
         acts = activities_fetch(window_after, now_utc.isoformat())

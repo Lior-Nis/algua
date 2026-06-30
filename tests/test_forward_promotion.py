@@ -407,37 +407,45 @@ def test_nonutc_aware_now_is_normalized_to_utc_date(conn):
 # Single-tenant + concurrency (clauses 7-8)
 # ---------------------------------------------------------------------------
 
-def test_single_tenant_violation_same_account_sibling(conn):
+def test_sibling_on_same_account_passes_single_account(conn):
+    # Under single_account_ok a sibling's tick on the same account no longer fails the gate:
+    # all of strategy 1's admissible ticks are on "acct", so single_account_ok is True even
+    # though strategy 2 also ticked on "acct" in the window.
     seed_tick(conn, date(2026, 6, 10), 100.0)
     seed_tick(conn, date(2026, 6, 12), 101.0)
     raw_tick(conn, name="other", strategy_id=2, tick_ts=_ts(date(2026, 6, 11)),
              decision_ts=_ts(date(2026, 6, 10)), account_id="acct",
              recorded_at=_ts(date(2026, 6, 11)))
     res = assemble(conn)
-    assert res.evidence.single_tenant_ok is False
+    assert res.evidence.single_account_ok is True
     assert res.n_concurrent_forward == 2
 
 
-def test_sibling_before_window_does_not_violate_single_tenant(conn):
+def test_sibling_before_window_single_account_ok(conn):
+    # A sibling tick recorded before the first admissible tick has no effect:
+    # strategy 1's admissible ticks are all on "acct" -> single_account_ok True.
     seed_tick(conn, date(2026, 6, 10), 100.0)
     seed_tick(conn, date(2026, 6, 12), 101.0)
     raw_tick(conn, name="other", strategy_id=2, tick_ts=_ts(date(2026, 6, 9)),
              decision_ts=_ts(date(2026, 6, 8)), account_id="acct",
              recorded_at=_ts(date(2026, 6, 9)))  # before first admissible recorded_at
     res = assemble(conn)
-    assert res.evidence.single_tenant_ok is True
+    assert res.evidence.single_account_ok is True
     assert res.n_concurrent_forward == 1
 
 
-def test_mixed_account_admissible_ticks_fail_single_tenant(conn):
+def test_mixed_account_admissible_ticks_fail_single_account(conn):
+    # Admissible ticks spanning two accounts -> single_account_ok False.
     seed_tick(conn, date(2026, 6, 10), 100.0, account_id="acct-A")
     seed_tick(conn, date(2026, 6, 12), 101.0, account_id="acct-B")
     res = assemble(conn)
-    assert res.evidence.single_tenant_ok is False
+    assert res.evidence.single_account_ok is False
     assert res.account_id == "acct-B"  # latest admissible tick's account
 
 
-def test_sibling_on_other_account_counts_concurrent_but_keeps_single_tenant(conn):
+def test_sibling_on_other_account_counts_concurrent_but_keeps_single_account_ok(conn):
+    # A sibling on a different account does not affect single_account_ok (strategy 1's
+    # admissible ticks are all on "acct"). Inadmissible siblings still count for concurrency.
     seed_tick(conn, date(2026, 6, 10), 100.0)
     seed_tick(conn, date(2026, 6, 12), 101.0)
     raw_tick(conn, name="other", strategy_id=2, tick_ts=_ts(date(2026, 6, 11)),
@@ -445,7 +453,7 @@ def test_sibling_on_other_account_counts_concurrent_but_keeps_single_tenant(conn
              clock_source="local",  # inadmissible siblings still count (family-wise error)
              recorded_at=_ts(date(2026, 6, 11)))
     res = assemble(conn)
-    assert res.evidence.single_tenant_ok is True
+    assert res.evidence.single_account_ok is True
     assert res.n_concurrent_forward == 2
 
 
@@ -570,7 +578,7 @@ def test_no_admissible_ticks_skips_broker_and_zeroes_evidence(conn):
     assert ev.n_return_observations == 0 and ev.session_coverage == 0.0
     assert ev.n_reconcile_failures == 0 and ev.n_defective_ticks == 0
     assert ev.n_kill_trips_in_window == 0
-    assert ev.single_tenant_ok is True
+    assert ev.single_account_ok is True
     assert res.n_concurrent_forward == 0
     assert res.first_tick_id is None and res.last_tick_id is None
     assert res.first_tick_ts is None and res.last_tick_ts is None
@@ -853,6 +861,28 @@ def test_run_forward_gate_human_pass_from_paper(conn, repo, monkeypatch):
     # Born consumed like the agent's: the atomic record+promote spends the row at birth for
     # EVERY actor (a human row was never consumable anyway — the actor='agent' token filter).
     assert row["consumed"] == 1
+
+
+def test_sibling_on_same_account_now_passes_single_account(conn):
+    # Strategy A has admissible ticks on 'acct-1'. Strategy B also has a tick on 'acct-1'
+    # in the same window. Under single_account_ok, A's evidence passes because all A's
+    # admissible ticks share one account (siblings on the same account are allowed).
+    seed_tick(conn, date(2026, 6, 10), 100.0, account_id="acct-1")
+    seed_tick(conn, date(2026, 6, 12), 101.0, account_id="acct-1")
+    # sibling strategy B on the same account in the window
+    raw_tick(conn, name="other", strategy_id=2, tick_ts=_ts(date(2026, 6, 11)),
+             decision_ts=_ts(date(2026, 6, 10)), account_id="acct-1",
+             recorded_at=_ts(date(2026, 6, 11)))
+    res = assemble(conn)
+    assert res.evidence.single_account_ok is True
+
+
+def test_mixed_account_evidence_fails_single_account(conn):
+    # Strategy A's admissible ticks span 'acct-1' and 'acct-2' -> single_account_ok False.
+    seed_tick(conn, date(2026, 6, 10), 100.0, account_id="acct-1")
+    seed_tick(conn, date(2026, 6, 12), 101.0, account_id="acct-2")
+    res = assemble(conn)
+    assert res.evidence.single_account_ok is False
 
 
 def test_classify_activities_attributes_fill_to_any_paper_order(tmp_path):

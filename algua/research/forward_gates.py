@@ -95,7 +95,7 @@ class ForwardEvidence:
     kill_switch_tripped: bool
     global_halt_engaged: bool
     n_kill_trips_in_window: int
-    single_tenant_ok: bool
+    single_account_ok: bool
     activities_ok: bool
     n_external_cash_flows: int
     n_unattributable_fills: int
@@ -220,11 +220,12 @@ def evaluate_forward_gate(
         "no_kill_trips_in_window", evidence.n_kill_trips_in_window == 0,
         f"{evidence.n_kill_trips_in_window} kill-switch trip event(s) in window"))
 
-    # 7. Account hygiene — uncontaminated single-tenant account, exhaustively-fetched activity
-    # history, no external capital movements, every fill attributable to this strategy.
+    # 7. Account hygiene — single-account evidence (siblings on the same account are allowed),
+    # exhaustively-fetched activity history, no external capital movements, every fill
+    # attributable to an order in the paper book.
     checks.append(_bool_check(
-        "single_tenant", evidence.single_tenant_ok,
-        "another strategy ticked on the same paper account in the window"))
+        "single_account", evidence.single_account_ok,
+        "evidence spans more than one paper account in the window"))
     checks.append(_bool_check(
         "activities_ok", evidence.activities_ok,
         "broker account-activities fetch incomplete or failed (fails closed)"))
