@@ -33,6 +33,12 @@ from algua.execution.order_state import (
 )
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.observability import (
+    CycleCounters,
+    configure_logging,
+    correlation_context,
+    get_logger,
+)
 from algua.registry import allocations
 from algua.registry.allocations import AllocationError, active_allocation
 from algua.registry.approvals import compute_artifact_hashes
@@ -51,6 +57,8 @@ from algua.strategies.loader import load_tradable_strategy
 live_app = typer.Typer(help="LIVE (real-money) trading — human-authorized strategies only",
                        no_args_is_help=True)
 app.add_typer(live_app, name="live")
+
+log = get_logger(__name__)
 
 
 def _live_account_equity() -> float:
@@ -164,9 +172,12 @@ def _run_strategy_tick(  # noqa: PLR0913
     except TickHalted as exc:
         audit_append(conn, actor="system", action="live_trade_tick_halted",
                      reason=str(exc), strategy=name)
+        log.info("tick_halted", extra={"fields": {"strategy": name, "lane": "live"}})
         return breach_payload(str(exc), strategy=name, halted=True)
     except RiskBreach as exc:
         trip_for_breach(conn, name, exc)
+        log.error("breach", extra={"fields": {"strategy": name, "lane": "live",
+                                              "kind": exc.kind}}, exc_info=True)
         liquidation_submitted = True
         flatten_error = None
         try:
@@ -187,6 +198,8 @@ def _run_strategy_tick(  # noqa: PLR0913
             flatten_error = str(fexc)
             audit_append(conn, actor="system", action="flatten_failed",
                          reason=str(fexc), strategy=name)
+            log.error("flatten_failed", extra={"fields": {"strategy": name, "lane": "live"}},
+                      exc_info=True)
         payload = breach_payload(exc.detail, strategy=name, kind=exc.kind,
                                   liquidation_submitted=liquidation_submitted)
         if flatten_error is not None:
@@ -256,97 +269,120 @@ def run_all(
     account reconciles clean; a persistent unexplained drift engages the global halt."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
-    with registry_conn() as conn:
-        repo = SqliteStrategyRepository(conn)
-        live = repo.list_strategies(Stage.LIVE)
-        if not live:
-            emit(ok({"strategies": [], "note": "no live strategies"}))
-            return
-        if global_halt.is_engaged(conn):
-            emit(breach_payload("global halt engaged", halted=True))
-            raise typer.Exit(1)
-        # re-verify each; skip + flag failures, keep one authorization for the account broker
-        verified: list[tuple[str, LiveAuthorization]] = []
-        skipped: list[dict] = []
-        for rec in live:
-            try:
-                verified.append((
-                    rec.name,
-                    verify_live_authorization(conn, repo, rec.name, ALLOWED_SIGNERS_PATH),
-                ))
-            except LiveAuthorizationError as exc:
-                skipped.append({"strategy": rec.name, "reason": str(exc)})
-        if not verified:
-            emit(ok({
-                "strategies": [],
-                "skipped": skipped,
-                "note": "no authorized live strategies",
-            }))
-            return
-        broker = _alpaca_live_broker(verified[0][1])
-        provider = _select_provider(False, snapshot)
-        # ingest fills, then reconcile the account before trading
-        cursor = fill_cursor(conn, LedgerKind.LIVE)
-        ingest_activities(conn, _broker_account_activities(broker, cursor), LedgerKind.LIVE)
-        cycle = live_reconcile.next_cycle(conn)
-        recon = live_reconcile.reconcile(
-            conn, _broker_net_positions(broker), cycle,
-            tolerance=tolerance, grace_cycles=grace_cycles,
-        )
-        recon_payload = {
-            "cycle": cycle,
-            "clean": recon.clean,
-            "halt": recon.halt,
-            "mismatches": recon.mismatches,
-        }
-        if recon.halt:
-            global_halt.engage(
-                conn, reason=f"reconcile drift {recon.mismatches}", actor="system"
-            )
-            emit({"ok": False, "reconcile": recon_payload, "skipped": skipped})
-            raise typer.Exit(1)
-        if not recon.clean:
-            emit(ok({
-                "reconcile": recon_payload,
-                "skipped": skipped,
-                "note": "reconcile pending; deferring trades this cycle",
-                "strategies": [],
-            }))
-            return
-        pool = {"available": _broker_buying_power(broker)}
-
-        def _reserve_for(strategy_name):
-            def _reserve(symbol: str, notional: float) -> float:
-                permitted = min(notional, max(0.0, pool["available"]))
-                pool["available"] -= permitted
-                if permitted < notional:  # trimmed or fully skipped -> audit the shortfall
-                    record_reservation(
-                        conn, cycle, strategy_name, symbol, notional, permitted
+    configure_logging()
+    counters = CycleCounters()
+    # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives
+    # even when the cycle fails before/around the strategy loop (#346).
+    with correlation_context():
+        log.info("cycle_start", extra={"fields": {"lane": "live", "snapshot": snapshot}})
+        try:
+            with registry_conn() as conn:
+                repo = SqliteStrategyRepository(conn)
+                live = repo.list_strategies(Stage.LIVE)
+                if not live:
+                    emit(ok({"strategies": [], "note": "no live strategies"}))
+                    return
+                if global_halt.is_engaged(conn):
+                    emit(breach_payload("global halt engaged", halted=True))
+                    raise typer.Exit(1)
+                # re-verify each; skip + flag failures, keep one authorization for the broker
+                verified: list[tuple[str, LiveAuthorization]] = []
+                skipped: list[dict] = []
+                for rec in live:
+                    try:
+                        verified.append((
+                            rec.name,
+                            verify_live_authorization(conn, repo, rec.name, ALLOWED_SIGNERS_PATH),
+                        ))
+                    except LiveAuthorizationError as exc:
+                        skipped.append({"strategy": rec.name, "reason": str(exc)})
+                if not verified:
+                    emit(ok({
+                        "strategies": [],
+                        "skipped": skipped,
+                        "note": "no authorized live strategies",
+                    }))
+                    return
+                broker = _alpaca_live_broker(verified[0][1])
+                provider = _select_provider(False, snapshot)
+                # ingest fills, then reconcile the account before trading
+                cursor = fill_cursor(conn, LedgerKind.LIVE)
+                ingest_activities(conn, _broker_account_activities(broker, cursor), LedgerKind.LIVE)
+                cycle = live_reconcile.next_cycle(conn)
+                recon = live_reconcile.reconcile(
+                    conn, _broker_net_positions(broker), cycle,
+                    tolerance=tolerance, grace_cycles=grace_cycles,
+                )
+                recon_payload = {
+                    "cycle": cycle,
+                    "clean": recon.clean,
+                    "halt": recon.halt,
+                    "mismatches": recon.mismatches,
+                }
+                if recon.halt:
+                    counters.reconcile_halted += 1
+                    log.error("reconcile_halt",
+                              extra={"fields": {"lane": "live", "mismatches": recon.mismatches}})
+                    global_halt.engage(
+                        conn, reason=f"reconcile drift {recon.mismatches}", actor="system"
                     )
-                return permitted
-            return _reserve
+                    emit({"ok": False, "reconcile": recon_payload, "skipped": skipped})
+                    raise typer.Exit(1)
+                if not recon.clean:
+                    counters.reconcile_deferred += 1
+                    log.info("reconcile_deferred", extra={"fields": {"lane": "live"}})
+                    emit(ok({
+                        "reconcile": recon_payload,
+                        "skipped": skipped,
+                        "note": "reconcile pending; deferring trades this cycle",
+                        "strategies": [],
+                    }))
+                    return
+                pool = {"available": _broker_buying_power(broker)}
 
-        results = []
-        breached = False
-        for name, authorization in verified:
-            result = _run_strategy_tick(
-                conn, name, authorization, broker, provider, max_drawdown,
-                start=start, end=end,
-                reserve_buy=_reserve_for(name),
-                cancel=lambda n=name: _scoped_cancel(conn, broker, n),
-            )
-            results.append(result)
-            if result.get("ok") is False:  # breach/halt marker: stop, but keep prior results
-                breached = True
-                break
-    envelope = {"reconcile": recon_payload, "skipped": skipped, "strategies": results}
-    if breached:
-        # A strategy breached/halted (already tripped + scoped-flattened): surface the breaching
-        # strategy AND every sibling already ticked this cycle in one envelope, then exit non-zero
-        # (#270) — don't discard the prior results by emitting only the breach payload.
-        emit({"ok": False, **envelope})
-        raise typer.Exit(1)
-    emit(ok(envelope))
+                def _reserve_for(strategy_name):
+                    def _reserve(symbol: str, notional: float) -> float:
+                        permitted = min(notional, max(0.0, pool["available"]))
+                        pool["available"] -= permitted
+                        if permitted < notional:  # trimmed/skipped -> audit the shortfall
+                            record_reservation(
+                                conn, cycle, strategy_name, symbol, notional, permitted
+                            )
+                        return permitted
+                    return _reserve
+
+                results = []
+                breached = False
+                for name, authorization in verified:
+                    result = _run_strategy_tick(
+                        conn, name, authorization, broker, provider, max_drawdown,
+                        start=start, end=end,
+                        reserve_buy=_reserve_for(name),
+                        cancel=lambda n=name: _scoped_cancel(conn, broker, n),
+                    )
+                    results.append(result)
+                    counters.ticks += 1
+                    if result.get("ok") is False:  # breach/halt marker: stop, keep prior results
+                        counters.breaches += 1
+                        if result.get("flatten_error") is not None:
+                            counters.flatten_failures += 1
+                        breached = True
+                        break
+            envelope = {"reconcile": recon_payload, "skipped": skipped, "strategies": results}
+            if breached:
+                # A strategy breached/halted (already tripped + scoped-flattened): surface the
+                # breaching strategy AND every sibling already ticked this cycle in one envelope,
+                # then exit non-zero (#270) — don't discard the prior results.
+                emit({"ok": False, **envelope})
+                raise typer.Exit(1)
+            emit(ok(envelope))
+        except typer.Exit:
+            raise
+        except Exception:
+            log.error("cycle_failed", extra={"fields": {"lane": "live"}}, exc_info=True)
+            raise
+        finally:
+            log.info("golden_signals", extra={"fields": counters.as_fields()})
 
 
 def _scoped_cancel(conn, broker, strategy: str) -> None:

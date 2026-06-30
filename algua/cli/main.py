@@ -38,6 +38,9 @@ def main(args: list[str] | None = None) -> None:
     types, unknown options, missing arguments) are rendered as JSON ``{ok: false}`` instead of Rich
     usage text. Command-body errors are already JSON-rendered by the ``json_errors`` decorator.
     """
+    from algua.observability import configure_logging
+
+    configure_logging()
     command = get_command(app)
     try:
         result = command.main(args=args, prog_name="algua", standalone_mode=False)

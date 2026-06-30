@@ -67,6 +67,7 @@ forbidden_modules = [
     "algua.config",
     "algua.calendar",
     "algua.data",
+    "algua.observability",
 ]
 
 [[tool.importlinter.contracts]]
@@ -86,6 +87,35 @@ forbidden_modules = [
     "algua.data",
     "algua.backtest",
     "algua.strategies",
+    "algua.observability",
+]
+
+[[tool.importlinter.contracts]]
+# observability (structured JSON logging, #346) is a pure stdlib-only leaf: cli/execution/live/
+# risk may depend on it for telemetry, but it must import no other algua.* module so it never
+# pulls a heavy or stateful layer into a logging call site.
+name = "observability layer is pure (imports no other algua module)"
+type = "forbidden"
+source_modules = ["algua.observability"]
+forbidden_modules = [
+    "algua.cli",
+    "algua.registry",
+    "algua.config",
+    "algua.calendar",
+    "algua.contracts",
+    "algua.features",
+    "algua.data",
+    "algua.backtest",
+    "algua.strategies",
+    "algua.research",
+    "algua.live",
+    "algua.execution",
+    "algua.risk",
+    "algua.audit",
+    "algua.knowledge",
+    "algua.portfolio",
+    "algua.tracking",
+    "algua.provenance",
 ]
 
 [[tool.importlinter.contracts]]
@@ -98,7 +128,7 @@ forbidden_modules = ["algua.cli", "algua.registry"]
 name = "features layer is pure (no algua imports beyond contracts)"
 type = "forbidden"
 source_modules = ["algua.features"]
-forbidden_modules = ["algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies"]
+forbidden_modules = ["algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies", "algua.observability"]
 
 [[tool.importlinter.contracts]]
 name = "portfolio construction layer is pure (no algua imports beyond contracts + features)"
@@ -107,6 +137,7 @@ source_modules = ["algua.portfolio"]
 forbidden_modules = [
     "algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies",
     "algua.live", "algua.execution", "algua.tracking", "algua.research", "algua.knowledge",
+    "algua.observability",
 ]
 
 [[tool.importlinter.contracts]]

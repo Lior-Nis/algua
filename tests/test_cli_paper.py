@@ -1631,7 +1631,7 @@ def test_trade_tick_defers_on_unattributable_holding(monkeypatch, tmp_path):
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
     result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
                                  "--start", "2026-01-01", "--end", "2026-02-01"])
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)  # stdout is the JSON contract; logs go to stderr (#346)
     assert payload.get("traded") is False
     assert payload.get("deferred") is True
     assert broker.submitted == []   # nothing traded on an unreconciled account
@@ -1656,13 +1656,13 @@ def test_trade_tick_halts_after_grace_expiry(monkeypatch, tmp_path):
     for i in range(3):
         r = runner.invoke(app, args)
         assert r.exit_code == 0, f"cycle {i + 1} unexpectedly non-zero: {r.output}"
-        p = json.loads(r.output)
+        p = json.loads(r.stdout)  # stdout is the JSON contract; logs go to stderr (#346)
         assert p.get("deferred") is True, f"cycle {i + 1} did not defer"
 
     # Cycle 4: cycle - first_seen == 3 >= DEFAULT_GRACE_CYCLES -> unexplained -> halt.
     result = runner.invoke(app, args)
     assert result.exit_code != 0, f"expected halt exit-code, got 0: {result.output}"
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)  # stdout is the JSON contract; logs go to stderr (#346)
     assert payload.get("halted") is True
 
     from algua.risk import global_halt
