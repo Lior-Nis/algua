@@ -69,7 +69,7 @@ def _tail_ratio(r: pd.Series) -> float:
     denom = abs(float(p5))
     if denom == 0.0:
         return 0.0
-    ratio = float(p95) / denom
+    ratio = abs(float(p95)) / denom  # magnitude ratio: always >= 0 (e.g. all-negative series)
     return ratio if math.isfinite(ratio) else 0.0
 
 

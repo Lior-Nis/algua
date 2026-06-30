@@ -65,7 +65,16 @@ def test_tail_ratio_matches_percentile_definition():
     rng = np.random.default_rng(7)
     r = pd.Series(rng.normal(0.0003, 0.012, size=400))
     p95, p5 = np.percentile(r.to_numpy(), [95, 5])
-    assert metrics_from_returns(r)["tail_ratio"] == float(p95) / abs(float(p5))
+    assert metrics_from_returns(r)["tail_ratio"] == abs(float(p95)) / abs(float(p5))
+
+
+def test_tail_ratio_is_a_non_negative_magnitude_on_all_negative_series():
+    # All-negative series: p95 is itself negative. A magnitude ratio must stay >= 0.
+    r = pd.Series([-0.01, -0.02, -0.03, -0.04, -0.05, -0.06])
+    p95, p5 = np.percentile(r.to_numpy(), [95, 5])
+    tr = metrics_from_returns(r)["tail_ratio"]
+    assert tr >= 0.0
+    assert tr == abs(float(p95)) / abs(float(p5))
 
 
 def test_sortino_exact_formula_and_exceeds_sharpe_on_left_skew():
