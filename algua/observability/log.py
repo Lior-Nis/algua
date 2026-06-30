@@ -90,6 +90,27 @@ class JsonFormatter(logging.Formatter):
             )
 
 
+class _StderrHandler(logging.StreamHandler):
+    """A StreamHandler that re-resolves ``sys.stderr`` on every emit.
+
+    A plain ``StreamHandler(sys.stderr)`` binds the stream object at construction. In a long-lived
+    process where ``sys.stderr`` is swapped or closed (pytest capture / typer CliRunner / any
+    repeated in-process invocation), that stale stream wedges the logger ("Logging error"). Mirrors
+    the stdlib ``logging._StderrHandler`` used by ``lastResort`` to always target the live stream.
+    """
+
+    def __init__(self) -> None:
+        logging.Handler.__init__(self)
+
+    @property
+    def stream(self):
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value: object) -> None:  # StreamHandler.__init__ assigns; ignore it
+        pass
+
+
 def get_logger(name: str = _ROOT) -> logging.Logger:
     """Return a logger under the ``algua`` root (the one carrying the stderr handler)."""
     if name != _ROOT and not name.startswith(_ROOT + "."):
@@ -116,7 +137,7 @@ def configure_logging() -> None:
     logger.setLevel(_resolve_level(os.environ.get("ALGUA_LOG_LEVEL")))
     logger.propagate = False
     if not any(getattr(h, "_algua_observability", False) for h in logger.handlers):
-        handler = logging.StreamHandler(sys.stderr)
+        handler = _StderrHandler()
         handler.setFormatter(JsonFormatter())
         handler._algua_observability = True  # type: ignore[attr-defined]
         logger.addHandler(handler)
