@@ -58,7 +58,7 @@ def test_yfinance_daily_output_satisfies_bar_schema():
     )
 
     frame = _normalize_yfinance(raw, ("AAPL",))
-    out = to_bar_schema(frame)
+    out = to_bar_schema(frame, timeframe="1d")
 
     assert str(out.index.tz) == "UTC"
     assert out.index[0] == pd.Timestamp("2026-01-02", tz="UTC")
@@ -82,7 +82,7 @@ def test_yfinance_intraday_output_is_converted_to_utc():
     )
 
     frame = _normalize_yfinance(raw, ("AAPL",))
-    out = to_bar_schema(frame)
+    out = to_bar_schema(frame, timeframe="1m")
 
     assert out.index[0] == pd.Timestamp("2026-01-02T14:30:00", tz="UTC")
 
@@ -96,6 +96,7 @@ def test_yfinance_provider_rejects_auto_adjustment():
 
 
 def test_alpaca_normalizer_flattens_symbol_keyed_payload():
+    # Intraday: timestamps are passed through untouched (no UTC-midnight flooring).
     frame = _normalize_alpaca(
         {
             "bars": {
@@ -110,7 +111,8 @@ def test_alpaca_normalizer_flattens_symbol_keyed_payload():
                     }
                 ]
             }
-        }
+        },
+        timeframe="1m",
     )
 
     assert frame.to_dict("records") == [
@@ -126,13 +128,43 @@ def test_alpaca_normalizer_flattens_symbol_keyed_payload():
     ]
 
 
+def test_alpaca_normalizer_floors_daily_to_utc_midnight():
+    # #262: Alpaca stamps a daily bar at the session-start UTC instant (…T05:00:00Z); the provider
+    # must floor it to the canonical UTC-midnight session date so it satisfies the frozen schema.
+    frame = _normalize_alpaca(
+        {
+            "bars": {
+                "AAPL": [
+                    {
+                        "t": "2024-07-01T05:00:00Z",
+                        "o": 100.0,
+                        "h": 101.0,
+                        "l": 99.0,
+                        "c": 100.5,
+                        "v": 1000,
+                    }
+                ]
+            }
+        },
+        timeframe="1d",
+    )
+
+    assert list(frame["ts"]) == [pd.Timestamp("2024-07-01T00:00:00", tz="UTC")]
+    # The floored frame reshapes through the schema rail without tripping the daily check.
+    merged = frame.assign(adj_close=frame["close"])
+    out = to_bar_schema(merged, timeframe="1d")
+    assert out.index[0] == pd.Timestamp("2024-07-01T00:00:00", tz="UTC")
+
+
 def test_alpaca_provider_merges_raw_close_with_adjusted_close(monkeypatch):
+    # Alpaca daily ('1Day') bars are stamped at the session-start UTC instant (…T05:00:00Z); the
+    # provider floors them to the canonical UTC-midnight session date (#262).
     responses = {
         "raw": {
             "bars": {
                 "AAPL": [
                     {
-                        "t": "2026-01-02T14:30:00Z",
+                        "t": "2026-01-02T05:00:00Z",
                         "o": 100.0,
                         "h": 101.0,
                         "l": 99.0,
@@ -146,7 +178,7 @@ def test_alpaca_provider_merges_raw_close_with_adjusted_close(monkeypatch):
             "bars": {
                 "AAPL": [
                     {
-                        "t": "2026-01-02T14:30:00Z",
+                        "t": "2026-01-02T05:00:00Z",
                         "o": 99.5,
                         "h": 100.5,
                         "l": 98.5,
@@ -178,7 +210,7 @@ def test_alpaca_provider_merges_raw_close_with_adjusted_close(monkeypatch):
 
     assert bars.frame.to_dict("records") == [
         {
-            "ts": "2026-01-02T14:30:00Z",
+            "ts": pd.Timestamp("2026-01-02T00:00:00", tz="UTC"),
             "symbol": "AAPL",
             "open": 100.0,
             "high": 101.0,

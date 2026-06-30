@@ -31,7 +31,7 @@ def test_importer_output_is_bar_schema_valid(tmp_path):
     req = FirstRateImportRequest(raw_dir=raw, adjusted_dir=adj)
     for chunk in FirstRateImporter().import_bars(req):
         # Same terminal boundary both seams must satisfy.
-        validate_bars(to_bar_schema(chunk.frame))
+        validate_bars(to_bar_schema(chunk.frame, timeframe="1d"))
 
 
 def test_snapshot_id_is_discovery_order_invariant(tmp_path):

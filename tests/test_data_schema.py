@@ -66,7 +66,7 @@ def test_to_bar_schema_reshapes_ts_column_frame():
          "ts": ["2024-07-01T00:00:00+00:00", "2024-07-01T00:00:00+00:00"],
          "volume": [20.0, 10.0]}
     )
-    out = to_bar_schema(raw)
+    out = to_bar_schema(raw, timeframe="1d")
     assert list(out.columns) == BAR_COLUMNS
     assert out.index.name == "timestamp"
     assert str(out.index.tz) == "UTC"
@@ -81,7 +81,7 @@ def test_to_bar_schema_rejects_non_numeric_values():
          "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01T00:00:00+00:00"], "volume": [10.0]}
     )
     with pytest.raises(ValueError):
-        to_bar_schema(raw)
+        to_bar_schema(raw, timeframe="1d")
 
 
 def test_to_bar_schema_requires_adj_close():
@@ -91,7 +91,7 @@ def test_to_bar_schema_requires_adj_close():
         "close": [10.0, 11.0], "volume": [1.0, 1.0],
     })
     with pytest.raises(ValueError):
-        to_bar_schema(raw)
+        to_bar_schema(raw, timeframe="1d")
 
 
 def test_to_bar_schema_rejects_naive_timestamps():
@@ -100,7 +100,7 @@ def test_to_bar_schema_rejects_naive_timestamps():
          "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01"], "volume": [10.0]}
     )
     with pytest.raises(ValueError, match="tz-aware"):
-        to_bar_schema(raw)
+        to_bar_schema(raw, timeframe="1d")
 
 
 def test_to_bar_schema_preserves_non_utc_offset_as_utc_instant():
@@ -109,7 +109,7 @@ def test_to_bar_schema_preserves_non_utc_offset_as_utc_instant():
         {"adj_close": [1.0], "close": [1.0], "high": [1.0], "low": [1.0],
          "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01T05:00:00+05:00"], "volume": [10.0]}
     )
-    out = to_bar_schema(raw)
+    out = to_bar_schema(raw, timeframe="1d")
     assert out.index[0] == pd.Timestamp("2024-07-01T00:00:00", tz="UTC")
 
 
@@ -142,3 +142,44 @@ def test_empty_bars_is_contract_shaped():
     assert out.index.name == "timestamp"
     assert str(out.index.tz) == "UTC"
     validate_bars(out)  # must satisfy the frozen schema unconditionally
+
+
+def _non_midnight_daily() -> pd.DataFrame:
+    # A schema-valid frame whose 1d timestamp is NOT at UTC midnight (e.g. Alpaca's …T05:00:00Z).
+    idx = pd.DatetimeIndex(
+        pd.to_datetime(["2024-07-01T05:00:00"], utc=True), name="timestamp"
+    )
+    return pd.DataFrame(
+        {"symbol": ["AAA"], "open": [1.0], "high": [1.0], "low": [1.0],
+         "close": [1.0], "adj_close": [1.0], "volume": [10.0]},
+        index=idx,
+    )[BAR_COLUMNS]
+
+
+def test_validate_rejects_non_midnight_daily():
+    # #262: the frozen contract pins daily (1d) timestamps to UTC midnight; the single rail enforces
+    # it (parity with the FirstRate/Databento importers), not just the file importers.
+    with pytest.raises(ValueError, match="UTC midnight"):
+        validate_bars(_non_midnight_daily(), timeframe="1d")
+
+
+def test_validate_accepts_non_midnight_intraday():
+    # Intraday bars are NOT clock-aligned by contract — the midnight check must not fire for them.
+    validate_bars(_non_midnight_daily(), timeframe="1m")
+
+
+def test_validate_skips_daily_check_when_timeframe_unknown():
+    # timeframe=None (the legacy read path with no recorded timeframe) skips only the daily check.
+    validate_bars(_non_midnight_daily(), timeframe=None)
+
+
+def test_to_bar_schema_rejects_non_midnight_daily():
+    raw = pd.DataFrame(
+        {"adj_close": [1.0], "close": [1.0], "high": [1.0], "low": [1.0],
+         "open": [1.0], "symbol": ["AAA"], "ts": ["2024-07-01T05:00:00+00:00"], "volume": [10.0]}
+    )
+    with pytest.raises(ValueError, match="UTC midnight"):
+        to_bar_schema(raw, timeframe="1d")
+    # Same data is fine when declared intraday.
+    out = to_bar_schema(raw, timeframe="1h")
+    assert out.index[0] == pd.Timestamp("2024-07-01T05:00:00", tz="UTC")

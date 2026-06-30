@@ -8,6 +8,7 @@ import requests
 
 from algua.data.contracts import BarProvider, BarRequest, ProviderBars
 from algua.data.providers.errors import ProviderError
+from algua.data.timeframes import is_intraday
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 MAX_ATTEMPTS = 4
@@ -39,8 +40,10 @@ class AlpacaBarProvider(BarProvider):
     def get_bars(self, request: BarRequest) -> ProviderBars:
         raw_payload = self._fetch_bars(request, adjustment="raw")
         adjusted_payload = self._fetch_bars(request, adjustment="all")
-        raw_frame = _normalize_alpaca(raw_payload)
-        adjusted_frame = _normalize_alpaca(adjusted_payload)[["ts", "symbol", "close"]].rename(
+        raw_frame = _normalize_alpaca(raw_payload, timeframe=request.timeframe)
+        adjusted_frame = _normalize_alpaca(adjusted_payload, timeframe=request.timeframe)[
+            ["ts", "symbol", "close"]
+        ].rename(
             columns={"close": "adj_close"}
         )
 
@@ -124,7 +127,7 @@ class AlpacaBarProvider(BarProvider):
         raise AssertionError("unreachable: retry loop always returns or raises")
 
 
-def _normalize_alpaca(payload: dict[str, Any]) -> pd.DataFrame:
+def _normalize_alpaca(payload: dict[str, Any], *, timeframe: str) -> pd.DataFrame:
     rows = []
     for symbol, bars in payload.get("bars", {}).items():
         for bar in bars:
@@ -142,4 +145,12 @@ def _normalize_alpaca(payload: dict[str, Any]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     if frame.empty:
         raise ProviderError("provider returned no bars")
+    if not is_intraday(timeframe):
+        # Alpaca stamps a daily ('1Day') bar at the session-start UTC instant (e.g. …T05:00:00Z),
+        # not UTC midnight. The frozen bar-schema pins daily timestamps to the session date at UTC
+        # midnight (issue #262), and the ingest rail now fails closed on a non-midnight 1d bar —
+        # so floor here to the canonical session date (parity with yfinance, which already lands on
+        # midnight). Symmetric across the raw + adjusted pulls, so their key sets still match.
+        ts = pd.to_datetime(frame["ts"], errors="raise", utc=True)
+        frame["ts"] = ts.dt.normalize()
     return frame.sort_values(["symbol", "ts"]).reset_index(drop=True)

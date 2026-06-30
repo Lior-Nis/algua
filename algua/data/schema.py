@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from algua.data.timeframes import DAILY
+
 # Single source of truth for the numeric (float64, non-null) bar columns. `BAR_COLUMNS` (the full
 # stored/serving column order) prepends the string `symbol` column. `NON_NULL_COLUMNS` and
 # `FLOAT_COLUMNS` are the same set under two names the validator reads, derived — not duplicated.
@@ -14,8 +16,14 @@ BAR_COLUMNS = ["symbol", *FLOAT_COLUMNS]
 BARS_FILE_HASH_COLUMNS = FLOAT_COLUMNS
 
 
-def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
+def validate_bars(df: pd.DataFrame, *, timeframe: str | None = None) -> pd.DataFrame:
     """Assert `df` matches the frozen bar schema; return it unchanged on success.
+
+    When `timeframe == "1d"`, the frozen contract pins each daily timestamp to the session date at
+    UTC midnight; this asserts it (the invariant the FirstRate/Databento importers already enforce,
+    now enforced uniformly on the single rail every ingest/serve path crosses — issue #262). Any
+    other (or `None`) `timeframe` skips the daily-anchor check: intraday bars are NOT clock-aligned
+    by contract, and `None` exists only for `empty_bars()` (a 0-row frame, vacuous regardless).
 
     Raises ValueError describing the first violation.
     """
@@ -43,6 +51,12 @@ def validate_bars(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("bars must not contain duplicate (timestamp, symbol) rows")
     if not keys.equals(keys.sort_values(["timestamp", "symbol"]).reset_index(drop=True)):
         raise ValueError("bars must be sorted by (timestamp, symbol)")
+    if timeframe == DAILY and len(df.index) and not df.index.equals(df.index.normalize()):
+        bad = df.index[df.index != df.index.normalize()][0]
+        raise ValueError(
+            f"daily (1d) bars must be timestamped at UTC midnight (the session date); "
+            f"found a non-midnight timestamp {bad}"
+        )
     return df
 
 
@@ -58,9 +72,13 @@ def empty_bars() -> pd.DataFrame:
     return validate_bars(pd.DataFrame(data, index=index))
 
 
-def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:
+def to_bar_schema(frame: pd.DataFrame, *, timeframe: str | None) -> pd.DataFrame:
     """Reshape a stored bars frame (a `ts` column + OHLCV + symbol, any column order) into the
-    bar schema: tz-aware UTC `timestamp` index, ordered columns, sorted, validated."""
+    bar schema: tz-aware UTC `timestamp` index, ordered columns, sorted, validated.
+
+    `timeframe` is required (keyword-only) so no ingest/serve path can silently skip the daily
+    UTC-midnight check (issue #262); pass the bars' timeframe, or `None` only when it is genuinely
+    unknown (e.g. a legacy snapshot that recorded no timeframe), which skips that one check."""
     out = frame.copy()
     if "ts" in out.columns:
         out = out.rename(columns={"ts": "timestamp"})
@@ -83,4 +101,4 @@ def to_bar_schema(frame: pd.DataFrame) -> pd.DataFrame:
     for col in FLOAT_COLUMNS:
         out[col] = pd.to_numeric(out[col], errors="raise").astype("float64")
     out = out.sort_values(["timestamp", "symbol"]).set_index("timestamp")
-    return validate_bars(out)
+    return validate_bars(out, timeframe=timeframe)
