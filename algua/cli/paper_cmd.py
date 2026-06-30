@@ -324,7 +324,7 @@ def account() -> None:
 
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
-    tick_ts, clock_source, acct, *, cancel=None,
+    tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
     start: str = "2023-01-01", end: str = "2023-12-31",
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
@@ -347,6 +347,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             conn, rec_.client_order_id, rec_.order_id),
         should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
         cancel=cancel,
+        reserve_buy=reserve_buy,
         peak_equity=get_peak_equity(conn, name),
         live_snapshot=lambda bars: build_paper_sizing_snapshot(
             conn, name, allocation, bars, strategy.universe),
@@ -365,7 +366,12 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         n_offsets = 0
         flatten_error = None
         try:
-            broker.cancel_open_orders()
+            # scoped cancel when the caller supplies one (run-all); account-wide fallback for the
+            # single-strategy trade-tick path (cancel=None) — never cancel a sibling's orders.
+            if cancel is not None:
+                cancel()
+            else:
+                broker.cancel_open_orders()
             breach_ts, _ = tick_clock(broker.clock)
             _ingest_paper_venue(conn, broker, breach_ts)
             for sym, qty in paper_believed_positions(conn, name).items():
