@@ -124,6 +124,10 @@ class _PaperVenueTestBroker:
     def account_activities_window(self, after: str, until: str) -> list[dict]:
         return list(self._activities)
 
+    def get_positions(self):
+        import pandas as pd
+        return pd.Series(self._positions, dtype="float64")
+
     def snapshot(self, universe: list[str]) -> TickSnapshot:
         all_syms = set(universe) | set(self._positions)
         return TickSnapshot(
@@ -150,20 +154,40 @@ class _PaperVenueTestBroker:
         return broker_id
 
 
+def _seed_allocation_venue(name: str, capital: float = 100_000.0) -> None:
+    """Insert a strategy_allocations row without going through the paper-allocate CLI."""
+    from datetime import UTC, datetime
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    with connect(get_settings().db_path) as conn:
+        migrate(conn)
+        rec = conn.execute("SELECT id FROM strategies WHERE name = ?", (name,)).fetchone()
+        if rec is None:
+            raise LookupError(f"strategy {name!r} not found")
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (rec["id"], capital, datetime.now(UTC).isoformat(), "agent"),
+        )
+        conn.commit()
+
+
 def test_trade_tick_no_phantom_flatten_after_fill(monkeypatch, tmp_path):
     """#249 regression: a fill at the venue reconciles clean on the next tick.
 
     Old path: derive_positions (paper_fills) was always empty for the wall-clock lane, so
     broker-held positions caused RiskBreach('reconcile') — a phantom flatten of a healthy
-    strategy.  New path: paper_venue_fills are ingested before each tick and paper_believed_
-    positions is reconciled against broker.snapshot().qtys — fill lands → belief matches
-    broker → reconcile_ok=True.
+    strategy.  New path: paper_venue_fills are ingested before each tick and the account
+    reconcile checks attributed_paper_net vs broker net — fill lands → belief matches
+    broker → account reconcile clean → reconcile_ok=True (no venue_belief in run_tick).
     """
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation_venue(_NAME, capital=100_000.0)
 
     broker = _PaperVenueTestBroker()
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
@@ -203,13 +227,22 @@ def test_trade_tick_no_phantom_flatten_after_fill(monkeypatch, tmp_path):
 
 
 def test_trade_tick_trips_on_orphan_holding(monkeypatch, tmp_path):
-    """A broker position with no matching paper_venue_fills (orphan / manual holding) must trip
-    RiskBreach('reconcile') — fail-closed, never trades on unattributed state."""
+    """A broker position with no matching paper_venue_fills (orphan / manual holding) must block
+    trading — fail-closed, never trades on unattributed state.
+
+    Multi-tenant (new) path: account-level reconcile detects AAPL as pending (first cycle, within
+    grace window) → defers instead of immediately tripping a RiskBreach. The key invariant stays:
+    the strategy submits zero orders while a reconcile mismatch is open.
+
+    (Old single-tenant path: immediate RiskBreach('reconcile') via venue_belief inside run_tick.
+    Grace window added by #316a.)
+    """
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation_venue(_NAME, capital=100_000.0)
 
     broker = _PaperVenueTestBroker()
     # Broker holds AAPL with NO matching paper_venue_fills (no orders recorded, no fills ingested)
@@ -221,16 +254,12 @@ def test_trade_tick_trips_on_orphan_holding(monkeypatch, tmp_path):
 
     result = runner.invoke(app, ["paper", "trade-tick", _NAME, "--snapshot", "snap1",
                                  "--start", _START, "--end", _END])
-    assert result.exit_code == 1
+    # Grace window: first cycle is a DEFER (pending), not a halt/breach. Exits 0.
+    assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
-    assert payload["ok"] is False
-    assert payload["kind"] == "reconcile"
-    assert payload["kill_switch"] == "tripped"
-    # GATE-2 HIGH: the breach residual is an ORPHAN the strategy does not own (belief is flat), so
-    # the offset loop submits nothing. The payload must say so honestly — not claim a liquidation
-    # that never went out while the broker position stays untouched.
-    assert payload["offsets_submitted"] == 0
-    assert payload["liquidation_submitted"] is False
+    assert payload.get("deferred") is True   # account reconcile mismatch → deferred
+    # Fail-closed: no orders submitted while reconcile is not clean
+    assert broker.submitted_orders == []
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +338,7 @@ def test_trade_tick_survives_broker_clock_failure(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation_venue(_NAME, capital=50_000.0)
 
     class _ClockFailBroker:
         def clock(self) -> str:
@@ -320,6 +350,10 @@ def test_trade_tick_survives_broker_clock_failure(monkeypatch, tmp_path):
 
         def account_activities_window(self, after: str, until: str) -> list:
             return []
+
+        def get_positions(self):
+            import pandas as pd
+            return pd.Series(dtype="float64")
 
     fake_result = TickResult(
         decision_ts=datetime(2024, 1, 15, 14, 0, 0, tzinfo=UTC),
