@@ -22,6 +22,7 @@ from algua.execution.live_ledger import (
     believed_positions,
     fill_cursor,
     ingest_activities,
+    owned_open_order_ids,
     paper_believed_positions,
     record_paper_venue_order,
     strategy_live_symbols,
@@ -109,6 +110,12 @@ def _ingest_paper_venue(conn: sqlite3.Connection, broker: object, until: str) ->
     after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
     acts = broker.account_activities_window(after, until)  # type: ignore[attr-defined]
     ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
+
+
+def _paper_scoped_cancel(conn, broker, name: str) -> None:
+    """Cancel only THIS strategy's open paper-venue orders (never a sibling's)."""
+    for oid in owned_open_order_ids(conn, broker, name, kind=LedgerKind.PAPER):
+        broker.cancel_order(oid)
 
 
 def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
@@ -324,7 +331,7 @@ def account() -> None:
 
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
-    tick_ts, clock_source, acct, *, cancel=None,
+    tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
     start: str = "2023-01-01", end: str = "2023-12-31",
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
@@ -347,6 +354,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             conn, rec_.client_order_id, rec_.order_id),
         should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
         cancel=cancel,
+        reserve_buy=reserve_buy,
         peak_equity=get_peak_equity(conn, name),
         live_snapshot=lambda bars: build_paper_sizing_snapshot(
             conn, name, allocation, bars, strategy.universe),
@@ -365,7 +373,12 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         n_offsets = 0
         flatten_error = None
         try:
-            broker.cancel_open_orders()
+            # scoped cancel when the caller supplies one (run-all); account-wide fallback for the
+            # single-strategy trade-tick path (cancel=None) — never cancel a sibling's orders.
+            if cancel is not None:
+                cancel()
+            else:
+                broker.cancel_open_orders()
             breach_ts, _ = tick_clock(broker.clock)
             _ingest_paper_venue(conn, broker, breach_ts)
             for sym, qty in paper_believed_positions(conn, name).items():
@@ -459,6 +472,89 @@ def trade_tick(
     emit(out)
     if not out.get("ok", False):
         raise typer.Exit(1)
+
+
+@paper_app.command("run-all")
+@json_errors(ValueError, LookupError, BrokerError)
+def run_all(
+    snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str = typer.Option("2023-12-31", "--end"),
+    max_drawdown: float = typer.Option(
+        None, "--max-drawdown",
+        help="halt + flatten a strategy if equity falls this fraction below its peak",
+    ),
+) -> None:
+    """One sequenced cycle over ALL paper strategies: ingest venue fills, reconcile the account,
+    then tick each (scoped cancel, shared buying-power pool). Trades only when the account
+    reconciles clean; a persistent unexplained drift engages the global halt."""
+    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
+        raise ValueError("--max-drawdown must be in (0, 1]")
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        paper = repo.list_strategies(Stage.PAPER)
+        if not paper:
+            emit(ok({"strategies": [], "note": "no paper strategies"}))
+            return
+        if global_halt.is_engaged(conn):
+            emit(breach_payload("global halt engaged", halted=True))
+            raise typer.Exit(1)
+        broker = _alpaca_broker_from_settings()
+        provider = _select_provider(False, snapshot)
+        acct = broker.account()
+        tick_ts, clock_source = tick_clock(broker.clock)
+        try:
+            _ingest_paper_venue(conn, broker, tick_ts)
+        except Exception as exc:
+            audit_append(conn, actor="system", action="venue_ingest_failed", reason=str(exc))
+            emit(breach_payload(str(exc), kind="venue_ingest_failed"))
+            raise typer.Exit(1) from exc
+
+        cycle = paper_reconcile.next_cycle(conn)
+        recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
+        if recon.halt:
+            global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
+                               actor="system")
+            emit({"ok": False, "deferred": True, "halted": True, "reconcile": recon.mismatches})
+            raise typer.Exit(1)
+        if not recon.clean:
+            emit(ok({"strategies": [], "deferred": True, "reconcile": recon.mismatches,
+                     "note": "reconcile pending; deferring trades this cycle"}))
+            return
+
+        pool = {"available": float(acct.buying_power)}
+
+        def _paper_reserve_for(strategy_name):
+            def _reserve(symbol: str, notional: float) -> float:
+                permitted = min(notional, max(0.0, pool["available"]))
+                pool["available"] -= permitted
+                if permitted < notional:
+                    audit_append(conn, actor="system", action="paper_reserve_trim",
+                                 reason=f"{symbol} {notional}->{permitted}",
+                                 strategy=strategy_name)
+                return permitted
+            return _reserve
+
+        results: list[dict] = []
+        breached = False
+        for prec in paper:
+            name = prec.name
+            strategy, rec = load_gated_strategy(conn, name, "paper run-all")
+            out = _run_paper_strategy_tick(
+                conn, name, strategy, rec, broker, provider, max_drawdown,
+                tick_ts, clock_source, acct,
+                reserve_buy=_paper_reserve_for(name),
+                cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
+                start=start, end=end)
+            results.append(out)
+            if out.get("ok") is False:
+                breached = True
+                break
+    envelope = {"reconcile": recon.mismatches, "strategies": results}
+    if breached:
+        emit({"ok": False, **envelope})
+        raise typer.Exit(1)
+    emit(ok(envelope))
 
 
 @paper_app.command("promote")

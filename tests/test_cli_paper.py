@@ -1541,6 +1541,7 @@ class _FakePaperBroker:
         self._marks = marks
         self.force_breach = force_breach
         self.submitted: list = []
+        self.account_wide_cancels: int = 0
 
     def account(self) -> AccountState:
         return AccountState(equity=self.account_equity, cash=self.account_equity,
@@ -1556,6 +1557,7 @@ class _FakePaperBroker:
         return pd.Series(self._positions, dtype="float64")
 
     def cancel_open_orders(self) -> None:
+        self.account_wide_cancels += 1
         if self.force_breach:
             raise RiskBreach("drawdown", "forced breach for testing")
 
@@ -1684,3 +1686,44 @@ def test_trade_tick_breach_trips_and_scoped_flattens(monkeypatch, tmp_path):
                                  "--max-drawdown", "0.01"])
     assert result.exit_code != 0
     assert kill_switch_is_tripped(name)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (#316b): _run_paper_strategy_tick — scoped breach cancel
+# ---------------------------------------------------------------------------
+
+def test_run_paper_strategy_tick_breach_uses_scoped_cancel(monkeypatch, tmp_path):
+    """On breach, when a `cancel` callable is supplied the helper must call IT (scoped)
+    and NOT the broker's account-wide cancel_open_orders()."""
+    from algua.backtest._sample import SyntheticProvider
+    from algua.cli import paper_cmd
+    from algua.cli._common import registry_conn
+    from algua.registry.gating import load_gated_strategy
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.risk.limits import RiskBreach as _RiskBreach
+
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0},
+                              force_breach=True)
+    called = {"scoped": 0}
+
+    # Raise RiskBreach directly from run_tick: when `cancel` is supplied hooks.cancel is not
+    # None, so run_tick calls hooks.cancel() (not broker.cancel_open_orders()), meaning the
+    # force_breach broker mechanism never fires.  Patching run_tick gives us a breach
+    # unconditionally, then the handler's scoped-vs-account-wide choice is exercised.
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(_RiskBreach("drawdown", "forced")))
+
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        strategy, _ = load_gated_strategy(conn, name, "trade-tick")
+        acct = broker.account()
+        out = paper_cmd._run_paper_strategy_tick(
+            conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+            "tick-ts", "broker", acct,
+            cancel=lambda: called.__setitem__("scoped", called["scoped"] + 1),
+            start="2026-01-01", end="2026-02-01")
+    assert out["ok"] is False                    # breach returns a failure marker
+    assert called["scoped"] >= 1                 # scoped cancel was invoked
+    assert broker.account_wide_cancels == 0      # account-wide cancel NOT invoked
