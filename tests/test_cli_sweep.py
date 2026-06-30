@@ -125,6 +125,54 @@ def test_pre_registration_sweep_breadth_used_by_promote():
     assert payload["n_funnel"] == 4
 
 
+def _promote_to_backtested_with_breadth():
+    """Shared setup for the promote tests below: measure breadth, register+backtest, assign family.
+
+    Returns the base `research promote` args (sans --summary) for an --allow-non-pit human run that
+    passes the (relaxed) gate against the demo provider.
+    """
+    sweep = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
+                                "--start", "2022-01-01", "--end", "2023-12-31",
+                                "--param", "lookback=20,40", "--param", "construction.top_k=1,3"])
+    assert sweep.exit_code == 0, sweep.stdout
+    backtested = runner.invoke(app, ["backtest", "run", "cross_sectional_momentum", "--demo",
+                                     "--start", "2022-01-01", "--end", "2023-12-31", "--register"])
+    assert backtested.exit_code == 0, backtested.stdout
+    _ensure_family()
+    return ["research", "promote", "cross_sectional_momentum", "--demo",
+            "--start", "2022-01-01", "--end", "2023-12-31",
+            "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
+            "--min-pct-positive", "0", "--min-window-sharpe", "-100",
+            "--allow-non-pit", "--actor", "human"]
+
+
+def test_promote_full_emits_deep_diagnostics():
+    # The single-use holdout is per-DB, so a full and a summary promote can't share a window in
+    # one test; assert the FULL surface here and the SUMMARY surface in the next test (#349).
+    base = _promote_to_backtested_with_breadth()
+    res = runner.invoke(app, base)
+    assert res.exit_code == 0, res.stdout
+    payload = json.loads(res.stdout)
+    # full output is unchanged: deep gate diagnostics present, no summary marker
+    assert "dsr_confidence" in payload and "haircut_would_have_blocked" in payload
+    assert "per_regime_sharpes" in payload
+    assert "summary" not in payload
+
+
+def test_promote_summary_drops_deep_diagnostics():
+    base = _promote_to_backtested_with_breadth()
+    res = runner.invoke(app, base + ["--summary"])
+    assert res.exit_code == 0, res.stdout
+    payload = json.loads(res.stdout)
+    # summary drops the ~25 deep dsr_*/fdr_*/regime/shadow-audit fields
+    assert "dsr_confidence" not in payload and "haircut_would_have_blocked" not in payload
+    assert "per_regime_sharpes" not in payload and "own_lifetime_combos" not in payload
+    # keeps the decision essence + marker
+    assert payload["summary"] is True and payload["ok"] is True
+    assert "promoted" in payload and "checks" in payload and "passed" in payload
+    assert payload["strategy"] == "cross_sectional_momentum"
+
+
 def test_sweep_of_registered_strategy_records_breadth():
     assert runner.invoke(app, ["registry", "add", "cross_sectional_momentum"]).exit_code == 0
     result = runner.invoke(app, ["backtest", "sweep", "cross_sectional_momentum", "--demo",
