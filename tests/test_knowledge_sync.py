@@ -129,6 +129,24 @@ def test_generate_indexes_router_and_axis_pages(tmp_path):
     assert "[[momentum]]" in families
 
 
+def test_by_stage_keeps_unknown_stage_visible_and_last(tmp_path):
+    s = _settings(tmp_path)
+    _scaffold(s, "good", family="momentum")
+    _scaffold(s, "weird", family="momentum")
+    sync_strategy_doc(s, "good", stage="idea")
+    # Force a non-lifecycle stage straight into the doc frontmatter.
+    p = strategy_doc_path(s, "weird")
+    fm, body = parse_doc(p.read_text())
+    fm["stage"] = "bogus_stage"
+    from algua.knowledge.frontmatter import render_doc
+    p.write_text(render_doc(fm, body))
+    generate_indexes(s)
+    by_stage = (strategies_dir(s) / "_by-stage.md").read_text()
+    assert "[[weird]]" in by_stage              # never dropped
+    assert "## bogus_stage" in by_stage
+    assert by_stage.index("## idea") < by_stage.index("## bogus_stage")  # unknown sorts last
+
+
 def test_render_members_block_empty_and_linked_roster():
     assert "No members yet" in render_members_block([])
     out = render_members_block([("alpha", "backtested"), ("beta", "idea"), ("gamma", "idea")])
@@ -150,8 +168,10 @@ def test_created_month_normalizes_values():
     from datetime import date as _date
 
     assert _created_month("2026-06-03") == "2026-06"
+    assert _created_month("2026-06-03T12:00:00") == "2026-06"  # ISO datetime buckets
     assert _created_month(_date(2026, 1, 9)) == "2026-01"
     assert _created_month("garbage") == "undated"
+    assert _created_month("2026-06-03junk") == "undated"       # malformed → undated, not sliced
     assert _created_month(None) == "undated"
 
 

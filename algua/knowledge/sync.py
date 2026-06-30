@@ -29,11 +29,12 @@ def _created_month(value: object) -> str:
     if isinstance(value, datetime | date):
         return f"{value.year:04d}-{value.month:02d}"
     if isinstance(value, str):
-        try:
-            parsed = date.fromisoformat(value[:10])
-        except ValueError:
-            return "undated"
-        return f"{parsed.year:04d}-{parsed.month:02d}"
+        for parse in (date.fromisoformat, datetime.fromisoformat):
+            try:
+                parsed = parse(value)
+            except ValueError:
+                continue
+            return f"{parsed.year:04d}-{parsed.month:02d}"
     return "undated"
 
 
