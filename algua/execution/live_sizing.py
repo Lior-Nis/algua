@@ -1,8 +1,8 @@
-"""The ledger-backed sizing view for a LIVE strategy (its virtual subaccount). Equity is the SIZING
-denominator = min(allocation, NAV); NAV (allocation + realized + unrealized) is the drawdown basis.
-Marks are the latest closed bar; a held symbol with no usable mark FAILS CLOSED (the loop skips the
-strategy) rather than falling back to average cost — which would hide a loss and suppress the
-drawdown breaker."""
+"""The ledger-backed sizing view for a strategy's virtual subaccount (live or paper). Equity is the
+SIZING denominator = min(allocation, NAV); NAV (allocation + realized + unrealized) is the drawdown
+basis. Marks are the latest closed bar; a held symbol with no usable mark FAILS CLOSED (the loop
+skips the strategy) rather than falling back to average cost — which would hide a loss and suppress
+the drawdown breaker."""
 from __future__ import annotations
 
 import sqlite3
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from algua.execution.live_ledger import LedgerKind, believed_positions, position_pnl
+from algua.execution.live_ledger import LedgerKind, believed_positions, fills_table, position_pnl
 
 
 class LiveSizingError(ValueError):
@@ -33,14 +33,16 @@ def _latest_marks(bars: pd.DataFrame) -> dict[str, float]:
     return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
 
 
-def build_live_sizing_snapshot(
+def build_sizing_snapshot(
     conn: sqlite3.Connection,
     strategy: str,
     allocation: float,
     bars: pd.DataFrame,
     universe: list[str],
+    *,
+    kind: LedgerKind,
 ) -> tuple[SizingSnapshot, float]:
-    held = believed_positions(conn, strategy, LedgerKind.LIVE)  # {symbol: signed qty}, nonzero only
+    held = believed_positions(conn, strategy, kind)  # {symbol: signed qty}, nonzero only
     marks = _latest_marks(bars)
     symbols = set(universe) | set(held)
 
@@ -61,7 +63,7 @@ def build_live_sizing_snapshot(
             fills = [
                 (float(r["qty"]), float(r["price"]))
                 for r in conn.execute(
-                    "SELECT qty, price FROM live_fills WHERE strategy = ? AND symbol = ? "
+                    f"SELECT qty, price FROM {fills_table(kind)} WHERE strategy = ? AND symbol = ? "
                     "ORDER BY fill_ts, id",
                     (strategy, sym),
                 )
@@ -76,3 +78,25 @@ def build_live_sizing_snapshot(
         # closed (skip the strategy) rather than size off it (codex C1 review).
         raise LiveSizingError(f"{strategy}: NAV {nav:.2f} leaves a non-positive sizing equity")
     return SizingSnapshot(equity=equity, market_values=market_values, qtys=qtys), nav
+
+
+def build_live_sizing_snapshot(
+    conn: sqlite3.Connection,
+    strategy: str,
+    allocation: float,
+    bars: pd.DataFrame,
+    universe: list[str],
+) -> tuple[SizingSnapshot, float]:
+    """The live-lane sizing snapshot (alias over build_sizing_snapshot with LedgerKind.LIVE)."""
+    return build_sizing_snapshot(conn, strategy, allocation, bars, universe, kind=LedgerKind.LIVE)
+
+
+def build_paper_sizing_snapshot(
+    conn: sqlite3.Connection,
+    strategy: str,
+    allocation: float,
+    bars: pd.DataFrame,
+    universe: list[str],
+) -> tuple[SizingSnapshot, float]:
+    """The paper-lane sizing snapshot (alias over build_sizing_snapshot with LedgerKind.PAPER)."""
+    return build_sizing_snapshot(conn, strategy, allocation, bars, universe, kind=LedgerKind.PAPER)
