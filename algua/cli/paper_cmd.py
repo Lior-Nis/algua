@@ -49,6 +49,12 @@ from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import _RECONCILE_TOL, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
+from algua.observability import (
+    CycleCounters,
+    configure_logging,
+    correlation_context,
+    get_logger,
+)
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
@@ -71,6 +77,8 @@ from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
 app.add_typer(paper_app, name="paper")
+
+log = get_logger(__name__)
 
 
 def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
@@ -358,10 +366,14 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     except TickHalted as exc:
         audit_append(conn, actor="system", action="trade_tick_halted", reason=str(exc),
                      strategy=name)
+        log.info("tick_halted", extra={"fields": {"strategy": name, "lane": "paper"}})
         return {"ok": False, "strategy": name, **breach_payload(str(exc), strategy=name,
                                                                 halted=True)}
     except RiskBreach as exc:
         trip_for_breach(conn, name, exc)
+        log.error("breach", extra={"fields": {"strategy": name, "lane": "paper",
+                                              "tick_ts": str(tick_ts), "kind": exc.kind}},
+                  exc_info=True)
         n_offsets = 0
         flatten_error = None
         try:
@@ -381,6 +393,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             flatten_error = str(fexc)
             audit_append(conn, actor="system", action="flatten_failed", reason=str(fexc),
                          strategy=name)
+            log.error("flatten_failed", extra={"fields": {"strategy": name, "lane": "paper"}},
+                      exc_info=True)
         payload = breach_payload(exc.detail, kind=exc.kind, liquidation_submitted=n_offsets > 0,
                                  offsets_submitted=n_offsets)
         if flatten_error is not None:
@@ -423,42 +437,73 @@ def trade_tick(
     breach trips the kill-switch and flattens. Never trades live (the broker refuses a live URL)."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
-    with registry_conn() as conn:
-        strategy, rec = load_gated_strategy(conn, name, "trade-tick")
-        broker = _alpaca_broker_from_settings()
-        provider = _select_provider(False, snapshot)
-        acct = broker.account()
-        tick_ts, clock_source = tick_clock(broker.clock)
+    configure_logging()
+    counters = CycleCounters()
+    # One correlation id per wall-clock tick; golden_signals flushes in `finally` so the rollup
+    # survives even when the cycle fails before the tick (ingest/reconcile) (#346).
+    with correlation_context():
+        log.info("cycle_start",
+                 extra={"fields": {"lane": "paper", "strategy": name, "snapshot": snapshot}})
         try:
-            _ingest_paper_venue(conn, broker, tick_ts)
-        except Exception as exc:   # fail closed on ANY ingest/transport error
-            audit_append(conn, actor="system", action="venue_ingest_failed", reason=str(exc),
-                         strategy=name)
-            emit(breach_payload(str(exc), strategy=name, kind="venue_ingest_failed"))
-            raise typer.Exit(1) from exc
+            with registry_conn() as conn:
+                strategy, rec = load_gated_strategy(conn, name, "trade-tick")
+                broker = _alpaca_broker_from_settings()
+                provider = _select_provider(False, snapshot)
+                acct = broker.account()
+                tick_ts, clock_source = tick_clock(broker.clock)
+                try:
+                    _ingest_paper_venue(conn, broker, tick_ts)
+                except Exception as exc:   # fail closed on ANY ingest/transport error
+                    audit_append(conn, actor="system", action="venue_ingest_failed",
+                                 reason=str(exc), strategy=name)
+                    log.error("venue_ingest_failed",
+                              extra={"fields": {"strategy": name, "lane": "paper"}}, exc_info=True)
+                    emit(breach_payload(str(exc), strategy=name, kind="venue_ingest_failed"))
+                    raise typer.Exit(1) from exc
 
-        # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book, grace
-        # window. halt -> global halt; not clean -> defer (no trade); clean -> tick.
-        cycle = paper_reconcile.next_cycle(conn)
-        recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
-        if recon.halt:
-            global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
-                               actor="system")
-            emit({"ok": False, "strategy": name, "deferred": True, "halted": True,
-                  "reconcile": recon.mismatches})
-            raise typer.Exit(1)
-        if not recon.clean:
-            audit_append(conn, actor="system", action="trade_tick_deferred",
-                         reason="reconcile pending", strategy=name)
-            emit(ok({"strategy": name, "traded": False, "deferred": True,
-                     "reconcile": recon.mismatches}))
-            return
+                # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book,
+                # grace window. halt -> global halt; not clean -> defer (no trade); clean -> tick.
+                cycle = paper_reconcile.next_cycle(conn)
+                recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
+                if recon.halt:
+                    counters.reconcile_halted += 1
+                    log.error("reconcile_halt",
+                              extra={"fields": {"strategy": name, "lane": "paper",
+                                                "mismatches": recon.mismatches}})
+                    global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
+                                       actor="system")
+                    emit({"ok": False, "strategy": name, "deferred": True, "halted": True,
+                          "reconcile": recon.mismatches})
+                    raise typer.Exit(1)
+                if not recon.clean:
+                    counters.reconcile_deferred += 1
+                    log.info("reconcile_deferred",
+                             extra={"fields": {"strategy": name, "lane": "paper"}})
+                    audit_append(conn, actor="system", action="trade_tick_deferred",
+                                 reason="reconcile pending", strategy=name)
+                    emit(ok({"strategy": name, "traded": False, "deferred": True,
+                             "reconcile": recon.mismatches}))
+                    return
 
-        out = _run_paper_strategy_tick(conn, name, strategy, rec, broker, provider, max_drawdown,
-                                       tick_ts, clock_source, acct, start=start, end=end)
-    emit(out)
-    if not out.get("ok", False):
-        raise typer.Exit(1)
+                out = _run_paper_strategy_tick(
+                    conn, name, strategy, rec, broker, provider, max_drawdown,
+                    tick_ts, clock_source, acct, start=start, end=end)
+                counters.ticks += 1
+                if out.get("ok") is False:
+                    counters.breaches += 1
+                    if out.get("flatten_error") is not None:
+                        counters.flatten_failures += 1
+            emit(out)
+            if not out.get("ok", False):
+                raise typer.Exit(1)
+        except typer.Exit:
+            raise
+        except Exception:
+            log.error("cycle_failed", extra={"fields": {"strategy": name, "lane": "paper"}},
+                      exc_info=True)
+            raise
+        finally:
+            log.info("golden_signals", extra={"fields": counters.as_fields()})
 
 
 @paper_app.command("promote")
