@@ -1635,6 +1635,7 @@ def test_trade_tick_defers_on_unattributable_holding(monkeypatch, tmp_path):
     assert payload.get("traded") is False
     assert payload.get("deferred") is True
     assert broker.submitted == []   # nothing traded on an unreconciled account
+    assert _latest_tick(name) is None  # a deferred tick records NO snapshot (no forward-gate coverage)
 
 
 def test_trade_tick_halts_after_grace_expiry(monkeypatch, tmp_path):
