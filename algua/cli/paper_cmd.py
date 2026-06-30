@@ -81,6 +81,15 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
+def _paper_broker_net(broker) -> dict[str, float]:
+    """Paper broker's net positions per symbol (nonzero only) for account reconcile.
+
+    Local to paper_cmd because the live analog (_broker_net_positions) can't be imported (cli->cli).
+    """
+    pos = broker.get_positions()  # pandas Series symbol -> qty
+    return {sym: float(q) for sym, q in pos.items() if float(q) != 0.0}
+
+
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
 
 

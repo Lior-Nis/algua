@@ -1465,3 +1465,15 @@ def test_show_sim_strategy_still_reports_sim_positions():
     assert payload["n_orders"] == sim_n_orders
     # recent_orders comes from sim paper_orders
     assert len(payload["recent_orders"]) <= 10
+
+
+def test_paper_broker_net_drops_zero_positions():
+    import pandas as pd
+
+    from algua.cli.paper_cmd import _paper_broker_net
+
+    class _B:
+        def get_positions(self):
+            return pd.Series({"AAA": 10.0, "BBB": 0.0, "CCC": -3.0})
+
+    assert _paper_broker_net(_B()) == {"AAA": 10.0, "CCC": -3.0}
