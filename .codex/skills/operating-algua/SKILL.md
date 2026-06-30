@@ -42,6 +42,11 @@ idea → backtested → candidate → paper → forward_tested → live → reti
 - `uv run algua paper promote <name>` — gate `paper → forward_tested`; requires ≥63 broker-clocked daily return observations, ≥90% coverage, realized Sharpe ≥ max(0.5×holdout, 0.3), vol/DD bounds, clean integrity + hygiene, evidence ≤5 sessions stale. Relaxation flags are human-only.
 - `uv run algua data inspect --summary` — what data snapshots exist.
 
+Pass `--summary` to `backtest walk-forward`, `backtest sweep`, and `research promote` to emit
+ONLY the decision-relevant scalars (drops the per-window/per-combo lists and the deep gate
+diagnostics; the payload is stamped `"summary": true`). Prefer it for unattended operation so
+verbose tool output doesn't rot your context (#349); omit it when you need the full detail.
+
 `--demo` uses the synthetic data provider (offline, deterministic). Swap in real bars with
 `--snapshot <id>` from `data ingest-bars` when you want real data.
 

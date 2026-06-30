@@ -91,6 +91,10 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   bulk-import local vendor files (FirstRateData: per-symbol unadjusted + adjusted), normalized to
   the bar-schema as one consolidated snapshot. Streamed (bounded RAM); `adj_close` from the adjusted
   file (no corporate-action math yet).
+- `--summary` (context-rot defense #349) — `backtest walk-forward`, `backtest sweep`, and
+  `research promote` accept `--summary` to emit ONLY the decision-relevant scalars (drops the
+  per-window/per-combo lists and the deep dsr_*/fdr_*/regime gate diagnostics); the projected
+  payload carries `"summary": true`. Prefer it for unattended operation; omit for full detail.
 - `uv run algua data inspect [--summary|--dataset NAME|--snapshot-id ID]` — inspect data snapshots.
 - `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
   payload back from disk (full read-back) and check it against its record; emits per-snapshot

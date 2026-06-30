@@ -11,6 +11,7 @@ from algua.backtest.engine import BacktestError, holdout_window
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
+    project,
     registry_conn,
     resolve_delisting_inputs,
     resolve_eval_inputs,
@@ -35,6 +36,19 @@ research_app = typer.Typer(help="Research workflow: gates and promotion", no_arg
 app.add_typer(research_app, name="research")
 
 _HOLDOUT_REUSE_OVERRIDE = "override"
+
+# --summary keep-list (#349): the decision essence of a promote — the pass/fail verdict, the
+# per-check breakdown (`checks` carries each gate's name/value/threshold/pass), the breadth and
+# the binding flags, the holdout/stability scalars, and provenance. Keep-list (not drop-list) so
+# the ~25 deep dsr_*/fdr_* internals, per-regime sharpes, and shadow-audit fields are
+# excluded-by-default from the operator-facing summary (context-rot defense).
+_PROMOTE_SUMMARY_KEYS = (
+    "promoted", "strategy", "passed", "checks", "n_combos", "n_funnel", "breadth_provenance",
+    "base_min_holdout_sharpe", "effective_min_holdout_sharpe", "pit_ok", "pit_override",
+    "dsr_binding", "dsr_bootstrap_binding", "fdr_binding", "regime_robustness_binding",
+    "returns_available", "holdout", "stability", "config_hash", "snapshot_id", "universe_name",
+    "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "holdout_reuse",
+)
 
 
 @research_app.command("promote")
@@ -93,6 +107,10 @@ def promote(
              "Ignored when the strategy is already assigned to a family. "
              "Required for a human actor facing a NOVEL verdict.",
     ),
+    summary: bool = typer.Option(
+        False, "--summary",
+        help="emit only decision-relevant scalars (drops deep dsr_*/fdr_*/regime diagnostics; "
+             "context-rot defense)"),
 ) -> None:
     """Gate backtested->candidate on walk-forward holdout + stability; promote only on pass.
 
@@ -244,7 +262,8 @@ def promote(
     }
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
-    emit(ok(payload))
+    out = ok(payload)
+    emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
 
 
 @research_app.command("dormant-sweep")

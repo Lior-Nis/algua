@@ -14,6 +14,7 @@ from algua.backtest.sweep import parse_grid, sweep
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
+    project,
     registry_conn,
     resolve_delisting_inputs,
     resolve_eval_inputs,
@@ -33,6 +34,23 @@ from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forw
 
 backtest_app = typer.Typer(help="Run backtests", no_args_is_help=True)
 app.add_typer(backtest_app, name="backtest")
+
+# --summary keep-lists (#349): the decision-relevant scalars per command. Keep-lists (not
+# drop-lists) so a future field is excluded-by-default. Walk-forward keeps everything but the
+# bulky per-window `window_metrics` (its scalar summary is `stability`); sweep keeps everything
+# but the per-combo `ranked` list and the `grid` (the headline combo is `best`).
+_WF_SUMMARY_KEYS = (
+    "strategy", "data_source", "snapshot_id", "timeframe", "seed", "period", "windows",
+    "holdout_frac", "stability", "code_hash", "dependency_hash", "config_hash",
+    "universe_name", "universe_snapshots", "fundamentals_snapshot", "news_snapshot",
+    "mlflow_run_id",
+)
+_SWEEP_SUMMARY_KEYS = (
+    "strategy", "n_combos", "rank_by", "best", "trial_sharpe_count", "trial_sharpe_mean",
+    "trial_sharpe_var_ann", "recorded_breadth", "code_hash", "dependency_hash", "data_source",
+    "snapshot_id", "timeframe", "seed", "period", "windows", "holdout_frac", "universe_name",
+    "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "mlflow_run_id",
+)
 
 
 def _track(call: Callable[[], str]) -> str:
@@ -204,6 +222,9 @@ def walk_forward_cmd(
         False, "--assume-terminal-last-close",
         help="realize a held-into-gap name at its last close when no delisting record exists"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
+    summary: bool = typer.Option(
+        False, "--summary",
+        help="emit only decision-relevant scalars (drops per-window metrics; context-rot defense)"),
 ) -> None:
     """Walk-forward (out-of-sample) evaluation: per-window metrics + stability.
 
@@ -249,7 +270,8 @@ def walk_forward_cmd(
                 result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
             )
         )
-    emit(ok(payload))
+    out = ok(payload)
+    emit(project(out, _WF_SUMMARY_KEYS) if summary else out)
 
 
 @backtest_app.command("sweep")
@@ -281,6 +303,10 @@ def sweep_cmd(
         False, "--assume-terminal-last-close",
         help="realize a held-into-gap name at its last close when no delisting record exists"),
     track: bool = typer.Option(False, "--track", help="log this run to MLflow"),
+    summary: bool = typer.Option(
+        False, "--summary",
+        help="emit only decision-relevant scalars (drops the ranked combo list; context-rot "
+             "defense)"),
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
     if top < 1:
@@ -328,4 +354,5 @@ def sweep_cmd(
     payload["recorded_breadth"] = recorded
     if run_id is not None:
         payload["mlflow_run_id"] = run_id
-    emit(ok(payload))
+    out = ok(payload)
+    emit(project(out, _SWEEP_SUMMARY_KEYS) if summary else out)
