@@ -3,7 +3,9 @@
 **Status:** Draft (design approved in brainstorming; pending human review → implementation plan)
 **Date:** 2026-06-30
 **Issue:** #316 (the run-all half of the #316 split; #316a = #321, the per-strategy tick). Epic #318.
-**Builds on:** #316a (#321/PR#322 — `_run_paper_strategy_tick`, `_paper_broker_net`), #313 (`paper_reconcile`), #314 (`build_paper_sizing_snapshot`), Slice 1 (`paper allocate`, Σ≤equity). #316a is unmerged → build branch stacks on it (or rebase onto main after #322 merges).
+**Builds on:** #316a (#321/PR#322 — `_run_paper_strategy_tick`, `_paper_broker_net`), #313 (`paper_reconcile`), #314 (`build_paper_sizing_snapshot`), the `allocations` module (`active_allocation`, on main). #316a is unmerged → build branch stacks on it (or rebase onto main after #322 merges).
+
+**Decoupled from Slice 1 (#288, unmerged):** run-all ticks ALL active paper strategies (all daily/XNYS today, so "all due"); the `is_due`/schedule-class filter is **deferred** to when a non-daily strategy first exists. So #316b's code/tests need only `active_allocation` (already on main), NOT `is_due` (#288). (`paper allocate` is how operators set allocations in production — an operator/#317 concern; run-all's code reads `active_allocation` and tests seed allocation rows directly.)
 
 ## 1. Problem
 
@@ -29,8 +31,7 @@ resting orders. So #316b:
 ## 3. `paper run-all` (mirror `live run-all`)
 
 ```
-load active Stage.PAPER strategies
-  → filter is_due (Slice 1; today all daily/XNYS are due)
+load active Stage.PAPER strategies   (tick ALL — all daily/XNYS today; is_due filter deferred)
   → ingest venue fills ONCE (_ingest_paper_venue)
   → account reconcile ONCE: cycle = paper_reconcile.next_cycle(conn);
       recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
@@ -78,6 +79,7 @@ passed to each strategy's tick — exactly the boundary #316a's helper signature
 
 ## 6. Non-goals (this issue)
 
+- The `is_due`/schedule-class filter (deferred; run-all ticks all paper strategies, all daily/XNYS today) → revisit when a non-daily strategy exists; decouples from the unmerged #288.
 - The forward-gate relaxation (`single_tenant` → attribution-clean) → #315.
 - The autonomous operator's paper intake (allocate candidates into the book) → #317.
 - No `run_tick` body change; no schema change; no rename of `live_snapshot`/`live_positions`/
