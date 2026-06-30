@@ -42,9 +42,9 @@ def project(payload: dict, keep: Collection[str]) -> dict:
 
     Always preserves the ``ok`` discriminator and stamps ``summary: True`` so a consumer can tell
     a projected payload from a full one; keeps only the listed keys that are present. Each command
-    passes its own curated keep-list (keep-lists, not drop-lists, so any future diagnostic field is
-    excluded-by-default). SUCCESS PAYLOADS ONLY — the ``@json_errors`` failure envelope is produced
-    by the decorator and never reaches this, so ``--summary`` can never strip ``error`` diagnostics.
+    passes its own curated keep-list (keep-lists, not drop-lists, so any future diagnostic field
+    is excluded-by-default). SUCCESS PAYLOADS ONLY — the ``@json_errors`` failure envelope is
+    produced by the decorator and never reaches this, so ``--summary`` can never strip ``error``.
     """
     return {k: v for k, v in payload.items() if k == "ok" or k in keep} | {"summary": True}
 

@@ -45,9 +45,9 @@ _HOLDOUT_REUSE_OVERRIDE = "override"
 _PROMOTE_SUMMARY_KEYS = (
     "promoted", "strategy", "passed", "checks", "n_combos", "n_funnel", "breadth_provenance",
     "base_min_holdout_sharpe", "effective_min_holdout_sharpe", "pit_ok", "pit_override",
-    "dsr_binding", "fdr_binding", "regime_robustness_binding", "holdout", "stability",
-    "config_hash", "snapshot_id", "universe_name", "universe_snapshots", "fundamentals_snapshot",
-    "news_snapshot", "holdout_reuse",
+    "dsr_binding", "dsr_bootstrap_binding", "fdr_binding", "regime_robustness_binding",
+    "returns_available", "holdout", "stability", "config_hash", "snapshot_id", "universe_name",
+    "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "holdout_reuse",
 )
 
 
