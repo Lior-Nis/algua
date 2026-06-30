@@ -5,7 +5,11 @@ import requests
 from algua.config.settings import Settings
 from algua.data.contracts import BarRequest
 from algua.data.providers import get_provider, register_provider
-from algua.data.providers.alpaca import AlpacaBarProvider, _normalize_alpaca
+from algua.data.providers.alpaca import (
+    AlpacaBarProvider,
+    _canonicalize_daily_ts,
+    _normalize_alpaca,
+)
 from algua.data.providers.errors import ProviderError
 from algua.data.providers.yfinance import YFinanceBarProvider, _normalize_yfinance
 from algua.data.schema import to_bar_schema
@@ -96,7 +100,8 @@ def test_yfinance_provider_rejects_auto_adjustment():
 
 
 def test_alpaca_normalizer_flattens_symbol_keyed_payload():
-    # Intraday: timestamps are passed through untouched (no UTC-midnight flooring).
+    # _normalize_alpaca passes original provider timestamps through untouched (flooring is a later
+    # step in get_bars, after the raw/adjusted integrity match).
     frame = _normalize_alpaca(
         {
             "bars": {
@@ -111,8 +116,7 @@ def test_alpaca_normalizer_flattens_symbol_keyed_payload():
                     }
                 ]
             }
-        },
-        timeframe="1m",
+        }
     )
 
     assert frame.to_dict("records") == [
@@ -128,32 +132,51 @@ def test_alpaca_normalizer_flattens_symbol_keyed_payload():
     ]
 
 
-def test_alpaca_normalizer_floors_daily_to_utc_midnight():
-    # #262: Alpaca stamps a daily bar at the session-start UTC instant (…T05:00:00Z); the provider
-    # must floor it to the canonical UTC-midnight session date so it satisfies the frozen schema.
+def test_canonicalize_daily_ts_floors_to_utc_midnight():
+    # #262: a daily Alpaca frame stamped at the session-start UTC instant (…T05:00:00Z) is floored
+    # to the canonical UTC-midnight session date, then reshapes through the schema rail cleanly.
     frame = _normalize_alpaca(
         {
             "bars": {
                 "AAPL": [
-                    {
-                        "t": "2024-07-01T05:00:00Z",
-                        "o": 100.0,
-                        "h": 101.0,
-                        "l": 99.0,
-                        "c": 100.5,
-                        "v": 1000,
-                    }
+                    {"t": "2024-07-01T05:00:00Z", "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 9.0}
                 ]
             }
-        },
-        timeframe="1d",
+        }
     )
+    out = _canonicalize_daily_ts(frame, "1d")
+    assert list(out["ts"]) == [pd.Timestamp("2024-07-01T00:00:00", tz="UTC")]
+    reshaped = to_bar_schema(out.assign(adj_close=out["close"]), timeframe="1d")
+    assert reshaped.index[0] == pd.Timestamp("2024-07-01T00:00:00", tz="UTC")
 
-    assert list(frame["ts"]) == [pd.Timestamp("2024-07-01T00:00:00", tz="UTC")]
-    # The floored frame reshapes through the schema rail without tripping the daily check.
-    merged = frame.assign(adj_close=frame["close"])
-    out = to_bar_schema(merged, timeframe="1d")
-    assert out.index[0] == pd.Timestamp("2024-07-01T00:00:00", tz="UTC")
+
+def test_canonicalize_daily_ts_leaves_intraday_untouched():
+    frame = _normalize_alpaca(
+        {
+            "bars": {
+                "AAPL": [
+                    {"t": "2026-01-02T14:30:00Z", "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 9.0}
+                ]
+            }
+        }
+    )
+    out = _canonicalize_daily_ts(frame, "1m")
+    assert list(out["ts"]) == ["2026-01-02T14:30:00Z"]
+
+
+def test_canonicalize_daily_ts_rejects_collapsed_duplicates():
+    # Two distinct same-day UTC instants for one symbol collapse to the same midnight date — an
+    # ambiguous daily snapshot the provider must refuse rather than silently dedup.
+    frame = pd.DataFrame(
+        {
+            "ts": ["2024-07-01T05:00:00Z", "2024-07-01T18:00:00Z"],
+            "symbol": ["AAPL", "AAPL"],
+            "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0],
+            "close": [1.0, 1.0], "volume": [9.0, 9.0],
+        }
+    )
+    with pytest.raises(ProviderError, match="duplicate"):
+        _canonicalize_daily_ts(frame, "1d")
 
 
 def test_alpaca_provider_merges_raw_close_with_adjusted_close(monkeypatch):
