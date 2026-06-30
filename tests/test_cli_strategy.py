@@ -159,7 +159,12 @@ def test_strategy_doc_syncs_and_builds_index(tmp_path, monkeypatch, _cleanup_sca
     result = runner.invoke(app, ["strategy", "doc", "--all"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["ok"] is True
-    assert "[[kb_sync_strat]]" in (tmp_path / "vault" / "strategies" / "_index.md").read_text()
+    # _index.md is now a router; the clickable roster lives in the per-axis pages.
+    assert "[[kb_sync_strat]]" in (
+        tmp_path / "vault" / "strategies" / "_by-stage.md"
+    ).read_text()
+    index = (tmp_path / "vault" / "strategies" / "_index.md").read_text()
+    assert "[[_by-stage]]" in index and "[[_families]]" in index
     assert "stage: backtested" in (
         tmp_path / "vault" / "strategies" / "kb_sync_strat.md"
     ).read_text()
@@ -191,9 +196,8 @@ def test_strategy_doc_single_refreshes_family_roster(tmp_path, monkeypatch, _cle
     result = runner.invoke(app, ["strategy", "doc", "kb_fam_strat"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout)["families"] == ["mom"]
-    assert "backtested 1" in (
-        tmp_path / "vault" / "strategies" / "families" / "mom.md"
-    ).read_text()
+    roster = (tmp_path / "vault" / "strategies" / "families" / "mom.md").read_text()
+    assert "### backtested (1)" in roster and "[[kb_fam_strat]]" in roster
 
 
 # ---------------------------------------------------------------------------

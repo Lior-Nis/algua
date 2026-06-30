@@ -5,9 +5,11 @@ import pytest
 from algua.config.settings import Settings
 from algua.knowledge.frontmatter import parse_doc
 from algua.knowledge.sync import (
+    _created_month,
     family_doc_path,
     generate_indexes,
     kb_check,
+    render_members_block,
     render_results_block,
     strategies_dir,
     strategy_doc_path,
@@ -107,25 +109,64 @@ def test_strategy_family_unwraps_wikilink(tmp_path):
     assert strategy_family(s, "ghost") is None
 
 
-def test_generate_indexes_lists_strategies_and_families(tmp_path):
-    s = _settings(tmp_path)
-    _scaffold(s, "alpha", family="momentum")
-    _scaffold_family(s, "momentum")
-    generate_indexes(s)
-    index = (strategies_dir(s) / "_index.md").read_text()
-    families = (strategies_dir(s) / "_families.md").read_text()
-    assert "[[alpha]]" in index
-    assert "[[momentum]]" in families
-
-
-def test_sync_family_doc_counts_members_by_stage(tmp_path):
+def test_generate_indexes_router_and_axis_pages(tmp_path):
     s = _settings(tmp_path)
     _scaffold(s, "alpha", family="momentum")
     _scaffold_family(s, "momentum")
     sync_strategy_doc(s, "alpha", stage="backtested")
+    generate_indexes(s)
+    index = (strategies_dir(s) / "_index.md").read_text()
+    by_stage = (strategies_dir(s) / "_by-stage.md").read_text()
+    by_date = (strategies_dir(s) / "_by-date.md").read_text()
+    families = (strategies_dir(s) / "_families.md").read_text()
+    # _index.md is a bounded router that links to the axis pages, not a flat roster.
+    assert "[[_by-stage]]" in index and "[[_by-date]]" in index and "[[_families]]" in index
+    assert "[[alpha]]" not in index
+    # The clickable roster lives in the axis pages.
+    assert "## backtested" in by_stage and "[[alpha]]" in by_stage
+    assert "[[momentum]]" in by_stage  # family link preserved
+    assert "## 2026-06" in by_date and "[[alpha]]" in by_date
+    assert "[[momentum]]" in families
+
+
+def test_render_members_block_empty_and_linked_roster():
+    assert "No members yet" in render_members_block([])
+    out = render_members_block([("alpha", "backtested"), ("beta", "idea"), ("gamma", "idea")])
+    assert "**3 members**" in out
+    assert "[[alpha]]" in out and "[[beta]]" in out and "[[gamma]]" in out
+    # Lifecycle order: idea section before backtested section.
+    assert out.index("### idea") < out.index("### backtested")
+    assert "### idea (2)" in out
+
+
+def test_render_members_block_keeps_unknown_stage_visible():
+    out = render_members_block([("alpha", "idea"), ("weird", "bogus_stage")])
+    assert "[[weird]]" in out                       # never dropped
+    assert "### bogus_stage" in out
+    assert out.index("### idea") < out.index("### bogus_stage")  # unknown sorts last
+
+
+def test_created_month_normalizes_values():
+    from datetime import date as _date
+
+    assert _created_month("2026-06-03") == "2026-06"
+    assert _created_month(_date(2026, 1, 9)) == "2026-01"
+    assert _created_month("garbage") == "undated"
+    assert _created_month(None) == "undated"
+
+
+def test_sync_family_doc_renders_linked_roster(tmp_path):
+    s = _settings(tmp_path)
+    _scaffold(s, "alpha", family="momentum")
+    _scaffold(s, "beta", family="momentum")
+    _scaffold(s, "other", family="value")
+    _scaffold_family(s, "momentum")
+    sync_strategy_doc(s, "alpha", stage="backtested")
     assert sync_family_doc(s, "momentum") is True
     members = family_doc_path(s, "momentum").read_text()
-    assert "backtested 1" in members
+    assert "[[alpha]]" in members and "[[beta]]" in members  # linked roster, not a count
+    assert "[[other]]" not in members                        # other family excluded
+    assert "### backtested (1)" in members
 
 
 def test_kb_check_flags_missing_doc(tmp_path):
@@ -152,7 +193,7 @@ def test_sync_all_returns_summary(tmp_path):
     assert "alpha" in summary["strategies"]
     assert "momentum" in summary["families"]
     members = family_doc_path(s, "momentum").read_text()
-    assert "1 members" in members or "members: idea 1" in members
+    assert "**1 members**" in members and "[[alpha]]" in members
 
 
 def test_sync_all_applies_metadata(tmp_path):

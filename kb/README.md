@@ -32,9 +32,12 @@ Managed by the `algua` CLI — you generally don't hand-create these:
 - `uv run algua strategy doc [<name> | --all]` regenerates the **synced** blocks in each note
   (lifecycle stage from the registry, metrics from MLflow) between
   `<!-- ALGUA:RESULTS -->` / `<!-- ALGUA:MEMBERS -->` markers. Everything outside those markers
-  is hand-authored prose and is never touched.
-- `strategies/_index.md` and `strategies/_families.md` are **generated** roll-ups — don't edit
-  them by hand.
+  is hand-authored prose and is never touched. A family hub's `MEMBERS` block is a true MOC — a
+  stage-grouped roster of `[[member]]` wikilinks, not a count string — so you can click straight
+  into members.
+- The **generated** roll-ups (don't edit by hand): `strategies/_index.md` is a small **router**
+  that links to the per-axis pages — `_by-stage.md` (by lifecycle stage), `_by-date.md` (by created
+  month) and `_families.md` (by thesis family). The router stays bounded as the vault grows.
 
 `uv run algua doctor` reports a `knowledge_base` check that flags strategies missing a note or
 with a stale synced stage.
