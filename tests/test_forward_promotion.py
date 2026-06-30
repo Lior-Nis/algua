@@ -522,12 +522,18 @@ def test_fill_matched_to_own_paper_venue_order_passes(conn):
 
 def test_unmatched_fill_counts(conn):
     _three_admissible(conn)
-    # An order recorded for ANOTHER strategy_id must not attribute this fill.
+    # Under account-level attribution a sibling's order IS attributable; a truly orphan
+    # broker_order_id (not in paper_venue_orders at all) is unattributable.
     record_paper_venue_order(conn, "other", "AAA", "buy", None, "coid-2", strategy_id=2)
     backfill_paper_venue_broker_order_id(conn, "coid-2", "ord-2")
-    res = assemble(
+    # sibling's fill -> attributable (account-level)
+    res_sib = assemble(
         conn, activities=lambda a, u: [{"activity_type": "FILL", "order_id": "ord-2"}])
-    assert res.evidence.n_unattributable_fills == 1
+    assert res_sib.evidence.n_unattributable_fills == 0
+    # truly orphan broker_order_id -> unattributable
+    res_orphan = assemble(
+        conn, activities=lambda a, u: [{"activity_type": "FILL", "order_id": "ord-unknown"}])
+    assert res_orphan.evidence.n_unattributable_fills == 1
 
 
 def test_fill_missing_order_id_counts_unattributable(conn):
@@ -847,3 +853,31 @@ def test_run_forward_gate_human_pass_from_paper(conn, repo, monkeypatch):
     # Born consumed like the agent's: the atomic record+promote spends the row at birth for
     # EVERY actor (a human row was never consumable anyway — the actor='agent' token filter).
     assert row["consumed"] == 1
+
+
+def test_classify_activities_attributes_fill_to_any_paper_order(tmp_path):
+    from algua.execution.live_ledger import record_paper_venue_order
+    from algua.registry.db import connect, migrate
+    from algua.registry.forward_promotion import _classify_activities
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute("INSERT INTO strategies(name, stage, created_at, updated_at) VALUES "
+                 "('sib','paper','2026-01-01','2026-01-01')")
+    conn.commit()
+    # a SIBLING strategy's order owns broker order id 'bo-7'
+    record_paper_venue_order(conn, "sib", "AAA", "buy", None, "coid-sib", strategy_id=1)
+    conn.execute(
+        "UPDATE paper_venue_orders SET broker_order_id='bo-7' WHERE client_order_id='coid-sib'"
+    )
+    conn.commit()
+
+    acts = [
+        {"activity_type": "FILL", "order_id": "bo-7"},       # sibling's fill -> ATTRIBUTABLE
+        {"activity_type": "FILL", "order_id": "bo-orphan"},  # no recorded order -> unattributable
+        {"activity_type": "FILL", "order_id": None},         # missing id -> unattributable
+        {"activity_type": "DIV", "order_id": None},          # non-fill -> ignored
+    ]
+    n_external, n_unattributable = _classify_activities(conn, acts)
+    assert n_external == 0
+    assert n_unattributable == 2     # only the orphan + the null-id fill

@@ -134,13 +134,13 @@ def _inadmissible_reason(
 
 
 def _classify_activities(
-    conn: sqlite3.Connection, strategy_id: int, acts: list[dict[str, Any]],
+    conn: sqlite3.Connection, acts: list[dict[str, Any]],
 ) -> tuple[int, int]:
-    """(n_external_cash_flows, n_unattributable_fills) over raw broker activities. External
-    capital types always count; a FILL is attributable iff it reconciles to one of THIS
-    strategy's persisted paper orders by broker order id AND strategy_id (a missing order_id
-    is unattributable — fail closed). Everything else (DIV/INT/FEE/...) passes. Shared with
-    the certificate re-verification path."""
+    """(n_external_cash_flows, n_unattributable_fills) over raw broker activities. External capital
+    types always count; a FILL is attributable iff it reconciles to SOME recorded paper-venue order
+    by broker order id (account-level — any current paper-book strategy's order; a missing or
+    unmatched order_id is unattributable, fail closed). Everything else (DIV/INT/FEE/...) passes.
+    Shared with the certificate re-verification path."""
     n_external = 0
     n_unattributable = 0
     for act in acts:
@@ -150,8 +150,8 @@ def _classify_activities(
         elif activity_type == "FILL":
             order_id = act.get("order_id")
             matched = order_id is not None and conn.execute(
-                "SELECT 1 FROM paper_venue_orders WHERE strategy_id = ? AND broker_order_id = ?",
-                (strategy_id, order_id),
+                "SELECT 1 FROM paper_venue_orders WHERE broker_order_id = ?",
+                (order_id,),
             ).fetchone() is not None
             if not matched:
                 n_unattributable += 1
@@ -316,7 +316,7 @@ def assemble_forward_evidence(
         try:
             acts = activities_fetch(window_after, now_iso)
             n_external_cash_flows, n_unattributable_fills = _classify_activities(
-                conn, strategy_id, acts)
+                conn, acts)
         except Exception:
             activities_ok = False
             n_external_cash_flows = 0
@@ -457,7 +457,7 @@ def verify_forward_certificate(
         raise TransitionError(
             f"could not verify account activities since certification ({exc}); "
             "failing closed") from exc
-    n_external, n_unattributable = _classify_activities(conn, strategy_id, acts)
+    n_external, n_unattributable = _classify_activities(conn, acts)
     if n_external or n_unattributable:
         raise TransitionError(
             f"account hygiene failed since certification: {n_external} external capital "
