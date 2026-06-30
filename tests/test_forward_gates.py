@@ -22,7 +22,7 @@ def passing_evidence(**over):
     base = dict(n_return_observations=63, session_coverage=0.95, realized_sharpe=0.8,
                 realized_vol=0.10, realized_max_drawdown=0.10, holdout_sharpe=1.0,
                 n_reconcile_failures=0, n_defective_ticks=0, kill_switch_tripped=False,
-                global_halt_engaged=False, n_kill_trips_in_window=0, single_tenant_ok=True,
+                global_halt_engaged=False, n_kill_trips_in_window=0, single_account_ok=True,
                 activities_ok=True, n_external_cash_flows=0, n_unattributable_fills=0,
                 staleness_sessions=2)
     return ForwardEvidence(**(base | over))
@@ -35,7 +35,7 @@ def _check(decision: ForwardGateDecision, name: str) -> dict:
 ALL_CHECK_NAMES = {
     "min_forward_observations", "session_coverage", "realized_sharpe", "min_forward_vol",
     "max_forward_drawdown", "reconcile_ok", "no_defective_ticks", "kill_switch_clear",
-    "global_halt_clear", "no_kill_trips_in_window", "single_tenant", "activities_ok",
+    "global_halt_clear", "no_kill_trips_in_window", "single_account", "activities_ok",
     "no_external_cash_flows", "no_unattributable_fills", "max_staleness_sessions",
 }
 
@@ -77,7 +77,7 @@ FLIP_CASES = [
     ({"global_halt_engaged": True}, "global_halt_clear"),
     ({"n_kill_trips_in_window": 1}, "no_kill_trips_in_window"),
     # account hygiene
-    ({"single_tenant_ok": False}, "single_tenant"),
+    ({"single_account_ok": False}, "single_account"),
     ({"activities_ok": False}, "activities_ok"),
     ({"n_external_cash_flows": 1}, "no_external_cash_flows"),
     ({"n_unattributable_fills": 1}, "no_unattributable_fills"),
@@ -90,7 +90,7 @@ FLIP_CASES = [
 @pytest.mark.parametrize("over,failing", FLIP_CASES, ids=[
     "obs_62", "coverage_0.89", "sharpe_below_degradation_bar", "sharpe_below_floor_bar",
     "vol_0.01", "drawdown_0.26", "reconcile_failure", "defective_tick", "kill_switch_tripped",
-    "global_halt_engaged", "kill_trip_in_window", "multi_tenant", "activities_not_ok",
+    "global_halt_engaged", "kill_trip_in_window", "single_account_failed", "activities_not_ok",
     "external_cash_flow", "unattributable_fill", "staleness_6", "staleness_none",
 ])
 def test_single_field_flip_fails_exactly_that_check(over, failing):
@@ -217,6 +217,15 @@ def test_tightened_observation_floor_fails_63_obs_evidence():
     c = _check(d, "min_forward_observations")
     assert c["passed"] is False
     assert c["threshold"] == 80
+
+
+def test_single_account_check_key_and_failure_message():
+    # An evidence with single_account_ok=False produces a failed check keyed "single_account".
+    ev = passing_evidence(single_account_ok=False)
+    decision = evaluate_forward_gate(ev, ForwardGateCriteria())
+    failed = {c["name"] for c in decision.checks if not c["passed"]}
+    assert "single_account" in failed
+    assert "single_tenant" not in {c["name"] for c in decision.checks}
 
 
 def test_evaluation_is_pure():
