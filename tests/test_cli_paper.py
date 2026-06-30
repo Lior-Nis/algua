@@ -1,15 +1,25 @@
 import json
+from contextlib import closing
 from datetime import UTC, datetime
 
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
+from algua.backtest._sample import SyntheticProvider
 from algua.cli.main import app
+from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState, BrokerError
+from algua.execution.order_state import latest_tick_snapshot
 from algua.live.live_loop import SubmittedOrder, TickResult
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
+
+_SNAP = "snap1"
 
 
 @pytest.fixture(autouse=True)
@@ -227,6 +237,9 @@ class _MinimalBroker:
     def account_activities_window(self, after, until):
         return []
 
+    def get_positions(self):
+        return pd.Series(dtype="float64")
+
 
 def test_trade_tick_submits_and_persists(monkeypatch):
     from contextlib import closing
@@ -238,6 +251,7 @@ def test_trade_tick_submits_and_persists(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
     ts = datetime(2023, 6, 1, tzinfo=UTC)
     intent = OrderIntent(symbol="AAA", side=Side.BUY, target_weight=1.0, decision_ts=ts)
     fake_result = TickResult(
@@ -289,6 +303,7 @@ def test_trade_tick_venue_order_recording(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
 
     ts = datetime(2023, 6, 1, tzinfo=UTC)
     dropped_sym = "ZZZ"  # NOT in cross_sectional_momentum's universe
@@ -460,6 +475,7 @@ def test_trade_tick_persists_snapshot(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
     fake = TickResult(decision_ts=datetime(2023, 6, 1, tzinfo=UTC), target_weights={"AAA": 1.0},
                       positions_before={"AAA": 5.0}, submitted=[{"symbol": "AAA"}],
                       equity=99000.0, peak_equity=99000.0)
@@ -658,6 +674,19 @@ def test_show_reflects_global_halt():
     payload = json.loads(runner.invoke(app, ["paper", "show", "cross_sectional_momentum"]).stdout)
     assert payload["health"] == "halted"
     assert payload["kill_switch"]["global_halt"] is True
+
+
+def _seed_allocation(name: str, capital: float = 10_000.0) -> None:
+    """Insert a strategy_allocations row directly (no paper-allocate CLI dependency)."""
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (rec.id, capital, datetime.now(UTC).isoformat(), "agent"),
+        )
+        conn.commit()
 
 
 def _seed_paper_order(db_path, strategy, symbol):
@@ -880,6 +909,7 @@ def test_trade_tick_persists_provenance(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
 
     name = "cross_sectional_momentum"
     # Venue clock reports an EDT offset: the stamp must be the converted UTC instant, pinned as a
@@ -904,6 +934,9 @@ def test_trade_tick_persists_provenance(monkeypatch):
 
         def account_activities_window(self, after, until):
             return []
+
+        def get_positions(self):
+            return pd.Series(dtype="float64")
 
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _FakeBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
@@ -953,6 +986,7 @@ def test_trade_tick_unusable_broker_clock_falls_back_to_local(monkeypatch, bad_c
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
 
     name = "cross_sectional_momentum"
     fake_result = TickResult(
@@ -975,6 +1009,9 @@ def test_trade_tick_unusable_broker_clock_falls_back_to_local(monkeypatch, bad_c
         def account_activities_window(self, after, until):
             return []
 
+        def get_positions(self):
+            return pd.Series(dtype="float64")
+
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _ClockFailBroker)
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.paper_cmd.run_tick", lambda *a, **k: fake_result)
@@ -996,6 +1033,7 @@ def test_trade_tick_allowed_at_forward_tested_stage(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
 
     name = "cross_sectional_momentum"
     # advance to forward_tested via a human transition
@@ -1248,12 +1286,16 @@ def test_trade_tick_breach_flattens_dropped_symbol_and_clears_belief(monkeypatch
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
     _to_paper()
+    _seed_allocation("cross_sectional_momentum")
     # seed a paper_venue_fills row so paper_believed_positions returns ZZZ:5
     _seed_paper_venue_fill(tmp_path / "p.db", "cross_sectional_momentum", "ZZZ")
 
     class _BreachTickBroker(_MinimalBroker):
         def __init__(self):
             self.offset_calls: list = []   # (sym, qty, coid) tuples
+        def get_positions(self):
+            # broker agrees with the seeded paper_venue_fills for ZZZ so reconcile passes
+            return pd.Series({"ZZZ": 5.0}, dtype="float64")
         def cancel_open_orders(self):
             pass
         def submit_offset(self, sym, qty, coid):
@@ -1465,3 +1507,180 @@ def test_show_sim_strategy_still_reports_sim_positions():
     assert payload["n_orders"] == sim_n_orders
     # recent_orders comes from sim paper_orders
     assert len(payload["recent_orders"]) <= 10
+
+
+def test_paper_broker_net_drops_zero_positions():
+    import pandas as pd
+
+    from algua.cli.paper_cmd import _paper_broker_net
+
+    class _B:
+        def get_positions(self):
+            return pd.Series({"AAA": 10.0, "BBB": 0.0, "CCC": -3.0})
+
+    assert _paper_broker_net(_B()) == {"AAA": 10.0, "CCC": -3.0}
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (#316a): multi-tenant trade-tick — NAV sizing, reconcile defer, breach
+# ---------------------------------------------------------------------------
+
+class _FakePaperBroker:
+    """Fake paper broker for multi-tenant trade-tick tests.
+
+    `force_breach=True` causes `cancel_open_orders()` to raise RiskBreach (called
+    unconditionally by run_tick after decide() so the breach fires regardless of whether
+    the strategy generates any intents — i.e. works even with short date ranges where the
+    lookback signal is all-NaN).
+    """
+
+    def __init__(self, account_equity: float, positions: dict, marks: dict,
+                 force_breach: bool = False) -> None:
+        self.account_equity = account_equity
+        self._positions = positions
+        self._marks = marks
+        self.force_breach = force_breach
+        self.submitted: list = []
+
+    def account(self) -> AccountState:
+        return AccountState(equity=self.account_equity, cash=self.account_equity,
+                            buying_power=self.account_equity, account_id="fake-acct")
+
+    def clock(self) -> str:
+        return "2026-01-02T14:00:00Z"
+
+    def account_activities_window(self, after: str, until: str) -> list:
+        return []
+
+    def get_positions(self) -> pd.Series:
+        return pd.Series(self._positions, dtype="float64")
+
+    def cancel_open_orders(self) -> None:
+        if self.force_breach:
+            raise RiskBreach("drawdown", "forced breach for testing")
+
+    def submit_sized(self, intent, snap, coid=None, reserve=None) -> str:
+        order_id = f"o-{intent.symbol}"
+        self.submitted.append(order_id)
+        return order_id
+
+    def submit_offset(self, sym: str, qty: float, coid: str) -> str:
+        return f"o-offset-{sym}"
+
+
+def _paper_strategy_with_allocation(
+    monkeypatch, tmp_path, *, capital: float, account_equity: float,
+    name: str = "cross_sectional_momentum",
+) -> str:
+    """Advance a strategy to paper stage, seed a capital allocation, and monkeypatch the
+    data provider to SyntheticProvider so trade-tick doesn't need a real snapshot."""
+    _to_paper(name)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (rec.id, capital, datetime.now(UTC).isoformat(), "agent"),
+        )
+        conn.commit()
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snapshot: SyntheticProvider())
+    return name
+
+
+def _latest_tick(name: str) -> dict | None:
+    """Return the latest tick snapshot for a strategy from the test DB."""
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        return latest_tick_snapshot(conn, name)
+
+
+def kill_switch_is_tripped(name: str) -> bool:
+    """True iff the strategy's kill-switch is currently tripped."""
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        return kill_switch.is_tripped(conn, name)
+
+
+def test_trade_tick_sizes_off_allocation_not_account(monkeypatch, tmp_path):
+    # A paper strategy at PAPER stage with a $10k allocation, account funded at $1M.
+    # Orders must target the $10k allocation/NAV, not the $1M account equity.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=1_000_000.0)
+    broker = _FakePaperBroker(account_equity=1_000_000.0, positions={}, marks={"AAA": 100.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
+                                 "--start", "2026-01-01", "--end", "2026-02-01"])
+    assert result.exit_code == 0, result.output
+    # the recorded tick snapshot equity is the per-strategy NAV (~allocation), not 1_000_000
+    snap = _latest_tick(name)
+    assert snap["equity"] <= 10_000.0
+
+
+def test_trade_tick_defers_on_unattributable_holding(monkeypatch, tmp_path):
+    # Broker shows a holding no paper strategy owns -> reconcile not clean -> defer, no orders.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0,
+                              positions={"ZZZ": 5.0}, marks={"AAA": 100.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
+                                 "--start", "2026-01-01", "--end", "2026-02-01"])
+    payload = json.loads(result.output)
+    assert payload.get("traded") is False
+    assert payload.get("deferred") is True
+    assert broker.submitted == []   # nothing traded on an unreconciled account
+    assert _latest_tick(name) is None  # a deferred tick records NO snapshot (no gate coverage)
+
+
+def test_trade_tick_halts_after_grace_expiry(monkeypatch, tmp_path):
+    # After DEFAULT_GRACE_CYCLES (=3) the persistent unattributable holding escalates from
+    # deferred to halt.  Invocations 1-3 defer (exit 0); invocation 4 hits
+    # cycle - first_seen == 3 >= 3, engages the global halt, and exits non-zero.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0,
+                              positions={"ZZZ": 5.0}, marks={"AAA": 100.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    args = ["paper", "trade-tick", name, "--snapshot", _SNAP,
+            "--start", "2026-01-01", "--end", "2026-02-01"]
+
+    # Cycles 1-3: mismatch is "pending" (within the grace window) -> defer, exit 0.
+    for i in range(3):
+        r = runner.invoke(app, args)
+        assert r.exit_code == 0, f"cycle {i + 1} unexpectedly non-zero: {r.output}"
+        p = json.loads(r.output)
+        assert p.get("deferred") is True, f"cycle {i + 1} did not defer"
+
+    # Cycle 4: cycle - first_seen == 3 >= DEFAULT_GRACE_CYCLES -> unexplained -> halt.
+    result = runner.invoke(app, args)
+    assert result.exit_code != 0, f"expected halt exit-code, got 0: {result.output}"
+    payload = json.loads(result.output)
+    assert payload.get("halted") is True
+
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is True
+
+
+def test_trade_tick_breach_trips_and_scoped_flattens(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0},
+                              force_breach=True)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
+                                 "--start", "2026-01-01", "--end", "2026-02-01",
+                                 "--max-drawdown", "0.01"])
+    assert result.exit_code != 0
+    assert kill_switch_is_tripped(name)

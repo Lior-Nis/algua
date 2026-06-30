@@ -14,6 +14,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.live_ledger import (
     LedgerKind,
@@ -26,6 +27,7 @@ from algua.execution.live_ledger import (
     strategy_live_symbols,
 )
 from algua.execution.live_reconcile import attributed_live_net
+from algua.execution.live_sizing import build_paper_sizing_snapshot
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
@@ -47,6 +49,7 @@ from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import _RECONCILE_TOL, TickHalted, TickHooks, run_tick
 from algua.live.paper_loop import run_paper
+from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
@@ -79,6 +82,15 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
         )
     return AlpacaPaperBroker(api_key=s.alpaca_api_key, api_secret=s.alpaca_api_secret,
                              base_url=s.alpaca_paper_url)
+
+
+def _paper_broker_net(broker) -> dict[str, float]:
+    """Paper broker's net positions per symbol (nonzero only) for account reconcile.
+
+    Local to paper_cmd because the live analog (_broker_net_positions) can't be imported (cli->cli).
+    """
+    pos = broker.get_positions()  # pandas Series symbol -> qty
+    return {sym: float(q) for sym, q in pos.items() if float(q) != 0.0}
 
 
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
@@ -310,6 +322,92 @@ def account() -> None:
     emit(ok({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power}))
 
 
+def _run_paper_strategy_tick(  # noqa: PLR0913
+    conn, name: str, strategy, rec, broker, provider, max_drawdown,
+    tick_ts, clock_source, acct, *, cancel=None,
+    start: str = "2023-01-01", end: str = "2023-12-31",
+) -> dict:
+    """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
+    recording, breach trip + scoped flatten, tick-snapshot persistence (equity = per-strategy NAV).
+    Returns ok({...}) on success, or an {"ok": False, ...} marker on TickHalted/RiskBreach (so
+    #316b's run-all can surface siblings on a breach, like live #270). Caller does the account
+    reconcile BEFORE calling this; no venue_belief here."""
+    alloc = active_allocation(conn, rec.id)
+    if alloc is None:
+        raise ValueError(f"{name} has no paper allocation")
+    allocation = float(alloc["capital"])
+    identity = compute_artifact_hashes(name)
+
+    hooks = TickHooks(
+        client_order_id_for=client_order_id,
+        before_submit=lambda intent, coid: (
+            record_paper_venue_order(conn, name, intent.symbol, intent.side.value, None,
+                                     coid, strategy_id=rec.id) if coid is not None else None),
+        on_submitted=lambda rec_: backfill_paper_venue_broker_order_id(
+            conn, rec_.client_order_id, rec_.order_id),
+        should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
+        cancel=cancel,
+        peak_equity=get_peak_equity(conn, name),
+        live_snapshot=lambda bars: build_paper_sizing_snapshot(
+            conn, name, allocation, bars, strategy.universe),
+        live_positions=lambda: paper_believed_positions(conn, name),
+    )
+    try:
+        result = run_tick(strategy, broker, provider, utc(start), utc(end),
+                          hooks=hooks, max_drawdown=max_drawdown)
+    except TickHalted as exc:
+        audit_append(conn, actor="system", action="trade_tick_halted", reason=str(exc),
+                     strategy=name)
+        return {"ok": False, "strategy": name, **breach_payload(str(exc), strategy=name,
+                                                                halted=True)}
+    except RiskBreach as exc:
+        trip_for_breach(conn, name, exc)
+        n_offsets = 0
+        flatten_error = None
+        try:
+            broker.cancel_open_orders()
+            breach_ts, _ = tick_clock(broker.clock)
+            _ingest_paper_venue(conn, broker, breach_ts)
+            for sym, qty in paper_believed_positions(conn, name).items():
+                if abs(qty) <= _RECONCILE_TOL:
+                    continue
+                coid = client_order_id(name, datetime.now(UTC), sym)
+                record_paper_venue_order(conn, name, sym, "sell" if qty > 0 else "buy",
+                                         None, coid, strategy_id=rec.id)
+                oid = broker.submit_offset(sym, qty, coid)
+                backfill_paper_venue_broker_order_id(conn, coid, oid)
+                n_offsets += 1
+        except Exception as fexc:
+            flatten_error = str(fexc)
+            audit_append(conn, actor="system", action="flatten_failed", reason=str(fexc),
+                         strategy=name)
+        payload = breach_payload(exc.detail, kind=exc.kind, liquidation_submitted=n_offsets > 0,
+                                 offsets_submitted=n_offsets)
+        if flatten_error is not None:
+            payload["flatten_error"] = flatten_error
+        return {"ok": False, "strategy": name, **payload}
+
+    if result.peak_equity is not None:
+        update_peak_equity(conn, name, result.peak_equity)
+        record_tick_snapshot(
+            conn, name, tick_ts=tick_ts,
+            decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
+            equity=result.equity, peak_equity=result.peak_equity,
+            positions=result.positions_before, n_submitted=len(result.submitted),
+            reconcile_ok=result.reconcile_ok, lane="paper", strategy_id=rec.id,
+            code_hash=identity.code_hash, config_hash=identity.config_hash,
+            dependency_hash=identity.dependency_hash, account_id=acct.account_id,
+            cash=acct.cash, clock_source=clock_source)
+    audit_append(conn, actor="agent", action="trade_tick",
+                 reason=f"{len(result.submitted)} orders submitted", strategy=name)
+    return ok({
+        "strategy": name,
+        "decision_ts": result.decision_ts.isoformat() if result.decision_ts else None,
+        "target_weights": result.target_weights, "positions_before": result.positions_before,
+        "submitted": result.submitted, "reconcile_ok": result.reconcile_ok,
+        "realized_gross": result.realized_gross})
+
+
 @paper_app.command("trade-tick")
 @json_errors(ValueError, LookupError, BrokerError)
 def trade_tick(
@@ -329,118 +427,38 @@ def trade_tick(
         strategy, rec = load_gated_strategy(conn, name, "trade-tick")
         broker = _alpaca_broker_from_settings()
         provider = _select_provider(False, snapshot)
-        identity = compute_artifact_hashes(name)
         acct = broker.account()
-        # Resolve the venue clock ONCE (resilient: clock failure falls back to local clock so the
-        # tick still proceeds) and use the resolved ts as the window upper bound for ingest.
         tick_ts, clock_source = tick_clock(broker.clock)
         try:
             _ingest_paper_venue(conn, broker, tick_ts)
-        except Exception as exc:   # fail closed on ANY ingest/transport error, not just BrokerError
-            audit_append(conn, actor="system", action="venue_ingest_failed",
-                         reason=str(exc), strategy=name)
+        except Exception as exc:   # fail closed on ANY ingest/transport error
+            audit_append(conn, actor="system", action="venue_ingest_failed", reason=str(exc),
+                         strategy=name)
             emit(breach_payload(str(exc), strategy=name, kind="venue_ingest_failed"))
             raise typer.Exit(1) from exc
 
-        hooks = TickHooks(
-            client_order_id_for=client_order_id,
-            # Record intent crash-safely BEFORE the broker call so a mid-submit death leaves a
-            # traceable row in the ledger (#249). The client_order_id is the durable identity.
-            # coid is str | None per TickHooks typing; None means no coid was generated (the
-            # paper path always supplies client_order_id_for, so coid is never None here, but the
-            # guard satisfies mypy and is correct in general).
-            before_submit=lambda intent, coid: (
-                record_paper_venue_order(conn, name, intent.symbol, intent.side.value, None,
-                                         coid, strategy_id=rec.id)
-                if coid is not None else None
-            ),
-            # Backfill the broker-assigned order id AFTER the broker accepts so fills can be
-            # attributed back to this strategy via broker_order_id (#249).
-            on_submitted=lambda rec_: backfill_paper_venue_broker_order_id(
-                conn, rec_.client_order_id, rec_.order_id),
-            # Re-read the switch from the DB right before submit so an externally-tripped switch
-            # aborts before any order goes out (#21).
-            should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
-            peak_equity=get_peak_equity(conn, name),
-            venue_belief=lambda: paper_believed_positions(conn, name),
-        )
-        try:
-            result = run_tick(strategy, broker, provider, utc(start), utc(end),
-                              hooks=hooks, max_drawdown=max_drawdown)
-        except TickHalted as exc:
-            # Switch tripped between cancel and submit: nothing was sent this tick. Already halted.
-            audit_append(conn, actor="system", action="trade_tick_halted",
-                         reason=str(exc), strategy=name)
-            emit(breach_payload(str(exc), strategy=name, halted=True))
-            raise typer.Exit(1) from exc
-        except RiskBreach as exc:
-            trip_for_breach(conn, name, exc)
-            n_offsets = 0
-            liquidation_submitted = False
-            flatten_error = None
-            try:
-                broker.cancel_open_orders()
-                # Re-ingest up to NOW (not the stale top-of-tick ts) so fills that landed during
-                # this tick are reflected in the belief the offset loop liquidates. tick_clock keeps
-                # this resilient to a broker-clock outage (local fallback).
-                breach_ts, _ = tick_clock(broker.clock)
-                _ingest_paper_venue(conn, broker, breach_ts)
-                for sym, qty in paper_believed_positions(conn, name).items():
-                    if abs(qty) <= _RECONCILE_TOL:
-                        continue
-                    coid = client_order_id(name, datetime.now(UTC), sym)
-                    record_paper_venue_order(conn, name, sym,
-                                             "sell" if qty > 0 else "buy", None,
-                                             coid, strategy_id=rec.id)
-                    oid = broker.submit_offset(sym, qty, coid)
-                    backfill_paper_venue_broker_order_id(conn, coid, oid)
-                    n_offsets += 1
-                # Honest signal (GATE-2 HIGH): True ONLY if at least one offset order actually
-                # went out. A breach whose broker residual is an orphan we don't own (belief flat)
-                # submits nothing — report False so the operator knows the position is untouched.
-                liquidation_submitted = n_offsets > 0
-            # Fail SAFE on ANY liquidation error (not only BrokerError): a non-BrokerError from the
-            # venue ingest/offset path must still report a structured liquidation_submitted=False
-            # rather than crash the breach handler with an unstructured traceback (GATE-2).
-            except Exception as fexc:
-                liquidation_submitted = False
-                flatten_error = str(fexc)
-                audit_append(conn, actor="system", action="flatten_failed",
-                             reason=str(fexc), strategy=name)
-            payload = breach_payload(exc.detail, kind=exc.kind,
-                                      liquidation_submitted=liquidation_submitted,
-                                      offsets_submitted=n_offsets)
-            if flatten_error is not None:
-                payload["flatten_error"] = flatten_error
-            emit(payload)
-            raise typer.Exit(1) from exc
-        if result.peak_equity is not None:
-            update_peak_equity(conn, name, result.peak_equity)
-            record_tick_snapshot(
-                conn, name,
-                tick_ts=tick_ts,
-                decision_ts=result.decision_ts.isoformat() if result.decision_ts else None,
-                equity=result.equity, peak_equity=result.peak_equity,
-                positions=result.positions_before, n_submitted=len(result.submitted),
-                reconcile_ok=result.reconcile_ok,
-                lane="paper", strategy_id=rec.id,
-                code_hash=identity.code_hash, config_hash=identity.config_hash,
-                dependency_hash=identity.dependency_hash,
-                account_id=acct.account_id, cash=acct.cash,
-                clock_source=clock_source,
-            )
-        audit_append(conn, actor="agent", action="trade_tick",
-                     reason=f"{len(result.submitted)} orders submitted", strategy=name)
+        # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book, grace
+        # window. halt -> global halt; not clean -> defer (no trade); clean -> tick.
+        cycle = paper_reconcile.next_cycle(conn)
+        recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
+        if recon.halt:
+            global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
+                               actor="system")
+            emit({"ok": False, "strategy": name, "deferred": True, "halted": True,
+                  "reconcile": recon.mismatches})
+            raise typer.Exit(1)
+        if not recon.clean:
+            audit_append(conn, actor="system", action="trade_tick_deferred",
+                         reason="reconcile pending", strategy=name)
+            emit(ok({"strategy": name, "traded": False, "deferred": True,
+                     "reconcile": recon.mismatches}))
+            return
 
-    emit(ok({
-        "strategy": name,
-        "decision_ts": result.decision_ts.isoformat() if result.decision_ts else None,
-        "target_weights": result.target_weights,
-        "positions_before": result.positions_before,
-        "submitted": result.submitted,
-        "reconcile_ok": result.reconcile_ok,
-        "realized_gross": result.realized_gross,
-    }))
+        out = _run_paper_strategy_tick(conn, name, strategy, rec, broker, provider, max_drawdown,
+                                       tick_ts, clock_source, acct, start=start, end=end)
+    emit(out)
+    if not out.get("ok", False):
+        raise typer.Exit(1)
 
 
 @paper_app.command("promote")
