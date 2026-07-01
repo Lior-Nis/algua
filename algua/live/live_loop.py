@@ -89,6 +89,10 @@ class TickHooks:
     # the paper lane can record order intent in a crash-safe ledger before the broker call (#249).
     # Live/sim callers that do not supply this hook are unaffected (None -> skipped).
     before_submit: Callable[[OrderIntent, str | None], None] | None = None
+    # on_noop(intent, coid): fires when submit_sized reports 'noop'/'skipped' (no order reached the
+    # venue — both sentinels return before the POST) AFTER before_submit already recorded a durable
+    # intent, so the paper lane can retract that phantom intent row (#311). None -> skipped.
+    on_noop: Callable[[OrderIntent, str | None], None] | None = None
 
 
 class TickHalted(RuntimeError):
@@ -229,6 +233,9 @@ def run_tick(
             hooks.before_submit(intent, coid)
         order_id = broker.submit_sized(intent, snap, coid, reserve=hooks.reserve_buy)
         if order_id in ("noop", "skipped"):
+            # No order reached the venue: let the lane retract the phantom before_submit row (#311).
+            if hooks.on_noop is not None:
+                hooks.on_noop(intent, coid)
             continue
         record = SubmittedOrder(symbol=intent.symbol, side=intent.side.value,
                                 target_weight=intent.target_weight, order_id=order_id,

@@ -13,12 +13,14 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.types import OrderIntent
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_paper_venue_broker_order_id,
     believed_positions,
+    delete_paper_venue_order,
     fill_cursor,
     ingest_activities,
     paper_believed_positions,
@@ -46,7 +48,13 @@ from algua.execution.order_state import (
 )
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
-from algua.live.live_loop import _RECONCILE_TOL, TickHalted, TickHooks, run_tick
+from algua.live.live_loop import (
+    _RECONCILE_TOL,
+    SubmittedOrder,
+    TickHalted,
+    TickHooks,
+    run_tick,
+)
 from algua.live.paper_loop import run_paper
 from algua.observability import (
     CycleCounters,
@@ -345,13 +353,36 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     allocation = float(alloc["capital"])
     identity = compute_artifact_hashes(name)
 
+    # coids this tick's before_submit FRESHLY inserted an intent row for (record returned True — no
+    # prior run had this coid). Only such rows are safe to retract on a noop/skipped: a pre-existing
+    # NULL row is indistinguishable from a real accepted order whose backfill was lost to a crash
+    # and MUST be preserved (#311).
+    freshly_recorded: set[str] = set()
+
+    def _before_submit(intent: OrderIntent, coid: str | None) -> None:
+        if coid is not None and record_paper_venue_order(
+            conn, name, intent.symbol, intent.side.value, None, coid, strategy_id=rec.id
+        ):
+            freshly_recorded.add(coid)
+
+    def _on_submitted(rec_: SubmittedOrder) -> None:
+        # A real order landed: backfill its broker id and drop it from the fresh set so on_noop can
+        # never retract a resolved order (defense-in-depth beyond submit_sized's noop/POST split).
+        backfill_paper_venue_broker_order_id(conn, rec_.client_order_id, rec_.order_id)
+        freshly_recorded.discard(rec_.client_order_id)
+
+    def _on_noop(intent: OrderIntent, coid: str | None) -> None:
+        # submit_sized reported noop/skipped -> no POST. Retract the phantom intent ONLY if THIS
+        # tick freshly recorded it (else it may be a prior run's real, crash-orphaned order).
+        if coid is not None and coid in freshly_recorded:
+            delete_paper_venue_order(conn, coid)
+            freshly_recorded.discard(coid)
+
     hooks = TickHooks(
         client_order_id_for=client_order_id,
-        before_submit=lambda intent, coid: (
-            record_paper_venue_order(conn, name, intent.symbol, intent.side.value, None,
-                                     coid, strategy_id=rec.id) if coid is not None else None),
-        on_submitted=lambda rec_: backfill_paper_venue_broker_order_id(
-            conn, rec_.client_order_id, rec_.order_id),
+        before_submit=_before_submit,
+        on_submitted=_on_submitted,
+        on_noop=_on_noop,
         should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
         cancel=cancel,
         peak_equity=get_peak_equity(conn, name),

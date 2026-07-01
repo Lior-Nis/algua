@@ -110,17 +110,45 @@ def record_paper_venue_order(
     client_order_id: str,
     *,
     strategy_id: int,
-) -> None:
+) -> bool:
     """Record a paper venue order at submit time, keyed by client_order_id. A retry that re-submits
     the same client_order_id is a no-op (INSERT OR IGNORE on the UNIQUE column). strategy_id is
-    required for forward-gate attribution."""
-    conn.execute(
+    required for forward-gate attribution.
+
+    Returns True iff this call actually inserted a NEW row (rowcount == 1); False if a row for this
+    client_order_id already existed and the INSERT was IGNORED. The caller uses this to tell a row
+    it freshly created THIS attempt (safe to retract on a noop/skipped — no POST) apart from a
+    pre-existing row that a PRIOR run may have created and POSTed then crashed before backfill (must
+    be preserved) — see delete_paper_venue_order (#311)."""
+    cur = conn.execute(
         "INSERT OR IGNORE INTO paper_venue_orders"
         "(strategy, symbol, side, intended_notional, client_order_id,"
         " strategy_id, status, submitted_ts)"
         " VALUES (?,?,?,?,?,?,?,?)",
         (strategy, symbol, side, intended_notional, client_order_id, strategy_id, "submitted",
          datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def delete_paper_venue_order(conn: sqlite3.Connection, client_order_id: str) -> None:
+    """Retract a paper venue INTENT row that never became a real order — submit_sized reported
+    'noop'/'skipped', so no order ever reached the venue (both sentinels return before the POST).
+    The crash-safe before_submit intent (#249) is only durable-worthy once a POST could have
+    happened; a phantom row with NULL broker_order_id otherwise inflates the venue order count and
+    flips paper-show onto the venue-strategy display branch (#311).
+
+    Caller MUST only invoke this for a coid it FRESHLY inserted this attempt
+    (record_paper_venue_order returned True): a pre-existing NULL row is INDISTINGUISHABLE from a
+    real accepted order whose
+    broker_order_id backfill was lost to a crash, so it must never be deleted. The
+    'broker_order_id IS NULL' guard is belt-and-suspenders on top of that caller-side gate — a real
+    order's row is only ever NULL transiently before on_submitted backfills it, and this deletes
+    nothing that carries a broker id."""
+    conn.execute(
+        "DELETE FROM paper_venue_orders WHERE client_order_id = ? AND broker_order_id IS NULL",
+        (client_order_id,),
     )
     conn.commit()
 
