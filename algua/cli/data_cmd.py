@@ -49,7 +49,7 @@ def _sha256(path: Path) -> str:
 
 
 @data_app.command("ingest")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def ingest(
     dataset: str,
     provider: str = typer.Option(..., "--provider"),
@@ -75,7 +75,7 @@ def ingest(
 
 
 @data_app.command("ingest-bars")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def ingest_bars(
     provider: str = typer.Option("yfinance", "--provider"),
     symbols: str = typer.Option(..., "--symbols", help="comma-separated symbols"),
@@ -118,7 +118,7 @@ def ingest_bars(
 
 
 @data_app.command("import-bars")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def import_bars(
     vendor: str = typer.Option(..., "--vendor", help="bulk-file vendor, e.g. firstrate"),
     raw_dir: Path = typer.Option(..., "--raw-dir", help="dir of unadjusted per-symbol files"),
@@ -201,7 +201,7 @@ def import_bars(
 
 
 @data_app.command("ingest-universe")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def ingest_universe(
     universe: str,
     symbols: str = typer.Option(..., "--symbols", help="comma-separated symbols"),
@@ -221,7 +221,7 @@ def ingest_universe(
 
 
 @data_app.command("import-universe")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def import_universe(
     universe: str,
     file: Path = typer.Option(..., "--file", help="constituents CSV: symbol,add_date,drop_date"),
@@ -266,7 +266,7 @@ def import_universe(
 
 
 @data_app.command("ingest-fundamentals")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def ingest_fundamentals(
     provider: str = typer.Option(..., "--provider"),
     symbols: str = typer.Option(..., "--symbols", help="comma-separated symbols"),
@@ -288,7 +288,7 @@ def ingest_fundamentals(
 
 
 @data_app.command("query-fundamentals")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def query_fundamentals_cmd(
     snapshot_id: str = typer.Option(..., "--snapshot-id"),
     symbols: str = typer.Option(None, "--symbols", help="optional comma-separated subset"),
@@ -311,7 +311,7 @@ def query_fundamentals_cmd(
 
 
 @data_app.command("ingest-news")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def ingest_news(
     provider: str = typer.Option(..., "--provider"),
     as_of: str = typer.Option(..., "--as-of", help="point-in-time ISO datetime"),
@@ -329,7 +329,7 @@ def ingest_news(
 
 
 @data_app.command("import-delistings")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def import_delistings(
     file: Path = typer.Option(..., "--file", help="CSV: symbol,delisting_date,delisting_value"),
     as_of: str = typer.Option(None, "--as-of", help="point-in-time ISO datetime"),
@@ -343,7 +343,7 @@ def import_delistings(
 
 
 @data_app.command("query-news")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def query_news_cmd(
     snapshot_id: str = typer.Option(..., "--snapshot-id"),
     symbols: str = typer.Option(None, "--symbols", help="optional comma-separated subset"),
@@ -368,7 +368,7 @@ def query_news_cmd(
 
 
 @data_app.command("verify")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def verify(
     snapshot_id: str = typer.Option(None, "--snapshot-id", help="verify one snapshot"),
 ) -> None:
@@ -388,7 +388,7 @@ def verify(
 
 
 @data_app.command("inspect")
-@json_errors(ValueError, LookupError, FileNotFoundError)
+@json_errors
 def inspect(
     dataset: str = typer.Option(None, "--dataset", help="filter by dataset"),
     snapshot_id: str = typer.Option(None, "--snapshot-id", help="show one snapshot"),

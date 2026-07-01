@@ -94,7 +94,7 @@ def emit_series_file(result: BacktestResult, path: Path) -> dict:
 
 
 @backtest_app.command("run")
-@json_errors(ValueError, LookupError, BacktestError)
+@json_errors
 def run(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
@@ -197,7 +197,7 @@ def run(
 
 
 @backtest_app.command("walk-forward")
-@json_errors(ValueError, LookupError, BacktestError)
+@json_errors
 def walk_forward_cmd(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
@@ -279,7 +279,7 @@ def walk_forward_cmd(
 
 
 @backtest_app.command("sweep")
-@json_errors(ValueError, LookupError, BacktestError)
+@json_errors
 def sweep_cmd(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),

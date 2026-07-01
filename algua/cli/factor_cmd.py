@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 
 import typer
 
-from algua.backtest.engine import BacktestError
 from algua.backtest.factor_eval import evaluate_factor
 from algua.cli._common import ok, registry_conn, resolve_universe_inputs, select_provider, utc
 from algua.cli.app import app, emit
@@ -123,7 +122,7 @@ def _parse_kv(items: list[str], flag: str) -> dict[str, object]:
 
 
 @factor_app.command("list")
-@json_errors()
+@json_errors
 def list_factors(
     tag: str = typer.Option(None, "--tag", help="filter by tag"),
     kind: str = typer.Option(None, "--kind", help="filter by FactorKind"),
@@ -134,14 +133,14 @@ def list_factors(
 
 
 @factor_app.command("show")
-@json_errors()
+@json_errors
 def show_factor(name: str = typer.Argument(..., help="factor name")) -> None:
     """Show one factor's full spec as JSON."""
     emit(ok(_spec_json(get_factor(name), full=True)))
 
 
 @factor_app.command("dependents")
-@json_errors()
+@json_errors
 def factor_dependents(
     name: str = typer.Argument(..., help="factor name"),
     allow_partial: bool = typer.Option(
@@ -158,7 +157,7 @@ def factor_dependents(
 
 
 @factor_app.command("uses")
-@json_errors()
+@json_errors
 def factor_uses(strategy: str = typer.Argument(..., help="strategy name")) -> None:
     """Catalogued factors a strategy composes."""
     specs = factors_used_by(strategy)
@@ -166,7 +165,7 @@ def factor_uses(strategy: str = typer.Argument(..., help="strategy name")) -> No
 
 
 @factor_app.command("eval")
-@json_errors(ValueError, LookupError, BacktestError)
+@json_errors
 def eval_factor(
     name: str = typer.Argument(..., help="standalone factor name"),
     symbols: str = typer.Option(..., "--symbols", help="comma-separated evaluation universe"),

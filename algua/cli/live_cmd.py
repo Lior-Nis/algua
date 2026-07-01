@@ -40,7 +40,7 @@ from algua.observability import (
     get_logger,
 )
 from algua.registry import allocations
-from algua.registry.allocations import AllocationError, active_allocation
+from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.live_gate import (
     ALLOWED_SIGNERS_PATH,
@@ -83,7 +83,7 @@ def _live_account_equity() -> float:
 
 
 @live_app.command("allocate")
-@json_errors(ValueError, LookupError, AllocationError)
+@json_errors
 def allocate(
     name: str,
     capital: float = typer.Option(..., "--capital", help="live capital base $"),
@@ -252,7 +252,7 @@ def _broker_buying_power(broker) -> float:
 
 
 @live_app.command("run-all")
-@json_errors(ValueError, LookupError, BrokerError, LiveAuthorizationError)
+@json_errors
 def run_all(
     snapshot: str = typer.Option(..., "--snapshot"),
     start: str = typer.Option("2023-01-01", "--start"),

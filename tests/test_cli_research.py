@@ -690,11 +690,12 @@ def test_post_peek_failure_keeps_burn(tmp_path, monkeypatch):
 
 
 def test_post_peek_unhandled_failure_keeps_burn(tmp_path, monkeypatch):
-    # The burn must survive a post-peek failure REGARDLESS of exception type — including one NOT in
-    # promote's @json_errors set (RuntimeError), which propagates raw past the JSON envelope. This
-    # is the real motivating class for #193 (a KeyboardInterrupt, or a TypeError from `**prov`
-    # construction): the `except BaseException` release is a no-op on the already-committed row, so
-    # burn-survival is independent of whether the error is JSON-wrapped.
+    # The burn must survive a post-peek failure REGARDLESS of exception type — including one no
+    # author anticipated (a RuntimeError, e.g. a TypeError from `**prov` construction). Since #337
+    # the json_errors decorator is a catch-all, so this now renders as the JSON error envelope with
+    # code "internal" and a nonzero exit instead of a raw traceback — yet the `except BaseException`
+    # release inside walk_forward stays a no-op on the already-committed row, so burn-survival is
+    # independent of whether the error is JSON-wrapped (the real invariant behind #193).
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
     import algua.backtest.walkforward as wfmod
@@ -707,10 +708,11 @@ def test_post_peek_unhandled_failure_keeps_burn(tmp_path, monkeypatch):
         bad = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
                                   "--start", "2022-01-01", "--end", "2023-12-31",
                                   *_PASS, "--n-combos", "9", "--allow-non-pit", "--actor", "human"])
-    # RuntimeError is unhandled: it propagates raw (no JSON envelope, nonzero exit) — yet the burn,
-    # committed by on_peek before the failure, must remain committed.
+    # The unanticipated RuntimeError is now caught by the json_errors catch-all: nonzero exit, a
+    # well-formed JSON envelope (never a raw traceback), code "internal".
     assert bad.exit_code != 0
-    assert isinstance(bad.exception, RuntimeError)
+    payload = json.loads(bad.stdout)
+    assert payload["ok"] is False and payload["code"] == "internal"
     rows = _holdout_committed(tmp_path)
     assert len(rows) == 1 and rows[0][1] is not None  # burn survived the unhandled failure
     assert _stage() == "backtested"

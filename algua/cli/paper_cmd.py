@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.backtest.engine import BacktestError
 from algua.calendar.market_calendar import MarketCalendar
 from algua.cli._common import breach_payload, ok, registry_conn, utc
 from algua.cli._common import select_provider as _select_provider
@@ -165,7 +164,7 @@ def _live_strategy_flat(
 
 
 @paper_app.command("run")
-@json_errors(ValueError, LookupError, BacktestError)
+@json_errors
 def run(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
@@ -210,7 +209,7 @@ def run(
 
 
 @paper_app.command("show")
-@json_errors(ValueError, LookupError)
+@json_errors
 def show(name: str) -> None:
     """Consolidated per-strategy operability view — stage, kill-switch, drawdown, last tick,
     recent orders, and a health rollup. A pure read of persisted state (no broker call)."""
@@ -266,7 +265,7 @@ def show(name: str) -> None:
 
 
 @paper_app.command("kill")
-@json_errors(ValueError, LookupError)
+@json_errors
 def kill(
     name: str,
     reason: str = typer.Option(..., "--reason", help="why the strategy is being halted"),
@@ -284,7 +283,7 @@ def kill(
 
 
 @paper_app.command("resume")
-@json_errors(ValueError, LookupError, BrokerError)
+@json_errors
 def resume(name: str) -> None:
     """Reset (clear) a strategy's kill-switch so paper runs may resume. For a LIVE strategy,
     confirms the strategy is flat via broker-truth reconcile before allowing resume. Human
@@ -322,7 +321,7 @@ def resume(name: str) -> None:
 
 
 @paper_app.command("account")
-@json_errors(ValueError, BrokerError)
+@json_errors
 def account() -> None:
     """Show the Alpaca paper account (equity/cash/buying-power) — a connectivity smoke."""
     broker = _alpaca_broker_from_settings()
@@ -423,7 +422,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
 
 
 @paper_app.command("trade-tick")
-@json_errors(ValueError, LookupError, BrokerError)
+@json_errors
 def trade_tick(
     name: str,
     snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
@@ -507,7 +506,7 @@ def trade_tick(
 
 
 @paper_app.command("promote")
-@json_errors(ValueError, LookupError, BrokerError)
+@json_errors
 def promote(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
@@ -582,7 +581,7 @@ def promote(
 
 
 @paper_app.command("flatten")
-@json_errors(ValueError, LookupError, BrokerError)
+@json_errors
 def flatten(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
@@ -633,7 +632,7 @@ def flatten(
 
 
 @paper_app.command("halt-all")
-@json_errors(ValueError, LookupError, BrokerError)
+@json_errors
 def halt_all(
     reason: str = typer.Option(..., "--reason", help="why the whole account is being halted"),
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
@@ -657,7 +656,7 @@ def halt_all(
 
 
 @paper_app.command("resume-all")
-@json_errors(ValueError, LookupError, BrokerError)
+@json_errors
 def resume_all(
     # Default 'agent' to match the sibling halt commands (kill/flatten/halt-all): resume-all is
     # not enforced human-only and an agent can legitimately invoke it, so a 'human' default would

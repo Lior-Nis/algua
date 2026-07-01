@@ -20,9 +20,10 @@ def emit(data: Any) -> None:
     """Print a value as indented JSON — the shared machine + human surface.
 
     CLI JSON-envelope convention: success payloads that are objects carry ``"ok": true`` (see
-    ``cli._common.ok``); failures carry ``{"ok": false, "error": ...}`` (see ``cli.errors`` and
-    ``cli.main``). Commands that return a collection (``registry list``, ``data inspect``) emit a
-    bare JSON array instead — the one documented exception.
+    ``cli._common.ok``); failures carry ``{"ok": false, "error": ..., "code": ...}`` where ``code``
+    is a stable machine-readable identifier (see ``cli.errors`` and ``cli.main``, and
+    ``docs/contracts/cli-error-envelope.md``). Commands that return a collection (``registry list``,
+    ``data inspect``) emit a bare JSON array instead — the one documented exception.
     """
     typer.echo(json.dumps(data, indent=2, default=str))
 
