@@ -348,9 +348,22 @@ def information_ratio(
     vol, so only numerically-degenerate series trip them.
 
     ``overlap_n`` is the number of date-joined bars (0 on empty join). Pure function; no I/O.
+
+    RAISES ``ValueError`` on a CORRUPT armed input — a ragged ``(returns, dates)`` leg or duplicate
+    dates within a leg. Upstream always pairs returns/dates equal-length with unique trading-day
+    dates (walk_forward; promotion.py asserts it), so this is a regression backstop: silently
+    truncating (``zip`` short) or collapsing duplicates (``dict``) could shrink ``overlap_n`` below
+    the bind floor and DOWNGRADE a binding check to a silent "omit" — the opposite of fail-closed.
     """
-    strat_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=False))
-    mkt_map: dict[str, float] = dict(zip(market_dates, market_returns, strict=False))
+    # Ragged (returns, dates) -> fail LOUD, never truncate to a smaller (silently-omitted) overlap.
+    strat_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=True))
+    mkt_map: dict[str, float] = dict(zip(market_dates, market_returns, strict=True))
+    # Duplicate dates within a leg are dict-collapsed above (trading-day dates are unique by
+    # construction); detect the collapse and fail loud rather than join on a silent subset.
+    if len(strat_map) != len(strategy_dates) or len(mkt_map) != len(market_dates):
+        raise ValueError(
+            "information_ratio: duplicate dates in strategy/market series (corrupt gate input)"
+        )
     joined_dates = sorted(set(strat_map) & set(mkt_map))
     overlap_n = len(joined_dates)
     # Fewer than 3 joined bars cannot fit a 2-parameter OLS (n - 2 <= 0). Degenerate only when the

@@ -125,6 +125,29 @@ def test_empty_overlap():
     assert res.degenerate is False   # nothing to test -> the caller omits (insufficient_overlap)
 
 
+def test_ragged_input_raises():
+    """A ragged (returns, dates) leg is corrupt -> fail LOUD, never silently truncate to omit."""
+    import pytest
+    d = _dates(64)
+    strat = [0.001] * 63          # one short of its dates
+    market = list(np.random.default_rng(8).normal(0.0, 0.01, 64))
+    with pytest.raises(ValueError):
+        information_ratio(strat, d, market, d)
+
+
+def test_duplicate_dates_raise():
+    """Duplicate dates within a leg would dict-collapse to a silent subset -> fail LOUD instead."""
+    import pytest
+    d = _dates(64)
+    d_dup = list(d)
+    d_dup[5] = d_dup[4]           # inject a duplicate date -> 63 unique of 64
+    rng = np.random.default_rng(9)
+    strat = list(rng.normal(0.001, 0.01, 64))
+    market = list(rng.normal(0.0, 0.01, 64))
+    with pytest.raises(ValueError):
+        information_ratio(strat, d_dup, market, d)
+
+
 def test_appraisal_equals_alpha_over_residual_vol():
     """appraisal_ratio must equal alpha_ann / residual_vol_ann (annualization consistency)."""
     n = 200
