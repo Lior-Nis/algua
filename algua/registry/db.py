@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -567,6 +567,30 @@ CREATE TABLE IF NOT EXISTS family_events (
     matched_family_id       INTEGER REFERENCES families(id),
     created_at              TEXT NOT NULL
 );
+-- v32 (#332): negative_results is an ADVISORY experience log capturing failed/rejected hypotheses
+-- (gate FAILs, discards, research dead-ends) so knowledge is not lost with the branch. It NEVER
+-- gates promotion and NEVER touches the live/paper path; it is written best-effort as a side effect
+-- of the reject path and via a manual CLI. `gate_evaluation_id` is a NULLABLE advisory back-link to
+-- the authoritative gate_evaluations row (not a hard FK — the log survives even if the reference is
+-- unknown). CHECK constraints keep `kind`/`source` to their known vocabularies.
+CREATE TABLE IF NOT EXISTS negative_results (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at          TEXT NOT NULL,
+    strategy_name       TEXT,
+    gate_evaluation_id  INTEGER,
+    kind                TEXT NOT NULL CHECK (kind IN ('gate_fail', 'discard', 'dead_end')),
+    verdict             TEXT NOT NULL,
+    actor               TEXT NOT NULL,
+    reason              TEXT NOT NULL,
+    hypothesis          TEXT,
+    params_json         TEXT,
+    tags                TEXT,
+    source              TEXT NOT NULL
+        CHECK (source IN ('auto:research_promote', 'manual'))
+);
+CREATE INDEX IF NOT EXISTS ix_negative_results_strategy ON negative_results(strategy_name);
+CREATE INDEX IF NOT EXISTS ix_negative_results_created ON negative_results(created_at);
+CREATE INDEX IF NOT EXISTS ix_negative_results_kind ON negative_results(kind);
 """
 
 
@@ -684,6 +708,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         {"fundamentals_snapshot": "TEXT", "news_snapshot": "TEXT"})
     # v30 (#249): paper_venue_* (orders/fills/activities/cursor/quarantine) are brand-new tables;
     # executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
+    # v32 (#332): negative_results is a brand-new advisory table; executescript(_SCHEMA) above
+    # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

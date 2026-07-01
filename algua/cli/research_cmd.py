@@ -9,6 +9,7 @@ import typer
 from algua.backtest.engine import holdout_window
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
+    now_iso,
     ok,
     project,
     registry_conn,
@@ -25,11 +26,63 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
+from algua.knowledge.experience import write_experience_note
+from algua.registry.negative_results import build_gate_fail_record, record_negative_result
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
 from algua.research import family_audit
 from algua.research.gates import GateCriteria
 from algua.strategies.loader import load_strategy
+
+
+def capture_gate_fail_experience(
+    conn: Any,
+    *,
+    name: str,
+    decision: Any,
+    actor: Actor,
+    config_hash: str | None,
+    strategy_id: int,
+    period_start: str,
+    period_end: str,
+    holdout: dict[str, Any] | None,
+    stability: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Best-effort advisory capture of a FAILED gate into the negative-result log (#332).
+
+    Writes the queryable ledger row (primary) and a graph-linked vault note (secondary), reporting
+    each independently. Every failure mode is caught: this is knowledge-capture, so it must NEVER
+    propagate and break the promote it is describing. ``gate_evaluation_id`` is an advisory
+    back-link resolved by a read-only lookup on the just-written gate_evaluations row.
+    """
+    ledger: dict[str, Any] = {"status": "skipped", "id": None, "error": None}
+    note: dict[str, Any] = {"status": "skipped", "path": None, "error": None}
+    created_at = now_iso()
+    record = build_gate_fail_record(
+        name, decision.to_dict(), actor=actor.value,
+        period_start=period_start, period_end=period_end, holdout=holdout, stability=stability)
+    try:
+        gate_eval_id: int | None = None
+        if config_hash is not None:
+            row = conn.execute(
+                "SELECT id FROM gate_evaluations WHERE strategy_id=? AND config_hash=? "
+                "ORDER BY id DESC LIMIT 1", (strategy_id, config_hash)).fetchone()
+            gate_eval_id = int(row[0]) if row else None
+        rid = record_negative_result(
+            conn, gate_evaluation_id=gate_eval_id, created_at=created_at, **record)
+        ledger = {"status": "recorded", "id": rid, "error": None}
+    except Exception as e:  # noqa: BLE001 - advisory capture must never break the promote
+        return {"ledger": {"status": "error", "id": None, "error": f"{type(e).__name__}: {e}"},
+                "note": note}
+    try:
+        path = write_experience_note(
+            get_settings(),
+            {**record, "created_at": created_at, "gate_evaluation_id": gate_eval_id},
+            record_id=rid)
+        note = {"status": "written", "path": str(path), "error": None}
+    except Exception as e:  # noqa: BLE001 - the vault note is a best-effort secondary surface
+        note = {"status": "error", "path": None, "error": f"{type(e).__name__}: {e}"}
+    return {"ledger": ledger, "note": note}
 
 research_app = typer.Typer(help="Research workflow: gates and promotion", no_args_is_help=True)
 app.add_typer(research_app, name="research")
@@ -185,6 +238,7 @@ def promote(
         min_pct_positive_windows=min_pct_positive, min_window_sharpe=min_window_sharpe,
     )
 
+    experience_log: dict[str, Any] | None = None
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
         repo.get(name)  # StrategyNotFound -> JSON error before any work
@@ -244,6 +298,18 @@ def promote(
             holdout_evaluation_id=reservation_id,
             reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
         decision, promoted = outcome.decision, outcome.promoted
+        # Advisory negative-result capture (#332): on a gate FAIL only, record the refuted
+        # hypothesis into the experience log so it is not lost with the branch. BEST-EFFORT — a
+        # capture failure NEVER breaks the promote (it is knowledge-capture, not a gate). Pre-gate
+        # refusals / post-peek crashes are operator errors / operational burns, not refuted
+        # hypotheses, and are intentionally out of scope (a manual `research log record` covers
+        # arbitrary discards).
+        if not promoted:
+            experience_log = capture_gate_fail_experience(
+                conn, name=name, decision=decision, actor=actor_enum,
+                config_hash=wf.config_hash, strategy_id=sid,
+                period_start=start_dt.date().isoformat(), period_end=end_dt.date().isoformat(),
+                holdout=wf.holdout_metrics, stability=wf.stability)
 
     payload: dict[str, Any] = {
         **decision.to_dict(),
@@ -261,6 +327,8 @@ def promote(
     }
     if reused:
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
+    if experience_log is not None:
+        payload["experience_log"] = experience_log
     out = ok(payload)
     emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
 
