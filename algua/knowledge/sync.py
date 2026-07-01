@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import fcntl
+import os
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -8,6 +13,58 @@ from algua.config.settings import Settings
 from algua.contracts.lifecycle import Stage
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 from algua.knowledge.metrics import latest_run_metrics
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically via a same-dir temp + `os.replace`.
+
+    Every vault write goes through here so no reader — Obsidian, `doctor`'s ``kb_check``, or a
+    concurrent sync's roster/index scan — ever observes a half-written doc (mirrors
+    ``data.files.write_bytes_atomic``). Not power-loss durable: the vault is regenerable curation,
+    not the binding audit (that is the ``gate_evaluations`` row + result JSON).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".sync-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+@contextmanager
+def kb_sync_lock(settings: Settings) -> Iterator[None]:
+    """Serialize composite vault syncs with a blocking ``flock`` on ``<knowledge_dir>/.sync.lock``.
+
+    A coarse cross-process lock so two concurrent auto-syncs (same working dir — e.g. the systemd
+    paper operator and a human) never interleave a roster/index scan with another sync's writes,
+    which would compute an index from a mixed on-disk snapshot. Held only across vault file I/O —
+    NEVER together with a registry write lock (callers open their own registry connection AFTER
+    their write transaction has committed and closed). FAIL-OPEN: if the lock cannot be taken
+    (exotic filesystem, ``ENOLCK``), proceed unlocked rather than break a best-effort curation
+    sync — atomic writes still prevent torn reads. The kernel frees the lock on process death.
+    """
+    settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = settings.knowledge_dir / ".sync.lock"
+    fd = None
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
 
 # Canonical lifecycle order for grouping rosters/axis pages by stage. Derived from the Stage enum
 # (definition order == lifecycle order) so adding a stage needs no edit here. Unknown/legacy stage
@@ -226,7 +283,7 @@ def sync_strategy_doc(
     if metrics:
         fm["mlflow_run"] = metrics["run_id"][:8]
     body = replace_block(body, "RESULTS", render_results_block(metrics))
-    path.write_text(render_doc(fm, body))
+    _write_text_atomic(path, render_doc(fm, body))
     return True
 
 
@@ -247,7 +304,7 @@ def sync_family_doc(settings: Settings, name: str) -> bool:
             members.append((doc.stem, str(fm.get("stage", "?"))))
     fm, body = parse_doc(path.read_text())
     body = replace_block(body, "MEMBERS", render_members_block(members))
-    path.write_text(render_doc(fm, body))
+    _write_text_atomic(path, render_doc(fm, body))
     return True
 
 
@@ -330,10 +387,12 @@ def generate_indexes(settings: Settings) -> None:
             fm, _ = parse_doc(doc.read_text())
             n_families += 1
             fam_lines.append(f"- [[{doc.stem}]] — {fm.get('status', '?')}")
-    (base / "_families.md").write_text("# Thesis families\n\n" + "\n".join(fam_lines) + "\n")
+    _write_text_atomic(
+        base / "_families.md", "# Thesis families\n\n" + "\n".join(fam_lines) + "\n"
+    )
 
-    (base / "_by-stage.md").write_text(_render_by_stage(entries))
-    (base / "_by-date.md").write_text(_render_by_date(entries))
+    _write_text_atomic(base / "_by-stage.md", _render_by_stage(entries))
+    _write_text_atomic(base / "_by-date.md", _render_by_date(entries))
 
     router = (
         "# Strategies\n\n"
@@ -342,7 +401,33 @@ def generate_indexes(settings: Settings) -> None:
         "- [[_by-date]] — by created month (date)\n"
         "- [[_families]] — by thesis family\n"
     )
-    (base / "_index.md").write_text(router)
+    _write_text_atomic(base / "_index.md", router)
+
+
+def sync_strategy_and_dependents(
+    settings: Settings,
+    name: str,
+    *,
+    stage: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, list[str]]:
+    """Sync ONE strategy's doc, its family roster, and the indexes — the single-strategy unit
+    re-run after a command mutates one strategy's stage (the transactional-side-effect entry, #331).
+
+    The single-strategy analog of ``sync_all``, serialized under ``kb_sync_lock`` so a concurrent
+    sync never interleaves the roster/index scan with another sync's writes. Returns the same
+    ``{"strategies": [...], "families": [...]}`` shape. An absent strategy doc is a no-op (empty
+    ``strategies``): this path never scaffolds a doc — that is ``strategy new``'s job.
+    """
+    with kb_sync_lock(settings):
+        synced = sync_strategy_doc(settings, name, stage=stage, metadata=metadata)
+        families: list[str] = []
+        if synced:
+            family = strategy_family(settings, name)
+            if family and sync_family_doc(settings, family):
+                families.append(family)
+            generate_indexes(settings)
+    return {"strategies": [name] if synced else [], "families": families}
 
 
 def sync_all(
@@ -357,18 +442,19 @@ def sync_all(
     """
     metadata = metadata or {}
     synced: list[str] = []
-    for name, stage in stages.items():
-        if sync_strategy_doc(settings, name, stage=stage, metadata=metadata.get(name)):
-            synced.append(name)
-    families: list[str] = []
-    fam_dir = strategies_dir(settings) / "families"
-    if fam_dir.exists():
-        for doc in sorted(fam_dir.glob("*.md")):
-            fm, _ = parse_doc(doc.read_text())
-            fam_name = str(fm.get("name", doc.stem))
-            if sync_family_doc(settings, fam_name):
-                families.append(fam_name)
-    generate_indexes(settings)
+    with kb_sync_lock(settings):
+        for name, stage in stages.items():
+            if sync_strategy_doc(settings, name, stage=stage, metadata=metadata.get(name)):
+                synced.append(name)
+        families: list[str] = []
+        fam_dir = strategies_dir(settings) / "families"
+        if fam_dir.exists():
+            for doc in sorted(fam_dir.glob("*.md")):
+                fm, _ = parse_doc(doc.read_text())
+                fam_name = str(fm.get("name", doc.stem))
+                if sync_family_doc(settings, fam_name):
+                    families.append(fam_name)
+        generate_indexes(settings)
     return {"strategies": synced, "families": families}
 
 
