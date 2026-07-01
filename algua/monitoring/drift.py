@@ -18,9 +18,9 @@ persistence into the paper/forward loop as a demotion trigger — is deliberatel
 (needs CODEOWNERS-protected promotion/schema changes; tracked as a follow-up).
 
 Limitations (advisory, not proof): a PSI shape shift may be a strategy-INTENDED regime tilt;
-coverage is a count-only proxy (a same-count but different symbol SET is not caught); the PSI
-bands are the industry-convention heuristic (0.10 / 0.25), not statistically validated; IC bars
-are equal-weighted regardless of cross-sectional breadth (matching ``factor_eval.factor_ic``).
+coverage is a count-only proxy (symbol-SET churn is caught only by the membership-Jaccard metric);
+the PSI bands are the industry-convention heuristic (0.10 / 0.25), not statistically validated; IC
+bars are equal-weighted regardless of cross-sectional breadth (matching ``factor_eval.factor_ic``).
 """
 from __future__ import annotations
 
@@ -47,6 +47,8 @@ TURNOVER_RATIO_WARN = 1.5
 TURNOVER_RATIO_ALARM = 2.5
 COVERAGE_RATIO_WARN = 0.85  # recent/reference: coverage that DROPS is the concern
 COVERAGE_RATIO_ALARM = 0.60
+MEMBERSHIP_JACCARD_WARN = 0.75  # symbol-set overlap that DROPS is the concern
+MEMBERSHIP_JACCARD_ALARM = 0.50
 IC_RETENTION_WARN = 0.50  # recent IC retains < 50% of the reference IC
 HITRATE_DROP_WARN = 0.08  # absolute drop in IC>0 hit-rate
 HITRATE_DROP_ALARM = 0.15
@@ -60,6 +62,24 @@ def _worst(statuses: list[str]) -> str:
     if triggering:
         return max(triggering, key=lambda s: _SEVERITY[s])
     return INSUFFICIENT if statuses and all(s == INSUFFICIENT for s in statuses) else OK
+
+
+def _leading_verdict(
+    psi: str, turnover: str, coverage: str, membership: str
+) -> str:
+    """Headline verdict from the leading (tier A) statuses, with an asymmetry: any metric may
+    RAISE the verdict (warn/alarm), but a confident all-clear (`ok`) requires at least one
+    DISTRIBUTION detector — PSI or rank-turnover — to have actually run and cleared. Coverage /
+    membership are presence checks: they can alarm on universe churn but cannot, alone, certify the
+    signal itself is undecayed. So a constant/degenerate signal (PSI + turnover both insufficient)
+    surfaces as `insufficient_data`, never a false `ok`."""
+    statuses = [psi, turnover, coverage, membership]
+    triggering = [s for s in statuses if _SEVERITY[s] > 0]
+    if triggering:
+        return max(triggering, key=lambda s: _SEVERITY[s])
+    if OK in (psi, turnover):
+        return OK
+    return INSUFFICIENT
 
 
 def _split_index(index: pd.Index, split: pd.Timestamp | None, reference_frac: float) -> int:
@@ -141,7 +161,10 @@ def mean_signal_turnover(panel: pd.DataFrame) -> float | None:
 
     For each adjacent bar pair, ranks are recomputed over ONLY the symbols scored (finite) in BOTH
     bars — so universe churn / missingness never masquerades as turnover (ranks are normalized to
-    [0, 1] within that intersection). Returns None when no pair has a >= 2-symbol overlap."""
+    [0, 1] within that intersection). A pair whose either bar is fully tied (zero cross-sectional
+    variation — e.g. a constant/degenerate signal) carries NO ordering information and is skipped,
+    so a constant signal reports None (insufficient), never a spurious 0-turnover all-clear.
+    Returns None when no pair has a >= 2-symbol overlap with usable ordering on both sides."""
     turns: list[float] = []
     prev: pd.Series | None = None
     for _, row in panel.iterrows():
@@ -149,12 +172,44 @@ def mean_signal_turnover(panel: pd.DataFrame) -> float | None:
         if prev is not None:
             common = prev.index.intersection(cur.index)
             if len(common) >= 2:
-                n = len(common) - 1
-                pr = prev[common].rank(method="average").to_numpy(dtype=float)
-                cr = cur[common].rank(method="average").to_numpy(dtype=float)
-                turns.append(float(np.mean(np.abs(cr - pr) / n)))
+                p_c, c_c = prev[common], cur[common]
+                if p_c.nunique() >= 2 and c_c.nunique() >= 2:  # both bars carry an ordering
+                    n = len(common) - 1
+                    pr = p_c.rank(method="average").to_numpy(dtype=float)
+                    cr = c_c.rank(method="average").to_numpy(dtype=float)
+                    turns.append(float(np.mean(np.abs(cr - pr) / n)))
         prev = cur
     return float(np.mean(turns)) if turns else None
+
+
+def _active_symbols(panel: pd.DataFrame) -> set[str]:
+    """Symbols scored (finite) on at least one bar — the era's realized cross-section."""
+    if panel.empty:
+        return set()
+    finite_any = np.isfinite(panel.to_numpy(dtype=float)).any(axis=0)
+    return {str(c) for c, keep in zip(panel.columns, finite_any, strict=True) if keep}
+
+
+def membership_jaccard(reference: pd.DataFrame, recent: pd.DataFrame) -> float | None:
+    """Jaccard overlap of the two eras' active-symbol SETS (identity-aware, unlike count coverage).
+
+    Catches a same-COUNT but different-SYMBOL cross-section (universe churn) that count-only
+    coverage and the identity-free pooled PSI both miss. None when either era scored nothing."""
+    ref_syms, rec_syms = _active_symbols(reference), _active_symbols(recent)
+    union = ref_syms | rec_syms
+    if not union:
+        return None
+    return len(ref_syms & rec_syms) / len(union)
+
+
+def _membership_status(jaccard: float | None) -> str:
+    if jaccard is None:
+        return INSUFFICIENT
+    if jaccard < MEMBERSHIP_JACCARD_ALARM:
+        return ALARM
+    if jaccard < MEMBERSHIP_JACCARD_WARN:
+        return WARN
+    return OK
 
 
 def _ratio_status(
@@ -242,7 +297,7 @@ class DriftReport:
         default_factory=lambda: [
             "advisory only: gates nothing, persists nothing, off the live/paper order path",
             "a PSI shape shift may be a strategy-intended regime tilt, not decay",
-            "coverage is a count-only proxy (a same-count different symbol SET is not caught)",
+            "coverage is a count-only proxy; symbol-SET churn is caught only by membership_drift",
             "PSI bands (0.10/0.25) are the industry heuristic, not statistically validated",
             "TIER B (IC/hit-rate) is coincident with the return window, not leading",
             "single-run snapshot; sustained drift across runs is the real signal",
@@ -269,12 +324,19 @@ def drift_report(
     reference_frac: float = 0.5,
     psi_bins: int = 10,
     min_obs: int = 20,
+    forward_embargo: int = 0,
 ) -> DriftReport:
     """Compute the advisory drift report over a chronological reference/recent split.
 
     `forward_returns` is OPTIONAL: when None, TIER B is reported as insufficient_data and the
     verdict rests purely on the label-free leading layer. No look-ahead — reference statistics and
-    PSI bin edges are frozen from the strictly-earlier window."""
+    PSI bin edges are frozen from the strictly-earlier window.
+
+    `forward_embargo` = the label-realization lag of `forward_returns` in bars (decision lag +
+    horizon). A label known at decision `t` is realized from prices at `t+embargo`, so the last
+    `forward_embargo` reference decisions consume RECENT-era prices; they are PURGED from the
+    reference IC so the frozen reference never peeks across the split (a purged-CV embargo). The
+    default 0 assumes labels already aligned to the decision timestamp."""
     panel = score_panel.sort_index()
     k = _split_index(panel.index, split, reference_frac)
     ref_panel, rec_panel = panel.iloc[:k], panel.iloc[k:]
@@ -300,6 +362,9 @@ def drift_report(
     ref_cov, rec_cov = mean_coverage(ref_panel), mean_coverage(rec_panel)
     coverage_status = _coverage_status(rec_cov, ref_cov)
 
+    jaccard = membership_jaccard(ref_panel, rec_panel)
+    membership_status = _membership_status(jaccard)
+
     leading = {
         "signal_distribution_psi": {"psi": psi, "status": psi_status, "bins": psi_bins},
         "turnover_drift": {
@@ -315,16 +380,23 @@ def drift_report(
             "ratio": (rec_cov / ref_cov) if (ref_cov and rec_cov is not None) else None,
             "status": coverage_status,
         },
+        "membership_drift": {"jaccard": jaccard, "status": membership_status},
     }
-    verdict = _worst([psi_status, turnover_status, coverage_status])
+    verdict = _leading_verdict(
+        psi_status, turnover_status, coverage_status, membership_status
+    )
 
     # --- TIER B (corroborating, coincident) ---
     if forward_returns is None:
         ref_ic = rec_ic = {"mean_ic": None, "hit_rate": None, "n_obs": 0, "ok": False}
     else:
         fwd = forward_returns.sort_index()
-        ref_ic = _window_ic(ref_panel, fwd.loc[fwd.index < split_ts], min_obs=min_obs)
-        rec_ic = _window_ic(rec_panel, fwd.loc[fwd.index >= split_ts], min_obs=min_obs)
+        # Purge the last `forward_embargo` reference decisions: their labels are realized from
+        # prices at/after the split, so keeping them would leak the recent window into the frozen
+        # reference IC (a boundary look-ahead). Recent decisions look only further forward.
+        ref_cut = max(k - max(forward_embargo, 0), 0)
+        ref_ic = _window_ic(panel.iloc[:ref_cut], fwd, min_obs=min_obs)
+        rec_ic = _window_ic(rec_panel, fwd, min_obs=min_obs)
     ic_status, retention = _ic_decay(ref_ic, rec_ic)
     hit_status, hit_drop = _hitrate_drift(ref_ic, rec_ic)
     corroborating = {

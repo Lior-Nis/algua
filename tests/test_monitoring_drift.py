@@ -13,6 +13,7 @@ from algua.monitoring.drift import (
     WARN,
     drift_report,
     mean_signal_turnover,
+    membership_jaccard,
     population_stability_index,
 )
 
@@ -154,6 +155,46 @@ def test_turnover_intersection_only():
         index=idx, columns=SYMS,
     )
     assert mean_signal_turnover(p) is None
+
+
+def test_constant_signal_is_insufficient_not_false_ok():
+    # A fully-constant signal: PSI can't bin, turnover carries no ordering, coverage is full.
+    # The headline must NOT be a confident `ok` — no distribution detector actually ran.
+    const = _panel([[3.0] * len(SYMS) for _ in range(40)], "2023-01-01")
+    rep = drift_report(const, None)
+    assert rep.leading["signal_distribution_psi"]["status"] == INSUFFICIENT
+    assert rep.leading["turnover_drift"]["status"] == INSUFFICIENT
+    assert rep.verdict == INSUFFICIENT
+
+
+def test_disjoint_symbol_sets_flag_membership():
+    # Same COUNT per bar, but the recent era trades a wholly different symbol set (universe churn).
+    # Count-coverage and the identity-free pooled PSI both miss it; membership drift must catch it.
+    ref = pd.DataFrame(
+        np.random.default_rng(0).normal(0, 1, (20, 3)),
+        index=pd.date_range("2023-01-01", periods=20, freq="D", tz="UTC"),
+        columns=["A", "B", "C"],
+    )
+    rec = pd.DataFrame(
+        np.random.default_rng(1).normal(0, 1, (20, 3)),
+        index=pd.date_range("2023-01-21", periods=20, freq="D", tz="UTC"),
+        columns=["X", "Y", "Z"],
+    )
+    scores = pd.concat([ref, rec], axis=1).sort_index()
+    rep = drift_report(scores, None)
+    assert membership_jaccard(scores.iloc[:20], scores.iloc[20:]) == 0.0
+    assert rep.leading["membership_drift"]["status"] == ALARM
+    assert rep.verdict == ALARM
+
+
+def test_forward_embargo_purges_reference_labels_across_split():
+    # A reference IC computed WITH the embargo purge must not silently consume recent-era labels.
+    # With a large embargo the entire reference window is purged -> reference IC insufficient.
+    scores = _stable_scores(40, "2023-01-01")
+    fwd = _fwd_from(scores, sign=1.0, seed=9)
+    rep = drift_report(scores, fwd, min_obs=1, forward_embargo=100)
+    assert rep.corroborating["ic_decay"]["reference_n"] == 0
+    assert rep.corroborating["ic_decay"]["status"] == INSUFFICIENT
 
 
 def test_degenerate_split_raises():

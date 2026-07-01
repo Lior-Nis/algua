@@ -71,12 +71,13 @@ def drift(
         .pivot(index="timestamp", columns="symbol", values="adj_close")
         .sort_index()
     )
-    fwd = _forward_returns(adj, lag=strategy.execution.decision_lag_bars, horizon=horizon)
+    lag = strategy.execution.decision_lag_bars
+    fwd = _forward_returns(adj, lag=lag, horizon=horizon)
 
     split_ts = utc(reference_end) if reference_end else None
     report = drift_report(
         panel, fwd, split=split_ts, reference_frac=reference_frac,
-        psi_bins=psi_bins, min_obs=min_obs,
+        psi_bins=psi_bins, min_obs=min_obs, forward_embargo=lag + horizon,
     )
     payload = report.to_dict()
     payload["strategy"] = name
