@@ -17,6 +17,7 @@ from algua.cli._common import (
     resolve_eval_inputs,
     resolve_universe_inputs,
     select_provider,
+    sync_kb_doc,
     utc,
 )
 from algua.cli.app import app, emit
@@ -332,6 +333,9 @@ def promote(
         payload["holdout_reuse"] = _HOLDOUT_REUSE_OVERRIDE
     if experience_log is not None:
         payload["experience_log"] = experience_log
+    # Re-sync the kb doc to the (possibly) new stage (#331): best-effort, out-of-transaction —
+    # the `with registry_conn()` block above has already committed and closed.
+    sync_kb_doc(name)
     out = ok(payload)
     emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
 

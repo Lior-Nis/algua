@@ -335,3 +335,62 @@ def test_sync_writes_owned_metadata_and_preserves_foreign_keys(tmp_path):
     assert fm2["hypothesis_status"] == "supported"
     assert fm2["stage"] == "backtested"
     assert fm2["my_note"] == "keep me"  # foreign key preserved
+
+
+def test_sync_strategy_and_dependents_updates_doc_family_and_index(tmp_path):
+    from algua.knowledge.sync import sync_strategy_and_dependents
+
+    s = _settings(tmp_path)
+    _scaffold(s, "alpha", family="momentum")
+    _scaffold_family(s, "momentum")
+    # Seed the doc at stage idea; the composite advances it to backtested and refreshes deps.
+    sync_strategy_doc(s, "alpha", stage="idea", metadata={"family": "momentum"})
+
+    out = sync_strategy_and_dependents(
+        s, "alpha", stage="backtested", metadata={"family": "momentum"}
+    )
+    assert out == {"strategies": ["alpha"], "families": ["momentum"]}
+
+    fm, _ = parse_doc(strategy_doc_path(s, "alpha").read_text())
+    assert fm["stage"] == "backtested"
+    # Family roster reflects the freshly-synced stage.
+    roster = family_doc_path(s, "momentum").read_text()
+    assert "[[alpha]]" in roster and "backtested" in roster
+    # Indexes were regenerated.
+    idx = (strategies_dir(s) / "_by-stage.md").read_text()
+    assert "backtested" in idx and "[[alpha]]" in idx
+
+
+def test_sync_strategy_and_dependents_absent_doc_is_noop(tmp_path):
+    from algua.knowledge.sync import sync_strategy_and_dependents
+
+    s = _settings(tmp_path)
+    out = sync_strategy_and_dependents(s, "ghost", stage="backtested", metadata=None)
+    assert out == {"strategies": [], "families": []}
+    # No doc scaffolded — this path never creates one.
+    assert not strategy_doc_path(s, "ghost").exists()
+
+
+def test_write_text_atomic_no_torn_file_and_replaces(tmp_path):
+    from algua.knowledge.sync import _write_text_atomic
+
+    s = _settings(tmp_path)
+    target = strategies_dir(s) / "x.md"
+    _write_text_atomic(target, "first")
+    assert target.read_text() == "first"
+    _write_text_atomic(target, "second")
+    assert target.read_text() == "second"
+    # No stray temp files left behind.
+    assert not list(target.parent.glob(".sync-*"))
+
+
+def test_kb_sync_lock_is_reentrant_across_sequential_acquire(tmp_path):
+    # Two sequential acquisitions (fresh fd each) must both succeed — no self-deadlock.
+    from algua.knowledge.sync import kb_sync_lock
+
+    s = _settings(tmp_path)
+    with kb_sync_lock(s):
+        pass
+    with kb_sync_lock(s):
+        pass
+    assert (s.knowledge_dir / ".sync.lock").exists()

@@ -669,3 +669,55 @@ def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_pa
     r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
     assert r.exit_code == 0  # a challenge is issued (no ≤1-live refusal)
     assert json.loads(r.stdout)["action"] == "go_live_challenge"
+
+
+def _seed_doc(vault, name, stage="idea"):
+    from algua.config.settings import Settings
+    from algua.knowledge.sync import strategy_doc_path
+    from algua.knowledge.templates import scaffold_strategy_doc
+
+    s = Settings(knowledge_dir=vault)
+    path = strategy_doc_path(s, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    from algua.knowledge.frontmatter import parse_doc, render_doc
+    fm, body = parse_doc(scaffold_strategy_doc(name, created="2026-06-03"))
+    fm["stage"] = stage
+    path.write_text(render_doc(fm, body))
+    return path
+
+
+def test_transition_auto_syncs_kb_doc(tmp_path, monkeypatch):
+    """#331: `registry transition` re-syncs the strategy doc as a side effect."""
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+    runner.invoke(app, ["registry", "add", "alpha"])
+    doc = _seed_doc(vault, "alpha", stage="idea")
+    out = _json(runner.invoke(
+        app, ["registry", "transition", "alpha", "--to", "backtested",
+              "--actor", "agent", "--reason", "r"]))
+    assert out["stage"] == "backtested"
+
+    from algua.knowledge.frontmatter import parse_doc
+    fm, _ = parse_doc(doc.read_text())
+    assert fm["stage"] == "backtested"  # vault no longer stale-by-default
+
+
+def test_transition_survives_kb_sync_failure(tmp_path, monkeypatch):
+    """A best-effort kb sync failure must NOT break or roll back the transition (#331)."""
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+    runner.invoke(app, ["registry", "add", "beta"])
+    _seed_doc(vault, "beta", stage="idea")
+
+    def _boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("algua.knowledge.sync.sync_strategy_and_dependents", _boom)
+    result = runner.invoke(
+        app, ["registry", "transition", "beta", "--to", "backtested",
+              "--actor", "agent", "--reason", "r"])
+    # Transition still succeeds and the registry stage advanced despite the sync blowing up.
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["stage"] == "backtested"
+    show = json.loads(runner.invoke(app, ["registry", "show", "beta"]).stdout)
+    assert show["stage"] == "backtested"

@@ -7,7 +7,7 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.calendar.market_calendar import MarketCalendar
-from algua.cli._common import breach_payload, ok, registry_conn, utc
+from algua.cli._common import breach_payload, ok, registry_conn, sync_kb_doc, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -603,6 +603,9 @@ def promote(
         "excluded_ticks": outcome.assembled.excluded,
         "n_concurrent_forward": outcome.assembled.n_concurrent_forward,
     }
+    # Re-sync the kb doc to the (possibly) new stage (#331): best-effort, out-of-transaction —
+    # the `with registry_conn()` block above has already committed and closed.
+    sync_kb_doc(name)
     # Pass mirrors research_cmd.promote's success envelope; a fail still emits the full
     # decision payload (the evaluation row was recorded) but carries the repo-wide exit-1
     # discriminator ("ok": false, see cli._common.ok) and exits non-zero.
