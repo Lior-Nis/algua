@@ -343,6 +343,101 @@ def test_trade_tick_venue_order_recording(monkeypatch):
     assert row["broker_order_id"] == "o-venue-1"
 
 
+def test_trade_tick_noop_retracts_fresh_phantom_intent(monkeypatch):
+    """#311: a sizing that resolves to noop/skipped fires before_submit (records the crash-safe
+    intent) then on_noop. Because THIS tick freshly recorded the row, on_noop must retract it so no
+    phantom paper_venue_orders row is left behind (would inflate the venue count + flip the display
+    branch)."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.contracts.types import OrderIntent, Side
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_allocation("cross_sectional_momentum")
+
+    ts = datetime(2023, 6, 1, tzinfo=UTC)
+    intent = OrderIntent(symbol="AAA", side=Side.BUY, target_weight=1.0, decision_ts=ts)
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        # record the intent (crash-safe), then submit_sized reports noop -> on_noop retracts it
+        hooks.before_submit(intent, "c-noop-1")
+        hooks.on_noop(intent, "c-noop-1")
+        return TickResult(decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
+                          submitted=[], peak_equity=100_000.0)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT 1 FROM paper_venue_orders WHERE client_order_id = 'c-noop-1'"
+        ).fetchone()
+    assert row is None, "phantom intent row for a noop was not retracted"
+
+
+def test_trade_tick_noop_preserves_preexisting_null_intent(monkeypatch):
+    """#311 crash-safety: a pre-existing NULL-broker_order_id row is INDISTINGUISHABLE from a real
+    order that POSTed then crashed before backfill. When this tick sizes the same coid to a noop,
+    before_submit's INSERT is IGNORED (not fresh), so on_noop must NOT delete the pre-existing row —
+    preserving the #249 durable intent."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.contracts.types import OrderIntent, Side
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_allocation("cross_sectional_momentum")
+
+    # Simulate a prior run's real order: an intent row already exists for this coid, NULL broker id.
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        sid = conn.execute(
+            "SELECT id FROM strategies WHERE name = 'cross_sectional_momentum'"
+        ).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO paper_venue_orders(strategy, symbol, side, intended_notional, "
+            "client_order_id, strategy_id, status, submitted_ts) VALUES (?,?,?,?,?,?,?,?)",
+            ("cross_sectional_momentum", "AAA", "buy", None, "c-crash-1", sid, "submitted",
+             "2023-05-31T00:00:00Z"),
+        )
+        conn.commit()
+
+    ts = datetime(2023, 6, 1, tzinfo=UTC)
+    intent = OrderIntent(symbol="AAA", side=Side.BUY, target_weight=1.0, decision_ts=ts)
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        hooks.before_submit(intent, "c-crash-1")   # INSERT OR IGNORE -> ignored -> NOT fresh
+        hooks.on_noop(intent, "c-crash-1")          # must NOT delete the pre-existing row
+        return TickResult(decision_ts=ts, target_weights={"AAA": 1.0}, positions_before={},
+                          submitted=[], peak_equity=100_000.0)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT 1 FROM paper_venue_orders WHERE client_order_id = 'c-crash-1'"
+        ).fetchone()
+    assert row is not None, "a pre-existing (possibly real, crash-orphaned) intent was deleted"
+
+
 class _FlattenBroker:
     def __init__(self, fail=False):
         self.fail = fail

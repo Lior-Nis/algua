@@ -5,7 +5,10 @@ import pytest
 
 from algua.contracts.types import ExecutionContract
 from algua.execution.alpaca_broker import BrokerError, TickSnapshot
-from algua.execution.live_ledger import record_paper_venue_order
+from algua.execution.live_ledger import (
+    delete_paper_venue_order,
+    record_paper_venue_order,
+)
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.registry.db import connect, migrate
 from algua.risk.limits import RiskBreach
@@ -77,6 +80,83 @@ def _strategy(weights, warmup_bars=0):
     return LoadedStrategy(
         config=cfg, signal_fn=lambda view, params: pd.Series(weights), construct_fn=_identity
     )
+
+
+class _NoopBroker(_FakeBroker):
+    """submit_sized always reports 'noop' (no order reaches the venue), like a sub-min-notional
+    delta or a position already at target. It never POSTs — mirrors alpaca_broker returning the
+    sentinel before /v2/orders."""
+
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
+        self.client_order_ids.append(client_order_id)
+        return "noop"
+
+
+def test_run_tick_fires_on_noop_when_submit_sized_noops():
+    # #311: when submit_sized reports noop/skipped, run_tick must invoke on_noop(intent, coid) so
+    # the paper lane can retract its crash-safe before_submit phantom — and must NOT call submit.
+    broker = _NoopBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    noops: list[tuple[str, str | None]] = []
+    submits: list[str] = []
+    hooks = TickHooks(
+        client_order_id_for=lambda s, ts, sym: f"{s}-{sym}",
+        before_submit=lambda intent, coid: None,
+        on_noop=lambda intent, coid: noops.append((intent.symbol, coid)),
+        on_submitted=lambda rec_: submits.append(rec_.symbol),
+    )
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars),
+                      DATES[0], DATES[-1], hooks=hooks)
+    assert noops == [("AAA", "cfg-AAA")]      # on_noop got the intent + deterministic coid
+    assert submits == []                      # a noop is never a real submit
+    assert result.submitted == []             # nothing recorded as sent
+
+
+def test_run_tick_does_not_fire_on_noop_on_real_submit():
+    # #311: a genuine submit (real order id) must NOT trigger on_noop — only the noop/skip branch.
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    noops: list[str] = []
+    hooks = TickHooks(on_noop=lambda intent, coid: noops.append(intent.symbol))
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars),
+                      DATES[0], DATES[-1], hooks=hooks)
+    assert noops == []
+    assert len(result.submitted) == 1
+
+
+def test_record_paper_venue_order_returns_true_only_on_fresh_insert(tmp_path):
+    # #311: the caller relies on the return value to know whether IT created the row this attempt
+    # (safe to retract on a noop) vs. a pre-existing row (a prior run may have POSTed — preserve).
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    assert record_paper_venue_order(conn, "s", "AAA", "buy", None, "c-1", strategy_id=1) is True
+    # same client_order_id again -> INSERT OR IGNORE ignores -> not a fresh insert
+    assert record_paper_venue_order(conn, "s", "AAA", "buy", None, "c-1", strategy_id=1) is False
+    rows = conn.execute(
+        "SELECT COUNT(*) AS n FROM paper_venue_orders WHERE client_order_id = 'c-1'"
+    ).fetchone()
+    assert rows["n"] == 1  # still exactly one row
+
+
+def test_delete_paper_venue_order_removes_null_row_but_not_backfilled(tmp_path):
+    # #311: delete retracts a phantom intent (NULL broker_order_id) but the belt-and-suspenders
+    # guard leaves any row that already carries a broker id (a real accepted order) untouched.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    record_paper_venue_order(conn, "s", "AAA", "buy", None, "c-null", strategy_id=1)
+    record_paper_venue_order(conn, "s", "BBB", "buy", None, "c-real", strategy_id=1)
+    conn.execute("UPDATE paper_venue_orders SET broker_order_id = 'o-9' "
+                 "WHERE client_order_id = 'c-real'")
+    conn.commit()
+
+    delete_paper_venue_order(conn, "c-null")   # phantom -> gone
+    delete_paper_venue_order(conn, "c-real")   # backfilled -> preserved by the NULL guard
+
+    remaining = {
+        r["client_order_id"]
+        for r in conn.execute("SELECT client_order_id FROM paper_venue_orders").fetchall()
+    }
+    assert remaining == {"c-real"}
 
 
 def test_run_tick_submits_target_and_cancels_first():
