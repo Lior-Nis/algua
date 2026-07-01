@@ -64,7 +64,10 @@ def compute_artifact_hashes(name: str) -> ArtifactIdentity:
     payload = "\n".join(
         f"# module: {mod_name}\n{source}" for mod_name, source in sorted(closure.items())
     )
-    code_hash = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    # 128-bit sha256 prefix (#341): widened from 64-bit for collision resistance on the live-gate
+    # identity. Recomputed on both the approve and transition-to-live paths, so widening is
+    # self-consistent — but any approval minted before the widen must be regenerated to match.
+    code_hash = hashlib.sha256(payload.encode()).hexdigest()[:32]
     return ArtifactIdentity(
         code_hash=code_hash,
         config_hash=config_hash(loaded),

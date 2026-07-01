@@ -44,23 +44,31 @@ _WF_SUMMARY_KEYS = (
     "strategy", "data_source", "snapshot_id", "timeframe", "seed", "period", "windows",
     "holdout_frac", "stability", "code_hash", "dependency_hash", "config_hash",
     "universe_name", "universe_snapshots", "fundamentals_snapshot", "news_snapshot",
-    "mlflow_run_id",
+    "mlflow_run_id", "mlflow_tracking_error",
 )
 _SWEEP_SUMMARY_KEYS = (
     "strategy", "n_combos", "rank_by", "best", "trial_sharpe_count", "trial_sharpe_mean",
     "trial_sharpe_var_ann", "recorded_breadth", "code_hash", "dependency_hash", "data_source",
     "snapshot_id", "timeframe", "seed", "period", "windows", "holdout_frac", "universe_name",
     "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "mlflow_run_id",
+    "mlflow_tracking_error",
 )
 
 
-def _track(call: Callable[[], str]) -> str:
-    """Run a tracker call; convert any failure into a BacktestError so MLflow problems stay in
-    the JSON command contract instead of leaking a traceback."""
+def _record_tracking(payload: dict, call: Callable[[], str]) -> None:
+    """Best-effort MLflow logging. The backtest result already exists by the time this runs, so a
+    tracker failure (flaky URI, serialization bug) must NOT discard a completed evaluation (#341).
+    On success record `mlflow_run_id`; on failure record a non-fatal `mlflow_tracking_error` (with
+    the exception type for triage) and warn to stderr — never raise. Keys are added ONLY when
+    tracking was requested, so the JSON distinguishes three states: not-requested (no keys),
+    succeeded (`mlflow_run_id` set, no error), failed (`mlflow_run_id` null + error)."""
     try:
-        return call()
+        payload["mlflow_run_id"] = call()
     except Exception as exc:  # noqa: BLE001 - tracking is a best-effort side effect
-        raise BacktestError(f"mlflow tracking failed: {exc}") from exc
+        detail = f"{type(exc).__name__}: {exc}"
+        payload["mlflow_run_id"] = None
+        payload["mlflow_tracking_error"] = detail
+        typer.echo(f"warning: mlflow tracking failed (result preserved): {detail}", err=True)
 
 
 def emit_series_file(result: BacktestResult, path: Path) -> dict:
@@ -191,11 +199,9 @@ def run(
     if emit_series:
         payload["series"] = emit_series_file(result, Path(emit_series))
     if track:
-        payload["mlflow_run_id"] = _track(
-            lambda: log_backtest(
-                result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
-            )
-        )
+        _record_tracking(payload, lambda: log_backtest(
+            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+        ))
     emit(ok(payload))
 
 
@@ -272,11 +278,9 @@ def walk_forward_cmd(
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
-        payload["mlflow_run_id"] = _track(
-            lambda: log_walk_forward(
-                result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
-            )
-        )
+        _record_tracking(payload, lambda: log_walk_forward(
+            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
+        ))
     out = ok(payload)
     emit(project(out, _WF_SUMMARY_KEYS) if summary else out)
 
@@ -348,9 +352,6 @@ def sweep_cmd(
                    news_provider=news_provider,
                    delisting_records=delisting_records,
                    assume_terminal_last_close=assume_terminal_last_close)
-    run_id = None
-    if track:
-        run_id = _track(lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
     with registry_conn() as conn:
         recorded = record_search_breadth(SqliteStrategyRepository(conn), name, result)
     payload = result.to_dict()
@@ -359,7 +360,8 @@ def sweep_cmd(
     # cumulative family total now on record, so the operator sees what promotion will read back.
     # Recorded by strategy NAME, so even a sweep of an UNREGISTERED strategy counts.
     payload["recorded_breadth"] = recorded
-    if run_id is not None:
-        payload["mlflow_run_id"] = run_id
+    if track:
+        _record_tracking(
+            payload, lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
     out = ok(payload)
     emit(project(out, _SWEEP_SUMMARY_KEYS) if summary else out)
