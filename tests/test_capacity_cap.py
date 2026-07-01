@@ -139,6 +139,22 @@ def test_empty_view_with_weights_forces_flat():
     assert capped["A"] == 0.0
 
 
+def test_nan_in_window_fails_closed():
+    # A NaN dollar value inside the trailing window must fail closed (no partial-sample ADV): the
+    # symbol is omitted and its weight forced flat, NOT sized off the one remaining finite bar.
+    view = _view([("2024-01-01", "A", float("nan"), 100.0), ("2024-01-02", "A", 10.0, 100.0)])
+    assert "A" not in _dollar_adv(view, 2).index
+    capped = apply_capacity_cap(pd.Series({"A": 0.5}), view, _CAP)
+    assert capped["A"] == 0.0
+
+
+def test_inf_in_window_fails_closed():
+    view = _view([("2024-01-01", "A", float("inf"), 100.0), ("2024-01-02", "A", 10.0, 100.0)])
+    assert "A" not in _dollar_adv(view, 2).index
+    capped = apply_capacity_cap(pd.Series({"A": 0.5}), view, _CAP)
+    assert capped["A"] == 0.0
+
+
 def test_dollar_adv_omits_short_history_symbols():
     view = _view(
         [

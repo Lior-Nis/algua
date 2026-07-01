@@ -89,10 +89,13 @@ def _dollar_adv(view: pd.DataFrame, window: int) -> pd.Series:
 
     Fail-closed shape guard: `view` must carry `symbol`, `close`, and `volume` (a live/paper view
     that dropped `volume` or supplied no history must be a loud failure, not a silent flatten).
-    A symbol with FEWER than `window` observations is omitted from the result (no established ADV ->
-    the caller treats it as un-sized), so a newly-listed / sparse name is never sized off one or two
-    noisy bars. Returns a Series indexed by symbol; symbols with a full window map to their mean
-    dollar volume (which may be 0.0 when volume was 0)."""
+
+    A symbol is OMITTED from the result (no established ADV -> the caller treats it as un-sized)
+    unless its trailing window has EXACTLY `window` finite dollar-volume observations. That fails
+    closed on all three degenerate cases at once: fewer than `window` bars (newly-listed / sparse),
+    and any NaN/inf dollar value in the window (a NaN would otherwise be silently skipped by the
+    mean and produce a positive ADV from a partial sample). Returns a Series indexed by the
+    surviving symbols mapping to their mean dollar volume (may be 0.0 when volume=0)."""
     for col in ("symbol", "close", "volume"):
         if col not in view.columns:
             raise ConstructionError(
@@ -105,14 +108,17 @@ def _dollar_adv(view: pd.DataFrame, window: int) -> pd.Series:
     # Sort by timestamp so `tail(window)` is the most-recent `window` bars per symbol regardless of
     # input row order; stable so equal timestamps keep their relative order.
     tmp = tmp.sort_index(kind="stable")
-    grouped = tmp.groupby("symbol", sort=False)
-    counts = grouped["dollar"].size()
-    full = counts[counts >= window].index
+    tail = tmp.groupby("symbol", sort=False).tail(window).copy()
+    tail["_finite"] = np.isfinite(tail["dollar"].to_numpy())
+    grouped = tail.groupby("symbol", sort=False)
+    # A clean full window == `window` FINITE observations in the trailing slice (tail holds at most
+    # `window` rows per symbol, so this is both the min-history AND the all-finite gate).
+    finite_counts = grouped["_finite"].sum()
+    full = finite_counts[finite_counts >= window].index
     if len(full) == 0:
         return pd.Series(dtype="float64")
-    tail = grouped.tail(window)
-    adv = tail.groupby("symbol", sort=False)["dollar"].mean()
-    return adv.reindex(full)
+    # mean() over a fully-finite window is exact (no NaN to skip); keep only surviving symbols.
+    return grouped["dollar"].mean().reindex(full)
 
 
 def apply_capacity_cap(
