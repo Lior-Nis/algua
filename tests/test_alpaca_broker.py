@@ -745,3 +745,34 @@ def test_live_readonly_broker_requires_live_https_host():
         AlpacaLiveReadOnlyBroker("k", "s", base_url="https://paper-api.alpaca.markets")
     with pytest.raises(BrokerError):
         AlpacaLiveReadOnlyBroker("k", "s", base_url="http://api.alpaca.markets")
+
+
+def test_get_order_by_client_order_id_returns_dict(monkeypatch):
+    # #312 recovery primitive: a matching order is returned as a dict (any status).
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/orders:by_client_order_id?client_order_id=coid-1":
+            _FakeResp(200, {"id": "b-9", "client_order_id": "coid-1", "symbol": "AAA",
+                            "status": "filled"})}))
+    order = _broker().get_order_by_client_order_id("coid-1")
+    assert order is not None and order["id"] == "b-9" and order["symbol"] == "AAA"
+
+
+def test_get_order_by_client_order_id_404_returns_none(monkeypatch):
+    # A coid never accepted at the venue -> 404 -> None (recovery preserves the local row).
+    monkeypatch.setattr(ab, "requests", _FakeRequests({}))  # every GET -> 404
+    assert _broker().get_order_by_client_order_id("missing") is None
+
+
+def test_get_order_by_client_order_id_non_dict_raises(monkeypatch):
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/orders:by_client_order_id?client_order_id=coid-1":
+            _FakeResp(200, ["not", "a", "dict"])}))
+    with pytest.raises(BrokerError, match="expected an order object"):
+        _broker().get_order_by_client_order_id("coid-1")
+
+
+def test_get_order_by_client_order_id_encodes_coid(monkeypatch):
+    # The coid is url-encoded (a sanitized coid can carry reserved chars); no raw char leaks.
+    fake = _FakeRequests({"client_order_id=a%2Fb": _FakeResp(200, {"id": "b1"})})
+    monkeypatch.setattr(ab, "requests", fake)
+    assert _broker().get_order_by_client_order_id("a/b") == {"id": "b1"}

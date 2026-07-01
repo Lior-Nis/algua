@@ -22,6 +22,7 @@ from algua.execution.live_ledger import (
     ingest_activities,
     owned_open_order_ids,
     record_live_order,
+    recover_stranded_broker_order_ids,
 )
 from algua.execution.live_reservations import record_reservation
 from algua.execution.live_sizing import LiveSizingError, build_live_sizing_snapshot
@@ -242,6 +243,21 @@ def _broker_account_activities(broker, after):
     return broker.account_activities(after=after)
 
 
+def _recover_live_stranded(conn, broker) -> None:
+    """#312: backfill broker_order_id onto any crash-stranded NULL live_orders row by asking the
+    venue for the order carrying each row's client_order_id (never submits; symbol-verified).
+    Audit-only side effects; a broker error propagates via the run-all json_errors handling."""
+    outcome = recover_stranded_broker_order_ids(conn, broker, kind=LedgerKind.LIVE)
+    if outcome.recovered:
+        audit_append(conn, actor="system", action="stranded_order_recovered",
+                     reason=f"{len(outcome.recovered)} backfilled: {outcome.recovered}",
+                     strategy=None)
+    if outcome.mismatched:
+        audit_append(conn, actor="system", action="stranded_recovery_mismatch",
+                     reason=f"{len(outcome.mismatched)} broker mismatch: {outcome.mismatched}",
+                     strategy=None)
+
+
 def _broker_net_positions(broker) -> dict:
     pos = broker.get_positions()  # pandas Series symbol->qty
     return {sym: float(q) for sym, q in pos.items() if float(q) != 0.0}
@@ -308,6 +324,9 @@ def run_all(
                 # ingest fills, then reconcile the account before trading
                 cursor = fill_cursor(conn, LedgerKind.LIVE)
                 ingest_activities(conn, _broker_account_activities(broker, cursor), LedgerKind.LIVE)
+                # #312: resolve any crash-stranded NULL-broker_order_id live row (accepted-but-not-
+                # backfilled) BEFORE reconcile, so its now-attributed fill no longer reads as drift.
+                _recover_live_stranded(conn, broker)
                 cycle = live_reconcile.next_cycle(conn)
                 recon = live_reconcile.reconcile(
                     conn, _broker_net_positions(broker), cycle,

@@ -240,6 +240,10 @@ class _MinimalBroker:
     def get_positions(self):
         return pd.Series(dtype="float64")
 
+    def get_order_by_client_order_id(self, coid):
+        # #312 recovery: default stub has no orders at the venue (a NULL row is preserved).
+        return None
+
 
 def test_trade_tick_submits_and_persists(monkeypatch):
     from contextlib import closing
@@ -436,6 +440,71 @@ def test_trade_tick_noop_preserves_preexisting_null_intent(monkeypatch):
             "SELECT 1 FROM paper_venue_orders WHERE client_order_id = 'c-crash-1'"
         ).fetchone()
     assert row is not None, "a pre-existing (possibly real, crash-orphaned) intent was deleted"
+
+
+class _StrandedRecoveryBroker(_MinimalBroker):
+    """#312: the venue HAS the crash-stranded order; get_positions matches the recovered fill so the
+    account reconciles clean and the tick proceeds."""
+    def get_positions(self):
+        return pd.Series({"AAA": 10.0}, dtype="float64")
+
+    def get_order_by_client_order_id(self, coid):
+        if coid == "c-crash-1":
+            return {"id": "broker-9", "client_order_id": "c-crash-1", "symbol": "AAA",
+                    "status": "filled"}
+        return None
+
+
+def test_trade_tick_recovers_stranded_fill(monkeypatch):
+    """#312 end-to-end: a prior run crashed after accept but before backfill -> a NULL broker id
+    row plus a fill already ingested under the real broker id with strategy NULL. The trade-tick
+    recovery pass (after ingest, before reconcile) must backfill the broker id and attribute the
+    fill, so it is no longer an unexplained residual."""
+    from algua.registry.db import connect, migrate
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_allocation("cross_sectional_momentum")
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        sid = conn.execute(
+            "SELECT id FROM strategies WHERE name = 'cross_sectional_momentum'").fetchone()["id"]
+        conn.execute(
+            "INSERT INTO paper_venue_orders(strategy, symbol, side, intended_notional, "
+            "client_order_id, strategy_id, status, submitted_ts) VALUES (?,?,?,?,?,?,?,?)",
+            ("cross_sectional_momentum", "AAA", "buy", None, "c-crash-1", sid, "submitted",
+             "2023-05-31T00:00:00Z"))  # NULL broker_order_id
+        conn.execute(
+            "INSERT INTO paper_venue_fills(activity_id, broker_order_id, strategy, symbol, qty, "
+            "price, fill_ts) VALUES (?,?,?,?,?,?,?)",
+            ("act-1", "broker-9", None, "AAA", 10.0, 100.0, "2023-05-31T00:00:00Z"))  # orphan fill
+        conn.commit()
+
+    ts = datetime(2023, 6, 1, tzinfo=UTC)
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        return TickResult(decision_ts=ts, target_weights={}, positions_before={"AAA": 10.0},
+                          submitted=[], peak_equity=100_000.0)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        _StrandedRecoveryBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 0, result.stdout
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        order = conn.execute(
+            "SELECT broker_order_id FROM paper_venue_orders WHERE client_order_id='c-crash-1'"
+        ).fetchone()
+        fill = conn.execute(
+            "SELECT strategy FROM paper_venue_fills WHERE broker_order_id='broker-9'").fetchone()
+    assert order["broker_order_id"] == "broker-9", "stranded order id was not backfilled"
+    assert fill["strategy"] == "cross_sectional_momentum", "stranded fill was not attributed"
 
 
 class _FlattenBroker:
