@@ -47,6 +47,8 @@ def drift(
 
     Exit code is 0 even when the verdict is `alarm` (drift is a finding, not a CLI error).
     """
+    if horizon < 1:
+        raise ValueError("--horizon must be >= 1 (a forward-return label needs a future bar)")
     strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
     if strategy.config.needs_fundamentals or strategy.config.needs_news:
         raise ValueError(

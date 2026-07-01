@@ -47,3 +47,11 @@ def test_drift_rejects_unknown_strategy():
     result = runner.invoke(app, ["monitoring", "drift", "nope", "--demo"])
     assert result.exit_code != 0
     assert json.loads(result.stdout)["ok"] is False
+
+
+def test_drift_rejects_non_positive_horizon():
+    result = runner.invoke(app, [
+        "monitoring", "drift", "cross_sectional_momentum", "--demo", "--horizon", "0",
+    ])
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["ok"] is False
