@@ -20,7 +20,9 @@ from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     FdrGateOutcome,
     FdrStreamState,
+    FunnelDriftError,
     FunnelFloor,
+    FunnelSnapshot,
     StrategyExists,
     StrategyNotFound,
     StrategyRecord,
@@ -538,7 +540,8 @@ class SqliteStrategyRepository:
         row has a NULL/NaN/inf/negative count|mean|var. NULL rows are NEVER silently skipped."""
         rows = self._conn.execute(
             "SELECT trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
-            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name=?",
+            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name=?"
+            " ORDER BY id",  # deterministic row order -> bit-identical pooled var (#339 CAS)
             (strategy_name,),
         ).fetchall()
         if not rows:
@@ -555,6 +558,15 @@ class SqliteStrategyRepository:
             (strategy_name,),
         ).fetchone()
         return int(row["total"])
+
+    def search_trials_fingerprint(self) -> tuple[int, int]:
+        # search_trials is append-only (INSERT-only, AUTOINCREMENT PK), so (COUNT(*), MAX(id))
+        # strictly increases on every insert and uniquely fingerprints the whole row set — the
+        # row-identity half of the #339 funnel CAS.
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS mx FROM search_trials",
+        ).fetchone()
+        return int(row["n"]), int(row["mx"])
 
     def reserve_holdout(
         self,
@@ -800,7 +812,8 @@ class SqliteStrategyRepository:
         rows = self._conn.execute(
             "SELECT strategy_name AS name, trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
             " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name IN"
-            " (SELECT DISTINCT strategy_name FROM search_trials WHERE created_at >= ?)",
+            " (SELECT DISTINCT strategy_name FROM search_trials WHERE created_at >= ?)"
+            " ORDER BY strategy_name, id",  # deterministic pooling order -> stable floor (#339 CAS)
             (cutoff,),
         ).fetchall()
         by_strategy: dict[str, list] = {}
@@ -1124,12 +1137,69 @@ class SqliteStrategyRepository:
                 discovery_indices.append(int(idx))
         return FdrStreamState(t=len(rows), discovery_indices=discovery_indices)
 
+    @staticmethod
+    def _cas_funnel(name: str, expected: object, actual: object) -> None:
+        """Fail-closed exact-equality check for one funnel-snapshot field (#339). Float fields are
+        compared exactly: they are recomputed from the SAME committed rows by the SAME deterministic
+        code, so an unchanged funnel yields a bit-identical value; any real drift changes it."""
+        if expected != actual:
+            raise FunnelDriftError(
+                f"{name} changed between promotion compute and commit "
+                f"({expected!r} -> {actual!r}); re-run the promotion against fresh funnel state")
+
+    def _verify_funnel_snapshot(self, funnel: FunnelSnapshot) -> None:
+        """#339 serializability CAS — MUST run with the write lock held (inside BEGIN IMMEDIATE).
+        Re-reads every mutable funnel-wide input the (lock-free) decision was computed against and
+        raises ``FunnelDriftError`` on any drift, which the caller's ``except`` rolls the whole
+        transaction back on. Conservative: it can only PREVENT a commit, never cause a false pass.
+
+        Covers the complete decision-input set (the rest of the decision is pinned to immutable
+        artifacts — fixed data snapshot, immutable strategy source/config hash, deterministic
+        bootstrap seed, and the atomically pre-burned holdout reservation #161):
+          * the append-only ``search_trials`` row-identity fingerprint (pins the whole row set, so
+            it pins the measured own-combo count AND the pooled/funnel variances against a
+            same-value collision);
+          * ``windowed_search_combos`` + family breadth — feed ``n_funnel`` (the deflated bar) on
+            EVERY path;
+          * on the FDR-binding (measured) path, the own-combo count and the two DSR variances that
+            feed the ``p_value``.
+        The FDR stream itself is deliberately NOT snapshotted here — it is read live under this same
+        lock because the online LORD++ position MUST reflect all prior commits."""
+        cur_count, cur_max = self.search_trials_fingerprint()
+        self._cas_funnel(
+            "search_trials fingerprint",
+            (funnel.search_trials_count, funnel.search_trials_max_id), (cur_count, cur_max))
+        self._cas_funnel(
+            "windowed_search_combos", funnel.windowed_total_combos,
+            self.windowed_search_combos(funnel.funnel_window_days))
+        family_id = self.strategy_family(funnel.strategy_name)
+        self._cas_funnel("strategy_family", funnel.family_id, family_id)
+        family_eff = self.family_lifetime_combos(family_id) if family_id is not None else 0
+        self._cas_funnel("family_lifetime_combos", funnel.family_lifetime_effective, family_eff)
+        if funnel.dsr_binding:
+            self._cas_funnel(
+                "total_search_combos", funnel.own_lifetime_combos,
+                self.total_search_combos(funnel.strategy_name))
+            self._cas_funnel(
+                "pooled_trial_sharpe_var", funnel.dsr_trial_var_ann,
+                self.pooled_trial_sharpe_var(funnel.strategy_name))
+            floor = self.funnel_trial_sharpe_var(funnel.funnel_window_days)
+            self._cas_funnel(
+                "funnel_trial_sharpe_var.var_ann", funnel.funnel_floor_var_ann, floor.var_ann)
+            self._cas_funnel(
+                "funnel_trial_sharpe_var.n_strategies",
+                funnel.funnel_floor_n_strategies, floor.n_strategies)
+            self._cas_funnel(
+                "funnel_trial_sharpe_var.n_total_rows",
+                funnel.funnel_floor_n_total_rows, floor.n_total_rows)
+
     def record_gate_with_fdr_and_maybe_promote(
         self,
         rec: StrategyRecord,
         *,
         gate_row: dict[str, Any],
         p_value: float | None,
+        funnel: FunnelSnapshot,
         level_fn: Callable[[int, list[int]], float],
         actor: Actor,
         reason: str | None = None,
@@ -1142,6 +1212,16 @@ class SqliteStrategyRepository:
             raise RuntimeError(
                 "record_gate_with_fdr_and_maybe_promote must be called at top level,"
                 " not inside an open transaction")
+
+        # #339 — bind the funnel snapshot to the strategy being promoted. The in-lock CAS re-reads
+        # the funnel-wide state keyed by funnel.strategy_name; if that name did not match rec (a
+        # caller passing the wrong snapshot), the CAS would validate a DIFFERENT strategy's inputs
+        # and the promoted strategy's own drift could escape. Fail closed on mismatch — the store
+        # method is the safety boundary, not just the run_gate caller.
+        if funnel.strategy_name != rec.name:
+            raise FunnelDriftError(
+                f"funnel snapshot is for {funnel.strategy_name!r} but the promotion is for "
+                f"{rec.name!r}; the funnel CAS must verify the strategy being promoted")
 
         provisional_passed = bool(gate_row.get("passed"))
         fdr_binding = p_value is not None and math.isfinite(p_value)
@@ -1157,6 +1237,12 @@ class SqliteStrategyRepository:
         # BaseException (not Exception) so KeyboardInterrupt/SystemExit still rolls back.
         try:
             self._conn.execute("BEGIN IMMEDIATE")
+            # #339 — serializability CAS: re-read the funnel-wide MUTABLE state the (lock-free)
+            # decision was computed against and abort if any of it drifted, so a committed decision
+            # is provably a pure function of ONE funnel snapshot. Runs BEFORE the FDR stream read
+            # (which is INTENTIONALLY live — the online stream must reflect all prior commits) and
+            # BEFORE the INSERT/stage-CAS, all inside this one write-locked critical section.
+            self._verify_funnel_snapshot(funnel)
             if fdr_binding:
                 stream = self.fdr_stream_state()
                 if stream is None:

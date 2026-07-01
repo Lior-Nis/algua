@@ -9,7 +9,13 @@ import pytest
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry.db import connect, migrate
-from algua.registry.repository import FdrGateOutcome, FdrStreamState, StrategyExists
+from algua.registry.repository import (
+    FdrGateOutcome,
+    FdrStreamState,
+    FunnelDriftError,
+    FunnelSnapshot,
+    StrategyExists,
+)
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 
@@ -1184,6 +1190,20 @@ def _make_gate_row(*, passed: bool = True) -> dict:
     }
 
 
+# #339 — the funnel snapshot for a synthetic empty-search_trials, no-family DB: every field the
+# in-lock CAS re-reads (windowed combos, family, the append-only fingerprint) evaluates to its
+# zero/None state here, so this constant satisfies the CAS for the FDR-mechanism unit tests below.
+# dsr_binding=False skips the own-combo/variance re-reads (those are exercised by the dedicated
+# funnel-drift tests, which build snapshots that match a seeded DB).
+_EMPTY_FUNNEL = FunnelSnapshot(
+    strategy_name="s", funnel_window_days=90, dsr_binding=False,
+    own_lifetime_combos=0, windowed_total_combos=0, family_id=None,
+    family_lifetime_effective=0, dsr_trial_var_ann=None, funnel_floor_var_ann=None,
+    funnel_floor_n_strategies=0, funnel_floor_n_total_rows=0,
+    search_trials_count=0, search_trials_max_id=0,
+)
+
+
 def _at_backtested(repo, name: str = "s"):
     repo.add(name)
     return transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, "setup")
@@ -1200,7 +1220,7 @@ def _level_reject(t: int, taus: list[int]) -> float:
 def test_fdr_gate_non_binding_passes_through_on_provisional_pass(repo):
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=None,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=None,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert isinstance(outcome, FdrGateOutcome)
     assert outcome.final_passed is True
@@ -1216,7 +1236,7 @@ def test_fdr_gate_non_binding_passes_through_on_provisional_pass(repo):
 def test_fdr_gate_non_binding_fails_on_provisional_fail(repo):
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=False), p_value=None,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=False), p_value=None,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert outcome.final_passed is False
     assert outcome.updated_rec is None
@@ -1234,7 +1254,7 @@ def test_fdr_gate_refuses_promote_from_drifted_source_stage(repo):
     assert drifted.stage is Stage.RETIRED
     with pytest.raises(TransitionError, match="backtested"):
         repo.record_gate_with_fdr_and_maybe_promote(
-            drifted, gate_row=_make_gate_row(passed=True), p_value=None,
+            drifted, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=None,
             level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
     assert repo.get("s").stage is Stage.RETIRED            # not resurrected to candidate
     assert repo.connection.execute(                         # gate row rolled back with the tx
@@ -1251,7 +1271,7 @@ def test_fdr_gate_drift_rollback_does_not_advance_fdr_stream(repo):
     assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
     with pytest.raises(TransitionError, match="backtested"):
         repo.record_gate_with_fdr_and_maybe_promote(
-            drifted, gate_row=_make_gate_row(passed=True), p_value=0.01,
+            drifted, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.01,
             level_fn=_level_accept, actor=Actor.AGENT, reason="promote")  # binding + would-pass
     assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])  # stream untouched
     assert repo.connection.execute(
@@ -1262,7 +1282,7 @@ def test_fdr_gate_promotes_from_backtested_source(repo):
     # Guard against over-restriction: a genuine BACKTESTED source still promotes to candidate.
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=None,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=None,
         level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
     assert outcome.final_passed is True
     assert outcome.updated_rec is not None and outcome.updated_rec.stage is Stage.CANDIDATE
@@ -1273,7 +1293,7 @@ def test_fdr_gate_binding_accept_promotes_when_provisional_passes(repo):
     rec = _at_backtested(repo)
     # p=0.03 ≤ level_accept(1, []) = 1.0 → FDR accepts → final_passed=True
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert outcome.final_passed is True
     assert outcome.fdr_binding is True
@@ -1287,7 +1307,7 @@ def test_fdr_gate_binding_reject_blocks_promotion(repo):
     rec = _at_backtested(repo)
     # p=0.03 > level_reject(1, []) = 0.0 → FDR rejects → final_passed=False
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_reject, actor=Actor.AGENT)
     assert outcome.final_passed is False
     assert outcome.fdr_binding is True
@@ -1301,7 +1321,7 @@ def test_fdr_gate_provisional_fail_skips_fdr_promotion(repo):
     rec = _at_backtested(repo)
     # provisional=False → final_passed=False regardless of FDR
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=False), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=False), p_value=0.03,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert outcome.final_passed is False
     assert outcome.updated_rec is None
@@ -1311,7 +1331,7 @@ def test_fdr_gate_db_passed_column_reflects_final_not_provisional(repo):
     rec = _at_backtested(repo)
     # provisional=True but FDR rejects → DB must store passed=0
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_reject, actor=Actor.AGENT)
     assert outcome.final_passed is False
     row = repo._conn.execute(
@@ -1323,7 +1343,7 @@ def test_fdr_gate_db_passed_column_reflects_final_not_provisional(repo):
 def test_fdr_gate_db_passed_column_true_on_accept(repo):
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert outcome.final_passed is True
     row = repo._conn.execute(
@@ -1336,7 +1356,7 @@ def test_fdr_gate_decision_json_contains_fdr_evidence_check(repo):
     """decision_json stored in DB must include fdr_evidence in its checks list."""
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_accept, actor=Actor.AGENT)
     row = repo._conn.execute(
         "SELECT decision_json FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
@@ -1354,7 +1374,7 @@ def test_fdr_gate_decision_json_contains_fdr_evidence_check(repo):
 def test_fdr_gate_stream_grows_for_binding_rows(repo):
     rec = _at_backtested(repo)
     repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_reject, actor=Actor.AGENT)
     stream = repo.fdr_stream_state()
     assert stream is not None
@@ -1366,7 +1386,7 @@ def test_fdr_gate_discovery_increments_test_index_and_replenishes(repo):
     rec = _at_backtested(repo)
     # First call: binding accept → discovery at t=1
     o1 = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert o1.fdr_test_index == 1
     assert o1.fdr_rejected is True
@@ -1378,7 +1398,8 @@ def test_fdr_gate_discovery_increments_test_index_and_replenishes(repo):
         recorded_calls.append((t, list(taus)))
         return 0.5
     o2 = repo.record_gate_with_fdr_and_maybe_promote(
-        rec2, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
+        gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=level_fn_probe, actor=Actor.AGENT)
     assert o2.fdr_test_index == 2
     # level_fn received t=2 and taus=[1] (the first discovery)
@@ -1393,7 +1414,7 @@ def test_fdr_gate_top_level_only_guard(repo):
     try:
         with pytest.raises(RuntimeError, match="top level"):
             repo.record_gate_with_fdr_and_maybe_promote(
-                rec, gate_row=_make_gate_row(), p_value=0.03,
+                rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(), p_value=0.03,
                 level_fn=_level_accept, actor=Actor.AGENT)
     finally:
         repo._conn.rollback()
@@ -1410,7 +1431,7 @@ def test_fdr_gate_rollback_on_stage_cas_failure(repo, tmp_path):
     repo._conn.commit()
     with pytest.raises(TransitionError):
         repo.record_gate_with_fdr_and_maybe_promote(
-            stale, gate_row=_make_gate_row(passed=True), p_value=0.03,
+            stale, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
             level_fn=_level_accept, actor=Actor.AGENT)
     # FDR stream must be empty — the row was rolled back
     assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
@@ -1449,7 +1470,8 @@ def test_fdr_gate_concurrent_distinct_t_values(tmp_path):
         rec = r.get(name)
         try:
             outcome = r.record_gate_with_fdr_and_maybe_promote(
-                rec, gate_row=_make_gate_row(passed=False), p_value=0.03,
+                rec, funnel=_EMPTY_FUNNEL._replace(strategy_name=name),
+                gate_row=_make_gate_row(passed=False), p_value=0.03,
                 level_fn=_level_reject, actor=Actor.AGENT)
         except BaseException as exc:  # noqa: BLE001
             with lock:
@@ -1472,11 +1494,156 @@ def test_fdr_gate_concurrent_distinct_t_values(tmp_path):
     assert t_values == {1, 2}, f"expected distinct t=1,2 but got {t_values}"
 
 
+# ---------------------------------------------------------------------------
+# #339: funnel-snapshot CAS — a promotion decision computed against a funnel snapshot that drifts
+# before commit must fail closed (never serialize a mixed-snapshot outcome).
+# ---------------------------------------------------------------------------
+
+
+def _live_funnel(repo, name: str = "s", *, dsr_binding: bool = False) -> FunnelSnapshot:
+    """Build a FunnelSnapshot matching the repo's CURRENT funnel state (what run_gate captures)."""
+    floor = repo.funnel_trial_sharpe_var(90)
+    count, mx = repo.search_trials_fingerprint()
+    fam = repo.strategy_family(name)
+    return FunnelSnapshot(
+        strategy_name=name, funnel_window_days=90, dsr_binding=dsr_binding,
+        own_lifetime_combos=repo.total_search_combos(name),
+        windowed_total_combos=repo.windowed_search_combos(90),
+        family_id=fam,
+        family_lifetime_effective=(repo.family_lifetime_combos(fam) if fam is not None else 0),
+        dsr_trial_var_ann=(repo.pooled_trial_sharpe_var(name) if dsr_binding else None),
+        funnel_floor_var_ann=(floor.var_ann if dsr_binding else None),
+        funnel_floor_n_strategies=(floor.n_strategies if dsr_binding else 0),
+        funnel_floor_n_total_rows=(floor.n_total_rows if dsr_binding else 0),
+        search_trials_count=count, search_trials_max_id=mx,
+    )
+
+
+def test_funnel_cas_passes_when_snapshot_matches(repo):
+    # A live snapshot that matches the committed funnel state promotes normally — the CAS is inert.
+    _at_backtested(repo)
+    repo.record_search_trial("s", 4, "{}")
+    rec = repo.get("s")  # unchanged stage, refreshed record
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_live_funnel(repo, "s"), gate_row=_make_gate_row(passed=True), p_value=None,
+        level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert outcome.final_passed is True
+
+
+def test_funnel_cas_aborts_on_search_trials_insert(repo):
+    # Snapshot captured, THEN a concurrent search_trials insert bumps the fingerprint (and windowed
+    # combos + own combos): the commit must abort with FunnelDriftError, rolling back the whole tx.
+    rec = _at_backtested(repo)
+    stale = _live_funnel(repo, "s")
+    repo.record_search_trial("other", 7, "{}")  # concurrent funnel change after the snapshot
+    with pytest.raises(FunnelDriftError, match="search_trials"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=stale, gate_row=_make_gate_row(passed=True), p_value=0.01,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    # Fail-closed: no gate row committed, stream untouched, strategy not promoted.
+    assert repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
+    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_funnel_cas_aborts_on_wrong_strategy_snapshot(repo):
+    # The store method is the safety boundary: a snapshot whose strategy_name does not match the
+    # record being promoted must fail closed BEFORE the CAS re-reads (else the CAS would validate a
+    # DIFFERENT strategy's inputs and the promoted strategy's own drift could escape). #339.
+    rec = _at_backtested(repo, "s")
+    _at_backtested(repo, "s2")
+    with pytest.raises(FunnelDriftError, match="but the promotion is for"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
+            gate_row=_make_gate_row(passed=True), p_value=None,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert repo.get("s").stage is Stage.BACKTESTED
+    assert repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
+
+
+def test_funnel_cas_aborts_on_windowed_breadth_drift(repo):
+    # A snapshot whose windowed_total_combos is stale (lower than live) must abort even if the
+    # fingerprint were to match — windowed breadth feeds n_funnel (the deflated bar) on every path.
+    rec = _at_backtested(repo)
+    snap = _live_funnel(repo, "s")._replace(windowed_total_combos=999999)
+    with pytest.raises(FunnelDriftError, match="windowed_search_combos"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=snap, gate_row=_make_gate_row(passed=True), p_value=None,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_funnel_cas_aborts_on_variance_drift_when_binding(repo):
+    # On the FDR-binding (measured) path the DSR variances feed p_value; a stale funnel-floor
+    # variance must abort. Seed >=2 strategies so the funnel floor is non-None, then present a
+    # snapshot with a perturbed floor variance.
+    _at_backtested(repo)
+    # MIN_FUNNEL_FLOOR_STRATEGIES=5 strategies with finite trial stats -> a non-None funnel floor.
+    for nm in ("s", "t", "u", "v", "w"):
+        repo.record_search_trial(
+            nm, 3, "{}", trial_sharpe_count=3, trial_sharpe_mean=0.1, trial_sharpe_var_ann=0.2)
+    rec = repo.get("s")
+    live = _live_funnel(repo, "s", dsr_binding=True)
+    assert live.funnel_floor_var_ann is not None  # 5 seeded strategies -> non-None floor
+    # Perturb the stored floor variance so it no longer matches the live recompute at commit.
+    drifted = live._replace(funnel_floor_var_ann=live.funnel_floor_var_ann + 1.0)
+    with pytest.raises(FunnelDriftError, match="funnel_trial_sharpe_var"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=drifted, gate_row=_make_gate_row(passed=True), p_value=0.01,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_funnel_cas_aborts_on_family_drift(repo):
+    # A stale family_id (decision computed before a concurrent family assignment) must abort.
+    rec = _at_backtested(repo)
+    snap = _live_funnel(repo, "s")._replace(family_id=4242)  # a family the strategy is not in
+    with pytest.raises(FunnelDriftError, match="strategy_family"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=snap, gate_row=_make_gate_row(passed=True), p_value=None,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_funnel_cas_concurrent_stale_promote_aborts_order_independent(tmp_path):
+    """Multi-connection proof of order-independence (#339): a promote whose funnel snapshot was
+    computed BEFORE a concurrent breadth change commits must NOT serialize a stale-breadth outcome.
+    It aborts with FunnelDriftError regardless of which connection commits first — the committed
+    outcome is a pure function of the funnel snapshot, never of the wall-clock interleaving."""
+    db = tmp_path / "f.db"
+    seed = connect(db)
+    migrate(seed)
+    sr = SqliteStrategyRepository(seed)
+    sr.add("s")
+    transition_strategy(sr, "s", Stage.BACKTESTED, Actor.AGENT, "setup")
+    seed.close()
+
+    # Connection A captures a funnel snapshot, then connection B commits a breadth change.
+    ca = connect(db)
+    ra = SqliteStrategyRepository(ca)
+    rec = ra.get("s")
+    stale = _live_funnel(ra, "s")
+
+    cb = connect(db)
+    rb = SqliteStrategyRepository(cb)
+    rb.record_search_trial("s", 5, "{}")  # funnel drift lands before A's commit
+
+    with pytest.raises(FunnelDriftError):
+        ra.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=stale, gate_row=_make_gate_row(passed=True), p_value=0.01,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    # A committed nothing; B's search_trials row is intact; s is still BACKTESTED (not promoted).
+    assert ra.get("s").stage is Stage.BACKTESTED
+    assert ra._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
+    ca.close()
+    cb.close()
+
+
 def test_fdr_gate_agent_pass_is_born_consumed(repo):
     """Agent passing rows must be born consumed=1 so a back-step cannot replay the token."""
     rec = _at_backtested(repo)
     repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True),
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True),
         p_value=0.01, level_fn=_level_accept, actor=Actor.AGENT,
     )
     row = repo._conn.execute(
@@ -1490,7 +1657,7 @@ def test_fdr_gate_agent_fail_and_human_pass_not_consumed(repo):
     # Agent row that fails FDR (provisional pass but FDR rejects) → consumed=0
     rec = _at_backtested(repo)
     repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=_make_gate_row(passed=True),
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True),
         p_value=0.01, level_fn=_level_reject, actor=Actor.AGENT,
     )
     row_agent_fail = repo._conn.execute(
@@ -1501,7 +1668,8 @@ def test_fdr_gate_agent_fail_and_human_pass_not_consumed(repo):
     # Human passing row → also consumed=0 (human rows are never consumable tokens)
     rec2 = _at_backtested(repo, "s2")
     repo.record_gate_with_fdr_and_maybe_promote(
-        rec2, gate_row=_make_gate_row(passed=True),
+        rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
+        gate_row=_make_gate_row(passed=True),
         p_value=0.01, level_fn=_level_accept, actor=Actor.HUMAN,
     )
     row_human = repo._conn.execute(

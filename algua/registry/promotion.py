@@ -14,7 +14,7 @@ from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_tr
 from algua.contracts.types import DataProvider
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
-from algua.registry.repository import StrategyRepository
+from algua.registry.repository import FunnelSnapshot, StrategyRepository
 from algua.research.clustering import (
     MERGE_THRESHOLD,
     PARENTAGE_THRESHOLD,
@@ -538,8 +538,30 @@ def run_gate(
     # pair, but always uses BEGIN IMMEDIATE for consistency (negligible overhead for ≤ a few
     # thousand gate_evaluations rows).
     level_fn = functools.partial(lord_plus_plus_level, alpha=FDR_ALPHA, w0=FDR_W0)
+    # #339 — capture the funnel-wide MUTABLE snapshot this decision was computed against, so the
+    # commit can CAS-verify it under the write lock and refuse to serialize a mixed-snapshot
+    # (stale-breadth / stale-variance) outcome. own/windowed are the exact values evaluate_gate
+    # used (from preflight); family + variances are the run_gate reads above; the search_trials
+    # fingerprint (captured here) is the append-only row-identity guard. Any drift by commit -> the
+    # store rolls back and raises FunnelDriftError, and the operator re-runs against fresh state.
+    st_count, st_max = repo.search_trials_fingerprint()
+    funnel = FunnelSnapshot(
+        strategy_name=name,
+        funnel_window_days=FUNNEL_WINDOW_DAYS,
+        dsr_binding=dsr_binding,
+        own_lifetime_combos=breadth.own,
+        windowed_total_combos=breadth.windowed_total,
+        family_id=family_id,
+        family_lifetime_effective=family_lifetime_effective,
+        dsr_trial_var_ann=dsr_trial_var_ann,
+        funnel_floor_var_ann=(funnel_floor.var_ann if funnel_floor else None),
+        funnel_floor_n_strategies=(funnel_floor.n_strategies if funnel_floor else 0),
+        funnel_floor_n_total_rows=(funnel_floor.n_total_rows if funnel_floor else 0),
+        search_trials_count=st_count,
+        search_trials_max_id=st_max,
+    )
     fdr_outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=gate_row, p_value=p_value, level_fn=level_fn, actor=actor,
+        rec, gate_row=gate_row, p_value=p_value, funnel=funnel, level_fn=level_fn, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
     )
 

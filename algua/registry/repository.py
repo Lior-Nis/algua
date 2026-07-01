@@ -54,6 +54,48 @@ class FunnelFloor(NamedTuple):
     n_total_rows: int
 
 
+class FunnelSnapshot(NamedTuple):
+    """The funnel-wide, MUTABLE state that a (lock-free) promotion decision was computed against,
+    captured so ``record_gate_with_fdr_and_maybe_promote`` can CAS-verify it is unchanged at
+    commit time (#339). Every field below feeds ``provisional_passed`` (via the deflated breadth
+    bar ``n_funnel``) and/or the FDR ``p_value`` (via the DSR SR* floor), so a change to ANY of
+    them between the lock-free compute and the commit would make the committed decision reflect a
+    DIFFERENT funnel snapshot than the one it was computed against — a non-serializable
+    mixed-snapshot outcome. The commit re-reads each value under the write lock and aborts
+    (``FunnelDriftError``) on any mismatch, so a committed promotion is provably a pure function of
+    ONE funnel snapshot.
+
+    Fields:
+    - ``strategy_name`` / ``funnel_window_days`` / ``dsr_binding``: identify what to re-read.
+    - ``own_lifetime_combos`` = ``total_search_combos(strategy_name)``.
+    - ``windowed_total_combos`` = ``windowed_search_combos(funnel_window_days)``.
+    - ``family_id`` = ``strategy_family(strategy_name)``; ``family_lifetime_effective`` =
+      ``family_lifetime_combos(family_id)`` (0 when unfamilied).
+    - ``dsr_trial_var_ann`` = ``pooled_trial_sharpe_var(strategy_name)`` (None unless dsr_binding).
+    - ``funnel_floor_var_ann`` / ``funnel_floor_n_strategies`` / ``funnel_floor_n_total_rows`` =
+      the ``FunnelFloor`` fields from ``funnel_trial_sharpe_var(funnel_window_days)`` (var_ann
+      None / counts 0 unless dsr_binding).
+    - ``search_trials_count`` / ``search_trials_max_id``: the append-only ``search_trials``
+      fingerprint ``(COUNT(*), COALESCE(MAX(id), 0))``. Because ``search_trials`` is INSERT-only,
+      this pins the ENTIRE row set — it closes the (astronomically unlikely) "different rows yield a
+      bit-identical pooled/funnel variance" collision that value-equality alone could not.
+    """
+
+    strategy_name: str
+    funnel_window_days: int
+    dsr_binding: bool
+    own_lifetime_combos: int
+    windowed_total_combos: int
+    family_id: int | None
+    family_lifetime_effective: int
+    dsr_trial_var_ann: float | None
+    funnel_floor_var_ann: float | None
+    funnel_floor_n_strategies: int
+    funnel_floor_n_total_rows: int
+    search_trials_count: int
+    search_trials_max_id: int
+
+
 class ArtifactIdentity(NamedTuple):
     """The full identity a human approval binds to and the live gate recomputes.
 
@@ -64,6 +106,15 @@ class ArtifactIdentity(NamedTuple):
     code_hash: str
     config_hash: str
     dependency_hash: str | None
+
+
+class FunnelDriftError(ValueError):
+    """Raised (fail-closed) when the funnel-wide state a promotion decision was computed against
+    changed before the commit could serialize it (#339). Conservative: it can only PREVENT a
+    commit, never produce a false pass. The caller re-runs the promotion against fresh funnel
+    state. A ``ValueError`` so the CLI's ``@json_errors`` surfaces it as a clean JSON error."""
+
+    pass
 
 
 class StrategyExists(ValueError):
@@ -516,6 +567,7 @@ class StrategyRepository(Protocol):
         *,
         gate_row: dict[str, Any],
         p_value: float | None,
+        funnel: FunnelSnapshot,
         level_fn: Callable[[int, list[int]], float],
         actor: Actor,
         reason: str | None = None,
@@ -536,10 +588,22 @@ class StrategyRepository(Protocol):
         provisional value — ``find_consumable_gate_evaluation`` reads this column). If
         ``final_passed`` is True, ``rec`` is atomically advanced to ``candidate``.
 
+        ``funnel`` is the funnel-wide snapshot the (lock-free) decision was computed against
+        (#339). Under the write lock, BEFORE the stream read, every mutable field is RE-READ and
+        CAS-verified; on any drift the whole transaction rolls back and raises ``FunnelDriftError``,
+        so a committed decision is provably a pure function of ONE funnel snapshot (serializable).
+
         TOP-LEVEL ONLY: raises ``RuntimeError`` if called inside an open transaction (mirrors
         ``reserve_holdout``). Crash semantics: a process crash before commit rolls back both
         the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy.
         """
+        ...
+
+    def search_trials_fingerprint(self) -> tuple[int, int]:
+        """``(COUNT(*), COALESCE(MAX(id), 0))`` over ALL ``search_trials`` rows. Because that table
+        is append-only (INSERT-only, AUTOINCREMENT PK), this pair strictly increases on every
+        insert and so uniquely fingerprints the entire row set — the row-identity half of the #339
+        funnel CAS."""
         ...
 
     # -------------------------------------------------------------------------
