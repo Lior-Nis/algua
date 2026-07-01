@@ -53,6 +53,16 @@ def test_secret_redacted_in_ledger_reason_and_params(tmp_path):
     assert _SECRET not in json.dumps(r["params"])  # scrubbed inside nested params too
 
 
+def test_secret_redacted_in_param_keys(tmp_path):
+    # A secret pasted as a dict KEY (not value) must also be masked in ledger + note.
+    conn = _conn(tmp_path)
+    record_negative_result(
+        conn, kind="discard", verdict="DISCARD", actor="agent", reason="k",
+        source="manual", params={f"api_key={_SECRET}": "v"})
+    r = list_negative_results(conn)[0]
+    assert _SECRET not in json.dumps(r["params"])
+
+
 def test_params_json_is_bounded(tmp_path):
     conn = _conn(tmp_path)
     record_negative_result(

@@ -78,7 +78,12 @@ def _scrub(obj: Any, depth: int = 0) -> Any:
     if isinstance(obj, float):
         return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
     if isinstance(obj, dict):
-        return {k: _scrub(v, depth + 1) for k, v in obj.items()}
+        # Scrub string KEYS too (a secret can be pasted as a key, not just a value). Collisions
+        # after redaction are last-wins — acceptable minor loss for an advisory masking pass.
+        return {
+            (_scrub_text(k) if isinstance(k, str) else k): _scrub(v, depth + 1)
+            for k, v in obj.items()
+        }
     if isinstance(obj, (list, tuple)):
         return [_scrub(v, depth + 1) for v in obj]
     return obj
