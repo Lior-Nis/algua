@@ -63,7 +63,7 @@ def _resolve_relative(package: str, level: int, module: str | None) -> str | Non
     parts = package.split(".") if package else []
     # level 1 == the package itself; each extra level strips one more component.
     keep = len(parts) - (level - 1)
-    if keep < 0:
+    if keep <= 0:  # walked above the top-level package -> unresolvable
         return None
     base = ".".join(parts[:keep])
     if module:
@@ -104,7 +104,15 @@ def _node_reaches_data(node: ast.AST, package: str) -> bool:
         return any(_is_data_target(a.name) for a in node.names)
     if isinstance(node, ast.Call):
         lit = _dynamic_import_literal(node)
-        return lit is not None and _is_data_target(lit)
+        if lit is None:
+            return False
+        if lit.startswith("."):
+            # relative dynamic name, e.g. import_module("..data.store", __package__) — resolve
+            # against the file's package the same way a `from` import would.
+            level = len(lit) - len(lit.lstrip("."))
+            resolved = _resolve_relative(package, level, lit.lstrip(".") or None)
+            return resolved is not None and _is_data_target(resolved)
+        return _is_data_target(lit)
     return False
 
 
@@ -143,6 +151,8 @@ def test_scanner_flags_each_data_reference_shape():
         "from .. import data",               # relative bare-name
         "import importlib; importlib.import_module('algua.data.store')",
         "__import__('algua.data')",
+        # relative dynamic import resolves against the anchor package (algua.backtest)
+        "import importlib; importlib.import_module('..data.store', __package__)",
     ]
     should_not_flag = [
         "import algua.database",             # sibling, not the data lane
