@@ -21,8 +21,14 @@ class SyntheticProvider:
     # the OOS bars are identical on a re-run, so a burned holdout is reproducible w/o a snapshot.
     reproducible = True
 
-    def __init__(self, seed: int = 0) -> None:
+    def __init__(self, seed: int = 0, *, drift: float = 0.0005, vol: float = 0.02) -> None:
+        # drift/vol are the per-bar GBM mean/stddev of log-returns. They default to the original
+        # constants so SyntheticProvider(seed=k) is byte-identical to before this param was added
+        # (a regression test pins this). They exist so the gate-eval harness (#347) can realize
+        # scenarios of known true edge (strong / zero / negative drift) from one generator.
         self.seed = seed
+        self.drift = drift
+        self.vol = vol
 
     def get_bars(
         self, symbols: list[str], start: datetime, end: datetime, timeframe: str
@@ -43,7 +49,7 @@ class SyntheticProvider:
         for i, sym in enumerate(sorted(symbols)):
             # Deterministic per-symbol drift/vol from a child RNG.
             sub = np.random.default_rng(self.seed + i + 1)
-            rets = sub.normal(loc=0.0005, scale=0.02, size=len(sessions))
+            rets = sub.normal(loc=self.drift, scale=self.vol, size=len(sessions))
             close = 100.0 * np.exp(np.cumsum(rets))
             # Open differs from close so high/low-dependent logic can be exercised.
             open_ = close * np.exp(sub.normal(loc=0.0, scale=0.005, size=len(sessions)))
