@@ -25,6 +25,7 @@ from algua.execution.live_ledger import (
     ingest_activities,
     paper_believed_positions,
     record_paper_venue_order,
+    recover_stranded_broker_order_ids,
     strategy_live_symbols,
 )
 from algua.execution.live_reconcile import attributed_live_net
@@ -111,6 +112,23 @@ def _paper_broker_net(broker) -> dict[str, float]:
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
 
 
+def _recover_stranded(conn, broker, kind) -> None:
+    """#312: backfill broker_order_id onto any crash-stranded NULL order row by asking the venue for
+    the order carrying each row's client_order_id (never submits; symbol-verified). Recovery is
+    ACCOUNT-WIDE (it scans every strategy's NULL rows), so the audit is account-wide (strategy=None)
+    since a per-strategy label would misattribute a recovered sibling's order. Audit-only effects;
+    a broker error propagates to the caller's fail-closed handling."""
+    outcome = recover_stranded_broker_order_ids(conn, broker, kind=kind)
+    if outcome.recovered:
+        audit_append(conn, actor="system", action="stranded_order_recovered",
+                     reason=f"{len(outcome.recovered)} backfilled: {outcome.recovered}",
+                     strategy=None)
+    if outcome.mismatched:
+        audit_append(conn, actor="system", action="stranded_recovery_mismatch",
+                     reason=f"{len(outcome.mismatched)} broker mismatch: {outcome.mismatched}",
+                     strategy=None)
+
+
 def _ingest_paper_venue(conn: sqlite3.Connection, broker: object, until: str) -> None:
     """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
 
@@ -157,6 +175,9 @@ def _live_strategy_flat(
     (unattributed/manual) or non-live holding does NOT explain it, so it fails closed (refuse)."""
     cursor = fill_cursor(conn, LedgerKind.LIVE)
     ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)  # type: ignore[attr-defined]
+    # #312: recover any crash-stranded NULL-broker_order_id live row before the flatness check, so a
+    # stranded (accepted-but-not-backfilled) fill does not block resume as an unexplained residual.
+    _recover_stranded(conn, broker, LedgerKind.LIVE)
     own = believed_positions(conn, name, LedgerKind.LIVE)
     broker_net = {s: float(q) for s, q in broker.get_positions().items()  # type: ignore[attr-defined]
                   if float(q) != 0.0}
@@ -483,6 +504,10 @@ def trade_tick(
                 tick_ts, clock_source = tick_clock(broker.clock)
                 try:
                     _ingest_paper_venue(conn, broker, tick_ts)
+                    # #312: resolve any crash-stranded NULL-broker_order_id row (accepted-but-not-
+                    # backfilled) BEFORE reconcile, so its now-attributed fill no longer reads as
+                    # drift. Fail-closed on a broker error, like the ingest above.
+                    _recover_stranded(conn, broker, LedgerKind.PAPER)
                 except Exception as exc:   # fail closed on ANY ingest/transport error
                     audit_append(conn, actor="system", action="venue_ingest_failed",
                                  reason=str(exc), strategy=name)

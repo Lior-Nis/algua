@@ -100,6 +100,107 @@ def test_owned_open_order_ids_filters_to_strategy(tmp_path):
     assert L.owned_open_order_ids(conn, _B(), "s1") == ["o1"]
 
 
+class _RecoveryBroker:
+    """Fake broker for #312 recovery: maps client_order_id -> order dict (None => 404 / not at
+    venue). Records whether it was queried, to prove the DB-first guard skips the round-trip."""
+
+    def __init__(self, orders):
+        self._orders = orders
+        self.queried: list[str] = []
+
+    def get_order_by_client_order_id(self, coid):
+        self.queried.append(coid)
+        return self._orders.get(coid)
+
+
+class _RaisingBroker:
+    def get_order_by_client_order_id(self, coid):  # pragma: no cover - must never be called
+        raise AssertionError("broker must not be queried when there are no stranded rows")
+
+
+def test_recover_stranded_backfills_and_attributes_live(tmp_path):
+    # A live order crashed after Alpaca accepted it but before backfill: row NULL and the fill
+    # already ingested under the real broker id is orphaned (strategy NULL). Recovery must backfill
+    # the broker id AND back-attribute the fill.
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-1")  # NULL broker_order_id
+    L.ingest_activities(conn, [{
+        "id": "act-1", "activity_type": "FILL", "side": "buy", "qty": "10", "price": "100",
+        "order_id": "broker-9", "symbol": "AAA", "transaction_time": "2026-06-06T00:00:00+00:00",
+    }], L.LedgerKind.LIVE)
+    assert L.believed_positions(conn, "s1", L.LedgerKind.LIVE) == {}  # orphaned pre-recovery
+
+    broker = _RecoveryBroker({"coid-1": {"id": "broker-9", "client_order_id": "coid-1",
+                                         "symbol": "AAA", "status": "filled"}})
+    out = L.recover_stranded_broker_order_ids(conn, broker, kind=L.LedgerKind.LIVE)
+
+    assert out.recovered == ["coid-1"] and out.mismatched == []
+    row = conn.execute(
+        "SELECT broker_order_id FROM live_orders WHERE client_order_id='coid-1'").fetchone()
+    assert row["broker_order_id"] == "broker-9"
+    assert L.believed_positions(conn, "s1", L.LedgerKind.LIVE) == {"AAA": 10.0}
+
+
+def test_recover_stranded_preserves_phantom_on_404_paper(tmp_path):
+    # A pure #365 phantom (a genuine noop whose coid never reached the venue) 404s -> preserved.
+    conn = _conn(tmp_path)
+    L.record_paper_venue_order(conn, "s1", "AAA", "buy", None, "coid-x", strategy_id=1)
+    broker = _RecoveryBroker({})  # nothing at the venue
+    out = L.recover_stranded_broker_order_ids(conn, broker, kind=L.LedgerKind.PAPER)
+    assert out.recovered == [] and out.mismatched == []
+    assert broker.queried == ["coid-x"]  # it DID look, and found nothing
+    row = conn.execute(
+        "SELECT broker_order_id FROM paper_venue_orders WHERE client_order_id='coid-x'").fetchone()
+    assert row["broker_order_id"] is None  # preserved, not deleted, not backfilled
+
+
+def test_recover_stranded_skips_symbol_mismatch(tmp_path):
+    # A coid collision surfaces as a symbol mismatch: never mis-attribute -> skip+flag, leave NULL.
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-1")
+    broker = _RecoveryBroker({"coid-1": {"id": "broker-9", "client_order_id": "coid-1",
+                                         "symbol": "BBB"}})  # WRONG symbol
+    out = L.recover_stranded_broker_order_ids(conn, broker, kind=L.LedgerKind.LIVE)
+    assert out.recovered == [] and out.mismatched == ["coid-1"]
+    row = conn.execute(
+        "SELECT broker_order_id FROM live_orders WHERE client_order_id='coid-1'").fetchone()
+    assert row["broker_order_id"] is None
+
+
+def test_recover_stranded_rejects_bad_coid_or_empty_id(tmp_path):
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-echo")   # returned coid differs
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-empty")  # empty id
+    broker = _RecoveryBroker({
+        "coid-echo": {"id": "b1", "client_order_id": "coid-OTHER", "symbol": "AAA"},
+        "coid-empty": {"id": "", "client_order_id": "coid-empty", "symbol": "AAA"},
+    })
+    out = L.recover_stranded_broker_order_ids(conn, broker, kind=L.LedgerKind.LIVE)
+    assert out.recovered == [] and sorted(out.mismatched) == ["coid-echo", "coid-empty"]
+
+
+def test_recover_stranded_no_null_rows_skips_broker(tmp_path):
+    # DB-first guard: with every row already backfilled, the broker is NEVER queried.
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-1")
+    L.backfill_broker_order_id(conn, "coid-1", "broker-9")
+    out = L.recover_stranded_broker_order_ids(conn, _RaisingBroker(), kind=L.LedgerKind.LIVE)
+    assert out.recovered == [] and out.mismatched == []
+
+
+def test_backfill_order_conditional_never_overwrites(tmp_path):
+    # The shared conditional backfill sets a NULL row once, is idempotent for the same id, and
+    # refuses to overwrite an already-set (different) broker id (concurrent-tick TOCTOU guard).
+    conn = _conn(tmp_path)
+    L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "coid-1")
+    assert L._backfill_order(conn, L.LedgerKind.LIVE, "coid-1", "b1") is True
+    assert L._backfill_order(conn, L.LedgerKind.LIVE, "coid-1", "b1") is True   # idempotent replay
+    assert L._backfill_order(conn, L.LedgerKind.LIVE, "coid-1", "b2") is False  # no overwrite
+    row = conn.execute(
+        "SELECT broker_order_id FROM live_orders WHERE client_order_id='coid-1'").fetchone()
+    assert row["broker_order_id"] == "b1"
+
+
 def test_strategy_live_symbols_unions_orders_and_fills(tmp_path):
     from contextlib import closing
 

@@ -320,6 +320,23 @@ class _AlpacaBroker:
         `client_order_id`; the caller scopes cancellation to a strategy by client_order_id."""
         return self._read(self._get("/v2/orders?status=open"), "/v2/orders")
 
+    def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        """The broker's order carrying `client_order_id` (GET /v2/orders:by_client_order_id), any
+        status (open/filled/canceled), or None on 404 (the broker has no such order). Used by #312
+        stranded-order recovery to backfill a broker_order_id onto a local NULL-broker_order_id row
+        after a crash between broker-accept and the backfill commit — a precise per-coid lookup with
+        no recency window. A None (404) means the coid never reached the venue, so recovery leaves
+        the row untouched (crash-safety / #365 phantom)."""
+        coid = quote(client_order_id, safe="")
+        path = f"/v2/orders:by_client_order_id?client_order_id={coid}"
+        resp = self._get(path)
+        if resp.status_code == 404:
+            return None
+        data = self._read(resp, path)
+        if not isinstance(data, dict):
+            raise BrokerError(f"alpaca {path}: expected an order object, got {type(data).__name__}")
+        return data
+
     def cancel_order(self, order_id: str) -> None:
         """Cancel ONE order by broker id (DELETE /v2/orders/{id}). 404/422 (already gone/terminal)
         is a no-op; any other non-2xx raises BrokerError."""
