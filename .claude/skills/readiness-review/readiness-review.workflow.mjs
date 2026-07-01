@@ -207,3 +207,66 @@ Return the dedup schema: { kept: [...findings...], dropped: [{title, reason}] }.
   if (dd && dd.dropped) dd.dropped.forEach((d) => log(`dropped: ${d.title} — ${d.reason}`))
 }
 log(`After dedup: ${deduped.length} to file`)
+
+// ---- Phase 4: file GitHub issues (skipped entirely under DRY_RUN) ----
+phase('File')
+let filed = []
+if (DRY_RUN) {
+  log(`DRY_RUN: would file ${deduped.length} issue(s); nothing created, nothing committed`)
+  deduped.forEach((f) => log(`WOULD FILE [${f.lane}/${f.severity}] ${f.title}`))
+} else {
+  const fileAgent = await agent(
+    `You are the issue-filing agent (cwd = repo root). Create GitHub issues via gh.
+
+FIRST, idempotently ensure these labels exist (use --force so an existing label is not an error):
+  gh label create readiness-review --color 5319e7 --force
+  For each lane slug, gh label create "lane:<slug>" --color 1d76db --force
+    slugs: swe mle ds qf clean-code agentic ml-dl-integration risk-safe-scaling model-risk-management security observability
+  gh label create severity:critical --color b60205 --force
+  gh label create severity:high --color d93f0b --force
+  gh label create severity:medium --color fbca04 --force
+  gh label create severity:low --color 0e8a16 --force
+
+THEN create ONE issue per finding below:
+  gh issue create --title "[<lane>] <title>" \
+    --label readiness-review --label "lane:<lane>" --label "severity:<severity>" \
+    --body "<body>"
+The body MUST include, as markdown sections: Severity, Lane, North-star link, Evidence (the files
+list), Description, Why it matters, Recommendation, KB citation, Web citation.
+Capture the issue number gh prints (trailing integer of the returned URL).
+
+Findings JSON:
+${JSON.stringify(deduped)}
+
+Return the filed schema: { filed: [{number, title, lane, severity}] }.`,
+    { label: 'file-issues', phase: 'File', schema: FILED_SCHEMA },
+  )
+  filed = (fileAgent && fileAgent.filed) || []
+  log(`Filed ${filed.length} issue(s)`)
+}
+
+// ---- Phase 5: synthesis verdict, committed (never pushed); skipped under DRY_RUN ----
+if (!DRY_RUN) {
+  phase('Synthesize')
+  await agent(
+    `You are the synthesis agent (cwd = repo root). Write a north-star readiness verdict and COMMIT
+it (do NOT push).
+
+Write to: docs/superpowers/specs/${RID}-readiness-review-verdict.md
+Content:
+- Title + the run date (${RID}).
+- Overall ML/DL-integration-readiness verdict AND safe-to-scale verdict (2-3 evidence-based paragraphs).
+- Cross-lane themes and the BINDING LEVERS (the few changes that unblock the most).
+- A table of filed issues: number | lane | severity | one-line title. Data: ${JSON.stringify(filed)}
+- Per-lane one-paragraph summary (11 lanes).
+
+Then commit ONLY that file (never git add -A), appending the standard trailers used by recent
+commits (Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com> and the Claude-Session line):
+  git add docs/superpowers/specs/${RID}-readiness-review-verdict.md
+  git commit -m "docs(readiness): ${RID} 11-lane readiness verdict"
+Do NOT git push. Return the path you wrote.`,
+    { label: 'synthesize', phase: 'Synthesize', model: 'sonnet' },
+  )
+}
+
+return { survivors: survivors.length, filed: filed.length, dryRun: DRY_RUN }
