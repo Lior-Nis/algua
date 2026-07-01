@@ -16,6 +16,7 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
 from algua.registry.repository import StrategyRepository
 from algua.research.clustering import (
+    _RETURN_STANDALONE_ESCALATION,
     MERGE_THRESHOLD,
     PARENTAGE_THRESHOLD,
     WEIGHT_CODE_ANCESTRY,
@@ -192,6 +193,7 @@ def _classify_and_assign_family(
             "factor_lineage": WEIGHT_FACTOR_LINEAGE,
             "return_correlation": WEIGHT_RETURN_CORRELATION,
         },
+        "return_standalone_escalation": _RETURN_STANDALONE_ESCALATION,
     }, sort_keys=True)
     axis_json = json.dumps({
         "verdict": best_verdict.value,
