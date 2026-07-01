@@ -144,7 +144,11 @@ def test_news_lane_unblocked_through_funnel(tmp_path):
     assert _holdout_count(tmp_path) >= 1
     assert payload["promoted"] is False
     failing = [c["name"] for c in payload.get("checks", []) if not c["passed"]]
-    assert failing == ["regime_robustness"], failing
+    # The flat synthetic fixture fails the two PIT-unrelated holdout-robustness gates
+    # (#221 regime-robustness and #328 idiosyncratic-alpha); both prove the funnel reached the
+    # gate evaluation. The PIT lane itself is unblocked (holdout reserved/burned above).
+    assert "regime_robustness" in failing, failing
+    assert set(failing) <= {"regime_robustness", "idiosyncratic_alpha"}, failing
 
 
 def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
@@ -186,4 +190,8 @@ def test_fundamentals_lane_unblocked_through_funnel(tmp_path):
     assert _holdout_count(tmp_path) >= 1
     assert payload["promoted"] is False
     failing = [c["name"] for c in payload.get("checks", []) if not c["passed"]]
-    assert failing == ["regime_robustness"], failing
+    # The flat synthetic fixture fails the two PIT-unrelated holdout-robustness gates
+    # (#221 regime-robustness and #328 idiosyncratic-alpha); both prove the funnel reached the
+    # gate evaluation. The PIT lane itself is unblocked (holdout reserved/burned above).
+    assert "regime_robustness" in failing, failing
+    assert set(failing) <= {"regime_robustness", "idiosyncratic_alpha"}, failing
