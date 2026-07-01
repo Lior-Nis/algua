@@ -137,6 +137,7 @@ def family_similarity(
     family_members: list[dict],
     *,
     returns_lookup: dict | None = None,
+    escalate: bool = True,
 ) -> tuple[SimVerdict, float]:
     """Compute similarity between a strategy and a family, returning a verdict and score.
 
@@ -149,6 +150,15 @@ def family_similarity(
             key ``"__strategy__"`` to supply the current strategy's own returns (a
             name that would otherwise collide with a strategy literally registered
             as ``"__strategy__"``). If None, the return-correlation axis is 0.0.
+        escalate: When True (default), apply the #338 standalone return-correlation
+            escalation — if the return axis is evaluable (>= MIN_OVERLAP shared dates),
+            let it bind on its own via ``max(blend, return_corr)``, so an identical-trading
+            but rewritten/re-labelled clone cannot escape into NOVEL. When False, the score
+            is the pure linear blend only (the pre-#338 behaviour). Callers ranking multiple
+            families for ASSIGNMENT pass ``escalate=False`` first so the family SELECTION stays
+            forward-only (a return-only match must not displace a blend match into a
+            narrower-breadth family); escalation is a NOVEL-rescue applied only when no family
+            matches on the blend alone. See ``registry.promotion._assign_family``.
 
     Returns:
         ``(SimVerdict, float)`` — verdict and similarity score (0.0–1.0, or 0.0 on failure).
@@ -174,11 +184,12 @@ def family_similarity(
         # Standalone return-correlation escalation (#338): when the return axis is evaluable
         # (>= MIN_OVERLAP shared dates), let it bind on its own by taking max() with the blend.
         # This is the gaming-resistant axis; max only raises the score (forward-only tightening).
-        ret = axes["return"]
-        if ret is not None:
-            if not math.isfinite(ret):
-                return (SimVerdict.NOVEL, 0.0)  # fail closed on a non-finite axis value
-            score = max(score, ret)
+        if escalate:
+            ret = axes["return"]
+            if ret is not None:
+                if not math.isfinite(ret):
+                    return (SimVerdict.NOVEL, 0.0)  # fail closed on a non-finite axis value
+                score = max(score, ret)
         if score > best_score:
             best_score = score
 
