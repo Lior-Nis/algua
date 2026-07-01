@@ -21,7 +21,7 @@ app.add_typer(eval_app, name="eval")
 
 
 @eval_app.command("gate")
-@json_errors()
+@json_errors
 def gate(
     k: int = typer.Option(8, "--k", min=1, help="seeds (Monte-Carlo paths) per scenario"),
     scenario: list[str] = typer.Option(

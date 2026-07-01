@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import sqlite3
 import time
 from itertools import combinations
 from typing import Any
 
 import typer
 
-from algua.backtest.engine import BacktestError, holdout_window
+from algua.backtest.engine import holdout_window
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     ok,
@@ -54,7 +53,7 @@ _PROMOTE_SUMMARY_KEYS = (
 @research_app.command("promote")
 # sqlite3.OperationalError keeps lock-contention ("database is locked") from reserve_holdout's
 # BEGIN IMMEDIATE inside the JSON envelope, not a leaked traceback (CLI JSON-output contract).
-@json_errors(ValueError, LookupError, BacktestError, sqlite3.OperationalError)
+@json_errors
 def promote(
     name: str,
     start: str = typer.Option("2023-01-01", "--start"),
@@ -267,7 +266,7 @@ def promote(
 
 
 @research_app.command("dormant-sweep")
-@json_errors(ValueError, LookupError, BacktestError, sqlite3.OperationalError)
+@json_errors
 def dormant_sweep(
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
@@ -371,7 +370,7 @@ def dormant_sweep(
 
 
 @research_app.command("family-audit")
-@json_errors(ValueError, LookupError, sqlite3.OperationalError)
+@json_errors
 def family_audit_cmd() -> None:
     """ADVISORY cross-family gaming detector. Scans the family DAG for separate families that
     empirically behave as one thesis (deliberate-split breadth evasion that #222's assignment-time

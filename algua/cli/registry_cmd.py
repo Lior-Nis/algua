@@ -15,7 +15,7 @@ from algua.contracts.types import PendingLiveAuthorization
 from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
-from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, SignatureError
+from algua.registry.live_gate import ALLOWED_SIGNERS_PATH
 from algua.registry.repository import StrategyRecord, kb_metadata
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -37,7 +37,7 @@ def _record_json(r: StrategyRecord) -> dict:
 
 
 @registry_app.command("add")
-@json_errors(ValueError, LookupError)
+@json_errors
 def add(
     name: str,
     family: str = typer.Option(None, "--family", help="thesis family slug"),
@@ -61,7 +61,7 @@ def add(
 
 
 @registry_app.command("list")
-@json_errors(ValueError, LookupError)
+@json_errors
 def list_(
     stage: str = typer.Option(None, "--stage", help="filter by stage"),
     family: str = typer.Option(None, "--family", help="filter by thesis family"),
@@ -81,7 +81,7 @@ def list_(
 
 
 @registry_app.command("show")
-@json_errors(ValueError, LookupError)
+@json_errors
 def show(name: str) -> None:
     """Show a strategy and its transition history."""
     with registry_conn() as conn:
@@ -92,7 +92,7 @@ def show(name: str) -> None:
 
 
 @registry_app.command("transition")
-@json_errors(ValueError, LookupError, TransitionError, SignatureError)
+@json_errors
 def transition(
     name: str,
     to: str = typer.Option(..., "--to"),
@@ -174,7 +174,7 @@ def transition(
 
 
 @registry_app.command("set")
-@json_errors(ValueError, LookupError)
+@json_errors
 def set_(
     name: str,
     family: str = typer.Option(None, "--family"),
@@ -213,7 +213,7 @@ def set_(
 
 
 @registry_app.command("backfill-from-kb")
-@json_errors(ValueError, LookupError)
+@json_errors
 def backfill_from_kb() -> None:
     """One-shot: recover kb-authored metadata into NULL registry columns; report conflicts.
 
@@ -301,7 +301,7 @@ def backfill_from_kb() -> None:
 
 
 @registry_app.command("enroll-approver")
-@json_errors(ValueError)
+@json_errors
 def enroll_approver(
     name: str = typer.Option(..., "--name", help="approver identity (allowed_signers principal)"),
     pubkey: str = typer.Option(..., "--pubkey", help="SSH public key (ssh-ed25519 AAAA...)"),

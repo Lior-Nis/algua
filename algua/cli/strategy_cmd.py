@@ -71,14 +71,14 @@ def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
 
 
 @strategy_app.command("list")
-@json_errors()
+@json_errors
 def list_() -> None:
     """List available strategies as JSON."""
     emit(list_strategies())
 
 
 @strategy_app.command("new")
-@json_errors()
+@json_errors
 def new(
     name: str,
     family: str = typer.Option(None, "--family", help="thesis family this belongs to (required)"),
@@ -182,7 +182,7 @@ def new(
 
 
 @strategy_app.command("doc")
-@json_errors()
+@json_errors
 def doc(
     name: str = typer.Argument(None, help="strategy to sync; omit (or --all) for all"),
     all_: bool = typer.Option(False, "--all", help="sync every strategy + family doc"),

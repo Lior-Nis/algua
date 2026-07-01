@@ -57,7 +57,7 @@ def _parse_required_data(raw: str | None) -> list[DataCapability]:
 
 
 @idea_app.command("add")
-@json_errors(ValueError, LookupError)
+@json_errors
 def add(
     title: str = typer.Option(..., "--title"),
     hypothesis: str = typer.Option(..., "--hypothesis"),
@@ -111,7 +111,7 @@ def add(
 
 
 @idea_app.command("list")
-@json_errors(ValueError, LookupError)
+@json_errors
 def list_(
     status: str = typer.Option(None, "--status", help="filter by idea status"),
     family: str = typer.Option(None, "--family", help="filter by thesis family"),
@@ -124,7 +124,7 @@ def list_(
 
 
 @idea_app.command("show")
-@json_errors(ValueError, LookupError)
+@json_errors
 def show(idea_id: int = typer.Argument(..., metavar="ID")) -> None:
     """Show one idea by id."""
     with registry_conn() as conn:
@@ -133,7 +133,7 @@ def show(idea_id: int = typer.Argument(..., metavar="ID")) -> None:
 
 
 @idea_app.command("dedup-check")
-@json_errors(ValueError, LookupError)
+@json_errors
 def dedup_check(
     title: str = typer.Option(..., "--title"),
     hypothesis: str = typer.Option(..., "--hypothesis"),
@@ -148,7 +148,7 @@ def dedup_check(
 
 
 @idea_app.command("set-status")
-@json_errors(ValueError, LookupError)
+@json_errors
 def set_status(
     idea_id: int = typer.Argument(..., metavar="ID"),
     to: IdeaStatus = typer.Option(..., "--to"),
@@ -167,7 +167,7 @@ def set_status(
 
 
 @idea_app.command("stats")
-@json_errors(ValueError, LookupError)
+@json_errors
 def stats(window_days: int = typer.Option(90, "--window-days")) -> None:
     """Funnel-breadth signal: idea counts by status in the trailing window. EXPOSED for the future
     (human, CODEOWNERS) gate change; NOT yet consumed by the promotion gate."""
