@@ -153,26 +153,56 @@ def delete_paper_venue_order(conn: sqlite3.Connection, client_order_id: str) -> 
     conn.commit()
 
 
+def _backfill_order(
+    conn: sqlite3.Connection, kind: LedgerKind, client_order_id: str, broker_order_id: str
+) -> bool:
+    """Attach `broker_order_id` to the {kind} order row keyed by `client_order_id`, and
+    back-attribute any fill already ingested under that broker id while the mapping was missing
+    (strategy was NULL) so an early fill is never orphaned. Shared by the on-submit backfill
+    (live/paper) and the #312 crash-recovery pass.
+
+    The UPDATE is CONDITIONAL (`broker_order_id IS NULL`) so a row already backfilled by a
+    tick/replay is never blind-overwritten. Fill back-attribution runs ONLY when we set the row
+    (rowcount == 1) or a re-read confirms the existing id already equals THIS `broker_order_id`
+    (idempotent replay); if the row already carries a DIFFERENT id, we own nothing, attribute no
+    fills, and return False (leave the strategy-NULL fills to fail closed at reconcile). Returns
+    True iff this call owns the (coid -> broker_order_id) mapping."""
+    t = _TABLES[kind]
+    row = conn.execute(
+        f"SELECT strategy FROM {t.orders} WHERE client_order_id = ?", (client_order_id,)
+    ).fetchone()
+    cur = conn.execute(
+        f"UPDATE {t.orders} SET broker_order_id = ?"
+        " WHERE client_order_id = ? AND broker_order_id IS NULL",
+        (broker_order_id, client_order_id),
+    )
+    if cur.rowcount == 0:
+        # No NULL row to set: either the row is absent, or it was already backfilled. Only proceed
+        # to attribute fills when it was already backfilled to THIS SAME id (idempotent replay); a
+        # different id means we do not own this mapping.
+        existing = conn.execute(
+            f"SELECT broker_order_id FROM {t.orders} WHERE client_order_id = ?", (client_order_id,)
+        ).fetchone()
+        if existing is None or existing["broker_order_id"] != broker_order_id:
+            conn.commit()
+            return False
+    if row is not None:
+        conn.execute(
+            f"UPDATE {t.fills} SET strategy = ?"
+            " WHERE broker_order_id = ? AND strategy IS NULL",
+            (row["strategy"], broker_order_id),
+        )
+    conn.commit()
+    return True
+
+
 def backfill_paper_venue_broker_order_id(
     conn: sqlite3.Connection, client_order_id: str, broker_order_id: str
 ) -> None:
     """Attach the broker's order id to a paper venue order once the broker accepts it. Also
     back-attributes any fills already ingested under this broker order id while the mapping was
     missing (strategy was NULL), so an early fill is never orphaned in the books."""
-    row = conn.execute(
-        "SELECT strategy FROM paper_venue_orders WHERE client_order_id = ?", (client_order_id,)
-    ).fetchone()
-    conn.execute(
-        "UPDATE paper_venue_orders SET broker_order_id = ? WHERE client_order_id = ?",
-        (broker_order_id, client_order_id),
-    )
-    if row is not None:
-        conn.execute(
-            "UPDATE paper_venue_fills SET strategy = ?"
-            " WHERE broker_order_id = ? AND strategy IS NULL",
-            (row["strategy"], broker_order_id),
-        )
-    conn.commit()
+    _backfill_order(conn, LedgerKind.PAPER, client_order_id, broker_order_id)
 
 
 def backfill_broker_order_id(
@@ -182,19 +212,54 @@ def backfill_broker_order_id(
     Alpaca accepted it: the client_order_id row exists, the broker id arrives later). Also
     back-attributes any fills already ingested under this broker order id while the mapping was
     missing (strategy was NULL), so an early fill is never orphaned in the books."""
-    row = conn.execute(
-        "SELECT strategy FROM live_orders WHERE client_order_id = ?", (client_order_id,)
-    ).fetchone()
-    conn.execute(
-        "UPDATE live_orders SET broker_order_id = ? WHERE client_order_id = ?",
-        (broker_order_id, client_order_id),
-    )
-    if row is not None:
-        conn.execute(
-            "UPDATE live_fills SET strategy = ? WHERE broker_order_id = ? AND strategy IS NULL",
-            (row["strategy"], broker_order_id),
+    _backfill_order(conn, LedgerKind.LIVE, client_order_id, broker_order_id)
+
+
+@dataclass(frozen=True)
+class StrandedRecovery:
+    """Outcome of a #312 stranded-order recovery pass. `recovered` = client_order_ids whose broker
+    order id was backfilled (crash-stranded rows resolved); `mismatched` = client_order_ids the
+    broker returned an inconsistent order for (symbol/coid/id mismatch) — left NULL, not attributed,
+    so they still fail closed at reconcile."""
+    recovered: list[str]
+    mismatched: list[str]
+
+
+def recover_stranded_broker_order_ids(
+    conn: sqlite3.Connection, broker: object, *, kind: LedgerKind,
+) -> StrandedRecovery:
+    """Auto-recover orders stranded by a crash between broker-accept and the broker_order_id
+    backfill commit (#312): for each local {kind} order row with `broker_order_id IS NULL`, ask
+    the order carrying that exact `client_order_id` and, on a verified match, backfill the broker id
+    (which also back-attributes any fill already ingested under it).
+
+    Read-only against the broker (never submits), so it can never double-submit. DB-first: with no
+    NULL rows it returns without a broker round-trip. A 404 (`get_order_by_client_order_id`->None)
+    means the coid never reached the venue (a pure #365 phantom / genuine noop) -> the row is
+    preserved. As a safety boundary it REJECTS an inconsistent broker payload (returned
+    client_order_id != coid, symbol != the local row's symbol, or an empty id) -> the row is left
+    NULL and flagged mismatched rather than mis-attributed. Side is NOT checked (the POSTed side is
+    delta-derived and can differ from the recorded intent side)."""
+    t = _TABLES[kind]
+    stranded = {
+        r["client_order_id"]: r["symbol"]
+        for r in conn.execute(
+            f"SELECT client_order_id, symbol FROM {t.orders} WHERE broker_order_id IS NULL"
         )
-    conn.commit()
+    }
+    recovered: list[str] = []
+    mismatched: list[str] = []
+    for coid, symbol in stranded.items():
+        order = broker.get_order_by_client_order_id(coid)  # type: ignore[attr-defined]
+        if order is None:
+            continue  # not at the venue -> preserve (crash-safety / #365 phantom)
+        boid = order.get("id")
+        if order.get("client_order_id") != coid or order.get("symbol") != symbol or not boid:
+            mismatched.append(coid)
+            continue
+        if _backfill_order(conn, kind, coid, str(boid)):
+            recovered.append(coid)
+    return StrandedRecovery(recovered=recovered, mismatched=mismatched)
 
 
 def believed_positions(
