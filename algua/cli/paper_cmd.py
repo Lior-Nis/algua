@@ -16,6 +16,7 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import OrderIntent
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
+from algua.execution.flatten import flatten_strategy
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_paper_venue_broker_order_id,
@@ -425,31 +426,18 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         log.error("breach", extra={"fields": {"strategy": name, "lane": "paper",
                                               "tick_ts": str(tick_ts), "kind": exc.kind}},
                   exc_info=True)
-        n_offsets = 0
-        flatten_error = None
-        try:
-            broker.cancel_open_orders()
-            breach_ts, _ = tick_clock(broker.clock)
-            _ingest_paper_venue(conn, broker, breach_ts)
-            for sym, qty in paper_believed_positions(conn, name).items():
-                if abs(qty) <= _RECONCILE_TOL:
-                    continue
-                coid = client_order_id(name, datetime.now(UTC), sym)
-                record_paper_venue_order(conn, name, sym, "sell" if qty > 0 else "buy",
-                                         None, coid, strategy_id=rec.id)
-                oid = broker.submit_offset(sym, qty, coid)
-                backfill_paper_venue_broker_order_id(conn, coid, oid)
-                n_offsets += 1
-        except Exception as fexc:
-            flatten_error = str(fexc)
-            audit_append(conn, actor="system", action="flatten_failed", reason=str(fexc),
-                         strategy=name)
-            log.error("flatten_failed", extra={"fields": {"strategy": name, "lane": "paper"}},
-                      exc_info=True)
-        payload = breach_payload(exc.detail, kind=exc.kind, liquidation_submitted=n_offsets > 0,
-                                 offsets_submitted=n_offsets)
-        if flatten_error is not None:
-            payload["flatten_error"] = flatten_error
+        # Account-wide cancel; ingest fills up to the broker clock, then offset every believed
+        # position — single-sourced in the execution layer (#336).
+        res = flatten_strategy(
+            conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
+            cancel=broker.cancel_open_orders,
+            ingest=lambda: _ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
+        )
+        payload = breach_payload(exc.detail, kind=exc.kind,
+                                 liquidation_submitted=res.n_offsets > 0,
+                                 offsets_submitted=res.n_offsets)
+        if res.flatten_error is not None:
+            payload["flatten_error"] = res.flatten_error
         return {"ok": False, "strategy": name, **payload}
 
     if result.peak_equity is not None:
@@ -662,32 +650,23 @@ def flatten(
         kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
         audit_append(conn, actor=actor_enum.value, action="flatten",
                      reason="manual flatten", strategy=name)
-        n_offsets = 0
-        try:
-            broker.cancel_open_orders()
-            flat_ts, _ = tick_clock(broker.clock)
-            _ingest_paper_venue(conn, broker, flat_ts)
-            for sym, qty in paper_believed_positions(conn, name).items():
-                if abs(qty) <= _RECONCILE_TOL:
-                    continue
-                coid = client_order_id(name, datetime.now(UTC), sym)
-                record_paper_venue_order(conn, name, sym,
-                                         "sell" if qty > 0 else "buy", None,
-                                         coid, strategy_id=rec.id)
-                oid = broker.submit_offset(sym, qty, coid)
-                backfill_paper_venue_broker_order_id(conn, coid, oid)
-                n_offsets += 1
-        # Fail SAFE on ANY liquidation error (not only BrokerError) so the emergency flatten always
-        # emits a structured payload instead of crashing with an unstructured traceback (GATE-2).
-        except Exception as exc:
-            emit(breach_payload(str(exc), strategy=name, liquidation_submitted=False,
-                                offsets_submitted=n_offsets))
-            raise typer.Exit(1) from exc
+        # Account-wide cancel; ingest fills up to the broker clock, then offset every believed
+        # position — single-sourced in the execution layer (#336). Fails SAFE: any liquidation
+        # error is captured to res.flatten_error (never an unstructured traceback).
+        res = flatten_strategy(
+            conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
+            cancel=broker.cancel_open_orders,
+            ingest=lambda: _ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
+        )
+        if res.flatten_error is not None:
+            emit(breach_payload(res.flatten_error, strategy=name, liquidation_submitted=False,
+                                offsets_submitted=res.n_offsets))
+            raise typer.Exit(1)
     # liquidation_submitted reflects whether any offset order ACTUALLY went out (GATE-2 HIGH): a
     # strategy already flat (no believed positions) submits none, so report False rather than imply
     # a liquidation that never happened. Accepted offset fills land async (may be next open).
     emit(ok({"strategy": name, "kill_switch": "tripped",
-             "liquidation_submitted": n_offsets > 0, "offsets_submitted": n_offsets}))
+             "liquidation_submitted": res.n_offsets > 0, "offsets_submitted": res.n_offsets}))
 
 
 @paper_app.command("halt-all")

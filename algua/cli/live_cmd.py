@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import typer
 
 from algua.audit.log import append as audit_append
@@ -13,7 +11,8 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization
 from algua.execution import live_reconcile
-from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
+from algua.execution.alpaca_broker import AlpacaLiveBroker
+from algua.execution.flatten import flatten_strategy
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_broker_order_id,
@@ -179,32 +178,20 @@ def _run_strategy_tick(  # noqa: PLR0913
         trip_for_breach(conn, name, exc)
         log.error("breach", extra={"fields": {"strategy": name, "lane": "live",
                                               "kind": exc.kind}}, exc_info=True)
-        liquidation_submitted = True
-        flatten_error = None
-        try:
-            _scoped_cancel(conn, broker, name)                       # cancel only our orders
-            cursor = fill_cursor(conn, LedgerKind.LIVE)
-            ingest_activities(conn, _broker_account_activities(broker, cursor), LedgerKind.LIVE)
-            for sym, qty in believed_positions(conn, name, LedgerKind.LIVE).items():  # fresh qty
-                # RECORD the offset in the books (+ backfill) so its fill attributes back to this
-                # strategy and believed_positions drops to flat — else the resume gate would block
-                # resume forever (codex CRITICAL). The kill-switch (just tripped) prevents a re-run
-                # from re-offsetting, so the per-attempt coid is safe.
-                coid = client_order_id(name, datetime.now(UTC), sym)
-                record_live_order(conn, name, sym, "sell" if qty > 0 else "buy", None, coid)
-                oid = broker.submit_offset(sym, qty, coid)
-                backfill_broker_order_id(conn, coid, oid)
-        except BrokerError as fexc:
-            liquidation_submitted = False
-            flatten_error = str(fexc)
-            audit_append(conn, actor="system", action="flatten_failed",
-                         reason=str(fexc), strategy=name)
-            log.error("flatten_failed", extra={"fields": {"strategy": name, "lane": "live"}},
-                      exc_info=True)
+        # Scoped cancel (only our orders); ingest fills up to now, then offset every believed
+        # position — single-sourced in the execution layer (#336). liquidation_submitted mirrors the
+        # prior optimistic semantics: True unless the flatten loop errored.
+        res = flatten_strategy(
+            conn, broker, name, LedgerKind.LIVE, lane="live",
+            cancel=lambda: _scoped_cancel(conn, broker, name),
+            ingest=lambda: ingest_activities(
+                conn, _broker_account_activities(broker, fill_cursor(conn, LedgerKind.LIVE)),
+                LedgerKind.LIVE),
+        )
         payload = breach_payload(exc.detail, strategy=name, kind=exc.kind,
-                                  liquidation_submitted=liquidation_submitted)
-        if flatten_error is not None:
-            payload["flatten_error"] = flatten_error
+                                  liquidation_submitted=res.flatten_error is None)
+        if res.flatten_error is not None:
+            payload["flatten_error"] = res.flatten_error
         return payload
     except LiveSizingError as exc:        # fail-closed mark -> skip this strategy, don't trade
         audit_append(conn, actor="system", action="live_sizing_skipped",
