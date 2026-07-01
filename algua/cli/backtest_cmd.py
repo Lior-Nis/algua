@@ -209,6 +209,10 @@ def walk_forward_cmd(
         help="point-in-time universe name (opt into survivorship-bias-free membership)"),
     windows: int = typer.Option(4, "--windows", help="number of equal out-of-sample windows"),
     holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
+    embargo: int = typer.Option(
+        None, "--embargo", min=0,
+        help="override the in-sample/holdout purge gap in bars (#345); default = "
+             "max(feature_lookback, decision_lag_bars) from the strategy"),
     fundamentals_snapshot: str = typer.Option(
         None, "--fundamentals-snapshot",
         help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
@@ -255,7 +259,7 @@ def walk_forward_cmd(
     )
     delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     result = walk_forward(strategy, provider, start_dt, end_dt,
-                          windows=windows, holdout_frac=holdout_frac,
+                          windows=windows, holdout_frac=holdout_frac, embargo=embargo,
                           universe_by_date=universe_by_date,
                           universe_name=universe, universe_snapshots=universe_prov,
                           fundamentals_provider=fundamentals_provider,

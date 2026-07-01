@@ -56,6 +56,7 @@ CONFIG = StrategyConfig(
     params={{"lookback": 60}},
     construction="top_k_equal_weight",
     construction_params={{"top_k": 2}},
+    feature_lookback=60,  # bars of trailing history the signal reads -> walk-forward embargo (#345)
 )
 
 

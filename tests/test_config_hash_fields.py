@@ -60,3 +60,15 @@ def test_config_hash_changes_with_construction_params():
     a = _loaded_for_test(_cfg(construction_params={"top_k": 2}))
     b = _loaded_for_test(_cfg(construction_params={"top_k": 3}))
     assert config_hash(a) != config_hash(b)
+
+
+def test_config_hash_changes_with_feature_lookback():
+    # #345: feature_lookback sizes the walk-forward embargo (carves different windows), so two runs
+    # that differ only in declared lookback must not collide on config_hash / artifact identity.
+    from algua.strategies.base import config_hash
+    from algua.strategies.loader import _loaded_for_test
+    undeclared = config_hash(_loaded_for_test(_cfg()))                       # feature_lookback=None
+    declared_0 = config_hash(_loaded_for_test(_cfg(feature_lookback=0)))
+    declared_60 = config_hash(_loaded_for_test(_cfg(feature_lookback=60)))
+    assert undeclared != declared_0 != declared_60
+    assert undeclared != declared_60

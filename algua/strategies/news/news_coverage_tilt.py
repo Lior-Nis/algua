@@ -17,6 +17,7 @@ CONFIG = StrategyConfig(
     params={"window_days": 5},
     construction="equal_weight_positive",
     needs_news=True,
+    feature_lookback=5,  # 5-day news coverage window -> walk-forward embargo (#345)
 )
 
 
