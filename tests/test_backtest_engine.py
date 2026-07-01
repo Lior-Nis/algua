@@ -44,6 +44,8 @@ def test_run_produces_metrics_keys() -> None:
     for key in [
         "total_return", "cagr", "ann_volatility", "sharpe", "max_drawdown",
         "turnover", "avg_gross_exposure", "n_rebalances",
+        # Golden-Rule-6 dashboard breadth (#348)
+        "sortino", "calmar", "hit_rate", "tail_ratio",
     ]:
         assert key in res.metrics
 
