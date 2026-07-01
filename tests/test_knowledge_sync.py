@@ -68,7 +68,7 @@ def _metrics(**overrides) -> dict:
         "run_id": "abcd1234ef", "kind": "backtest", "snapshot_id": "ds_2", "seed": "7",
         "config_hash": "cfg123", "code_hash": "code123", "dependency_hash": "dep123",
         "period_start": "2020-01-01", "period_end": "2020-12-31", "timeframe": "1d",
-        "universe_name": "liquid10", "metrics": {"sharpe": 0.35},
+        "universe_mode": "pit", "universe_name": "liquid10", "metrics": {"sharpe": 0.35},
     }
     base.update(overrides)
     return base
@@ -87,14 +87,16 @@ def test_render_results_block_reproduce_named_universe():
 
 
 def test_render_results_block_reproduce_static_vs_unknown():
-    # An explicitly static-universe run logs the "static" sentinel; a legacy run (no
-    # universe_name param) is Python None -> "unknown". These must render distinctly.
-    static = render_results_block(_metrics(universe_name="static"))
+    # The mode enum is the authority: "static" => static run; absent (legacy run) => unknown.
+    # These must render distinctly and can never be confused with a real universe name.
+    static = render_results_block(_metrics(universe_mode="static", universe_name=""))
     assert "universe static" in static
-    unknown = render_results_block(_metrics(universe_name=None))
+    unknown = render_results_block(_metrics(universe_mode=None, universe_name=None))
     assert "universe unknown" in unknown
-    # A universe literally named "None" must survive as a name, not collapse to unknown.
-    named_none = render_results_block(_metrics(universe_name="None"))
+    # A PIT universe literally named "static" or "None" survives as a name (mode disambiguates).
+    named_static = render_results_block(_metrics(universe_mode="pit", universe_name="static"))
+    assert "universe `static`" in named_static
+    named_none = render_results_block(_metrics(universe_mode="pit", universe_name="None"))
     assert "universe `None`" in named_none
 
 

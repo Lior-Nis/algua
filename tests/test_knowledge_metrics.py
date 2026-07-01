@@ -54,7 +54,7 @@ def test_latest_run_metrics_carries_reproduction_params(tmp_path):
         "snapshot_id": "ds_1", "seed": "7", "config_hash": "cfg123",
         "code_hash": "code123", "dependency_hash": "dep123",
         "period_start": "2020-01-01", "period_end": "2020-12-31",
-        "timeframe": "1d", "universe_name": "liquid10",
+        "timeframe": "1d", "universe_mode": "pit", "universe_name": "liquid10",
     })
     out = latest_run_metrics("alpha", tracking_uri=uri)
     assert out is not None
@@ -64,6 +64,7 @@ def test_latest_run_metrics_carries_reproduction_params(tmp_path):
     assert out["period_start"] == "2020-01-01"
     assert out["period_end"] == "2020-12-31"
     assert out["timeframe"] == "1d"
+    assert out["universe_mode"] == "pit"
     assert out["universe_name"] == "liquid10"
 
 
@@ -76,5 +77,6 @@ def test_latest_run_metrics_absent_reproduction_params_are_none(tmp_path):
     out = latest_run_metrics("alpha", tracking_uri=uri)
     assert out is not None
     assert out["config_hash"] is None
+    assert out["universe_mode"] is None
     assert out["universe_name"] is None
     assert out["period_start"] is None

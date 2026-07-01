@@ -125,10 +125,10 @@ def test_log_backtest_drops_nan_metrics(tmp_path):
     assert "n_rebalances" in runs[0].data.metrics
 
 
-def test_log_backtest_stamps_universe_name(tmp_path):
-    # #333: a named-universe run logs its universe name; a static-universe run (universe_name
-    # is None) logs the explicit "static" sentinel so the kb doc can tell them apart from a
-    # legacy run that never logged the param at all.
+def test_log_backtest_stamps_universe_mode(tmp_path):
+    # #333: a named-universe run logs universe_mode="pit" + the name; a static-universe run
+    # (universe_name is None) logs universe_mode="static". The mode enum is a controlled value
+    # that can never be confused with a real universe name.
     from mlflow.tracking import MlflowClient
 
     uri = str(tmp_path / "mlruns")
@@ -143,10 +143,11 @@ def test_log_backtest_stamps_universe_name(tmp_path):
     client = MlflowClient(tracking_uri=uri)
     named_run = client.search_runs(
         [client.get_experiment_by_name("named").experiment_id])[0]
+    assert named_run.data.params["universe_mode"] == "pit"
     assert named_run.data.params["universe_name"] == "liquid10"
     static_run = client.search_runs(
         [client.get_experiment_by_name("ew").experiment_id])[0]
-    assert static_run.data.params["universe_name"] == "static"
+    assert static_run.data.params["universe_mode"] == "static"
 
 
 def test_log_backtest_n_rebalances_is_metric_not_param(tmp_path):

@@ -58,6 +58,7 @@ def latest_run_metrics(strategy: str, *, tracking_uri: str) -> dict[str, Any] | 
         "period_start": params.get("period_start"),
         "period_end": params.get("period_end"),
         "timeframe": params.get("timeframe"),
+        "universe_mode": params.get("universe_mode"),
         "universe_name": params.get("universe_name"),
         "metrics": filtered_metrics,
     }

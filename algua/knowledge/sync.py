@@ -114,15 +114,17 @@ def _reproduce_lines(metrics: dict[str, Any]) -> list[str]:
         val = _norm(metrics.get(key))
         return f"`{val}`" if val is not None else "—"
 
-    # Universe from the RAW value: absent key (None) => unknown; "static" sentinel => static;
-    # any other value (including a universe literally named "None") => that literal name.
-    raw_universe = metrics.get("universe_name")
-    if raw_universe is None:
+    # Universe from the mode enum (the authority — never collides with a real name):
+    # absent key => legacy run => unknown; "static" => static-universe run; "pit" => show the
+    # literal name (raw, NOT via _norm — a universe may legitimately be named "None").
+    mode = metrics.get("universe_mode")
+    if mode is None:
         universe = "unknown"
-    elif raw_universe == "static":
+    elif mode == "static":
         universe = "static"
-    else:
-        universe = f"`{raw_universe}`"
+    else:  # "pit"
+        name = metrics.get("universe_name")
+        universe = f"`{name}`" if name else "unknown"
     return [
         f"Reproduce — universe {universe} · period {cell('period_start')}→{cell('period_end')}",
         (

@@ -58,16 +58,21 @@ def _numeric_metrics(d: dict[str, Any]) -> dict[str, float]:
     return {k: float(v) for k, v in d.items() if _is_finite_number(v)}
 
 
-def _universe_param(universe_name: str | None) -> str:
-    """MLflow param value for a run's PIT universe (#333).
+def _universe_params(universe_name: str | None) -> dict[str, str]:
+    """PIT-universe provenance params for a run (#333): a mode enum plus the name.
 
-    A named run logs its universe name; a static-universe run (``universe_name is None``)
-    logs the literal ``"static"`` sentinel — never absent — so the knowledge-doc RESULTS
-    block can tell an explicitly-static run apart from a legacy run that predates this stamp
-    (which has no ``universe_name`` param at all). Together with ``snapshot_id`` and the
-    period this is the canonical resolver key for point-in-time membership (the same key
-    ``research promote --universe NAME --start --end`` reproduces from)."""
-    return universe_name if universe_name is not None else "static"
+    ``universe_mode`` is the authority — ``"pit"`` for a named universe, ``"static"`` when
+    ``universe_name is None``. It is a controlled value we own, so (unlike an in-band name
+    sentinel) it can never collide with a real universe that happens to be named ``"static"``
+    or ``"None"``. ``universe_name`` carries the literal name for a PIT run and is empty in
+    static mode. A run logged before #333 has NEITHER key, so the reader renders "unknown".
+
+    Together with ``snapshot_id`` and the period, ``universe_name`` is the canonical resolver
+    key for point-in-time membership (the same key ``research promote --universe NAME --start
+    --end`` reproduces from)."""
+    if universe_name is None:
+        return {"universe_mode": "static", "universe_name": ""}
+    return {"universe_mode": "pit", "universe_name": universe_name}
 
 
 def _stamp_params(result: Any) -> dict[str, Any]:
@@ -80,7 +85,7 @@ def _stamp_params(result: Any) -> dict[str, Any]:
         "timeframe": result.timeframe,
         "code_hash": result.code_hash,
         "dependency_hash": result.dependency_hash,
-        "universe_name": _universe_param(result.universe_name),
+        **_universe_params(result.universe_name),
     }
 
 
@@ -159,7 +164,7 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
             "period_start": result.period["start"], "period_end": result.period["end"],
             "timeframe": result.timeframe, "code_hash": result.code_hash,
             "dependency_hash": result.dependency_hash,
-            "universe_name": _universe_param(result.universe_name),
+            **_universe_params(result.universe_name),
         })
         if result.best is not None:
             _best_score = result.best["score"]
@@ -179,7 +184,7 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                     "timeframe": result.timeframe, "windows": result.windows,
                     "holdout_frac": result.holdout_frac, "code_hash": result.code_hash,
                     "dependency_hash": result.dependency_hash,
-                    "universe_name": _universe_param(result.universe_name),
+                    **_universe_params(result.universe_name),
                 })
                 _entry_score = entry["score"]
                 _score_metric: dict[str, float] = (
