@@ -1398,7 +1398,8 @@ def test_fdr_gate_discovery_increments_test_index_and_replenishes(repo):
         recorded_calls.append((t, list(taus)))
         return 0.5
     o2 = repo.record_gate_with_fdr_and_maybe_promote(
-        rec2, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
+        gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=level_fn_probe, actor=Actor.AGENT)
     assert o2.fdr_test_index == 2
     # level_fn received t=2 and taus=[1] (the first discovery)
@@ -1469,7 +1470,8 @@ def test_fdr_gate_concurrent_distinct_t_values(tmp_path):
         rec = r.get(name)
         try:
             outcome = r.record_gate_with_fdr_and_maybe_promote(
-                rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=False), p_value=0.03,
+                rec, funnel=_EMPTY_FUNNEL._replace(strategy_name=name),
+                gate_row=_make_gate_row(passed=False), p_value=0.03,
                 level_fn=_level_reject, actor=Actor.AGENT)
         except BaseException as exc:  # noqa: BLE001
             with lock:
@@ -1542,6 +1544,21 @@ def test_funnel_cas_aborts_on_search_trials_insert(repo):
     assert repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
     assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
     assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_funnel_cas_aborts_on_wrong_strategy_snapshot(repo):
+    # The store method is the safety boundary: a snapshot whose strategy_name does not match the
+    # record being promoted must fail closed BEFORE the CAS re-reads (else the CAS would validate a
+    # DIFFERENT strategy's inputs and the promoted strategy's own drift could escape). #339.
+    rec = _at_backtested(repo, "s")
+    _at_backtested(repo, "s2")
+    with pytest.raises(FunnelDriftError, match="but the promotion is for"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
+            gate_row=_make_gate_row(passed=True), p_value=None,
+            level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
+    assert repo.get("s").stage is Stage.BACKTESTED
+    assert repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
 
 
 def test_funnel_cas_aborts_on_windowed_breadth_drift(repo):
@@ -1651,7 +1668,8 @@ def test_fdr_gate_agent_fail_and_human_pass_not_consumed(repo):
     # Human passing row → also consumed=0 (human rows are never consumable tokens)
     rec2 = _at_backtested(repo, "s2")
     repo.record_gate_with_fdr_and_maybe_promote(
-        rec2, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True),
+        rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
+        gate_row=_make_gate_row(passed=True),
         p_value=0.01, level_fn=_level_accept, actor=Actor.HUMAN,
     )
     row_human = repo._conn.execute(

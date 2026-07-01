@@ -540,7 +540,8 @@ class SqliteStrategyRepository:
         row has a NULL/NaN/inf/negative count|mean|var. NULL rows are NEVER silently skipped."""
         rows = self._conn.execute(
             "SELECT trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
-            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name=?",
+            " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name=?"
+            " ORDER BY id",  # deterministic row order -> bit-identical pooled var (#339 CAS)
             (strategy_name,),
         ).fetchall()
         if not rows:
@@ -811,7 +812,8 @@ class SqliteStrategyRepository:
         rows = self._conn.execute(
             "SELECT strategy_name AS name, trial_sharpe_count AS n, trial_sharpe_mean AS mean,"
             " trial_sharpe_var_ann AS var FROM search_trials WHERE strategy_name IN"
-            " (SELECT DISTINCT strategy_name FROM search_trials WHERE created_at >= ?)",
+            " (SELECT DISTINCT strategy_name FROM search_trials WHERE created_at >= ?)"
+            " ORDER BY strategy_name, id",  # deterministic pooling order -> stable floor (#339 CAS)
             (cutoff,),
         ).fetchall()
         by_strategy: dict[str, list] = {}
@@ -1210,6 +1212,16 @@ class SqliteStrategyRepository:
             raise RuntimeError(
                 "record_gate_with_fdr_and_maybe_promote must be called at top level,"
                 " not inside an open transaction")
+
+        # #339 — bind the funnel snapshot to the strategy being promoted. The in-lock CAS re-reads
+        # the funnel-wide state keyed by funnel.strategy_name; if that name did not match rec (a
+        # caller passing the wrong snapshot), the CAS would validate a DIFFERENT strategy's inputs
+        # and the promoted strategy's own drift could escape. Fail closed on mismatch — the store
+        # method is the safety boundary, not just the run_gate caller.
+        if funnel.strategy_name != rec.name:
+            raise FunnelDriftError(
+                f"funnel snapshot is for {funnel.strategy_name!r} but the promotion is for "
+                f"{rec.name!r}; the funnel CAS must verify the strategy being promoted")
 
         provisional_passed = bool(gate_row.get("passed"))
         fdr_binding = p_value is not None and math.isfinite(p_value)
