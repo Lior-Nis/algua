@@ -18,6 +18,7 @@ from algua.knowledge.experience import write_experience_note
 from algua.registry.negative_results import (
     list_negative_results,
     record_negative_result,
+    sanitize_record,
 )
 
 log_app = typer.Typer(
@@ -56,9 +57,10 @@ def record(
     try:
         path = write_experience_note(
             get_settings(),
-            {"strategy_name": strategy, "kind": kind, "verdict": verdict, "actor": actor,
-             "reason": reason, "hypothesis": hypothesis, "tags": tags, "source": "manual",
-             "created_at": created_at, "params": None, "gate_evaluation_id": None},
+            sanitize_record(
+                {"strategy_name": strategy, "kind": kind, "verdict": verdict, "actor": actor,
+                 "reason": reason, "hypothesis": hypothesis, "tags": tags, "source": "manual",
+                 "created_at": created_at, "params": None, "gate_evaluation_id": None}),
             record_id=rid)
         note = {"status": "written", "path": str(path), "error": None}
     except Exception as e:  # noqa: BLE001 - the note is a best-effort secondary surface

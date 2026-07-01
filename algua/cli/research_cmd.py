@@ -27,7 +27,11 @@ from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.knowledge.experience import write_experience_note
-from algua.registry.negative_results import build_gate_fail_record, record_negative_result
+from algua.registry.negative_results import (
+    build_gate_fail_record,
+    record_negative_result,
+    sanitize_record,
+)
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.store import SqliteStrategyRepository
 from algua.research import family_audit
@@ -75,10 +79,9 @@ def capture_gate_fail_experience(
         return {"ledger": {"status": "error", "id": None, "error": f"{type(e).__name__}: {e}"},
                 "note": note}
     try:
-        path = write_experience_note(
-            get_settings(),
-            {**record, "created_at": created_at, "gate_evaluation_id": gate_eval_id},
-            record_id=rid)
+        note_record = sanitize_record(
+            {**record, "created_at": created_at, "gate_evaluation_id": gate_eval_id})
+        path = write_experience_note(get_settings(), note_record, record_id=rid)
         note = {"status": "written", "path": str(path), "error": None}
     except Exception as e:  # noqa: BLE001 - the vault note is a best-effort secondary surface
         note = {"status": "error", "path": None, "error": f"{type(e).__name__}: {e}"}

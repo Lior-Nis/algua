@@ -31,6 +31,8 @@ VALID_SOURCES = frozenset({"auto:research_promote", "manual"})
 VALID_ACTORS = frozenset({"agent", "human", "system"})
 
 _MAX_TEXT = 8000  # cap any single free-text field so a pasted blob can't bloat the ledger row
+_MAX_PARAM_DEPTH = 8  # cap nested-structure depth in params so a pathological payload is bounded
+_MAX_PARAMS_JSON = 64000  # cap the serialized params_json so one row can't bloat the ledger/vault
 
 # Secret-shaped substrings to mask out of operator-supplied free text before it is persisted.
 # Best-effort defense-in-depth: the ledger should never become an exfiltration surface for a
@@ -49,11 +51,9 @@ _REDACTIONS: tuple[re.Pattern[str], ...] = (
 _REDACTED = "[REDACTED]"
 
 
-def _redact(text: str | None) -> str | None:
-    """Mask secret-shaped substrings and cap length. None passes through."""
-    if text is None:
-        return None
-    out = text
+def _scrub_text(s: str) -> str:
+    """Mask secret-shaped substrings and cap length in a single string leaf."""
+    out = s
     for pat in _REDACTIONS:
         out = pat.sub(_REDACTED, out)
     if len(out) > _MAX_TEXT:
@@ -61,25 +61,53 @@ def _redact(text: str | None) -> str | None:
     return out
 
 
-def _sanitize(obj: Any) -> Any:
-    """Recursively replace non-finite floats (NaN/Inf) with None so the payload is valid JSON.
+def _redact(text: str | None) -> str | None:
+    """Mask secret-shaped substrings and cap length. None passes through."""
+    return None if text is None else _scrub_text(text)
 
-    Mirrors how ``GateDecision.to_dict`` nulls non-finite metrics; applied here as a backstop for
-    the raw holdout/stability dicts we fold into ``params``.
+
+def _scrub(obj: Any, depth: int = 0) -> Any:
+    """Recursively scrub a params payload: redact + cap string leaves (so a key/token pasted
+    into a nested value can't leak into the durable log), null non-finite floats (valid JSON),
+    and bound nesting depth. Mirrors ``GateDecision.to_dict`` float-nulling as a backstop.
     """
+    if depth > _MAX_PARAM_DEPTH:
+        return "[REDACTED:max-depth]"
+    if isinstance(obj, str):
+        return _scrub_text(obj)
     if isinstance(obj, float):
         return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
     if isinstance(obj, dict):
-        return {k: _sanitize(v) for k, v in obj.items()}
+        return {k: _scrub(v, depth + 1) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_sanitize(v) for v in obj]
+        return [_scrub(v, depth + 1) for v in obj]
     return obj
 
 
 def _dump_params(params: dict[str, Any] | None) -> str | None:
     if params is None:
         return None
-    return json.dumps(_sanitize(params), allow_nan=False, sort_keys=True, default=str)
+    js = json.dumps(_scrub(params), allow_nan=False, sort_keys=True, default=str)
+    if len(js) > _MAX_PARAMS_JSON:
+        # Bound the durable payload; keep it valid JSON so list_negative_results still parses.
+        js = json.dumps({"_truncated": True, "_original_bytes": len(js)})
+    return js
+
+
+def sanitize_record(fields: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of a record field-dict with free text redacted and ``params`` scrubbed.
+
+    The SINGLE sanitizer shared by both durable surfaces — the ledger INSERT and the vault
+    experience note — so a secret masked from one can never leak through the other. Non-text
+    fields (kind/verdict/actor/source/ids/created_at) pass through untouched.
+    """
+    out = dict(fields)
+    for k in ("reason", "hypothesis", "tags"):
+        if k in out:
+            out[k] = _redact(out[k])
+    if out.get("params") is not None:
+        out["params"] = _scrub(out["params"])
+    return out
 
 
 def record_negative_result(
@@ -116,6 +144,12 @@ def record_negative_result(
         raise ValueError("verdict must be <= 64 chars")
     if not reason or not reason.strip():
         raise ValueError("reason must be non-empty")
+    # Top-level-only: this advisory write owns its transaction (`with conn:` below). Calling it
+    # inside a caller's open transaction would let an INSERT failure here roll back the caller's
+    # real work — the opposite of "best-effort, never breaks the thing being logged".
+    if conn.in_transaction:
+        raise RuntimeError(
+            "record_negative_result must run at top level, not inside an open transaction")
 
     row = (
         created_at or datetime.now(UTC).isoformat(),
