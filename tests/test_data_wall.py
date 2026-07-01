@@ -71,19 +71,52 @@ def _resolve_relative(package: str, level: int, module: str | None) -> str | Non
     return base
 
 
-def _dynamic_import_literal(node: ast.Call) -> str | None:
-    """Return the literal first-arg module string of an importlib.import_module / __import__
-    call, or None when the call isn't such a form or its arg isn't a string literal."""
+def _dynamic_func_name(node: ast.Call) -> str | None:
+    """The called name if this is an importlib.import_module / __import__ call, else None."""
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else (
         func.id if isinstance(func, ast.Name) else None
     )
-    if name not in _DYNAMIC_IMPORT_FUNCS or not node.args:
-        return None
-    first = node.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value
+    return name if name in _DYNAMIC_IMPORT_FUNCS else None
+
+
+def _import_module_anchor(node: ast.Call, file_package: str) -> str | None:
+    """The package `importlib.import_module(name, package=...)` resolves a RELATIVE name
+    against: a literal package arg verbatim, or the file's package when the arg is the
+    `__package__` builtin. None when absent/non-literal (a relative name is then unresolvable
+    and raises at runtime — nothing to flag)."""
+    arg = node.args[1] if len(node.args) >= 2 else next(
+        (k.value for k in node.keywords if k.arg == "package"), None
+    )
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.Name) and arg.id == "__package__":
+        return file_package
     return None
+
+
+def _call_reaches_data(node: ast.Call, package: str) -> bool:
+    """True iff a literal-arg importlib.import_module / __import__ call targets algua.data.
+
+    Absolute literal names are checked directly; a RELATIVE name is resolved per importlib
+    semantics (import_module only — against its `package` arg / `__package__`)."""
+    fname = _dynamic_func_name(node)
+    if fname is None or not node.args:
+        return False
+    first = node.args[0]
+    if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+        return False
+    name = first.value
+    if not name.startswith("."):
+        return _is_data_target(name)
+    if fname != "import_module":  # __import__ uses a numeric `level`, not a dotted-name prefix
+        return False
+    anchor = _import_module_anchor(node, package)
+    if anchor is None:
+        return False
+    level = len(name) - len(name.lstrip("."))
+    resolved = _resolve_relative(anchor, level, name.lstrip(".") or None)
+    return resolved is not None and _is_data_target(resolved)
 
 
 def _node_reaches_data(node: ast.AST, package: str) -> bool:
@@ -103,16 +136,7 @@ def _node_reaches_data(node: ast.AST, package: str) -> bool:
     if isinstance(node, ast.Import):
         return any(_is_data_target(a.name) for a in node.names)
     if isinstance(node, ast.Call):
-        lit = _dynamic_import_literal(node)
-        if lit is None:
-            return False
-        if lit.startswith("."):
-            # relative dynamic name, e.g. import_module("..data.store", __package__) — resolve
-            # against the file's package the same way a `from` import would.
-            level = len(lit) - len(lit.lstrip("."))
-            resolved = _resolve_relative(package, level, lit.lstrip(".") or None)
-            return resolved is not None and _is_data_target(resolved)
-        return _is_data_target(lit)
+        return _call_reaches_data(node, package)
     return False
 
 
@@ -151,14 +175,17 @@ def test_scanner_flags_each_data_reference_shape():
         "from .. import data",               # relative bare-name
         "import importlib; importlib.import_module('algua.data.store')",
         "__import__('algua.data')",
-        # relative dynamic import resolves against the anchor package (algua.backtest)
+        # relative dynamic import resolves against its package anchor
         "import importlib; importlib.import_module('..data.store', __package__)",
+        "import importlib; importlib.import_module('.store', 'algua.data')",
     ]
     should_not_flag = [
         "import algua.database",             # sibling, not the data lane
         "from algua.contracts import types",
         "import importlib; importlib.import_module(f'{pkg}.{name}')",  # non-literal
         "x = 'algua.data'  # a bare string, e.g. in a docstring or list",
+        # relative dynamic name with NO package anchor raises at runtime -> unresolvable
+        "import importlib; importlib.import_module('..data.store')",
     ]
     # Anchor synthetic modules in a two-deep package so `from ..data ...` resolves to algua.data.
     package = "algua.backtest"
