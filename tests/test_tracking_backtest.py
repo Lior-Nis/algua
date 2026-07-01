@@ -125,6 +125,30 @@ def test_log_backtest_drops_nan_metrics(tmp_path):
     assert "n_rebalances" in runs[0].data.metrics
 
 
+def test_log_backtest_stamps_universe_name(tmp_path):
+    # #333: a named-universe run logs its universe name; a static-universe run (universe_name
+    # is None) logs the explicit "static" sentinel so the kb doc can tell them apart from a
+    # legacy run that never logged the param at all.
+    from mlflow.tracking import MlflowClient
+
+    uri = str(tmp_path / "mlruns")
+    named = BacktestResult(
+        strategy="named", metrics={"sharpe": 1.0}, config_hash="c", data_source="Synthetic",
+        timeframe="1d", period={"start": "2022-01-01", "end": "2022-12-31"}, seed=0,
+        snapshot_id=None, universe_name="liquid10",
+    )
+    log_backtest(named, {}, tracking_uri=uri)
+    log_backtest(_result(), {}, tracking_uri=uri)  # _result() is static (universe_name=None)
+
+    client = MlflowClient(tracking_uri=uri)
+    named_run = client.search_runs(
+        [client.get_experiment_by_name("named").experiment_id])[0]
+    assert named_run.data.params["universe_name"] == "liquid10"
+    static_run = client.search_runs(
+        [client.get_experiment_by_name("ew").experiment_id])[0]
+    assert static_run.data.params["universe_name"] == "static"
+
+
 def test_log_backtest_n_rebalances_is_metric_not_param(tmp_path):
     """n_rebalances comes from metrics dict and must land in run metrics, not params."""
     from mlflow.tracking import MlflowClient
