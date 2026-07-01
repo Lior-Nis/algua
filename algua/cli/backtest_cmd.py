@@ -19,6 +19,7 @@ from algua.cli._common import (
     resolve_delisting_inputs,
     resolve_eval_inputs,
     resolve_universe_inputs,
+    sync_kb_doc,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -166,6 +167,8 @@ def run(
                 f"ret={result.metrics['total_return']:.2%}"
             )
             transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason)
+        # Re-sync the kb doc to the new `backtested` stage (#331): best-effort, out-of-transaction.
+        sync_kb_doc(name)
 
     # Persist return series for the return-correlation clustering axis (#222, Task 7).
     # Only persists for registered strategies; silently skips otherwise.

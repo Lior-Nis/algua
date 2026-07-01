@@ -5,7 +5,7 @@ from pathlib import Path
 
 import typer
 
-from algua.cli._common import ok, registry_conn
+from algua.cli._common import ok, registry_conn, sync_kb_doc
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -170,6 +170,10 @@ def transition(
             # _default_approval_verifier/has_valid_approval still back programmatic (non-CLI)
             # transition calls, so the approvals mechanism is not fully dead.
             record_approval(repo, name, approver["id"])
+    # Re-sync the kb doc to the new stage (#331): best-effort, out-of-transaction — the
+    # `with registry_conn()` block above has already committed and closed. The go-live CHALLENGE
+    # path returns earlier (no stage change), so only real stage transitions reach here.
+    sync_kb_doc(rec.name)
     emit(ok({"name": rec.name, "stage": rec.stage.value}))
 
 
