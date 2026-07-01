@@ -58,6 +58,7 @@ MAX_FALSE_PROMOTE_RATE = 0.0
 MAX_CRASH_RATE = 0.0
 
 ScenarioKind = Literal["promote", "discard", "ambiguous"]
+VALID_KINDS: frozenset[str] = frozenset(("promote", "discard", "ambiguous"))
 
 
 @dataclass(frozen=True)
@@ -269,10 +270,11 @@ def run_one(
             "min_window_sharpe": float(stab.get("min_sharpe", 0.0)),
         }
         outcome = _classify(scenario.kind, actual)
-        reason = (
-            f"{outcome}: holdout_sharpe={stats['holdout_sharpe']:.3f} "
-            f"vs bar; failed={failed or 'none'}"
-        )
+        # Format the reason from the CLEANED sharpe so a non-finite metric cannot leak a
+        # "nan"/"inf" token into the (otherwise JSON-clean) report string.
+        sharpe_clean = _clean(stats["holdout_sharpe"])
+        sharpe_str = f"{sharpe_clean:.3f}" if sharpe_clean is not None else "n/a"
+        reason = f"{outcome}: holdout_sharpe={sharpe_str} vs bar; failed={failed or 'none'}"
         return RunTrace(
             scenario=scenario.name, kind=scenario.kind, seed=seed, actual=actual,
             outcome=outcome, failed_checks=failed, stats=stats, reason=reason,
@@ -288,6 +290,14 @@ def run_one(
 def run_scenario(
     scenario: Scenario, k: int = DEFAULT_K, *, strategy: LoadedStrategy | None = None
 ) -> ScenarioResult:
+    # Fail closed on an unknown kind: a mistyped kind would otherwise be silently treated as
+    # ``ambiguous`` (see ``_classify``) and vanish from the ``discard``/``promote`` safety
+    # denominators in ``run_eval`` — hiding a catastrophic false-promote. Reject it loudly.
+    if scenario.kind not in VALID_KINDS:
+        raise ValueError(
+            f"scenario {scenario.name!r} has unknown kind {scenario.kind!r}; "
+            f"expected one of {sorted(VALID_KINDS)}"
+        )
     traces = [run_one(scenario, seed, strategy=strategy) for seed in range(k)]
     n_promote = sum(1 for t in traces if t.actual == "promote")
     n_discard = sum(1 for t in traces if t.actual == "discard")

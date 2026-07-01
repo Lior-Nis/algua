@@ -39,8 +39,12 @@ def test_discard_scenarios_never_wrongly_promote(name):
 
 def test_false_promote_rate_within_regression_guard():
     """The load-bearing safety assertion: the core gate never promotes a no-edge/losing book on
-    the fixed, well-separated bank. A deterministic CI guard, not a statistical bound."""
-    report = eh.run_eval(k=K)
+    the fixed, well-separated bank. A deterministic CI guard, not a statistical bound.
+
+    Run at the harness DEFAULT_K (not the fast K) so the CI guard covers exactly the seed set the
+    default `algua eval gate` run uses — otherwise a regression that only false-promotes on the
+    higher seeds (>= K) would pass CI while failing the real run."""
+    report = eh.run_eval()  # k defaults to eh.DEFAULT_K
     assert report.false_promote_rate <= eh.MAX_FALSE_PROMOTE_RATE
     assert report.crash_rate <= eh.MAX_CRASH_RATE  # crashes cannot masquerade as safety
     assert report.pass_pow_k == 1.0  # every labelled scenario all-seed-correct
@@ -75,6 +79,14 @@ def test_mislabeled_promote_on_no_edge_is_wrongly_discarded():
     report = eh.run_eval(scenarios=(mis,), k=K)
     assert report.false_discard_rate == 1.0
     assert report.pass_pow_k == 0.0
+
+
+def test_unknown_kind_fails_closed():
+    """A scenario with a mistyped kind must raise, not silently vanish from the safety
+    denominators (which count only exact 'discard'/'promote')."""
+    bad = eh.Scenario("typo", "discrd", drift=0.0, vol=0.02)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown kind"):
+        eh.run_scenario(bad, K)
 
 
 def test_crashed_run_is_recorded_and_sweep_completes():
