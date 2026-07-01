@@ -59,6 +59,32 @@ MIN_REGIME_VOL = 1e-9
 MIN_REGIME_OVERLAP_BARS = 63   # min holdout dates with a valid trailing market-vol for the check
 VOL_ROLLING_WINDOW = 21        # trailing bars for the benchmark realized-vol estimate
 
+# Market-beta / idiosyncratic-alpha screen (#328). Protected — relaxing weakens the gate.
+# All gate Sharpes are RAW (risk_free=0, no benchmark subtraction), so a persistently net-long or
+# LEVERED-market-beta book in a bull market posts a HIGH raw Sharpe with ~ZERO true alpha and is
+# promoted. This tighten-only AND-check regresses the strategy's OOS holdout returns on the SAME
+# PIT equal-weighted cross-sectional `market_returns` benchmark the regime check already reuses
+# (single-factor CAPM: r_strat = alpha + beta*r_mkt + eps) and requires the ANNUALIZED
+# idiosyncratic APPRAISAL RATIO (residual alpha / residual vol) to clear a floor. A pure/levered
+# beta book has alpha~=0 and residual~=0 -> appraisal~=0 -> FAILS; a market-neutral genuine-alpha
+# book has beta~=0 and appraisal ~= its raw Sharpe -> PASSES. Beta is estimated ONLY over the
+# date-joined holdout window (no look-ahead). SCOPE: this nets out MARKET beta only, NOT style
+# factors (size/value/momentum) — the platform has no factor-return series (deferred follow-up).
+IR_MIN_OVERLAP_BARS = MIN_HOLDOUT_OBSERVATIONS   # 63; min date-joined holdout bars to bind
+# Pragmatic annualized idiosyncratic-IR floor, NOT a significance test (statistical significance +
+# multiple-testing are owned by the orthogonal DSR + Sharpe-haircut AND-checks). 0.3 matches the
+# platform's existing 0.3 Sharpe-floor family (the forward gate uses max(0.5*holdout, 0.3)); it sits
+# BELOW the 0.5 raw holdout-Sharpe bar so a genuine low-beta alpha still clears it, but far above
+# the ~0 idiosyncratic appraisal of pure/levered market beta. Over a 63-bar holdout the estimate
+# carries material sampling error — a structural beta-dominance screen, not an alpha significance
+# test. Protected — lowering it weakens the gate.
+IR_MIN_APPRAISAL_RATIO = 0.3
+# Annualized-vol floor for BOTH the market series (beta denominator) and the residual (appraisal
+# denominator). Identical to MIN_REGIME_VOL: ~10 orders of magnitude below any real strategy vol, so
+# it only trips on a numerically-degenerate (near-constant market, or perfectly-explained residual)
+# series — which then fails the check CLOSED (an armed-but-unusable regression is not a pass).
+IR_MIN_VOL = MIN_REGIME_VOL
+
 # Dominance-audit predeclaration (#221, Phase 3 Slice 4). CODEOWNERS-protected constants — these
 # thresholds are committed HERE (before any audit data accumulates) so the Slice 5
 # haircut-retirement audit cannot select them post-hoc. The retirement audit (Slice 5) filters
@@ -272,6 +298,116 @@ def regime_robustness_check(
         n_attempted=n_attempted,
         n_surviving=n_surviving,
         per_regime_sharpes=per_regime_sharpes,
+    )
+
+
+class InformationRatioResult(NamedTuple):
+    """Outcome of the single-factor CAPM idiosyncratic-alpha screen (#328).
+
+    ``degenerate`` True means the regression was armed (enough overlap) but UNUSABLE (constant
+    market, zero residual, or non-finite) — the caller fails the check CLOSED. Numeric fields are
+    None when unavailable/degenerate; ``market_beta`` / ``alpha_ann`` are still populated when
+    computable (audit visibility) even if a later stage is degenerate.
+    """
+
+    overlap_n: int
+    market_beta: float | None
+    alpha_ann: float | None          # annualized intercept (residual alpha)
+    residual_vol_ann: float | None   # annualized idiosyncratic (residual) volatility
+    appraisal_ratio: float | None    # annualized alpha_ann / residual_vol_ann
+    degenerate: bool
+
+
+def information_ratio(
+    strategy_returns: list[float],
+    strategy_dates: list[str],
+    market_returns: list[float],
+    market_dates: list[str],
+) -> InformationRatioResult:
+    """Single-factor CAPM idiosyncratic appraisal ratio of the strategy vs the market benchmark.
+
+    Inner-joins the two series by ISO date (PIT: both are period returns keyed by the SAME trading
+    calendar; the strategy leg is the OOS holdout and the market leg is the as-of-member-masked PIT
+    benchmark, so beta is estimated ONLY over the joined holdout window — no look-ahead), then OLS-
+    regresses strategy on market:  ``r_strat_t = alpha + beta * r_mkt_t + eps_t``.
+
+        market_beta     = cov(strat, mkt) / var(mkt)                    (systematic exposure)
+        alpha_pp        = mean(strat) - beta * mean(mkt)                (per-period intercept)
+        resid_var_pp    = SSR / (n - 2)                                 (OLS residual df, 2 params)
+        appraisal_ratio = (alpha_pp / sqrt(resid_var_pp)) * sqrt(ANN)   (annualized; = alpha_ann /
+                                                                         residual_vol_ann)
+
+    Both legs are RAW returns (risk_free=0, the platform-wide convention #44) with no modeled cash/
+    carry leg, so the intercept is idiosyncratic alpha, not risk-free yield.
+
+    ``degenerate=True`` (caller fails the check closed) when the regression is UNUSABLE: fewer than
+    3 joined bars, a (near-)constant market (annualized market vol <= IR_MIN_VOL — beta undefined),
+    a (near-)zero residual (annualized residual vol <= IR_MIN_VOL — a perfectly-explained series
+    carries no measurable idiosyncratic alpha, appraisal explodes), or any non-finite intermediate.
+    Both vol floors are ANNUALIZED and identical to MIN_REGIME_VOL — far below any real strategy
+    vol, so only numerically-degenerate series trip them.
+
+    ``overlap_n`` is the number of date-joined bars (0 on empty join). Pure function; no I/O.
+
+    RAISES ``ValueError`` on a CORRUPT armed input — a ragged ``(returns, dates)`` leg or duplicate
+    dates within a leg. Upstream always pairs returns/dates equal-length with unique trading-day
+    dates (walk_forward; promotion.py asserts it), so this is a regression backstop: silently
+    truncating (``zip`` short) or collapsing duplicates (``dict``) could shrink ``overlap_n`` below
+    the bind floor and DOWNGRADE a binding check to a silent "omit" — the opposite of fail-closed.
+    """
+    # Ragged (returns, dates) -> fail LOUD, never truncate to a smaller (silently-omitted) overlap.
+    strat_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=True))
+    mkt_map: dict[str, float] = dict(zip(market_dates, market_returns, strict=True))
+    # Duplicate dates within a leg are dict-collapsed above (trading-day dates are unique by
+    # construction); detect the collapse and fail loud rather than join on a silent subset.
+    if len(strat_map) != len(strategy_dates) or len(mkt_map) != len(market_dates):
+        raise ValueError(
+            "information_ratio: duplicate dates in strategy/market series (corrupt gate input)"
+        )
+    joined_dates = sorted(set(strat_map) & set(mkt_map))
+    overlap_n = len(joined_dates)
+    # Fewer than 3 joined bars cannot fit a 2-parameter OLS (n - 2 <= 0). Degenerate only when the
+    # caller would otherwise bind; the caller's IR_MIN_OVERLAP_BARS (63) floor makes this defensive.
+    if overlap_n < 3:
+        return InformationRatioResult(overlap_n, None, None, None, None, degenerate=overlap_n > 0)
+
+    strat = np.array([strat_map[d] for d in joined_dates], dtype=float)
+    mkt = np.array([mkt_map[d] for d in joined_dates], dtype=float)
+    if not (bool(np.all(np.isfinite(strat))) and bool(np.all(np.isfinite(mkt)))):
+        return InformationRatioResult(overlap_n, None, None, None, None, degenerate=True)
+
+    n = overlap_n
+    mkt_mean = float(mkt.mean())
+    strat_mean = float(strat.mean())
+    mkt_centered = mkt - mkt_mean
+    mkt_ss = float(np.dot(mkt_centered, mkt_centered))          # sum of squares (var * (n-1))
+    mkt_var_pp = mkt_ss / (n - 1)
+    mkt_vol_ann = math.sqrt(mkt_var_pp) * math.sqrt(ANN) if mkt_var_pp > 0.0 else 0.0
+    # Constant / near-constant market -> beta is undefined -> fail closed.
+    if not math.isfinite(mkt_var_pp) or mkt_var_pp <= 0.0 or not (mkt_vol_ann > IR_MIN_VOL):
+        return InformationRatioResult(overlap_n, None, None, None, None, degenerate=True)
+
+    beta = float(np.dot(mkt_centered, strat - strat_mean) / mkt_ss)
+    alpha_pp = strat_mean - beta * mkt_mean
+    alpha_ann = alpha_pp * ANN
+    resid = strat - (alpha_pp + beta * mkt)
+    ssr = float(np.dot(resid, resid))
+    resid_var_pp = ssr / (n - 2)
+    resid_vol_ann = math.sqrt(resid_var_pp) * math.sqrt(ANN) if resid_var_pp > 0.0 else 0.0
+
+    beta_out = beta if math.isfinite(beta) else None
+    alpha_out = alpha_ann if math.isfinite(alpha_ann) else None
+    # Perfectly-explained / degenerate residual -> no measurable idiosyncratic alpha -> fail closed.
+    # Beta and alpha are still surfaced for the audit trail.
+    if not math.isfinite(resid_var_pp) or resid_var_pp <= 0.0 or not (resid_vol_ann > IR_MIN_VOL):
+        return InformationRatioResult(overlap_n, beta_out, alpha_out, None, None, degenerate=True)
+
+    appraisal = (alpha_pp / math.sqrt(resid_var_pp)) * math.sqrt(ANN)
+    if beta_out is None or alpha_out is None or not math.isfinite(appraisal):
+        return InformationRatioResult(overlap_n, beta_out, alpha_out, resid_vol_ann, None,
+                                      degenerate=True)
+    return InformationRatioResult(
+        overlap_n, beta_out, alpha_out, resid_vol_ann, float(appraisal), degenerate=False
     )
 
 
@@ -578,6 +714,18 @@ class GateDecision:
     n_regimes_surviving: int | None = None    # regimes that cleared power + vol floors
     per_regime_sharpes: list[float | None] | None = None  # per-slice Sharpe; None for dropped
     regime_robustness_binding: bool = False   # True iff the check was appended to checks
+    # Market-beta / idiosyncratic-alpha screen (#328). Populated by evaluate_gate when the check
+    # binds (holdout_returns + market_returns present, overlap >= IR_MIN_OVERLAP_BARS). When omitted
+    # (unavailable / insufficient overlap): ir_method explains why and ir_binding is False.
+    # market_beta is recorded for AUDIT ONLY — there is no hard beta cap (it would over-reject
+    # legitimate high-alpha/high-beta strategies); the gate binds on the appraisal ratio.
+    ir_method: str | None = None              # capm_appraisal | unavailable | insufficient_overlap
+    ir_binding: bool = False                  # True iff the idiosyncratic_alpha check was appended
+    ir_overlap_n: int | None = None           # date-joined holdout bars
+    market_beta: float | None = None          # OLS slope vs the market benchmark (audit only)
+    ir_alpha_ann: float | None = None         # annualized residual alpha (intercept)
+    ir_residual_vol_ann: float | None = None  # annualized idiosyncratic (residual) volatility
+    appraisal_ratio: float | None = None      # annualized alpha / residual vol (the gated value)
     # Dominance-audit shadow fields (#221 Slice 4). SHADOW/AUDIT ONLY — not in checks, not in
     # passed. Recorded on every evaluate_gate call so the Slice 5 retirement audit can accumulate
     # real-traffic statistics with pre-committed thresholds.
@@ -646,6 +794,14 @@ class GateDecision:
                 if self.per_regime_sharpes is not None else None
             ),
             "regime_robustness_binding": self.regime_robustness_binding,
+            # Market-beta / idiosyncratic-alpha screen (#328)
+            "ir_method": self.ir_method,
+            "ir_binding": self.ir_binding,
+            "ir_overlap_n": self.ir_overlap_n,
+            "market_beta": _f(self.market_beta),
+            "ir_alpha_ann": _f(self.ir_alpha_ann),
+            "ir_residual_vol_ann": _f(self.ir_residual_vol_ann),
+            "appraisal_ratio": _f(self.appraisal_ratio),
             # Dominance-audit shadow fields (#221 Slice 4)
             "haircut_would_have_blocked": self.haircut_would_have_blocked,
             "phase3_component_mask": self.phase3_component_mask,
@@ -844,6 +1000,48 @@ def evaluate_gate(
             n_regimes_surviving = res.n_surviving
             per_regime_sharpes_out = res.per_regime_sharpes
 
+    # Market-beta / idiosyncratic-alpha screen (#328): a tighten-only AND-check appended ONLY when
+    # holdout_returns + market_returns are present AND the date-join overlap >= IR_MIN_OVERLAP_BARS.
+    # Omit-not-fail otherwise (byte-identical to today for market-less runs) — consistent with the
+    # regime sibling. Armed-but-degenerate (constant mkt, zero residual, non-finite) fails closed.
+    # Binding is INDEPENDENT of dsr_binding and regime binding — purely a beta-attribution screen.
+    ir_method: str | None = None
+    ir_binding = False
+    ir_overlap_n: int | None = None
+    market_beta: float | None = None
+    ir_alpha_ann: float | None = None
+    ir_residual_vol_ann: float | None = None
+    appraisal_ratio: float | None = None
+    if holdout_ret_vec is None or market_returns is None:
+        ir_method = "unavailable"
+    else:
+        ir_strat_rets, ir_strat_dates = holdout_ret_vec
+        ir_mkt_rets, ir_mkt_dates = market_returns
+        ir = information_ratio(ir_strat_rets, ir_strat_dates, ir_mkt_rets, ir_mkt_dates)
+        ir_overlap_n = ir.overlap_n
+        if ir.overlap_n < IR_MIN_OVERLAP_BARS:
+            ir_method = "insufficient_overlap"
+        else:
+            market_beta = ir.market_beta
+            ir_alpha_ann = ir.alpha_ann
+            ir_residual_vol_ann = ir.residual_vol_ann
+            appraisal_ratio = ir.appraisal_ratio
+            ir_passed = (
+                (not ir.degenerate)
+                and appraisal_ratio is not None
+                and appraisal_ratio >= IR_MIN_APPRAISAL_RATIO
+            )
+            ir_value = (
+                appraisal_ratio
+                if (appraisal_ratio is not None and math.isfinite(appraisal_ratio))
+                else None
+            )
+            checks.append({"name": "idiosyncratic_alpha", "value": ir_value,
+                           "threshold": IR_MIN_APPRAISAL_RATIO, "op": ">=",
+                           "passed": bool(ir_passed)})
+            ir_method = "capm_appraisal"
+            ir_binding = True
+
     # Dominance-audit shadow field (#221 Slice 4): did the haircut alone block an otherwise-passing
     # holdout? True iff the holdout Sharpe clears the BASE bar but fails the haircut-inflated bar.
     # The haircut is still BINDING (this is shadow recording only). When the effective bar is +inf
@@ -887,6 +1085,13 @@ def evaluate_gate(
         n_regimes_surviving=n_regimes_surviving,
         per_regime_sharpes=per_regime_sharpes_out,
         regime_robustness_binding=regime_robustness_binding,
+        ir_method=ir_method,
+        ir_binding=ir_binding,
+        ir_overlap_n=ir_overlap_n,
+        market_beta=market_beta,
+        ir_alpha_ann=ir_alpha_ann,
+        ir_residual_vol_ann=ir_residual_vol_ann,
+        appraisal_ratio=appraisal_ratio,
         haircut_would_have_blocked=haircut_would_have_blocked,
         phase3_component_mask=PHASE3_COMPONENT_MASK,
     )
