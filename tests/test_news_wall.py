@@ -1,4 +1,3 @@
-import ast
 import pathlib
 import tomllib
 
@@ -51,20 +50,5 @@ def test_all_decision_lanes_barred_from_data_lane_in_config():
         assert lane in barred, f"{lane} is not forbidden from algua.data by any contract"
 
 
-def test_no_static_data_import_in_live_or_execution():
-    """Defense beyond config (mirrors the fundamentals wall test): assert no module under
-    algua/live or algua/execution statically imports algua.data — the property the new contract
-    protects. This is what makes store.read_news unreachable from the live decision lane."""
-    offenders = []
-    for pkg in ["algua/live", "algua/execution"]:
-        for path in (REPO / pkg).rglob("*.py"):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                mod = node.module or "" if isinstance(node, ast.ImportFrom) else ""
-                if mod.startswith("algua.data"):
-                    offenders.append(str(path))
-                if isinstance(node, ast.Import):
-                    for a in node.names:
-                        if a.name.startswith("algua.data"):
-                            offenders.append(str(path))
-    assert not offenders, f"live/execution import algua.data: {offenders}"
+# The AST defense (no module in a walled lane statically reaches algua.data) is consolidated for
+# ALL lanes — including live/execution — in tests/test_data_wall.py (issue #277).

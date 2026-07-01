@@ -1,4 +1,3 @@
-import ast
 import pathlib
 import tomllib
 
@@ -36,20 +35,5 @@ def test_hindsight_module_walled():
         assert src in rule["source_modules"]
 
 
-def test_no_static_data_import_in_pure_layers():
-    """Defense beyond config: assert no module under algua/strategies or algua/contracts imports
-    algua.data (the actual property the wall protects)."""
-    offenders = []
-    for pkg in ["algua/strategies", "algua/contracts"]:
-        for path in (REPO / pkg).rglob("*.py"):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and (
-                    (node.module or "").startswith("algua.data")
-                ):
-                    offenders.append(str(path))
-                if isinstance(node, ast.Import):
-                    for a in node.names:
-                        if a.name.startswith("algua.data"):
-                            offenders.append(str(path))
-    assert not offenders, f"pure layers import algua.data: {offenders}"
+# The AST defense (no module in a walled lane statically reaches algua.data) is consolidated for
+# ALL lanes — including strategies/contracts — in tests/test_data_wall.py (issue #277).
