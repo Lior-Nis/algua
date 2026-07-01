@@ -26,7 +26,10 @@ if (!A || typeof A !== 'object') A = {}
 // that didn't parse, a typo — is a dry run that files/commits nothing.
 const DRY_RUN = A.execute !== true
 const LANE_SUBSET = Array.isArray(A.lanes) ? A.lanes : null
-const RID = (typeof A.runId === 'string' && A.runId) || 'run'
+// RID is interpolated into the verdict file path — sanitize so a garbled runId
+// (containing '/', '..', spaces, …) cannot misplace the committed file.
+const RID_RAW = (typeof A.runId === 'string' && A.runId) || 'run'
+const RID = /^[A-Za-z0-9_-]+$/.test(RID_RAW) ? RID_RAW : 'run'
 const LANES_DOC = '.claude/skills/readiness-review/lanes.md'
 
 const ALL_LANES = [
@@ -197,7 +200,7 @@ log(`Verified survivors: ${survivors.length} across ${LANES.length} lane(s)`)
 // ---- Phase 3: dedup survivors vs each other and vs open issues (barrier) ----
 phase('Dedup')
 let deduped = survivors
-if (survivors.length > 1) {
+if (survivors.length >= 1) {
   const dd = await agent(
     `You are the dedup agent (cwd = repo root). Below are ${survivors.length} verified
 readiness-review findings as JSON. Also run: gh issue list --state open --limit 300 --json number,title,body
@@ -216,7 +219,17 @@ Return the dedup schema: { kept: [...findings...], dropped: [{title, reason}] }.
     { label: 'dedup', phase: 'Dedup', schema: DEDUP_SCHEMA },
   )
   deduped = (dd && dd.kept) || survivors
-  if (dd && dd.dropped) dd.dropped.forEach((d) => log(`dropped: ${d.title} — ${d.reason}`))
+  const droppedList = (dd && dd.dropped) || []
+  droppedList.forEach((d) => log(`dropped: ${d.title} — ${d.reason}`))
+  // Integrity backstop for the "never silently drop" guarantee: every survivor
+  // must appear in EITHER kept or dropped. Anything in neither vanished — surface it.
+  const keptTitles = new Set(deduped.map((f) => f.title))
+  const droppedTitles = new Set(droppedList.map((d) => d.title))
+  survivors.forEach((f) => {
+    if (!keptTitles.has(f.title) && !droppedTitles.has(f.title)) {
+      log(`WARNING: finding neither kept nor dropped by dedup (investigate): ${f.title}`)
+    }
+  })
 }
 log(`After dedup: ${deduped.length} to file`)
 
@@ -272,13 +285,16 @@ Content:
 - A table of filed issues: number | lane | severity | one-line title. Data: ${JSON.stringify(filed)}
 - Per-lane one-paragraph summary (11 lanes).
 
-Then commit ONLY that file (never git add -A), appending the standard trailers used by recent
-commits (Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com> and the Claude-Session line):
+Then commit ONLY that file (never git add -A). The commit message MUST end with the two trailer
+lines shown here verbatim:
   git add docs/superpowers/specs/${RID}-readiness-review-verdict.md
-  git commit -m "docs(readiness): ${RID} 11-lane readiness verdict"
+  git commit -m "docs(readiness): ${RID} 11-lane readiness verdict
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VnGemnoHubNa8JRQpZucPC"
 Do NOT git push. Return the path you wrote.`,
     { label: 'synthesize', phase: 'Synthesize', model: 'sonnet' },
   )
 }
 
-return { survivors: survivors.length, filed: filed.length, dryRun: DRY_RUN }
+return { survivors: survivors.length, wouldFile: deduped.length, filed: filed.length, dryRun: DRY_RUN }

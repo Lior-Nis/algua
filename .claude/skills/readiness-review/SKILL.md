@@ -58,5 +58,7 @@ model-risk-management security observability`.
 6. **Synthesize** — write + commit (no push) `docs/superpowers/specs/<runId>-readiness-review-verdict.md`.
 
 ## After the run
-Relay to the user: the returned `{ survivors, filed, dryRun }` summary, the path of the committed
-verdict doc, and a note that issues were created on GitHub but nothing was pushed.
+Relay to the user the returned `{ survivors, wouldFile, filed, dryRun }` summary:
+- **Dry run** (`dryRun:true`): report `wouldFile` (issues it would create) — `filed` is 0.
+- **Real run** (`dryRun:false`): report `filed` and the path of the committed verdict doc, and note
+  that issues were created on GitHub but nothing was pushed.
