@@ -289,7 +289,9 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
     monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
-    monkeypatch.setattr("algua.cli.live_cmd.believed_positions",
+    # #336: the believed-position read moved into the single-sourced flatten helper, so patch it
+    # where the helper resolves it (algua.execution.flatten), not the old live_cmd call site.
+    monkeypatch.setattr("algua.execution.flatten.believed_positions",
                         lambda conn, name, kind: {"AAA": 5.0})  # strategy believes it holds 5 AAA
     monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
                         lambda conn, sid: {"capital": 10_000.0})
