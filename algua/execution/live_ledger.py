@@ -254,10 +254,15 @@ def recover_stranded_broker_order_ids(
         if order is None:
             continue  # not at the venue -> preserve (crash-safety / #365 phantom)
         boid = order.get("id")
-        if order.get("client_order_id") != coid or order.get("symbol") != symbol or not boid:
+        # Reject a malformed/inconsistent broker payload (safety boundary): the returned coid must
+        # match exactly, the symbol must equal the local row's, and the id must be a non-empty
+        # string (a truthy non-str would coerce to a bogus broker id). Any failure -> skip + flag,
+        # never backfill (a coid collision must not mis-attribute; the NULL row still fails closed).
+        if (order.get("client_order_id") != coid or order.get("symbol") != symbol
+                or not isinstance(boid, str) or not boid.strip()):
             mismatched.append(coid)
             continue
-        if _backfill_order(conn, kind, coid, str(boid)):
+        if _backfill_order(conn, kind, coid, boid):
             recovered.append(coid)
     return StrandedRecovery(recovered=recovered, mismatched=mismatched)
 
