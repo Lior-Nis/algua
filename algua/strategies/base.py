@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -10,7 +10,7 @@ import pandas as pd
 from pydantic import BaseModel, field_validator
 
 from algua.contracts.types import ExecutionContract
-from algua.portfolio.construction import ConstructFn
+from algua.portfolio.construction import ConstructFn, apply_capacity_cap
 
 # The AUTHORED signal: a pure module-level `signal(view, params) -> pd.Series` of cross-sectional
 # scores (NOT weights). The protocol-level `Strategy.target_weights(features)` is exposed only by
@@ -61,6 +61,21 @@ class StrategyConfig(BaseModel):
     def _non_negative_lookback(cls, v: int | None) -> int | None:
         if v is not None and v < 0:
             raise ValueError("feature_lookback must be >= 0 (or None if undeclared)")
+        return v
+
+    @field_validator("execution", mode="before")
+    @classmethod
+    def _execution_must_be_a_contract(cls, v: object) -> object:
+        # `execution` must be an already-constructed ExecutionContract (which every strategy builds
+        # directly). A raw mapping would let pydantic coerce nested values BEFORE the dataclass
+        # __post_init__ guards run — e.g. bool `True` -> 1.0 for reference_aum / max_participation_
+        # rate (fail-OPEN capacity, #344), or "false" -> allow_short. Reject it: fail closed at the
+        # boundary so those __post_init__ rails can never be bypassed via dict input.
+        if isinstance(v, Mapping):
+            raise ValueError(
+                "execution must be an ExecutionContract instance, not a raw mapping (a dict "
+                "bypasses ExecutionContract/CapacityLimit __post_init__ rails via coercion)"
+            )
         return v
 
 
@@ -177,7 +192,16 @@ class LoadedStrategy:
         return self.signal_panel_fn(bars, self.config.params)
 
     def construct(self, scores: pd.Series, view: pd.DataFrame) -> pd.Series:
-        return self.construct_fn(scores, view, self.config.construction_params)
+        weights = self.construct_fn(scores, view, self.config.construction_params)
+        # ADV / capacity participation cap (issue #344). Applied HERE — the single chokepoint every
+        # path (backtest loop, vectorized fast path + its parity twin, live/paper decide) resolves
+        # weights through — so the cap is enforced identically everywhere. `view` is the same PIT
+        # frame the signal saw (ends at the fully-closed decision bar t), so the trailing ADV never
+        # sees the fill bar. No-op when no capacity budget is declared.
+        capacity = self.config.execution.capacity
+        if capacity is not None:
+            weights = apply_capacity_cap(weights, view, capacity)
+        return weights
 
     def target_weights(
         self,
