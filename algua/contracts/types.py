@@ -38,14 +38,17 @@ class CapacityLimit:
     def __post_init__(self) -> None:
         # Fail closed on every neutering value, mirroring ExecutionContract's own guards: a
         # non-finite / non-positive reference_aum, an out-of-range rate, or a sub-1 window would
-        # silently disable or corrupt the cap.
-        if not math.isfinite(self.reference_aum) or self.reference_aum <= 0:
+        # silently disable or corrupt the cap. bool is an int subtype, so a `True` passed to any
+        # numeric field would masquerade as 1 and fail OPEN (reference_aum=1 => a ~$1 budget makes
+        # the cap a no-op; rate=1 => 100% participation) — reject bool on every field.
+        if isinstance(self.reference_aum, bool) or not math.isfinite(self.reference_aum) \
+                or self.reference_aum <= 0:
             raise ValueError("reference_aum must be a finite number > 0")
-        if not math.isfinite(self.max_participation_rate):
+        if isinstance(self.max_participation_rate, bool) \
+                or not math.isfinite(self.max_participation_rate):
             raise ValueError("max_participation_rate must be finite")
         if not 0.0 < self.max_participation_rate <= 1.0:
             raise ValueError("max_participation_rate must be in (0, 1]")
-        # bool is an int subtype; reject it so True can't masquerade as a window of 1.
         if isinstance(self.adv_window_bars, bool) or not isinstance(self.adv_window_bars, int):
             raise ValueError("adv_window_bars must be an int")
         if self.adv_window_bars < 1:

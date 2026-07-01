@@ -184,6 +184,9 @@ def test_dollar_adv_omits_short_history_symbols():
         {"reference_aum": 1000.0, "max_participation_rate": float("nan"), "adv_window_bars": 2},
         {"reference_aum": 1000.0, "max_participation_rate": 0.1, "adv_window_bars": 0},
         {"reference_aum": 1000.0, "max_participation_rate": 0.1, "adv_window_bars": True},
+        # bool is an int subtype: True would masquerade as 1 on a numeric field and fail OPEN.
+        {"reference_aum": True, "max_participation_rate": 0.1, "adv_window_bars": 2},
+        {"reference_aum": 1000.0, "max_participation_rate": True, "adv_window_bars": 2},
     ],
 )
 def test_capacity_limit_rejects_bad_values(kwargs: dict):
