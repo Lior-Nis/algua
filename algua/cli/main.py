@@ -17,6 +17,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     factor_cmd,
     idea_cmd,
     live_cmd,
+    monitoring_cmd,
     negative_cmd,
     paper_cmd,
     registry_cmd,
