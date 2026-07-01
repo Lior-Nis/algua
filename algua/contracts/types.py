@@ -16,6 +16,46 @@ class Side(StrEnum):
 
 
 @dataclass(frozen=True)
+class CapacityLimit:
+    """An ADV / participation capacity budget for POSITION sizing (issue #344).
+
+    Bar `volume` is in the schema but was never consulted for sizing, so a strategy could size a
+    position into an untradeable fraction of a name's liquidity. This caps each held position at
+    `max_participation_rate` of the name's trailing dollar-ADV, evaluated at a DECLARED
+    `reference_aum` (the AUM-breakeven capital the capacity is assessed at — the backtest itself is
+    unitless `targetpercent`, so a reference notional is required to turn a weight into dollars).
+
+    Applied in `LoadedStrategy.construct` (see algua/portfolio/construction.apply_capacity_cap), so
+    it composes with the existing weight->position pipeline and applies identically in the backtest
+    loop, the vectorized fast path, and live/paper sizing. Folded into `config_hash` (part of
+    strategy identity). This is a POSITION cap, not a per-trade order-delta participation cap.
+    """
+
+    reference_aum: float          # declared capital the capacity is evaluated at (dollars)
+    max_participation_rate: float # max fraction of a name's ADV one position may occupy
+    adv_window_bars: int          # trailing window length (bars) for the dollar-ADV estimate
+
+    def __post_init__(self) -> None:
+        # Fail closed on every neutering value, mirroring ExecutionContract's own guards: a
+        # non-finite / non-positive reference_aum, an out-of-range rate, or a sub-1 window would
+        # silently disable or corrupt the cap. bool is an int subtype, so a `True` passed to any
+        # numeric field would masquerade as 1 and fail OPEN (reference_aum=1 => a ~$1 budget makes
+        # the cap a no-op; rate=1 => 100% participation) — reject bool on every field.
+        if isinstance(self.reference_aum, bool) or not math.isfinite(self.reference_aum) \
+                or self.reference_aum <= 0:
+            raise ValueError("reference_aum must be a finite number > 0")
+        if isinstance(self.max_participation_rate, bool) \
+                or not math.isfinite(self.max_participation_rate):
+            raise ValueError("max_participation_rate must be finite")
+        if not 0.0 < self.max_participation_rate <= 1.0:
+            raise ValueError("max_participation_rate must be in (0, 1]")
+        if isinstance(self.adv_window_bars, bool) or not isinstance(self.adv_window_bars, int):
+            raise ValueError("adv_window_bars must be an int")
+        if self.adv_window_bars < 1:
+            raise ValueError("adv_window_bars must be >= 1")
+
+
+@dataclass(frozen=True)
 class ExecutionContract:
     """How target weights become executable orders. Pinned per strategy.
 
@@ -31,6 +71,10 @@ class ExecutionContract:
     max_weight_per_symbol: float = 1.0  # cap on |weight| per symbol; 1.0 = no cap
     allow_short: bool = False           # False = long-only (today's behavior)
     warmup_bars: int = 0
+    # Optional ADV / participation capacity budget (issue #344). None = no capacity cap (default),
+    # so existing strategies are byte-unchanged. Last field: the whole codebase builds
+    # ExecutionContract with keyword args, so appending here is safe.
+    capacity: CapacityLimit | None = None
 
     def __post_init__(self) -> None:
         if self.decision_lag_bars < 1:
@@ -47,6 +91,8 @@ class ExecutionContract:
         if not isinstance(self.allow_short, bool):
             # A truthy non-bool (e.g. the string "false") would silently enable shorts.
             raise ValueError("allow_short must be a bool")
+        if self.capacity is not None and not isinstance(self.capacity, CapacityLimit):
+            raise ValueError("capacity must be a CapacityLimit or None")
 
 
 @dataclass(frozen=True)
