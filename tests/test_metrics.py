@@ -77,6 +77,14 @@ def test_tail_ratio_is_a_non_negative_magnitude_on_all_negative_series():
     assert tr == abs(float(p95)) / abs(float(p5))
 
 
+def test_tail_ratio_sentinel_on_all_positive_series():
+    # #348 GATE-2 MEDIUM: an all-positive series has a POSITIVE p5 (no loss tail), so the
+    # ratio is undefined -> finite sentinel 0.0, NOT a meaningless |gain|/|smaller gain|.
+    r = pd.Series([0.01, 0.02, 0.03, 0.04, 0.05])
+    assert float(np.percentile(r.to_numpy(), 5)) > 0.0  # positive left tail -> undefined
+    assert metrics_from_returns(r)["tail_ratio"] == 0.0
+
+
 def test_sortino_exact_formula_and_exceeds_sharpe_on_left_skew():
     # Left-skewed-but-net-positive series: downside dev < total vol -> Sortino > Sharpe.
     r = pd.Series([0.02, 0.02, 0.02, 0.02, -0.01, 0.02, 0.02, -0.01, 0.02, 0.02])
@@ -91,6 +99,31 @@ def test_sortino_exact_formula_and_exceeds_sharpe_on_left_skew():
 def test_sortino_sentinel_when_no_downside():
     r = pd.Series([0.01, 0.02, 0.0, 0.03])  # no strictly-negative return -> dd == 0
     assert metrics_from_returns(r)["sortino"] == 0.0
+
+
+def test_sortino_uses_risk_free_as_mar_in_downside():
+    # #348 GATE-2 HIGH: with a non-zero risk_free the downside deviation must measure
+    # shortfalls below the daily MAR (risk_free / ANN), consistent with the excess-return
+    # numerator. An all-positive series that still underperforms the risk-free rate must
+    # yield a NEGATIVE Sortino, not the no-downside sentinel 0.0.
+    r = pd.Series([0.0002] * 252)
+    m = metrics_from_returns(r, risk_free=0.10)
+    excess = float(r.mean() * ANN) - 0.10
+    mar_daily = 0.10 / ANN
+    downside = np.minimum(r.to_numpy() - mar_daily, 0.0)
+    dd = float(np.sqrt(np.mean(downside**2))) * np.sqrt(ANN)
+    assert m["sortino"] < 0.0
+    assert math.isclose(m["sortino"], excess / dd, rel_tol=1e-12)
+
+
+def test_sortino_default_risk_free_preserves_target_zero_form():
+    # risk_free defaults to 0.0 -> MAR 0 -> the gate-calibrated target-0 denominator is
+    # preserved exactly (no behavior change on the calibrated path).
+    r = pd.Series([0.02, 0.02, -0.01, 0.02, -0.01, 0.02])
+    m = metrics_from_returns(r)
+    downside = np.minimum(r.to_numpy(), 0.0)
+    dd = float(np.sqrt(np.mean(downside**2))) * np.sqrt(ANN)
+    assert math.isclose(m["sortino"], float(r.mean() * ANN) / dd, rel_tol=1e-12)
 
 
 def test_calmar_uses_negative_drawdown_convention():

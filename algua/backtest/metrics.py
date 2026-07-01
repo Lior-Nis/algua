@@ -66,10 +66,13 @@ def _tail_ratio(r: pd.Series) -> float:
     "undefined", NOT "worst possible", so read it only alongside the rest of the dashboard.
     """
     p95, p5 = np.percentile(r, [95, 5])
-    denom = abs(float(p5))
-    if denom == 0.0:
+    # The left tail must be an actual LOSS for the ratio to mean "upside vs downside". A
+    # non-negative left tail (p5 >= 0, e.g. an all-positive series) has no loss tail, so the
+    # ratio is undefined -> finite sentinel 0.0 (NOT "worst"). Guarding only p5 == 0 would
+    # leak a meaningless |gain|/|smaller gain| score for an all-positive series.
+    if float(p5) >= 0.0:
         return 0.0
-    ratio = abs(float(p95)) / denom  # magnitude ratio: always >= 0 (e.g. all-negative series)
+    ratio = abs(float(p95)) / abs(float(p5))  # magnitude ratio: always >= 0
     return ratio if math.isfinite(ratio) else 0.0
 
 
@@ -106,10 +109,15 @@ def metrics_from_returns(returns: pd.Series, *, risk_free: float = 0.0) -> dict[
     out["sharpe"] = float(excess / ann_vol) if ann_vol > 0 else 0.0
 
     # Sortino: arithmetic annualized excess return (same numerator as Sharpe) over the
-    # annualized downside deviation. Downside deviation uses target/MAR = 0 with the FULL
-    # sample in the denominator: dd = sqrt(mean(min(r, 0)**2)). dd == 0 (no down periods) ->
-    # finite sentinel 0.0 (undefined, NOT "good"); read only with the rest of the dashboard.
-    downside = np.minimum(r.to_numpy(), 0.0)
+    # annualized downside deviation, measured against the SAME benchmark as the numerator so
+    # the ratio is self-consistent. The minimum acceptable return (MAR) is the daily
+    # risk-free rate (risk_free / ANN); shortfalls below it, with the FULL sample in the
+    # denominator, give dd = sqrt(mean(min(r - mar, 0)**2)). With the default risk_free = 0.0
+    # this reduces to the target-0 form (min(r, 0)), so the gate-calibrated path is unchanged.
+    # dd == 0 (never below MAR) -> finite sentinel 0.0 (undefined, NOT "good"); read only with
+    # the rest of the dashboard.
+    mar_daily = risk_free / ANN
+    downside = np.minimum(r.to_numpy() - mar_daily, 0.0)
     dd = float(np.sqrt(np.mean(downside**2))) * np.sqrt(ANN)
     out["sortino"] = float(excess / dd) if dd > 0 and math.isfinite(dd) else 0.0
 
