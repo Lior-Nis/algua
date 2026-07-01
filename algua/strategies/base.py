@@ -245,8 +245,10 @@ def config_hash(strategy: LoadedStrategy) -> str:
     is part of the identity — and any field added later is included automatically. The construction
     policy id + its params (issue #141) are folded in too, so retuning the construction policy
     (e.g. top_k) or swapping the policy invalidates a prior live approval. Serialized with
-    allow_nan=False so a non-finite construction param cannot produce a non-canonical hash. Two
-    configs that produce different trades can therefore never collide on config_hash."""
+    allow_nan=False so a non-finite construction param cannot produce a non-canonical hash. The
+    digest is a 128-bit sha256 prefix (#341): collision-resistant for identity/gate use, not a
+    collision-proof guarantee — two differing configs are astronomically unlikely, not provably
+    unable, to collide."""
     payload = json.dumps(
         {
             "name": strategy.name,
@@ -265,4 +267,4 @@ def config_hash(strategy: LoadedStrategy) -> str:
         sort_keys=True,
         allow_nan=False,
     )
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return hashlib.sha256(payload.encode()).hexdigest()[:32]

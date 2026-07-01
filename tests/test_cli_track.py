@@ -49,7 +49,9 @@ def test_sweep_track_logs_parent_and_children(tmp_path):
     assert sum(1 for r in runs if r.data.tags.get("kind") == "sweep_combo") == 2
 
 
-def test_track_failure_renders_json_error(tmp_path, monkeypatch):
+def test_track_failure_is_non_fatal(tmp_path, monkeypatch):
+    """A tracker failure must NOT discard a completed backtest (#341): the command still exits 0
+    with the full result, surfacing the failure as a non-fatal `mlflow_tracking_error`."""
     import algua.cli.backtest_cmd as bt
 
     def boom(*a, **k):
@@ -58,5 +60,8 @@ def test_track_failure_renders_json_error(tmp_path, monkeypatch):
     monkeypatch.setattr(bt, "log_backtest", boom)
     result = runner.invoke(app, ["backtest", "run", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31", "--track"])
-    assert result.exit_code == 1
-    assert json.loads(result.stdout)["ok"] is False
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["mlflow_run_id"] is None
+    assert "RuntimeError: mlflow down" in payload["mlflow_tracking_error"]
