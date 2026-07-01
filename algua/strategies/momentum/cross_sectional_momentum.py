@@ -16,6 +16,7 @@ CONFIG = StrategyConfig(
     params={"lookback": 60},
     construction="top_k_equal_weight",
     construction_params={"top_k": 3},
+    feature_lookback=60,  # 60-bar trailing return -> walk-forward embargo (#345)
 )
 
 

@@ -16,6 +16,7 @@ CONFIG = StrategyConfig(
     params={"metric": "eps_diluted"},
     construction="equal_weight_positive",
     needs_fundamentals=True,
+    feature_lookback=0,  # latest-value tilt, no rolling window -> embargo = decision lag (#345)
 )
 
 

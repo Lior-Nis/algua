@@ -30,6 +30,39 @@ def _equal_weight():
     )
 
 
+def _strategy(*, feature_lookback=None, decision_lag_bars=1):
+    from algua.portfolio.construction import get_construction_policy
+    cfg = StrategyConfig(
+        name="ew", universe=["AAA", "BBB"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=decision_lag_bars),
+        params={}, construction="equal_weight_positive", feature_lookback=feature_lookback,
+    )
+    return LoadedStrategy(
+        config=cfg,
+        signal_fn=lambda v, p: pd.Series(1.0, index=sorted(v["symbol"].unique())),
+        construct_fn=get_construction_policy(cfg.construction),
+    )
+
+
+def test_resolve_embargo_explicit_arg_wins():
+    # An explicit embargo (the exploratory --embargo override) beats any derivation.
+    assert wfmod._resolve_embargo(_strategy(feature_lookback=60), 3) == 3
+    assert wfmod._resolve_embargo(_strategy(feature_lookback=None), 0) == 0
+
+
+def test_resolve_embargo_undeclared_is_zero():
+    # Undeclared lookback -> legacy zero gap (the agent promote path refuses undeclared upstream).
+    assert wfmod._resolve_embargo(_strategy(feature_lookback=None), None) == 0
+
+
+def test_resolve_embargo_declared_is_max_lookback_lag():
+    # Declared lookback dominates the decision lag...
+    assert wfmod._resolve_embargo(_strategy(feature_lookback=60, decision_lag_bars=1), None) == 60
+    # ...but a declared 0 (no rolling window) still floors at the t->t+1 decision lag.
+    assert wfmod._resolve_embargo(_strategy(feature_lookback=0, decision_lag_bars=1), None) == 1
+    assert wfmod._resolve_embargo(_strategy(feature_lookback=2, decision_lag_bars=5), None) == 5
+
+
 def test_walk_forward_shape_and_stamps():
     res = walk_forward(_equal_weight(), SyntheticProvider(seed=3), START, END,
                        windows=4, holdout_frac=0.2)

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import pandas as pd
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from algua.contracts.types import ExecutionContract
 from algua.portfolio.construction import ConstructFn
@@ -46,6 +46,22 @@ class StrategyConfig(BaseModel):
     needs_fundamentals: bool = False
     # Opt into the as-of news lane (issue #132). Mutually exclusive with needs_fundamentals.
     needs_news: bool = False
+    # Declared maximum feature lookback in bars (issue #345): how many trailing bars the signal
+    # reads to score a single bar (e.g. a 60-bar trailing-return momentum => 60). Drives the
+    # walk-forward train/holdout embargo (purge gap = max(feature_lookback, decision_lag_bars)) so
+    # the in-sample selection stats can't share feature/decision windows with the holdout.
+    # `None` = UNDECLARED (the agent `research promote` path fails closed on it — declare it, even
+    # to 0 for a strategy with no rolling feature window). An explicit value (incl. 0) is honored.
+    # Author contract: declare >= the largest lookback the signal will ever use, including any
+    # value you intend to sweep (under-declaration is an author bug, like a wrong `universe`).
+    feature_lookback: int | None = None
+
+    @field_validator("feature_lookback")
+    @classmethod
+    def _non_negative_lookback(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("feature_lookback must be >= 0 (or None if undeclared)")
+        return v
 
 
 @dataclass
@@ -197,7 +213,8 @@ def config_hash(strategy: LoadedStrategy) -> str:
     """Stable digest of a strategy's resolved configuration (name + universe + params +
     execution contract + construction policy id and params). The single source of truth for the
     config side of the artifact identity, shared by the backtest engine and the registry's
-    live-approval gate.
+    live-approval gate. The declared `feature_lookback` (#345) is folded in too, since it sizes the
+    walk-forward embargo and therefore the carved windows.
 
     Serializes the *full* ExecutionContract via asdict, so every behavior-affecting field
     (warmup_bars, allow_fractional, max_gross_exposure, decision_lag_bars, rebalance_frequency)
@@ -216,6 +233,10 @@ def config_hash(strategy: LoadedStrategy) -> str:
             "construction_params": strategy.config.construction_params,
             "needs_fundamentals": strategy.config.needs_fundamentals,
             "needs_news": strategy.config.needs_news,
+            # #345: behavior-affecting (sizes the walk-forward embargo), and NOT inside params /
+            # execution, so it must be folded in explicitly — two runs with different declared
+            # lookbacks carve different windows and must never collide on config_hash.
+            "feature_lookback": strategy.config.feature_lookback,
         },
         sort_keys=True,
         allow_nan=False,

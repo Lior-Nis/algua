@@ -194,6 +194,7 @@ def log_walk_forward(
         mlflow.log_params({
             **{f"param.{k}": v for k, v in params.items()},
             "windows": result.windows, "holdout_frac": result.holdout_frac,
+            "embargo": result.embargo,
             **_stamp_params(result),
         })
         mlflow.log_metrics(_numeric_metrics(result.stability))
