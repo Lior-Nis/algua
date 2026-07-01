@@ -227,6 +227,27 @@ def _strat(capacity: CapacityLimit | None):
     )
 
 
+def test_strategyconfig_rejects_dict_execution_bypassing_capacity_guards():
+    # A raw-mapping `execution` would let pydantic coerce bool->1.0 BEFORE CapacityLimit's
+    # __post_init__ runs (fail-open cap). The boundary validator must reject the dict outright.
+    from pydantic import ValidationError
+
+    from algua.strategies.base import StrategyConfig
+
+    with pytest.raises(ValidationError):
+        StrategyConfig(
+            name="x", universe=["A"], construction="passthrough",
+            execution={  # type: ignore[arg-type]
+                "rebalance_frequency": "1d",
+                "capacity": {
+                    "reference_aum": True,
+                    "max_participation_rate": True,
+                    "adv_window_bars": True,
+                },
+            },
+        )
+
+
 def test_config_hash_changes_with_capacity_and_stable_when_none():
     from algua.strategies.base import config_hash
 
