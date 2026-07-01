@@ -59,6 +59,54 @@ def test_render_results_block_renders_metrics():
     assert "sharpe" in out
     assert "holdout.sharpe" not in out
     assert "ds_2" in out
+    # No period_start -> legacy run -> the reproduce section is omitted entirely.
+    assert "Reproduce" not in out
+
+
+def _metrics(**overrides) -> dict:
+    base = {
+        "run_id": "abcd1234ef", "kind": "backtest", "snapshot_id": "ds_2", "seed": "7",
+        "config_hash": "cfg123", "code_hash": "code123", "dependency_hash": "dep123",
+        "period_start": "2020-01-01", "period_end": "2020-12-31", "timeframe": "1d",
+        "universe_mode": "pit", "universe_name": "liquid10", "metrics": {"sharpe": 0.35},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_render_results_block_reproduce_named_universe():
+    # #333: a stamped run carries the full reproduction stamp — hashes, period, and the
+    # literal PIT universe name — so the kb doc alone can re-run the exact experiment.
+    out = render_results_block(_metrics())
+    assert "Reproduce" in out
+    assert "universe `liquid10`" in out
+    assert "period `2020-01-01`→`2020-12-31`" in out
+    assert "config_hash `cfg123`" in out
+    assert "code_hash `code123`" in out
+    assert "dependency_hash `dep123`" in out
+
+
+def test_render_results_block_reproduce_static_vs_unknown():
+    # The mode enum is the authority: "static" => static run; absent (legacy run) => unknown.
+    # These must render distinctly and can never be confused with a real universe name.
+    static = render_results_block(_metrics(universe_mode="static", universe_name=""))
+    assert "universe static" in static
+    unknown = render_results_block(_metrics(universe_mode=None, universe_name=None))
+    assert "universe unknown" in unknown
+    # A PIT universe literally named "static" or "None" survives as a name (mode disambiguates).
+    named_static = render_results_block(_metrics(universe_mode="pit", universe_name="static"))
+    assert "universe `static`" in named_static
+    named_none = render_results_block(_metrics(universe_mode="pit", universe_name="None"))
+    assert "universe `None`" in named_none
+
+
+def test_render_results_block_reproduce_missing_hash_is_visible():
+    # A sweep PARENT has no single config_hash (a grid) -> a visible dash, not a silent drop.
+    # MLflow stringifies a null param to "None"; that also renders as a dash.
+    out = render_results_block(_metrics(config_hash=None, dependency_hash="None"))
+    assert "config_hash —" in out
+    assert "dependency_hash —" in out
+    assert "code_hash `code123`" in out
 
 
 def test_sync_strategy_doc_updates_stage_and_preserves_prose(tmp_path):

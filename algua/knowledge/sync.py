@@ -85,8 +85,62 @@ def strategy_family(settings: Settings, name: str) -> str | None:
     return _unwikilink(fm.get("family"))
 
 
+def _norm(value: object) -> str | None:
+    """A reproduction field, or None if it is effectively missing.
+
+    MLflow stringifies a logged ``None`` to the literal ``"None"``, so both a truly-absent
+    param (Python ``None``) and a null-valued one (``"None"``) — and an empty string — mean
+    "not recorded". NOT used for ``universe_name``: a universe could be literally named
+    ``"None"``, so that field is rendered from its raw value (see ``_reproduce_lines``)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in ("", "None"):
+        return None
+    return text
+
+
+def _reproduce_lines(metrics: dict[str, Any]) -> list[str]:
+    """The `Reproduce` provenance lines for the RESULTS block (#333), or [] for a legacy run.
+
+    Gated on ``period_start``: EVERY stamped run (backtest, walk_forward, sweep parent/child)
+    logs it, so only pre-stamp legacy runs skip the section and render exactly as before. A
+    genuinely-missing field renders a visible ``—`` (e.g. a sweep parent has no single
+    ``config_hash`` — a grid, not one config — so it shows ``—``; drill into a combo)."""
+    if _norm(metrics.get("period_start")) is None:
+        return []
+
+    def cell(key: str) -> str:
+        val = _norm(metrics.get(key))
+        return f"`{val}`" if val is not None else "—"
+
+    # Universe from the mode enum (the authority — never collides with a real name):
+    # absent key => legacy run => unknown; "static" => static-universe run; "pit" => show the
+    # literal name (raw, NOT via _norm — a universe may legitimately be named "None").
+    mode = metrics.get("universe_mode")
+    if mode is None:
+        universe = "unknown"
+    elif mode == "static":
+        universe = "static"
+    else:  # "pit"
+        name = metrics.get("universe_name")
+        universe = f"`{name}`" if name else "unknown"
+    return [
+        f"Reproduce — universe {universe} · period {cell('period_start')}→{cell('period_end')}",
+        (
+            f"config_hash {cell('config_hash')} · code_hash {cell('code_hash')} · "
+            f"dependency_hash {cell('dependency_hash')}"
+        ),
+    ]
+
+
 def render_results_block(metrics: dict[str, Any] | None) -> str:
-    """Markdown content (no markers) for the synced RESULTS block."""
+    """Markdown content (no markers) for the synced RESULTS block.
+
+    Beyond the latest-run head + metric table, this carries the reproduction stamp (#333):
+    universe (PIT — resolved as-of the period against the named universe + bars snapshot),
+    period, and the config/code/dependency hashes, so the always-on doc is self-sufficient to
+    re-run the exact experiment without the optional report-experiments output or MLflow."""
     if not metrics:
         return "_No tracked runs yet._"
     head = (
@@ -94,6 +148,9 @@ def render_results_block(metrics: dict[str, Any] | None) -> str:
         f"seed `{metrics.get('seed')}` · run `{metrics['run_id'][:8]}`"
     )
     lines = [head, ""]
+    repro = _reproduce_lines(metrics)
+    if repro:
+        lines += repro + [""]
     if metrics["metrics"]:
         lines += ["| metric | value |", "|---|---|"]
         for key in sorted(metrics["metrics"]):

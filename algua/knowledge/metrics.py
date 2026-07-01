@@ -43,10 +43,22 @@ def latest_run_metrics(strategy: str, *, tracking_uri: str) -> dict[str, Any] | 
         for k, v in raw_metrics.items()
         if k != "holdout_metrics" and not k.lower().startswith("holdout.")
     }
+    params = run.data.params
     return {
         "run_id": run.info.run_id,
         "kind": run.data.tags.get("kind", "unknown"),
-        "snapshot_id": run.data.params.get("snapshot_id"),
-        "seed": run.data.params.get("seed"),
+        "snapshot_id": params.get("snapshot_id"),
+        "seed": params.get("seed"),
+        # Reproduction provenance (#333): the identity + coordinates needed to re-run this
+        # exact experiment from the kb doc alone. Each degrades to None when the param is
+        # absent (a run logged before the stamp existed); the render layer marks the gap.
+        "config_hash": params.get("config_hash"),
+        "code_hash": params.get("code_hash"),
+        "dependency_hash": params.get("dependency_hash"),
+        "period_start": params.get("period_start"),
+        "period_end": params.get("period_end"),
+        "timeframe": params.get("timeframe"),
+        "universe_mode": params.get("universe_mode"),
+        "universe_name": params.get("universe_name"),
         "metrics": filtered_metrics,
     }

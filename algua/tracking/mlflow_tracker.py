@@ -58,6 +58,23 @@ def _numeric_metrics(d: dict[str, Any]) -> dict[str, float]:
     return {k: float(v) for k, v in d.items() if _is_finite_number(v)}
 
 
+def _universe_params(universe_name: str | None) -> dict[str, str]:
+    """PIT-universe provenance params for a run (#333): a mode enum plus the name.
+
+    ``universe_mode`` is the authority — ``"pit"`` for a named universe, ``"static"`` when
+    ``universe_name is None``. It is a controlled value we own, so (unlike an in-band name
+    sentinel) it can never collide with a real universe that happens to be named ``"static"``
+    or ``"None"``. ``universe_name`` carries the literal name for a PIT run and is empty in
+    static mode. A run logged before #333 has NEITHER key, so the reader renders "unknown".
+
+    Together with ``snapshot_id`` and the period, ``universe_name`` is the canonical resolver
+    key for point-in-time membership (the same key ``research promote --universe NAME --start
+    --end`` reproduces from)."""
+    if universe_name is None:
+        return {"universe_mode": "static", "universe_name": ""}
+    return {"universe_mode": "pit", "universe_name": universe_name}
+
+
 def _stamp_params(result: Any) -> dict[str, Any]:
     return {
         "config_hash": result.config_hash,
@@ -68,6 +85,7 @@ def _stamp_params(result: Any) -> dict[str, Any]:
         "timeframe": result.timeframe,
         "code_hash": result.code_hash,
         "dependency_hash": result.dependency_hash,
+        **_universe_params(result.universe_name),
     }
 
 
@@ -146,6 +164,7 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
             "period_start": result.period["start"], "period_end": result.period["end"],
             "timeframe": result.timeframe, "code_hash": result.code_hash,
             "dependency_hash": result.dependency_hash,
+            **_universe_params(result.universe_name),
         })
         if result.best is not None:
             _best_score = result.best["score"]
@@ -165,6 +184,7 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                     "timeframe": result.timeframe, "windows": result.windows,
                     "holdout_frac": result.holdout_frac, "code_hash": result.code_hash,
                     "dependency_hash": result.dependency_hash,
+                    **_universe_params(result.universe_name),
                 })
                 _entry_score = entry["score"]
                 _score_metric: dict[str, float] = (
