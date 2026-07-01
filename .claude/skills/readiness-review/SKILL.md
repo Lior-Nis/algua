@@ -16,17 +16,30 @@ synthesis verdict.
 - The KB exists at `/home/liornisimov/KB`.
 
 ## How to run
-This skill authorizes and runs a Workflow. Invoke it with today's date as `runId`:
+This skill authorizes and runs a Workflow. It **fails safe**: unless you pass `execute: true`, the
+run is a dry run that files and commits nothing. This prevents a missing or malformed `args` (e.g.
+the harness handing the script a stringified value) from silently launching a destructive full run.
+
+**Real run** (files issues + commits the verdict) — invoke with today's date as `runId`:
+
+    Workflow({
+      scriptPath: '.claude/skills/readiness-review/readiness-review.workflow.mjs',
+      args: { execute: true, runId: '<TODAY as YYYY-MM-DD>' }
+    })
+
+**Dry run** (preview — Context+Find+Verify+Dedup, prints what it WOULD file, files/commits nothing):
+just omit `execute` (or pass `execute: false`).
 
     Workflow({
       scriptPath: '.claude/skills/readiness-review/readiness-review.workflow.mjs',
       args: { runId: '<TODAY as YYYY-MM-DD>' }
     })
 
-Optional args:
-- `dryRun: true` — run Context+Find+Verify+Dedup and PRINT what it would file; files nothing,
-  commits nothing. Use to preview before a real run.
-- `lanes: ['security', ...]` — restrict to a subset of the 11 lane slugs.
+Optional args (either mode):
+- `lanes: ['security', ...]` — restrict to a subset of the 11 lane slugs (defaults to all 11).
+
+Note: `args` may be given as a JSON object or a JSON string — the script tolerates both. But a
+string that fails to parse falls back to a dry run (fail safe), so prefer a real object.
 
 Lane slugs: `swe mle ds qf clean-code agentic ml-dl-integration risk-safe-scaling
 model-risk-management security observability`.

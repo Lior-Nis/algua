@@ -12,9 +12,21 @@ export const meta = {
 }
 
 // ---- config (args-driven; no Date/Math.random in workflow scripts) ----
-const DRY_RUN = !!(args && args.dryRun)
-const LANE_SUBSET = (args && args.lanes) || null
-const RID = (args && args.runId) || 'run'
+// Tolerate args arriving as an already-parsed object OR as a JSON string (the
+// Workflow harness can hand the script a stringified value); never let a
+// missing/garbled args silently become a destructive full run.
+let A = args
+if (typeof A === 'string') {
+  try { A = JSON.parse(A) } catch (_e) { A = {} }
+}
+if (!A || typeof A !== 'object') A = {}
+
+// FAIL SAFE: a real run (files GitHub issues + commits a verdict) happens ONLY
+// when execute===true is passed explicitly. Anything else — no args, a string
+// that didn't parse, a typo — is a dry run that files/commits nothing.
+const DRY_RUN = A.execute !== true
+const LANE_SUBSET = Array.isArray(A.lanes) ? A.lanes : null
+const RID = (typeof A.runId === 'string' && A.runId) || 'run'
 const LANES_DOC = '.claude/skills/readiness-review/lanes.md'
 
 const ALL_LANES = [
