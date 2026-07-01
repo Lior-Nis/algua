@@ -16,6 +16,7 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
 from algua.registry.repository import FunnelSnapshot, StrategyRepository
 from algua.research.clustering import (
+    _RETURN_STANDALONE_ESCALATION,
     MERGE_THRESHOLD,
     PARENTAGE_THRESHOLD,
     WEIGHT_CODE_ANCESTRY,
@@ -145,10 +146,6 @@ def _classify_and_assign_family(
     except Exception:  # noqa: BLE001 — unregistered/test strategies silently get no factors
         strategy_factors = set()
 
-    best_family_id: int | None = None
-    best_verdict = SimVerdict.NOVEL
-    best_score = 0.0
-
     # Load family data once; also collect member names for return-correlation axis
     all_family_data = _get_all_family_members_for_clustering(repo)
     all_member_names: list[str] = [
@@ -170,17 +167,35 @@ def _classify_and_assign_family(
             if member_returns is not None:
                 returns_lookup[member_name] = member_returns
 
-    has_any_family = False
-    for fam_id, members in all_family_data:
-        has_any_family = True
-        verdict, score = family_similarity(
-            strategy_code_hash, strategy_factors, members,
-            returns_lookup=returns_lookup or None,
-        )
-        if score > best_score or (score == best_score and best_verdict == SimVerdict.NOVEL):
-            best_score = score
-            best_verdict = verdict
-            best_family_id = fam_id
+    def _rank(escalate: bool) -> tuple[int | None, SimVerdict, float, bool]:
+        """Select the best-matching family. ``escalate`` toggles the #338 return-correlation
+        NOVEL-rescue. Returns (family_id, verdict, score, has_any_family)."""
+        b_id: int | None = None
+        b_verdict = SimVerdict.NOVEL
+        b_score = 0.0
+        any_family = False
+        for fam_id, members in all_family_data:
+            any_family = True
+            verdict, score = family_similarity(
+                strategy_code_hash, strategy_factors, members,
+                returns_lookup=returns_lookup or None,
+                escalate=escalate,
+            )
+            if score > b_score or (score == b_score and b_verdict == SimVerdict.NOVEL):
+                b_score = score
+                b_verdict = verdict
+                b_id = fam_id
+        return b_id, b_verdict, b_score, any_family
+
+    # Forward-only family selection (#338): rank first on the PURE blend (escalate=False),
+    # identical to the pre-#338 behaviour. Only if NO family matches on the blend (best is
+    # NOVEL) do we re-rank WITH the standalone return-correlation escalation to rescue an
+    # identical-trading clone out of NOVEL. This guarantees a return-only match can never
+    # DISPLACE a code/factor (blend) match into a narrower-breadth family — escalation can
+    # only pull a would-be-NOVEL strategy INTO a family (strictly tightening).
+    best_family_id, best_verdict, best_score, has_any_family = _rank(escalate=False)
+    if best_verdict == SimVerdict.NOVEL:
+        best_family_id, best_verdict, best_score, has_any_family = _rank(escalate=True)
 
     cv = clustering_version()
     clustering_config_json = json.dumps({
@@ -192,6 +207,7 @@ def _classify_and_assign_family(
             "factor_lineage": WEIGHT_FACTOR_LINEAGE,
             "return_correlation": WEIGHT_RETURN_CORRELATION,
         },
+        "return_standalone_escalation": _RETURN_STANDALONE_ESCALATION,
     }, sort_keys=True)
     axis_json = json.dumps({
         "verdict": best_verdict.value,

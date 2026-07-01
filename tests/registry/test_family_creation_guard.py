@@ -474,3 +474,95 @@ def test_family_events_row_has_clustering_version_after_novel_create() -> None:
     ).fetchone()
     assert row is not None
     assert row["clustering_version"] == clustering_version()
+
+
+# ---------------------------------------------------------------------------
+# #338: return-correlation escalation must be forward-only at the FAMILY-SELECTION
+# layer. A return-only match must NOT displace a blend (code/factor) match into a
+# narrower-breadth family; escalation only rescues a would-be-NOVEL strategy.
+# ---------------------------------------------------------------------------
+
+import pandas as pd  # noqa: E402
+
+from algua.registry.promotion import _classify_and_assign_family  # noqa: E402
+
+
+def _corr_series(scale: float = 1.0, n: int = 70) -> pd.Series:
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    return pd.Series([float(i) * scale for i in range(n)], index=idx, dtype=float)
+
+
+def _fake_repo_two_families(strategy_returns, member_returns_by_name):
+    """MagicMock repo exposing exactly what _classify_and_assign_family needs."""
+    repo = MagicMock()
+    repo.strategy_family.return_value = None  # not yet assigned
+
+    def _load_returns(sname):
+        if sname == "cand":
+            return strategy_returns
+        return member_returns_by_name.get(sname)
+
+    repo.load_backtest_returns.side_effect = _load_returns
+    return repo
+
+
+def test_return_match_does_not_displace_blend_match_338():
+    """Strategy code/factor-matches BROAD family A (blend 0.80) AND return-matches NARROW
+    family B (corr ~1.0). Pre-#338-fix the escalated B (1.0) would displace A; the
+    forward-only two-pass must keep the assignment in A (no breadth loss)."""
+    fam_a_id, fam_b_id = 1, 2
+    # A: exact code + factor match -> blend 0.80 (PARENTAGE), returns uncorrelated (none stored)
+    # B: disjoint code/factor, returns perfectly correlated with the candidate
+    families = [
+        (fam_a_id, [{"name": "a_mem", "code_hash": "CODE_A", "factors": {"fa"}}]),
+        (fam_b_id, [{"name": "b_mem", "code_hash": "CODE_B", "factors": {"fb"}}]),
+    ]
+    cand_ret = _corr_series(1.0)
+    b_ret = _corr_series(3.0)  # perfectly correlated with cand_ret (linear)
+    repo = _fake_repo_two_families(cand_ret, {"b_mem": b_ret})  # a_mem: no returns
+    repo.all_families_with_member_profiles.return_value = families
+
+    factor = MagicMock()
+    factor.name = "fa"
+    with (
+        patch("algua.registry.promotion.compute_artifact_hashes",
+              return_value=MagicMock(code_hash="CODE_A")),
+        patch("algua.registry.promotion.factors_used_by", return_value=[factor]),
+    ):
+        assigned = _classify_and_assign_family(
+            repo, "cand", actor=Actor.AGENT, new_family_slug=None)
+
+    assert assigned == fam_a_id  # stayed in the broad code/factor family, not displaced to B
+    # the recorded verdict is PARENTAGE (blend 0.80), NOT a return-escalated MERGE into B
+    _args, kwargs = repo.assign_strategy_to_family.call_args
+    assert kwargs["verdict"] == SimVerdict.PARENTAGE.value
+    assert kwargs["similarity_score"] == pytest.approx(0.80)
+
+
+def test_return_only_clone_is_rescued_from_novel_338():
+    """A rewritten + re-labelled clone (no code/factor match anywhere) that trades
+    IDENTICALLY to family B must be rescued out of NOVEL and MERGED into B (inherits its
+    breadth) — the core #338 evasion fix."""
+    fam_b_id = 2
+    families = [
+        (fam_b_id, [{"name": "b_mem", "code_hash": "CODE_B", "factors": {"fb"}}]),
+    ]
+    cand_ret = _corr_series(1.0)
+    b_ret = _corr_series(5.0)  # perfectly correlated
+    repo = _fake_repo_two_families(cand_ret, {"b_mem": b_ret})
+    repo.all_families_with_member_profiles.return_value = families
+
+    factor = MagicMock()
+    factor.name = "xx"  # disjoint from b_mem's {"fb"}
+    with (
+        patch("algua.registry.promotion.compute_artifact_hashes",
+              return_value=MagicMock(code_hash="REWRITTEN")),  # no code match
+        patch("algua.registry.promotion.factors_used_by", return_value=[factor]),
+    ):
+        assigned = _classify_and_assign_family(
+            repo, "cand", actor=Actor.AGENT, new_family_slug=None)
+
+    assert assigned == fam_b_id  # rescued into B instead of escaping to a fresh family
+    _args, kwargs = repo.assign_strategy_to_family.call_args
+    assert kwargs["verdict"] == SimVerdict.MERGE.value
+    assert kwargs["similarity_score"] == pytest.approx(1.0)

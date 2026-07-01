@@ -39,6 +39,17 @@ _AXIS_AVAILABILITY = {
 # Below this threshold the axis is omitted (contributes 0.0).
 _RETURN_CORRELATION_MIN_OVERLAP = 63
 
+# Return-correlation is the only axis a breadth-evader cannot cheaply fake (code can be
+# rewritten, factors re-declared). At weight 0.20 it can never alone reach even PARENTAGE
+# (0.50), so two strategies that trade IDENTICALLY but are rewritten + re-labelled score
+# 0.20 -> NOVEL, re-opening the deliberate-split breadth evasion #222 exists to stop (#338).
+# Fix: when the return axis is evaluable, let it ESCALATE the verdict as a standalone floor,
+# composed by max() with the linear blend (see family_similarity). max(blend, ret) >= blend
+# for every pair, so this is strictly TIGHTENING (forward-only, #222): no existing family
+# assignment can loosen. The escalation lives ONLY in the assignment path — pairwise_axes
+# stays a pure linear blend so family_audit's provenance-gated return logic is unaffected.
+_RETURN_STANDALONE_ESCALATION = True
+
 
 def clustering_version() -> str:
     """Hash of the configuration that determines clustering behaviour.
@@ -53,6 +64,7 @@ def clustering_version() -> str:
         "weight_factor_lineage": WEIGHT_FACTOR_LINEAGE,
         "weight_return_correlation": WEIGHT_RETURN_CORRELATION,
         "axis_availability": _AXIS_AVAILABILITY,
+        "return_standalone_escalation": _RETURN_STANDALONE_ESCALATION,
     }
     digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
     return digest[:32]
@@ -80,7 +92,9 @@ def _return_correlation_axis(
     corr = strategy_returns.loc[shared_idx].corr(member_returns.loc[shared_idx])  # type: ignore[attr-defined]
     if not math.isfinite(corr):
         return None
-    return max(0.0, corr)  # negative correlation -> 0.0 (not similar)
+    # Clamp to [0,1]: negative correlation -> 0.0 (not similar); guard float overshoot > 1.0
+    # so the standalone escalation in family_similarity never exceeds the [0,1] score scale.
+    return min(1.0, max(0.0, corr))
 
 
 def pairwise_axes(
@@ -123,6 +137,7 @@ def family_similarity(
     family_members: list[dict],
     *,
     returns_lookup: dict | None = None,
+    escalate: bool = True,
 ) -> tuple[SimVerdict, float]:
     """Compute similarity between a strategy and a family, returning a verdict and score.
 
@@ -135,6 +150,15 @@ def family_similarity(
             key ``"__strategy__"`` to supply the current strategy's own returns (a
             name that would otherwise collide with a strategy literally registered
             as ``"__strategy__"``). If None, the return-correlation axis is 0.0.
+        escalate: When True (default), apply the #338 standalone return-correlation
+            escalation — if the return axis is evaluable (>= MIN_OVERLAP shared dates),
+            let it bind on its own via ``max(blend, return_corr)``, so an identical-trading
+            but rewritten/re-labelled clone cannot escape into NOVEL. When False, the score
+            is the pure linear blend only (the pre-#338 behaviour). Callers ranking multiple
+            families for ASSIGNMENT pass ``escalate=False`` first so the family SELECTION stays
+            forward-only (a return-only match must not displace a blend match into a
+            narrower-breadth family); escalation is a NOVEL-rescue applied only when no family
+            matches on the blend alone. See ``registry.promotion._assign_family``.
 
     Returns:
         ``(SimVerdict, float)`` — verdict and similarity score (0.0–1.0, or 0.0 on failure).
@@ -151,12 +175,21 @@ def family_similarity(
         if returns_lookup is not None:
             member_name = member.get("name")
             member_returns = returns_lookup.get(member_name) if member_name else None
-        score, _axes = pairwise_axes(
+        score, axes = pairwise_axes(
             strategy_code_hash, strategy_factors, strategy_returns,
             member["code_hash"], member["factors"], member_returns,
         )
         if not math.isfinite(score):
             return (SimVerdict.NOVEL, 0.0)
+        # Standalone return-correlation escalation (#338): when the return axis is evaluable
+        # (>= MIN_OVERLAP shared dates), let it bind on its own by taking max() with the blend.
+        # This is the gaming-resistant axis; max only raises the score (forward-only tightening).
+        if escalate:
+            ret = axes["return"]
+            if ret is not None:
+                if not math.isfinite(ret):
+                    return (SimVerdict.NOVEL, 0.0)  # fail closed on a non-finite axis value
+                score = max(score, ret)
         if score > best_score:
             best_score = score
 

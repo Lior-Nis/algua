@@ -6,11 +6,14 @@ import math
 import re
 import sqlite3
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from algua.registry.db import migrate
 from algua.research.clustering import (
+    MERGE_THRESHOLD,
+    PARENTAGE_THRESHOLD,
     SimVerdict,
     _return_correlation_axis,
     clustering_version,
@@ -281,3 +284,121 @@ def test_merge_now_reachable_with_all_axes():
     )
     assert math.isclose(score, 1.0, rel_tol=1e-9)
     assert verdict == SimVerdict.MERGE
+
+
+# ---------------------------------------------------------------------------
+# #338: standalone return-correlation escalation
+#
+# Return-correlation is the gaming-resistant axis (code can be rewritten, factors
+# re-declared). It must be able to BIND on its own — a rewritten + re-labelled clone
+# that trades identically must not escape into NOVEL (fresh family, zero inherited
+# breadth). Escalation is max(blend, ret), applied ONLY in family_similarity.
+# ---------------------------------------------------------------------------
+
+
+def _correlated_series(target_noise: float, n: int = 200, seed: int = 42):
+    """Two return series whose Pearson corr ~= 1/sqrt(1+target_noise**2)."""
+    rng = np.random.default_rng(seed)
+    base = rng.standard_normal(n)
+    noise = rng.standard_normal(n)
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    s1 = pd.Series(base, index=idx, dtype=float)
+    s2 = pd.Series(base + target_noise * noise, index=idx, dtype=float)
+    return s1, s2
+
+
+def test_standalone_return_corr_binds_merge_despite_code_factor_mismatch():
+    """Identical trading (corr ~1.0) but rewritten code + disjoint factors -> MERGE.
+
+    Old behaviour: blend = 0.20*1.0 = 0.20 -> NOVEL (the #338 evasion). With standalone
+    escalation, max(0.20, ~1.0) -> MERGE, folding the clone back into the incumbent family.
+    """
+    n = 70
+    strat_ret = _make_series([float(i) for i in range(n)])
+    member_ret = _make_series([float(i) * 5.0 for i in range(n)])  # perfect positive corr
+
+    members = [{"code_hash": "rewritten_hash", "factors": {"x", "y"}, "name": "mem"}]
+    verdict, score = family_similarity(
+        strategy_code_hash="original_hash",   # code axis = 0.0
+        strategy_factors={"a", "b"},           # factor axis = 0.0 (disjoint)
+        family_members=members,
+        returns_lookup={"__strategy__": strat_ret, "mem": member_ret},
+    )
+    assert math.isclose(score, 1.0, rel_tol=1e-9)
+    assert verdict == SimVerdict.MERGE
+
+
+def test_standalone_return_corr_binds_parentage_moderate():
+    """Moderate return corr (~0.71) with code/factor mismatch -> PARENTAGE (not NOVEL)."""
+    strat_ret, member_ret = _correlated_series(target_noise=1.0)  # corr ~ 0.707
+    members = [{"code_hash": "hb", "factors": {"x"}, "name": "mem"}]
+    verdict, score = family_similarity(
+        strategy_code_hash="ha",               # mismatch
+        strategy_factors={"a"},                 # disjoint
+        family_members=members,
+        returns_lookup={"__strategy__": strat_ret, "mem": member_ret},
+    )
+    assert 0.55 < score < 0.82, score
+    assert PARENTAGE_THRESHOLD <= score < MERGE_THRESHOLD
+    assert verdict == SimVerdict.PARENTAGE
+
+
+def test_standalone_low_return_corr_stays_novel():
+    """Weak return corr (~0.32) with code/factor mismatch -> still NOVEL (does not bind)."""
+    strat_ret, member_ret = _correlated_series(target_noise=3.0)  # corr ~ 0.316
+    members = [{"code_hash": "hb", "factors": {"x"}, "name": "mem"}]
+    verdict, score = family_similarity(
+        strategy_code_hash="ha",
+        strategy_factors={"a"},
+        family_members=members,
+        returns_lookup={"__strategy__": strat_ret, "mem": member_ret},
+    )
+    assert score < PARENTAGE_THRESHOLD, score
+    assert verdict == SimVerdict.NOVEL
+
+
+def test_pairwise_axes_stays_pure_no_standalone_escalation():
+    """pairwise_axes must NOT apply the escalation — it stays the pure linear blend so
+    family_audit's provenance-gated return logic is unaffected. Identical returns + code/
+    factor mismatch -> blended == WEIGHT_RETURN_CORRELATION (0.20), NOT max()-escalated.
+    """
+    from algua.research.clustering import WEIGHT_RETURN_CORRELATION, pairwise_axes
+
+    n = 70
+    s = _make_series([float(i) for i in range(n)])
+    blended, axes = pairwise_axes("ha", {"a"}, s, "hb", {"b"}, s)  # corr 1.0, code/factor 0
+    assert axes["return"] is not None and math.isclose(axes["return"], 1.0, abs_tol=1e-9)
+    assert math.isclose(blended, WEIGHT_RETURN_CORRELATION, rel_tol=1e-9)  # 0.20, not escalated
+
+
+def test_standalone_escalation_is_monotone_never_lowers():
+    """When the linear blend already exceeds the raw return axis, max() picks the blend —
+    escalation is a no-op and never LOWERS the score (forward-only tightening). With a
+    code+factor match the blend is 0.80 + 0.20*ret, which strictly exceeds ret, so the
+    standalone floor cannot pull the score down.
+    """
+    from algua.research.clustering import _return_correlation_axis
+
+    strat_ret, member_ret = _correlated_series(target_noise=1.0)
+    ret = _return_correlation_axis(strat_ret, member_ret)
+    assert ret is not None
+    blend = 0.50 + 0.30 + 0.20 * ret  # code=1.0, factor=1.0, + return term
+    assert blend > ret  # blend dominates -> max() must leave the score == blend
+
+    members = [{"code_hash": "same", "factors": {"a", "b"}, "name": "mem"}]
+    _verdict, score = family_similarity(
+        strategy_code_hash="same",              # code = 1.0
+        strategy_factors={"a", "b"},             # factor = 1.0
+        family_members=members,
+        returns_lookup={"__strategy__": strat_ret, "mem": member_ret},
+    )
+    assert math.isclose(score, blend, rel_tol=1e-9)  # escalation did not lower the blend
+
+
+def test_clustering_version_changes_when_escalation_toggled(monkeypatch):
+    """The standalone-escalation flag is part of the config digest (records invalidate)."""
+    import algua.research.clustering as m
+
+    current = clustering_version()
+    monkeypatch.setattr(m, "_RETURN_STANDALONE_ESCALATION", False)
+    assert clustering_version() != current
