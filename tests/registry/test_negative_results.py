@@ -63,6 +63,18 @@ def test_secret_redacted_in_param_keys(tmp_path):
     assert _SECRET not in json.dumps(r["params"])
 
 
+def test_params_with_mixed_and_non_string_keys_does_not_crash(tmp_path):
+    # A logging primitive must not raise on plausible input: mixed str/int keys would break
+    # json.dumps(sort_keys=True); keys are coerced to str (JSON-object semantics).
+    conn = _conn(tmp_path)
+    rid = record_negative_result(
+        conn, kind="discard", verdict="DISCARD", actor="agent", reason="k",
+        source="manual", params={1: "x", "a": "y", (2, 3): "z"})
+    r = list_negative_results(conn)[0]
+    assert r["id"] == rid
+    assert set(r["params"]) == {"1", "a", "(2, 3)"}
+
+
 def test_params_json_is_bounded(tmp_path):
     conn = _conn(tmp_path)
     record_negative_result(

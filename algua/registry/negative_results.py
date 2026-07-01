@@ -78,10 +78,12 @@ def _scrub(obj: Any, depth: int = 0) -> Any:
     if isinstance(obj, float):
         return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
     if isinstance(obj, dict):
-        # Scrub string KEYS too (a secret can be pasted as a key, not just a value). Collisions
-        # after redaction are last-wins — acceptable minor loss for an advisory masking pass.
+        # Scrub string KEYS too (a secret can be pasted as a key, not just a value), and coerce
+        # every key to str: JSON object keys are strings anyway, and this avoids a json.dumps
+        # sort_keys=True crash on mixed/non-string keys (e.g. {1: ..., "a": ...}). Collisions
+        # after redaction/coercion are last-wins — acceptable minor loss for an advisory mask.
         return {
-            (_scrub_text(k) if isinstance(k, str) else k): _scrub(v, depth + 1)
+            (_scrub_text(k) if isinstance(k, str) else str(k)): _scrub(v, depth + 1)
             for k, v in obj.items()
         }
     if isinstance(obj, (list, tuple)):
