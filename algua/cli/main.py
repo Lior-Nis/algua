@@ -18,6 +18,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     idea_cmd,
     live_cmd,
     monitoring_cmd,
+    negative_cmd,
     paper_cmd,
     registry_cmd,
     research_cmd,
@@ -30,6 +31,7 @@ from algua.cli.errors import error_code
 # module imports a sibling. Typer builds the command tree lazily at get_command(app) inside main(),
 # so this only needs to run before that call. MUST stay after the `from algua.cli import (…)` block.
 research_cmd.research_app.add_typer(idea_cmd.idea_app, name="idea")
+research_cmd.research_app.add_typer(negative_cmd.log_app, name="log")
 
 __all__ = ["app", "main"]
 
