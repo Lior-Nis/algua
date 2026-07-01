@@ -6,7 +6,9 @@ from algua.backtest.metrics import metrics_from_returns
 def test_empty_returns_are_zero():
     m = metrics_from_returns(pd.Series(dtype="float64"))
     assert m == {"total_return": 0.0, "ann_return": 0.0, "ann_volatility": 0.0,
-                 "sharpe": 0.0, "max_drawdown": 0.0, "skewness": 0.0, "kurtosis": 0.0}
+                 "max_drawdown": 0.0, "hit_rate": 0.0, "tail_ratio": 0.0,
+                 "sharpe": 0.0, "sortino": 0.0, "cagr": 0.0, "calmar": 0.0,
+                 "skewness": 0.0, "kurtosis": 0.0}
 
 
 def test_zero_volatility_returns_zero_sharpe():

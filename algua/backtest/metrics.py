@@ -49,12 +49,41 @@ def _max_drawdown(r: pd.Series) -> float:
     return float((equity / peak - 1.0).min())
 
 
+def _hit_rate(r: pd.Series) -> float:
+    """Fraction of strictly-positive periods (STRICT: a flat/zero period counts as a miss).
+
+    In [0, 1]. Part of the Golden-Rule-6 dashboard — never read in isolation.
+    """
+    return float((r > 0.0).mean())
+
+
+def _tail_ratio(r: pd.Series) -> float:
+    """Right-tail magnitude over left-tail magnitude: |p95| / |p5|.
+
+    Uses NumPy's default (linear-interpolation) percentile. >1 means upside tails dominate
+    downside tails. Returns the finite sentinel 0.0 when the left tail is empty (|p5| == 0,
+    e.g. a non-negative series) or the ratio is otherwise non-finite — 0.0 here means
+    "undefined", NOT "worst possible", so read it only alongside the rest of the dashboard.
+    """
+    p95, p5 = np.percentile(r, [95, 5])
+    # The left tail must be an actual LOSS for the ratio to mean "upside vs downside". A
+    # non-negative left tail (p5 >= 0, e.g. an all-positive series) has no loss tail, so the
+    # ratio is undefined -> finite sentinel 0.0 (NOT "worst"). Guarding only p5 == 0 would
+    # leak a meaningless |gain|/|smaller gain| score for an all-positive series.
+    if float(p5) >= 0.0:
+        return 0.0
+    ratio = abs(float(p95)) / abs(float(p5))  # magnitude ratio: always >= 0
+    return ratio if math.isfinite(ratio) else 0.0
+
+
 # Registry of named, pure, single-series metrics. Order defines dict key order.
 METRIC_FUNCTIONS: dict[str, MetricFn] = {
     "total_return": _total_return,
     "ann_return": _ann_return,
     "ann_volatility": _ann_volatility,
     "max_drawdown": _max_drawdown,
+    "hit_rate": _hit_rate,
+    "tail_ratio": _tail_ratio,
 }
 
 
@@ -70,13 +99,40 @@ def metrics_from_returns(returns: pd.Series, *, risk_free: float = 0.0) -> dict[
     r = returns.dropna()
     if len(r) == 0:
         return {name: 0.0 for name in METRIC_FUNCTIONS} | {
-            "sharpe": 0.0, "skewness": 0.0, "kurtosis": 0.0,
+            "sharpe": 0.0, "sortino": 0.0, "cagr": 0.0, "calmar": 0.0,
+            "skewness": 0.0, "kurtosis": 0.0,
         }
 
     out = {name: fn(r) for name, fn in METRIC_FUNCTIONS.items()}
     ann_vol = out["ann_volatility"]
     excess = out["ann_return"] - risk_free
     out["sharpe"] = float(excess / ann_vol) if ann_vol > 0 else 0.0
+
+    # Sortino: arithmetic annualized excess return (same numerator as Sharpe) over the
+    # annualized downside deviation, measured against the SAME benchmark as the numerator so
+    # the ratio is self-consistent. The minimum acceptable return (MAR) is the daily
+    # risk-free rate (risk_free / ANN); shortfalls below it, with the FULL sample in the
+    # denominator, give dd = sqrt(mean(min(r - mar, 0)**2)). With the default risk_free = 0.0
+    # this reduces to the target-0 form (min(r, 0)), so the gate-calibrated path is unchanged.
+    # dd == 0 (never below MAR) -> finite sentinel 0.0 (undefined, NOT "good"); read only with
+    # the rest of the dashboard.
+    mar_daily = risk_free / ANN
+    downside = np.minimum(r.to_numpy() - mar_daily, 0.0)
+    dd = float(np.sqrt(np.mean(downside**2))) * np.sqrt(ANN)
+    out["sortino"] = float(excess / dd) if dd > 0 and math.isfinite(dd) else 0.0
+
+    # CAGR = compounded annual growth over the realized number of periods. Guard a
+    # compounding base <= 0 (a cumulative loss of >= 100%, possible if any period return
+    # <= -1) which would make the fractional power complex/non-finite -> sentinel 0.0.
+    base = 1.0 + out["total_return"]
+    cagr = float(base ** (ANN / len(r)) - 1.0) if base > 0.0 else 0.0
+    out["cagr"] = cagr if math.isfinite(cagr) else 0.0
+
+    # Calmar = CAGR / |max drawdown| (note: max_drawdown is the NEGATIVE convention, e.g.
+    # -0.2). Numerator is CAGR (compounded), unlike Sortino/Sharpe which use the arithmetic
+    # annualized return. |maxDD| == 0 -> finite sentinel 0.0.
+    mdd = abs(out["max_drawdown"])
+    out["calmar"] = float(out["cagr"] / mdd) if mdd > 0 else 0.0
     # Moments for the DSR non-normality adjustment (#211). RAW (Pearson) kurtosis (fisher=False):
     # a Gaussian series gives ~3, so the gate's (kurtosis-1)/4 term reduces to 0.5. scipy returns
     # NaN for a single-element or zero-variance series; coerce any non-finite moment to 0.0 so no
@@ -113,18 +169,17 @@ def portfolio_metrics(pf: vbt.Portfolio, weights_eff: pd.DataFrame) -> dict[str,
     """
     returns = pf.returns()
     base = metrics_from_returns(returns)
-    n_periods = len(returns.dropna())
-    total_return = base["total_return"]
-    cagr = (
-        float((1.0 + total_return) ** (ANN / n_periods) - 1.0) if n_periods > 0 else 0.0
-    )
     n_rebalances = int((weights_eff.diff().abs().sum(axis=1) > REBALANCE_EPS).sum())
     return {
-        "total_return": total_return,
-        "cagr": cagr,
+        "total_return": base["total_return"],
+        "cagr": base["cagr"],
         "ann_volatility": base["ann_volatility"],
         "sharpe": base["sharpe"],
+        "sortino": base["sortino"],
+        "calmar": base["calmar"],
         "max_drawdown": base["max_drawdown"],
+        "hit_rate": base["hit_rate"],
+        "tail_ratio": base["tail_ratio"],
         "turnover": weights_turnover(weights_eff),
         "avg_gross_exposure": avg_gross_exposure(weights_eff),
         "n_rebalances": n_rebalances,

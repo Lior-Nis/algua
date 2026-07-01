@@ -1,11 +1,41 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from algua.config.settings import Settings
+from algua.contracts.lifecycle import Stage
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 from algua.knowledge.metrics import latest_run_metrics
+
+# Canonical lifecycle order for grouping rosters/axis pages by stage. Derived from the Stage enum
+# (definition order == lifecycle order) so adding a stage needs no edit here. Unknown/legacy stage
+# strings sort AFTER all known stages (and alphabetically among themselves) and are never dropped —
+# a corrupted stage stays visible to a human instead of vanishing from the hub.
+_STAGE_ORDER = {s.value: i for i, s in enumerate(Stage)}
+
+
+def _stage_sort_key(stage: str) -> tuple[int, str]:
+    return (_STAGE_ORDER.get(stage, len(_STAGE_ORDER)), stage)
+
+
+def _created_month(value: object) -> str:
+    """Normalize a frontmatter ``created`` value to a ``YYYY-MM`` bucket; ``undated`` otherwise.
+
+    YAML may load the date as a ``date``/``datetime`` or as an ISO string; anything missing or
+    malformed buckets to ``undated`` so the date axis never raises.
+    """
+    if isinstance(value, datetime | date):
+        return f"{value.year:04d}-{value.month:02d}"
+    if isinstance(value, str):
+        for parse in (date.fromisoformat, datetime.fromisoformat):
+            try:
+                parsed = parse(value)
+            except ValueError:
+                continue
+            return f"{parsed.year:04d}-{parsed.month:02d}"
+    return "undated"
 
 
 def _safe_path(base: Path, *parts: str) -> Path:
@@ -71,6 +101,28 @@ def render_results_block(metrics: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
+def render_members_block(members: list[tuple[str, str]]) -> str:
+    """Markdown content (no markers) for a family's synced MEMBERS block.
+
+    ``members`` is a list of ``(strategy_stem, stage)`` pairs. Renders a true MOC: a total-count
+    summary line followed by per-stage ``### {stage} ({n})`` sections of ``[[stem]]`` wikilinks
+    (stems sorted), stages in canonical lifecycle order (unknown stages last, never dropped). Links
+    target the canonical filename ``stem``, so a drifted frontmatter ``name`` can't break them.
+    """
+    if not members:
+        return "_No members yet._"
+    by_stage: dict[str, list[str]] = {}
+    for stem, stage in members:
+        by_stage.setdefault(stage, []).append(stem)
+    lines = [f"**{len(members)} members**", ""]
+    for stage in sorted(by_stage, key=_stage_sort_key):
+        stems = sorted(by_stage[stage])
+        lines.append(f"### {stage} ({len(stems)})")
+        lines += [f"- [[{stem}]]" for stem in stems]
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def _apply_owned_metadata(fm: dict[str, Any], metadata: dict[str, Any]) -> None:
     """Write the registry-owned frontmatter keys from a registry metadata dict, wrapping
     ``family``/``derived_from`` as Obsidian wikilinks. NULL/None values clear the key.
@@ -122,53 +174,118 @@ def sync_strategy_doc(
 
 
 def sync_family_doc(settings: Settings, name: str) -> bool:
-    """Rewrite the synced MEMBERS roster of one family doc. False if the doc is absent."""
+    """Rewrite the synced MEMBERS roster of one family doc. False if the doc is absent.
+
+    The roster is a true MOC — a stage-grouped list of ``[[member]]`` wikilinks, not a count string.
+    """
     path = family_doc_path(settings, name)
     if not path.exists():
         return False
-    counts: dict[str, int] = {}
+    members: list[tuple[str, str]] = []
     for doc in strategies_dir(settings).glob("*.md"):
         if doc.name.startswith("_"):
             continue
         fm, _ = parse_doc(doc.read_text())
         if _unwikilink(fm.get("family")) == name:
-            stage = str(fm.get("stage", "?"))
-            counts[stage] = counts.get(stage, 0) + 1
-    total = sum(counts.values())
-    detail = f"{total} members"
-    if counts:
-        detail += ": " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+            members.append((doc.stem, str(fm.get("stage", "?"))))
     fm, body = parse_doc(path.read_text())
-    body = replace_block(body, "MEMBERS", detail)
+    body = replace_block(body, "MEMBERS", render_members_block(members))
     path.write_text(render_doc(fm, body))
     return True
 
 
-def generate_indexes(settings: Settings) -> None:
-    """(Re)generate strategies/_index.md and strategies/_families.md from frontmatter."""
-    base = strategies_dir(settings)
-    base.mkdir(parents=True, exist_ok=True)
-    strat_lines: list[str] = []
+def _strategy_entries(base: Path) -> list[dict[str, Any]]:
+    """Frontmatter of every strategy doc (one non-recursive ``*.md`` scan, DRY across axis pages).
+
+    Skips ``_``-prefixed roll-ups and ``type: family`` docs; family docs live in ``families/`` so
+    the non-recursive glob already excludes them. Each entry carries the canonical link ``stem``.
+    """
+    entries: list[dict[str, Any]] = []
     for doc in sorted(base.glob("*.md")):
         if doc.name.startswith("_"):
             continue
         fm, _ = parse_doc(doc.read_text())
         if fm.get("type") == "family":
             continue
-        name = fm.get("name", doc.stem)
-        strat_lines.append(
-            f"- [[{name}]] — {fm.get('family', '—')} · "
-            f"{fm.get('stage', '?')} · {fm.get('hypothesis_status', '?')}"
+        entries.append(
+            {
+                "stem": doc.stem,
+                "family": _unwikilink(fm.get("family")),
+                "stage": str(fm.get("stage", "?")),
+                "hypothesis_status": str(fm.get("hypothesis_status", "?")),
+                "created": fm.get("created"),
+            }
         )
-    (base / "_index.md").write_text("# Strategies\n\n" + "\n".join(strat_lines) + "\n")
+    return entries
+
+
+def _family_link(family: str | None) -> str:
+    return f"[[{family}]]" if family else "—"
+
+
+def _render_by_stage(entries: list[dict[str, Any]]) -> str:
+    by_stage: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        by_stage.setdefault(e["stage"], []).append(e)
+    lines = ["# Strategies by stage", ""]
+    for stage in sorted(by_stage, key=_stage_sort_key):
+        rows = sorted(by_stage[stage], key=lambda e: e["stem"])
+        lines.append(f"## {stage} ({len(rows)})")
+        lines += [
+            f"- [[{e['stem']}]] — {e['hypothesis_status']} · {_family_link(e['family'])}"
+            for e in rows
+        ]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_by_date(entries: list[dict[str, Any]]) -> str:
+    by_month: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        by_month.setdefault(_created_month(e["created"]), []).append(e)
+    lines = ["# Strategies by created date", ""]
+    # Newest month first; the ``undated`` bucket sorts last (it is not a real month).
+    ordered = sorted((m for m in by_month if m != "undated"), reverse=True)
+    if "undated" in by_month:
+        ordered.append("undated")
+    for month in ordered:
+        rows = sorted(by_month[month], key=lambda e: e["stem"])
+        lines.append(f"## {month} ({len(rows)})")
+        lines += [
+            f"- [[{e['stem']}]] — {e['stage']} · {_family_link(e['family'])}" for e in rows
+        ]
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def generate_indexes(settings: Settings) -> None:
+    """(Re)generate the strategies roll-ups: a bounded ``_index.md`` router over per-axis pages
+    (``_by-stage.md`` status, ``_by-date.md`` date, ``_families.md`` thesis)."""
+    base = strategies_dir(settings)
+    base.mkdir(parents=True, exist_ok=True)
+    entries = _strategy_entries(base)
 
     fam_dir = base / "families"
     fam_lines: list[str] = []
+    n_families = 0
     if fam_dir.exists():
         for doc in sorted(fam_dir.glob("*.md")):
             fm, _ = parse_doc(doc.read_text())
-            fam_lines.append(f"- [[{fm.get('name', doc.stem)}]] — {fm.get('status', '?')}")
+            n_families += 1
+            fam_lines.append(f"- [[{doc.stem}]] — {fm.get('status', '?')}")
     (base / "_families.md").write_text("# Thesis families\n\n" + "\n".join(fam_lines) + "\n")
+
+    (base / "_by-stage.md").write_text(_render_by_stage(entries))
+    (base / "_by-date.md").write_text(_render_by_date(entries))
+
+    router = (
+        "# Strategies\n\n"
+        f"{len(entries)} strategies across {n_families} families. Navigate by axis:\n\n"
+        "- [[_by-stage]] — by lifecycle stage (status)\n"
+        "- [[_by-date]] — by created month (date)\n"
+        "- [[_families]] — by thesis family\n"
+    )
+    (base / "_index.md").write_text(router)
 
 
 def sync_all(
