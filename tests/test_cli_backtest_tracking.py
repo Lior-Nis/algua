@@ -69,3 +69,23 @@ def test_sweep_track_failure_is_non_fatal(monkeypatch):
     assert p["ok"] is True
     assert p["mlflow_run_id"] is None
     assert "RuntimeError: flaky uri" in p["mlflow_tracking_error"]
+
+
+# --- --summary mode must still surface the tracking error (it is in the keep-lists) ---
+
+
+def test_walk_forward_summary_track_failure_keeps_error(monkeypatch):
+    monkeypatch.setattr(backtest_cmd, "log_walk_forward", _boom)
+    p = _payload(["backtest", "walk-forward", STRAT, *DEMO, "--track", "--summary"])
+    assert p["summary"] is True
+    assert p["mlflow_run_id"] is None
+    assert "RuntimeError: flaky uri" in p["mlflow_tracking_error"]
+
+
+def test_sweep_summary_track_failure_keeps_error(monkeypatch):
+    monkeypatch.setattr(backtest_cmd, "log_sweep", _boom)
+    p = _payload(
+        ["backtest", "sweep", STRAT, *DEMO, "--param", "lookback=20,40", "--track", "--summary"])
+    assert p["summary"] is True
+    assert p["mlflow_run_id"] is None
+    assert "RuntimeError: flaky uri" in p["mlflow_tracking_error"]
