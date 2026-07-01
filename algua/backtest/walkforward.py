@@ -27,17 +27,29 @@ _MIN_WINDOW_BARS = 5
 
 
 def _segment_bounds(
-    n: int, windows: int, holdout_frac: float
+    n: int, windows: int, holdout_frac: float, embargo: int = 0
 ) -> tuple[list[tuple[int, int]], tuple[int, int]]:
-    """Partition n bars (by index) into K equal windows + a final holdout, as half-open ranges.
+    """Partition n bars (by index) into K equal windows + a final holdout, as half-open ranges,
+    with an `embargo`-bar PURGE GAP between the last in-sample bar and the holdout (issue #345).
 
-    Holdout = the last int(n*holdout_frac) bars. The remaining bars split into `windows` equal
-    pieces; any integer-division remainder goes to the LAST window.
+    Holdout = the last int(n*holdout_frac) bars `[train_n, n)` (UNCHANGED by the embargo, so the
+    #192 single-use holdout-burn interval stays identical). The embargo carves the last `embargo`
+    training bars `[train_n - embargo, train_n)` out of the in-sample region: the windows split
+    `[0, train_n - embargo)` into `windows` equal pieces (remainder to the LAST window). The carved
+    gap guarantees `max(train_idx) = train_n - embargo - 1 < train_n - embargo = holdout_start -
+    embargo`, so no in-sample sample index lies within `embargo` bars of the holdout — the
+    Lopez de Prado purge/embargo assertion. The holdout still reads earlier bars as feature
+    HISTORY (a test set reading its own past inputs is not leakage); the gap only decorrelates the
+    in-sample *selection* statistics from the holdout.
     """
     if windows < 2:
         raise ValueError("windows must be >= 2")
     if not (0.0 < holdout_frac < 1.0):
         raise ValueError("holdout_frac must be in (0, 1)")
+    if embargo < 0:
+        # A negative embargo would set usable_train > train_n, overlapping the windows INTO the
+        # holdout (re-opening the leak) while the carved-gap postcondition still held numerically.
+        raise BacktestError(f"embargo must be >= 0, got {embargo}")
     holdout_n = int(n * holdout_frac)
     if holdout_n < 1:
         raise BacktestError(
@@ -45,18 +57,23 @@ def _segment_bounds(
             f"increase --holdout-frac or widen the period so the holdout is non-empty"
         )
     train_n = n - holdout_n
-    base = train_n // windows
+    usable_train = train_n - embargo  # in-sample region after the embargo purge
+    base = usable_train // windows if usable_train > 0 else 0
     if base < _MIN_WINDOW_BARS:
         raise BacktestError(
-            f"not enough bars: {train_n} train bars / {windows} windows is "
-            f"< {_MIN_WINDOW_BARS} bars/window; widen the period or lower --windows"
+            f"not enough bars: {train_n} train bars minus a {embargo}-bar embargo leaves "
+            f"{usable_train} usable / {windows} windows is < {_MIN_WINDOW_BARS} bars/window; "
+            f"widen the period, lower --windows, or lower the embargo (feature_lookback)"
         )
     bounds: list[tuple[int, int]] = []
     s = 0
     for i in range(windows):
-        e = train_n if i == windows - 1 else s + base
+        e = usable_train if i == windows - 1 else s + base
         bounds.append((s, e))
         s = e
+    # Postcondition: the carved gap is exactly `embargo` bars (and >= 0, since embargo >= 0).
+    assert bounds[-1][1] == usable_train
+    assert train_n - bounds[-1][1] == embargo
     return bounds, (train_n, n)
 
 
@@ -76,6 +93,10 @@ class WalkForwardResult:
     # EXCEPT `research promote`, which is the sole command that reveals and burns the holdout.
     holdout_metrics: dict[str, Any]
     stability: dict[str, float]
+    # Purge/embargo gap (bars) carved between the in-sample windows and the holdout (#345).
+    # = max(feature_lookback, decision_lag_bars) when the strategy declares a lookback, else 0.
+    # Defaulted only so hand-built test fixtures need not set it; `walk_forward` always passes it.
+    embargo: int = 0
     code_hash: str | None = None
     dependency_hash: str | None = None
     # Point-in-time universe provenance — separate from the bars `snapshot_id` (see BacktestResult).
@@ -157,6 +178,20 @@ def _segment_record(returns: pd.Series, start_i: int, end_i: int) -> dict[str, A
     return rec
 
 
+def _resolve_embargo(strategy: LoadedStrategy, embargo: int | None) -> int:
+    """The walk-forward purge gap (#345). An explicit ``embargo`` wins (the exploratory CLI
+    override). Otherwise derive from the strategy: a DECLARED ``feature_lookback`` gives
+    ``max(feature_lookback, decision_lag_bars)`` — the feature-window span OR the t->t+1 decision
+    lag, whichever is larger; an UNDECLARED lookback (``None``) gives ``0`` (legacy zero-gap; the
+    agent promote path refuses an undeclared lookback upstream)."""
+    if embargo is not None:
+        return embargo
+    lookback = strategy.config.feature_lookback
+    if lookback is None:
+        return 0
+    return max(lookback, strategy.execution.decision_lag_bars)
+
+
 def walk_forward(
     strategy: LoadedStrategy,
     provider: DataProvider,
@@ -165,6 +200,7 @@ def walk_forward(
     *,
     windows: int = 4,
     holdout_frac: float = 0.2,
+    embargo: int | None = None,
     seed: int | None = None,
     universe_by_date: Mapping[date, Collection[str]] | None = None,
     universe_name: str | None = None,
@@ -175,7 +211,14 @@ def walk_forward(
     delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
     assume_terminal_last_close: bool = False,
 ) -> WalkForwardResult:
-    """Run the strategy once, then segment its return series into K windows + a final holdout.
+    """Run the strategy once, then segment its return series into K windows + a final holdout,
+    separated by an ``embargo``-bar purge gap (issue #345).
+
+    ``embargo`` (bars between the last in-sample window and the holdout): when ``None`` it is
+    derived from the strategy — ``max(feature_lookback, decision_lag_bars)`` if the strategy
+    DECLARES ``feature_lookback`` (``config.feature_lookback is not None``), else ``0`` (an
+    undeclared strategy keeps the legacy zero-gap behavior; the agent ``research promote`` path
+    refuses an undeclared lookback upstream). An explicit value overrides the derivation.
 
     The returned ``holdout_metrics`` are SENSITIVE: callers that emit this result to operators
     (CLI output, MLflow artifacts, API responses, etc.) MUST withhold the ``holdout_metrics``
@@ -185,6 +228,7 @@ def walk_forward(
     BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
+    embargo = _resolve_embargo(strategy, embargo)
     # PIT sidecar providers (#132) are threaded straight into build_portfolio (= simulate, which
     # consumes them); the `_reject_pit_sidecar` guard is removed here — unblocking needs_* in
     # walk-forward is the point of #132 slice 4 (the engine still fails closed if a needs_*
@@ -201,7 +245,7 @@ def walk_forward(
     # universe_by_date — PIT-identical, a second read of the same immutable snapshot). Never raises.
     market_returns = _market_return_series(strategy, provider, start, end, universe_by_date)
     returns = pf.returns()
-    bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac)
+    bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac, embargo)
 
     window_metrics = [
         {"index": i, **_segment_record(returns, s, e)} for i, (s, e) in enumerate(bounds)
@@ -240,6 +284,7 @@ def walk_forward(
         period={"start": start.date().isoformat(), "end": end.date().isoformat()},
         windows=windows,
         holdout_frac=holdout_frac,
+        embargo=embargo,
         window_metrics=window_metrics,
         holdout_metrics=holdout_metrics,
         stability=stability,

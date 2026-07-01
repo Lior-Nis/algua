@@ -316,6 +316,21 @@ def promotion_preflight(
     # Raises BacktestError on divergence (caught by the `promote` CLI's @json_errors).
     if _loaded is not None:
         verify_signal_panel_parity(_loaded, provider, start, end)
+    # Walk-forward embargo declaration (#345): an agent's holdout is gated on a purge gap sized by
+    # the strategy's declared feature lookback. An UNDECLARED lookback (feature_lookback is None)
+    # would silently size the gap from the t->t+1 decision lag alone (= 1 bar), under-embargoing a
+    # real ~60-bar-lookback signal and re-opening the leak on the gate-bearing path. Fail closed:
+    # the agent must declare feature_lookback (it may declare 0 for a strategy with no rolling
+    # feature window). Humans accept the cost. Only enforceable for a bundled module (load_strategy
+    # resolved); synthetic-name test strategies are left as-is, matching the parity gate above.
+    if (actor is Actor.AGENT and _loaded is not None
+            and _loaded.config.feature_lookback is None):
+        raise ValueError(
+            f"agent research promote requires {name!r} to declare feature_lookback (the bars of "
+            f"trailing history its signal reads) so the walk-forward embargo can purge the "
+            f"in-sample/holdout boundary (#345). Declare it on the strategy CONFIG (0 if the "
+            f"signal has no rolling feature window); promote with --actor human to accept the "
+            f"default.")
     # --- Family classification (clustering verdict, #222) ---
     # Runs BEFORE breadth resolution (no holdout has been touched yet). A strategy already
     # assigned to a family is left as-is (no reclassification). A NOVEL verdict refuses an

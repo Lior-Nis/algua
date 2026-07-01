@@ -49,7 +49,7 @@ def test_promotion_preflight_passes_news_pit_check(tmp_path):
         "from algua.strategies.base import StrategyConfig\n"
         f"CONFIG = StrategyConfig(name='{name}', universe=['AAPL'],\n"
         "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
-        "    construction='equal_weight_positive', needs_news=True)\n"
+        "    construction='equal_weight_positive', needs_news=True, feature_lookback=0)\n"
         "def signal(view, params, news):\n"
         "    return pd.Series(dtype='float64')\n"
     )

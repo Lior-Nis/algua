@@ -102,7 +102,7 @@ def test_walkforward_result_to_dict_has_expected_keys():
     d = _walkforward_result().to_dict()
     assert set(d) == {
         "strategy", "config_hash", "data_source", "snapshot_id", "timeframe",
-        "seed", "period", "windows", "holdout_frac", "window_metrics",
+        "seed", "period", "windows", "holdout_frac", "embargo", "window_metrics",
         "holdout_metrics", "stability", "code_hash", "dependency_hash",
         "universe_name", "universe_snapshots",
         "fundamentals_snapshot", "news_snapshot",

@@ -50,7 +50,7 @@ def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
         "from algua.strategies.base import StrategyConfig\n"
         f"CONFIG = StrategyConfig(name=\'{name}\', universe=[\'AAPL\'],\n"
         "    execution=ExecutionContract(rebalance_frequency=\'1d\'),\n"
-        "    construction=\'equal_weight_positive\', needs_fundamentals=True)\n"
+        "    construction=\'equal_weight_positive\', needs_fundamentals=True, feature_lookback=0)\n"
         "def signal(view, params, fundamentals):\n"
         "    return pd.Series(dtype=\'float64\')\n"
     )
@@ -77,6 +77,40 @@ def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
                 provider=SyntheticProvider(seed=0),
                 start=datetime(2024, 1, 1, tzinfo=UTC),
                 end=datetime(2024, 6, 1, tzinfo=UTC),
+            )
+    finally:
+        path.unlink(missing_ok=True)
+        _clear_cache(dotted)
+
+
+def test_agent_preflight_fails_closed_on_undeclared_feature_lookback(tmp_path):
+    # #345: an agent may not promote a bundled strategy that leaves feature_lookback undeclared —
+    # the walk-forward embargo would silently under-size and re-open the in-sample/holdout leak.
+    name = "tmp_undeclared_lookback"
+    dotted = f"algua.strategies.momentum.{name}"
+    body = (
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        f"CONFIG = StrategyConfig(name='{name}', universe=['AAPL'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"  # NOTE: no feature_lookback declared
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    path = _write_module(name, body)
+    _clear_cache(dotted)
+    try:
+        importlib.import_module(dotted)
+        repo = _repo(tmp_path)
+        repo.add(name)
+        transition_strategy(repo, name, Stage.BACKTESTED, Actor.HUMAN, "seed")
+        with pytest.raises(ValueError, match="declare feature_lookback"):
+            promotion_preflight(
+                repo, name, actor=Actor.AGENT, declared_combos=None,
+                allow_holdout_reuse=False, allow_non_pit=False,
+                provider=SyntheticProvider(seed=0),
+                start=datetime(2024, 1, 1, tzinfo=UTC), end=datetime(2024, 6, 1, tzinfo=UTC),
             )
     finally:
         path.unlink(missing_ok=True)
