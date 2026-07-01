@@ -4,10 +4,13 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from algua.contracts.types import CapacityLimit
 
 # A construction policy maps cross-sectional scores -> target weights under a risk convention.
 # `view` is the same PIT bar-schema frame the signal saw (passed so a future vol-targeting policy
@@ -75,6 +78,70 @@ def score_proportional_long(
     if total <= 0.0:
         return pd.Series(dtype="float64")
     return (positive / total).sort_index()
+
+
+def _dollar_adv(view: pd.DataFrame, window: int) -> pd.Series:
+    """Per-symbol trailing dollar-ADV over the last `window` bars of `view`.
+
+    `view` is the PIT bar-schema frame the signal saw — history up to and INCLUDING the fully-closed
+    decision bar t, never t+1 — so a trailing window over it carries NO look-ahead. Dollar volume is
+    raw `close * volume` (the actual historical dollars that traded), not adj_close.
+
+    Fail-closed shape guard: `view` must carry `symbol`, `close`, and `volume` (a live/paper view
+    that dropped `volume` or supplied no history must be a loud failure, not a silent flatten).
+    A symbol with FEWER than `window` observations is omitted from the result (no established ADV ->
+    the caller treats it as un-sized), so a newly-listed / sparse name is never sized off one or two
+    noisy bars. Returns a Series indexed by symbol; symbols with a full window map to their mean
+    dollar volume (which may be 0.0 when volume was 0)."""
+    for col in ("symbol", "close", "volume"):
+        if col not in view.columns:
+            raise ConstructionError(
+                f"capacity cap requires a '{col}' column in the bar view (fail closed)"
+            )
+    if view.empty:
+        return pd.Series(dtype="float64")
+    dollar = view["close"].to_numpy(dtype="float64") * view["volume"].to_numpy(dtype="float64")
+    tmp = pd.DataFrame({"symbol": view["symbol"].to_numpy(), "dollar": dollar}, index=view.index)
+    # Sort by timestamp so `tail(window)` is the most-recent `window` bars per symbol regardless of
+    # input row order; stable so equal timestamps keep their relative order.
+    tmp = tmp.sort_index(kind="stable")
+    grouped = tmp.groupby("symbol", sort=False)
+    counts = grouped["dollar"].size()
+    full = counts[counts >= window].index
+    if len(full) == 0:
+        return pd.Series(dtype="float64")
+    tail = grouped.tail(window)
+    adv = tail.groupby("symbol", sort=False)["dollar"].mean()
+    return adv.reindex(full)
+
+
+def apply_capacity_cap(
+    weights: pd.Series, view: pd.DataFrame, capacity: CapacityLimit
+) -> pd.Series:
+    """Cap each target weight at `max_participation_rate` of the name's trailing dollar-ADV,
+    evaluated at the declared `reference_aum` (issue #344). SCALES down (never rejects): the freed
+    weight is left as cash, and the vector is NOT renormalized (renormalizing could push notional
+    back onto neighbours and re-breach — cap-and-hold-cash is the KISS-correct behaviour).
+
+    Per symbol s: max_weight_s = (max_participation_rate * dollar_adv_s) / reference_aum, then
+    capped_w_s = copysign(min(|w_s|, max_weight_s), w_s). Scaling only ever REDUCES |weight|, so a
+    weight vector that already passed the gross / per-symbol rails still passes them.
+
+    Fail-closed illiquidity: a symbol with no established ADV (zero/NaN/inf dollar volume, fewer
+    than `adv_window_bars` observations, or simply absent from `view`) gets max_weight_s = 0 and is
+    forced flat. There is no division by ADV anywhere (we divide by the validated-positive
+    reference_aum and multiply by ADV), so no divide-by-zero is possible."""
+    if len(weights) == 0:
+        return weights
+    adv = _dollar_adv(view, capacity.adv_window_bars)  # only full-window symbols present
+    max_weight = (capacity.max_participation_rate * adv) / capacity.reference_aum
+    # Align to the weight index; a symbol missing an established ADV -> NaN -> treated as 0 budget.
+    budget = max_weight.reindex(weights.index).to_numpy(dtype="float64")
+    # Non-finite (NaN from missing symbol, or a stray inf) -> 0 budget (fail closed).
+    budget = np.where(np.isfinite(budget) & (budget > 0.0), budget, 0.0)
+    w = weights.to_numpy(dtype="float64")
+    capped = np.copysign(np.minimum(np.abs(w), budget), w)
+    return pd.Series(capped, index=weights.index, dtype="float64")
 
 
 def _require_no_unknown_keys(params: dict[str, Any], allowed: set[str]) -> None:

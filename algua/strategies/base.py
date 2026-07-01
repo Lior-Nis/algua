@@ -10,7 +10,7 @@ import pandas as pd
 from pydantic import BaseModel, field_validator
 
 from algua.contracts.types import ExecutionContract
-from algua.portfolio.construction import ConstructFn
+from algua.portfolio.construction import ConstructFn, apply_capacity_cap
 
 # The AUTHORED signal: a pure module-level `signal(view, params) -> pd.Series` of cross-sectional
 # scores (NOT weights). The protocol-level `Strategy.target_weights(features)` is exposed only by
@@ -177,7 +177,16 @@ class LoadedStrategy:
         return self.signal_panel_fn(bars, self.config.params)
 
     def construct(self, scores: pd.Series, view: pd.DataFrame) -> pd.Series:
-        return self.construct_fn(scores, view, self.config.construction_params)
+        weights = self.construct_fn(scores, view, self.config.construction_params)
+        # ADV / capacity participation cap (issue #344). Applied HERE — the single chokepoint every
+        # path (backtest loop, vectorized fast path + its parity twin, live/paper decide) resolves
+        # weights through — so the cap is enforced identically everywhere. `view` is the same PIT
+        # frame the signal saw (ends at the fully-closed decision bar t), so the trailing ADV never
+        # sees the fill bar. No-op when no capacity budget is declared.
+        capacity = self.config.execution.capacity
+        if capacity is not None:
+            weights = apply_capacity_cap(weights, view, capacity)
+        return weights
 
     def target_weights(
         self,
