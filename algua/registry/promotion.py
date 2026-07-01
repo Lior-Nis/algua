@@ -318,8 +318,9 @@ def promotion_preflight(
         verify_signal_panel_parity(_loaded, provider, start, end)
     # Walk-forward embargo declaration (#345): an agent's holdout is gated on a purge gap sized by
     # the strategy's declared feature lookback. An UNDECLARED lookback (feature_lookback is None)
-    # would silently size the gap from the t->t+1 decision lag alone (= 1 bar), under-embargoing a
-    # real ~60-bar-lookback signal and re-opening the leak on the gate-bearing path. Fail closed:
+    # resolves the embargo to 0 (legacy zero-gap, see _resolve_embargo), leaving a real
+    # ~60-bar-lookback signal with NO purge and re-opening the leak on the gate-bearing path. Fail
+    # closed:
     # the agent must declare feature_lookback (it may declare 0 for a strategy with no rolling
     # feature window). Humans accept the cost. Only enforceable for a bundled module (load_strategy
     # resolved); synthetic-name test strategies are left as-is, matching the parity gate above.
