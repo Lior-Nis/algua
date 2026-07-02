@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 
+from algua.contracts.types import OpenOrderReader, OrderLookupBroker
+
 
 @dataclass(frozen=True)
 class LedgerTables:
@@ -226,7 +228,7 @@ class StrandedRecovery:
 
 
 def recover_stranded_broker_order_ids(
-    conn: sqlite3.Connection, broker: object, *, kind: LedgerKind,
+    conn: sqlite3.Connection, broker: OrderLookupBroker, *, kind: LedgerKind,
 ) -> StrandedRecovery:
     """Auto-recover orders stranded by a crash between broker-accept and the broker_order_id
     backfill commit (#312): for each local {kind} order row with `broker_order_id IS NULL`, ask
@@ -250,7 +252,7 @@ def recover_stranded_broker_order_ids(
     recovered: list[str] = []
     mismatched: list[str] = []
     for coid, symbol in stranded.items():
-        order = broker.get_order_by_client_order_id(coid)  # type: ignore[attr-defined]
+        order = broker.get_order_by_client_order_id(coid)
         if order is None:
             continue  # not at the venue -> preserve (crash-safety / #365 phantom)
         boid = order.get("id")
@@ -455,12 +457,12 @@ def _quarantine_activity(
 
 
 def owned_open_order_ids(
-    conn: sqlite3.Connection, broker: object, strategy: str
+    conn: sqlite3.Connection, broker: OpenOrderReader, strategy: str
 ) -> list[str]:
     """The broker order ids of THIS strategy's currently-open orders: list the account's open
     orders and keep those whose client_order_id maps (via live_orders) to `strategy`. Used to
     scope cancellation so one strategy never cancels a sibling's orders."""
-    open_orders = broker.list_open_orders()  # type: ignore[attr-defined]
+    open_orders = broker.list_open_orders()
     owned = {
         r["client_order_id"]
         for r in conn.execute(
