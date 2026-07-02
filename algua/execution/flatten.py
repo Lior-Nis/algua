@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from algua.audit.log import append as audit_append
+from algua.contracts.types import OffsetBroker
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_broker_order_id,
@@ -72,7 +73,7 @@ def _backfill(
 
 def flatten_strategy(  # noqa: PLR0913
     conn: sqlite3.Connection,
-    broker: object,
+    broker: OffsetBroker,
     name: str,
     kind: LedgerKind,
     *,
@@ -112,7 +113,7 @@ def flatten_strategy(  # noqa: PLR0913
             coid = client_order_id(name, now(), symbol)
             side = "sell" if qty > 0 else "buy"
             _record(conn, name, symbol, side, coid, kind, strategy_id)
-            oid = broker.submit_offset(symbol, qty, coid)  # type: ignore[attr-defined]
+            oid = broker.submit_offset(symbol, qty, coid)
             _backfill(conn, coid, oid, kind)
             n_offsets += 1
     except Exception as exc:  # noqa: BLE001 — emergency path must fail safe, never propagate

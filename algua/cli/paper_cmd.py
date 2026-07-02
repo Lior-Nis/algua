@@ -13,7 +13,13 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.contracts.types import OrderIntent
+from algua.contracts.types import (
+    ActivityWindowBroker,
+    LiveReconcileBroker,
+    OrderIntent,
+    OrderLookupBroker,
+    PositionsBroker,
+)
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.flatten import flatten_strategy
@@ -98,7 +104,7 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-def _paper_broker_net(broker) -> dict[str, float]:
+def _paper_broker_net(broker: PositionsBroker) -> dict[str, float]:
     """Paper broker's net positions per symbol (nonzero only) for account reconcile.
 
     Local to paper_cmd because the live analog (_broker_net_positions) can't be imported (cli->cli).
@@ -110,7 +116,9 @@ def _paper_broker_net(broker) -> dict[str, float]:
 _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
 
 
-def _recover_stranded(conn, broker, kind) -> None:
+def _recover_stranded(
+    conn: sqlite3.Connection, broker: OrderLookupBroker, kind: LedgerKind
+) -> None:
     """#312: backfill broker_order_id onto any crash-stranded NULL order row by asking the venue for
     the order carrying each row's client_order_id (never submits; symbol-verified). Recovery is
     ACCOUNT-WIDE (it scans every strategy's NULL rows), so the audit is account-wide (strategy=None)
@@ -127,7 +135,9 @@ def _recover_stranded(conn, broker, kind) -> None:
                      strategy=None)
 
 
-def _ingest_paper_venue(conn: sqlite3.Connection, broker: object, until: str) -> None:
+def _ingest_paper_venue(
+    conn: sqlite3.Connection, broker: ActivityWindowBroker, until: str
+) -> None:
     """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
 
     Cursor is a broker-time high-water: fetch (cursor, until] via the paginated
@@ -138,7 +148,7 @@ def _ingest_paper_venue(conn: sqlite3.Connection, broker: object, until: str) ->
     before calling — this function never calls broker.clock() itself so that a clock failure
     stays in the caller's hands (resilient fallback vs. fail-closed, per call site)."""
     after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
-    acts = broker.account_activities_window(after, until)  # type: ignore[attr-defined]
+    acts = broker.account_activities_window(after, until)
     ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
 
 
@@ -164,7 +174,7 @@ def _maybe_live_readonly() -> AlpacaLiveReadOnlyBroker | None:
 
 
 def _live_strategy_flat(
-    conn: sqlite3.Connection, name: str, universe: list[str], broker: object,
+    conn: sqlite3.Connection, name: str, universe: list[str], broker: LiveReconcileBroker,
 ) -> tuple[bool, dict]:
     """Ingest pending broker activities, then ACCOUNT-WIDE reconcile: the strategy is flat iff its
     own believed_positions is empty AND the broker holds no UNEXPLAINED qty (broker net minus the
@@ -172,12 +182,12 @@ def _live_strategy_flat(
     legitimately holds the same symbol explains the broker qty and does not block resume; an orphan
     (unattributed/manual) or non-live holding does NOT explain it, so it fails closed (refuse)."""
     cursor = fill_cursor(conn, LedgerKind.LIVE)
-    ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)  # type: ignore[attr-defined]
+    ingest_activities(conn, broker.account_activities(after=cursor), LedgerKind.LIVE)
     # #312: recover any crash-stranded NULL-broker_order_id live row before the flatness check, so a
     # stranded (accepted-but-not-backfilled) fill does not block resume as an unexplained residual.
     _recover_stranded(conn, broker, LedgerKind.LIVE)
     own = believed_positions(conn, name, LedgerKind.LIVE)
-    broker_net = {s: float(q) for s, q in broker.get_positions().items()  # type: ignore[attr-defined]
+    broker_net = {s: float(q) for s, q in broker.get_positions().items()
                   if float(q) != 0.0}
     expected = attributed_live_net(conn)
     syms = set(universe) | strategy_live_symbols(conn, name)
