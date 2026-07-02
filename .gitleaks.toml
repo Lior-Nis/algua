@@ -1,0 +1,29 @@
+# gitleaks configuration (consumed by .github/workflows/security.yml)
+#
+# Extends the bundled gitleaks default ruleset, then adds a MINIMAL allowlist for
+# documented false positives. gitleaks exits non-zero on any un-allowlisted
+# finding, which fails the CI secret-scan job.
+#
+# Keep the allowlist tight: every entry needs a one-line reason. Do NOT add broad
+# path regexes — prefer scoping to a specific file or a specific stopword.
+
+# Pull in gitleaks' maintained default rules (the `useDefault` mechanism).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented false positives for the algua repository"
+
+# Test/fixture credentials are dummy values, never real secrets. Scope this to the
+# test tree only so real leaks elsewhere are still caught.
+paths = [
+  '''(^|/)tests?/.*''',
+]
+
+# Common non-secret placeholder tokens used in docs/fixtures.
+stopwords = [
+  "example",
+  "dummy",
+  "placeholder",
+  "changeme",
+]

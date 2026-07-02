@@ -1,0 +1,58 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Supply-chain gates (issue #395, OWASP 2025 A03):
+#   sca         — dependency-vulnerability scan of the locked environment (pip-audit)
+#   secret-scan — secret detection over the diff/push range (gitleaks)
+# Both jobs fail the build on findings. Mark them as required checks in branch protection.
+
+jobs:
+  sca:
+    name: Dependency vulnerabilities (SCA)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.9.0
+        with:
+          enable-cache: true
+      - name: Audit locked dependencies
+        run: |
+          set -euo pipefail
+          # Export the fully pinned lock graph (incl. transitives + all dependency
+          # groups) so the audit reflects exactly what CI installs. Any export
+          # failure is fatal (set -e).
+          uv export --format requirements-txt --no-emit-project --all-groups --no-hashes > requirements.audit.txt
+          # Assemble documented false-positive / unfixable advisory ignores into an
+          # array (no word-splitting; an empty file yields no args).
+          ignores=()
+          if [ -f .pip-audit-ignore.txt ]; then
+            while IFS= read -r id; do
+              [ -n "$id" ] && ignores+=(--ignore-vuln "$id")
+            done < <(grep -vE '^\s*#|^\s*$' .pip-audit-ignore.txt || true)
+          fi
+          # --no-deps: versions are already fully pinned by the lockfile, skip
+          # re-resolution. --strict: fail if any dependency can't be audited.
+          # pip-audit exits non-zero on any un-ignored advisory -> build fails.
+          uvx pip-audit@2.9.0 \
+            --requirement requirements.audit.txt \
+            --no-deps \
+            --strict \
+            --desc on \
+            "${ignores[@]}"
+
+  secret-scan:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # gitleaks needs history to compute the scan range
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gitleaks exits non-zero on any finding -> build fails.
