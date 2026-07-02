@@ -656,6 +656,14 @@ def simulate(
     # call_seq="auto" (sells before buys under cash_sharing) only when a forced exit needs the
     # same-bar liquidation cash — keeps non-delisting backtests bit-identical to today.
     extra = {"call_seq": "auto"} if forced_exits else {}
+    # Transaction costs (issue #325). Charged on `weights_exec` — the ALREADY t->t+1-shifted,
+    # delisting-adjusted execution weights — so cost is applied at execution time on the bar the
+    # trade fills, introducing NO look-ahead. vectorbt applies `fees` as a proportional charge on
+    # |trade notional| and `slippage` as an adverse per-side fill-price move (buys/covers fill
+    # higher, sells/shorts fill lower), so the model is symmetric across sides. The forced
+    # delisting liquidation is a real (modeled) trade and is charged the same conservative cost;
+    # over-charging a rare terminal exit only makes returns LOWER, never inflates edge — the safe
+    # direction for a gate that must not overstate edge. DEFAULT-ON via the ExecutionContract.
     pf = vbt.Portfolio.from_orders(
         close=adj_exec,
         size=weights_exec,
@@ -663,6 +671,8 @@ def simulate(
         cash_sharing=True,
         group_by=True,
         freq="1D",
+        fees=strategy.execution.fees,
+        slippage=strategy.execution.slippage,
         **extra,
     )
 
@@ -711,7 +721,10 @@ def run(
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
     )
-    metrics = portfolio_metrics(pf, weights_eff)
+    metrics = portfolio_metrics(
+        pf, weights_eff,
+        fees=strategy.execution.fees, slippage=strategy.execution.slippage,
+    )
     stamps = runtime_stamps()
     prov = provenance(provider, seed)
     # Surface daily returns for downstream correlation analysis (#222 Task 7).

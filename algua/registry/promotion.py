@@ -11,7 +11,7 @@ from algua.backtest.engine import verify_signal_panel_parity
 from algua.backtest.neff import estimate_n_eff
 from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
-from algua.contracts.types import DataProvider
+from algua.contracts.types import DataProvider, assert_gated_costs
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
 from algua.registry.repository import FunnelSnapshot, StrategyRepository
@@ -328,6 +328,14 @@ def promotion_preflight(
         _loaded = load_strategy(name)
     except StrategyNotFound:
         _loaded = None
+    # Transaction-cost floor (#325): an agent may only promote a backtest evaluated at a realistic
+    # transaction cost. The whole statistical stack (Sharpe/DSR/bootstrap/FDR/regime) is calibrated
+    # on the return stream this promote will peek; if that stream were (near-)cost-free, a strategy
+    # whose only edge is a cost illusion could clear every gate. assert_gated_costs fails closed on
+    # a sub-floor fees+slippage BEFORE the holdout is touched, so a frictionless config can't mint
+    # a gate token. Agent-only — a human accepts any cost (exploration / sensitivity sweeps).
+    if actor is Actor.AGENT and _loaded is not None:
+        assert_gated_costs(_loaded.execution)
     # Exhaustive signal_panel parity gate (#178): a panel that diverges from its per-bar signal on
     # ANY bar cannot pass promotion. Runs on the already-loaded strategy, in static mode over the
     # promotion window, BEFORE the holdout is touched. No-op when the strategy has no signal_panel.

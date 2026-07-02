@@ -37,7 +37,9 @@ def scaffold_strategy_doc(
         "## Results\n\n"
         "<!-- ALGUA:RESULTS -->\n_No tracked runs yet._\n<!-- /ALGUA:RESULTS -->\n\n"
         "## Verdict & next\n\n"
-        "_What was learned; the next idea as a [[link]]._\n"
+        "_What was learned; the next idea as a [[link]]._\n\n"
+        "---\n"
+        "Principles: [[research-methodology]] · [[risk-conventions]]\n"
     )
     return render_doc(fm, body)
 

@@ -49,6 +49,11 @@ import pandas as pd
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import StrategyConfig
 
+# Provenance marker (additions-only discipline): every scaffolded module is agent-authored.
+# Informational only — read by `algua doctor`'s advisory generated_provenance probe, NOT a trust
+# or authorization control.
+GENERATED_BY = "agent"
+
 CONFIG = StrategyConfig(
     name="{name}",
     universe=["AAPL", "MSFT", "NVDA"],

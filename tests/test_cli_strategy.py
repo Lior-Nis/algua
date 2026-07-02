@@ -76,6 +76,8 @@ def test_strategy_new_scaffolds_loadable_module(tmp_path, monkeypatch, _cleanup_
     _cleanup_scaffolded.append(p)
     assert p.is_absolute(), f"expected absolute path, got {p}"
     assert p.exists(), f"scaffold file not created: {p}"
+    # Provenance marker the author-a-strategy contract mandates is emitted by the scaffold.
+    assert 'GENERATED_BY = "agent"' in p.read_text()
 
 
 def test_strategy_new_path_is_package_relative(tmp_path, monkeypatch, _cleanup_scaffolded):
