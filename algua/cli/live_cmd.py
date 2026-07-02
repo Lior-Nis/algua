@@ -71,6 +71,10 @@ def _live_account_equity() -> float:
     try:
         resp = requests.get(
             f"{s.alpaca_live_url.rstrip('/')}/v2/account",
+            # Host is pinned https by the alpaca_live_url settings validator; refuse to chase a
+            # redirect so the APCA credential headers can never reach a foreign target (#394). A
+            # 3xx then fails the status!=200 check below.
+            allow_redirects=False,
             headers={"APCA-API-KEY-ID": s.alpaca_live_api_key,
                      "APCA-API-SECRET-KEY": s.alpaca_live_api_secret},
             timeout=30,

@@ -6,9 +6,15 @@ from typing import Any
 import pandas as pd
 import requests
 
+from algua.contracts.net import require_https_allowlisted_host
 from algua.data.contracts import BarProvider, BarRequest, ProviderBars
 from algua.data.providers.errors import ProviderError
 from algua.data.timeframes import is_intraday
+
+# The Alpaca market-data host. Its credentials (APCA-API-KEY-ID / APCA-API-SECRET-KEY) are the
+# same account-scoped broker secrets used to place orders, so the data path enforces the SAME
+# https + host wall the trading path does (issue #394) before any request attaches them.
+_ALLOWED_HOSTS = frozenset({"data.alpaca.markets"})
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 MAX_ATTEMPTS = 4
@@ -33,6 +39,12 @@ class AlpacaBarProvider(BarProvider):
         api_secret: str,
         base_url: str = "https://data.alpaca.markets/v2",
     ) -> None:
+        # Guard BEFORE storing the URL: credentials must never dial a plaintext or non-Alpaca
+        # host (#394). Re-raised as ProviderError to keep the CLI's JSON error contract.
+        try:
+            require_https_allowlisted_host(base_url, _ALLOWED_HOSTS)
+        except ValueError as exc:
+            raise ProviderError(str(exc)) from exc
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
@@ -97,6 +109,9 @@ class AlpacaBarProvider(BarProvider):
                         "adjustment": adjustment,
                     },
                     timeout=30,
+                    # Never chase a redirect: requests re-sends the APCA credential headers on a
+                    # cross-host 3xx, which would leak them to the redirect target (#394).
+                    allow_redirects=False,
                 )
             except requests.RequestException as exc:
                 if last_attempt:
@@ -107,6 +122,11 @@ class AlpacaBarProvider(BarProvider):
                 continue
 
             status = getattr(response, "status_code", None)
+            if status is not None and 300 <= status <= 399:
+                raise ProviderError(
+                    f"alpaca returned an unexpected redirect (HTTP {status}); refusing to "
+                    "forward credentials to the redirect target"
+                )
             if status in RETRYABLE_STATUS and not last_attempt:
                 time.sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
                 continue

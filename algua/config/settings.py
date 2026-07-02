@@ -6,10 +6,16 @@ from urllib.parse import urlparse
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from algua.contracts.net import require_https_allowlisted_host
+
 # Alpaca's paper-trading API host. The hard live boundary is enforced at config load:
 # the paper URL must point here, never at the live host (api.alpaca.markets).
 _ALPACA_PAPER_HOST = "paper-api.alpaca.markets"
 _ALPACA_LIVE_HOST = "api.alpaca.markets"
+# Alpaca's market-data host. Its credentials are the same account-scoped broker secrets, so the
+# data URL is pinned https + host at config load — defense-in-depth ahead of AlpacaBarProvider's
+# own constructor guard (#394).
+_ALPACA_DATA_HOST = "data.alpaca.markets"
 
 
 class Settings(BaseSettings):
@@ -35,6 +41,20 @@ class Settings(BaseSettings):
     def _path_must_be_nonempty(cls, value: Path) -> Path:
         if not str(value).strip() or value == Path("."):
             raise ValueError("path must be a non-empty filesystem path")
+        return value
+
+    @field_validator("alpaca_data_url")
+    @classmethod
+    def _data_url_is_data_endpoint(cls, value: str) -> str:
+        # https-only to the Alpaca data host — the data URL carries the same broker credentials,
+        # so a plaintext/foreign host would leak them (#394).
+        try:
+            require_https_allowlisted_host(value, frozenset({_ALPACA_DATA_HOST}))
+        except ValueError as exc:
+            raise ValueError(
+                f"alpaca_data_url must be https to the data endpoint ({_ALPACA_DATA_HOST}); "
+                f"got {value!r}"
+            ) from exc
         return value
 
     @field_validator("alpaca_paper_url")

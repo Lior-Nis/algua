@@ -308,14 +308,14 @@ def test_run_tick_live_snapshot_equity_flows_into_order_notional(monkeypatch):
         def __init__(self):
             self.posted = []
 
-        def get(self, url, headers=None, timeout=None):
+        def get(self, url, headers=None, timeout=None, allow_redirects=None):
             return _Resp(200, [])
 
-        def post(self, url, headers=None, json=None, timeout=None):
+        def post(self, url, headers=None, json=None, timeout=None, allow_redirects=None):
             self.posted.append(json)
             return _Resp(201, {"id": "o1"})
 
-        def delete(self, url, headers=None, timeout=None):
+        def delete(self, url, headers=None, timeout=None, allow_redirects=None):
             return _Resp(200, [])
 
     fake = _RecordingRequests()
