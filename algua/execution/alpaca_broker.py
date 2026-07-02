@@ -5,12 +5,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import pandas as pd
 import requests
 from requests import RequestException
 
+from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
 from algua.execution.sizing import MIN_NOTIONAL, size_order
 
@@ -86,13 +87,12 @@ class _AlpacaBroker:
     _ALLOWED_HOSTS: frozenset[str] = frozenset()
 
     def __init__(self, api_key: str, api_secret: str, base_url: str) -> None:
-        parsed = urlparse(base_url)
-        # Require https to a permitted host — API keys must never travel over plaintext (codex).
-        if parsed.scheme != "https" or parsed.hostname not in self._ALLOWED_HOSTS:
-            raise BrokerError(
-                f"refusing Alpaca endpoint {base_url!r} (host {parsed.hostname!r}); "
-                f"must be https to one of {sorted(self._ALLOWED_HOSTS)}"
-            )
+        # Require https to a permitted host — API keys must never travel over plaintext. Shared
+        # with the data provider via the pure contracts.net wall (#394); re-raised as BrokerError.
+        try:
+            require_https_allowlisted_host(base_url, self._ALLOWED_HOSTS)
+        except ValueError as exc:
+            raise BrokerError(str(exc)) from exc
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
@@ -111,12 +111,19 @@ class _AlpacaBroker:
         last_exc: RequestException | None = None
         for attempt in range(_MAX_RETRIES):
             try:
+                # allow_redirects=False on every verb: requests re-sends the APCA credential
+                # headers on a cross-host 3xx, which would leak them to the redirect target. A
+                # 3xx is not retryable, so it returns below and the caller's non-2xx handling
+                # (a BrokerError) rejects it — the credentials never reach the redirect host (#394).
                 if method == "GET":
-                    resp = requests.get(url, headers=self._headers(), timeout=_TIMEOUT)
+                    resp = requests.get(url, headers=self._headers(), timeout=_TIMEOUT,
+                                        allow_redirects=False)
                 elif method == "POST":
-                    resp = requests.post(url, headers=self._headers(), json=body, timeout=_TIMEOUT)
+                    resp = requests.post(url, headers=self._headers(), json=body, timeout=_TIMEOUT,
+                                         allow_redirects=False)
                 else:  # DELETE
-                    resp = requests.delete(url, headers=self._headers(), timeout=_TIMEOUT)
+                    resp = requests.delete(url, headers=self._headers(), timeout=_TIMEOUT,
+                                          allow_redirects=False)
             except RequestException as exc:
                 last_exc = exc
             else:
