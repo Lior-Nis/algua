@@ -485,15 +485,21 @@ def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
                                  *_PASS, "--n-combos", "9", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
-    assert payload["passed"] is True
-    assert payload["promoted"] is True
+    # Net of the default transaction costs (#325), cross_sectional_momentum is market-beta with a
+    # NEGATIVE idiosyncratic alpha (market_beta ~1.0, appraisal_ratio < 0), so it fails the
+    # idiosyncratic-alpha screen (#328) — ir_binding is not relaxed by _PASS. This test's subject is
+    # PIT-provenance THREADING, which is recorded on the run regardless of the pass/fail verdict, so
+    # we assert the (now correct) net-of-cost FAIL and keep every provenance assertion.
+    assert payload["passed"] is False
+    assert payload["promoted"] is False
+    assert payload["ir_binding"] is True and payload["appraisal_ratio"] < 0.0
     assert payload["universe_name"] == "pit_core"
     eff = [s["effective_date"] for s in payload["universe_snapshots"]]
     assert eff == ["2022-01-01", "2023-01-01"]
     assert {s["snapshot_id"] for s in payload["universe_snapshots"]} == {first_u, second_u}
     # The bars snapshot_id is a SEPARATE provenance dimension — still the bars snapshot.
     assert payload["snapshot_id"] == snap
-    assert _stage() == "candidate"
+    assert _stage() == "backtested"  # gate failed -> no transition
 
 
 def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):

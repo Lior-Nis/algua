@@ -158,7 +158,13 @@ def avg_gross_exposure(weights: pd.DataFrame) -> float:
     return float(weights.abs().sum(axis=1).mean())
 
 
-def portfolio_metrics(pf: vbt.Portfolio, weights_eff: pd.DataFrame) -> dict[str, float]:
+def portfolio_metrics(
+    pf: vbt.Portfolio,
+    weights_eff: pd.DataFrame,
+    *,
+    fees: float | None = None,
+    slippage: float | None = None,
+) -> dict[str, float]:
     """Full backtest metric dict for a simulated portfolio.
 
     Builds the canonical return-based metrics from `pf.returns()` (so backtest and
@@ -166,11 +172,16 @@ def portfolio_metrics(pf: vbt.Portfolio, weights_eff: pd.DataFrame) -> dict[str,
     the path/accounting metrics derived from the effective weights. `cagr` is the
     compounded annual growth rate over the realized number of periods (distinct from the
     arithmetic `ann_return`).
+
+    `pf.returns()` is NET of the transaction costs charged in `simulate` (issue #325); the
+    per-side `fees`/`slippage` cost ASSUMPTION is surfaced here (when supplied) so a reader can
+    see, alongside the now cost-inclusive Sharpe, which cost the run was evaluated at rather than
+    having to recover it from `config_hash`. Purely informational — no metric is derived from it.
     """
     returns = pf.returns()
     base = metrics_from_returns(returns)
     n_rebalances = int((weights_eff.diff().abs().sum(axis=1) > REBALANCE_EPS).sum())
-    return {
+    out = {
         "total_return": base["total_return"],
         "cagr": base["cagr"],
         "ann_volatility": base["ann_volatility"],
@@ -184,3 +195,8 @@ def portfolio_metrics(pf: vbt.Portfolio, weights_eff: pd.DataFrame) -> dict[str,
         "avg_gross_exposure": avg_gross_exposure(weights_eff),
         "n_rebalances": n_rebalances,
     }
+    if fees is not None:
+        out["cost_fees"] = float(fees)
+    if slippage is not None:
+        out["cost_slippage"] = float(slippage)
+    return out
