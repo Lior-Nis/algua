@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from algua.features.catalogue import FactorSpec, all_factors, get_factor, load_all_factors
 from algua.registry.approvals import closure_module_names
-from algua.registry.repository import StrategyRepository
+from algua.registry.repository import StrategyLister
 from algua.strategies.loader import load_strategy
 
 
@@ -29,7 +29,7 @@ def factors_used_by(strategy_name: str) -> list[FactorSpec]:
     return [f for f in all_factors() if f.module in modules]
 
 
-def dependents_of(repo: StrategyRepository, factor_name: str) -> Dependents:
+def dependents_of(repo: StrategyLister, factor_name: str) -> Dependents:
     """Registered strategies whose identity closure reaches ``factor_name``'s module. Iterates the
     registry (not just filesystem-discoverable modules) so a registered strategy cannot silently
     vanish from blast radius; a strategy that fails to load lands in ``unloadable`` rather than
