@@ -4,6 +4,7 @@ import pytest
 from algua.data.contracts import FirstRateImportRequest
 from algua.data.importers import get_importer, register_importer
 from algua.data.schema import BAR_COLUMNS, validate_bars
+from algua.data.staging import SnapshotStagingLease
 from algua.data.store import DataStore
 
 
@@ -269,7 +270,7 @@ def test_lock_held_fails_closed_on_probe_error(tmp_path, monkeypatch):
     # so clear_staging never deletes a dir it can't prove abandoned. Unit-level + deterministic: an
     # earlier clear_staging variant forced the error with a directory-named `.lock`, but that hit
     # clear_staging's `is_dir()` branch and was iteration-order-dependent (green local, red in CI).
-    store = DataStore(tmp_path)
+    lease = SnapshotStagingLease(tmp_path)  # lease plumbing lives here since #384
     lock = tmp_path / "x.lock"
     lock.write_bytes(b"")
 
@@ -277,31 +278,31 @@ def test_lock_held_fails_closed_on_probe_error(tmp_path, monkeypatch):
     def _flock_boom(*_a, **_k):
         raise OSError("ENOLCK: locks not supported here")
 
-    monkeypatch.setattr("algua.data.store.fcntl.flock", _flock_boom)
-    assert store._lock_held(lock) is True
+    monkeypatch.setattr("algua.data.staging.fcntl.flock", _flock_boom)
+    assert lease._lock_held(lock) is True
 
     # An absent marker -> not held (sweepable); FileNotFoundError short-circuits before the probe.
-    assert store._lock_held(tmp_path / "absent.lock") is False
+    assert lease._lock_held(tmp_path / "absent.lock") is False
 
     # A non-FileNotFound OSError from os.open itself (e.g. EACCES) -> held.
     def _open_boom(*_a, **_k):
         raise PermissionError("EACCES")
 
-    monkeypatch.setattr("algua.data.store.os.open", _open_boom)
-    assert store._lock_held(lock) is True
+    monkeypatch.setattr("algua.data.staging.os.open", _open_boom)
+    assert lease._lock_held(lock) is True
 
 
 def test_new_leased_staging_cleans_up_on_lock_failure(tmp_path, monkeypatch):
     # #255 (Codex round 2): the lease helper must be self-cleaning if flock fails before the
     # caller's try/finally takes over — no leaked fd, no orphan dir/marker residue.
-    store = DataStore(tmp_path)
+    lease = SnapshotStagingLease(tmp_path)  # lease plumbing lives here since #384
 
     def _boom(*_a, **_k):
         raise OSError("flock unsupported here")
 
-    monkeypatch.setattr("algua.data.store.fcntl.flock", _boom)
+    monkeypatch.setattr("algua.data.staging.fcntl.flock", _boom)
     with pytest.raises(OSError, match="flock"):
-        store._new_leased_staging()
+        lease.new_leased_staging()
     staging = tmp_path / "snapshots" / "_staging"
     assert not staging.exists() or list(staging.iterdir()) == []  # nothing left behind
 
