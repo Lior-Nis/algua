@@ -71,6 +71,32 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+# The model-artifact registry (#376) is a leaf filesystem-I/O layer, like data: it is the
+# system-of-record for trained model versions. The strategy loader and the MLflow tracker are its
+# only resolve/ingress callers. It may import algua.contracts (the pure model types) and, lazily,
+# algua.config (for the data_dir root), but must stay OFF every higher/heavier layer so a model
+# lookup never pulls in the engine, the registry lifecycle, or the trading lanes.
+name = "models layer is a leaf (imports no higher algua module)"
+type = "forbidden"
+source_modules = ["algua.models"]
+forbidden_modules = [
+    "algua.cli",
+    "algua.registry",
+    "algua.calendar",
+    "algua.features",
+    "algua.data",
+    "algua.backtest",
+    "algua.strategies",
+    "algua.research",
+    "algua.live",
+    "algua.execution",
+    "algua.risk",
+    "algua.audit",
+    "algua.tracking",
+    "algua.observability",
+]
+
+[[tool.importlinter.contracts]]
 # provenance is a pure stdlib-only leaf: it holds the ONE locked-dependency hash that both
 # the backtest stamps and the registry's live-approval identity share, so both lanes may
 # depend on it without crossing a boundary. It must import no other algua.* module.

@@ -35,7 +35,7 @@ def test_needs_news_requires_news_signal_fn():
 
 
 def test_needs_news_and_needs_fundamentals_together_rejected():
-    with pytest.raises(ValueError, match="both"):
+    with pytest.raises(ValueError, match="at most one"):
         LoadedStrategy(config=_cfg(needs_news=True, needs_fundamentals=True),
                        news_signal_fn=_news_fn, construct_fn=_pol())
 

@@ -365,6 +365,14 @@ def sweep(
     """
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
+    # Model lane (#376) is not supported in sweep (it runs walk_forward per combo, which is not
+    # PIT-safe for a fixed-per-run model across OOS windows). Fail fast at the top with a clear
+    # message rather than surfacing the per-combo walk_forward failure. See walk_forward.
+    if strategy.config.needs_model:
+        raise BacktestError(
+            f"strategy {strategy.name!r} declares needs_model; sweep/walk-forward do not support "
+            f"the model lane yet (#376 follow-up) — refusing to run (fail closed)"
+        )
     combos = _combos(grid)
     # Parent pre-pass: build + validate EVERY override here so a bad signal key or invalid
     # construction param fails fast (ValueError) BEFORE any worker process spawns — exactly the

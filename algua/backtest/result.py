@@ -49,6 +49,10 @@ class BacktestResult:
     fundamentals_snapshot: str | None = None
     # News snapshot used by a needs_news strategy (issue #132); None otherwise.
     news_snapshot: str | None = None
+    # Model provenance (issue #376): the pinned model_ref dict (name/version/digest/training_as_of/
+    # provenance_digest) for a needs_model strategy; None otherwise. Explicit sidecar provenance
+    # alongside config_hash, mirroring fundamentals/news/delisting.
+    model_ref: dict[str, Any] | None = None
     # Delisting provenance (issue #212): snapshot name + forced exits applied during simulate().
     delisting_snapshot: str | None = None
     forced_exits: list[dict] = field(default_factory=list)

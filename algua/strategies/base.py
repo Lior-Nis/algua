@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel, field_validator
 
+from algua.contracts.model_types import ModelHandle, ModelRef, compute_provenance_digest
 from algua.contracts.types import ExecutionContract
 from algua.portfolio.construction import ConstructFn, apply_capacity_cap
 
@@ -30,6 +31,12 @@ FundamentalsSignalFn = Callable[[pd.DataFrame, dict[str, Any], pd.DataFrame], pd
 # form never silently overloads the 2-arg or fundamentals 3-arg forms.
 NewsSignalFn = Callable[[pd.DataFrame, dict[str, Any], pd.DataFrame], pd.Series]
 
+# OPT-IN model signal (issue #376): `signal(view, params, model)` where `model` is a ModelHandle
+# (resolved artifact bytes + immutable ModelVersion) injected by the loader. Distinct type so the
+# model 3-arg form never silently overloads the fundamentals/news 3-arg forms. Unlike those lanes,
+# the model is FIXED for the whole run (bound once at load), so no per-bar sidecar is injected.
+ModelSignalFn = Callable[[pd.DataFrame, dict[str, Any], ModelHandle], pd.Series]
+
 
 class StrategyConfig(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
@@ -46,6 +53,14 @@ class StrategyConfig(BaseModel):
     needs_fundamentals: bool = False
     # Opt into the as-of news lane (issue #132). Mutually exclusive with needs_fundamentals.
     needs_news: bool = False
+    # Opt into the model lane (issue #376). Mutually exclusive with needs_fundamentals/needs_news.
+    # When True the loader resolves `model_ref` against the model registry and binds the 3-arg
+    # signal as `model_signal_fn`, injecting the resolved ModelHandle.
+    needs_model: bool = False
+    # PINNED model reference — required iff needs_model, forbidden otherwise. NEVER 'latest': an
+    # explicit version + the artifact digest + training_as_of cutoff + provenance digest the config
+    # was validated against, so a strategy can never silently bind a different model.
+    model_ref: ModelRef | None = None
     # Declared maximum feature lookback in bars (issue #345): how many trailing bars the signal
     # reads to score a single bar (e.g. a 60-bar trailing-return momentum => 60). Drives the
     # walk-forward train/holdout embargo (purge gap = max(feature_lookback, decision_lag_bars)) so
@@ -98,30 +113,96 @@ class LoadedStrategy:
     signal_panel_fn: SignalPanelFn | None = None
     fundamentals_signal_fn: FundamentalsSignalFn | None = None
     news_signal_fn: NewsSignalFn | None = None
+    model_signal_fn: ModelSignalFn | None = None
+    # The model artifact bound at load time for a needs_model strategy (issue #376) — fixed for the
+    # whole run (PIT-safe), injected as the 3rd arg to `model_signal_fn`.
+    model_handle: ModelHandle | None = None
 
     def __post_init__(self) -> None:
         cfg = self.config
-        if cfg.needs_fundamentals and cfg.needs_news:
+        # Three-way (fundamentals / news / model) exclusivity — a strategy uses exactly one PIT
+        # sidecar lane, or none.
+        exclusive = [
+            n for n, on in (
+                ("needs_fundamentals", cfg.needs_fundamentals),
+                ("needs_news", cfg.needs_news),
+                ("needs_model", cfg.needs_model),
+            ) if on
+        ]
+        if len(exclusive) > 1:
             raise ValueError(
-                "needs_fundamentals and needs_news cannot both be True "
-                "(a strategy using both is not supported yet — #132 follow-up)"
+                f"at most one of needs_fundamentals/needs_news/needs_model may be True; "
+                f"got {exclusive} (a strategy combining lanes is not supported yet)"
             )
+        if cfg.needs_model and cfg.model_ref is None:
+            raise ValueError("needs_model=True requires model_ref to be set")
+        if not cfg.needs_model and cfg.model_ref is not None:
+            raise ValueError("model_ref set but needs_model is False (forbidden)")
+        if cfg.needs_model and self.model_handle is None:
+            raise ValueError("needs_model=True requires a resolved model_handle")
+        # The bound handle MUST be the pinned model — otherwise a caller could pass a safe old
+        # model_ref (which the engine PIT-guards) while binding a different (e.g. future-trained)
+        # artifact that signal() would actually use. Enforce identity here, at construction, so no
+        # construction path (loader OR a direct programmatic build) can diverge (#376).
+        if cfg.needs_model:
+            assert cfg.model_ref is not None
+            assert self.model_handle is not None
+            bound = self.model_handle.version
+            if (
+                bound.name != cfg.model_ref.name
+                or bound.version != cfg.model_ref.version
+                or bound.digest != cfg.model_ref.digest
+                or bound.training_as_of != cfg.model_ref.training_as_of
+                or bound.provenance_digest != cfg.model_ref.provenance_digest
+            ):
+                raise ValueError(
+                    "bound model_handle does not match the pinned model_ref "
+                    "(name/version/digest/training_as_of/provenance) — refusing to bind a "
+                    "different model than the config was validated against"
+                )
+            # The metadata matching the pin is not enough: verify the ACTUAL artifact bytes hash to
+            # the pinned digest, and that the version's metadata reproduces its own provenance
+            # digest. Otherwise a direct programmatic build could present matching ModelVersion
+            # metadata while binding arbitrary (e.g. future-trained) bytes that signal() consumes —
+            # the exact silent-different-model / PIT bypass we fail closed on (#376).
+            bytes_digest = hashlib.sha256(self.model_handle.artifact_bytes).hexdigest()[:16]
+            if bytes_digest != cfg.model_ref.digest:
+                raise ValueError(
+                    f"bound model artifact bytes (digest {bytes_digest}) do not hash to the pinned "
+                    f"model_ref.digest {cfg.model_ref.digest} — refusing to bind a different model"
+                )
+            expected_prov = compute_provenance_digest(
+                digest=bound.digest,
+                training_snapshot_id=bound.training_snapshot_id,
+                training_as_of=bound.training_as_of,
+                code_hash=bound.code_hash,
+                hyperparameters=bound.hyperparameters,
+                seed=bound.seed,
+                eval_report=bound.eval_report,
+            )
+            if expected_prov != cfg.model_ref.provenance_digest:
+                raise ValueError(
+                    "bound model_handle provenance does not reproduce the pinned "
+                    "provenance_digest — the version metadata was forged; refusing to bind"
+                )
         decision_fns = {
             "signal_fn": self.signal_fn,
             "fundamentals_signal_fn": self.fundamentals_signal_fn,
             "news_signal_fn": self.news_signal_fn,
+            "model_signal_fn": self.model_signal_fn,
         }
         active = [k for k, v in decision_fns.items() if v is not None]
         expected = (
             "fundamentals_signal_fn" if cfg.needs_fundamentals
             else "news_signal_fn" if cfg.needs_news
+            else "model_signal_fn" if cfg.needs_model
             else "signal_fn"
         )
         if active != [expected]:
             raise ValueError(
                 f"config requires exactly {expected!r} to be set "
-                f"(needs_fundamentals={cfg.needs_fundamentals}, needs_news={cfg.needs_news}); "
-                f"got {active}"
+                f"(needs_fundamentals={cfg.needs_fundamentals}, needs_news={cfg.needs_news}, "
+                f"needs_model={cfg.needs_model}); got {active}"
             )
 
     @property
@@ -141,15 +222,19 @@ class LoadedStrategy:
         return self.config.params
 
     @property
-    def authored_signal(self) -> SignalFn | FundamentalsSignalFn | NewsSignalFn:
+    def authored_signal(self) -> SignalFn | FundamentalsSignalFn | NewsSignalFn | ModelSignalFn:
         """The active authored signal fn — used wherever code needs the strategy's source module
-        (e.g. code_hash), since signal_fn is None for a needs_fundamentals/needs_news strategy."""
+        (e.g. code_hash), since signal_fn is None for a needs_fundamentals/needs_news/needs_model
+        strategy."""
         if self.config.needs_fundamentals:
             assert self.fundamentals_signal_fn is not None
             return self.fundamentals_signal_fn
         if self.config.needs_news:
             assert self.news_signal_fn is not None
             return self.news_signal_fn
+        if self.config.needs_model:
+            assert self.model_signal_fn is not None
+            return self.model_signal_fn
         assert self.signal_fn is not None
         return self.signal_fn
 
@@ -181,6 +266,15 @@ class LoadedStrategy:
                 )
             assert self.news_signal_fn is not None
             return self.news_signal_fn(view, self.config.params, news)
+        if self.config.needs_model:
+            if fundamentals is not None or news is not None:
+                raise ValueError(
+                    f"strategy {self.name!r} is a model strategy but was passed a "
+                    f"fundamentals/news frame it does not use"
+                )
+            assert self.model_signal_fn is not None
+            assert self.model_handle is not None
+            return self.model_signal_fn(view, self.config.params, self.model_handle)
         if fundamentals is not None or news is not None:
             raise ValueError(f"strategy {self.name!r} takes no PIT sidecar but one was passed")
         assert self.signal_fn is not None
@@ -233,6 +327,16 @@ def assert_tradable_without_news(strategy: LoadedStrategy) -> None:
         )
 
 
+def assert_tradable_without_model(strategy: LoadedStrategy) -> None:
+    """Fail closed: a needs_model strategy must NOT run paper/live yet — the model lane is wired
+    only into the `backtest run` engine (issue #376). Called at every trading load point."""
+    if strategy.config.needs_model:
+        raise ValueError(
+            f"strategy {strategy.name!r} declares needs_model; paper/live model wiring is not "
+            f"built yet (#376 follow-up) — refusing to trade it blind"
+        )
+
+
 def config_hash(strategy: LoadedStrategy) -> str:
     """Stable digest of a strategy's resolved configuration (name + universe + params +
     execution contract + construction policy id and params). The single source of truth for the
@@ -249,22 +353,28 @@ def config_hash(strategy: LoadedStrategy) -> str:
     digest is a 128-bit sha256 prefix (#341): collision-resistant for identity/gate use, not a
     collision-proof guarantee — two differing configs are astronomically unlikely, not provably
     unable, to collide."""
-    payload = json.dumps(
-        {
-            "name": strategy.name,
-            "universe": strategy.universe,
-            "params": strategy.params,
-            "execution": asdict(strategy.execution),
-            "construction": strategy.config.construction,
-            "construction_params": strategy.config.construction_params,
-            "needs_fundamentals": strategy.config.needs_fundamentals,
-            "needs_news": strategy.config.needs_news,
-            # #345: behavior-affecting (sizes the walk-forward embargo), and NOT inside params /
-            # execution, so it must be folded in explicitly — two runs with different declared
-            # lookbacks carve different windows and must never collide on config_hash.
-            "feature_lookback": strategy.config.feature_lookback,
-        },
-        sort_keys=True,
-        allow_nan=False,
-    )
+    identity: dict[str, Any] = {
+        "name": strategy.name,
+        "universe": strategy.universe,
+        "params": strategy.params,
+        "execution": asdict(strategy.execution),
+        "construction": strategy.config.construction,
+        "construction_params": strategy.config.construction_params,
+        "needs_fundamentals": strategy.config.needs_fundamentals,
+        "needs_news": strategy.config.needs_news,
+        # #345: behavior-affecting (sizes the walk-forward embargo), and NOT inside params /
+        # execution, so it must be folded in explicitly — two runs with different declared
+        # lookbacks carve different windows and must never collide on config_hash.
+        "feature_lookback": strategy.config.feature_lookback,
+    }
+    # Model identity (issue #376) is folded in ONLY when needs_model is True, so every existing
+    # non-model strategy's config_hash is byte-identical to before (no live-approval / result-
+    # identity churn). The pinned model_ref carries name/version/digest/training_as_of AND the
+    # provenance_digest (which commits to the training snapshot/code/hyperparameters/seed/eval
+    # report), so the full training provenance — not just the version — is part of the identity.
+    if strategy.config.needs_model:
+        assert strategy.config.model_ref is not None
+        identity["needs_model"] = True
+        identity["model_ref"] = strategy.config.model_ref.as_dict()
+    payload = json.dumps(identity, sort_keys=True, allow_nan=False)
     return hashlib.sha256(payload.encode()).hexdigest()[:32]
