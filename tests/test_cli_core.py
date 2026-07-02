@@ -64,6 +64,44 @@ def test_doctor_flags_missing_strategy_doc(monkeypatch, tmp_path):
     assert result.exit_code == 1
 
 
+def test_doctor_advisory_rows_do_not_gate_exit(monkeypatch, tmp_path):
+    # No paper creds and no bars snapshot in a clean env -> advisory rows fail, but doctor still
+    # passes (exit 0, ok=True) because advisory rows carry required=False.
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.delenv("ALGUA_ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALGUA_ALPACA_API_SECRET", raising=False)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    rows = {c["check"]: c for c in payload["checks"]}
+    for name in ("paper_credentials", "bars_snapshot", "generated_provenance"):
+        assert rows[name]["required"] is False
+    assert rows["paper_credentials"]["ok"] is False
+    assert rows["bars_snapshot"]["ok"] is False
+
+
+def test_has_generated_by_recognizes_plain_and_annotated(tmp_path):
+    from algua.cli.app import _has_generated_by
+
+    plain = tmp_path / "plain.py"
+    plain.write_text('GENERATED_BY = "agent"\n')
+    annotated = tmp_path / "annotated.py"
+    annotated.write_text('GENERATED_BY: str = "agent"\n')
+    missing = tmp_path / "missing.py"
+    missing.write_text("X = 1\n")
+    bare = tmp_path / "bare.py"
+    bare.write_text("GENERATED_BY: str\n")  # annotation only, assigns no marker value
+    broken = tmp_path / "broken.py"
+    broken.write_text("def (\n")  # unparseable -> False, never raises
+    assert _has_generated_by(plain) is True
+    assert _has_generated_by(annotated) is True
+    assert _has_generated_by(missing) is False
+    assert _has_generated_by(bare) is False
+    assert _has_generated_by(broken) is False
+
+
 def test_main_decorated_errors_exit_nonzero(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
 
