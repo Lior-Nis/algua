@@ -42,12 +42,17 @@ def _auth():
 
 def _permissive_book(monkeypatch):
     """Stub the #389 book-level exposure build with a large-equity, empty long-only book so book
-    caps never bind — for run-all tests that assert the pre-existing tick/pool/breach behavior.
-    (Book-limit enforcement itself is covered by test_book_limits.py + test_live_book_limits.py.)"""
+    caps never bind, AND no-op the #390 book-level LOSS circuit breaker — for run-all tests that
+    assert the pre-existing tick/pool/breach behavior. (Book-exposure enforcement is covered by
+    test_book_limits.py + test_live_book_limits.py; the loss breaker by test_book_breaker.py +
+    test_live_book_breaker.py.)"""
     from algua.risk.book_limits import BookExposure, BookRiskLimits
     monkeypatch.setattr(
         "algua.cli.live_cmd._build_book_exposure",
         lambda *a, **k: (BookExposure(1e15, {}, BookRiskLimits()), None),
+    )
+    monkeypatch.setattr(
+        "algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None
     )
 
 
@@ -296,7 +301,10 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
             return "off"
         def account(self):
             from algua.execution.alpaca_broker import AccountState
-            return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0)
+            # last_equity == equity so the #390 book loss breaker passes; this test exercises the
+            # PER-STRATEGY breach path (run_tick raising), not the book-level breaker.
+            return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0,
+                                last_equity=100_000.0)
 
     broker = _LiqBroker()
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
@@ -327,6 +335,61 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
             "WHERE strategy = 'cross_sectional_momentum' AND symbol = 'AAA'"
         ).fetchone()
         assert row["side"] == "sell" and row["broker_order_id"] == "off"
+
+
+def test_run_all_book_loss_breaker_halts_and_flattens_whole_account(monkeypatch):
+    # #390: a whole-account daily loss past the cap engages the global halt and flattens the ENTIRE
+    # account (close_all_positions), BEFORE any strategy ticks. run_tick must never be reached.
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+
+    class _LossBroker:
+        def __init__(self):
+            self.closed_all = False
+        def account_activities(self, after=None):
+            return []
+        def get_positions(self):
+            import pandas as pd
+            return pd.Series(dtype=float)
+        def close_all_positions(self):
+            self.closed_all = True
+        def account(self):
+            from algua.execution.alpaca_broker import AccountState
+            # equity 10% below prior-session close (last_equity) — past the 5% daily-loss cap.
+            return AccountState(equity=90_000.0, cash=0.0, buying_power=0.0,
+                                last_equity=100_000.0)
+
+    broker = _LossBroker()
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
+                        lambda conn, sid: {"capital": 10_000.0})
+
+    def _no_tick(*a, **k):
+        raise AssertionError("run_tick must not run once the book loss breaker trips")
+    monkeypatch.setattr("algua.cli.live_cmd.run_tick", _no_tick)
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    import json
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    assert payload["book_breach"]["kind"] == "book_daily_loss"
+    assert payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is True
+    assert broker.closed_all is True
+
+    # the global halt is now persisted: a subsequent cycle refuses at the top-of-cycle check
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is True
 
 
 def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
