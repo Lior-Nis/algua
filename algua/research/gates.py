@@ -422,6 +422,44 @@ FDR_W0 = FDR_ALPHA / 2   # initial alpha-wealth (standard choice, Ramdas et al. 
 # positions > 10 000 uses γ_j=0 for j>10 000 (negligible, conservative).
 FDR_GAMMA_TRUNCATION = 10_000
 
+# Count-triggered cohort restarts (#324). The LORD++ stream is partitioned into consecutive,
+# non-overlapping COHORTS of exactly FDR_COHORT_SIZE binding tests, assigned by ARRIVAL ORDER;
+# each cohort runs an INDEPENDENT LORD++ stream (fresh W0, in-cohort t and rejection positions).
+#
+# WHY (protected constant — raising it weakens the fix). A SINGLE lifetime-global LORD++ stream is
+# anti-scaling: every measured test (mostly clear-null flops, p≈1) advances position t, so in a
+# dry spell α_t = γ_t·W0 → 0 as t grows — testing MORE garbage monotonically lowers everyone's
+# future bar. This is INTRINSIC to a *lifetime* target on a garbage-dominated funnel: any valid
+# lifetime online-FDR procedure must drive the per-test level to 0 over an unbounded null stream.
+# Bounding the count (a deterministic LORD-with-restarts, Ramdas et al. 2017; Zrnic et al.) caps
+# the worst-case dry-spell level at γ_{FDR_COHORT_SIZE}·W0 INDEPENDENT of throughput — 1000
+# tests/day or 1/day yield identical within-cohort statistics. The FDR guarantee is RE-SCOPED and
+# EXPLICIT: FDR is controlled PER COHORT of FDR_COHORT_SIZE binding tests at FDR_ALPHA, NOT per
+# lifetime. Cumulative exposure over K completed cohorts is bounded by FDR_ALPHA·K (surfaced as an
+# audit-only fdr_exposure block; see promotion.py). "Only bind passing rows" is REJECTED — it hides
+# non-rejections from the multiplicity process (covert loosening). SAFFRON is insufficient here: it
+# indexes γ by non-candidate count, so clear-null garbage still alpha-deaths.
+#
+# WHY 64 (power calibration, not aesthetics). Real normalized-γ dry-spell floors: α_1 = 0.00165
+# (dsr ≥ 0.99835) — the first test is already strict, inherent to W0 + γ-normalization
+# (pre-existing, not a regression); α_64 = 4.6e-5 (dsr ≥ 0.99995). 64 keeps α_N within ~35× of α_1
+# (same order as the pre-existing α_1 strictness) and caps decay; larger N approaches lifetime-like
+# decay, smaller N means more independent 5% cohorts (weaker multiplicity control).
+FDR_COHORT_SIZE = 64
+
+
+def fdr_cohort_position(k: int) -> tuple[int, int]:
+    """Map a 1-based GLOBAL binding-test ordinal ``k`` to its ``(cohort_index, within_cohort_t)``.
+
+    ``cohort_index = (k − 1) // FDR_COHORT_SIZE`` (0-based); ``within_cohort_t`` runs 1..
+    FDR_COHORT_SIZE and is the position fed to :func:`lord_plus_plus_level` for that cohort's
+    independent LORD++ stream. Fails closed (``ValueError``) on ``k < 1`` — a binding ordinal is
+    always ≥ 1 by construction, so a non-positive value is a caller bug, not a silent-0 default.
+    """
+    if k < 1:
+        raise ValueError(f"binding-test ordinal k must be >= 1, got {k}")
+    return (k - 1) // FDR_COHORT_SIZE, (k - 1) % FDR_COHORT_SIZE + 1
+
 
 def _compute_lord_gamma(n: int) -> list[float]:
     """Normalized LORD++ γ weights for j=1..n.
@@ -457,11 +495,19 @@ def lord_plus_plus_level(
     α_t depends ONLY on past decisions — no circularity. Wealth is computed from the ledger
     rows on every call (not cached), mirroring pooled_trial_sharpe_var's fail-closed philosophy.
 
-    The p-value fed here must be 1 − dsr_confidence (conversion at the caller), which equals
-    P(SR_true ≤ SR*) — the DSR selection-inflated null. The FDR guarantee is over that null.
+    COHORT SCOPING (#324): ``t`` and ``discovery_indices`` are WITHIN-COHORT — the caller supplies
+    the current cohort's position (1..FDR_COHORT_SIZE via :func:`fdr_cohort_position`) and that
+    cohort's in-cohort rejection positions. Each cohort of FDR_COHORT_SIZE binding tests is an
+    independent LORD++ stream (fresh w0). This math is unchanged; only its scoping moved from a
+    single lifetime stream to per-cohort restarts to defeat throughput-driven alpha-death.
 
-    Dry-spell behavior: with no discoveries, α_t = γ_t · w0 → 0 as t grows (expected
-    LORD++ "alpha-death" in a long null streak; no floor, by design).
+    The p-value fed here must be 1 − dsr_confidence (conversion at the caller), which equals
+    P(SR_true ≤ SR*) — the DSR selection-inflated null. The FDR guarantee is over that null, and is
+    controlled PER COHORT of FDR_COHORT_SIZE binding tests, NOT per lifetime (see FDR_COHORT_SIZE).
+
+    Dry-spell behavior: with no in-cohort discoveries, α_t = γ_t · w0. Because t is bounded to
+    1..FDR_COHORT_SIZE, α_t is floored at γ_{FDR_COHORT_SIZE} · w0 (never collapses toward 0 from
+    throughput) and restarts fresh (α_1 = γ_1 · w0) at each cohort boundary.
 
     Returns a CONSERVATIVE 0.0 on any degenerate input (t<1, non-finite alpha/w0, any
     discovery index ≥ t or < 1). 0.0 means p_t ≤ α_t can never be satisfied — only tightens.
@@ -685,9 +731,22 @@ class GateDecision:
     fdr_binding: bool = False
     fdr_p_value: float | None = None
     fdr_alpha_level: float | None = None
-    fdr_test_index: int | None = None
+    fdr_test_index: int | None = None      # WITHIN-COHORT position (1..FDR_COHORT_SIZE), #324
     fdr_rejected: bool | None = None
     fdr_skip_reason: str | None = None
+    # Cohort restart + cumulative-exposure audit (#324). Populated by run_gate on binding rows.
+    # fdr_cohort: this row's 0-based cohort index. The remaining fields are AUDIT-ONLY (never
+    # change pass/fail) and make the per-cohort re-scoping honest: they surface that FDR is
+    # controlled per cohort of FDR_COHORT_SIZE binding tests, NOT per lifetime, and how much
+    # cumulative exposure has accrued. fdr_expected_false_discoveries = FDR_ALPHA *
+    # fdr_cohorts_completed is the honest upper bound on cumulative expected false discoveries over
+    # completed independent cohorts (NOT conditioned on cohorts-with-discoveries, which would be
+    # post-selection and understate exposure).
+    fdr_cohort: int | None = None
+    fdr_cohorts_completed: int | None = None
+    fdr_binding_tests: int | None = None
+    fdr_discoveries: int | None = None
+    fdr_expected_false_discoveries: float | None = None
     # Returns-persistence audit (#221 Slice 1). Non-binding: True iff run_gate wrote a
     # holdout_returns row for this evaluation. False for pre-Slice-1 promotions (omit-not-fail).
     returns_available: bool = False
@@ -776,6 +835,11 @@ class GateDecision:
             "fdr_test_index": self.fdr_test_index,
             "fdr_rejected": self.fdr_rejected,
             "fdr_skip_reason": self.fdr_skip_reason,
+            "fdr_cohort": self.fdr_cohort,
+            "fdr_cohorts_completed": self.fdr_cohorts_completed,
+            "fdr_binding_tests": self.fdr_binding_tests,
+            "fdr_discoveries": self.fdr_discoveries,
+            "fdr_expected_false_discoveries": _f(self.fdr_expected_false_discoveries),
             "returns_available": self.returns_available,
             "dsr_bootstrap_binding": self.dsr_bootstrap_binding,
             "dsr_bootstrap_lower": _f(self.dsr_bootstrap_lower),

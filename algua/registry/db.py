@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -686,9 +686,21 @@ def migrate(conn: sqlite3.Connection) -> None:
         "fdr_rejected": "INTEGER",
         "fdr_test_index": "INTEGER",
     })
+    # v33 (#324): count-triggered cohort restarts. fdr_test_index is no longer a GLOBAL lifetime
+    # counter — it restarts at 1 within each cohort of FDR_COHORT_SIZE binding tests. Add fdr_cohort
+    # and replace the global-unique index with a (cohort, index) composite so the same within-cohort
+    # position in different cohorts does not false-conflict.
+    _add_missing_columns(conn, "gate_evaluations", {"fdr_cohort": "INTEGER"})
+    # DROP the old global-unique index BEFORE the backfill. On a legacy DB with > FDR_COHORT_SIZE
+    # binding rows, the backfill rewrites the 65th row's fdr_test_index to 1 — which would collide
+    # with row 1 under the still-present global unique index and abort the migration mid-write. The
+    # new composite index is created AFTER the backfill (once every row carries its within-cohort
+    # (cohort, index) pair), so no window exists where either index is violated. (GATE-2 finding.)
+    conn.execute("DROP INDEX IF EXISTS ix_gate_evaluations_fdr_index")
+    _backfill_fdr_cohorts(conn)
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_index"
-        " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1"
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_cohort_index"
+        " ON gate_evaluations(fdr_cohort, fdr_test_index) WHERE fdr_binding=1"
     )
     # v26 (#222): backtest_returns is a brand-new table; executescript creates it.
     # v26 (#222): family registry tables (families/family_members/family_parents/family_events).
@@ -710,6 +722,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     # executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
     # v32 (#332): negative_results is a brand-new advisory table; executescript(_SCHEMA) above
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # v33 (#324): fdr_cohort column + (cohort, index) composite unique index + legacy backfill
+    # handled above (before the index swap so the new composite index sees the rewritten indices).
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
@@ -770,6 +784,51 @@ def _backfill_holdout_intervals(conn: sqlite3.Connection) -> None:
     if leftover:
         raise RuntimeError(
             f"holdout interval backfill left {leftover} NULL-interval row(s); refusing to stamp v23"
+        )
+
+
+def _backfill_fdr_cohorts(conn: sqlite3.Connection) -> None:
+    """Re-partition legacy LORD++ binding rows into cohorts of FDR_COHORT_SIZE (#324).
+
+    Pre-#324 binding rows carried a GLOBAL lifetime ``fdr_test_index`` (1, 2, 3, …) and a NULL
+    ``fdr_cohort``. This one-time, idempotent backfill packs them, in ``id`` order, into
+    consecutive cohorts: the g-th binding row (g 1-based) gets ``fdr_cohort = (g-1)//N`` and its
+    ``fdr_test_index`` is REWRITTEN to the within-cohort position ``(g-1)%N + 1``.
+
+    Guarded by "any binding row with NULL fdr_cohort" so it runs exactly once (a second migrate()
+    finds every binding row already assigned and does nothing). Ordering by ``id`` (not by the old
+    ``fdr_test_index``) makes the packing robust to any historical index gap.
+
+    Stored ``fdr_alpha_level`` is LEFT FROZEN — it is the historical record of the decision made at
+    the time (computed under the old lifetime formula); recomputing it under cohort scoping would
+    falsify the audit trail. The stream reader validates only index contiguity + p/alpha finiteness
+    + rejected∈{0,1}; it never recomputes a past α, so freezing is correct. The re-partition does
+    not change any past pass/fail verdict (``passed`` is untouched); it only re-labels the ledger so
+    the new (cohort, index) invariant and composite unique index hold over history. Rows imported
+    from the migration MUST use the SAME FDR_COHORT_SIZE the reader/writer use — imported here.
+    """
+    from algua.research.gates import fdr_cohort_position
+
+    binding_ids = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM gate_evaluations WHERE fdr_binding=1 AND fdr_cohort IS NULL ORDER BY id"
+        )
+    ]
+    if not binding_ids:
+        return
+    # If SOME binding rows already have fdr_cohort (a partial prior backfill / mixed history), the
+    # global ordinal must count ALL binding rows, not just the NULL ones, so the packing stays
+    # contiguous. Count already-assigned binding rows to offset the global ordinal.
+    already = conn.execute(
+        "SELECT COUNT(*) AS c FROM gate_evaluations WHERE fdr_binding=1 AND fdr_cohort IS NOT NULL"
+    ).fetchone()["c"]
+    for offset, row_id in enumerate(binding_ids):
+        g = already + offset + 1
+        cohort, t = fdr_cohort_position(g)
+        conn.execute(
+            "UPDATE gate_evaluations SET fdr_cohort=?, fdr_test_index=? WHERE id=?",
+            (cohort, t, row_id),
         )
 
 

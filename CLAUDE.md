@@ -47,10 +47,17 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   `backtest sweep` (declaring it with `--n-combos` is human-only); the holdout-Sharpe bar is
   DEFLATED by funnel-wide search breadth (multiple-testing defense); a minimum holdout-observations
   floor (63) applies (underpowered holdouts fail closed); a funnel-wide **LORD++ FDR alpha-wealth
-  ledger** (#220, schema v26) applies a SECOND tighten-only AND-check on measured runs — the
-  per-strategy DSR p-value (p = 1 − dsr_confidence) must ≤ α_t (LORD++ level, global stream);
-  FDR is an operating target (FDR_ALPHA=0.05, W0=0.025); declared/human breadth and missing
-  dsr_confidence skip FDR. A passing run is the ONLY way an agent reaches `candidate` — there is no
+  ledger** (#220, schema v26; **#324 cohort restarts**, schema v33) applies a SECOND tighten-only
+  AND-check on measured runs — the per-strategy DSR p-value (p = 1 − dsr_confidence) must ≤ α_t
+  (LORD++ level); FDR is an operating target (FDR_ALPHA=0.05, W0=0.025); declared/human breadth and
+  missing dsr_confidence skip FDR. The stream is **partitioned into cohorts of FDR_COHORT_SIZE=64
+  binding tests by arrival order**, each an independent LORD++ stream (fresh W0), so FDR is
+  controlled **PER COHORT of 64 binding tests, NOT per lifetime**. This defeats anti-scaling: a
+  single lifetime stream let a dry spell of failed attempts drive α_t → 0 (testing more garbage
+  lowered everyone's bar); bounding the count floors the worst-case dry-spell level at γ_64·W0
+  independent of throughput. Cumulative exposure over K completed cohorts is ≈ FDR_ALPHA·K, surfaced
+  as audit-only `fdr_*` exposure fields. A passing run is the ONLY way an agent reaches `candidate`
+  — there is no
   raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
   `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).
   **Family governance (#222):** at preflight, the strategy is empirically classified into a family

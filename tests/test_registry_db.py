@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -366,7 +366,7 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
     migrate(c2)
     cols = {row["name"] for row in c2.execute("PRAGMA table_info(search_trials)")}
     assert {"trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 33
     c2.close()
 
 
@@ -374,18 +374,85 @@ def test_v26_adds_fdr_columns_to_gate_evaluations(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)")}
+    # #324 (v33) adds fdr_cohort alongside the v26 FDR columns.
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
-            "fdr_test_index"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+            "fdr_test_index", "fdr_cohort"} <= cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
 
 
-def test_v26_fdr_partial_unique_index_exists(tmp_path):
+def test_v33_backfills_legacy_binding_rows_into_cohorts(tmp_path):
+    """#324: pre-existing binding rows (global lifetime fdr_test_index, NULL fdr_cohort) are packed,
+    in id order, into cohorts of FDR_COHORT_SIZE — fdr_cohort=(g-1)//N, fdr_test_index=(g-1)%N+1 —
+    idempotently, leaving fdr_alpha_level frozen and `passed` untouched."""
+    from algua.research.gates import FDR_COHORT_SIZE
+
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(id, name, stage, created_at, updated_at)"
+        " VALUES (1, 's', 'backtested', '2026-01-01', '2026-01-01')")
+    # Faithfully reproduce a pre-#324 ledger: restore the OLD global-unique index (drop the new
+    # composite one) so the backfill's fdr_test_index rewrite must survive the > FDR_COHORT_SIZE
+    # collision the OLD index would otherwise raise (GATE-2 migration-ordering regression).
+    conn.execute("DROP INDEX IF EXISTS ix_gate_evaluations_fdr_cohort_index")
+    conn.execute(
+        "CREATE UNIQUE INDEX ix_gate_evaluations_fdr_index"
+        " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1")
+    conn.execute("PRAGMA user_version=32")
+    conn.commit()
+    # Emulate legacy binding rows: global fdr_test_index, NULL fdr_cohort. More than one cohort's
+    # worth so the 65th row's rewritten within-cohort index (1) collides with row 1 under the OLD
+    # global index unless it is dropped before the backfill.
+    n = FDR_COHORT_SIZE + 3
+    for g in range(1, n + 1):
+        conn.execute(
+            "INSERT INTO gate_evaluations"
+            " (strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+            "  funnel_window_days, breadth_provenance, pit_ok, holdout_n_bars,"
+            "  min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
+            "  period_start, period_end, holdout_frac, actor, decision_json, created_at,"
+            "  fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index, fdr_cohort)"
+            " VALUES (?,?,9,9,9,90,'measured',1,80,63,'c0','cfg0','dep0','SyntheticProvider',"
+            "         '2022-01-01','2023-12-31',0.2,'agent','{}','2024-01-01T00:00:00+00:00',"
+            "         1,0.5,?,0,?,NULL)",
+            (1, g % 2, 0.01 * g, g),
+        )
+    conn.commit()
+
+    migrate(conn)  # backfill
+
+    rows = conn.execute(
+        "SELECT fdr_cohort, fdr_test_index, fdr_alpha_level, passed"
+        " FROM gate_evaluations WHERE fdr_binding=1 ORDER BY id"
+    ).fetchall()
+    assert (rows[0]["fdr_cohort"], rows[0]["fdr_test_index"]) == (0, 1)
+    assert (rows[FDR_COHORT_SIZE - 1]["fdr_cohort"],
+            rows[FDR_COHORT_SIZE - 1]["fdr_test_index"]) == (0, FDR_COHORT_SIZE)
+    assert (rows[FDR_COHORT_SIZE]["fdr_cohort"], rows[FDR_COHORT_SIZE]["fdr_test_index"]) == (1, 1)
+    # fdr_alpha_level frozen (row g had 0.01*g) and passed untouched (g % 2).
+    assert rows[0]["fdr_alpha_level"] == 0.01
+    assert rows[0]["passed"] == 1 % 2
+
+    before = [dict(r) for r in rows]
+    migrate(conn)  # idempotent — no re-partition
+    after = [
+        dict(r) for r in conn.execute(
+            "SELECT fdr_cohort, fdr_test_index, fdr_alpha_level, passed"
+            " FROM gate_evaluations WHERE fdr_binding=1 ORDER BY id")
+    ]
+    assert before == after
+
+
+def test_v33_fdr_cohort_composite_unique_index_replaces_global(tmp_path):
+    # #324: the global fdr_test_index unique index is replaced by a (cohort, index) composite so
+    # per-cohort restarted positions do not false-conflict.
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     indexes = {
         r["name"] for r in conn.execute("PRAGMA index_list(gate_evaluations)")
     }
-    assert "ix_gate_evaluations_fdr_index" in indexes
+    assert "ix_gate_evaluations_fdr_cohort_index" in indexes
+    assert "ix_gate_evaluations_fdr_index" not in indexes
 
 
 def test_v26_migration_is_idempotent(tmp_path):
@@ -397,8 +464,8 @@ def test_v26_migration_is_idempotent(tmp_path):
     migrate(c2)   # second migrate must not raise
     cols = {r["name"] for r in c2.execute("PRAGMA table_info(gate_evaluations)")}
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
-            "fdr_test_index"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 32
+            "fdr_test_index", "fdr_cohort"} <= cols
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 33
     c2.close()
 
 
@@ -415,7 +482,7 @@ def test_v28_upgrade_adds_quarantine_table(tmp_path):
     migrate(c2)
     tables = {r["name"] for r in c2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "live_activity_quarantine" in tables
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == 33
     c2.close()
 
 
@@ -447,7 +514,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -455,7 +522,7 @@ def test_paper_venue_tables_created_at_v30(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"paper_venue_orders", "paper_venue_fills", "paper_venue_activities",
             "paper_venue_fill_cursor", "paper_venue_activity_quarantine"} <= names
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
     # partial-unique broker_order_id index allows many NULLs, one non-null owner
     conn.execute("INSERT INTO paper_venue_orders(strategy,symbol,side,client_order_id,"
                  "strategy_id,status,submitted_ts) VALUES ('s','AAA','buy','c1',1,'submitted','t')")
@@ -471,7 +538,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -486,4 +553,4 @@ def test_v32_negative_results_table_created(tmp_path):
     assert {"id", "created_at", "strategy_name", "gate_evaluation_id", "kind", "verdict",
             "actor", "reason", "hypothesis", "params_json", "tags", "source"} <= cols
     migrate(conn)  # idempotent re-run must not raise
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 33

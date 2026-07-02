@@ -442,7 +442,11 @@ def test_run_gate_fdr_discovery_increments_stream(tmp_path):
     assert outcome.promoted is True
     stream = repo.fdr_stream_state()
     assert stream is not None
-    assert stream.t == 1
+    # #324: the recorded discovery is at cohort-0 position 1; the NEXT test's within-cohort
+    # position is 2, and the in-cohort discovery positions carry forward.
+    assert stream.t == 2
+    assert stream.cohort_index == 0
+    assert stream.discoveries == 1
     assert stream.discovery_indices == [1]
 
 
@@ -455,7 +459,9 @@ def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
     assert outcome.promoted is False
     stream = repo.fdr_stream_state()
     assert stream is not None
-    assert stream.t == 1
+    # #324: one binding (non-discovery) row recorded -> next within-cohort position is 2.
+    assert stream.t == 2
+    assert stream.binding_tests == 1
     assert stream.discovery_indices == []
 
 
