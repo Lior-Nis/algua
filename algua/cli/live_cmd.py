@@ -33,6 +33,7 @@ from algua.execution.order_state import (
     record_tick_snapshot,
     update_nav_peak,
 )
+from algua.execution.sizing import MIN_NOTIONAL
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.observability import (
@@ -307,7 +308,15 @@ def _build_book_exposure(
         max_symbol_concentration=s.book_max_symbol_concentration,
         max_symbol_notional=s.book_max_symbol_notional,
     )
-    return BookExposure(equity, book_notionals, limits), None
+    book = BookExposure(equity, book_notionals, limits)
+    # An account book that ALREADY breaches a cap at reconcile time is an anomaly: the per-buy
+    # monotone headroom guarantees no-worse but cannot heal an already-over OTHER symbol via a buy,
+    # so trading through it is unsound (Codex #389 GATE-2). Fail closed — skip the whole cycle.
+    breaches = book.seed_breaches()
+    if breaches:
+        return None, f"account book already breaches book-level cap(s) {breaches} at reconcile " \
+                     "— refusing to trade this cycle"
+    return book, None
 
 
 @live_app.command("run-all")
@@ -429,7 +438,11 @@ def run_all(
                         # MUTATES its running book by the FINAL permitted (so the next strategy's
                         # buys see the compounded book). Audit any shortfall vs intended notional.
                         pool_permitted = min(notional, max(0.0, pool["available"]))
-                        permitted = book.permit_buy(symbol, pool_permitted)
+                        # min_notional: a sub-minimum book trim is skipped downstream, so the book
+                        # does not burn budget for a phantom fill (accounting stays in step).
+                        permitted = book.permit_buy(
+                            symbol, pool_permitted, min_notional=MIN_NOTIONAL
+                        )
                         pool["available"] -= permitted
                         if permitted < notional:  # trimmed/skipped -> audit the shortfall
                             record_reservation(

@@ -342,3 +342,70 @@ def test_exact_boundary_permit_allowed() -> None:
     assert permitted == pytest.approx(100.0, abs=TOL)
     assert book.gross == pytest.approx(100.0, abs=TOL)
     assert not math.isnan(book.gross)
+
+
+# --------------------------------------------------------------------------- #
+# seed_breaches — already-breached seed detection (Codex #389 GATE-2)
+# --------------------------------------------------------------------------- #
+
+
+def test_seed_breaches_empty_for_compliant_book() -> None:
+    lim = BookRiskLimits()  # gross 2.0, net 1.0, conc 0.25, sym_notional 0.50
+    book = BookExposure(equity=1000.0, book_notionals={"AAA": 100.0, "BBB": 100.0}, limits=lim)
+    assert book.seed_breaches() == []
+
+
+def test_seed_breaches_flags_symbol_notional_on_other_name() -> None:
+    # The hole Codex found: AAA over its notional cap must be flagged even when a buy targets BBB.
+    lim = BookRiskLimits(max_gross=100.0, max_net=100.0, max_symbol_concentration=1.0,
+                         max_symbol_notional=0.50)
+    book = BookExposure(equity=1000.0, book_notionals={"AAA": 600.0}, limits=lim)
+    assert "symbol_notional" in book.seed_breaches()
+
+
+def test_seed_breaches_flags_gross_net_and_concentration() -> None:
+    lim = BookRiskLimits(max_gross=0.5, max_net=0.5, max_symbol_concentration=0.25,
+                         max_symbol_notional=10.0)
+    # gross 900 > 0.5*1000=500; net 900 > 500; AAA 600/max(900,1000)=0.6 > 0.25.
+    book = BookExposure(equity=1000.0, book_notionals={"AAA": 600.0, "BBB": 300.0}, limits=lim)
+    flags = set(book.seed_breaches())
+    assert {"gross", "net", "concentration"} <= flags
+
+
+def test_seed_breaches_flags_degenerate_equity() -> None:
+    assert BookExposure(0.0, {}, BookRiskLimits()).seed_breaches() == ["equity"]
+    assert BookExposure(float("nan"), {}, BookRiskLimits()).seed_breaches() == ["equity"]
+
+
+def test_seed_compliant_book_at_exactly_the_cap_is_not_breached() -> None:
+    lim = BookRiskLimits(max_gross=1.0, max_net=10.0, max_symbol_concentration=1.0,
+                         max_symbol_notional=10.0)
+    # gross exactly at 1.0*100 = 100 -> not breached (tolerance).
+    book = BookExposure(equity=100.0, book_notionals={"AAA": 100.0}, limits=lim)
+    assert book.seed_breaches() == []
+
+
+# --------------------------------------------------------------------------- #
+# permit_buy min_notional floor — sub-minimum trim skips WITHOUT mutating
+# --------------------------------------------------------------------------- #
+
+
+def test_permit_buy_sub_min_notional_returns_zero_no_mutation() -> None:
+    # Only 0.5 of headroom left but venue min is 1.0 -> the buy would be skipped downstream, so
+    # permit_buy returns 0 and does NOT burn book budget (accounting stays in step with the venue).
+    lim = BookRiskLimits(max_gross=1.0, max_net=10.0, max_symbol_concentration=1.0,
+                         max_symbol_notional=10.0)
+    book = BookExposure(equity=100.0, book_notionals={"AAA": 99.5}, limits=lim)  # gross hr = 0.5
+    permitted = book.permit_buy("BBB", 10.0, min_notional=1.0)
+    assert permitted == 0.0
+    assert book.gross == pytest.approx(99.5, abs=TOL)  # unchanged
+    assert "BBB" not in book.book
+
+
+def test_permit_buy_at_or_above_min_notional_still_permits() -> None:
+    lim = BookRiskLimits(max_gross=2.0, max_net=10.0, max_symbol_concentration=1.0,
+                         max_symbol_notional=10.0)
+    book = BookExposure(equity=100.0, book_notionals={}, limits=lim)
+    # 5.0 >= min_notional 1.0 -> permitted and mutated.
+    assert book.permit_buy("AAA", 5.0, min_notional=1.0) == pytest.approx(5.0, abs=TOL)
+    assert book.book["AAA"] == pytest.approx(5.0, abs=TOL)

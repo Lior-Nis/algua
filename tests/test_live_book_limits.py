@@ -97,6 +97,18 @@ def test_build_book_exposure_fails_closed_on_non_positive_or_non_finite_mark(bad
     assert reason is not None
 
 
+def test_build_book_exposure_fails_closed_on_already_breached_seed():
+    # Seed a single name over its per-symbol notional cap (0.5*equity): AAA notional = 600 on a
+    # 1000 equity account (max_symbol_notional default 0.5 => 500). An already-breached book is an
+    # anomaly -> fail closed (a buy of ANOTHER symbol must NOT proceed through a breached book).
+    book, reason = live_cmd._build_book_exposure(
+        _Broker(equity=1000.0), _Provider({"AAA": 6.0}), {"AAA": 100.0},
+        "2023-01-01", "2023-12-31",
+    )
+    assert book is None
+    assert reason is not None and "already breaches" in reason.lower()
+
+
 # --------------------------------------------------------------------------- #
 # compose into _reserve_for — the book trims a BUY across strategies
 # --------------------------------------------------------------------------- #

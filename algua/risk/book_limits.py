@@ -17,6 +17,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+# Absolute tolerance for a seed "already breached" comparison — absorbs float noise in the
+# mark×qty book valuation so a book exactly at a cap isn't spuriously flagged as over it.
+_EPS = 1e-6
+
 
 def _finite(x: float) -> bool:
     """True iff x is a finite float (not NaN, not +/-inf)."""
@@ -81,9 +85,46 @@ class BookExposure:
         self.gross: float = sum(abs(v) for v in book_notionals.values())
         self.net: float = sum(book_notionals.values())
 
-    def permit_buy(self, symbol: str, requested_notional: float) -> float:
+    def seed_breaches(self) -> list[str]:
+        """Names of book caps ALREADY breached by the seed (before any buy). A non-empty result
+        means the whole account book is over a limit at reconcile time — an anomaly the caller must
+        treat as fail-closed (skip the cycle), because the per-buy monotone headroom only guarantees
+        NO-worse; it cannot heal an already-breached OTHER symbol via a buy (Codex #389 GATE-2). An
+        empty book (equity <= 0 or non-finite) is reported as breached ('equity') so a degenerate
+        seed also fails closed. Concentration checked with the same equity-floored base as buys."""
+        e = self.equity
+        if not _finite(e) or e <= 0:
+            return ["equity"]
+        lim = self.limits
+        breaches: list[str] = []
+        if self.gross > lim.max_gross * e + _EPS:
+            breaches.append("gross")
+        if self.net > lim.max_net * e + _EPS:
+            breaches.append("net")
+        over_notional = [
+            s for s, v in self.book.items() if abs(v) > lim.max_symbol_notional * e + _EPS
+        ]
+        if over_notional:
+            breaches.append("symbol_notional")
+        if lim.max_symbol_concentration < 1.0:
+            denom = max(self.gross, e)
+            over_conc = [
+                s for s, v in self.book.items()
+                if abs(v) > lim.max_symbol_concentration * denom + _EPS
+            ]
+            if over_conc:
+                breaches.append("concentration")
+        return breaches
+
+    def permit_buy(
+        self, symbol: str, requested_notional: float, *, min_notional: float = 0.0
+    ) -> float:
         """Largest permitted BUY notional (0 <= permitted <= requested_notional) that keeps
         every book cap satisfied after the add; mutate the accumulator iff permitted > 0.
+
+        `min_notional`: a venue minimum — if the trimmed permitted lands in (0, min_notional) the
+        buy would be SKIPPED downstream (below the broker minimum), so return 0 WITHOUT mutating,
+        keeping the accumulator's book in step with what actually reaches the venue (Codex #389).
 
         Fail-closed on: requested <= 0, non-finite requested, equity <= 0, non-finite equity.
         """
@@ -124,6 +165,11 @@ class BookExposure:
             0.0,
             min(requested_notional, gross_hr, net_hr, symbol_notional_hr, concentration_hr),
         )
+
+        # A trim that lands below the venue minimum is SKIPPED downstream (no order posted), so do
+        # not burn book budget for a phantom fill — return 0 without mutating (Codex #389 GATE-2).
+        if permitted < min_notional:
+            return 0.0
 
         if permitted > 0.0:
             self.book[symbol] = sb + permitted
