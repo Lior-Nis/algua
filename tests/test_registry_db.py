@@ -391,9 +391,18 @@ def test_v33_backfills_legacy_binding_rows_into_cohorts(tmp_path):
     conn.execute(
         "INSERT INTO strategies(id, name, stage, created_at, updated_at)"
         " VALUES (1, 's', 'backtested', '2026-01-01', '2026-01-01')")
+    # Faithfully reproduce a pre-#324 ledger: restore the OLD global-unique index (drop the new
+    # composite one) so the backfill's fdr_test_index rewrite must survive the > FDR_COHORT_SIZE
+    # collision the OLD index would otherwise raise (GATE-2 migration-ordering regression).
+    conn.execute("DROP INDEX IF EXISTS ix_gate_evaluations_fdr_cohort_index")
+    conn.execute(
+        "CREATE UNIQUE INDEX ix_gate_evaluations_fdr_index"
+        " ON gate_evaluations(fdr_test_index) WHERE fdr_binding=1")
+    conn.execute("PRAGMA user_version=32")
     conn.commit()
-    # Emulate legacy binding rows: global fdr_test_index, NULL fdr_cohort. Null out the column the
-    # migration just added so this looks like a pre-#324 ledger, then re-run migrate to backfill.
+    # Emulate legacy binding rows: global fdr_test_index, NULL fdr_cohort. More than one cohort's
+    # worth so the 65th row's rewritten within-cohort index (1) collides with row 1 under the OLD
+    # global index unless it is dropped before the backfill.
     n = FDR_COHORT_SIZE + 3
     for g in range(1, n + 1):
         conn.execute(

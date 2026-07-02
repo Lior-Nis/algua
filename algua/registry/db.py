@@ -691,8 +691,13 @@ def migrate(conn: sqlite3.Connection) -> None:
     # and replace the global-unique index with a (cohort, index) composite so the same within-cohort
     # position in different cohorts does not false-conflict.
     _add_missing_columns(conn, "gate_evaluations", {"fdr_cohort": "INTEGER"})
-    _backfill_fdr_cohorts(conn)
+    # DROP the old global-unique index BEFORE the backfill. On a legacy DB with > FDR_COHORT_SIZE
+    # binding rows, the backfill rewrites the 65th row's fdr_test_index to 1 — which would collide
+    # with row 1 under the still-present global unique index and abort the migration mid-write. The
+    # new composite index is created AFTER the backfill (once every row carries its within-cohort
+    # (cohort, index) pair), so no window exists where either index is violated. (GATE-2 finding.)
     conn.execute("DROP INDEX IF EXISTS ix_gate_evaluations_fdr_index")
+    _backfill_fdr_cohorts(conn)
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_cohort_index"
         " ON gate_evaluations(fdr_cohort, fdr_test_index) WHERE fdr_binding=1"
