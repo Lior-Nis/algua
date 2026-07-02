@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 from urllib.parse import quote
 
@@ -282,7 +282,15 @@ class _AlpacaBroker:
                 # A trim below Alpaca's min notional must SKIP, not post a sub-$1 order the venue
                 # rejects (a BrokerError would abort the whole run-all cycle) — codex C2 review.
                 return "skipped"
-        notional = format(Decimal(str(amount)).quantize(Decimal("0.01")), "f")
+        # Quantize DOWN (ROUND_FLOOR), never up: a risk-reserved BUY amount was granted against
+        # book-level headroom (#389); rounding the submitted notional UP to cents could push the
+        # actual gross a fraction of a cent PAST a book cap the accumulator believes is exactly met
+        # (Codex #389 GATE-2). Flooring guarantees submitted notional <= reserved amount. A buy in
+        # [MIN_NOTIONAL, MIN_NOTIONAL+0.01) floors to MIN_NOTIONAL, so it never drops below the
+        # venue minimum the guard above already enforced.
+        notional = format(
+            Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_FLOOR), "f"
+        )
         body: dict[str, Any] = {"symbol": intent.symbol, "notional": notional,
                                 "side": side, "type": "market", "time_in_force": "day"}
         if client_order_id is not None:
