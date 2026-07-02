@@ -155,6 +155,44 @@ def test_fleet_status_ranks_worst_first(monkeypatch, tmp_path):
     assert {r["strategy"] for r in rows} == {"a_ok", "b_idle", "c_stale", "d_drift", "e_killed"}
 
 
+def test_corrupt_tick_row_fails_closed_not_crash(monkeypatch, tmp_path):
+    """A strategy with a corrupt persisted tick (unreadable positions JSON) must fail closed to
+    'stale' with a last_tick_error — never crash and never read 'idle'/'ok' (one bad row must not
+    take down the whole fleet view)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    now = _now()
+    with closing(_conn()) as conn:
+        rec = _register(conn, "s_corrupt")
+        _tick(conn, rec, tick_ts=now.isoformat())
+        # scribble non-JSON into the positions column of the newest row
+        conn.execute("UPDATE tick_snapshots SET positions = ? WHERE strategy = ?",
+                     ("{not json", rec.name))
+        conn.commit()
+        h = strategy_health(conn, rec, MarketCalendar(), halted_globally=False, now=now)
+    assert h["health"] == "stale"
+    assert h["last_tick_error"] is not None
+    assert h["staleness_sessions"] > STALE_AFTER_SESSIONS
+
+
+def test_fleet_status_survives_one_corrupt_strategy(monkeypatch, tmp_path):
+    """fleet_status returns the full array even when one strategy's tick row is corrupt."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    now = _now()
+    with closing(_conn()) as conn:
+        good = _register(conn, "z_good")
+        _tick(conn, good, tick_ts=now.isoformat())
+        bad = _register(conn, "a_bad")
+        _tick(conn, bad, tick_ts=now.isoformat())
+        conn.execute("UPDATE tick_snapshots SET positions = ? WHERE strategy = ?",
+                     ("{oops", bad.name))
+        conn.commit()
+        rows = fleet_status(conn, MarketCalendar(), now=now)
+    by_name = {r["strategy"]: r for r in rows}
+    assert by_name["z_good"]["health"] == "ok"
+    assert by_name["a_bad"]["health"] == "stale"
+    assert len(rows) == 2  # the aggregate did not collapse on the bad row
+
+
 def test_fleet_status_global_halt_marks_all_halted(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
     now = _now()

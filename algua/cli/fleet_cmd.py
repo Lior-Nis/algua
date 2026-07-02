@@ -21,6 +21,9 @@ def status() -> None:
     tick, tick staleness, and health verdict in ONE read, ranked worst-offender-first. A pure read
     of persisted state (no broker call) — the standing observability view that replaces an O(N)
     sweep of ``paper show``. Emits a bare JSON array (like ``registry list``)."""
+    # registry_conn() is the sanctioned read-path opener shared by every read command (paper show,
+    # registry list, data inspect): its migrate() is idempotent and touches no strategy/trading
+    # state, so "read-only" holds at the domain level (no order/kill-switch/allocation mutation).
     with registry_conn() as conn:
         rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC))
     emit(rows)

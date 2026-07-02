@@ -53,6 +53,19 @@ class _Calendar(Protocol):
     def sessions_between(self, a: Any, b: Any) -> int: ...
 
 
+def _safe_latest_tick(conn: sqlite3.Connection, name: str) -> tuple[dict | None, str | None]:
+    """The newest tick snapshot, or ``(None, error)`` if reading it raised.
+
+    ``latest_tick_snapshot`` eagerly ``json.loads`` the persisted ``positions`` column, so ONE
+    strategy with a corrupt row would otherwise crash the whole ``fleet status`` aggregate and hide
+    every OTHER strategy's health. Catch the read here so a broken row degrades to a per-strategy
+    fail-closed verdict (``stale`` + ``last_tick_error``) instead of taking down the fleet view."""
+    try:
+        return latest_tick_snapshot(conn, name), None
+    except Exception as exc:  # corrupt positions JSON / any read error: fail closed, don't crash
+        return None, f"{type(exc).__name__}: {exc}"
+
+
 def _parse_utc(value: object) -> datetime | None:
     """ISO-8601 -> aware-UTC datetime, or ``None`` on anything unparseable — INCLUDING a tz-naive
     string. Every legitimate tick writer stamps an explicit offset, so a naive/garbage value can
@@ -103,7 +116,10 @@ def strategy_health(
 
     ks = kill_switch.get(conn, rec.name)
     tripped = ks is not None
-    last = latest_tick_snapshot(conn, rec.name)
+    last, tick_error = _safe_latest_tick(conn, rec.name)
+    # A row that exists but can't be read (corrupt positions JSON) is NOT idle: the strategy has
+    # ticked but is unmonitorable, so it must fail closed to ``stale`` — never ``idle``/``ok``.
+    has_unreadable_tick = tick_error is not None
     last_equity = last["equity"] if last else None
     drawdown = (
         1.0 - last_equity / peak
@@ -111,9 +127,12 @@ def strategy_health(
     )
 
     # Staleness: completed sessions since the newest tick. A non-idle strategy whose tick_ts is
-    # unparseable/tz-naive/future fails closed to sentinel staleness so it can never read as ``ok``.
+    # unparseable/tz-naive/future — or whose row is unreadable — fails closed to sentinel staleness
+    # so it can never read as ``ok``.
     staleness_sessions: int | None = None
-    if last is not None:
+    if has_unreadable_tick:
+        staleness_sessions = STALE_AFTER_SESSIONS + 1  # fail closed -> stale
+    elif last is not None:
         tick_dt = _parse_utc(last["tick_ts"])
         if tick_dt is None or tick_dt > now:
             staleness_sessions = STALE_AFTER_SESSIONS + 1  # fail closed -> stale
@@ -124,7 +143,7 @@ def strategy_health(
         health = "halted"
     elif last is not None and not last["reconcile_ok"]:
         health = "drift"
-    elif last is None:
+    elif last is None and not has_unreadable_tick:
         health = "idle"
     elif staleness_sessions is not None and staleness_sessions > STALE_AFTER_SESSIONS:
         health = "stale"
@@ -137,6 +156,7 @@ def strategy_health(
         "health": health,
         "staleness_sessions": staleness_sessions,
         "stale_after_sessions": STALE_AFTER_SESSIONS,
+        "last_tick_error": tick_error,
         "kill_switch": {
             "tripped": tripped,
             "reason": ks["reason"] if ks else None,
