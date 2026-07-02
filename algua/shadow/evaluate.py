@@ -188,8 +188,10 @@ def _result(
         float(broker.equity(closes.loc[last_ts])) if closes is not None and last_ts is not None
         else broker.cash
     )
-    # Daily returns from the equity curve; metrics_from_returns is the SAME layer the backtester
-    # uses, so a shadow Sharpe is directly comparable to a backtest/holdout Sharpe.
+    # Daily returns from the equity curve; metrics_from_returns is the SAME metric layer the
+    # backtester uses (same annualization/definitions). Shadow returns are GROSS of costs (the
+    # SimBroker charges no fees/slippage), so a shadow Sharpe is a like-for-like champion-vs-
+    # challenger number, NOT directly comparable to a cost-charged backtest/holdout Sharpe.
     eq = pd.Series([v for _, v in equity_curve], dtype="float64")
     returns = eq.pct_change().dropna() if len(eq) > 1 else pd.Series([], dtype="float64")
     m = metrics_from_returns(returns)
