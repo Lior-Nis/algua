@@ -609,6 +609,21 @@ def test_submit_sized_reserve_ignores_sells(monkeypatch):
     assert fake.posted[0]["side"] == "sell"
 
 
+def test_submit_sized_floors_reserved_notional_never_rounds_up(monkeypatch):
+    # #389 GATE-2: a risk-reserved BUY amount is granted against book-level headroom; the submitted
+    # notional must be floored to cents, never rounded UP, or the actual gross could edge a fraction
+    # of a cent PAST a book cap the accumulator believes is exactly met. 12345.678 -> "12345.67".
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"equity": "100000", "cash": "0", "buying_power": "0"}),
+         "/v2/positions": _FakeResp(200, [])},
+        post_resp=_FakeResp(201, {"id": "o1"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+    _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                           reserve=lambda sym, n: 12_345.678)
+    assert fake.posted[0]["notional"] == "12345.67"  # floored down, NOT "12345.68"
+
+
 def test_submit_sized_reserve_below_min_notional_skips(monkeypatch):
     # a buy trimmed below Alpaca's $1 minimum must skip, not post a sub-$1 order that gets rejected
     fake = _FakeRequests(
