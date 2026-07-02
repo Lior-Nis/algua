@@ -667,8 +667,12 @@ def _seed_snapshot(name, *, equity, peak, reconcile_ok=True, positions=None):
         migrate(conn)
         update_peak_equity(conn, name, peak)
         rec = SqliteStrategyRepository(conn).get(name)
-        record_tick_snapshot(conn, name, tick_ts="2023-06-01T00:00:00+00:00",
-                             decision_ts="2023-05-31T00:00:00+00:00", equity=equity,
+        # Fresh tick_ts (now) so the liveness/staleness rollup (#399/#400) reads this seeded tick
+        # as current — the health verdict under test is then driven by reconcile_ok/kill-switch,
+        # not by accidental staleness of a hardcoded past date.
+        now = datetime.now(UTC).isoformat()
+        record_tick_snapshot(conn, name, tick_ts=now,
+                             decision_ts=now, equity=equity,
                              peak_equity=peak, positions=positions or {}, n_submitted=0,
                              reconcile_ok=reconcile_ok, lane="paper", strategy_id=rec.id,
                              code_hash="c", config_hash="g", dependency_hash=None,
@@ -685,6 +689,7 @@ def test_show_consolidated_view():
     assert abs(payload["drawdown"]["drawdown"] - 0.10) < 1e-9
     assert payload["last_tick"]["positions"] == {"AAA": 3.0}
     assert payload["health"] == "ok"
+    assert payload["staleness_sessions"] == 0  # #399: fresh tick -> liveness proven
     assert "recent_orders" in payload
 
 

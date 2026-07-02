@@ -23,6 +23,7 @@ from algua.contracts.types import (
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
 from algua.execution.flatten import flatten_strategy
+from algua.execution.fleet_health import strategy_health
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_paper_venue_broker_order_id,
@@ -43,11 +44,7 @@ from algua.execution.order_state import (
     clear_nav_peak,
     clear_peak_equity,
     client_order_id,
-    count_orders,
-    count_venue_orders,
-    derive_positions,
     get_peak_equity,
-    latest_tick_snapshot,
     persist_run,
     recent_orders,
     recent_venue_orders,
@@ -252,56 +249,24 @@ def run(
 @json_errors
 def show(name: str) -> None:
     """Consolidated per-strategy operability view — stage, kill-switch, drawdown, last tick,
-    recent orders, and a health rollup. A pure read of persisted state (no broker call)."""
+    tick staleness, recent orders, and a health rollup. A pure read of persisted state (no broker
+    call). The core rollup (incl. the #399 liveness/staleness verdict) is the SAME
+    ``strategy_health`` engine that backs ``fleet status`` (DRY); ``show`` layers ``recent_orders``
+    on top for the single-strategy drill-down."""
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
+        halted_globally = global_halt.is_engaged(conn)
+        rollup = strategy_health(conn, rec, MarketCalendar(),
+                                 halted_globally=halted_globally, now=datetime.now(UTC))
         if rec.stage is Stage.LIVE:
-            from algua.execution.order_state import get_nav_peak
-            positions = believed_positions(conn, name, LedgerKind.LIVE)
-            peak = get_nav_peak(conn, name)
-            n_orders = count_orders(conn, name)
             orders = recent_orders(conn, name, 10)
         elif conn.execute(
             "SELECT 1 FROM paper_venue_orders WHERE strategy = ? LIMIT 1", (name,)
         ).fetchone() is not None:
-            positions = paper_believed_positions(conn, name)
-            peak = get_peak_equity(conn, name)
-            n_orders = count_venue_orders(conn, name)
             orders = recent_venue_orders(conn, name, 10)
         else:
-            positions = derive_positions(conn, name)
-            peak = get_peak_equity(conn, name)
-            n_orders = count_orders(conn, name)
             orders = recent_orders(conn, name, 10)
-        ks = kill_switch.get(conn, name)
-        halted_globally = global_halt.is_engaged(conn)
-        last = latest_tick_snapshot(conn, name)
-    tripped = ks is not None
-    last_equity = last["equity"] if last else None
-    drawdown = (
-        1.0 - last_equity / peak
-        if last_equity is not None and peak is not None and peak > 0 else None
-    )
-    if tripped or halted_globally:
-        health = "halted"
-    elif last is not None and not last["reconcile_ok"]:
-        health = "drift"
-    elif last is None:
-        health = "idle"
-    else:
-        health = "ok"
-    emit(ok({
-        "strategy": name,
-        "stage": rec.stage.value,
-        "kill_switch": {"tripped": tripped, "reason": ks["reason"] if ks else None,
-                        "global_halt": halted_globally},
-        "drawdown": {"peak_equity": peak, "last_equity": last_equity, "drawdown": drawdown},
-        "last_tick": last,
-        "positions": positions,
-        "n_orders": n_orders,
-        "recent_orders": orders,
-        "health": health,
-    }))
+    emit(ok({**rollup, "recent_orders": orders}))
 
 
 @paper_app.command("kill")
