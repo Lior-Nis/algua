@@ -254,6 +254,55 @@ def test_alpaca_timeframe_maps_1d_to_alpaca_format():
     assert _alpaca_timeframe("1Min") == "1Min"  # unknown-to-us passes through
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://data.alpaca.markets/v2",  # plaintext — creds in the clear
+        "https://evil.test/v2",  # foreign host — SSRF/exfil target
+        "https://data.alpaca.markets@evil.test/v2",  # userinfo trick — real host is evil.test
+        "data.alpaca.markets/v2",  # missing scheme — hostless after parse
+        "https:///v2",  # no host
+    ],
+)
+def test_alpaca_provider_rejects_unsafe_base_url(bad_url):
+    with pytest.raises(ProviderError):
+        AlpacaBarProvider(api_key="key", api_secret="secret", base_url=bad_url)
+
+
+def test_alpaca_provider_accepts_uppercase_scheme_and_host():
+    # urlparse lowercases scheme+host, so an uppercased-but-legitimate URL is accepted.
+    provider = AlpacaBarProvider(
+        api_key="key", api_secret="secret", base_url="HTTPS://DATA.ALPACA.MARKETS/v2"
+    )
+    assert provider.base_url == "HTTPS://DATA.ALPACA.MARKETS/v2"
+
+
+def test_alpaca_provider_does_not_follow_redirect(monkeypatch):
+    # A 3xx must fail closed BEFORE a second request could carry the APCA headers elsewhere (#394).
+    calls = []
+
+    class RedirectResponse:
+        status_code = 302
+
+        def raise_for_status(self):  # pragma: no cover - must never be reached on a 3xx
+            raise AssertionError("raise_for_status called on a redirect")
+
+        def json(self):  # pragma: no cover
+            raise AssertionError("json called on a redirect")
+
+    def fake_get(*args, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        calls.append(kwargs)
+        return RedirectResponse()
+
+    monkeypatch.setattr("algua.data.providers.alpaca.requests.get", fake_get)
+    provider = AlpacaBarProvider(api_key="key", api_secret="secret")
+    with pytest.raises(ProviderError, match="redirect"):
+        provider.get_bars(BarRequest(("AAPL",), "2026-01-02", "2026-01-03"))
+    # Exactly one request fired; the redirect was never chased.
+    assert len(calls) == 1
+
+
 def test_get_provider_builds_yfinance():
     provider = get_provider("yfinance", Settings())
     assert isinstance(provider, YFinanceBarProvider)

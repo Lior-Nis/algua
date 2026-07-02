@@ -28,18 +28,22 @@ class _FakeRequests:
         self.post_resp = post_resp
         self.posted = []
         self.deleted = []
+        self.redirects_allowed = []  # every call's allow_redirects flag, for the #394 assertion
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
+        self.redirects_allowed.append(allow_redirects)
         for suffix, resp in self.routes.items():
             if url.endswith(suffix):
                 return resp
         return _FakeResp(404, text="not found")
 
-    def post(self, url, headers=None, json=None, timeout=None):
+    def post(self, url, headers=None, json=None, timeout=None, allow_redirects=None):
+        self.redirects_allowed.append(allow_redirects)
         self.posted.append(json)
         return self.post_resp
 
-    def delete(self, url, headers=None, timeout=None):
+    def delete(self, url, headers=None, timeout=None, allow_redirects=None):
+        self.redirects_allowed.append(allow_redirects)
         self.deleted.append(url)
         for suffix, resp in self.routes.items():
             if url.endswith(suffix):
@@ -67,6 +71,25 @@ def test_accepts_paper_base_url():
 def test_alpaca_broker_conforms_to_broker_protocol():
     from algua.contracts.types import Broker
     assert isinstance(_broker(), Broker)
+
+
+def test_request_disables_redirects(monkeypatch):
+    # #394: every credential-bearing verb must pass allow_redirects=False so a 3xx cannot chase
+    # the APCA headers to a foreign host.
+    fake = _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"id": "a", "equity": "1", "cash": "0",
+                                        "buying_power": "0"})})
+    monkeypatch.setattr(ab, "requests", fake)
+    _broker().account()
+    assert fake.redirects_allowed == [False]
+
+
+def test_request_does_not_follow_redirect(monkeypatch):
+    # A 3xx is non-2xx, so it surfaces as a BrokerError instead of the creds being re-sent (#394).
+    fake = _FakeRequests({"/v2/account": _FakeResp(302, text="redirect")})
+    monkeypatch.setattr(ab, "requests", fake)
+    with pytest.raises(BrokerError):
+        _broker().account()
 
 
 def test_account_parses_floats(monkeypatch):
@@ -182,7 +205,7 @@ def test_non_2xx_raises_broker_error(monkeypatch):
 
 
 class _RaisingRequests:
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
         raise ab.RequestException("connection reset")
 
 
@@ -211,7 +234,7 @@ class _FakeRequestsWithDelete(_FakeRequests):
         self._delete_resp = delete_resp
         self.deleted = []
 
-    def delete(self, url, headers=None, timeout=None):
+    def delete(self, url, headers=None, timeout=None, allow_redirects=None):
         self.deleted.append(url)
         return self._delete_resp
 
@@ -270,7 +293,7 @@ class _FlakyRequests(_FakeRequests):
         self.final_payload = final_payload
         self.attempts = 0
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
         self.attempts += 1
         if self.attempts <= self.fail_times:
             return _FakeResp(503, text="unavailable")
@@ -300,7 +323,7 @@ class _RetryableThenRaise(_FakeRequests):
         super().__init__({})
         self.attempts = 0
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
         self.attempts += 1
         raise ab.RequestException("timeout")
 
@@ -323,7 +346,7 @@ class _TimeoutThenSucceedPost(_FakeRequests):
         self._ok = _FakeResp(201, ok_payload)
         self.attempts = 0
 
-    def post(self, url, headers=None, json=None, timeout=None):
+    def post(self, url, headers=None, json=None, timeout=None, allow_redirects=None):
         self.attempts += 1
         # Deep-copy so we capture the body AS SENT on each attempt — not a shared reference that
         # would make the two-attempts-equal assertion tautological if production mutated it.
@@ -371,7 +394,7 @@ class _FakeDeleteRouter(_FakeRequests):
         self.status_by_symbol = status_by_symbol
         self.deleted = []
 
-    def delete(self, url, headers=None, timeout=None):
+    def delete(self, url, headers=None, timeout=None, allow_redirects=None):
         self.deleted.append(url)
         symbol = url.rsplit("/", 1)[-1]
         status = self.status_by_symbol.get(symbol, 200)
@@ -503,7 +526,10 @@ def test_cancel_order_by_id(monkeypatch):
     fake = _FakeRequests({})
     monkeypatch.setattr(ab, "requests", fake)
     # a 204 (or 200) is success; a 404 (already gone) is a no-op, not an error
-    monkeypatch.setattr(fake, "delete", lambda url, headers=None, timeout=None: _FakeResp(204))
+    monkeypatch.setattr(
+        fake, "delete",
+        lambda url, headers=None, timeout=None, allow_redirects=None: _FakeResp(204),
+    )
     _broker().cancel_order("o1")  # must not raise
 
 
@@ -607,7 +633,7 @@ class _PaginatingRequests:
         self._pages = {k: list(v) for k, v in pages_by_prefix.items()}
         self.requested_urls: list[str] = []
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=None):
         self.requested_urls.append(url)
         for prefix, pages in self._pages.items():
             if prefix in url:
@@ -616,10 +642,14 @@ class _PaginatingRequests:
                 return _FakeResp(500, text="no more pages configured")
         return _FakeResp(404, text="not found")
 
-    def post(self, url, headers=None, json=None, timeout=None):  # pragma: no cover
+    def post(  # pragma: no cover
+        self, url, headers=None, json=None, timeout=None, allow_redirects=None
+    ):
         return _FakeResp(405, text="unexpected POST")
 
-    def delete(self, url, headers=None, timeout=None):  # pragma: no cover
+    def delete(  # pragma: no cover
+        self, url, headers=None, timeout=None, allow_redirects=None
+    ):
         return _FakeResp(405, text="unexpected DELETE")
 
 

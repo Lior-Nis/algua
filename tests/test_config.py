@@ -23,11 +23,31 @@ def test_env_override(monkeypatch, tmp_path):
 def test_alpaca_env_override(monkeypatch):
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "key")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "secret")
-    monkeypatch.setenv("ALGUA_ALPACA_DATA_URL", "https://example.test")
+    monkeypatch.setenv("ALGUA_ALPACA_DATA_URL", "https://data.alpaca.markets/v2")
     s = get_settings()
     assert s.alpaca_api_key == "key"
     assert s.alpaca_api_secret == "secret"
-    assert s.alpaca_data_url == "https://example.test"
+    assert s.alpaca_data_url == "https://data.alpaca.markets/v2"
+
+
+def test_alpaca_data_url_rejects_plaintext(monkeypatch):
+    # http:// would carry the account-scoped broker credentials in cleartext (#394).
+    monkeypatch.setenv("ALGUA_ALPACA_DATA_URL", "http://data.alpaca.markets/v2")
+    with pytest.raises(ValidationError):
+        get_settings()
+
+
+def test_alpaca_data_url_rejects_foreign_host(monkeypatch):
+    monkeypatch.setenv("ALGUA_ALPACA_DATA_URL", "https://evil.test/v2")
+    with pytest.raises(ValidationError):
+        get_settings()
+
+
+def test_alpaca_data_url_rejects_userinfo_host(monkeypatch):
+    # The real destination host is evil.test, not the display prefix.
+    monkeypatch.setenv("ALGUA_ALPACA_DATA_URL", "https://data.alpaca.markets@evil.test/v2")
+    with pytest.raises(ValidationError):
+        get_settings()
 
 
 def test_mlflow_tracking_uri_default_and_override(monkeypatch):

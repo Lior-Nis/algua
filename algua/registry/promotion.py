@@ -585,7 +585,8 @@ def run_gate(
         search_trials_max_id=st_max,
     )
     fdr_outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=gate_row, p_value=p_value, funnel=funnel, level_fn=level_fn, actor=actor,
+        rec, gate_row=gate_row, p_value=p_value, funnel=funnel, level_fn=level_fn,
+        fdr_alpha=FDR_ALPHA, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
     )
 
@@ -598,6 +599,12 @@ def run_gate(
         decision.fdr_alpha_level = fdr_outcome.fdr_alpha_level
         decision.fdr_test_index = fdr_outcome.fdr_test_index
         decision.fdr_rejected = fdr_outcome.fdr_rejected
+        # #324 cohort restart + cumulative-exposure audit (audit-only; never changes pass/fail).
+        decision.fdr_cohort = fdr_outcome.fdr_cohort
+        decision.fdr_cohorts_completed = fdr_outcome.fdr_cohorts_completed
+        decision.fdr_binding_tests = fdr_outcome.fdr_binding_tests
+        decision.fdr_discoveries = fdr_outcome.fdr_discoveries
+        decision.fdr_expected_false_discoveries = fdr_outcome.fdr_expected_false_discoveries
         decision.checks.append({
             "name": "fdr_evidence",
             "value": fdr_outcome.fdr_p_value,
