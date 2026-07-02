@@ -180,6 +180,38 @@ def promote(
     holdouts). On pass for an agent this mints the single-use gate token the BACKTESTED->CANDIDATE
     transition consumes.
     """
+    payload = promote_task(
+        name, start=start, end=end, demo=demo, snapshot=snapshot,
+        fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
+        universe=universe, windows=windows, holdout_frac=holdout_frac,
+        min_holdout_sharpe=min_holdout_sharpe, min_holdout_return=min_holdout_return,
+        min_pct_positive=min_pct_positive, min_window_sharpe=min_window_sharpe,
+        n_combos=n_combos, allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit,
+        delistings=delistings, assume_terminal_last_close=assume_terminal_last_close,
+        actor=actor, new_family=new_family,
+    )
+    out = ok(payload)
+    emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
+
+
+def promote_task(  # noqa: PLR0913, PLR0915
+    name: str, *, start: str = "2023-01-01", end: str = "2023-12-31", demo: bool = False,
+    snapshot: str | None = None, fundamentals_snapshot: str | None = None,
+    news_snapshot: str | None = None, universe: str | None = None, windows: int = 4,
+    holdout_frac: float = 0.2, min_holdout_sharpe: float = 0.5, min_holdout_return: float = 0.0,
+    min_pct_positive: float = 0.6, min_window_sharpe: float = 0.0, n_combos: int | None = None,
+    allow_holdout_reuse: bool = False, allow_non_pit: bool = False, delistings: str | None = None,
+    assume_terminal_last_close: bool = False, actor: str = "agent",
+    new_family: str | None = None, reload: bool = False,
+) -> dict:
+    """Run the backtested->candidate gate and return the (pre-``--summary``) payload dict — the
+    body of ``research promote``, shared with the ``research run-all`` batch worker (#326).
+
+    Opens+closes its own ``registry_conn()`` per call (NO caller-owned connection): the holdout
+    single-use guard is a DB row reserved under BEGIN IMMEDIATE, so reusing ONE warm process across
+    many promote tasks reuses NOTHING — a second task on an already-burned window hits the same
+    committed-burn overlap and fails closed, identical to two separate cold processes. ``reload``
+    force-reloads the strategy module (warm-worker state hygiene)."""
     actor_enum = Actor(actor)  # fail fast on a bad actor before running the walk-forward
     if n_combos is not None and n_combos < 1:
         raise ValueError("--n-combos must be >= 1 when provided")
@@ -199,7 +231,8 @@ def promote(
     # --universe refuses here, before any holdout is peeked at). The universe is intentionally NOT
     # part of the holdout-burn identity below (conservative: the same OOS data window is burned
     # regardless of universe).
-    strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    strategy, provider, start_dt, end_dt = resolve_eval_inputs(
+        name, demo, snapshot, start, end, reload=reload)
     # PIT sidecar guards (misuse + early fail-closed) BEFORE any holdout reservation/peek: a
     # needs_X strategy without its snapshot must refuse before reserve_holdout touches the window.
     if fundamentals_snapshot and not strategy.config.needs_fundamentals:
@@ -336,8 +369,7 @@ def promote(
     # Re-sync the kb doc to the (possibly) new stage (#331): best-effort, out-of-transaction —
     # the `with registry_conn()` block above has already committed and closed.
     sync_kb_doc(name)
-    out = ok(payload)
-    emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
+    return payload
 
 
 @research_app.command("dormant-sweep")
