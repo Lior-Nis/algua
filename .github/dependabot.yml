@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Python dependencies (uv is pip-compatible for Dependabot's pip ecosystem).
+  # Keeps the locked dependency graph patched against newly disclosed CVEs.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  # GitHub Actions — keeps the SHA-pinned actions in CI/security workflows fresh
+  # so pinning does not silently rot into stale, unpatched action versions.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
