@@ -7,10 +7,14 @@ from typing import Any
 import pandas as pd
 
 from algua.backtest.metrics import metrics_from_returns
-from algua.contracts.types import OrderIntent, Side
+from algua.contracts.types import OrderIntent, Side, fill_reference_column
 from algua.execution.sim_broker import SimBroker
 from algua.risk.limits import WEIGHT_TOL, validate_decision_weights
-from algua.strategies.base import LoadedStrategy
+from algua.strategies.base import (
+    LoadedStrategy,
+    assert_tradable_without_fundamentals,
+    assert_tradable_without_news,
+)
 
 # Shadow evaluation is a DAILY-bar exercise: metrics_from_returns annualizes with the daily
 # constant, so a non-1d timeframe would produce a mis-annualized (unfair) Sharpe. Restrict to "1d".
@@ -85,11 +89,21 @@ def shadow_replay(
     - Only fully-CLOSED sessions drive a decision: any bar dated on/after `now.date()` is dropped
       before the replay (the live loop's cutoff, `now` injected for tests) so a partial current-bar
       the live champion would reject can never leak into the shadow decision.
-    - Decide on closed bar `t` (data <= t), fill at the NEXT bar's open — no future bar is read
-      before deciding, so there is no look-ahead.
+    - Decide on closed bar `t` (data <= t), fill at the NEXT bar on the SAME intra-bar reference the
+      backtest/paper loops resolve via `fill_reference_column` (open, or adj_close for fill_price=
+      "close") — no future bar is read before deciding, so there is no look-ahead.
 
-    Accounting is a pure in-process SimBroker (no real/paper broker, no order submission, no
-    allocation, no holdout). `cash` is a caller-supplied SIM notional, NOT a live allocation.
+    Accounting is a pure in-process SimBroker: the SHADOW LANE's own code never constructs a real or
+    paper broker, never submits an order, never touches an allocation or the holdout. (The authored
+    strategy code it loads runs in-process like every other lane — sandboxing untrusted strategy
+    code is a pre-existing, platform-wide deferred threat model, NOT introduced here; shadow adds no
+    new capability to that code beyond what `backtest run` / `paper run` already give it.)
+
+    Performance is PAPER-ACCOUNTED and GROSS of transaction costs — the SimBroker charges no
+    fees/slippage, exactly like the paper loop's SimBroker replay. Shadow metrics are therefore a
+    LIKE-FOR-LIKE champion-vs-challenger comparison (both sides scored identically), NOT directly
+    comparable to a cost-charged backtest/holdout Sharpe. `cash` is a SIM notional, NOT a live
+    allocation.
     """
     if timeframe != SHADOW_TIMEFRAME:
         raise ValueError(
@@ -98,6 +112,12 @@ def shadow_replay(
         )
     if not cash > 0:
         raise ValueError(f"cash must be a positive sim notional, got {cash}")
+    # Fail closed on strategies whose decision needs a PIT sidecar frame shadow cannot supply: it
+    # calls target_weights(bars) with bars only, so a needs_fundamentals/needs_news strategy would
+    # otherwise raise deep in signal(). needs_model is fine — the model is bound at load time and
+    # target_weights(bars) evaluates it without a sidecar (that is the ML champion-challenger case).
+    assert_tradable_without_fundamentals(strategy)
+    assert_tradable_without_news(strategy)
     now = now or datetime.now(UTC)
 
     bars = provider.get_bars(strategy.universe, start, end, timeframe).sort_index()
@@ -116,6 +136,10 @@ def shadow_replay(
     reset = bars.reset_index()
     opens = reset.pivot(index="timestamp", columns="symbol", values="open").sort_index()
     closes = reset.pivot(index="timestamp", columns="symbol", values="adj_close").sort_index()
+    # Fill on the SAME intra-bar reference the backtest/paper loops resolve (issue #383): the paper
+    # loop fills on `opens` for fill_price="open" and `closes` (adj_close) for "close". Reuse the
+    # one resolver so shadow can never silently pick a different fill basis than the real lanes.
+    fill_grid = opens if fill_reference_column(strategy.execution) == "open" else closes
     ts = list(opens.index)
     warmup = strategy.execution.warmup_bars
     bars_seen = 0
@@ -143,7 +167,7 @@ def shadow_replay(
         )
         for intent in _intents(weights, current_weights, t):
             broker.submit(intent)
-        broker.fill_pending(opens.loc[t_next], fill_ts=t_next)
+        broker.fill_pending(fill_grid.loc[t_next], fill_ts=t_next)
 
     # Mark the final bar to market so the last session's P&L is in the curve.
     last_ts = ts[-1]

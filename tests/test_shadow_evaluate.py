@@ -121,3 +121,51 @@ def test_shadow_replay_warmup_holds_flat():
 
 def test_shadow_replay_timeframe_constant_is_daily():
     assert SHADOW_TIMEFRAME == "1d"
+
+
+def _sidecar_strategy(needs: str) -> LoadedStrategy:
+    kw = {"needs_fundamentals": True} if needs == "fundamentals" else {"needs_news": True}
+    cfg = StrategyConfig(
+        name=f"sc_{needs}", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        **_CONSTRUCTION, **kw,
+    )
+    if needs == "fundamentals":
+        return LoadedStrategy(config=cfg, construct_fn=_identity,
+                              fundamentals_signal_fn=lambda v, p, f: pd.Series({"AAA": 1.0}))
+    return LoadedStrategy(config=cfg, construct_fn=_identity,
+                          news_signal_fn=lambda v, p, n: pd.Series({"AAA": 1.0}))
+
+
+@pytest.mark.parametrize("needs", ["fundamentals", "news"])
+def test_shadow_replay_rejects_sidecar_strategies(needs):
+    # Shadow supplies bars only; a needs_fundamentals/needs_news strategy must fail closed with a
+    # clear message BEFORE any replay (mirrors the paper/live tradable asserts), never silently
+    # producing an unfair comparison.
+    provider = _FakeProvider(_bars({"AAA": [100.0] * 5}))
+    with pytest.raises(ValueError, match="needs_"):
+        shadow_replay(_sidecar_strategy(needs), provider, DATES[0], DATES[-1],
+                      cash=100_000.0, now=_FUTURE_NOW)
+
+
+def test_shadow_replay_fill_price_close_uses_adj_close():
+    # With fill_price="close" the fill basis is adj_close (not open), matching the paper/backtest
+    # resolver (issue #383). Opens and adj_close differ here so the chosen basis is observable.
+    cfg = StrategyConfig(
+        name="close_fill", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1,
+                                    fill_price="close"),
+        **_CONSTRUCTION,
+    )
+    strat = LoadedStrategy(config=cfg, signal_fn=lambda view, params: pd.Series({"AAA": 1.0}),
+                           construct_fn=_identity)
+    rows = []
+    for ts, o, c in zip(DATES, [10.0, 10.0, 10.0, 10.0, 10.0], [100.0, 50.0, 50.0, 50.0, 50.0],
+                        strict=True):
+        rows.append({"timestamp": ts, "symbol": "AAA", "open": o, "high": c, "low": o,
+                     "close": c, "adj_close": c, "volume": 1000})
+    provider = _FakeProvider(pd.DataFrame(rows).set_index("timestamp").sort_index())
+    result = shadow_replay(strat, provider, DATES[0], DATES[-1], cash=100_000.0, now=_FUTURE_NOW)
+    # Filled against adj_close (~50), not the open (10): ~2000 shares, not ~10000.
+    shares = result.final_positions["AAA"]
+    assert 1500.0 < shares < 2100.0
