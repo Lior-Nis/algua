@@ -128,11 +128,15 @@ def select_provider(demo: bool, snapshot: str | None) -> DataProvider:
 
 
 def resolve_eval_inputs(
-    name: str, demo: bool, snapshot: str | None, start: str, end: str
+    name: str, demo: bool, snapshot: str | None, start: str, end: str, *, reload: bool = False
 ) -> tuple[LoadedStrategy, DataProvider, datetime, datetime]:
     """Resolve the shared backtest-family preamble: load the strategy, pick the provider, and
-    parse the period. Returns ``(strategy, provider, start_dt, end_dt)``."""
-    strategy = load_strategy(name)
+    parse the period. Returns ``(strategy, provider, start_dt, end_dt)``.
+
+    ``reload=True`` force-reloads the strategy module (see ``load_strategy``) — used by the
+    long-lived ``research run-all`` batch worker (#326) so a warm process does not carry a
+    strategy's own module-level state from one task into the next."""
+    strategy = load_strategy(name, reload=reload)
     provider = select_provider(demo, snapshot)
     return strategy, provider, utc(start), utc(end)
 

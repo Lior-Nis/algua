@@ -21,6 +21,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     negative_cmd,
     paper_cmd,
     registry_cmd,
+    research_batch_cmd,
     research_cmd,
     strategy_cmd,
 )
@@ -30,8 +31,12 @@ from algua.cli.errors import error_code
 # Composition root: mount idea_app under research_app HERE (not inside idea_cmd) so no cli command
 # module imports a sibling. Typer builds the command tree lazily at get_command(app) inside main(),
 # so this only needs to run before that call. MUST stay after the `from algua.cli import (…)` block.
+# research_batch_cmd (the `run-all` batch worker, #326) is likewise mounted here — it imports the
+# reusable task bodies from backtest_cmd/research_cmd, so mounting at the composition root keeps
+# those listed command modules free of any sibling import.
 research_cmd.research_app.add_typer(idea_cmd.idea_app, name="idea")
 research_cmd.research_app.add_typer(negative_cmd.log_app, name="log")
+research_cmd.research_app.add_typer(research_batch_cmd.run_all_app, name="run-all")
 
 __all__ = ["app", "main"]
 

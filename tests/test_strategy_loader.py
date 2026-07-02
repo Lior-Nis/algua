@@ -173,3 +173,130 @@ def test_load_tradable_strategy_rejects_fundamentals_strategy(monkeypatch):
     monkeypatch.setattr(loader, "assert_tradable_without_fundamentals", _boom)
     with pytest.raises(ValueError, match="needs_fundamentals"):
         loader.load_tradable_strategy("x")
+
+
+def test_reload_purges_strategy_and_helper_module_state(tmp_path):
+    """Warm-worker state hygiene (#326): load_strategy(reload=True) must reset BOTH the strategy
+    module's own globals AND its author-written first-party helper modules (part of the artifact
+    identity, hashed into code_hash) — so a batch worker's task N+1 never inherits task N's state.
+    Regression for the Codex GATE-2 finding: a root-only reload leaks a sibling helper's state."""
+    import algua.strategies.momentum as fam
+
+    fam_dir = Path(fam.__path__[0])
+    # `_`-prefixed: a real first-party helper module, skipped by strategy discovery.
+    helper = fam_dir / "_reload_probe_helper.py"
+    strat = fam_dir / "reload_probe_strat.py"
+    # The helper carries mutable module-level state that its score() advances on each call.
+    helper.write_text(
+        "count = 0\n"
+        "def bump():\n"
+        "    global count\n"
+        "    count += 1\n"
+        "    return count\n"
+    )
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._reload_probe_helper import bump\n"
+        "CONFIG = StrategyConfig(name='reload_probe_strat', universe=['AAPL'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series({'AAPL': float(bump())})\n"
+    )
+    try:
+        # Task 1: helper.count advances to 1 via the signal.
+        s1 = load_strategy("reload_probe_strat", reload=True)
+        assert s1.signal_fn(None, {})["AAPL"] == 1.0
+        # Task 2 in the SAME process: reload must reset the helper's `count` to 0 so the next
+        # signal call starts at 1 again — identical to a cold process. A root-only reload would
+        # leak `count` and return 2.0 here.
+        s2 = load_strategy("reload_probe_strat", reload=True)
+        assert s2.signal_fn(None, {})["AAPL"] == 1.0, "helper module state leaked across reload"
+    finally:
+        for f in (helper, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.reload_probe_strat",
+                  "algua.strategies.momentum._reload_probe_helper"):
+            sys.modules.pop(m, None)
+
+
+def test_reload_is_dependency_safe_for_helper_to_helper_imports(tmp_path):
+    """Warm reload (#326) must be dependency-order-safe: a helper A that re-exports an object from
+    a deeper helper B, whose object carries mutable class-attached state, must still reset across a
+    warm reload (sys.modules insertion order is dependency-first, so B reloads before A before the
+    strategy). Regression for the Codex GATE-2 helper-to-helper reload-order concern."""
+    import algua.strategies.momentum as fam
+
+    d = Path(fam.__path__[0])
+    state = d / "_dep_state_probe.py"   # B: owns the mutable state
+    mid = d / "_dep_mid_probe.py"       # A: re-exports B's object
+    strat = d / "dep_order_probe_strat.py"
+    state.write_text(
+        "class F:\n    count = 0\n"
+        "def tick():\n    F.count += 1\n    return F.count\n"
+    )
+    mid.write_text("from algua.strategies.momentum._dep_state_probe import tick\n")
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._dep_mid_probe import tick\n"
+        "CONFIG = StrategyConfig(name='dep_order_probe_strat', universe=['AAPL'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n    return pd.Series({'AAPL': float(tick())})\n"
+    )
+    try:
+        s1 = load_strategy("dep_order_probe_strat", reload=True)
+        assert s1.signal_fn(None, {})["AAPL"] == 1.0
+        s2 = load_strategy("dep_order_probe_strat", reload=True)
+        assert s2.signal_fn(None, {})["AAPL"] == 1.0, "transitive helper state leaked across reload"
+    finally:
+        for f in (state, mid, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.dep_order_probe_strat",
+                  "algua.strategies.momentum._dep_mid_probe",
+                  "algua.strategies.momentum._dep_state_probe"):
+            sys.modules.pop(m, None)
+
+
+def test_reload_resets_reexported_class_state(tmp_path):
+    """Warm reload (#326) resets state even when a helper A re-exports a CLASS (not a function)
+    from a deeper helper B and the strategy mutates a class attribute. sys.modules insertion order
+    is dependency-first (B before A before the strategy), so reloading in that order rebinds A's
+    re-exported name to the freshly reloaded class. Regression for the Codex GATE-2 class/object
+    re-export concern (which predicted a leak here)."""
+    import algua.strategies.momentum as fam
+
+    d = Path(fam.__path__[0])
+    state = d / "_cls_state_probe.py"   # B: owns the class with mutable class-attr state
+    mid = d / "_cls_mid_probe.py"       # A: re-exports the CLASS object itself
+    strat = d / "cls_reexport_probe_strat.py"
+    state.write_text("class Counter:\n    count = 0\n")
+    mid.write_text("from algua.strategies.momentum._cls_state_probe import Counter\n")
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._cls_mid_probe import Counter\n"
+        "CONFIG = StrategyConfig(name='cls_reexport_probe_strat', universe=['AAPL'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    Counter.count += 1\n"
+        "    return pd.Series({'AAPL': float(Counter.count)})\n"
+    )
+    try:
+        s1 = load_strategy("cls_reexport_probe_strat", reload=True)
+        assert s1.signal_fn(None, {})["AAPL"] == 1.0
+        s2 = load_strategy("cls_reexport_probe_strat", reload=True)
+        assert s2.signal_fn(None, {})["AAPL"] == 1.0, "re-exported class state leaked across reload"
+    finally:
+        for f in (state, mid, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.cls_reexport_probe_strat",
+                  "algua.strategies.momentum._cls_mid_probe",
+                  "algua.strategies.momentum._cls_state_probe"):
+            sys.modules.pop(m, None)

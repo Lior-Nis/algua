@@ -132,7 +132,33 @@ def run(
         help="write the daily return series to a parquet at PATH (for series plots)"),
 ) -> None:
     """Backtest a strategy and emit metrics JSON."""
-    strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    emit(ok(run_backtest_task(
+        name, start=start, end=end, demo=demo, snapshot=snapshot, universe=universe,
+        fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
+        delistings=delistings, assume_terminal_last_close=assume_terminal_last_close,
+        register=register, emit_series=emit_series, track=track,
+    )))
+
+
+def run_backtest_task(  # noqa: PLR0913
+    name: str, *, start: str = "2023-01-01", end: str = "2023-12-31", demo: bool = False,
+    snapshot: str | None = None, universe: str | None = None,
+    fundamentals_snapshot: str | None = None, news_snapshot: str | None = None,
+    delistings: str | None = None, assume_terminal_last_close: bool = False,
+    register: bool = False, emit_series: str | None = None, track: bool = False,
+    reload: bool = False,
+) -> dict:
+    """Backtest a strategy and return the result payload dict (the body of ``backtest run``).
+
+    Shared by the ``backtest run`` typer command and the ``research run-all`` batch worker (#326)
+    so there is exactly ONE backtest code path. Opens+closes its own ``registry_conn()`` and takes
+    NO caller-owned connection (each call is a self-contained unit — the batch worker never wraps
+    the loop in one connection, so per-task transaction contracts stay intact). ``track`` runs the
+    best-effort MLflow log in-place (the batch worker never passes it, so a warm run-all never
+    leaks an active MLflow run). ``reload`` force-reloads the strategy module (warm-worker state
+    hygiene, #326)."""
+    strategy, provider, start_dt, end_dt = resolve_eval_inputs(
+        name, demo, snapshot, start, end, reload=reload)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     delisting_records, delisting_snapshot_id = resolve_delisting_inputs(delistings, end_dt)
     if fundamentals_snapshot and not strategy.config.needs_fundamentals:
@@ -202,7 +228,7 @@ def run(
         _record_tracking(payload, lambda: log_backtest(
             result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
         ))
-    emit(ok(payload))
+    return payload
 
 
 @backtest_app.command("walk-forward")
@@ -320,9 +346,34 @@ def sweep_cmd(
              "defense)"),
 ) -> None:
     """Sweep a strategy across a parameter grid; walk-forward score each combo and rank."""
+    payload = sweep_task(
+        name, start=start, end=end, demo=demo, snapshot=snapshot, universe=universe,
+        windows=windows, holdout_frac=holdout_frac, param=param, rank_by=rank_by, top=top,
+        fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
+        delistings=delistings, assume_terminal_last_close=assume_terminal_last_close, track=track,
+    )
+    out = ok(payload)
+    emit(project(out, _SWEEP_SUMMARY_KEYS) if summary else out)
+
+
+def sweep_task(  # noqa: PLR0913
+    name: str, *, start: str = "2023-01-01", end: str = "2023-12-31", demo: bool = False,
+    snapshot: str | None = None, universe: str | None = None, windows: int = 4,
+    holdout_frac: float = 0.2, param: list[str] | None = None, rank_by: str = "mean_sharpe",
+    top: int = 20, fundamentals_snapshot: str | None = None, news_snapshot: str | None = None,
+    delistings: str | None = None, assume_terminal_last_close: bool = False, track: bool = False,
+    reload: bool = False,
+) -> dict:
+    """Sweep a strategy across a parameter grid and return the (untruncated-summary) payload dict —
+    the body of ``backtest sweep``, shared with the ``research run-all`` batch worker (#326).
+
+    Opens+closes its own ``registry_conn()`` (no caller-owned connection). The ``--summary``
+    projection stays in the typer wrapper; ``top`` truncation lives here (it is part of the
+    recorded payload shape). ``reload`` force-reloads the strategy module (warm-worker hygiene)."""
     if top < 1:
         raise ValueError("--top must be >= 1")
-    strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    strategy, provider, start_dt, end_dt = resolve_eval_inputs(
+        name, demo, snapshot, start, end, reload=reload)
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
     if fundamentals_snapshot and not strategy.config.needs_fundamentals:
         raise ValueError(
@@ -363,5 +414,4 @@ def sweep_cmd(
     if track:
         _record_tracking(
             payload, lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
-    out = ok(payload)
-    emit(project(out, _SWEEP_SUMMARY_KEYS) if summary else out)
+    return payload
