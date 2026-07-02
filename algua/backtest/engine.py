@@ -504,6 +504,38 @@ def adj_grid(bars: pd.DataFrame) -> pd.DataFrame:
     return adj.sort_index()
 
 
+def adj_open_grid(bars: pd.DataFrame) -> pd.DataFrame:
+    """The ADJUSTED-open execution grid (issue #383): raw `open` scaled by the SAME per-bar
+    adjustment ratio that maps raw close -> adj_close, so it is to adj_close exactly what raw open
+    is to raw close.
+
+        adj_open[t] = open[t] * (adj_close[t] / close[t])
+
+    Splits and dividends scale a whole bar uniformly, so this preserves `adj_open/adj_close ==
+    open/close` and is the correct next-bar-open reference in the backtest's adjusted frame. Shares
+    `adj_grid`'s (timestamp x symbol) index/columns EXACTLY, so it is a drop-in fill-price grid that
+    leaves holdout_window / the #192 single-use holdout identity / PIT masking / the returns index
+    untouched — only the price VALUES change.
+
+    Fail-safe cells: any bar where `close <= 0`, `open <= 0`, either is NaN, or the ratio is
+    non-finite (inf/-inf/NaN) yields a NaN adj_open — an untradeable bar that `from_orders` treats
+    as a no-fill, identical to a missing bar. So a corrupt OHLC row can never inject a bogus fill
+    price (it can only decline to fill)."""
+    wide = bars.reset_index().pivot(index="timestamp", columns="symbol", values="open").sort_index()
+    close = bars.reset_index().pivot(
+        index="timestamp", columns="symbol", values="close"
+    ).sort_index()
+    adj_close = adj_grid(bars)
+    open_ = wide.to_numpy(dtype="float64")
+    close_ = close.to_numpy(dtype="float64")
+    adjc = adj_close.to_numpy(dtype="float64")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where((close_ > 0) & np.isfinite(close_), adjc / close_, np.nan)
+        adj_open = np.where((open_ > 0) & np.isfinite(open_), open_ * ratio, np.nan)
+    adj_open[~np.isfinite(adj_open)] = np.nan  # inf/-inf ratios collapse to a no-fill cell
+    return pd.DataFrame(adj_open, index=adj_close.index, columns=adj_close.columns)
+
+
 
 
 def _static_operating_view(
@@ -676,10 +708,21 @@ def simulate(
     lag = strategy.execution.decision_lag_bars
     weights_eff = weights.shift(lag).fillna(0.0)
 
+    # Fill-price basis (issue #383): pick the intra-bar execution-price grid the contract pins, so
+    # the backtest fills on the SAME semantic reference the paper/live loop uses. Default "open"
+    # fills at the adjusted next-bar open (adj_open_grid); "close" is the legacy adj_close basis.
+    # `adj` (the adj_close grid) stays the sim DATE-INDEX / holdout identity source of truth — only
+    # the fill PRICE grid handed to from_orders changes.
+    exec_grid = adj_open_grid(bars) if strategy.execution.fill_price == "open" else adj
+
     try:
+        # terminal_price_grid=adj pins the delisting `assume_terminal_last_close` fallback to the
+        # last adj_CLOSE (a delisting is a close-of-book realization, not an open fill) regardless
+        # of the ordinary fill basis; the ordinary (non-terminal) fill cells come from exec_grid.
         adj_exec, weights_exec, forced_exits = apply_delisting_exits(
-            adj, weights_eff, delisting_records,
+            exec_grid, weights_eff, delisting_records,
             assume_terminal_last_close=assume_terminal_last_close,
+            terminal_price_grid=adj,
         )
     except DelistingExitError as exc:
         raise BacktestError(str(exc)) from exc
