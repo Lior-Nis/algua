@@ -343,10 +343,10 @@ def test_run_gate_measured_but_missing_stats_fails_closed(tmp_path):
     assert outcome.promoted is False
 
 
-# --- run_gate FDR binding (#220, Phase 2) -----------------------------------------------
-# Calibration notes:
-#   sharpe=7.0 → dsr_confidence≈1.0 → p≈0.0 ≤ α_1≈0.00165 → FDR accepts (discovery)
-#   sharpe=2.0 → dsr_confidence≈0.96 → p≈0.04 > α_1≈0.00165 → FDR rejects (no discovery)
+# --- run_gate FDR binding (#324 ADDIS, replaces #220 LORD++) -----------------------------
+# Calibration notes (ADDIS* first-test level α_1 = (τ−λ)·W0·γ[0] ≈ 7.4e-4 at λ=0.05, τ=0.5):
+#   sharpe=7.0 → dsr_confidence≈1.0 → p≈0.0 ≤ α_1 → FDR accepts (discovery)
+#   sharpe=2.0 → dsr_confidence≈0.96 → p≈0.04 > α_1 → FDR rejects (no discovery)
 
 
 def _wf_sharpe(sharpe: float):
@@ -434,7 +434,7 @@ def test_run_gate_fdr_decision_in_to_dict(tmp_path):
 
 
 def test_run_gate_fdr_discovery_increments_stream(tmp_path):
-    """A passing FDR-binding gate (t=1, discovery) is recorded in the stream."""
+    """A passing FDR-binding gate joins the ADDIS epoch stream (t_global=1, one p-value)."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
@@ -442,12 +442,14 @@ def test_run_gate_fdr_discovery_increments_stream(tmp_path):
     assert outcome.promoted is True
     stream = repo.fdr_stream_state()
     assert stream is not None
-    assert stream.t == 1
-    assert stream.discovery_indices == [1]
+    assert stream.t_global == 1
+    assert len(stream.prior_p_values) == 1
+    # A strong signal is a low DSR p-value (p = 1 − dsr_confidence).
+    assert 0.0 <= stream.prior_p_values[0] <= 1.0
 
 
-def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
-    """A failing FDR-binding gate (t=1, no discovery) increments t but leaves discoveries empty."""
+def test_run_gate_fdr_reject_increments_stream(tmp_path):
+    """A failing FDR-binding gate still joins the ADDIS epoch stream (the test was performed)."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
@@ -455,8 +457,8 @@ def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
     assert outcome.promoted is False
     stream = repo.fdr_stream_state()
     assert stream is not None
-    assert stream.t == 1
-    assert stream.discovery_indices == []
+    assert stream.t_global == 1
+    assert len(stream.prior_p_values) == 1
 
 
 def test_run_gate_non_binding_decision_json_has_fdr_skip_reason(tmp_path):

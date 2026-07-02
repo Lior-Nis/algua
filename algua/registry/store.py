@@ -1107,35 +1107,31 @@ class SqliteStrategyRepository:
         return dict(row) if row is not None else None
 
     def fdr_stream_state(self) -> FdrStreamState | None:
-        """Read the global LORD++ FDR stream from ``gate_evaluations WHERE fdr_binding=1``.
+        """Read the ADDIS FDR stream (#324) from ``gate_evaluations``.
 
-        Rows with ``fdr_binding`` NULL or 0 are excluded (legacy-safe). The stream is read in
-        ``id`` (insertion) order so the position counter t matches the order in which evaluations
-        were serialized. Integrity is validated fail-closed: any binding row with NULL/non-finite
-        p-value or alpha-level, ``fdr_rejected`` not in {0, 1}, NULL or non-positive
-        ``fdr_test_index``, or non-contiguous indices returns None."""
+        ``t_global`` counts ALL binding rows (``fdr_binding=1``, both the legacy LORD++ epoch and
+        the ADDIS epoch) — the next audit ``fdr_test_index``, kept global so the existing partial
+        unique index on ``fdr_test_index`` never collides across epochs. ``prior_p_values`` is the
+        ordered ``fdr_p_value`` list of the ADDIS-EPOCH rows ONLY (``fdr_algo='addis_v1'``), by
+        ``id``. Legacy LORD++ rows (``fdr_algo`` NULL) are counted in ``t_global`` but EXCLUDED from
+        the p-history — ADDIS derives rejections endogenously from the epoch p-values and never
+        reads stored ``fdr_rejected``/``fdr_alpha_level``, so the anti-scaling LORD++ history cannot
+        contaminate the recursion. Fail-closed: an ADDIS-epoch row with NULL/non-finite
+        ``fdr_p_value`` returns None."""
+        t_global = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM gate_evaluations WHERE fdr_binding=1",
+        ).fetchone()["n"]
         rows = self._conn.execute(
-            "SELECT fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index"
-            " FROM gate_evaluations WHERE fdr_binding=1 ORDER BY id",
+            "SELECT fdr_p_value FROM gate_evaluations"
+            " WHERE fdr_binding=1 AND fdr_algo='addis_v1' ORDER BY id",
         ).fetchall()
-        if not rows:
-            return FdrStreamState(t=0, discovery_indices=[])
-        discovery_indices: list[int] = []
-        for pos, r in enumerate(rows, start=1):
-            p, alpha, rejected, idx = (
-                r["fdr_p_value"], r["fdr_alpha_level"], r["fdr_rejected"], r["fdr_test_index"]
-            )
-            if p is None or alpha is None or not math.isfinite(p) or not math.isfinite(alpha):
+        prior_p_values: list[float] = []
+        for r in rows:
+            p = r["fdr_p_value"]
+            if p is None or not math.isfinite(p):
                 return None
-            if rejected is None or int(rejected) not in (0, 1):
-                return None
-            if idx is None or int(idx) < 1:
-                return None
-            if int(idx) != pos:
-                return None
-            if int(rejected) == 1:
-                discovery_indices.append(int(idx))
-        return FdrStreamState(t=len(rows), discovery_indices=discovery_indices)
+            prior_p_values.append(float(p))
+        return FdrStreamState(t_global=int(t_global), prior_p_values=prior_p_values)
 
     @staticmethod
     def _cas_funnel(name: str, expected: object, actual: object) -> None:
@@ -1164,7 +1160,7 @@ class SqliteStrategyRepository:
           * on the FDR-binding (measured) path, the own-combo count and the two DSR variances that
             feed the ``p_value``.
         The FDR stream itself is deliberately NOT snapshotted here — it is read live under this same
-        lock because the online LORD++ position MUST reflect all prior commits."""
+        lock because the online ADDIS position MUST reflect all prior commits."""
         cur_count, cur_max = self.search_trials_fingerprint()
         self._cas_funnel(
             "search_trials fingerprint",
@@ -1200,7 +1196,7 @@ class SqliteStrategyRepository:
         gate_row: dict[str, Any],
         p_value: float | None,
         funnel: FunnelSnapshot,
-        level_fn: Callable[[int, list[int]], float],
+        level_fn: Callable[[list[float]], float],
         actor: Actor,
         reason: str | None = None,
     ) -> FdrGateOutcome:
@@ -1247,8 +1243,11 @@ class SqliteStrategyRepository:
                 stream = self.fdr_stream_state()
                 if stream is None:
                     raise RuntimeError("FDR stream integrity failure — cannot compute alpha_t")
-                t_next = stream.t + 1
-                alpha_t = level_fn(t_next, stream.discovery_indices)
+                # ADDIS (#324): α_t is a pure function of the ADDIS-epoch p-history (rejections are
+                # recomputed inside level_fn, never read from stored flags). t_next is the GLOBAL
+                # audit index (both epochs), decoupled from the epoch-internal ADDIS positions.
+                t_next = stream.t_global + 1
+                alpha_t = level_fn(stream.prior_p_values)
                 assert p_value is not None
                 fdr_rejected = p_value <= alpha_t
                 final_passed = provisional_passed and fdr_rejected
@@ -1261,6 +1260,7 @@ class SqliteStrategyRepository:
             raw_decision["passed"] = final_passed
             if fdr_binding:
                 raw_decision["fdr_binding"] = True
+                raw_decision["fdr_algo"] = "addis_v1"
                 raw_decision["fdr_p_value"] = p_value
                 raw_decision["fdr_alpha_level"] = alpha_t
                 raw_decision["fdr_rejected"] = bool(fdr_rejected)
@@ -1282,9 +1282,10 @@ class SqliteStrategyRepository:
                 " snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
                 " consumed, created_at,"
                 " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,"
+                " fdr_algo,"
                 " family_id, family_lifetime_effective,"
                 " fundamentals_snapshot, news_snapshot)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 # Agent passing rows are born-consumed: the stage has already advanced inside
                 # this transaction, so the token is spent. Leaving consumed=0 would let a
                 # future `registry transition --to candidate --actor agent` reuse the old row
@@ -1305,6 +1306,7 @@ class SqliteStrategyRepository:
                  alpha_t if fdr_binding else None,
                  int(fdr_rejected) if fdr_rejected is not None else None,
                  t_next if fdr_binding else None,
+                 "addis_v1" if fdr_binding else None,
                  gate_row.get("family_id"), gate_row.get("family_lifetime_effective"),
                  gate_row.get("fundamentals_snapshot"), gate_row.get("news_snapshot")),
             )

@@ -7,6 +7,8 @@ from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research.gates import (
     _LORD_GAMMA,
+    ADDIS_LAMBDA,
+    ADDIS_TAU,
     DSR_ALPHA,
     EULER_MASCHERONI,
     FDR_ALPHA,
@@ -16,10 +18,11 @@ from algua.research.gates import (
     MIN_HOLDOUT_OBSERVATIONS,
     GateCriteria,
     GateDecision,
+    _fdr_gamma,
+    addis_level,
     dsr_confidence,
     effective_funnel_breadth,
     evaluate_gate,
-    lord_plus_plus_level,
     sharpe_haircut,
 )
 
@@ -356,13 +359,19 @@ def test_tighten_only_invariant():
 
 
 # ---------------------------------------------------------------------------
-# Task 1 — LORD++ alpha-wealth level (#220, Phase 2)
+# ADDIS* alpha-wealth level (#324 — replaces the anti-scaling LORD++ ledger of #220)
+# ADDIS: Tian & Ramdas, NeurIPS 2019, arXiv:1905.11465.
 # ---------------------------------------------------------------------------
 
 def test_fdr_constants():
     assert FDR_ALPHA == 0.05
     assert FDR_W0 == pytest.approx(FDR_ALPHA / 2)
     assert FDR_GAMMA_TRUNCATION == 10_000
+    # ADDIS parameter constraints (Appendix J): W0 <= alpha, alpha <= lambda < tau, 0<tau<1.
+    assert ADDIS_LAMBDA == 0.05
+    assert ADDIS_TAU == 0.5
+    assert FDR_W0 <= FDR_ALPHA
+    assert FDR_ALPHA <= ADDIS_LAMBDA < ADDIS_TAU < 1.0
 
 
 def test_gamma_weights_sum_to_at_most_one():
@@ -371,83 +380,101 @@ def test_gamma_weights_sum_to_at_most_one():
 
 
 def test_gamma_weights_are_positive():
+    # ADDIS requires γ nonnegative (and nonincreasing, sum ≤ 1).
     assert all(g > 0 for g in _LORD_GAMMA)
 
 
 def test_gamma_weights_are_eventually_decreasing():
     # The raw formula is eventually monotone-decreasing; after the first few terms, γ is ↓.
-    # We check that the tail is strictly decreasing (j=10 onward is reliable).
     for j in range(10, 100):
         assert _LORD_GAMMA[j] <= _LORD_GAMMA[j - 1], f"γ not decreasing at j={j+1}"
 
 
-def test_lord_no_discoveries_alpha_decreasing():
-    # With no prior discoveries, α_t = γ_t · W_0 → decreases as γ_t → 0.
-    levels = [lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0) for t in range(1, 50)]
-    # All positive (weights are positive)
-    assert all(lv > 0 for lv in levels)
-    # Monotone non-increasing after the first position (tail of γ is ↓ past j~2)
-    for i in range(2, len(levels)):
-        assert levels[i] <= levels[i - 1] + 1e-15, f"level not decreasing at t={i+2}"
+def test_addis_alpha_1_empty_history():
+    # α_1 over an empty epoch: min(λ, (τ−λ)·W0·γ[0]).  (γ 0-indexed.)
+    expected = min(ADDIS_LAMBDA, (ADDIS_TAU - ADDIS_LAMBDA) * FDR_W0 * _fdr_gamma(0))
+    assert addis_level([]) == pytest.approx(expected, rel=1e-12)
+    # (τ−λ)·W0·γ[0] is far below λ, so the min is the wealth term, not the λ cap.
+    assert addis_level([]) < ADDIS_LAMBDA
 
 
-def test_lord_first_discovery_bumps_alpha():
-    # A discovery at τ_1=1 adds (α-W_0)·γ_{t-1} to every subsequent α_t.
-    # At t=2: α_2_with = γ_2·W_0 + (α-W_0)·γ_1 > α_2_without = γ_2·W_0
-    alpha_2_no_disc = lord_plus_plus_level(2, [], alpha=FDR_ALPHA, w0=FDR_W0)
-    alpha_2_disc1 = lord_plus_plus_level(2, [1], alpha=FDR_ALPHA, w0=FDR_W0)
-    assert alpha_2_disc1 > alpha_2_no_disc
-
-    # The bump equals (α-W_0)·γ_{t-τ_1}
-    expected_bump = (FDR_ALPHA - FDR_W0) * _LORD_GAMMA[0]  # γ_{2-1}=γ_1=_LORD_GAMMA[0]
-    assert alpha_2_disc1 - alpha_2_no_disc == pytest.approx(expected_bump, rel=1e-9)
+def test_addis_discard_spam_invariance():
+    # THE #324 FIX: a run of very-conservative nulls (p > τ, discarded) must NOT decay the level
+    # for the next candidate. The bar after K discards is IDENTICAL to the bar with zero discards.
+    base = addis_level([0.1])                 # one non-rejecting candidate, then next test
+    for k in (1, 5, 50, 500):
+        spammed = addis_level([0.1] + [0.9] * k)   # p=0.9 > τ=0.5 → all discarded
+        assert spammed == pytest.approx(base, rel=1e-12), f"discards decayed the bar at K={k}"
 
 
-def test_lord_multiple_discoveries_replenish():
-    # More discoveries → more replenishment → higher α_t vs no-discovery baseline.
-    t = 10
-    alpha_no_disc = lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
-    alpha_1disc = lord_plus_plus_level(t, [1], alpha=FDR_ALPHA, w0=FDR_W0)
-    alpha_3disc = lord_plus_plus_level(t, [1, 3, 5], alpha=FDR_ALPHA, w0=FDR_W0)
-    assert alpha_no_disc < alpha_1disc < alpha_3disc
+def test_addis_candidate_band_does_advance_clock():
+    # NOT a loosening: p in (λ, τ] is SELECTED-but-not-a-candidate and DOES advance the γ clock,
+    # so a run of near-miss nulls DOES lower the next candidate's level (multiplicity still paid).
+    base = addis_level([0.1])
+    band = addis_level([0.1] + [0.4] * 10)    # 0.4 ∈ (0.25, 0.5]
+    assert band < base
 
 
-def test_lord_manual_recursion_check():
-    # Verify the formula directly for a small stream.
-    # t=3, τ_1=1, τ_2=2:
-    # α_3 = γ_3·W_0 + (α-W_0)·γ_{3-1} + α·γ_{3-2}
-    #      = γ_3·W_0 + (α-W_0)·γ_2 + α·γ_1
-    g1, g2, g3 = _LORD_GAMMA[0], _LORD_GAMMA[1], _LORD_GAMMA[2]
-    expected = g3 * FDR_W0 + (FDR_ALPHA - FDR_W0) * g2 + FDR_ALPHA * g1
-    computed = lord_plus_plus_level(3, [1, 2], alpha=FDR_ALPHA, w0=FDR_W0)
-    assert computed == pytest.approx(expected, rel=1e-12)
+def test_addis_rejection_replenishes():
+    # A prior test that REJECTS (p ≤ α_i) earns alpha-wealth → raises the next level vs a
+    # non-rejecting candidate at the same position.
+    rejecting = addis_level([1e-9])           # p ≪ α_1 → rejection
+    non_rejecting = addis_level([0.2])        # candidate (≤ λ) but ≫ α_1 → no rejection
+    assert rejecting > non_rejecting
 
 
-def test_lord_fail_closed_guards():
-    # t < 1 → 0.0 (conservative; can't pass a level-0 test)
-    assert lord_plus_plus_level(0, [], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
-    assert lord_plus_plus_level(-1, [], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
-    # non-finite alpha/w0
-    assert lord_plus_plus_level(1, [], alpha=float("nan"), w0=FDR_W0) == 0.0
-    assert lord_plus_plus_level(1, [], alpha=FDR_ALPHA, w0=float("inf")) == 0.0
-    # discovery index >= t (not a past discovery)
-    assert lord_plus_plus_level(2, [2], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
-    # discovery index < 1
-    assert lord_plus_plus_level(2, [0], alpha=FDR_ALPHA, w0=FDR_W0) == 0.0
+def test_addis_manual_recursion_two_rejections():
+    # Hand-worked stream: p=[1e-9, 1e-9] (both reject), compute α for the 3rd test directly.
+    # τ=0.5, λ=0.25, so both are candidates AND selected AND rejections.
+    a = FDR_ALPHA
+    w0 = FDR_W0
+    lam = ADDIS_LAMBDA
+    tau = ADDIS_TAU
+    g = _fdr_gamma
+    # Position 1: S=0, C0=0, no κ. α_1 = min(λ,(τ−λ)·w0·γ[0]).  p1=1e-9 ≤ α_1 → reject.
+    a1 = min(lam, (tau - lam) * (w0 * g(0)))
+    assert 1e-9 <= a1  # sanity: rejects
+    # After pos1: selected=1, C0=1 (candidate), κ1*=1, open interval for κ1 with C1+=0.
+    # Position 2: S=1. α_2 = min(λ,(τ−λ)·[w0·γ[1−1] + (α−w0)·γ[1−1−0]]) = (τ−λ)·[w0·γ0+(α−w0)·γ0].
+    a2 = min(lam, (tau - lam) * (w0 * g(1 - 1) + (a - w0) * g(1 - 1 - 0)))
+    assert 1e-9 <= a2
+    # After pos2: selected=2, C0=2, κ=[1,2] with κ1*=1, κ2*=2; C1+=1 (pos2 is a candidate after κ1);
+    # C2+=0.
+    # Position 3: S=2. α_3 = (τ−λ)·[ w0·γ[2−2] + (α−w0)·γ[2−1−1] + α·γ[2−2−0] ]
+    #                     = (τ−λ)·[ w0·γ0     + (α−w0)·γ0       + α·γ0 ]
+    a3_expected = min(lam, (tau - lam) * (w0 * g(0) + (a - w0) * g(0) + a * g(0)))
+    a3_computed = addis_level([1e-9, 1e-9])
+    assert a3_computed == pytest.approx(a3_expected, rel=1e-12)
 
 
-def test_lord_injected_params():
-    # Calling with different alpha/w0 produces a proportionally scaled level.
-    alpha_half = lord_plus_plus_level(1, [], alpha=0.025, w0=0.0125)
-    alpha_full = lord_plus_plus_level(1, [], alpha=FDR_ALPHA, w0=FDR_W0)
-    assert alpha_half == pytest.approx(alpha_full / 2, rel=1e-9)
+def test_addis_recompute_equals_recorded():
+    # Determinism / no-drift: the level over prefix p[:i] is a pure function of that prefix, so
+    # recomputing the whole stream incrementally matches recomputing it in one shot.
+    stream = [0.1, 0.9, 0.001, 0.4, 0.02, 0.95, 0.3]
+    for i in range(len(stream) + 1):
+        one_shot = addis_level(stream[:i])
+        # incremental: identical inputs → identical output (pure function)
+        assert addis_level(list(stream[:i])) == one_shot
 
 
-def test_lord_t1_no_discoveries_equals_gamma1_times_w0():
-    # α_1 = γ_1 · W_0 (base case, no prior discoveries)
-    expected = _LORD_GAMMA[0] * FDR_W0
-    result = lord_plus_plus_level(1, [], alpha=FDR_ALPHA, w0=FDR_W0)
-    assert result == pytest.approx(expected, rel=1e-12)
+def test_addis_fail_closed_guards():
+    # Non-finite prior p → 0.0 (conservative; unreachable level, only tightens).
+    assert addis_level([float("nan")]) == 0.0
+    assert addis_level([0.1, float("inf")]) == 0.0
+    # Bad params → 0.0.
+    assert addis_level([], alpha=float("nan")) == 0.0
+    assert addis_level([], w0=float("inf")) == 0.0
+    assert addis_level([], w0=FDR_ALPHA * 2) == 0.0       # W0 > alpha violates W0 ≤ alpha
+    assert addis_level([], lam=ADDIS_TAU) == 0.0          # λ ≥ τ violated
+    assert addis_level([], lam=FDR_ALPHA / 2) == 0.0      # λ < alpha violated
+    assert addis_level([], tau=1.5) == 0.0                # τ out of (0,1)
+
+
+def test_addis_injected_params_scale():
+    # Halving alpha AND w0 halves the (uncapped) wealth term proportionally at t=1.
+    half = addis_level([], alpha=0.025, w0=0.0125)
+    full = addis_level([], alpha=FDR_ALPHA, w0=FDR_W0)
+    assert half == pytest.approx(full / 2, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

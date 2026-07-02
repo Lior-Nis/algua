@@ -27,6 +27,8 @@ from algua.research.clustering import (
     family_similarity,
 )
 from algua.research.gates import (
+    ADDIS_LAMBDA,
+    ADDIS_TAU,
     DSR_ALPHA,
     DSR_BOOTSTRAP_LOWER_QUANTILE,
     DSR_BOOTSTRAP_RESAMPLES,
@@ -38,10 +40,10 @@ from algua.research.gates import (
     RHO_BAR_SHRINKAGE_K,
     GateCriteria,
     GateDecision,
+    addis_level,
     dsr_sr_star_annualized,
     effective_funnel_breadth,
     evaluate_gate,
-    lord_plus_plus_level,
 )
 from algua.strategies.loader import StrategyNotFound, load_strategy
 
@@ -457,7 +459,7 @@ def run_gate(
         bootstrap_seed=boot_seed, bootstrap_b=boot_b, bootstrap_block_len=boot_block,
         market_returns=wf.market_returns,
     )
-    # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
+    # ADDIS FDR binding (#324, was LORD++ #220): dsr_confidence must be finite (not None, not ±inf).
     # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
     # here guards the ≥/≤ inversion hazard (see GATE-1 finding H3 in the design doc).
     dsr_conf = decision.dsr_confidence
@@ -553,7 +555,8 @@ def run_gate(
     # behaves identically to the old record_gate_evaluation + conditional transition_strategy
     # pair, but always uses BEGIN IMMEDIATE for consistency (negligible overhead for ≤ a few
     # thousand gate_evaluations rows).
-    level_fn = functools.partial(lord_plus_plus_level, alpha=FDR_ALPHA, w0=FDR_W0)
+    level_fn = functools.partial(
+        addis_level, alpha=FDR_ALPHA, w0=FDR_W0, lam=ADDIS_LAMBDA, tau=ADDIS_TAU)
     # #339 — capture the funnel-wide MUTABLE snapshot this decision was computed against, so the
     # commit can CAS-verify it under the write lock and refuse to serialize a mixed-snapshot
     # (stale-breadth / stale-variance) outcome. own/windowed are the exact values evaluate_gate

@@ -1032,42 +1032,47 @@ def _insert_fdr_row(
     fdr_alpha_level,
     fdr_rejected,
     fdr_test_index,
+    fdr_algo="addis_v1",
     passed=0,
 ):
-    """Insert a gate_evaluations row with FDR columns directly (tests only; Task 4 owns the
-    production writer)."""
+    """Insert a gate_evaluations row with FDR columns directly (tests only; the production writer
+    owns the atomic path). ``fdr_algo`` defaults to the current ADDIS epoch; pass None to simulate
+    a legacy LORD++ row (excluded from the ADDIS p-history)."""
     repo._conn.execute(
         "INSERT INTO gate_evaluations"
         " (strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
         "  funnel_window_days, breadth_provenance, pit_ok, pit_override, holdout_n_bars,"
         "  min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
         "  snapshot_id, period_start, period_end, holdout_frac, actor, decision_json,"
-        "  created_at, fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "  created_at, fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,"
+        "  fdr_algo)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, passed, 9, 9, 9, 90, "measured", 1, 0, 80, 63,
          "c0", "cfg0", "dep0", "SyntheticProvider", None,
          "2022-01-01", "2023-12-31", 0.2, "agent", "{}",
          "2024-01-01T00:00:00+00:00",
-         fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index),
+         fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,
+         fdr_algo if fdr_binding else None),
     )
     repo._conn.commit()
 
 
 def test_fdr_stream_empty(repo):
     result = repo.fdr_stream_state()
-    assert result == FdrStreamState(t=0, discovery_indices=[])
+    assert result == FdrStreamState(t_global=0, prior_p_values=[])
 
 
 def test_fdr_stream_non_binding_excluded(repo):
+    # A non-binding row is neither counted in t_global nor in the ADDIS p-history.
     sid = repo.add("s").id
     _insert_fdr_row(repo, sid, fdr_binding=0, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=None)
+                    fdr_rejected=0, fdr_test_index=None, fdr_algo=None)
     result = repo.fdr_stream_state()
-    assert result == FdrStreamState(t=0, discovery_indices=[])
+    assert result == FdrStreamState(t_global=0, prior_p_values=[])
 
 
 def test_fdr_stream_legacy_null_binding_excluded(repo):
-    # A pre-v26 row has fdr_binding=NULL; it must be invisible to the stream.
+    # A pre-v26 row has fdr_binding=NULL; it must be invisible to the stream entirely.
     sid = repo.add("s").id
     repo._conn.execute(
         "INSERT INTO gate_evaluations"
@@ -1081,94 +1086,49 @@ def test_fdr_stream_legacy_null_binding_excluded(repo):
     )
     repo._conn.commit()
     result = repo.fdr_stream_state()
-    assert result == FdrStreamState(t=0, discovery_indices=[])
+    assert result == FdrStreamState(t_global=0, prior_p_values=[])
 
 
-def test_fdr_stream_mixed_binding(repo):
+def test_fdr_stream_legacy_lord_epoch_excluded_from_p_history(repo):
+    # #324: a legacy LORD++ binding row (fdr_algo NULL) IS counted in t_global (audit-index
+    # continuity, so fdr_test_index never collides) but is EXCLUDED from the ADDIS p-history —
+    # the anti-scaling LORD++ history can never contaminate the ADDIS wealth recursion.
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.9, fdr_alpha_level=0.001,
+                    fdr_rejected=0, fdr_test_index=1, fdr_algo=None)   # legacy LORD row
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.03,
+                    fdr_rejected=1, fdr_test_index=2, fdr_algo="addis_v1")  # ADDIS epoch row
+    result = repo.fdr_stream_state()
+    assert result is not None
+    assert result.t_global == 2                 # both binding rows counted
+    assert result.prior_p_values == [0.02]      # only the ADDIS-epoch p-value
+
+
+def test_fdr_stream_addis_p_history_in_order(repo):
     sid = repo.add("s").id
     _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
                     fdr_rejected=0, fdr_test_index=1)
     _insert_fdr_row(repo, sid, fdr_binding=0, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=None)
+                    fdr_rejected=0, fdr_test_index=None, fdr_algo=None)  # non-binding, skipped
     _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.04,
                     fdr_rejected=1, fdr_test_index=2)
     result = repo.fdr_stream_state()
     assert result is not None
-    assert result.t == 2
-    assert result.discovery_indices == [2]
+    assert result.t_global == 2
+    assert result.prior_p_values == [0.06, 0.02]
 
 
-def test_fdr_stream_discovery_extraction(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=1)
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.01, fdr_alpha_level=0.04,
-                    fdr_rejected=1, fdr_test_index=2)
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.05, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=3)
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.001, fdr_alpha_level=0.02,
-                    fdr_rejected=1, fdr_test_index=4)
-    result = repo.fdr_stream_state()
-    assert result is not None
-    assert result.t == 4
-    assert result.discovery_indices == [2, 4]
-
-
-def test_fdr_stream_null_p_value_fails_closed(repo):
+def test_fdr_stream_null_p_value_in_epoch_fails_closed(repo):
     sid = repo.add("s").id
     _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=None, fdr_alpha_level=0.04,
                     fdr_rejected=0, fdr_test_index=1)
     assert repo.fdr_stream_state() is None
 
 
-def test_fdr_stream_null_alpha_level_fails_closed(repo):
+def test_fdr_stream_non_finite_p_value_in_epoch_fails_closed(repo):
     sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=None,
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=float("inf"), fdr_alpha_level=0.04,
                     fdr_rejected=0, fdr_test_index=1)
-    assert repo.fdr_stream_state() is None
-
-
-def test_fdr_stream_null_rejected_fails_closed(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=None, fdr_test_index=1)
-    assert repo.fdr_stream_state() is None
-
-
-def test_fdr_stream_bad_rejected_value_fails_closed(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=2, fdr_test_index=1)
-    assert repo.fdr_stream_state() is None
-
-
-def test_fdr_stream_zero_test_index_fails_closed(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=0)
-    assert repo.fdr_stream_state() is None
-
-
-def test_fdr_stream_negative_test_index_fails_closed(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=-1)
-    assert repo.fdr_stream_state() is None
-
-
-def test_fdr_stream_non_contiguous_indices_fails_closed(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=1)
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.04,
-                    fdr_rejected=1, fdr_test_index=3)  # skips 2 → gap → corrupted
-    assert repo.fdr_stream_state() is None
-
-
-def test_fdr_stream_null_test_index_fails_closed(repo):
-    sid = repo.add("s").id
-    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
-                    fdr_rejected=0, fdr_test_index=None)
     assert repo.fdr_stream_state() is None
 
 
@@ -1209,11 +1169,11 @@ def _at_backtested(repo, name: str = "s"):
     return transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, "setup")
 
 
-def _level_accept(t: int, taus: list[int]) -> float:
+def _level_accept(prior_p_values: list[float]) -> float:
     return 1.0  # p ≤ 1.0 always → always a discovery
 
 
-def _level_reject(t: int, taus: list[int]) -> float:
+def _level_reject(prior_p_values: list[float]) -> float:
     return 0.0  # p ≤ 0.0 never → never a discovery
 
 
@@ -1230,7 +1190,7 @@ def test_fdr_gate_non_binding_passes_through_on_provisional_pass(repo):
     assert outcome.fdr_alpha_level is None
     assert outcome.fdr_rejected is None
     # Non-binding: stream must remain empty.
-    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    assert repo.fdr_stream_state() == FdrStreamState(t_global=0, prior_p_values=[])
 
 
 def test_fdr_gate_non_binding_fails_on_provisional_fail(repo):
@@ -1268,12 +1228,13 @@ def test_fdr_gate_drift_rollback_does_not_advance_fdr_stream(repo):
     repo.add("s")
     transition_strategy(repo, "s", Stage.BACKTESTED, Actor.AGENT, "setup")
     drifted = transition_strategy(repo, "s", Stage.RETIRED, Actor.HUMAN, "retired")
-    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    assert repo.fdr_stream_state() == FdrStreamState(t_global=0, prior_p_values=[])
     with pytest.raises(TransitionError, match="backtested"):
         repo.record_gate_with_fdr_and_maybe_promote(
             drifted, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.01,
             level_fn=_level_accept, actor=Actor.AGENT, reason="promote")  # binding + would-pass
-    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])  # stream untouched
+    # stream untouched
+    assert repo.fdr_stream_state() == FdrStreamState(t_global=0, prior_p_values=[])
     assert repo.connection.execute(
         "SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
 
@@ -1378,33 +1339,44 @@ def test_fdr_gate_stream_grows_for_binding_rows(repo):
         level_fn=_level_reject, actor=Actor.AGENT)
     stream = repo.fdr_stream_state()
     assert stream is not None
-    assert stream.t == 1
-    assert stream.discovery_indices == []
+    assert stream.t_global == 1
+    # The binding row's p-value enters the ADDIS epoch history regardless of rejection.
+    assert stream.prior_p_values == [0.03]
 
 
-def test_fdr_gate_discovery_increments_test_index_and_replenishes(repo):
+def test_fdr_gate_binding_row_stamped_addis_epoch(repo):
+    # #324: a binding row is stamped fdr_algo='addis_v1' so it joins the ADDIS epoch.
     rec = _at_backtested(repo)
-    # First call: binding accept → discovery at t=1
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
+        level_fn=_level_reject, actor=Actor.AGENT)
+    algo = repo._conn.execute(
+        "SELECT fdr_algo FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()["fdr_algo"]
+    assert algo == "addis_v1"
+
+
+def test_fdr_gate_level_fn_receives_epoch_p_history(repo):
+    # The injected ADDIS level_fn is called with the ordered prior-p-value history of the epoch,
+    # and t_next is the global audit index. Two successive binding evals: the second sees the first.
+    rec = _at_backtested(repo)
     o1 = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_accept, actor=Actor.AGENT)
     assert o1.fdr_test_index == 1
     assert o1.fdr_rejected is True
-    # Second call with new strategy
     rec2 = _at_backtested(repo, "s2")
-    # Use a level_fn that checks taus: if [1] present, it returns 0.5 (generous)
-    recorded_calls: list[tuple[int, list[int]]] = []
-    def level_fn_probe(t: int, taus: list[int]) -> float:
-        recorded_calls.append((t, list(taus)))
+    recorded_calls: list[list[float]] = []
+    def level_fn_probe(prior_p_values: list[float]) -> float:
+        recorded_calls.append(list(prior_p_values))
         return 0.5
     o2 = repo.record_gate_with_fdr_and_maybe_promote(
         rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
         gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=level_fn_probe, actor=Actor.AGENT)
-    assert o2.fdr_test_index == 2
-    # level_fn received t=2 and taus=[1] (the first discovery)
+    assert o2.fdr_test_index == 2                 # global audit index advances
     assert len(recorded_calls) == 1
-    assert recorded_calls[0] == (2, [1])
+    assert recorded_calls[0] == [0.03]            # the prior epoch p-value
 
 
 def test_fdr_gate_top_level_only_guard(repo):
@@ -1434,7 +1406,7 @@ def test_fdr_gate_rollback_on_stage_cas_failure(repo, tmp_path):
             stale, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
             level_fn=_level_accept, actor=Actor.AGENT)
     # FDR stream must be empty — the row was rolled back
-    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    assert repo.fdr_stream_state() == FdrStreamState(t_global=0, prior_p_values=[])
     # No gate row was committed
     n = repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0]
     assert n == 0
@@ -1542,7 +1514,7 @@ def test_funnel_cas_aborts_on_search_trials_insert(repo):
             level_fn=_level_accept, actor=Actor.AGENT, reason="promote")
     # Fail-closed: no gate row committed, stream untouched, strategy not promoted.
     assert repo._conn.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
-    assert repo.fdr_stream_state() == FdrStreamState(t=0, discovery_indices=[])
+    assert repo.fdr_stream_state() == FdrStreamState(t_global=0, prior_p_values=[])
     assert repo.get("s").stage is Stage.BACKTESTED
 
 

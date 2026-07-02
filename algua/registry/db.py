@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -710,6 +710,12 @@ def migrate(conn: sqlite3.Connection) -> None:
     # executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
     # v32 (#332): negative_results is a brand-new advisory table; executescript(_SCHEMA) above
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # v33 (#324): ADDIS FDR-algorithm epoch marker. Additive nullable — pre-existing rows (LORD++
+    # ledger, #220) stay NULL and are EXCLUDED from the ADDIS stream (WHERE fdr_algo='addis_v1' in
+    # fdr_stream_state), so the anti-scaling LORD++ history never contaminates the ADDIS wealth
+    # recursion. New binding rows are stamped 'addis_v1' (a fresh epoch: the first ADDIS test sees
+    # an empty history). Fail-closed by omission — NULL is not 'addis_v1'.
+    _add_missing_columns(conn, "gate_evaluations", {"fdr_algo": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

@@ -27,15 +27,19 @@ class FdrGateOutcome(NamedTuple):
 
 
 class FdrStreamState(NamedTuple):
-    """Snapshot of the global LORD++ alpha-wealth stream.
+    """Snapshot of the ADDIS alpha-wealth stream (#324, replaces the LORD++ snapshot of #220).
 
-    Source: ``gate_evaluations WHERE fdr_binding=1``. ``t`` is the count of binding rows (the
-    current stream position); ``discovery_indices`` is the ordered list of ``fdr_test_index``
-    values where ``fdr_rejected=1`` (past rejections that replenish alpha-wealth for future
-    tests). Together they fully determine ``lord_plus_plus_level`` for the NEXT test."""
+    ``t_global`` is the count of ALL binding rows across BOTH the legacy LORD++ epoch and the
+    ADDIS epoch — it is the next ``fdr_test_index`` audit position (kept global so the existing
+    partial-unique index on ``fdr_test_index`` never collides across epochs). ``prior_p_values`` is
+    the ordered list of ``fdr_p_value`` for the ADDIS-EPOCH rows ONLY (``fdr_algo='addis_v1'``), in
+    insertion order; ADDIS replays it to derive candidate/selected/rejection state and the level for
+    the NEXT test (rejections are endogenous — recomputed by ADDIS, never read from stored flags, so
+    the legacy LORD++ rows can never contaminate the recursion). Together they fully determine
+    ``addis_level`` and the next audit index."""
 
-    t: int
-    discovery_indices: list[int]
+    t_global: int
+    prior_p_values: list[float]
 
 
 class FunnelFloor(NamedTuple):
@@ -549,16 +553,16 @@ class StrategyRepository(Protocol):
         ...
 
     def fdr_stream_state(self) -> FdrStreamState | None:
-        """Read the global LORD++ FDR stream: all ``gate_evaluations`` rows where
-        ``fdr_binding=1``, ordered by ``id``.
+        """Read the ADDIS FDR stream (#324). Returns
+        ``FdrStreamState(t_global, prior_p_values)`` where ``t_global`` is the count of ALL binding
+        rows (``fdr_binding=1``, both epochs — the next audit ``fdr_test_index``) and
+        ``prior_p_values`` is the ordered ``fdr_p_value`` list of the ADDIS-EPOCH rows only
+        (``fdr_binding=1 AND fdr_algo='addis_v1'``), by ``id``.
 
-        Returns ``FdrStreamState(t, discovery_indices)`` where ``t`` is the total count of
-        binding rows and ``discovery_indices`` is the ordered list of ``fdr_test_index`` values
-        where ``fdr_rejected=1``. Returns ``None`` (fail-closed) on any stream integrity failure:
-        a binding row with NULL or non-finite ``fdr_p_value``/``fdr_alpha_level``, ``fdr_rejected``
-        not in {0, 1}, NULL or non-positive ``fdr_test_index``, or non-contiguous indices
-        (``fdr_test_index`` must equal 1, 2, …, t in order). Rows with ``fdr_binding`` NULL or 0
-        are invisible to the stream (legacy-safe)."""
+        Legacy LORD++ rows (``fdr_algo`` NULL) are counted in ``t_global`` but EXCLUDED from
+        ``prior_p_values`` — the ADDIS wealth recursion never sees them. Returns ``None``
+        (fail-closed) on any integrity failure: an ADDIS-epoch row with NULL or non-finite
+        ``fdr_p_value``."""
         ...
 
     def record_gate_with_fdr_and_maybe_promote(
@@ -568,11 +572,11 @@ class StrategyRepository(Protocol):
         gate_row: dict[str, Any],
         p_value: float | None,
         funnel: FunnelSnapshot,
-        level_fn: Callable[[int, list[int]], float],
+        level_fn: Callable[[list[float]], float],
         actor: Actor,
         reason: str | None = None,
     ) -> FdrGateOutcome:
-        """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
+        """Record a gate evaluation WITH ADDIS FDR accounting (#324) and optionally promote to
         ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
         the stream-state SELECT through the INSERT + stage CAS).
 
@@ -582,11 +586,12 @@ class StrategyRepository(Protocol):
         non-binding and FDR is skipped entirely for this row.
 
         When binding: reads the prior stream state UNDER the write lock, computes
-        ``t_next = prior.t + 1``, ``α_t = level_fn(t_next, prior.discovery_indices)``,
-        ``fdr_rejected = (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND
-        fdr_rejected``. The gate row is inserted with ``passed = final_passed`` (never the
-        provisional value — ``find_consumable_gate_evaluation`` reads this column). If
-        ``final_passed`` is True, ``rec`` is atomically advanced to ``candidate``.
+        ``α_t = level_fn(prior.prior_p_values)`` (ADDIS replays the ADDIS-epoch p-history),
+        ``fdr_rejected = (p_value ≤ α_t)``, ``t_next = prior.t_global + 1`` (the GLOBAL audit
+        index), and ``final_passed = provisional_passed AND fdr_rejected``. The row is inserted with
+        ``passed = final_passed`` (never the provisional value — ``find_consumable_gate_evaluation``
+        reads this column) and stamped ``fdr_algo='addis_v1'``. If ``final_passed`` is True, ``rec``
+        is atomically advanced to ``candidate``.
 
         ``funnel`` is the funnel-wide snapshot the (lock-free) decision was computed against
         (#339). Under the write lock, BEFORE the stream read, every mutable field is RE-READ and

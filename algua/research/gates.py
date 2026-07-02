@@ -411,25 +411,49 @@ def information_ratio(
     )
 
 
-# LORD++ FDR accounting layer (#220, Phase 2). Protected constants — relaxing them weakens the gate.
-# FDR here is an operating target (shared-holdout dependence breaks the formal guarantee); Phase 3
-# (#221) adds dependence-aware calibration. The p-value fed here is 1 − dsr_confidence, which is
-# P(SR_true ≤ SR*) — i.e. the FDR guarantee governs discoveries relative to the DSR null (SR > SR*),
-# a STRONGER criterion than the simple null (SR > 0).
+# ADDIS FDR accounting layer (#324, replaces the LORD++ ledger of #220). Protected constants —
+# relaxing them weakens the gate. FDR here is an operating target (shared-holdout dependence breaks
+# the formal guarantee); #221 adds dependence-aware calibration. The p-value fed here is
+# 1 − dsr_confidence = P(SR_true ≤ SR*) — the DSR selection-inflated null, a STRONGER criterion
+# than the simple null (SR > 0).
+#
+# WHY ADDIS (Tian & Ramdas, NeurIPS 2019, arXiv:1905.11465) rather than LORD++ (#324):
+# LORD++ over one lifetime-global stream is ANTI-SCALING — in a dry spell α_t = γ_t·W0 → 0 as the
+# position counter t grows, and EVERY measured attempt (including the majority that FAIL the
+# holdout/PIT checks) advances t. So at hundreds of failed explorations/day the bar decays toward
+# zero and testing MORE makes the gate strictly LESS passable. SAFFRON does NOT fix this: its γ
+# index still advances on every conservative null. ADDIS adds an adaptive DISCARD threshold τ — a
+# p-value with p > τ (a very conservative null, i.e. exactly our p≈1 garbage strategies) is
+# DISCARDED: it does NOT advance the γ clock and does NOT spend alpha-wealth. So failed garbage
+# explorations no longer decay the bar for legitimate future candidates, while FDR is still
+# controlled at ALPHA (ADDIS Theorem 1, same independence/conservativeness assumption class #220
+# used as its operating target). ADDIS reduces to SAFFRON at τ=1.
 FDR_ALPHA = 0.05   # target FDR level
-FDR_W0 = FDR_ALPHA / 2   # initial alpha-wealth (standard choice, Ramdas et al. 2017)
-# γ-sequence truncation for normalization. 10 000 terms captures >99.99% of tail mass; α_t at
-# positions > 10 000 uses γ_j=0 for j>10 000 (negligible, conservative).
+FDR_W0 = FDR_ALPHA / 2   # initial alpha-wealth (W0 ≤ α; standard choice)
+# ADDIS thresholds. Constraints (Appendix J): λ ∈ [α, τ), W0 ≤ α. Here λ=0.05 (=α, the boundary —
+# legal, no degeneracy: ADDIS* always builds α_t ≤ α so the min(λ,·) cap is vacuous), τ=0.5.
+# WHY λ=α rather than the paper default 0.25: our DSR p-values (p = 1 − dsr_confidence) are BIMODAL:
+# genuine discoveries have p < 0.01 (dsr_confidence > 0.99) and failed garbage has p ≈ 1. Almost
+# nothing lands in the (λ, τ] selected-but-not-candidate band, so λ's only live effect is the power
+# prefactor (τ − λ): λ=0.05 gives 0.45 vs 0.25 at the default, ~1.8× more power at the tight early
+# bar, with NO loss of FDR control and NO weakening of the τ=0.5 discard fix (garbage p > τ is still
+# discarded, never advancing the clock). A candidate is p ≤ λ; a p ∈ (τ, 1] is discarded.
+ADDIS_LAMBDA = 0.05   # candidate threshold (only p ≤ λ can be a discovery); = α (legal boundary)
+ADDIS_TAU = 0.5       # discard threshold (p > τ is discarded — spends no wealth, no clock advance)
+# γ-sequence truncation for normalization. 10 000 terms captures >99.99% of tail mass; γ_j=0 for
+# j beyond the window (negligible, conservative). ADDIS only requires γ nonnegative, nonincreasing,
+# and summing to ≤ 1 — the existing normalized sequence satisfies this, so it is reused unchanged.
 FDR_GAMMA_TRUNCATION = 10_000
 
 
 def _compute_lord_gamma(n: int) -> list[float]:
-    """Normalized LORD++ γ weights for j=1..n.
+    """Normalized FDR γ weights for j=1..n (shared by the ADDIS ledger).
 
     Raw: γ_j ∝ log(max(j, 2)) / (j · exp(√(log(max(j, 2)))))
     max(j, 2) is the standard practical variant per Ramdas et al. 2017 / the onlineFDR R package,
     ensuring γ_j > 0 for all j (log(max(1,2))=log(2)>0 handles j=1). Dividing by the truncated
-    sum normalizes so Σγ_j ≤ 1.0 + machine-epsilon over the truncation window.
+    sum normalizes so Σγ_j ≤ 1.0 + machine-epsilon over the truncation window. The sequence is
+    nonnegative, (eventually) nonincreasing, and sums to ≤ 1 — exactly ADDIS's γ requirements.
     """
     raw = [
         math.log(max(j, 2)) / (j * math.exp(math.sqrt(math.log(max(j, 2)))))
@@ -442,47 +466,109 @@ def _compute_lord_gamma(n: int) -> list[float]:
 _LORD_GAMMA: list[float] = _compute_lord_gamma(FDR_GAMMA_TRUNCATION)
 
 
-def lord_plus_plus_level(
-    t: int,
-    discovery_indices: Sequence[int],
+def _fdr_gamma(k: int) -> float:
+    """0-indexed γ accessor: γ[k] for k≥0, 0.0 out of range (conservative — only tightens)."""
+    if k < 0 or k >= len(_LORD_GAMMA):
+        return 0.0
+    return _LORD_GAMMA[k]
+
+
+def _addis_level_from_history(
+    prior_p_values: Sequence[float],
+    *,
+    alpha: float,
+    w0: float,
+    lam: float,
+    tau: float,
+) -> float:
+    """ADDIS* level α_t for the NEXT test given the ordered ADDIS-epoch prior p-values.
+
+    Constant-parameter ADDIS* (arXiv:1905.11465, Algorithm 1 / Appendix J), raw-p scale:
+
+        α_t = min( λ, (τ − λ) · [ W0·γ[S_t − C0₊]
+                                  + (α − W0)·γ[S_t − κ₁* − C1₊]
+                                  + α · Σ_{j≥2} γ[S_t − κ_j* − C_j₊] ] )
+
+    with, over prior tests i (1-indexed, i < t):
+      candidate  C_i = 1{p_i ≤ λ}       selected S_i = 1{p_i ≤ τ}     discard  p_i > τ
+      rejection  R_i = 1{p_i ≤ α_i}     where α_i is THIS SAME level over p_1..p_{i-1}
+      κ_j = time of the j-th rejection, κ_j* = #selected up to and including κ_j,
+      C_{j₊} = #candidates in the open interval (κ_j, t), C_{0₊} = #candidates in [1, t).
+      S_t    = #selected in [1, t).
+    γ is 0-indexed. The κ-anchored term for a rejection that has not occurred is absent.
+
+    Rejections are ENDOGENOUS — recomputed by replaying ADDIS over the epoch p-history (never read
+    from stored flags), so the caller need only supply the ordered p-values. Because each prior
+    row's recorded α/rejection WAS produced by this same function over that same prefix at write
+    time, recompute == recorded (no drift). Discarded conservative nulls (p > τ) do not change S_t,
+    C, or κ, so a run of p≈1 failures leaves the next candidate's γ index — hence its level —
+    unchanged: the anti-scaling fix (#324).
+
+    Fail-closed 0.0 (never passable — only tightens) on any degenerate input: non-finite/out-of-
+    range α, W0, λ, τ; λ ≥ τ; W0 > α; λ < α; or any non-finite prior p-value.
+    """
+    if not (math.isfinite(alpha) and 0.0 < alpha < 1.0):
+        return 0.0
+    if not (math.isfinite(w0) and 0.0 < w0 <= alpha):
+        return 0.0
+    if not (math.isfinite(tau) and 0.0 < tau < 1.0):
+        return 0.0
+    if not (math.isfinite(lam) and alpha <= lam < tau):
+        return 0.0
+    if any(not math.isfinite(p) for p in prior_p_values):
+        return 0.0
+
+    # Replay the epoch to derive S_t, the candidate counts, and the rejection times κ (with their
+    # selected-counts κ*). Position i is 1-indexed. We accumulate the level for each successive test
+    # so the endogenous rejection R_i = 1{p_i ≤ α_i} is defined by ADDIS itself.
+    kappa_selected: list[int] = []   # κ_j* : #selected up to and including each rejection time
+    selected_before = 0              # S_t  : #selected strictly before the current position
+    # candidates_after[j] = #candidates in the open interval (κ_j, current). candidates_after[0]
+    # tracks C_{0₊} (candidates since the start). Extended when a new rejection is recorded.
+    candidates_after: list[int] = [0]
+
+    def level_for(sel_before: int, kap_sel: list[int], cand_after: list[int]) -> float:
+        # w0 term uses C_{0₊}; κ-anchored terms use κ_j* and C_{j₊}. cand_after[0] is C_{0₊};
+        # cand_after[j] (j≥1) is C_{j₊} for the j-th rejection. kap_sel[j-1] is κ_j*.
+        val = w0 * _fdr_gamma(sel_before - cand_after[0])
+        for j in range(1, len(kap_sel) + 1):
+            coef = (alpha - w0) if j == 1 else alpha
+            val += coef * _fdr_gamma(sel_before - kap_sel[j - 1] - cand_after[j])
+        return min(lam, (tau - lam) * val)
+
+    for p in prior_p_values:
+        alpha_i = level_for(selected_before, kappa_selected, candidates_after)
+        is_selected = p <= tau
+        is_candidate = p <= lam
+        is_rejection = p <= alpha_i
+        if is_selected:
+            selected_before += 1
+        if is_candidate:
+            # A candidate advances every open interval's candidate count (C_{0₊} and each C_{j₊}).
+            candidates_after = [c + 1 for c in candidates_after]
+        if is_rejection:
+            # New rejection: record κ* (selected count INCLUDING this row) and open a fresh interval
+            # whose candidate count starts at 0 (no candidates strictly after κ_j yet).
+            kappa_selected.append(selected_before)
+            candidates_after.append(0)
+
+    return level_for(selected_before, kappa_selected, candidates_after)
+
+
+def addis_level(
+    prior_p_values: Sequence[float],
     *,
     alpha: float = FDR_ALPHA,
     w0: float = FDR_W0,
+    lam: float = ADDIS_LAMBDA,
+    tau: float = ADDIS_TAU,
 ) -> float:
-    """LORD++ test level α_t (Ramdas et al. 2017 Biometrika 104:1).
+    """ADDIS* test level α_t for the next test — see ``_addis_level_from_history``.
 
-    α_t = γ_t · w0 + (α − w0) · γ_{t−τ_1} + α · Σ_{j≥2} γ_{t−τ_j}
-
-    where τ_1 < τ_2 < … are the 1-indexed positions of past discoveries (all strictly < t).
-    α_t depends ONLY on past decisions — no circularity. Wealth is computed from the ledger
-    rows on every call (not cached), mirroring pooled_trial_sharpe_var's fail-closed philosophy.
-
-    The p-value fed here must be 1 − dsr_confidence (conversion at the caller), which equals
-    P(SR_true ≤ SR*) — the DSR selection-inflated null. The FDR guarantee is over that null.
-
-    Dry-spell behavior: with no discoveries, α_t = γ_t · w0 → 0 as t grows (expected
-    LORD++ "alpha-death" in a long null streak; no floor, by design).
-
-    Returns a CONSERVATIVE 0.0 on any degenerate input (t<1, non-finite alpha/w0, any
-    discovery index ≥ t or < 1). 0.0 means p_t ≤ α_t can never be satisfied — only tightens.
-    """
-    if t < 1 or not math.isfinite(alpha) or alpha <= 0 or not math.isfinite(w0) or w0 <= 0:
-        return 0.0
-    taus = sorted(int(tau) for tau in discovery_indices)
-    if any(tau < 1 or tau >= t for tau in taus):
-        return 0.0
-
-    def _gamma(j: int) -> float:
-        if j < 1 or j > len(_LORD_GAMMA):
-            return 0.0
-        return _LORD_GAMMA[j - 1]
-
-    level = _gamma(t) * w0
-    if taus:
-        level += (alpha - w0) * _gamma(t - taus[0])
-        for tau in taus[1:]:
-            level += alpha * _gamma(t - tau)
-    return level
+    The injected ``level_fn`` for the atomic FDR write. ``prior_p_values`` is the ordered list of
+    every prior ADDIS-epoch binding p-value (chronological). Reject (FDR discovery) iff the next
+    p ≤ the returned α_t; the gate ANDs this with the other checks (tighten-only)."""
+    return _addis_level_from_history(prior_p_values, alpha=alpha, w0=w0, lam=lam, tau=tau)
 
 
 @dataclass
@@ -679,7 +765,7 @@ class GateDecision:
     dsr_funnel_floor_var_ann: float | None = None
     dsr_funnel_floor_n_strategies: int | None = None
     dsr_funnel_floor_n_total_rows: int | None = None
-    # LORD++ FDR accounting (#220, Phase 2). Populated by run_gate() AFTER the atomic store
+    # ADDIS FDR accounting (#324, was LORD++ #220). Populated by run_gate() AFTER the atomic store
     # call (α_t is only known inside the write transaction). Non-binding rows leave all fdr_*
     # fields at their defaults (False/None); fdr_skip_reason explains why FDR was omitted.
     fdr_binding: bool = False
