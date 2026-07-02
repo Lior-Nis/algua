@@ -1,0 +1,10 @@
+# CODEOWNERS — require owner review for changes to CI and security configuration.
+#
+# The supply-chain gates (issue #395) are only as strong as their config: without
+# review-protection a PR could weaken a scan, broaden an allowlist, or delete a
+# workflow in the same change that ships it. Routing all of .github/ (workflows,
+# dependabot, this file) and the scan allowlists through owner review closes that.
+
+/.github/            @Lior-Nis
+/.gitleaks.toml      @Lior-Nis
+/.pip-audit-ignore.txt @Lior-Nis

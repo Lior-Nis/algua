@@ -90,6 +90,20 @@ class ExecutionContract:
     # so existing strategies are byte-unchanged. Last field: the whole codebase builds
     # ExecutionContract with keyword args, so appending here is safe.
     capacity: CapacityLimit | None = None
+    # Intra-bar fill REFERENCE price (issue #383). The t->t+1 lag pins WHEN a lagged decision
+    # fills (bar t+1); this pins WHICH price on that bar it fills at, so the backtest and the
+    # paper/live loop share one semantic fill basis instead of the backtest silently filling at
+    # adj_close while the loop fills at the next-bar open.
+    #   - "open"  (DEFAULT): the next-bar OPEN — what the sim/paper loop already fills at, and the
+    #             anti-look-ahead-correct reference (a close-of-t decision executes at open of t+1).
+    #             The engine maps this into its ADJUSTED frame (adj_open = open*adj_close/close).
+    #   - "close": legacy adjusted-close basis — reproduces the pre-#383 backtest numbers; the
+    #             sim/paper loop's in-sim analog fills against adj_close. NOT a live market-on-close
+    #             order claim — purely "value on the adj_close basis".
+    # Folded into config_hash (asdict), so the fill basis is part of strategy identity and a change
+    # invalidates a prior live approval. See algua.contracts.types.fill_reference_column — the ONE
+    # resolver both paths consult so they can never silently pick a different reference.
+    fill_price: str = "open"
 
     def __post_init__(self) -> None:
         if self.decision_lag_bars < 1:
@@ -116,6 +130,33 @@ class ExecutionContract:
             # better.
             if isinstance(_val, bool) or not math.isfinite(_val) or _val < 0:
                 raise ValueError(f"{_name} must be a finite number >= 0")
+        if not isinstance(self.fill_price, str) or self.fill_price not in _FILL_PRICES:
+            # An unknown fill basis would silently fall through to the default reference in one path
+            # and diverge in the other — the exact parity gap #383 closes. Fail closed.
+            raise ValueError(f"fill_price must be one of {sorted(_FILL_PRICES)}")
+
+
+# The allowed intra-bar fill references (issue #383). "vwap" is deferred (no vwap column in the bar
+# schema and no trivial live vwap fill) — adding it here later is the single extension point.
+_FILL_PRICES: frozenset[str] = frozenset({"open", "close"})
+
+
+def fill_reference_column(execution: ExecutionContract) -> str:
+    """The RAW bar-schema column both paths fill against for this contract (issue #383).
+
+    The ONE resolver the backtest engine's grid selection and the paper/live loop both consult, so
+    the two paths can never silently pick a different intra-bar reference:
+      - fill_price == "open"  -> "open"      (the raw next-bar open; the engine maps it into its
+                                              adjusted frame as adj_open = open*adj_close/close)
+      - fill_price == "close" -> "adj_close" (the adjusted-close basis; the backtest's `adj` grid
+                                              and the paper loop's `closes` grid are both adj_close)
+    Pure — no I/O, no cross-module import. `__post_init__` already validated `fill_price`, so the
+    final `raise` is an unreachable belt-and-suspenders guard against a future value."""
+    if execution.fill_price == "open":
+        return "open"
+    if execution.fill_price == "close":
+        return "adj_close"
+    raise ValueError(f"unhandled fill_price {execution.fill_price!r}")  # pragma: no cover
 
 
 # The minimum COMBINED per-side cost (fees + slippage) an AGENT-gated backtest must charge (issue

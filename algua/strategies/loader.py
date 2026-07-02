@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import algua.strategies as _strategies_pkg
+from algua.contracts.model_types import ModelHandle
 from algua.portfolio.construction import (
     ConstructionError,
     get_construction_policy,
@@ -16,6 +17,7 @@ from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
     assert_tradable_without_fundamentals,
+    assert_tradable_without_model,
     assert_tradable_without_news,
 )
 
@@ -141,7 +143,27 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
 
     needs_fundamentals = bool(getattr(config, "needs_fundamentals", False))
     needs_news = bool(getattr(config, "needs_news", False))
+    needs_model = bool(getattr(config, "needs_model", False))
     n_params = len(inspect.signature(module.signal).parameters)
+
+    if needs_model:
+        if panel_fn is not None:
+            raise StrategyNotFound(
+                f"{name}: signal_panel is not supported with needs_model "
+                f"(no vectorized model fast path yet)"
+            )
+        if n_params != 3:
+            raise StrategyNotFound(
+                f"{name}: needs_model=True requires signal(view, params, model); "
+                f"got {n_params} params"
+            )
+        handle = _resolve_model_handle(name, config)
+        return LoadedStrategy(
+            config=config,
+            model_signal_fn=module.signal,
+            model_handle=handle,
+            construct_fn=construct_fn,
+        )
     if needs_fundamentals:
         if panel_fn is not None:
             raise StrategyNotFound(
@@ -179,16 +201,51 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     )
 
 
+def _resolve_model_handle(name: str, config: StrategyConfig) -> ModelHandle:
+    """Resolve a needs_model strategy's PINNED model_ref against the model registry and build the
+    ModelHandle injected into signal(view, params, model). Fails closed (StrategyNotFound) unless
+    the resolved version's artifact digest, training_as_of, AND provenance_digest all match the
+    pinned ref — so a strategy can NEVER silently bind a different model (or a model whose training
+    provenance was rewritten) than the one its config was validated with (issue #376)."""
+    import hashlib
+
+    from algua.models import ModelRegistryError, get_version_with_bytes
+
+    ref = config.model_ref
+    if ref is None:  # defensive — __post_init__ already enforces this
+        raise StrategyNotFound(f"{name}: needs_model=True but model_ref is missing")
+    try:
+        # ONE atomic read of (metadata, bytes) — no window where the returned bytes could belong to
+        # a different manifest state than the validated metadata.
+        version, artifact_bytes = get_version_with_bytes(ref.name, ref.version)
+    except ModelRegistryError as exc:
+        raise StrategyNotFound(f"{name}: model {ref.name!r} v{ref.version}: {exc}") from exc
+    bytes_digest = hashlib.sha256(artifact_bytes).hexdigest()[:16]
+    if (
+        version.digest != ref.digest
+        or bytes_digest != ref.digest  # the ACTUAL bytes must match the pin, not only the metadata
+        or version.training_as_of != ref.training_as_of
+        or version.provenance_digest != ref.provenance_digest
+    ):
+        raise StrategyNotFound(
+            f"{name}: pinned model_ref does not match registry model {ref.name!r} v{ref.version} "
+            f"(digest/training_as_of/provenance mismatch — the config was validated against a "
+            f"different model artifact)"
+        )
+    return ModelHandle(version=version, artifact_bytes=artifact_bytes)
+
+
 def load_tradable_strategy(name: str) -> LoadedStrategy:
     """Load a strategy AND assert it can trade off bars alone.
 
-    The shared paper/live preamble: a ``needs_fundamentals``/``needs_news`` strategy has no
-    paper/live data lane yet, so it must be refused before any order work. Kept beside
-    ``load_strategy`` because the tradability assertions are a strategies-layer concern.
+    The shared paper/live preamble: a ``needs_fundamentals``/``needs_news``/``needs_model``
+    strategy has no paper/live data lane yet, so it must be refused before any order work. Kept
+    beside ``load_strategy`` because the tradability assertions are a strategies-layer concern.
     """
     strategy = load_strategy(name)
     assert_tradable_without_fundamentals(strategy)
     assert_tradable_without_news(strategy)
+    assert_tradable_without_model(strategy)
     return strategy
 
 

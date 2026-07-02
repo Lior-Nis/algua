@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from algua.contracts.types import OrderIntent, Side
+from algua.contracts.types import OrderIntent, Side, fill_reference_column
 from algua.execution.sim_broker import Fill, SimBroker
 from algua.risk.limits import (
     WEIGHT_TOL,
@@ -88,7 +88,8 @@ def run_paper(
     on_decision: Callable[[datetime, pd.Series], None] | None = None,
 ) -> PaperRunResult:
     """Replay the strategy bar-by-bar: decide weights on closed bar t (data <= t), submit
-    orders, fill at t+1 open. Pure over the injected broker + provider.
+    orders, fill at the contract-pinned t+1 reference price (next-bar open by default; #383).
+    Pure over the injected broker + provider.
 
     `on_decision`, if given, is called with (decision_ts, decided_weights) for every bar the
     loop actually decides on (post warm-up). It is a read-only observation seam — it cannot
@@ -97,6 +98,11 @@ def run_paper(
     _reset = bars.reset_index()
     opens = _reset.pivot(index="timestamp", columns="symbol", values="open").sort_index()
     closes = _reset.pivot(index="timestamp", columns="symbol", values="adj_close").sort_index()
+    # Fill-price basis (issue #383): the ONE resolver both paths consult picks the raw column the
+    # next-bar fill references — "open" (default) or "adj_close" (legacy close basis) — so the loop
+    # can never silently fill on a different reference than the backtest pins.
+    fill_col = fill_reference_column(strategy.execution)
+    fill_grid = opens if fill_col == "open" else closes
     ts = list(opens.index)
     warmup = strategy.execution.warmup_bars
     peak = broker.equity(closes.loc[ts[0]]) if ts else broker.cash
@@ -139,7 +145,7 @@ def run_paper(
         for intent in intents:
             order_id = broker.submit(intent)
             orders.append(OrderRecord(intent=intent, broker_order_id=order_id))
-        fills.extend(broker.fill_pending(opens.loc[t_next], fill_ts=t_next))
+        fills.extend(broker.fill_pending(fill_grid.loc[t_next], fill_ts=t_next))
 
     final_positions = {s: float(q) for s, q in broker.get_positions().items()}
     final_equity = broker.equity(closes.loc[ts[-1]]) if ts else broker.cash

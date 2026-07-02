@@ -144,7 +144,7 @@ def test_needs_news_with_signal_panel_raises():
 
 # ---------------------------------------------------------------------------
 # Test 4: both needs_news=True AND needs_fundamentals=True raises
-# (LoadedStrategy.__post_init__ catches this via "both")
+# (LoadedStrategy.__post_init__ catches this via "at most one")
 # ---------------------------------------------------------------------------
 def test_needs_news_and_needs_fundamentals_both_raises():
     name = "tmp_news_and_fund"
@@ -157,7 +157,7 @@ def test_needs_news_and_needs_fundamentals_both_raises():
     path = _write_module(name, body)
     _clear_cache(dotted)
     try:
-        with pytest.raises((StrategyNotFound, ValueError), match="both"):
+        with pytest.raises((StrategyNotFound, ValueError), match="at most one"):
             load_strategy(name)
     finally:
         path.unlink(missing_ok=True)

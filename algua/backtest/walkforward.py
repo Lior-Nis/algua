@@ -228,6 +228,15 @@ def walk_forward(
     BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
     """
+    # Model lane (#376) is NOT supported in walk-forward/sweep this slice: a single fixed-per-run
+    # model is not point-in-time safe across rolling OOS windows (each window would need the model
+    # that predates ITS train end). Fail closed until per-window model binding is built (follow-up).
+    if strategy.config.needs_model:
+        raise BacktestError(
+            f"strategy {strategy.name!r} declares needs_model; the model lane is only wired into "
+            f"`backtest run` (single fixed period). Walk-forward needs per-window model binding — "
+            f"not built yet (#376 follow-up); refusing to run (fail closed)"
+        )
     embargo = _resolve_embargo(strategy, embargo)
     # PIT sidecar providers (#132) are threaded straight into build_portfolio (= simulate, which
     # consumes them); the `_reject_pit_sidecar` guard is removed here — unblocking needs_* in

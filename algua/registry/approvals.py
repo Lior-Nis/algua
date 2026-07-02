@@ -7,7 +7,7 @@ import sys
 from types import ModuleType
 
 from algua.provenance import lockfile
-from algua.registry.repository import ArtifactIdentity, StrategyRepository
+from algua.registry.repository import ApprovalLedger, ApprovalRepository, ArtifactIdentity
 from algua.strategies.base import LoadedStrategy, config_hash
 from algua.strategies.loader import load_strategy
 
@@ -124,7 +124,7 @@ def _imported_first_party_modules(module: ModuleType) -> list[ModuleType]:
     return deps
 
 
-def record_approval(repo: StrategyRepository, name: str, approved_by: str) -> int:
+def record_approval(repo: ApprovalRepository, name: str, approved_by: str) -> int:
     """Record a human approval. The approved identity is computed from the live strategy source,
     config, and locked dependency set, never supplied by the caller, so the approval binds to the
     exact artifact it approves."""
@@ -141,7 +141,7 @@ def record_approval(repo: StrategyRepository, name: str, approved_by: str) -> in
 
 
 def has_valid_approval(
-    repo: StrategyRepository,
+    repo: ApprovalLedger,
     strategy_id: int,
     code_hash: str,
     config_hash: str,

@@ -1,0 +1,30 @@
+# pip-audit advisory allowlist  (consumed by .github/workflows/security.yml)
+#
+# One vulnerability ID per non-comment line. Each entry is a KNOWN advisory that
+# cannot currently be remediated by a lockfile bump, with a documented reason.
+# Keep this list MINIMAL and review the entries at every dependency upgrade.
+#
+# NOTE ON SCOPE: pip-audit's --ignore-vuln suppresses an advisory GLOBALLY (it is
+# not package-scoped). Because the list is small and reviewed, that is acceptable;
+# do not add an ID here without confirming which package/version it applies to.
+#
+# Format for each active entry (all lines above the ID are comments):
+#   # <package> <version> — <one-line reason> — tracking: <issue/url> — review: <YYYY-MM>
+
+# ---------------------------------------------------------------------------
+# starlette 0.52.1 — vulnerable, but the fix ships only in starlette 1.x (a MAJOR
+# release). starlette is pinned transitively via mlflow -> fastapi and cannot be
+# upgraded without a major mlflow-tree bump. Clears when mlflow is next
+# major-upgraded. tracking: #395 — review: 2026-10
+PYSEC-2026-161
+PYSEC-2026-248
+PYSEC-2026-249
+GHSA-wqp7-x3pw-xc5r
+GHSA-x746-7m8f-x49c
+
+# ---------------------------------------------------------------------------
+# cryptography 46.0.7 — fix is 48.0.1, but the version is pinned transitively via
+# mlflow -> databricks-sdk -> google-auth and does not resolve to 48.x without a
+# major mlflow-tree bump. Clears when mlflow is next major-upgraded.
+# tracking: #395 — review: 2026-10
+GHSA-537c-gmf6-5ccf

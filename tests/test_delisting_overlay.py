@@ -54,6 +54,24 @@ def test_held_without_record_relaxation_realizes_last_close():
                        "terminal_price": 11.0, "source": "assumed_last_close"}]
 
 
+def test_assume_terminal_last_close_reads_terminal_price_grid_not_fill_grid():
+    """Under the #383 open-fill basis the ordinary price grid is adj_OPEN, but a delisting is a
+    close-of-book event: the assume_terminal_last_close fallback must realize at the last adj_CLOSE
+    (terminal_price_grid), never the last open of the fill grid — else the human-only relaxation
+    silently reprices terminal proceeds."""
+    fill_grid = _grid({"A": [10, 11, 12, 13], "B": [9, 8, np.nan, np.nan]})   # adj_OPEN values
+    close_grid = _grid({"A": [10, 11, 12, 13], "B": [10, 11, np.nan, np.nan]})  # adj_CLOSE values
+    w = _grid({"A": [0.5, 0.5, 0.5, 0.5], "B": [0.5, 0.5, 0.0, 0.0]})
+    adj_x, w_x, forced = apply_delisting_exits(
+        fill_grid, w, None, assume_terminal_last_close=True, terminal_price_grid=close_grid,
+    )
+    T = fill_grid.index[1]
+    # Realized at the last CLOSE (11.0), not the last open (8.0); adj_exec[T] carries that close.
+    assert forced == [{"symbol": "B", "bar": T.isoformat(),
+                       "terminal_price": 11.0, "source": "assumed_last_close"}]
+    assert adj_x.loc[T, "B"] == 11.0
+
+
 def test_not_held_only_nan_killed_no_error():
     adj = _grid({"A": [10, 11, 12, 13], "B": [10, np.nan, np.nan, np.nan]})
     w = _grid({"A": [1.0, 1.0, 1.0, 1.0], "B": [0.0, 0.0, 0.0, 0.0]})
