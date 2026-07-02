@@ -4,7 +4,7 @@ import dataclasses
 import functools
 import itertools
 import math
-import os
+import multiprocessing
 import pickle
 from collections.abc import Collection, Mapping
 from concurrent.futures import BrokenExecutor, ProcessPoolExecutor
@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 from threadpoolctl import threadpool_limits
 
+from algua.backtest.core_budget import admit, close_lease_fd_in_worker, cpu_budget
 from algua.backtest.delisting import DelistingRecord
 from algua.backtest.engine import BacktestError
 from algua.backtest.walkforward import walk_forward
@@ -296,8 +297,10 @@ def _run_combos(
       * Ordering matters: the domain re-raise MUST precede the infrastructure catch, or a worker
         BacktestError would be double-wrapped into "parallel sweep failed".
     """
-    n_workers = min(os.cpu_count() or 1, len(overridden))
-    if n_workers <= 1:
+    # Inline (no pool, full BLAS threads) when there is at most one combo or the core budget is a
+    # single core. The budget is the GLOBAL injected core allowance (#327), not os.cpu_count():
+    # `ALGUA_SWEEP_CPU_BUDGET=1` collapses every sweep to the inline path.
+    if len(overridden) <= 1 or cpu_budget() <= 1:
         return [_evaluate_combo(ov, **eval_kwargs) for ov in overridden]
 
     worker = functools.partial(_evaluate_combo_pooled, **eval_kwargs)
@@ -313,9 +316,21 @@ def _run_combos(
             "parallel sweep requires picklable strategy/provider inputs (a strategy signal must be "
             f"a module-level function, not a closure/lambda): {exc}"
         ) from exc
+    # Admit this sweep into the GLOBAL core budget shared across ALL concurrent sweeps (#327):
+    # `admit` grants a worker count carved from the budget minus what live sibling sweeps already
+    # hold, so K concurrent sweeps total <= budget + (K-1) workers instead of K x cpu_count. The
+    # lease flock is held for the pool's lifetime; a fork context + initializer close the inherited
+    # lease fd in every worker so a parent crash still frees the lease.
+    fork_ctx = multiprocessing.get_context("fork")
     try:
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            return list(executor.map(worker, overridden))
+        with admit(len(overridden)) as lease:
+            with ProcessPoolExecutor(
+                max_workers=lease.grant,
+                mp_context=fork_ctx,
+                initializer=close_lease_fd_in_worker,
+                initargs=(lease.lease_fd,),
+            ) as executor:
+                return list(executor.map(worker, overridden))
     except BacktestError:
         raise
     except BrokenExecutor as exc:

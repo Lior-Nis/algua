@@ -121,18 +121,20 @@ def test_run_combos_inline_single_combo():
     assert results[0]["score"] == results[0]["stability"]["mean_sharpe"]
 
 
-def _force_pool(monkeypatch):
-    # The pool path only engages when n_workers > 1. On a single-core CI host os.cpu_count() == 1
-    # would silently route these "pool" tests through the inline branch, so pin it to 2 to actually
-    # exercise ProcessPoolExecutor.
-    from algua.backtest import sweep as sweep_mod
-    monkeypatch.setattr(sweep_mod.os, "cpu_count", lambda: 2)
+def _force_pool(monkeypatch, tmp_path=None):
+    # The pool path only engages when the injected core budget is > 1 and there is >1 combo (#327).
+    # On a single-core CI host cpu_budget() would be 1 and silently route these "pool" tests through
+    # the inline branch, so pin the budget to 2 to actually exercise ProcessPoolExecutor. Also point
+    # data_dir at a tmp dir so the sweep-lease markers don't touch the real data tree.
+    monkeypatch.setenv("ALGUA_SWEEP_CPU_BUDGET", "2")
+    if tmp_path is not None:
+        monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
 
 
-def test_run_combos_pool_preserves_order(monkeypatch):
+def test_run_combos_pool_preserves_order(monkeypatch, tmp_path):
     from algua.backtest.sweep import _evaluate_combo, _override, _run_combos
 
-    _force_pool(monkeypatch)
+    _force_pool(monkeypatch, tmp_path)
     combos = [{"lookback": 20}, {"lookback": 30}, {"lookback": 40}]  # >1 -> pool path
     overridden = [_override(_momentum(), c) for c in combos]
     pooled = _run_combos(overridden, _run_kwargs())
@@ -145,12 +147,12 @@ def test_run_combos_pool_preserves_order(monkeypatch):
     assert len(pooled) == 3
 
 
-def test_run_combos_non_picklable_strategy_raises_backtest_error(monkeypatch):
+def test_run_combos_non_picklable_strategy_raises_backtest_error(monkeypatch, tmp_path):
     from algua.backtest.engine import BacktestError
     from algua.backtest.sweep import _override, _run_combos
     from algua.portfolio.construction import get_construction_policy
 
-    _force_pool(monkeypatch)
+    _force_pool(monkeypatch, tmp_path)
 
     # A signal defined inside this test is a LOCAL object -> pickle raises AttributeError (not
     # PicklingError). The parent-side preflight must convert that into a JSON-safe BacktestError,
@@ -173,10 +175,10 @@ def test_run_combos_non_picklable_strategy_raises_backtest_error(monkeypatch):
         _run_combos(overridden, _run_kwargs())
 
 
-def test_sweep_combo_error_surfaces_as_backtest_error(monkeypatch):
+def test_sweep_combo_error_surfaces_as_backtest_error(monkeypatch, tmp_path):
     from algua.backtest.engine import BacktestError
 
-    _force_pool(monkeypatch)
+    _force_pool(monkeypatch, tmp_path)
     # >1 combo through the pool; `windows` far too large for the period forces walk_forward to raise
     # BacktestError ("not enough bars") inside a worker. It must come back as BacktestError
     # (CLI-wrappable), not a BrokenProcessPool and not a partial result.
