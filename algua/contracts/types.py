@@ -71,6 +71,21 @@ class ExecutionContract:
     max_weight_per_symbol: float = 1.0  # cap on |weight| per symbol; 1.0 = no cap
     allow_short: bool = False           # False = long-only (today's behavior)
     warmup_bars: int = 0
+    # Transaction-cost model (issue #325). Both are per-side PROPORTIONAL frictions on trade
+    # notional, expressed as fractional decimals (0.0005 = 5 bps). They are charged by the backtest
+    # at execution time (see algua.backtest.engine.simulate -> vbt.from_orders fees=/slippage=), so
+    # every metric downstream — Sharpe, DSR, bootstrap, FDR, regime robustness, and the paper
+    # forward gate — evaluates NET-OF-COST returns. Two DISTINCT frictions, NOT double-counting:
+    #   - fees:     commission / exchange+regulatory charge, proportional to |trade notional|.
+    #   - slippage: half-spread + market-impact, an ADVERSE per-side fill-price move (buys/covers
+    #               fill higher, sells/shorts fill lower) — SYMMETRIC across sides by construction.
+    # DEFAULT-ON at a conservative 5 bps each (~20 bps round-trip) so a backtest is realistic by
+    # default; an edge that survives only frictionlessly is not an edge (kb research-methodology).
+    # Folded into config_hash (asdict), so the cost assumption is part of strategy identity and a
+    # change invalidates a prior live approval. Explicit 0.0 is allowed for EXPLORATION only — the
+    # agent promotion preflight rejects a sub-floor cost (see assert_gated_costs / MIN_GATED_COST).
+    fees: float = 0.0005
+    slippage: float = 0.0005
     # Optional ADV / participation capacity budget (issue #344). None = no capacity cap (default),
     # so existing strategies are byte-unchanged. Last field: the whole codebase builds
     # ExecutionContract with keyword args, so appending here is safe.
@@ -93,6 +108,39 @@ class ExecutionContract:
             raise ValueError("allow_short must be a bool")
         if self.capacity is not None and not isinstance(self.capacity, CapacityLimit):
             raise ValueError("capacity must be a CapacityLimit or None")
+        for _name, _val in (("fees", self.fees), ("slippage", self.slippage)):
+            # bool is an int subtype; a True passed here would masquerade as 1.0 (a 100% cost) and
+            # a non-finite / negative value would either poison every downstream metric or SUBSIDISE
+            # trades (a negative cost inflates returns — the exact false-edge this issue closes).
+            # Fail closed on all three so the cost model can only ever make returns worse, never
+            # better.
+            if isinstance(_val, bool) or not math.isfinite(_val) or _val < 0:
+                raise ValueError(f"{_name} must be a finite number >= 0")
+
+
+# The minimum COMBINED per-side cost (fees + slippage) an AGENT-gated backtest must charge (issue
+# #325). The DEFAULT-ON contract (5 bps + 5 bps = 0.001) clears this; the floor exists only to stop
+# an agent from promoting on a config-overridden frictionless (or near-frictionless) backtest, which
+# would reintroduce the cost-free-return false-edge path the whole statistical stack is calibrated
+# against. A human may run any cost (exploration, sensitivity sweeps); the floor binds the agent.
+MIN_GATED_COST = 0.001
+
+
+def assert_gated_costs(execution: ExecutionContract) -> None:
+    """Fail closed if an agent-gated backtest would run with a below-floor transaction cost.
+
+    Charging realistic costs is only a defense if it CANNOT be zeroed out on the promotion path.
+    Called from the agent research-promote preflight (never the human path): a strategy whose
+    ``fees + slippage`` is below ``MIN_GATED_COST`` is refused before any holdout is peeked, so a
+    frictionless config can never mint a gate token. Pure check — no I/O, no cross-module import."""
+    combined = execution.fees + execution.slippage
+    if combined < MIN_GATED_COST:
+        raise ValueError(
+            f"agent-gated backtest requires fees + slippage >= {MIN_GATED_COST} "
+            f"(got fees={execution.fees}, slippage={execution.slippage}, "
+            f"combined={combined}); a below-floor cost would validate a near-cost-free return "
+            f"stream. Use the DEFAULT-ON cost (or higher); zero-cost runs are exploration-only."
+        )
 
 
 @dataclass(frozen=True)
