@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import json
 import math
 import os
 import shutil
-import time
-import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -25,8 +22,6 @@ from algua.data.files import (
     fsync_parents,
     fsync_tree,
     logical_bars_hash,
-    parquet_dataset_row_count,
-    parquet_file_row_count,
     read_partitioned_bars,
     sha256_bytes,
     sha256_file,
@@ -54,7 +49,9 @@ from algua.data.news_schema import (
     to_news_schema,
 )
 from algua.data.schema import empty_bars, to_bar_schema
+from algua.data.staging import SnapshotStagingLease
 from algua.data.timeframes import validate_timeframe
+from algua.data.verify import SnapshotVerifier
 
 if TYPE_CHECKING:
     from algua.backtest.delisting import DelistingRecord
@@ -74,6 +71,10 @@ class DataStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
         self.manifest = SnapshotManifest(data_dir / "manifest.jsonl")
+        # Cohesive collaborators (#384): staging-lease concurrency plumbing and the power-loss
+        # verifier live in their own modules; DataStore composes them and delegates.
+        self._staging = SnapshotStagingLease(data_dir)
+        self._verifier = SnapshotVerifier(data_dir)
 
     def ingest_file(
         self,
@@ -116,7 +117,7 @@ class DataStore:
             universe=universe,
             source_metadata=source_metadata,
         )
-        staging_dir, lock_fd, lock_path = self._new_leased_staging()
+        staging_dir, lock_fd, lock_path = self._staging.new_leased_staging()
         try:
             # Copy the external source ONCE, then hash/count THE STAGING COPY and publish that
             # exact artifact (#158): a source mutating mid-ingest can no longer commit bytes
@@ -151,7 +152,7 @@ class DataStore:
             )
             return self.manifest.append_if_absent(rec)
         finally:
-            self._release_leased_staging(staging_dir, lock_fd, lock_path)
+            self._staging.release_leased_staging(staging_dir, lock_fd, lock_path)
 
     def ingest_bars(
         self,
@@ -203,14 +204,14 @@ class DataStore:
             created_at=datetime.now(UTC).isoformat(),
             storage_format="parquet_dataset",
         )
-        staging_dir, lock_fd, lock_path = self._new_leased_staging()
+        staging_dir, lock_fd, lock_path = self._staging.new_leased_staging()
         try:
             write_partitioned_bars(canon.sort_values(["symbol", "ts"]), staging_dir)
             return self._commit_bars_dir(
                 rec, staging_dir, expected_symbols={str(s) for s in canon["symbol"].unique()}
             )
         finally:
-            self._release_leased_staging(staging_dir, lock_fd, lock_path)
+            self._staging.release_leased_staging(staging_dir, lock_fd, lock_path)
 
     def _commit_bars_dir(
         self, rec: SnapshotRecord, staging_dir: Path, *, expected_symbols: set[str]
@@ -430,99 +431,9 @@ class DataStore:
         return self.manifest.append_if_absent(rec, conflict_check=conflict_check)
 
     def clear_staging(self, *, max_age_seconds: float = 3600.0) -> None:
-        """Remove stale staging dirs (crash residue) older than `max_age_seconds`.
-
-        Age alone is unsafe: a staging dir's root mtime is set once at `mkdir` and does NOT refresh
-        as writes land in `symbol=<SYM>/` subdirs (or a long file copy), so a >1h in-flight import
-        looks "stale" and would be rmtree'd mid-write (#255). So an old dir is swept only when its
-        staging LEASE — an exclusive `flock` on the sibling `<uuid>.lock` marker, held for the
-        writer's lifetime by `_new_leased_staging` (used by EVERY staging writer) — is NOT held. The
-        lease auto-releases on the writer's death (even a hard kill), so true crash residue reads as
-        unheld and is swept; a live writer's dir reads as held and is spared. Each run also cleans
-        its own dir in a `finally`; this only sweeps what a hard kill left behind.
-        """
-        staging = self.data_dir / "snapshots" / "_staging"
-        if not staging.exists():
-            return
-        cutoff = time.time() - max_age_seconds
-        for child in staging.iterdir():
-            try:
-                if child.stat().st_mtime >= cutoff:
-                    continue  # fresh — a just-started import may own it
-                if child.is_dir():
-                    if self._lock_held(staging / f"{child.name}.lock"):
-                        continue  # in-progress import holds the lease (#255)
-                    shutil.rmtree(child, ignore_errors=True)
-                    (staging / f"{child.name}.lock").unlink(missing_ok=True)
-                elif child.suffix == ".lock":
-                    # An orphan lease marker (its staging dir already gone): clean it unless a dir
-                    # still pairs with it (handled above) or a writer still holds it.
-                    if (staging / child.stem).is_dir() or self._lock_held(child):
-                        continue
-                    child.unlink(missing_ok=True)
-            except OSError:
-                continue
-
-    @staticmethod
-    def _lock_held(lock_path: Path) -> bool:
-        """True iff a live writer currently holds the exclusive `flock` on `lock_path` (an
-        in-progress staging writer). A non-blocking probe. FAIL CLOSED: only a genuinely absent
-        marker (`FileNotFoundError`) counts as not-held (sweepable); any other open/lock error
-        (ENOLCK, permission, unsupported flock, transient I/O) is treated as held, so cleanup never
-        deletes a dir it cannot prove is abandoned — leftover residue is recoverable, a deleted live
-        write is not. flock is freed by the kernel on the holder's death, so a crash is unheld."""
-        try:
-            fd = os.open(lock_path, os.O_RDWR)
-        except FileNotFoundError:
-            return False  # no lease marker — true crash residue or a pre-lease dir
-        except OSError:
-            return True  # can't even open it — refuse to sweep (fail closed)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True  # a writer holds it
-        except OSError:
-            return True  # lock probe failed — refuse to sweep (fail closed)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return False  # acquired freely → not held
-        finally:
-            os.close(fd)
-
-    def _new_leased_staging(self) -> tuple[Path, int, Path]:
-        """Take an exclusive `flock` lease on a unique SIBLING `<uuid>.lock` marker, THEN create the
-        `_staging/<uuid>` dir under it — so there is never an unleased-dir window (#255). The marker
-        is a sibling (not inside the dir) so `_commit_bars_dir`/`os.replace` move a clean snapshot
-        dir. Used by EVERY staging writer so `clear_staging` can never rmtree any of them mid-write;
-        the lease is released by `_release_leased_staging` (caller's finally). The unique path means
-        LOCK_EX never contends; the kernel frees the lease on writer death. Self-cleaning: a failure
-        before the caller takes over closes the fd and removes the marker/dir, leaking nothing."""
-        staging_root = self.data_dir / "snapshots" / "_staging"
-        staging_root.mkdir(parents=True, exist_ok=True)
-        name = uuid.uuid4().hex
-        lock_path = staging_root / f"{name}.lock"
-        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            staging_dir = staging_root / name
-            staging_dir.mkdir()
-        except BaseException:
-            os.close(lock_fd)
-            lock_path.unlink(missing_ok=True)
-            shutil.rmtree(staging_root / name, ignore_errors=True)
-            raise
-        return staging_dir, lock_fd, lock_path
-
-    @staticmethod
-    def _release_leased_staging(staging_dir: Path, lock_fd: int, lock_path: Path) -> None:
-        """Release the lease and remove the staging dir + its sibling marker (idempotent — safe
-        after a successful commit moved the dir away). Pair with `_new_leased_staging` in a try."""
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        lock_path.unlink(missing_ok=True)
+        """Sweep stale staging residue (#255). Delegates to the staging-lease collaborator (#384),
+        which owns the ``_staging`` dir lifecycle; kept on the facade for the CLI call site."""
+        self._staging.clear_staging(max_age_seconds=max_age_seconds)
 
     def ingest_bars_streamed(
         self,
@@ -563,7 +474,7 @@ class DataStore:
         validate_timeframe(timeframe)
         # Lease the staging dir for the whole import so a concurrent clear_staging can't rmtree it
         # mid-write — the staging-root mtime is set once at mkdir and never refreshes (#255).
-        staging_dir, lock_fd, lock_path = self._new_leased_staging()
+        staging_dir, lock_fd, lock_path = self._staging.new_leased_staging()
         row_count = 0
         observed_min: pd.Timestamp | None = None
         observed_max: pd.Timestamp | None = None
@@ -648,7 +559,7 @@ class DataStore:
             )
             return self._commit_bars_dir(rec, staging_dir, expected_symbols=seen_symbols_set)
         finally:
-            self._release_leased_staging(staging_dir, lock_fd, lock_path)
+            self._staging.release_leased_staging(staging_dir, lock_fd, lock_path)
 
     def list_snapshots(self, dataset: Dataset | None = None) -> list[SnapshotRecord]:
         return self.manifest.list_records(dataset)
@@ -660,53 +571,19 @@ class DataStore:
         return rec
 
     def verify_snapshot(self, rec: SnapshotRecord) -> None:
-        """Power-loss read-back of one snapshot's payload (#184). Reads the bytes back to prove
-        they are durable and decompressible, and checks the row count against the record. Raises
-        on any damage (the caller decides how to surface it). Dispatch by `storage_format`:
-
-        - ``parquet_dataset`` (bars): full read of every partition; summed rows == ``row_count``.
-        - ``parquet`` (universe/fundamentals/news, or a ``.parquet`` via ``ingest_file``): full
-          read of the single file; ``num_rows == row_count``. Readability check, NOT a
-          content-hash recompute. For a ``.parquet`` ingested via ``ingest_file`` (byte-hash
-          ``content_hash``) this is a strictly weaker check than the ``else`` branch's
-          ``sha256_file`` comparison — by design, since verify targets power-loss readability,
-          not tampering.
-        - anything else (``ingest_file`` csv/generic): ``sha256_file == content_hash`` (a full
-          read). Fails closed: a record whose ``content_hash`` is not a byte hash would report a
-          (false) failure rather than a false pass — that signals the dispatch needs extending.
-        """
-        target = self.data_dir / rec.data_path
-        fmt = rec.storage_format
-        if fmt == "parquet_dataset":
-            if not target.is_dir():
-                raise ValueError(f"snapshot {rec.snapshot_id}: payload dir missing at {target}")
-            rows = parquet_dataset_row_count(target)
-            if rec.row_count is not None and rows != rec.row_count:
-                raise ValueError(
-                    f"snapshot {rec.snapshot_id}: read {rows} rows, expected {rec.row_count}"
-                )
-        elif fmt == "parquet":
-            if not target.is_file():
-                raise ValueError(f"snapshot {rec.snapshot_id}: payload file missing at {target}")
-            rows = parquet_file_row_count(target)
-            if rec.row_count is not None and rows != rec.row_count:
-                raise ValueError(
-                    f"snapshot {rec.snapshot_id}: read {rows} rows, expected {rec.row_count}"
-                )
-        else:
-            if not target.is_file():
-                raise ValueError(f"snapshot {rec.snapshot_id}: payload file missing at {target}")
-            actual = sha256_file(target)
-            if actual != rec.content_hash:
-                raise ValueError(
-                    f"snapshot {rec.snapshot_id}: content hash {actual} != {rec.content_hash}"
-                )
+        """Power-loss read-back of one snapshot's payload (#184). Delegates the per-format dispatch
+        to the verifier collaborator (#384); kept on the facade for existing callers/tests."""
+        self._verifier.verify_snapshot(rec)
 
     def verify_snapshots(self, snapshot_id: str | None = None) -> list[dict[str, Any]]:
         """Verify one snapshot (`snapshot_id`) or all committed snapshots. Returns one result
         row per snapshot: ``{snapshot_id, dataset, storage_format, ok, error}``. Never raises for
         a damaged payload — the damage is captured in the row (`ok=False`); the caller decides
-        the exit code. A missing `snapshot_id` itself raises `SnapshotNotFound`."""
+        the exit code. A missing `snapshot_id` itself raises `SnapshotNotFound`.
+
+        The record-resolution + aggregation loop stay here (calling ``self.verify_snapshot`` /
+        ``self.get_snapshot`` / ``self.list_snapshots``) so the dynamic self-dispatch an override or
+        monkeypatch relies on is preserved; only the per-format read-back moved to the verifier."""
         records = (
             [self.get_snapshot(snapshot_id)] if snapshot_id is not None else self.list_snapshots()
         )
