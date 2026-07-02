@@ -19,12 +19,18 @@ def require_https_allowlisted_host(url: str, allowed_hosts: frozenset[str]) -> N
     """Raise ``ValueError`` unless ``url`` is https to a host in ``allowed_hosts``.
 
     Fails closed on every ambiguous input: a non-https scheme, an unparseable/hostless URL
-    (``hostname`` is ``None``), a host outside the allowlist, and an empty allowlist (which
-    admits nothing). ``urlparse(...).hostname`` lowercases the host and resolves userinfo
-    tricks — ``https://data.alpaca.markets@evil.test`` parses to host ``evil.test`` and is
-    rejected — so the allowlist is enforced on the REAL destination, not the display string.
+    (``hostname`` is ``None``), a host outside the allowlist, an empty allowlist (which admits
+    nothing), and a malformed port (a non-numeric/out-of-range ``:port`` — ``parsed.port``
+    raises ``ValueError`` on access, which we translate into a closed refusal rather than let
+    the endpoint through unvalidated). ``urlparse(...).hostname`` lowercases the host and
+    resolves userinfo tricks — ``https://data.alpaca.markets@evil.test`` parses to host
+    ``evil.test`` and is rejected — so the allowlist is enforced on the REAL destination.
     """
     parsed = urlparse(url)
+    try:
+        parsed.port  # noqa: B018 — property access; a non-numeric/out-of-range port raises here
+    except ValueError:
+        raise ValueError(f"refusing endpoint {url!r}: malformed port") from None
     if (
         parsed.scheme != "https"
         or parsed.hostname is None
