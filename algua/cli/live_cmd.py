@@ -9,7 +9,7 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
-from algua.contracts.types import LiveAuthorization
+from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker
 from algua.execution.flatten import flatten_strategy
@@ -395,7 +395,7 @@ def run_all(
             log.info("golden_signals", extra={"fields": counters.as_fields()})
 
 
-def _scoped_cancel(conn, broker, strategy: str) -> None:
+def _scoped_cancel(conn, broker: ScopedCancelBroker, strategy: str) -> None:
     """Cancel only THIS strategy's open orders (never a sibling's)."""
     for oid in owned_open_order_ids(conn, broker, strategy):
         broker.cancel_order(oid)
