@@ -24,18 +24,39 @@ class FdrGateOutcome(NamedTuple):
     fdr_rejected: bool | None
     final_passed: bool
     updated_rec: StrategyRecord | None
+    # Cohort restart + cumulative-exposure audit (#324). None on non-binding rows.
+    fdr_cohort: int | None = None
+    fdr_cohorts_completed: int | None = None
+    fdr_binding_tests: int | None = None
+    fdr_discoveries: int | None = None
+    fdr_expected_false_discoveries: float | None = None
 
 
 class FdrStreamState(NamedTuple):
-    """Snapshot of the global LORD++ alpha-wealth stream.
+    """Snapshot of the LORD++ alpha-wealth stream scoped to the cohort the NEXT test joins (#324).
 
-    Source: ``gate_evaluations WHERE fdr_binding=1``. ``t`` is the count of binding rows (the
-    current stream position); ``discovery_indices`` is the ordered list of ``fdr_test_index``
-    values where ``fdr_rejected=1`` (past rejections that replenish alpha-wealth for future
-    tests). Together they fully determine ``lord_plus_plus_level`` for the NEXT test."""
+    Source: ``gate_evaluations WHERE fdr_binding=1``, partitioned into consecutive cohorts of
+    ``FDR_COHORT_SIZE`` binding tests by arrival order. Each cohort runs an INDEPENDENT LORD++
+    stream (fresh W0). This snapshot describes the cohort that the NEXT binding test will join:
+
+    - ``t`` — the next test's WITHIN-COHORT position (1..FDR_COHORT_SIZE).
+    - ``discovery_indices`` — that cohort's in-cohort ``fdr_test_index`` values where
+      ``fdr_rejected=1`` (past rejections replenishing alpha-wealth WITHIN the cohort). All < ``t``.
+    - ``cohort_index`` — the 0-based index of that cohort.
+
+    The remaining fields are lifetime AUDIT counters (not used by ``lord_plus_plus_level``):
+    - ``cohorts_completed`` — number of FULLY-filled cohorts (each == FDR_COHORT_SIZE tests).
+    - ``binding_tests`` — total binding rows so far (the next test is ``binding_tests + 1``).
+    - ``discoveries`` — total ``fdr_rejected=1`` rows across all cohorts.
+
+    ``t`` + ``discovery_indices`` fully determine ``lord_plus_plus_level`` for the NEXT test."""
 
     t: int
     discovery_indices: list[int]
+    cohort_index: int = 0
+    cohorts_completed: int = 0
+    binding_tests: int = 0
+    discoveries: int = 0
 
 
 class FunnelFloor(NamedTuple):
@@ -549,16 +570,21 @@ class StrategyRepository(Protocol):
         ...
 
     def fdr_stream_state(self) -> FdrStreamState | None:
-        """Read the global LORD++ FDR stream: all ``gate_evaluations`` rows where
-        ``fdr_binding=1``, ordered by ``id``.
+        """Read the LORD++ FDR stream scoped to the cohort the NEXT binding test will join (#324):
+        all ``gate_evaluations`` rows where ``fdr_binding=1``, ordered by ``id`` and partitioned
+        into cohorts of ``FDR_COHORT_SIZE`` by (``fdr_cohort``, ``fdr_test_index``).
 
-        Returns ``FdrStreamState(t, discovery_indices)`` where ``t`` is the total count of
-        binding rows and ``discovery_indices`` is the ordered list of ``fdr_test_index`` values
-        where ``fdr_rejected=1``. Returns ``None`` (fail-closed) on any stream integrity failure:
-        a binding row with NULL or non-finite ``fdr_p_value``/``fdr_alpha_level``, ``fdr_rejected``
-        not in {0, 1}, NULL or non-positive ``fdr_test_index``, or non-contiguous indices
-        (``fdr_test_index`` must equal 1, 2, …, t in order). Rows with ``fdr_binding`` NULL or 0
-        are invisible to the stream (legacy-safe)."""
+        Returns ``FdrStreamState(t, discovery_indices, cohort_index, cohorts_completed,
+        binding_tests, discoveries)`` where ``t`` is the next test's WITHIN-COHORT position,
+        ``discovery_indices`` are that cohort's in-cohort rejection positions (all < ``t``), and
+        the audit counters describe lifetime progress. Returns ``None`` (fail-closed) on any
+        integrity failure: a binding row with NULL or non-finite
+        ``fdr_p_value``/``fdr_alpha_level``,
+        ``fdr_rejected`` not in {0, 1}, NULL ``fdr_cohort``, NULL or non-positive
+        ``fdr_test_index``, or within-cohort ``fdr_test_index`` not contiguous 1..k in ``id`` order,
+        or a cohort exceeding ``FDR_COHORT_SIZE``. Rows with ``fdr_binding`` NULL or 0 are invisible
+        (legacy-safe). A partially-filled cohort whose max is < ``FDR_COHORT_SIZE`` is the current
+        cohort; a full cohort seals and the next test opens ``cohort_index + 1`` at ``t = 1``."""
         ...
 
     def record_gate_with_fdr_and_maybe_promote(
@@ -569,6 +595,7 @@ class StrategyRepository(Protocol):
         p_value: float | None,
         funnel: FunnelSnapshot,
         level_fn: Callable[[int, list[int]], float],
+        fdr_alpha: float,
         actor: Actor,
         reason: str | None = None,
     ) -> FdrGateOutcome:
@@ -581,12 +608,17 @@ class StrategyRepository(Protocol):
         FDR-binding (``dsr_binding=True`` AND ``dsr_confidence`` is finite); ``None`` means
         non-binding and FDR is skipped entirely for this row.
 
-        When binding: reads the prior stream state UNDER the write lock, computes
-        ``t_next = prior.t + 1``, ``α_t = level_fn(t_next, prior.discovery_indices)``,
-        ``fdr_rejected = (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND
-        fdr_rejected``. The gate row is inserted with ``passed = final_passed`` (never the
-        provisional value — ``find_consumable_gate_evaluation`` reads this column). If
-        ``final_passed`` is True, ``rec`` is atomically advanced to ``candidate``.
+        When binding: reads the prior stream state UNDER the write lock — SCOPED to the cohort the
+        next test joins (#324) — computes ``α_t = level_fn(prior.t, prior.discovery_indices)`` where
+        ``prior.t`` is the within-cohort position (1..FDR_COHORT_SIZE), ``fdr_rejected =
+        (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND fdr_rejected``. The row is
+        inserted with ``fdr_cohort = prior.cohort_index``, ``fdr_test_index = prior.t``, and
+        ``passed = final_passed`` (never the provisional value — ``find_consumable_gate_evaluation``
+        reads this column). If ``final_passed`` is True, ``rec`` is atomically advanced to
+        ``candidate``. ``fdr_alpha`` (the scalar FDR level, injected from ``promotion.py`` to keep
+        ``algua/registry`` free of ``algua/research`` imports) feeds the AUDIT-ONLY exposure block
+        (``fdr_expected_false_discoveries = fdr_alpha × cohorts_completed``); it never changes the
+        pass/fail decision.
 
         ``funnel`` is the funnel-wide snapshot the (lock-free) decision was computed against
         (#339). Under the write lock, BEFORE the stream read, every mutable field is RE-READ and
