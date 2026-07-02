@@ -5,7 +5,9 @@
 # finding, which fails the CI secret-scan job.
 #
 # Keep the allowlist tight: every entry needs a one-line reason. Do NOT add broad
-# path regexes — prefer scoping to a specific file or a specific stopword.
+# path regexes (e.g. an entire tests/ tree) — that would hide a REAL secret
+# accidentally committed to a test file. Scope any path entry to a specific known
+# fixture file, or prefer a stopword that matches only the dummy token's content.
 
 # Pull in gitleaks' maintained default rules (the `useDefault` mechanism).
 [extend]
@@ -14,16 +16,21 @@ useDefault = true
 [allowlist]
 description = "Documented false positives for the algua repository"
 
-# Test/fixture credentials are dummy values, never real secrets. Scope this to the
-# test tree only so real leaks elsewhere are still caught.
-paths = [
-  '''(^|/)tests?/.*''',
-]
-
-# Common non-secret placeholder tokens used in docs/fixtures.
+# Content-scoped stopwords: a finding is allowlisted only when the matched secret
+# itself contains one of these placeholder markers, so a real secret sitting next
+# to them in the same file is still caught. Add file-scoped `paths` entries only
+# for a specific fixture, never a whole directory.
 stopwords = [
   "example",
   "dummy",
   "placeholder",
   "changeme",
+]
+
+# File-scoped path allowlist for a single known fixture. This test asserts the
+# registry redactor masks provider-style keys, so it embeds an OBVIOUSLY FAKE
+# placeholder key (sk-abcdefghij1234567890). Scoped to this ONE file so real
+# secrets elsewhere (including other test files) are still caught. — tracking: #395
+paths = [
+  '''tests/registry/test_negative_results\.py''',
 ]
