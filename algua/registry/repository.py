@@ -174,14 +174,48 @@ def kb_metadata(rec: StrategyRecord) -> dict:
     }
 
 
-class StrategyRepository(Protocol):
-    """Persistence seam for the registry.
+# =============================================================================
+# Narrow role protocols (#334, ISP).
+#
+# The single 46-method ``StrategyRepository`` Protocol below is composed from these
+# cohesive, bounded-context slices so a caller can depend on ONLY the role it uses
+# (e.g. a read-only consumer takes ``StrategyReader``, not the whole persistence seam).
+# ``StrategyRepository`` remains the exact structural superset, so broad cross-context
+# consumers keep depending on it unchanged. The sqlite implementation in
+# ``algua.registry.store`` is the only place that knows SQL and structurally satisfies
+# every slice below; swapping the backing store means writing another implementation,
+# not touching policy code.
+# =============================================================================
 
-    The lifecycle policy (transitions, approvals) depends on this Protocol, never on a concrete
-    database driver. The sqlite implementation lives in ``algua.registry.store`` and is the only
-    place that knows SQL; swapping the backing store means writing another implementation, not
-    touching policy code.
-    """
+
+class StrategyReader(Protocol):
+    """Read a single strategy record — the cross-context read capability."""
+
+    def get(self, name: str) -> StrategyRecord:
+        """Return the strategy by name, or raise ``StrategyNotFound``."""
+        ...
+
+
+class StrategyLister(Protocol):
+    """List strategy records with optional filters."""
+
+    def list_strategies(
+        self,
+        stage: Stage | None = None,
+        *,
+        family: str | None = None,
+        tags: list[str] | None = None,
+        author: Author | None = None,
+        hypothesis_status: HypothesisStatus | None = None,
+    ) -> list[StrategyRecord]:
+        """List strategies, optionally filtered. Filters AND together; repeated ``tags`` means
+        all-of. ``author``/``hypothesis_status`` use COALESCE so NULL legacy rows match the
+        default. Ordered by insertion."""
+        ...
+
+
+class StrategyStore(StrategyReader, StrategyLister, Protocol):
+    """Strategy CRUD + organizational metadata + stage transitions."""
 
     def add(
         self,
@@ -201,10 +235,6 @@ class StrategyRepository(Protocol):
         """
         ...
 
-    def get(self, name: str) -> StrategyRecord:
-        """Return the strategy by name, or raise ``StrategyNotFound``."""
-        ...
-
     def update_metadata(
         self,
         name: str,
@@ -220,20 +250,6 @@ class StrategyRepository(Protocol):
         """Update only the supplied organizational-metadata fields (never the stage).
         ``add_tags``/``remove_tags`` mutate the tag set. Returns the updated record.
         """
-        ...
-
-    def list_strategies(
-        self,
-        stage: Stage | None = None,
-        *,
-        family: str | None = None,
-        tags: list[str] | None = None,
-        author: Author | None = None,
-        hypothesis_status: HypothesisStatus | None = None,
-    ) -> list[StrategyRecord]:
-        """List strategies, optionally filtered. Filters AND together; repeated ``tags`` means
-        all-of. ``author``/``hypothesis_status`` use COALESCE so NULL legacy rows match the
-        default. Ordered by insertion."""
         ...
 
     def backfill_metadata(
@@ -298,6 +314,10 @@ class StrategyRepository(Protocol):
         the check and the CAS orphans a position on a now-dormant strategy)."""
         ...
 
+
+class ApprovalLedger(Protocol):
+    """Human-approval records that pin an artifact identity for the live gate."""
+
     def record_approval(
         self,
         strategy_id: int,
@@ -321,6 +341,10 @@ class StrategyRepository(Protocol):
         dependency set. A ``None`` ``dependency_hash`` (no lockfile) never matches, and a stored
         row with a NULL ``dependency_hash`` never matches a concrete hash — both fail closed."""
         ...
+
+
+class SearchBreadthLedger(Protocol):
+    """Search-trial breadth + trial-Sharpe dispersion (the #211/#221 multiple-testing inputs)."""
 
     def record_search_trial(
         self, strategy_name: str, n_combos: int, grid_json: str,
@@ -350,6 +374,22 @@ class StrategyRepository(Protocol):
         """Sum of ``n_combos`` across every recorded ``search_trials`` row for the strategy NAME —
         the cumulative count of parameter combinations searched in this family (0 if none)."""
         ...
+
+    def windowed_search_combos(self, window_days: int) -> int:
+        """Sum of ``n_combos`` across ALL strategies' ``search_trials`` recorded within the trailing
+        ``window_days`` — funnel-wide search effort for the breadth wall (0 if none)."""
+        ...
+
+    def search_trials_fingerprint(self) -> tuple[int, int]:
+        """``(COUNT(*), COALESCE(MAX(id), 0))`` over ALL ``search_trials`` rows. Because that table
+        is append-only (INSERT-only, AUTOINCREMENT PK), this pair strictly increases on every
+        insert and so uniquely fingerprints the entire row set — the row-identity half of the #339
+        funnel CAS."""
+        ...
+
+
+class HoldoutLedger(Protocol):
+    """Single-use holdout-window reservations/burns + OOS return-vector persistence."""
 
     def reserve_holdout(
         self,
@@ -431,10 +471,9 @@ class StrategyRepository(Protocol):
         """
         ...
 
-    def windowed_search_combos(self, window_days: int) -> int:
-        """Sum of ``n_combos`` across ALL strategies' ``search_trials`` recorded within the trailing
-        ``window_days`` — funnel-wide search effort for the breadth wall (0 if none)."""
-        ...
+
+class GateLedger(Protocol):
+    """Research/shortlist gate evaluations + the LORD++ FDR alpha-wealth stream."""
 
     def record_gate_evaluation(
         self,
@@ -482,6 +521,73 @@ class StrategyRepository(Protocol):
         the recomputed (code, config, dependency), or None. A human row and a NULL
         ``dependency_hash`` are never consumable tokens — fail-closed."""
         ...
+
+    def fdr_stream_state(self) -> FdrStreamState | None:
+        """Read the LORD++ FDR stream scoped to the cohort the NEXT binding test will join (#324):
+        all ``gate_evaluations`` rows where ``fdr_binding=1``, ordered by ``id`` and partitioned
+        into cohorts of ``FDR_COHORT_SIZE`` by (``fdr_cohort``, ``fdr_test_index``).
+
+        Returns ``FdrStreamState(t, discovery_indices, cohort_index, cohorts_completed,
+        binding_tests, discoveries)`` where ``t`` is the next test's WITHIN-COHORT position,
+        ``discovery_indices`` are that cohort's in-cohort rejection positions (all < ``t``), and
+        the audit counters describe lifetime progress. Returns ``None`` (fail-closed) on any
+        integrity failure: a binding row with NULL or non-finite
+        ``fdr_p_value``/``fdr_alpha_level``,
+        ``fdr_rejected`` not in {0, 1}, NULL ``fdr_cohort``, NULL or non-positive
+        ``fdr_test_index``, or within-cohort ``fdr_test_index`` not contiguous 1..k in ``id`` order,
+        or a cohort exceeding ``FDR_COHORT_SIZE``. Rows with ``fdr_binding`` NULL or 0 are invisible
+        (legacy-safe). A partially-filled cohort whose max is < ``FDR_COHORT_SIZE`` is the current
+        cohort; a full cohort seals and the next test opens ``cohort_index + 1`` at ``t = 1``."""
+        ...
+
+    def record_gate_with_fdr_and_maybe_promote(
+        self,
+        rec: StrategyRecord,
+        *,
+        gate_row: dict[str, Any],
+        p_value: float | None,
+        funnel: FunnelSnapshot,
+        level_fn: Callable[[int, list[int]], float],
+        fdr_alpha: float,
+        actor: Actor,
+        reason: str | None = None,
+    ) -> FdrGateOutcome:
+        """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
+        ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
+        the stream-state SELECT through the INSERT + stage CAS).
+
+        ``gate_row`` carries ``record_gate_evaluation``'s keyword arguments (including the
+        provisional ``passed`` flag). ``p_value`` is ``1 − dsr_confidence`` when the row is
+        FDR-binding (``dsr_binding=True`` AND ``dsr_confidence`` is finite); ``None`` means
+        non-binding and FDR is skipped entirely for this row.
+
+        When binding: reads the prior stream state UNDER the write lock — SCOPED to the cohort the
+        next test joins (#324) — computes ``α_t = level_fn(prior.t, prior.discovery_indices)`` where
+        ``prior.t`` is the within-cohort position (1..FDR_COHORT_SIZE), ``fdr_rejected =
+        (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND fdr_rejected``. The row is
+        inserted with ``fdr_cohort = prior.cohort_index``, ``fdr_test_index = prior.t``, and
+        ``passed = final_passed`` (never the provisional value — ``find_consumable_gate_evaluation``
+        reads this column). If ``final_passed`` is True, ``rec`` is atomically advanced to
+        ``candidate``. ``fdr_alpha`` (the scalar FDR level, injected from ``promotion.py`` to keep
+        ``algua/registry`` free of ``algua/research`` imports) feeds the AUDIT-ONLY exposure block
+        (``fdr_expected_false_discoveries = fdr_alpha × cohorts_completed``); it never changes the
+        pass/fail decision.
+
+        ``funnel`` is the funnel-wide snapshot the (lock-free) decision was computed against
+        (#339). Under the write lock, BEFORE the stream read, every mutable field is RE-READ and
+        CAS-verified; on any drift the whole transaction rolls back and raises ``FunnelDriftError``,
+        so a committed decision is provably a pure function of ONE funnel snapshot (serializable).
+
+        TOP-LEVEL ONLY: raises ``RuntimeError`` if called inside an open transaction (mirrors
+        ``reserve_holdout``). Crash semantics: a process crash before commit rolls back both
+        the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy.
+        """
+        ...
+
+
+class ForwardGateLedger(Protocol):
+    """Forward-test gate evaluations + the paper -> forward_tested atomic promotion + live-wall
+    certificate selection (#124)."""
 
     def record_forward_gate_evaluation(
         self,
@@ -569,78 +675,9 @@ class StrategyRepository(Protocol):
         (#124). A NULL ``dependency_hash`` matches nothing — fail-closed."""
         ...
 
-    def fdr_stream_state(self) -> FdrStreamState | None:
-        """Read the LORD++ FDR stream scoped to the cohort the NEXT binding test will join (#324):
-        all ``gate_evaluations`` rows where ``fdr_binding=1``, ordered by ``id`` and partitioned
-        into cohorts of ``FDR_COHORT_SIZE`` by (``fdr_cohort``, ``fdr_test_index``).
 
-        Returns ``FdrStreamState(t, discovery_indices, cohort_index, cohorts_completed,
-        binding_tests, discoveries)`` where ``t`` is the next test's WITHIN-COHORT position,
-        ``discovery_indices`` are that cohort's in-cohort rejection positions (all < ``t``), and
-        the audit counters describe lifetime progress. Returns ``None`` (fail-closed) on any
-        integrity failure: a binding row with NULL or non-finite
-        ``fdr_p_value``/``fdr_alpha_level``,
-        ``fdr_rejected`` not in {0, 1}, NULL ``fdr_cohort``, NULL or non-positive
-        ``fdr_test_index``, or within-cohort ``fdr_test_index`` not contiguous 1..k in ``id`` order,
-        or a cohort exceeding ``FDR_COHORT_SIZE``. Rows with ``fdr_binding`` NULL or 0 are invisible
-        (legacy-safe). A partially-filled cohort whose max is < ``FDR_COHORT_SIZE`` is the current
-        cohort; a full cohort seals and the next test opens ``cohort_index + 1`` at ``t = 1``."""
-        ...
-
-    def record_gate_with_fdr_and_maybe_promote(
-        self,
-        rec: StrategyRecord,
-        *,
-        gate_row: dict[str, Any],
-        p_value: float | None,
-        funnel: FunnelSnapshot,
-        level_fn: Callable[[int, list[int]], float],
-        fdr_alpha: float,
-        actor: Actor,
-        reason: str | None = None,
-    ) -> FdrGateOutcome:
-        """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
-        ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
-        the stream-state SELECT through the INSERT + stage CAS).
-
-        ``gate_row`` carries ``record_gate_evaluation``'s keyword arguments (including the
-        provisional ``passed`` flag). ``p_value`` is ``1 − dsr_confidence`` when the row is
-        FDR-binding (``dsr_binding=True`` AND ``dsr_confidence`` is finite); ``None`` means
-        non-binding and FDR is skipped entirely for this row.
-
-        When binding: reads the prior stream state UNDER the write lock — SCOPED to the cohort the
-        next test joins (#324) — computes ``α_t = level_fn(prior.t, prior.discovery_indices)`` where
-        ``prior.t`` is the within-cohort position (1..FDR_COHORT_SIZE), ``fdr_rejected =
-        (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND fdr_rejected``. The row is
-        inserted with ``fdr_cohort = prior.cohort_index``, ``fdr_test_index = prior.t``, and
-        ``passed = final_passed`` (never the provisional value — ``find_consumable_gate_evaluation``
-        reads this column). If ``final_passed`` is True, ``rec`` is atomically advanced to
-        ``candidate``. ``fdr_alpha`` (the scalar FDR level, injected from ``promotion.py`` to keep
-        ``algua/registry`` free of ``algua/research`` imports) feeds the AUDIT-ONLY exposure block
-        (``fdr_expected_false_discoveries = fdr_alpha × cohorts_completed``); it never changes the
-        pass/fail decision.
-
-        ``funnel`` is the funnel-wide snapshot the (lock-free) decision was computed against
-        (#339). Under the write lock, BEFORE the stream read, every mutable field is RE-READ and
-        CAS-verified; on any drift the whole transaction rolls back and raises ``FunnelDriftError``,
-        so a committed decision is provably a pure function of ONE funnel snapshot (serializable).
-
-        TOP-LEVEL ONLY: raises ``RuntimeError`` if called inside an open transaction (mirrors
-        ``reserve_holdout``). Crash semantics: a process crash before commit rolls back both
-        the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy.
-        """
-        ...
-
-    def search_trials_fingerprint(self) -> tuple[int, int]:
-        """``(COUNT(*), COALESCE(MAX(id), 0))`` over ALL ``search_trials`` rows. Because that table
-        is append-only (INSERT-only, AUTOINCREMENT PK), this pair strictly increases on every
-        insert and so uniquely fingerprints the entire row set — the row-identity half of the #339
-        funnel CAS."""
-        ...
-
-    # -------------------------------------------------------------------------
-    # Factor-evaluation ledger (#219, slice E of #140)
-    # -------------------------------------------------------------------------
+class FactorLedger(Protocol):
+    """Standalone-factor evaluation ledger (#219, slice E of #140)."""
 
     def record_factor_evaluation(
         self,
@@ -699,9 +736,9 @@ class StrategyRepository(Protocol):
         """Write the correction columns (n_hypotheses, dsr_confidence, significant) to the row."""
         ...
 
-    # -------------------------------------------------------------------------
-    # Family registry + parentage DAG (#222)
-    # -------------------------------------------------------------------------
+
+class FamilyGraph(Protocol):
+    """Family registry + parentage DAG + family-scoped breadth accounting (#222)."""
 
     def create_family(self, name: str, actor: str, created_by_strategy: str | None = None) -> int:
         """Create a new family and record the family_created event. Return the new family id."""
@@ -754,9 +791,9 @@ class StrategyRepository(Protocol):
         """All family ids → names."""
         ...
 
-    # -------------------------------------------------------------------------
-    # Backtest returns persistence (#222, Task 7)
-    # -------------------------------------------------------------------------
+
+class BacktestReturnsLedger(Protocol):
+    """Backtest return-series persistence (#222, Task 7)."""
 
     def persist_backtest_returns(
         self,
@@ -774,3 +811,29 @@ class StrategyRepository(Protocol):
         """Load the most recent return series for a strategy, or None.
         Returns a ``pd.Series | None`` (typed ``Any`` here to avoid the pandas import)."""
         ...
+
+
+class StrategyRepository(
+    StrategyStore,
+    ApprovalLedger,
+    SearchBreadthLedger,
+    HoldoutLedger,
+    GateLedger,
+    ForwardGateLedger,
+    FactorLedger,
+    FamilyGraph,
+    BacktestReturnsLedger,
+    Protocol,
+):
+    """Persistence seam for the registry — the structural union of all role protocols above.
+
+    The lifecycle policy (transitions, approvals) depends on this Protocol or on one of its narrow
+    slices, never on a concrete database driver. The sqlite implementation lives in
+    ``algua.registry.store`` and is the only place that knows SQL; swapping the backing store means
+    writing another implementation, not touching policy code. Cross-context consumers depend on this
+    full seam; single-context consumers depend on the narrow role protocol they use (ISP, #334).
+    """
+
+
+class ApprovalRepository(StrategyReader, ApprovalLedger, Protocol):
+    """The slice the approval workflow depends on: read a strategy + record/verify approvals."""

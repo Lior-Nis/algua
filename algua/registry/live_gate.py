@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from algua.contracts.types import LiveAuthorization, PendingLiveAuthorization
-from algua.registry.repository import StrategyRepository
+from algua.registry.repository import StrategyReader
 
 _NAMESPACE = "algua-go-live"
 _TTL = timedelta(minutes=10)
@@ -151,7 +151,7 @@ class LiveAuthorizationError(RuntimeError):
     """The current live artifact is NOT covered by a re-verifiable human go-live signature."""
 
 
-def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyRepository, name: str,
+def verify_live_authorization(conn: sqlite3.Connection, repo: StrategyReader, name: str,
                               allowed_signers_path: Path) -> LiveAuthorization:
     """Trade-time wall: prove the strategy's CURRENT artifact is human-authorized for live by
     re-verifying a stored signature against the CURRENT trust anchor. Trusts nothing forgeable —
