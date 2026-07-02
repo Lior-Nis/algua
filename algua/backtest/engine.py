@@ -11,6 +11,7 @@ from algua.backtest.delisting import DelistingExitError, DelistingRecord, apply_
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.result import BacktestResult, config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
+from algua.contracts.model_types import normalize_as_of
 from algua.contracts.types import (
     FUNDAMENTALS_AS_OF_KEY,
     FUNDAMENTALS_COLUMNS,
@@ -607,6 +608,36 @@ def simulate(
     if bars.empty:
         raise BacktestError("provider returned no bars for the universe/period")
 
+    # Model lane PIT guard (#376): a fixed-per-run model is point-in-time safe ONLY if it predates
+    # the whole evaluated period. Enforced HERE — the mandatory simulate() boundary shared by run()
+    # and walk_forward() — so a direct programmatic call can never run a model that saw data after
+    # the first decision bar. training_as_of and the first bar are normalized to comparable UTC
+    # instants; an unparseable training_as_of fails closed.
+    if strategy.config.needs_model:
+        assert strategy.config.model_ref is not None
+        first_bar = pd.Timestamp(bars.index.min())
+        first_bar_utc = (
+            first_bar.tz_localize("UTC") if first_bar.tzinfo is None
+            else first_bar.tz_convert("UTC")
+        )
+        try:
+            training_as_of = normalize_as_of(strategy.config.model_ref.training_as_of)
+        except (ValueError, TypeError) as exc:
+            raise BacktestError(
+                f"strategy {strategy.name!r}: model "
+                f"{strategy.config.model_ref.name!r} v{strategy.config.model_ref.version} has an "
+                f"unparseable training_as_of {strategy.config.model_ref.training_as_of!r} "
+                f"(fail closed): {exc}"
+            ) from exc
+        if training_as_of > first_bar_utc:
+            raise BacktestError(
+                f"strategy {strategy.name!r}: model {strategy.config.model_ref.name!r} "
+                f"v{strategy.config.model_ref.version} has training_as_of "
+                f"{strategy.config.model_ref.training_as_of} AFTER the first decision bar "
+                f"{first_bar_utc.date().isoformat()} — that model saw future data (look-ahead); "
+                f"refusing to backtest (fail closed)"
+            )
+
     adj = adj_grid(bars)
 
     if universe_by_date is None:
@@ -747,6 +778,14 @@ def run(
         news_snapshot=(
             getattr(news_provider, "snapshot_id", None)
             if strategy.config.needs_news else None
+        ),
+        # Model provenance (#376): the pinned model_ref (name/version/digest/training_as_of/
+        # provenance_digest) is stamped HERE, at the same mandatory boundary as the run, so a
+        # programmatic caller cannot get an unstamped result. None for non-model strategies.
+        model_ref=(
+            strategy.config.model_ref.as_dict()
+            if strategy.config.needs_model and strategy.config.model_ref is not None
+            else None
         ),
         delisting_snapshot=delisting_snapshot,
         forced_exits=forced_exits,

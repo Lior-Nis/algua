@@ -12,7 +12,9 @@ import numpy as np
 from algua.backtest.result import BacktestResult, series_frame
 from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
+from algua.contracts.model_types import ModelVersion
 from algua.data.files import frame_to_parquet_bytes
+from algua.models import register
 
 # ---------------------------------------------------------------------------
 # Protocol (#45)
@@ -198,6 +200,83 @@ def log_sweep(result: SweepResult, *, tracking_uri: str) -> str:
                 })
                 mlflow.set_tags({"kind": "sweep_combo", "strategy": result.strategy})
         return parent.info.run_id
+
+
+def log_model(
+    name: str,
+    artifact_bytes: bytes,
+    *,
+    tracking_uri: str,
+    training_snapshot_id: str | None,
+    training_as_of: str,
+    code_hash: str | None,
+    hyperparameters: dict[str, Any] | None = None,
+    seed: int | None = None,
+    eval_report: dict[str, Any] | None = None,
+    root: Path | None = None,
+) -> ModelVersion:
+    """Register a trained model artifact as a new immutable version and mirror it to MLflow (#376).
+
+    Ordering + failure contract (the model registry is the authoritative system-of-record, MLflow
+    is only a mirror):
+      1. `algua.models.register(...)` — if this fails, the failure PROPAGATES (nothing was
+         durably registered, so there is nothing to mirror).
+      2. best-effort MLflow: log the artifact + provenance tags. If this fails AFTER a successful
+         registration, the error is swallowed (the version is already durably in the registry) and
+         the `ModelVersion` is returned.
+    So the registry and the tracker can diverge only as "registered but not mirrored", never
+    "mirrored but not registered".
+    """
+    version = register(
+        name,
+        artifact_bytes,
+        training_snapshot_id=training_snapshot_id,
+        training_as_of=training_as_of,
+        code_hash=code_hash,
+        hyperparameters=hyperparameters,
+        seed=seed,
+        eval_report=eval_report,
+        root=root,
+    )
+    try:
+        import mlflow
+
+        with _run(f"model:{name}", tracking_uri):
+            mlflow.log_params({
+                "model_name": version.name,
+                "model_version": version.version,
+                "digest": version.digest,
+                "training_snapshot_id": version.training_snapshot_id,
+                "training_as_of": version.training_as_of,
+                "code_hash": version.code_hash,
+                "seed": version.seed,
+                "provenance_digest": version.provenance_digest,
+            })
+            mlflow.set_tags({
+                "kind": "model", "model_name": version.name,
+                "model_version": str(version.version), "digest": version.digest,
+                "provenance_digest": version.provenance_digest,
+            })
+            with tempfile.TemporaryDirectory() as d:
+                p = Path(d) / "artifact.bin"
+                p.write_bytes(artifact_bytes)
+                mlflow.log_artifact(str(p))
+            mlflow.log_dict(
+                {
+                    "name": version.name, "version": version.version, "digest": version.digest,
+                    "created_at": version.created_at,
+                    "training_snapshot_id": version.training_snapshot_id,
+                    "training_as_of": version.training_as_of, "code_hash": version.code_hash,
+                    "hyperparameters": version.hyperparameters, "seed": version.seed,
+                    "eval_report": version.eval_report,
+                    "provenance_digest": version.provenance_digest,
+                },
+                "model_version.json",
+            )
+    except Exception:  # noqa: BLE001 — the registry write is authoritative; a mirror failure must
+        # NOT lose the durable registration. The version is already committed to the registry.
+        pass
+    return version
 
 
 def log_walk_forward(
