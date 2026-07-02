@@ -1,89 +1,137 @@
+"""Promotion gate (backtested -> candidate) composer (#335 extraction).
+
+The pure-maths responsibilities that ``evaluate_gate`` composes now live in cohesive sibling
+modules (mirroring the ``backtest/bootstrap.py`` / ``backtest/neff.py`` precedent):
+
+- ``algua.research.regime``   — volatility-tertile regime robustness + CAPM idiosyncratic-alpha.
+- ``algua.research.fdr_lord``  — LORD++ online-FDR γ-sequence, cohort restarts, and α_t level.
+- ``algua.research.dsr``       — DSR SR*/confidence, dispersion floor, effective funnel breadth.
+- ``algua.research.haircut``   — the deflated-Sharpe multiple-testing haircut.
+- ``algua.research._constants`` — the shared holdout-power floor (MIN_HOLDOUT_OBSERVATIONS).
+
+This module keeps the gate-orchestration surface: ``GateCriteria``, ``GateDecision``, the
+declarative ``GateSpec``/``GATE_SPECS``, the orchestration-level constants, and ``evaluate_gate``.
+It RE-EXPORTS every moved name (see ``__all__``) so ``from algua.research.gates import X`` continues
+to resolve byte-identically for all existing call sites (promotion.py, factor_fdr.py, store.py, the
+CLIs, and the test suite). Pure refactor — no gate criterion, threshold, or
+fail-closed/tighten-only semantic changed.
+"""
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple
-
-import numpy as np
-import pandas as pd
-from scipy.stats import norm as _norm
+from typing import Any
 
 from algua.backtest._constants import ANN
-from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.walkforward import WalkForwardResult
+from algua.research._constants import MIN_HOLDOUT_OBSERVATIONS
+from algua.research.dsr import (
+    DSR_ALPHA,
+    DSR_BOOTSTRAP_LOWER_QUANTILE,
+    DSR_BOOTSTRAP_RESAMPLES,
+    EULER_MASCHERONI,
+    MAX_BOOTSTRAP_BLOCK_LEN_FRACTION,
+    MIN_CORR_OVERLAP_BARS,
+    MIN_FUNNEL_FLOOR_STRATEGIES,
+    MIN_N_EFF_SIBLINGS,
+    RHO_BAR_SHRINKAGE_K,
+    dsr_confidence,
+    dsr_sr_star,
+    dsr_sr_star_annualized,
+    effective_funnel_breadth,
+    floored_trial_var_per_period,
+)
+from algua.research.fdr_lord import (
+    _LORD_GAMMA,
+    FDR_ALPHA,
+    FDR_COHORT_SIZE,
+    FDR_GAMMA_TRUNCATION,
+    FDR_W0,
+    _compute_lord_gamma,
+    fdr_cohort_position,
+    lord_plus_plus_level,
+)
+from algua.research.haircut import sharpe_haircut
+from algua.research.regime import (
+    IR_MIN_APPRAISAL_RATIO,
+    IR_MIN_OVERLAP_BARS,
+    IR_MIN_VOL,
+    MIN_REGIME_OBSERVATIONS,
+    MIN_REGIME_OVERLAP_BARS,
+    MIN_REGIME_SHARPE,
+    MIN_REGIME_VOL,
+    N_REGIMES,
+    VOL_ROLLING_WINDOW,
+    InformationRatioResult,
+    RegimeRobustnessResult,
+    RegimeSlice,
+    information_ratio,
+    regime_robustness_check,
+    regime_splits,
+)
+
+# Re-export surface: every name below was previously defined in this module and is imported directly
+# from ``algua.research.gates`` by production code and tests. Listing them in ``__all__`` keeps the
+# import compatibility explicit and silences the "imported but unused" lint on the re-exports.
+__all__ = [
+    "ANN",
+    "DSR_ALPHA",
+    "DSR_BOOTSTRAP_LOWER_QUANTILE",
+    "DSR_BOOTSTRAP_RESAMPLES",
+    "DOMINANCE_AUDIT_MIN_PROMOTIONS",
+    "DOMINANCE_AUDIT_MIN_WINDOW_DAYS",
+    "DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS",
+    "EULER_MASCHERONI",
+    "FDR_ALPHA",
+    "FDR_COHORT_SIZE",
+    "FDR_GAMMA_TRUNCATION",
+    "FDR_W0",
+    "FUNNEL_WINDOW_DAYS",
+    "GATE_SPECS",
+    "GateCriteria",
+    "GateDecision",
+    "GateSpec",
+    "InformationRatioResult",
+    "IR_MIN_APPRAISAL_RATIO",
+    "IR_MIN_OVERLAP_BARS",
+    "IR_MIN_VOL",
+    "MAX_BOOTSTRAP_BLOCK_LEN_FRACTION",
+    "MIN_CORR_OVERLAP_BARS",
+    "MIN_FUNNEL_FLOOR_STRATEGIES",
+    "MIN_HOLDOUT_OBSERVATIONS",
+    "MIN_N_EFF_SIBLINGS",
+    "MIN_REGIME_OBSERVATIONS",
+    "MIN_REGIME_OVERLAP_BARS",
+    "MIN_REGIME_SHARPE",
+    "MIN_REGIME_VOL",
+    "N_REGIMES",
+    "PHASE3_COMPONENT_MASK",
+    "RHO_BAR_SHRINKAGE_K",
+    "RegimeRobustnessResult",
+    "RegimeSlice",
+    "VOL_ROLLING_WINDOW",
+    "WalkForwardResult",
+    "_LORD_GAMMA",
+    "_compute_lord_gamma",
+    "dsr_confidence",
+    "dsr_sr_star",
+    "dsr_sr_star_annualized",
+    "effective_funnel_breadth",
+    "evaluate_gate",
+    "fdr_cohort_position",
+    "floored_trial_var_per_period",
+    "information_ratio",
+    "lord_plus_plus_level",
+    "regime_robustness_check",
+    "regime_splits",
+    "sharpe_haircut",
+]
 
 # Funnel-level multiple-testing window (Wall A). Protected constant, not an agent-tunable knob
 # (relaxing it would weaken the gate). Rolling window keeps the bar bounded; the wait-out-the-window
 # trade-off is accepted and auditable via search_trials.created_at.
 FUNNEL_WINDOW_DAYS = 90
-
-# Minimum holdout sample (Wall C). A holdout with fewer observations is underpowered and fails
-# closed — complements the 1/sqrt(T) haircut, which is ZERO at N=1. ~one trading quarter. Protected.
-MIN_HOLDOUT_OBSERVATIONS = 63
-
-# DSR evidence layer (#211, Phase 1). Protected constants — relaxing them weakens the gate.
-DSR_ALPHA = 0.05  # require >= 95% confidence the true Sharpe beats the selection-inflated benchmark
-EULER_MASCHERONI = 0.5772156649015329  # gamma_E, the DSR expected-max weight (NOT e^-1)
-
-# Serial-dependence bootstrap (#221, Phase 3 Slice 2). Protected — relaxing weakens the gate.
-DSR_BOOTSTRAP_RESAMPLES = 2000            # stationary-bootstrap resample count (B)
-DSR_BOOTSTRAP_LOWER_QUANTILE = 0.05       # lower quantile of the bootstrap DSR-confidence dist.
-MAX_BOOTSTRAP_BLOCK_LEN_FRACTION = 0.5    # cap block length at max(1, floor(T * FRACTION))
-
-# Effective independent trials N_eff (#221, Phase 3 Slice 3). SHADOW-ONLY in Phase 3 — recorded in
-# the audit payload, never the binding DSR trial count (a lower N_eff would loosen the gate; it goes
-# binding only at Slice 5, bundled with haircut retirement). Protected — load-bearing from Slice 5.
-MIN_N_EFF_SIBLINGS = 5          # min overlapping-OOS sibling streams to attempt an N_eff estimate
-MIN_CORR_OVERLAP_BARS = 21      # min date-aligned shared bars per sibling pair to estimate a corr
-RHO_BAR_SHRINKAGE_K = 1.0       # SE multiplier for the conservative (lower-bound) rho_bar
-
-# Funnel-wide dispersion floor (#221, Phase 3 Slice 0). Min finite per-strategy trial-Sharpe
-# variances needed to form a meaningful cross-strategy floor. Below this, the floor is unavailable
-# and the DSR falls back to own-sweep variance (Phase-1 behavior). Protected — raising it weakens
-# the floor's availability; the floor can only ever TIGHTEN the gate, so its absence is
-# conservative.
-MIN_FUNNEL_FLOOR_STRATEGIES = 5
-
-# Multi-regime robustness (#221, Phase 3 Slice 4). Protected — relaxing weakens the gate.
-N_REGIMES = 3                  # market-volatility tertiles (low/medium/high)
-MIN_REGIME_OBSERVATIONS = 21   # per-regime power floor (underpowered regimes are dropped)
-MIN_REGIME_SHARPE = 0.0        # relaxed per-regime Sharpe bar (paired with the vol-floor drop)
-# Annualized-vol floor: a regime at/below this is "effectively constant" and is DROPPED (not
-# counted as a surviving pass). An exact `== 0.0` test failed open (#248): a constant-but-NONZERO
-# return series produces a catastrophic-cancellation residual vol (~1e-18 — not exactly 0.0) and a
-# Sharpe ~1e16 that trivially clears MIN_REGIME_SHARPE=0.0. The floor sits orders of magnitude above
-# float64 cancellation noise and far below any real strategy vol (>=~1e-2). Protected — raising it
-# weakens the gate. `not (vol > MIN_REGIME_VOL)` also drops NaN vol (another degenerate case).
-MIN_REGIME_VOL = 1e-9
-MIN_REGIME_OVERLAP_BARS = 63   # min holdout dates with a valid trailing market-vol for the check
-VOL_ROLLING_WINDOW = 21        # trailing bars for the benchmark realized-vol estimate
-
-# Market-beta / idiosyncratic-alpha screen (#328). Protected — relaxing weakens the gate.
-# All gate Sharpes are RAW (risk_free=0, no benchmark subtraction), so a persistently net-long or
-# LEVERED-market-beta book in a bull market posts a HIGH raw Sharpe with ~ZERO true alpha and is
-# promoted. This tighten-only AND-check regresses the strategy's OOS holdout returns on the SAME
-# PIT equal-weighted cross-sectional `market_returns` benchmark the regime check already reuses
-# (single-factor CAPM: r_strat = alpha + beta*r_mkt + eps) and requires the ANNUALIZED
-# idiosyncratic APPRAISAL RATIO (residual alpha / residual vol) to clear a floor. A pure/levered
-# beta book has alpha~=0 and residual~=0 -> appraisal~=0 -> FAILS; a market-neutral genuine-alpha
-# book has beta~=0 and appraisal ~= its raw Sharpe -> PASSES. Beta is estimated ONLY over the
-# date-joined holdout window (no look-ahead). SCOPE: this nets out MARKET beta only, NOT style
-# factors (size/value/momentum) — the platform has no factor-return series (deferred follow-up).
-IR_MIN_OVERLAP_BARS = MIN_HOLDOUT_OBSERVATIONS   # 63; min date-joined holdout bars to bind
-# Pragmatic annualized idiosyncratic-IR floor, NOT a significance test (statistical significance +
-# multiple-testing are owned by the orthogonal DSR + Sharpe-haircut AND-checks). 0.3 matches the
-# platform's existing 0.3 Sharpe-floor family (the forward gate uses max(0.5*holdout, 0.3)); it sits
-# BELOW the 0.5 raw holdout-Sharpe bar so a genuine low-beta alpha still clears it, but far above
-# the ~0 idiosyncratic appraisal of pure/levered market beta. Over a 63-bar holdout the estimate
-# carries material sampling error — a structural beta-dominance screen, not an alpha significance
-# test. Protected — lowering it weakens the gate.
-IR_MIN_APPRAISAL_RATIO = 0.3
-# Annualized-vol floor for BOTH the market series (beta denominator) and the residual (appraisal
-# denominator). Identical to MIN_REGIME_VOL: ~10 orders of magnitude below any real strategy vol, so
-# it only trips on a numerically-degenerate (near-constant market, or perfectly-explained residual)
-# series — which then fails the check CLOSED (an armed-but-unusable regression is not a pass).
-IR_MIN_VOL = MIN_REGIME_VOL
 
 # Dominance-audit predeclaration (#221, Phase 3 Slice 4). CODEOWNERS-protected constants — these
 # thresholds are committed HERE (before any audit data accumulates) so the Slice 5
@@ -104,433 +152,6 @@ DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS = 0  # haircut-blocked-but-DSR-passed ca
 PHASE3_COMPONENT_MASK = 0b11111  # bits 0-4 = Phase 3 slices 0-4, all five active
 
 
-class RegimeSlice(NamedTuple):
-    """One volatility-tertile regime slice of the holdout period.
-
-    ``dropped_reason`` is None when the slice is usable; ``"too_short"`` when it has fewer
-    than the observation floor; ``"zero_vol"`` when ann_volatility <= MIN_REGIME_VOL (effectively
-    constant, or NaN) in the robustness check (set by ``regime_robustness_check``, not
-    ``regime_splits``).
-    """
-
-    regime_index: int
-    returns: list[float]
-    n_bars: int
-    dropped_reason: str | None  # None | "too_short" | "zero_vol"
-
-
-class RegimeRobustnessResult(NamedTuple):
-    """Outcome of the per-regime robustness check."""
-
-    passed: bool
-    n_attempted: int
-    n_surviving: int
-    per_regime_sharpes: list[float | None]  # None for dropped regimes, float for survivors
-
-
-def regime_splits(
-    strategy_returns: list[float],
-    strategy_dates: list[str],
-    market_returns: list[float],
-    market_dates: list[str],
-    *,
-    n_regimes: int,
-    vol_window: int,
-) -> tuple[list[RegimeSlice], int]:
-    """Partition holdout dates into ``n_regimes`` volatility-tertile buckets.
-
-    Algorithm:
-    1. Build ``market_date -> market_return`` and ``strategy_date -> strategy_return`` dicts.
-    2. Compute trailing-``vol_window`` realized vol of the MARKET series.  For each market
-       date index ``i`` with ``i >= vol_window - 1``, the window is the ``vol_window`` returns
-       ending at ``i`` (inclusive): ``market_returns[i - vol_window + 1 : i + 1]``.
-       Vol = annualized std (ddof=1) of log(1+r) for r in the window.  Guard: if any
-       ``1 + r <= 0`` the entire date is skipped (no valid log).  Dates with ``i < vol_window - 1``
-       have no vol label and are excluded from the join.
-    3. Inner-join: market dates that HAVE a valid vol label AND appear in ``strategy_dates``.
-       ``overlap_n = len(joined_dates)``.  Empty join returns ``([], 0)``.
-    4. Assign tertiles by market-vol VALUE: thresholds ``t1 = quantile(vols, 1/3)`` and
-       ``t2 = quantile(vols, 2/3)``; regime 0 if ``vol <= t1``, regime 2 if ``vol > t2``, else
-       regime 1.  Value-based (not equal-count rank) so a degenerate/constant vol distribution
-       COLLAPSES — all dates fall into one tertile and the others are empty → dropped → fail-closed.
-       Group 0 = lowest-vol tertile, …, group n_regimes-1 = highest. Deterministic (no RNG).
-    5. For each regime, collect STRATEGY returns for that regime's dates (in date order).
-       ``RegimeSlice.dropped_reason`` is always ``None`` here; dropping is done by
-       ``regime_robustness_check``.
-
-    Returns ``(slices, overlap_n)``.  If ``overlap_n == 0`` returns ``([], 0)``.
-    ``slices`` always has exactly ``n_regimes`` entries when ``overlap_n > 0``.
-    """
-    # Step 1: build lookup dicts
-    strategy_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=False))
-
-    # Step 2: compute trailing-vol_window realized vol for each market date
-    m_dates_list = list(market_dates)
-    m_returns_list = list(market_returns)
-    vol_labels: dict[str, float] = {}
-    for i in range(len(m_dates_list)):
-        if i < vol_window - 1:
-            continue  # insufficient lookback
-        window = m_returns_list[i - vol_window + 1 : i + 1]
-        # Guard: every return must be FINITE and have 1+r > 0 to take log. A non-finite return
-        # (NaN/inf) must NOT produce a vol label — `1+r <= 0` is False for NaN, so check finiteness
-        # explicitly, else a NaN vol label would count toward overlap and poison np.quantile.
-        if any((not math.isfinite(r)) or (1.0 + r <= 0.0) for r in window):
-            continue
-        log_rets = [math.log(1.0 + r) for r in window]
-        std = float(np.std(log_rets, ddof=1))
-        vol = std * math.sqrt(ANN)
-        if not math.isfinite(vol):
-            continue  # fail-closed: a non-finite vol label is no label at all
-        vol_labels[m_dates_list[i]] = vol
-
-    # Step 3: inner-join with strategy_dates
-    joined: list[tuple[str, float]] = [
-        (d, vol_labels[d])
-        for d in vol_labels
-        if d in strategy_map
-    ]
-    overlap_n = len(joined)
-    if overlap_n == 0:
-        return ([], 0)
-
-    # Step 4: assign tertiles by market-vol VALUE (quantile thresholds), not by equal-count rank.
-    # This ensures a degenerate vol distribution collapses: if all vols are equal,
-    # t1 == t2 == that value, ALL dates satisfy vol <= t1 (regime 0), and regimes 1 & 2 are
-    # EMPTY (n_bars=0). Empty regimes are dropped by regime_robustness_check (too_short) ->
-    # n_surviving < 2 -> passed=False. That is the intended fail-closed behavior for constant vol.
-    #
-    # For a genuine low/mid/high spread, dates distribute across all 3 tertiles normally.
-    # Boundaries: regime 0: vol <= t1; regime 1: t1 < vol <= t2; regime 2: vol > t2.
-    # Deterministic: equal vols always resolve to the same regime (<=/>).
-    # The joined list is sorted by (vol, date) for order-independence before assignment.
-    joined_sorted = sorted(joined, key=lambda x: (x[1], x[0]))  # sort by (vol, date) asc
-    vols_array = np.array([x[1] for x in joined_sorted])
-    t1 = float(np.quantile(vols_array, 1.0 / n_regimes))
-    t2 = float(np.quantile(vols_array, 2.0 / n_regimes))
-
-    # Build per-regime date lists (in vol-sorted order, which matches joined_sorted)
-    regime_date_sets: list[list[str]] = [[] for _ in range(n_regimes)]
-    for date_str, vol in joined_sorted:
-        if vol <= t1:
-            regime_date_sets[0].append(date_str)
-        elif vol > t2:
-            regime_date_sets[n_regimes - 1].append(date_str)
-        else:
-            regime_date_sets[1].append(date_str)
-
-    # Step 5: build RegimeSlice for each regime — collect strategy returns in DATE order
-    slices: list[RegimeSlice] = []
-    for regime_idx, regime_dates_unordered in enumerate(regime_date_sets):
-        # ISO date strings sort lexicographically = chronologically
-        regime_dates = sorted(regime_dates_unordered)
-        regime_returns = [strategy_map[d] for d in regime_dates]
-        slices.append(RegimeSlice(
-            regime_index=regime_idx,
-            returns=regime_returns,
-            n_bars=len(regime_returns),
-            dropped_reason=None,
-        ))
-    return (slices, overlap_n)
-
-
-def regime_robustness_check(
-    slices: list[RegimeSlice],
-    *,
-    min_obs: int,
-    min_sharpe: float,
-) -> RegimeRobustnessResult:
-    """Check per-regime Sharpe robustness across volatility-tertile slices.
-
-    Drop rules (in order):
-    - ``n_bars < min_obs`` → ``dropped_reason = "too_short"``; ``per_regime_sharpe = None``.
-    - ``ann_volatility <= MIN_REGIME_VOL`` (effectively constant) or NaN → ``per_regime_sharpe =
-      None`` (the Sharpe is meaningless — a near-constant series' Sharpe explodes to ~±1e16 — and is
-      NEVER recorded; #248/#268). Such a regime is NOT a surviving pass. BUT its return direction is
-      still real: a degenerate regime that LOST money (``sum(returns) < 0``) forces ``passed=False``
-      (``degenerate_loss``) — dropping it would loosen the gate vs the old ``== 0.0`` code, whose
-      huge-negative Sharpe failed the AND-check. A flat/favorable degenerate regime is just dropped.
-
-    Passing rule:
-    - any degenerate LOSING regime → ``passed = False`` (a real per-regime loss, fail closed).
-    - ``n_surviving < 2`` → ``passed = False`` (cannot establish multi-regime evidence).
-    - Else ``passed = all(sharpe >= min_sharpe for surviving regimes)``.
-
-    ``per_regime_sharpes`` is aligned to the input ``slices`` list (None for dropped).
-    """
-    n_attempted = len(slices)
-    per_regime_sharpes: list[float | None] = []
-    surviving_sharpes: list[float] = []
-    degenerate_loss = False
-
-    for s in slices:
-        if s.n_bars < min_obs:
-            per_regime_sharpes.append(None)
-            continue
-        returns = pd.Series(s.returns)
-        m = metrics_from_returns(returns)
-        # An effectively-constant (or NaN-vol) regime has no reliable Sharpe — a catastrophic-
-        # cancellation residual vol (~1e-18 != 0.0, where `== 0.0` failed open, #248) yields a
-        # ~±1e16 Sharpe. `not (vol > floor)` catches that and NaN. We never record that explosive
-        # Sharpe (it would feed #268) — per_regime_sharpe is None. But the regime's RETURN direction
-        # is still real: a degenerate regime that LOST money is a true robustness failure and must
-        # force a fail — dropping it would LOOSEN the gate vs the old code (whose huge-negative
-        # Sharpe failed the AND-check). The loss proxy uses the SAME NaN-cleaned series metrics does
-        # (a raw sum() would be NaN for a NaN-bearing slice and silently skip the check, #248 r2). A
-        # flat/favorable degenerate regime carries no signal and is simply dropped.
-        if not (m["ann_volatility"] > MIN_REGIME_VOL):
-            if returns.dropna().sum() < 0.0:
-                degenerate_loss = True
-            per_regime_sharpes.append(None)
-            continue
-        sharpe = m["sharpe"]
-        per_regime_sharpes.append(sharpe)
-        surviving_sharpes.append(sharpe)
-
-    n_surviving = len(surviving_sharpes)
-    if n_surviving < 2 or degenerate_loss:
-        passed = False
-    else:
-        passed = all(sh >= min_sharpe for sh in surviving_sharpes)
-
-    return RegimeRobustnessResult(
-        passed=passed,
-        n_attempted=n_attempted,
-        n_surviving=n_surviving,
-        per_regime_sharpes=per_regime_sharpes,
-    )
-
-
-class InformationRatioResult(NamedTuple):
-    """Outcome of the single-factor CAPM idiosyncratic-alpha screen (#328).
-
-    ``degenerate`` True means the regression was armed (enough overlap) but UNUSABLE (constant
-    market, zero residual, or non-finite) — the caller fails the check CLOSED. Numeric fields are
-    None when unavailable/degenerate; ``market_beta`` / ``alpha_ann`` are still populated when
-    computable (audit visibility) even if a later stage is degenerate.
-    """
-
-    overlap_n: int
-    market_beta: float | None
-    alpha_ann: float | None          # annualized intercept (residual alpha)
-    residual_vol_ann: float | None   # annualized idiosyncratic (residual) volatility
-    appraisal_ratio: float | None    # annualized alpha_ann / residual_vol_ann
-    degenerate: bool
-
-
-def information_ratio(
-    strategy_returns: list[float],
-    strategy_dates: list[str],
-    market_returns: list[float],
-    market_dates: list[str],
-) -> InformationRatioResult:
-    """Single-factor CAPM idiosyncratic appraisal ratio of the strategy vs the market benchmark.
-
-    Inner-joins the two series by ISO date (PIT: both are period returns keyed by the SAME trading
-    calendar; the strategy leg is the OOS holdout and the market leg is the as-of-member-masked PIT
-    benchmark, so beta is estimated ONLY over the joined holdout window — no look-ahead), then OLS-
-    regresses strategy on market:  ``r_strat_t = alpha + beta * r_mkt_t + eps_t``.
-
-        market_beta     = cov(strat, mkt) / var(mkt)                    (systematic exposure)
-        alpha_pp        = mean(strat) - beta * mean(mkt)                (per-period intercept)
-        resid_var_pp    = SSR / (n - 2)                                 (OLS residual df, 2 params)
-        appraisal_ratio = (alpha_pp / sqrt(resid_var_pp)) * sqrt(ANN)   (annualized; = alpha_ann /
-                                                                         residual_vol_ann)
-
-    Both legs are RAW returns (risk_free=0, the platform-wide convention #44) with no modeled cash/
-    carry leg, so the intercept is idiosyncratic alpha, not risk-free yield.
-
-    ``degenerate=True`` (caller fails the check closed) when the regression is UNUSABLE: fewer than
-    3 joined bars, a (near-)constant market (annualized market vol <= IR_MIN_VOL — beta undefined),
-    a (near-)zero residual (annualized residual vol <= IR_MIN_VOL — a perfectly-explained series
-    carries no measurable idiosyncratic alpha, appraisal explodes), or any non-finite intermediate.
-    Both vol floors are ANNUALIZED and identical to MIN_REGIME_VOL — far below any real strategy
-    vol, so only numerically-degenerate series trip them.
-
-    ``overlap_n`` is the number of date-joined bars (0 on empty join). Pure function; no I/O.
-
-    RAISES ``ValueError`` on a CORRUPT armed input — a ragged ``(returns, dates)`` leg or duplicate
-    dates within a leg. Upstream always pairs returns/dates equal-length with unique trading-day
-    dates (walk_forward; promotion.py asserts it), so this is a regression backstop: silently
-    truncating (``zip`` short) or collapsing duplicates (``dict``) could shrink ``overlap_n`` below
-    the bind floor and DOWNGRADE a binding check to a silent "omit" — the opposite of fail-closed.
-    """
-    # Ragged (returns, dates) -> fail LOUD, never truncate to a smaller (silently-omitted) overlap.
-    strat_map: dict[str, float] = dict(zip(strategy_dates, strategy_returns, strict=True))
-    mkt_map: dict[str, float] = dict(zip(market_dates, market_returns, strict=True))
-    # Duplicate dates within a leg are dict-collapsed above (trading-day dates are unique by
-    # construction); detect the collapse and fail loud rather than join on a silent subset.
-    if len(strat_map) != len(strategy_dates) or len(mkt_map) != len(market_dates):
-        raise ValueError(
-            "information_ratio: duplicate dates in strategy/market series (corrupt gate input)"
-        )
-    joined_dates = sorted(set(strat_map) & set(mkt_map))
-    overlap_n = len(joined_dates)
-    # Fewer than 3 joined bars cannot fit a 2-parameter OLS (n - 2 <= 0). Degenerate only when the
-    # caller would otherwise bind; the caller's IR_MIN_OVERLAP_BARS (63) floor makes this defensive.
-    if overlap_n < 3:
-        return InformationRatioResult(overlap_n, None, None, None, None, degenerate=overlap_n > 0)
-
-    strat = np.array([strat_map[d] for d in joined_dates], dtype=float)
-    mkt = np.array([mkt_map[d] for d in joined_dates], dtype=float)
-    if not (bool(np.all(np.isfinite(strat))) and bool(np.all(np.isfinite(mkt)))):
-        return InformationRatioResult(overlap_n, None, None, None, None, degenerate=True)
-
-    n = overlap_n
-    mkt_mean = float(mkt.mean())
-    strat_mean = float(strat.mean())
-    mkt_centered = mkt - mkt_mean
-    mkt_ss = float(np.dot(mkt_centered, mkt_centered))          # sum of squares (var * (n-1))
-    mkt_var_pp = mkt_ss / (n - 1)
-    mkt_vol_ann = math.sqrt(mkt_var_pp) * math.sqrt(ANN) if mkt_var_pp > 0.0 else 0.0
-    # Constant / near-constant market -> beta is undefined -> fail closed.
-    if not math.isfinite(mkt_var_pp) or mkt_var_pp <= 0.0 or not (mkt_vol_ann > IR_MIN_VOL):
-        return InformationRatioResult(overlap_n, None, None, None, None, degenerate=True)
-
-    beta = float(np.dot(mkt_centered, strat - strat_mean) / mkt_ss)
-    alpha_pp = strat_mean - beta * mkt_mean
-    alpha_ann = alpha_pp * ANN
-    resid = strat - (alpha_pp + beta * mkt)
-    ssr = float(np.dot(resid, resid))
-    resid_var_pp = ssr / (n - 2)
-    resid_vol_ann = math.sqrt(resid_var_pp) * math.sqrt(ANN) if resid_var_pp > 0.0 else 0.0
-
-    beta_out = beta if math.isfinite(beta) else None
-    alpha_out = alpha_ann if math.isfinite(alpha_ann) else None
-    # Perfectly-explained / degenerate residual -> no measurable idiosyncratic alpha -> fail closed.
-    # Beta and alpha are still surfaced for the audit trail.
-    if not math.isfinite(resid_var_pp) or resid_var_pp <= 0.0 or not (resid_vol_ann > IR_MIN_VOL):
-        return InformationRatioResult(overlap_n, beta_out, alpha_out, None, None, degenerate=True)
-
-    appraisal = (alpha_pp / math.sqrt(resid_var_pp)) * math.sqrt(ANN)
-    if beta_out is None or alpha_out is None or not math.isfinite(appraisal):
-        return InformationRatioResult(overlap_n, beta_out, alpha_out, resid_vol_ann, None,
-                                      degenerate=True)
-    return InformationRatioResult(
-        overlap_n, beta_out, alpha_out, resid_vol_ann, float(appraisal), degenerate=False
-    )
-
-
-# LORD++ FDR accounting layer (#220, Phase 2). Protected constants — relaxing them weakens the gate.
-# FDR here is an operating target (shared-holdout dependence breaks the formal guarantee); Phase 3
-# (#221) adds dependence-aware calibration. The p-value fed here is 1 − dsr_confidence, which is
-# P(SR_true ≤ SR*) — i.e. the FDR guarantee governs discoveries relative to the DSR null (SR > SR*),
-# a STRONGER criterion than the simple null (SR > 0).
-FDR_ALPHA = 0.05   # target FDR level
-FDR_W0 = FDR_ALPHA / 2   # initial alpha-wealth (standard choice, Ramdas et al. 2017)
-# γ-sequence truncation for normalization. 10 000 terms captures >99.99% of tail mass; α_t at
-# positions > 10 000 uses γ_j=0 for j>10 000 (negligible, conservative).
-FDR_GAMMA_TRUNCATION = 10_000
-
-# Count-triggered cohort restarts (#324). The LORD++ stream is partitioned into consecutive,
-# non-overlapping COHORTS of exactly FDR_COHORT_SIZE binding tests, assigned by ARRIVAL ORDER;
-# each cohort runs an INDEPENDENT LORD++ stream (fresh W0, in-cohort t and rejection positions).
-#
-# WHY (protected constant — raising it weakens the fix). A SINGLE lifetime-global LORD++ stream is
-# anti-scaling: every measured test (mostly clear-null flops, p≈1) advances position t, so in a
-# dry spell α_t = γ_t·W0 → 0 as t grows — testing MORE garbage monotonically lowers everyone's
-# future bar. This is INTRINSIC to a *lifetime* target on a garbage-dominated funnel: any valid
-# lifetime online-FDR procedure must drive the per-test level to 0 over an unbounded null stream.
-# Bounding the count (a deterministic LORD-with-restarts, Ramdas et al. 2017; Zrnic et al.) caps
-# the worst-case dry-spell level at γ_{FDR_COHORT_SIZE}·W0 INDEPENDENT of throughput — 1000
-# tests/day or 1/day yield identical within-cohort statistics. The FDR guarantee is RE-SCOPED and
-# EXPLICIT: FDR is controlled PER COHORT of FDR_COHORT_SIZE binding tests at FDR_ALPHA, NOT per
-# lifetime. Cumulative exposure over K completed cohorts is bounded by FDR_ALPHA·K (surfaced as an
-# audit-only fdr_exposure block; see promotion.py). "Only bind passing rows" is REJECTED — it hides
-# non-rejections from the multiplicity process (covert loosening). SAFFRON is insufficient here: it
-# indexes γ by non-candidate count, so clear-null garbage still alpha-deaths.
-#
-# WHY 64 (power calibration, not aesthetics). Real normalized-γ dry-spell floors: α_1 = 0.00165
-# (dsr ≥ 0.99835) — the first test is already strict, inherent to W0 + γ-normalization
-# (pre-existing, not a regression); α_64 = 4.6e-5 (dsr ≥ 0.99995). 64 keeps α_N within ~35× of α_1
-# (same order as the pre-existing α_1 strictness) and caps decay; larger N approaches lifetime-like
-# decay, smaller N means more independent 5% cohorts (weaker multiplicity control).
-FDR_COHORT_SIZE = 64
-
-
-def fdr_cohort_position(k: int) -> tuple[int, int]:
-    """Map a 1-based GLOBAL binding-test ordinal ``k`` to its ``(cohort_index, within_cohort_t)``.
-
-    ``cohort_index = (k − 1) // FDR_COHORT_SIZE`` (0-based); ``within_cohort_t`` runs 1..
-    FDR_COHORT_SIZE and is the position fed to :func:`lord_plus_plus_level` for that cohort's
-    independent LORD++ stream. Fails closed (``ValueError``) on ``k < 1`` — a binding ordinal is
-    always ≥ 1 by construction, so a non-positive value is a caller bug, not a silent-0 default.
-    """
-    if k < 1:
-        raise ValueError(f"binding-test ordinal k must be >= 1, got {k}")
-    return (k - 1) // FDR_COHORT_SIZE, (k - 1) % FDR_COHORT_SIZE + 1
-
-
-def _compute_lord_gamma(n: int) -> list[float]:
-    """Normalized LORD++ γ weights for j=1..n.
-
-    Raw: γ_j ∝ log(max(j, 2)) / (j · exp(√(log(max(j, 2)))))
-    max(j, 2) is the standard practical variant per Ramdas et al. 2017 / the onlineFDR R package,
-    ensuring γ_j > 0 for all j (log(max(1,2))=log(2)>0 handles j=1). Dividing by the truncated
-    sum normalizes so Σγ_j ≤ 1.0 + machine-epsilon over the truncation window.
-    """
-    raw = [
-        math.log(max(j, 2)) / (j * math.exp(math.sqrt(math.log(max(j, 2)))))
-        for j in range(1, n + 1)
-    ]
-    total = sum(raw)
-    return [w / total for w in raw]
-
-
-_LORD_GAMMA: list[float] = _compute_lord_gamma(FDR_GAMMA_TRUNCATION)
-
-
-def lord_plus_plus_level(
-    t: int,
-    discovery_indices: Sequence[int],
-    *,
-    alpha: float = FDR_ALPHA,
-    w0: float = FDR_W0,
-) -> float:
-    """LORD++ test level α_t (Ramdas et al. 2017 Biometrika 104:1).
-
-    α_t = γ_t · w0 + (α − w0) · γ_{t−τ_1} + α · Σ_{j≥2} γ_{t−τ_j}
-
-    where τ_1 < τ_2 < … are the 1-indexed positions of past discoveries (all strictly < t).
-    α_t depends ONLY on past decisions — no circularity. Wealth is computed from the ledger
-    rows on every call (not cached), mirroring pooled_trial_sharpe_var's fail-closed philosophy.
-
-    COHORT SCOPING (#324): ``t`` and ``discovery_indices`` are WITHIN-COHORT — the caller supplies
-    the current cohort's position (1..FDR_COHORT_SIZE via :func:`fdr_cohort_position`) and that
-    cohort's in-cohort rejection positions. Each cohort of FDR_COHORT_SIZE binding tests is an
-    independent LORD++ stream (fresh w0). This math is unchanged; only its scoping moved from a
-    single lifetime stream to per-cohort restarts to defeat throughput-driven alpha-death.
-
-    The p-value fed here must be 1 − dsr_confidence (conversion at the caller), which equals
-    P(SR_true ≤ SR*) — the DSR selection-inflated null. The FDR guarantee is over that null, and is
-    controlled PER COHORT of FDR_COHORT_SIZE binding tests, NOT per lifetime (see FDR_COHORT_SIZE).
-
-    Dry-spell behavior: with no in-cohort discoveries, α_t = γ_t · w0. Because t is bounded to
-    1..FDR_COHORT_SIZE, α_t is floored at γ_{FDR_COHORT_SIZE} · w0 (never collapses toward 0 from
-    throughput) and restarts fresh (α_1 = γ_1 · w0) at each cohort boundary.
-
-    Returns a CONSERVATIVE 0.0 on any degenerate input (t<1, non-finite alpha/w0, any
-    discovery index ≥ t or < 1). 0.0 means p_t ≤ α_t can never be satisfied — only tightens.
-    """
-    if t < 1 or not math.isfinite(alpha) or alpha <= 0 or not math.isfinite(w0) or w0 <= 0:
-        return 0.0
-    taus = sorted(int(tau) for tau in discovery_indices)
-    if any(tau < 1 or tau >= t for tau in taus):
-        return 0.0
-
-    def _gamma(j: int) -> float:
-        if j < 1 or j > len(_LORD_GAMMA):
-            return 0.0
-        return _LORD_GAMMA[j - 1]
-
-    level = _gamma(t) * w0
-    if taus:
-        level += (alpha - w0) * _gamma(t - taus[0])
-        for tau in taus[1:]:
-            level += alpha * _gamma(t - tau)
-    return level
-
-
 @dataclass
 class GateCriteria:
     """Thresholds for promoting backtested -> candidate. Holdout checks are the search-breadth
@@ -541,163 +162,6 @@ class GateCriteria:
     min_pct_positive_windows: float = 0.6
     min_window_sharpe: float = 0.0        # the worst window's Sharpe must be >= this
     min_holdout_observations: int = MIN_HOLDOUT_OBSERVATIONS  # Wall C: power floor, fails closed
-
-
-def sharpe_haircut(n_combos: int, n_bars: int) -> float:
-    """Deflated-Sharpe haircut: how many Sharpe units to add to the holdout-Sharpe bar after
-    searching ``n_combos`` parameter combinations over a holdout of ``n_bars`` observations.
-
-    Rationale (Bailey & López de Prado, "The Deflated Sharpe Ratio", 2014). Selecting the best
-    of N independent trials inflates the winner's Sharpe: the expected maximum of N standard
-    normals grows like ``sqrt(2 * ln(N))`` standard errors. The standard error of a *per-period*
-    Sharpe estimate over T observations is ``≈ 1/sqrt(T)``. So the per-period inflation is
-    ``sqrt(2 * ln(N)) / sqrt(T)``.
-
-    UNIT MATCH (critical): the holdout Sharpe in ``algua.backtest.metrics`` is ANNUALIZED —
-    ``sharpe = (mean * ANN) / (std * sqrt(ANN)) = (mean/std) * sqrt(ANN)`` — i.e. the per-period
-    Sharpe scaled by ``sqrt(ANN)``. The haircut must live in the same units as the threshold it
-    raises, so the per-period standard-error term is scaled by ``sqrt(ANN)`` identically:
-
-        haircut = sqrt(2 * ln(max(N, 1))) * sqrt(ANN) / sqrt(T)
-
-    Invariants: 0 at N=1 (``ln(1) == 0`` — no penalty for a single pre-registered hypothesis),
-    monotonically non-decreasing in N, and uses the holdout sample size T (not a constant).
-
-    DEGENERATE HOLDOUT (T <= 0) FAILS CLOSED: a zero-length holdout carries no out-of-sample
-    evidence, so the multiple-testing penalty is UNDEFINED, not zero. Returning ``inf`` lifts the
-    effective holdout-Sharpe bar out of reach so the gate cannot pass on an empty holdout — the
-    opposite of waiving the penalty (which returning 0.0 would silently do).
-
-    NOTE: N is the RAW combo count with no deduplication. Correlated combos (e.g. neighboring
-    parameter values that produce near-duplicate strategies) make the effective number of
-    independent trials smaller, so ``sqrt(2*ln N)`` is an upper bound — the haircut errs on the
-    strict side, which is intentional.
-    """
-    n = max(int(n_combos), 1)
-    if n_bars <= 0:
-        return math.inf
-    return math.sqrt(2.0 * math.log(n)) * math.sqrt(ANN) / math.sqrt(n_bars)
-
-
-def floored_trial_var_per_period(
-    own_var_pp: float, floor_var_pp: float | None
-) -> float | None:
-    """Own-variance-first dispersion floor (#221 Slice 0): validate own (finite & >=0 else None),
-    then max(own, floor) only when floor is finite and strictly greater. Returns the floored
-    per-period trial-Sharpe variance, or None when own is degenerate (the floor must never rescue a
-    degenerate own variance into a pass)."""
-    if not math.isfinite(own_var_pp) or own_var_pp < 0.0:
-        return None
-    var_used = own_var_pp
-    if floor_var_pp is not None and math.isfinite(floor_var_pp) and floor_var_pp > var_used:
-        var_used = floor_var_pp
-    return var_used
-
-
-def dsr_sr_star(n_trials: int, trial_sr_var_per_period: float) -> float | None:
-    """Selection-inflated benchmark SR* (per-period). 0.0 for n<=1; else the López de Prado E[max]
-    of n trial Sharpes scaled by sqrt(var). None on degenerate input."""
-    n = int(n_trials)
-    if n < 1:
-        return None
-    if not math.isfinite(trial_sr_var_per_period) or trial_sr_var_per_period < 0.0:
-        return None
-    if n <= 1:
-        return 0.0
-    sr_star = math.sqrt(trial_sr_var_per_period) * (
-        (1.0 - EULER_MASCHERONI) * float(_norm.ppf(1.0 - 1.0 / n))
-        + EULER_MASCHERONI * float(_norm.ppf(1.0 - 1.0 / (n * math.e)))
-    )
-    return sr_star if math.isfinite(sr_star) else None
-
-
-def dsr_sr_star_annualized(
-    n_trials: int, trial_var_ann: float | None, floor_var_ann: float | None
-) -> float | None:
-    """SR* (per-period) from ANNUALIZED inputs — the SR* the binding dsr_evidence uses. Converts
-    /ANN, applies the funnel floor, then dsr_sr_star. None if no own variance or degenerate."""
-    if trial_var_ann is None or not math.isfinite(trial_var_ann):
-        return None
-    own_pp = trial_var_ann / ANN
-    floor_pp = (
-        floor_var_ann / ANN
-        if floor_var_ann is not None and math.isfinite(floor_var_ann)
-        else None
-    )
-    var_used = floored_trial_var_per_period(own_pp, floor_pp)
-    if var_used is None:
-        return None
-    return dsr_sr_star(n_trials, var_used)
-
-
-def dsr_confidence(
-    sr_obs_per_period: float,
-    t: int,
-    skew: float,
-    raw_kurtosis: float,
-    n_trials: int,
-    trial_sr_var_per_period: float,
-    funnel_floor_var_per_period: float | None = None,
-) -> float | None:
-    """Deflated-Sharpe-Ratio confidence (Bailey & López de Prado): the probability — in [0,1],
-    NOT a p-value — that the true (per-period) Sharpe exceeds the expected maximum Sharpe of
-    ``n_trials`` selections.
-
-        SR* = sqrt(var) * [ (1-gamma_E)*Z^-1(1-1/N) + gamma_E*Z^-1(1-1/(N*e)) ]   for N > 1
-        SR* = 0                                                                    for N <= 1
-        DSR = Phi( (SR_obs - SR*) * sqrt(T-1) / sqrt(1 - skew*SR_obs + (kurt-1)/4 * SR_obs^2) )
-
-    ``raw_kurtosis`` is Pearson kurtosis (=3 for Gaussian), so the variance term reduces to the
-    Lo/Mertens 1 + SR^2/2 for a normal series. Inputs are PER-PERIOD; the caller converts from the
-    system's annualized Sharpes. Returns None (fail closed) on any degenerate input.
-
-    ``funnel_floor_var_per_period`` is the optional funnel-wide dispersion floor (#221 Slice 0).
-    When finite and > own variance, ``max(own, floor)`` is used — a tighten-only operation (SR*
-    can only rise, DSR confidence can only fall). A None or non-finite floor falls back to own
-    variance (Phase-1 behavior). The own variance is validated FIRST (fail-closed on
-    non-finite/negative): the floor must never rescue a degenerate own variance into a pass —
-    that would be a FAIL->PASS tighten-only violation."""
-    n = int(n_trials)
-    if n < 1:                      # invalid breadth
-        return None
-    if t <= 1:                     # PSR needs sqrt(T-1) > 0; underpowered holdout
-        return None
-    if not math.isfinite(sr_obs_per_period) or not math.isfinite(skew) \
-            or not math.isfinite(raw_kurtosis):
-        return None
-    var_used = floored_trial_var_per_period(trial_sr_var_per_period, funnel_floor_var_per_period)
-    if var_used is None:
-        return None
-    sr_star = dsr_sr_star(n, var_used)
-    if sr_star is None:
-        return None
-    sr = sr_obs_per_period
-
-    var_term = 1.0 - skew * sr + ((raw_kurtosis - 1.0) / 4.0) * sr * sr
-    if not math.isfinite(var_term) or var_term <= 0.0:
-        return None
-    z = (sr - sr_star) * math.sqrt(t - 1) / math.sqrt(var_term)
-    conf = float(_norm.cdf(z))
-    return conf if math.isfinite(conf) else None
-
-
-def effective_funnel_breadth(
-    own_lifetime: int,
-    windowed_total: int,
-    family_lifetime_effective: int = 0,
-) -> int:
-    """3-way max (tighten-only): own lifetime, funnel-wide windowed, family+ancestor lifetime.
-
-    Effective funnel breadth fed to the haircut (Wall A): ``max`` of this strategy's LIFETIME
-    recorded breadth, the funnel-wide breadth recorded in the rolling window (``windowed_total``
-    INCLUDES this strategy's own windowed sweeps, so no double-count, no name-exclusion subtlety),
-    and the family+ancestor lifetime combos (``family_lifetime_effective``).
-    An *effective funnel-breadth policy*, NOT a literal independent-trial count. A lone hypothesis
-    with no siblings has ``windowed_total <= own_lifetime`` ⇒ returns ``own_lifetime`` ⇒ identical
-    to the prior per-strategy behavior (no regression).
-    ``family_lifetime_effective=0`` (default) is byte-identical to the prior 2-arg behavior:
-    ``max(own, windowed, 0) == max(own, windowed)`` when family=0."""
-    return max(int(own_lifetime), int(windowed_total), int(family_lifetime_effective))
 
 
 @dataclass
