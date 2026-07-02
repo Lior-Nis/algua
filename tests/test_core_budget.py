@@ -261,3 +261,16 @@ def test_lease_reclaimed_after_parent_sigkill(monkeypatch, tmp_path):
             break
         time.sleep(0.05)
     assert freed, "lease flock still held after parent SIGKILL -> a worker kept the inherited fd"
+
+
+def test_published_lease_is_always_flock_held(monkeypatch):
+    # Fail-open-race guard: any marker visible under the *.lease glob must ALREADY be flock-held
+    # (published via lock-then-rename). A concurrent scanner must never see an unlocked lease and
+    # mistake it for an orphan. Also: no stray .tmp remains mid-body.
+    monkeypatch.setenv("ALGUA_SWEEP_CPU_BUDGET", "8")
+    lease_dir = Path(os.environ["ALGUA_DATA_DIR"]) / "sweep_leases"
+    with cb.admit(overridden_count=100):
+        published = list(lease_dir.glob("*.lease"))
+        assert len(published) == 1
+        assert not _flock_free(str(published[0]))  # held by us
+        assert list(lease_dir.glob("*.tmp")) == []  # rename completed, no residue

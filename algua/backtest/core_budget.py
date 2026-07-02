@@ -142,10 +142,14 @@ class _Lease:
 def admit(overridden_count: int) -> Iterator[_Lease]:
     """Admit this sweep into the global core budget; yield its ``_Lease`` (grant + lease fd).
 
-    On entry: create a unique per-sweep lease marker and hold an exclusive non-blocking
-    ``flock`` on it for the WHOLE ``with`` body (the pool's lifetime). Then, under a short-lived
-    GLOBAL admission ``flock`` (serialises concurrent admissions so the grant accounting is a
-    consistent read-then-reserve), compute::
+    On entry: create a per-sweep marker and take an exclusive non-blocking ``flock`` on it BEFORE
+    it is visible under the ``*.lease`` glob (create+lock a ``.tmp`` sibling, then ``rename`` it to
+    the ``.lease`` name while holding the flock — the rename preserves the fd + its lock). This
+    closes a fail-open race: a concurrent admitter must never observe a ``.lease`` marker that is
+    not yet flock-held, or it would classify it as an orphan, unlink it, and let the box be
+    oversubscribed. The flock is held for the WHOLE ``with`` body (the pool's lifetime). Then, under
+    a short-lived GLOBAL admission ``flock`` (serialises concurrent admissions so the grant
+    accounting is a consistent read-then-reserve), compute::
 
         grant = clamp(cpu_budget() - sum(live sibling grants), low=1, high=cpu_budget())
 
@@ -156,12 +160,17 @@ def admit(overridden_count: int) -> Iterator[_Lease]:
     """
     lease_dir = _lease_dir()
     budget = cpu_budget()
-    lease_path = lease_dir / f"{os.getpid()}-{uuid.uuid4().hex}{_LEASE_SUFFIX}"
+    stem = f"{os.getpid()}-{uuid.uuid4().hex}"
+    tmp_path = lease_dir / f"{stem}.tmp"
+    lease_path = lease_dir / f"{stem}{_LEASE_SUFFIX}"
     # O_CLOEXEC so any exec'd grandchild drops it; forked workers still inherit it (no exec),
     # which is why the caller closes it via the pool initializer.
-    lease_fd = os.open(lease_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644)
+    lease_fd = os.open(tmp_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644)
     try:
         fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Publish the marker under the .lease glob ONLY now that it is flock-held (atomic rename,
+        # same fd + lock). A scanner can never see an unlocked future lease.
+        os.rename(tmp_path, lease_path)
         # --- short-lived admission critical section ---
         admission_fd = os.open(
             lease_dir / _ADMISSION_LOCK_NAME, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644
@@ -172,7 +181,12 @@ def admit(overridden_count: int) -> Iterator[_Lease]:
             grant = max(1, min(budget, budget - used))
             grant = min(grant, max(1, overridden_count))
             os.ftruncate(lease_fd, 0)
-            os.pwrite(lease_fd, str(grant).encode("ascii"), 0)
+            buf = str(grant).encode("ascii")
+            written = os.pwrite(lease_fd, buf, 0)
+            if written != len(buf):
+                # A short write would leave a smaller valid integer on disk → later sweeps
+                # UNDERcount used cores → oversubscription. Fail closed.
+                raise OSError(f"short write recording sweep grant: {written}/{len(buf)} bytes")
             os.fsync(lease_fd)
         finally:
             os.close(admission_fd)  # releases the admission flock
@@ -181,8 +195,12 @@ def admit(overridden_count: int) -> Iterator[_Lease]:
     finally:
         with contextlib.suppress(OSError):
             os.close(lease_fd)  # releases the lease flock
-        with contextlib.suppress(OSError):
-            lease_path.unlink()
+        # Unlink whichever name the marker currently has (published .lease, or the .tmp if we
+        # crashed before the rename). A stray .tmp is harmless (never globbed as a lease) but we
+        # tidy it anyway.
+        for p in (lease_path, tmp_path):
+            with contextlib.suppress(OSError):
+                p.unlink()
 
 
 def close_lease_fd_in_worker(lease_fd: int) -> None:
