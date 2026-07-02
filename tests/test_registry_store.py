@@ -1159,6 +1159,15 @@ def test_fdr_stream_non_contiguous_index_fails_closed(repo):
     assert repo.fdr_stream_state() is None
 
 
+def test_fdr_stream_non_integer_index_fails_closed(repo):
+    # INTEGER affinity is not STRICT: a corrupt non-integer (float 1.5) index must fail closed, not
+    # be silently coerced to position 1 (int(1.5)==1 would have slipped through).
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=1.5)
+    assert repo.fdr_stream_state() is None
+
+
 def test_fdr_stream_index_contiguity_spans_both_epochs(repo):
     # The index contiguity check covers a legacy LORD row (fdr_algo NULL) too — the global audit
     # counter must be gap-free across the epoch boundary even though the LORD p is not replayed.

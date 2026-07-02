@@ -1132,7 +1132,11 @@ class SqliteStrategyRepository:
         prior_p_values: list[float] = []
         for pos, r in enumerate(rows, start=1):
             idx = r["fdr_test_index"]
-            if idx is None or int(idx) != pos:   # NULL / non-positive / gap → corrupted stream
+            # Reject unless the stored index is a GENUINE integer equal to pos. The column has
+            # INTEGER affinity (not STRICT), so a corrupt float (1.5) or text could be present;
+            # `int(idx) != pos` would silently coerce 1.5→1, and a non-numeric text would RAISE
+            # instead of fail-closing. isinstance+equality catches both → None (corrupted stream).
+            if not isinstance(idx, int) or idx != pos:   # NULL / non-int / non-positive / gap
                 return None
             if r["fdr_algo"] == "addis_v1":
                 p = r["fdr_p_value"]
