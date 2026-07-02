@@ -40,6 +40,17 @@ def _auth():
     return LiveAuthorization(1, "c", "cf", "d", "lior", "t")
 
 
+def _permissive_book(monkeypatch):
+    """Stub the #389 book-level exposure build with a large-equity, empty long-only book so book
+    caps never bind — for run-all tests that assert the pre-existing tick/pool/breach behavior.
+    (Book-limit enforcement itself is covered by test_book_limits.py + test_live_book_limits.py.)"""
+    from algua.risk.book_limits import BookExposure, BookRiskLimits
+    monkeypatch.setattr(
+        "algua.cli.live_cmd._build_book_exposure",
+        lambda *a, **k: (BookExposure(1e15, {}, BookRiskLimits()), None),
+    )
+
+
 
 def test_run_all_no_live_strategies_is_noop(monkeypatch):
     r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
@@ -67,6 +78,7 @@ def test_run_all_no_authorized_returns_without_building_broker(monkeypatch):
 
 
 def test_run_all_skips_only_the_unauthorized_strategy(monkeypatch):
+    _permissive_book(monkeypatch)
     # #253 sibling: with a mix, the unauthorized strategy is skipped and the authorized one still
     # trades — an unverified strategy must never leak into the traded set.
     from contextlib import closing
@@ -152,6 +164,7 @@ def test_still_live_allocated_false_after_bench(monkeypatch):
 
 
 def test_run_all_halts_strategy_benched_to_dormant_mid_cycle(monkeypatch):
+    _permissive_book(monkeypatch)
     # #281: a live->dormant bench landing MID-CYCLE must halt the tick via should_halt — never
     # submit/persist an order for the now-dormant strategy (which run-all, iterating Stage.LIVE,
     # would never flatten). Simulate the concurrent bench committing inside run_tick.
@@ -217,6 +230,7 @@ def test_run_all_halts_on_unexplained_reconcile_drift(monkeypatch):
 
 
 def test_run_all_ticks_strategy_when_clean(monkeypatch):
+    _permissive_book(monkeypatch)
     _to_live()
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
@@ -316,6 +330,7 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
 
 
 def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
+    _permissive_book(monkeypatch)
     # #270: when a LATER strategy breaches, run-all must still surface the siblings already ticked
     # this cycle in one envelope (not discard them by emitting only the breach payload).
     from contextlib import closing
@@ -360,6 +375,7 @@ def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
 
 
 def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
+    _permissive_book(monkeypatch)
     _to_live()
     captured = {}
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
@@ -422,6 +438,7 @@ def test_live_allocate_rejects_dormant(monkeypatch):
 
 
 def test_run_all_forwards_start_end_to_tick(monkeypatch):
+    _permissive_book(monkeypatch)
     # operator-supplied --start/--end must reach the per-strategy tick (codex C2: were ignored)
     _to_live()
     captured = {}
@@ -508,6 +525,7 @@ def _seed_live_fills(name, fills):
 
 
 def test_breach_flatten_resume_end_to_end(monkeypatch):
+    _permissive_book(monkeypatch)
     from algua.live.live_loop import RiskBreach
     name = "cross_sectional_momentum"
     _to_live(name)

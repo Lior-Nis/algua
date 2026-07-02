@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     alpaca_live_api_secret: str | None = None
     alpaca_live_url: str = "https://api.alpaca.markets"
     mlflow_tracking_uri: str = "mlruns"
+    # Book-level aggregate risk caps (#389), enforced across ALL strategies sharing the live
+    # account in `live run-all`. Conservative defaults; env-overridable via ALGUA_BOOK_*.
+    # gross/net/single-name-notional are multiples of account equity; concentration is a fraction
+    # of the gross book. Validated where they are consumed (BookRiskLimits.__post_init__).
+    book_max_gross: float = 2.0
+    book_max_net: float = 1.0
+    book_max_symbol_concentration: float = 0.25
+    book_max_symbol_notional: float = 0.50
 
     @field_validator("db_path", "data_dir")
     @classmethod
