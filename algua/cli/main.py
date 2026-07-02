@@ -11,6 +11,7 @@ from typer._click import exceptions as _click_exc
 from typer.main import get_command
 
 from algua.cli import (  # noqa: F401 - imports register subcommands
+    audit_cmd,
     backtest_cmd,
     data_cmd,
     eval_cmd,
