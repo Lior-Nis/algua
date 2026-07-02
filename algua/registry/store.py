@@ -1116,22 +1116,30 @@ class SqliteStrategyRepository:
         ``id``. Legacy LORD++ rows (``fdr_algo`` NULL) are counted in ``t_global`` but EXCLUDED from
         the p-history — ADDIS derives rejections endogenously from the epoch p-values and never
         reads stored ``fdr_rejected``/``fdr_alpha_level``, so the anti-scaling LORD++ history cannot
-        contaminate the recursion. Fail-closed: an ADDIS-epoch row with NULL/non-finite
-        ``fdr_p_value`` returns None."""
-        t_global = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM gate_evaluations WHERE fdr_binding=1",
-        ).fetchone()["n"]
+        contaminate the recursion.
+
+        Fail-closed (returns None) on any integrity failure: (a) ANY binding row (either epoch) with
+        NULL/non-positive ``fdr_test_index`` or a non-contiguous global index sequence —
+        ``t_global`` is a valid NEXT audit position only if binding rows occupy exactly indices
+        1..N in ``id`` order (the partial unique index enforces uniqueness; this enforces
+        contiguity); or
+        (b) an ADDIS-epoch row with NULL/non-finite/out-of-[0,1] ``fdr_p_value`` (a p-value is a
+        probability — a corrupt value must never feed the wealth recursion)."""
         rows = self._conn.execute(
-            "SELECT fdr_p_value FROM gate_evaluations"
-            " WHERE fdr_binding=1 AND fdr_algo='addis_v1' ORDER BY id",
+            "SELECT fdr_p_value, fdr_test_index, fdr_algo FROM gate_evaluations"
+            " WHERE fdr_binding=1 ORDER BY id",
         ).fetchall()
         prior_p_values: list[float] = []
-        for r in rows:
-            p = r["fdr_p_value"]
-            if p is None or not math.isfinite(p):
+        for pos, r in enumerate(rows, start=1):
+            idx = r["fdr_test_index"]
+            if idx is None or int(idx) != pos:   # NULL / non-positive / gap → corrupted stream
                 return None
-            prior_p_values.append(float(p))
-        return FdrStreamState(t_global=int(t_global), prior_p_values=prior_p_values)
+            if r["fdr_algo"] == "addis_v1":
+                p = r["fdr_p_value"]
+                if p is None or not math.isfinite(p) or not (0.0 <= p <= 1.0):
+                    return None
+                prior_p_values.append(float(p))
+        return FdrStreamState(t_global=len(rows), prior_p_values=prior_p_values)
 
     @staticmethod
     def _cas_funnel(name: str, expected: object, actual: object) -> None:
@@ -1220,6 +1228,14 @@ class SqliteStrategyRepository:
                 f"{rec.name!r}; the funnel CAS must verify the strategy being promoted")
 
         provisional_passed = bool(gate_row.get("passed"))
+        # A p-value is a probability: a finite value outside [0, 1] is a corrupt/forged input, not a
+        # binding test. Fail closed at the persistence boundary (the promotion.py caller already
+        # range-checks dsr_confidence, but the store is the last line of defense) — a negative p
+        # would otherwise satisfy p <= alpha_t and forge an FDR discovery.
+        if p_value is not None and math.isfinite(p_value) and not (0.0 <= p_value <= 1.0):
+            raise ValueError(
+                f"FDR p_value={p_value!r} is outside [0, 1]; a p-value is a probability — refusing"
+                " to record a corrupt FDR row")
         fdr_binding = p_value is not None and math.isfinite(p_value)
 
         t_next: int | None = None

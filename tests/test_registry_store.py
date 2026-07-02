@@ -1132,6 +1132,45 @@ def test_fdr_stream_non_finite_p_value_in_epoch_fails_closed(repo):
     assert repo.fdr_stream_state() is None
 
 
+def test_fdr_stream_out_of_range_p_value_in_epoch_fails_closed(repo):
+    # A p-value is a probability: a stored negative or >1 value is a corrupt/forged ADDIS row and
+    # must never feed the wealth recursion (a negative p would forge p <= alpha_t discoveries).
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=-0.01, fdr_alpha_level=0.04,
+                    fdr_rejected=1, fdr_test_index=1)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_null_test_index_fails_closed(repo):
+    # fdr_test_index integrity: t_global is only a valid next audit position if binding rows occupy
+    # exactly indices 1..N in id order. A NULL index corrupts that invariant → fail closed.
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.03, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=None)
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_non_contiguous_index_fails_closed(repo):
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.06, fdr_alpha_level=0.04,
+                    fdr_rejected=0, fdr_test_index=1)
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.04,
+                    fdr_rejected=1, fdr_test_index=3)  # gap at 2 → corrupted global stream
+    assert repo.fdr_stream_state() is None
+
+
+def test_fdr_stream_index_contiguity_spans_both_epochs(repo):
+    # The index contiguity check covers a legacy LORD row (fdr_algo NULL) too — the global audit
+    # counter must be gap-free across the epoch boundary even though the LORD p is not replayed.
+    sid = repo.add("s").id
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.9, fdr_alpha_level=0.001,
+                    fdr_rejected=0, fdr_test_index=1, fdr_algo=None)      # legacy LORD, index 1
+    _insert_fdr_row(repo, sid, fdr_binding=1, fdr_p_value=0.02, fdr_alpha_level=0.03,
+                    fdr_rejected=1, fdr_test_index=2, fdr_algo="addis_v1")  # ADDIS, index 2
+    result = repo.fdr_stream_state()
+    assert result == FdrStreamState(t_global=2, prior_p_values=[0.02])
+
+
 # ---------------------------------------------------------------------------
 # Task 4 (#220 Phase 2): record_gate_with_fdr_and_maybe_promote — atomic FDR write
 # ---------------------------------------------------------------------------

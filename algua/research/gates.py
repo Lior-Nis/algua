@@ -505,7 +505,10 @@ def _addis_level_from_history(
     unchanged: the anti-scaling fix (#324).
 
     Fail-closed 0.0 (never passable — only tightens) on any degenerate input: non-finite/out-of-
-    range α, W0, λ, τ; λ ≥ τ; W0 > α; λ < α; or any non-finite prior p-value.
+    range α, W0, λ, τ; λ ≥ τ; W0 > α; λ < α; or any prior p-value that is non-finite or outside
+    [0, 1] (a p-value is a probability — a negative or >1 value is a corrupt/forged row and must
+    never be treated as a candidate/rejection that could replenish wealth; the store is the
+    persistence boundary, so the guard lives here, not only at the promotion.py caller).
     """
     if not (math.isfinite(alpha) and 0.0 < alpha < 1.0):
         return 0.0
@@ -515,7 +518,7 @@ def _addis_level_from_history(
         return 0.0
     if not (math.isfinite(lam) and alpha <= lam < tau):
         return 0.0
-    if any(not math.isfinite(p) for p in prior_p_values):
+    if any(not (math.isfinite(p) and 0.0 <= p <= 1.0) for p in prior_p_values):
         return 0.0
 
     # Replay the epoch to derive S_t, the candidate counts, and the rejection times κ (with their

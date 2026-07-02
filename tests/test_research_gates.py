@@ -411,21 +411,21 @@ def test_addis_candidate_band_does_advance_clock():
     # NOT a loosening: p in (λ, τ] is SELECTED-but-not-a-candidate and DOES advance the γ clock,
     # so a run of near-miss nulls DOES lower the next candidate's level (multiplicity still paid).
     base = addis_level([0.1])
-    band = addis_level([0.1] + [0.4] * 10)    # 0.4 ∈ (0.25, 0.5]
+    band = addis_level([0.1] + [0.4] * 10)    # 0.4 ∈ (λ=0.05, τ=0.5]: selected, not candidate
     assert band < base
 
 
 def test_addis_rejection_replenishes():
     # A prior test that REJECTS (p ≤ α_i) earns alpha-wealth → raises the next level vs a
-    # non-rejecting candidate at the same position.
+    # selected non-rejecting test at the same position.
     rejecting = addis_level([1e-9])           # p ≪ α_1 → rejection
-    non_rejecting = addis_level([0.2])        # candidate (≤ λ) but ≫ α_1 → no rejection
+    non_rejecting = addis_level([0.2])        # in-band (λ<p≤τ), selected, ≫ α_1 → no rejection
     assert rejecting > non_rejecting
 
 
 def test_addis_manual_recursion_two_rejections():
     # Hand-worked stream: p=[1e-9, 1e-9] (both reject), compute α for the 3rd test directly.
-    # τ=0.5, λ=0.25, so both are candidates AND selected AND rejections.
+    # τ=0.5, λ=0.05, so both p=1e-9 are candidates (≤λ) AND selected (≤τ) AND rejections (≤α_i).
     a = FDR_ALPHA
     w0 = FDR_W0
     lam = ADDIS_LAMBDA
@@ -447,20 +447,56 @@ def test_addis_manual_recursion_two_rejections():
     assert a3_computed == pytest.approx(a3_expected, rel=1e-12)
 
 
-def test_addis_recompute_equals_recorded():
-    # Determinism / no-drift: the level over prefix p[:i] is a pure function of that prefix, so
-    # recomputing the whole stream incrementally matches recomputing it in one shot.
-    stream = [0.1, 0.9, 0.001, 0.4, 0.02, 0.95, 0.3]
+def _addis_reference_level(prior_p_values, *, alpha, w0, lam, tau):
+    """Independent hand-rolled ADDIS* replay used to cross-check the production recursion — proves
+    that stepping the stream one row at a time (as the production writer does, each row's rejection
+    computed over its own prefix) reproduces the same levels/rejections as the production function
+    (i.e. recompute == recorded, no drift). Deliberately structured differently from the impl."""
+    def _g(k):
+        return _fdr_gamma(k)
+    taus_selected = []      # kappa_j* (selected count including each rejection)
+    cand_after = [0]        # candidates in each open interval, index 0 = C_{0+}
+    n_selected = 0          # S_t
+    def _level(sel, ksel, cafter):
+        v = w0 * _g(sel - cafter[0])
+        for j in range(1, len(ksel) + 1):
+            coef = (alpha - w0) if j == 1 else alpha
+            v += coef * _g(sel - ksel[j - 1] - cafter[j])
+        return min(lam, (tau - lam) * v)
+    for p in prior_p_values:
+        a_i = _level(n_selected, taus_selected, cand_after)
+        sel = p <= tau
+        cand = p <= lam
+        rej = p <= a_i
+        if sel:
+            n_selected += 1
+        if cand:
+            cand_after = [c + 1 for c in cand_after]
+        if rej:
+            taus_selected.append(n_selected)
+            cand_after.append(0)
+    return _level(n_selected, taus_selected, cand_after)
+
+
+def test_addis_matches_independent_reference_replay():
+    # recompute == recorded: the production recursion equals a structurally-independent replay for
+    # a mixed stream (candidates, discards, band p's, rejections). No drift between step-wise
+    # recording and one-shot recomputation.
+    stream = [0.1, 0.9, 1e-6, 0.4, 0.001, 0.95, 0.3, 5e-4, 0.99]
     for i in range(len(stream) + 1):
-        one_shot = addis_level(stream[:i])
-        # incremental: identical inputs → identical output (pure function)
-        assert addis_level(list(stream[:i])) == one_shot
+        prod = addis_level(stream[:i])
+        ref = _addis_reference_level(
+            stream[:i], alpha=FDR_ALPHA, w0=FDR_W0, lam=ADDIS_LAMBDA, tau=ADDIS_TAU)
+        assert prod == pytest.approx(ref, rel=1e-12), f"drift at prefix len {i}"
 
 
 def test_addis_fail_closed_guards():
     # Non-finite prior p → 0.0 (conservative; unreachable level, only tightens).
     assert addis_level([float("nan")]) == 0.0
     assert addis_level([0.1, float("inf")]) == 0.0
+    # Out-of-[0,1] prior p → 0.0 (a p-value is a probability; a negative p would forge p ≤ α_t).
+    assert addis_level([-0.01]) == 0.0
+    assert addis_level([0.1, 1.5]) == 0.0
     # Bad params → 0.0.
     assert addis_level([], alpha=float("nan")) == 0.0
     assert addis_level([], w0=float("inf")) == 0.0
