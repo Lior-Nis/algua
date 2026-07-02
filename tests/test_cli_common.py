@@ -73,3 +73,26 @@ def test_breach_payload_shape():
     p = breach_payload("boom", kind="drawdown", strategy="s")
     assert p == {"ok": False, "kill_switch": "tripped", "error": "boom",
                  "kind": "drawdown", "strategy": "s"}
+
+
+def test_resolve_drawdown_breaker_defaults_on():
+    from algua.cli._common import resolve_drawdown_breaker
+
+    # omitting --max-drawdown resolves to the conservative default-ON setting (0.25), NOT None.
+    assert resolve_drawdown_breaker(None, disabled=False) == pytest.approx(0.25)
+    # an explicit value is honored as-is.
+    assert resolve_drawdown_breaker(0.1, disabled=False) == pytest.approx(0.1)
+    # the ONLY off-path is the explicit disable flag.
+    assert resolve_drawdown_breaker(None, disabled=True) is None
+    assert resolve_drawdown_breaker(0.1, disabled=True) is None
+
+
+def test_resolve_drawdown_breaker_rejects_misconfigured_default(monkeypatch):
+    # a bad env override of the default must fail closed rather than silently disable the breaker.
+    from algua.cli import _common
+    from algua.config.settings import Settings
+
+    monkeypatch.setattr(_common, "get_settings",
+                        lambda: Settings(strategy_max_drawdown_default=1.5))
+    with pytest.raises(ValueError):
+        _common.resolve_drawdown_breaker(None, disabled=False)

@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     book_max_net: float = 1.0
     book_max_symbol_concentration: float = 0.25
     book_max_symbol_notional: float = 0.50
+    # Default-ON per-strategy drawdown breaker (#390). The live/paper trading loops default their
+    # --max-drawdown to this fraction instead of running the breaker OFF; reuses the conservative
+    # 0.25 forward bound value but is a SEPARATE setting (it does not touch the protected forward
+    # gate). env: ALGUA_STRATEGY_MAX_DRAWDOWN_DEFAULT.
+    strategy_max_drawdown_default: float = 0.25
+    # Book-level LOSS circuit breaker (#390): halt + flatten the WHOLE live account when aggregate
+    # drawdown (vs the account high-water mark) or daily loss (vs the prior-session close) breaches
+    # these fractions. Conservative defaults (institutional daily-loss band is ~2-5%). Validated
+    # where consumed (BookBreakerLimits.__post_init__). env: ALGUA_BOOK_MAX_DRAWDOWN /
+    # ALGUA_BOOK_MAX_DAILY_LOSS.
+    book_max_drawdown: float = 0.15
+    book_max_daily_loss: float = 0.05
 
     @field_validator("db_path", "data_dir")
     @classmethod

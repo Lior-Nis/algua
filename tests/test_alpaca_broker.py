@@ -100,6 +100,22 @@ def test_account_parses_floats(monkeypatch):
     assert (acct.equity, acct.cash, acct.buying_power) == (100000.0, 50000.0, 150000.0)
 
 
+def test_account_parses_last_equity(monkeypatch):
+    # last_equity (prior trading-session close) flows into AccountState for the book breaker (#390).
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"id": "acct-1", "equity": "90000", "cash": "0",
+                                        "buying_power": "0", "last_equity": "100000"})}))
+    assert _broker().account().last_equity == 100000.0
+
+
+def test_account_missing_last_equity_defaults_zero(monkeypatch):
+    # absent last_equity -> 0.0 so the daily-loss breaker fails closed, not crash account().
+    monkeypatch.setattr(ab, "requests", _FakeRequests(
+        {"/v2/account": _FakeResp(200, {"id": "acct-1", "equity": "90000", "cash": "0",
+                                        "buying_power": "0"})}))
+    assert _broker().account().last_equity == 0.0
+
+
 def test_get_positions_parses_and_empty(monkeypatch):
     monkeypatch.setattr(ab, "requests", _FakeRequests(
         {"/v2/positions": _FakeResp(200, [{"symbol": "AAA", "qty": "10"},
