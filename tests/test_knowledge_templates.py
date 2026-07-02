@@ -16,6 +16,8 @@ def test_scaffold_strategy_doc_has_frontmatter_and_sections():
     assert "## Derivation" in body
     assert "## Verdict & next" in body
     assert "<!-- ALGUA:RESULTS -->" in body and "<!-- /ALGUA:RESULTS -->" in body
+    # Principles backlink footer: a revised principle can find the strategies authored under it.
+    assert "[[research-methodology]]" in body and "[[risk-conventions]]" in body
 
 
 def test_scaffold_strategy_doc_omits_absent_lineage():
