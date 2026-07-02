@@ -9,6 +9,7 @@ import typer
 from algua.backtest.engine import holdout_window
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
+    authenticate_actor,
     now_iso,
     ok,
     project,
@@ -28,6 +29,7 @@ from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.knowledge.experience import write_experience_note
+from algua.registry.human_actor import canonical_run_context
 from algua.registry.negative_results import (
     build_gate_fail_record,
     record_negative_result,
@@ -157,6 +159,12 @@ def promote(
              "exists. An agent must supply explicit delisting records; no-record-gap fails closed.",
     ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
+    actor_signature: str = typer.Option(
+        None, "--actor-signature",
+        help="path to the SSH signature over the printed human-actor challenge (#329). Required to "
+             "authenticate --actor human: a bare --actor human unlocks NO human-only path — run "
+             "once without this to print a challenge, sign it with your enrolled algua-human-actor "
+             "key (ssh-keygen -Y sign -n algua-human-actor), then re-run with --actor-signature."),
     new_family: str = typer.Option(
         None, "--new-family",
         help="HUMAN-ONLY: slug for a new family when clustering verdict is NOVEL or PARENTAGE. "
@@ -188,7 +196,7 @@ def promote(
         min_pct_positive=min_pct_positive, min_window_sharpe=min_window_sharpe,
         n_combos=n_combos, allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit,
         delistings=delistings, assume_terminal_last_close=assume_terminal_last_close,
-        actor=actor, new_family=new_family,
+        actor=actor, actor_signature=actor_signature, new_family=new_family,
     )
     out = ok(payload)
     emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
@@ -202,6 +210,7 @@ def promote_task(  # noqa: PLR0913, PLR0915
     min_pct_positive: float = 0.6, min_window_sharpe: float = 0.0, n_combos: int | None = None,
     allow_holdout_reuse: bool = False, allow_non_pit: bool = False, delistings: str | None = None,
     assume_terminal_last_close: bool = False, actor: str = "agent",
+    actor_signature: str | None = None,
     new_family: str | None = None, reload: bool = False,
 ) -> dict:
     """Run the backtested->candidate gate and return the (pre-``--summary``) payload dict — the
@@ -265,7 +274,7 @@ def promote_task(  # noqa: PLR0913, PLR0915
             raise ValueError(f"--fundamentals-snapshot {fundamentals_provider.snapshot_id!r} is "
                              f"dataset {rec.dataset!r}, not {Dataset.FUNDAMENTALS.value!r}")
     universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
-    delisting_records, _delisting_prov = resolve_delisting_inputs(delistings, end_dt)
+    delisting_records, delisting_prov = resolve_delisting_inputs(delistings, end_dt)
     data_source = type(provider).__name__
     snapshot_id = getattr(provider, "snapshot_id", None)
     period_start = start_dt.date().isoformat()
@@ -278,7 +287,35 @@ def promote_task(  # noqa: PLR0913, PLR0915
     experience_log: dict[str, Any] | None = None
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        repo.get(name)  # StrategyNotFound -> JSON error before any work
+        rec0 = repo.get(name)  # StrategyNotFound -> JSON error before any work
+        # AUTHENTICATE the human actor (#329) BEFORE any relaxation is honored or the holdout is
+        # touched. A bare `--actor human` is forgeable, so asserting a human actor here requires an
+        # SSH signature (namespace algua-human-actor) over a fresh single-use challenge that binds
+        # this command + strategy + RECOMPUTED artifact identity + the FULL canonical run_context
+        # (every gate-relevant input, incl. the exact relaxation set). No signature => a challenge
+        # is issued+printed and NOTHING runs. A declared agent/system is returned unchanged (the
+        # downstream guards refuse its relaxations exactly as before).
+        actor_enum = authenticate_actor(
+            conn, command="research promote", name=name, rec=rec0, stage_to=Stage.CANDIDATE.value,
+            declared_actor=actor_enum, actor_signature=actor_signature,
+            run_context=canonical_run_context({
+                "start": start, "end": end, "demo": demo, "snapshot": snapshot,
+                "fundamentals_snapshot": fundamentals_snapshot, "news_snapshot": news_snapshot,
+                "universe": universe, "windows": windows, "holdout_frac": holdout_frac,
+                "min_holdout_sharpe": min_holdout_sharpe, "min_holdout_return": min_holdout_return,
+                "min_pct_positive": min_pct_positive, "min_window_sharpe": min_window_sharpe,
+                "n_combos": n_combos, "allow_holdout_reuse": allow_holdout_reuse,
+                "allow_non_pit": allow_non_pit, "delistings": delistings,
+                "assume_terminal_last_close": assume_terminal_last_close,
+                "new_family": new_family,
+                # Bind the RESOLVED immutable data provenance, not just the mutable name: an agent
+                # can `data ingest-universe`/`import-delistings` a new effective-date between the
+                # challenge and the signature to change what the SAME name resolves to. Binding the
+                # resolved snapshot ids/effective-dates makes a captured signature fail if the
+                # named universe/delistings timeline shifts under it (codex GATE-2 CRITICAL).
+                "universe_prov": universe_prov, "delistings_prov": delisting_prov,
+            }),
+        )
         # PREFLIGHT (pre-peek): relaxations-need-human + stage legality + breadth. Refuses here,
         # before walk_forward touches the holdout.
         breadth = promotion_preflight(

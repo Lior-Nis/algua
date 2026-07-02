@@ -36,6 +36,14 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   `--min-vol`, `--max-drawdown`, `--max-staleness`) are human-only. A passing run is the ONLY
   agent path to `forward_tested`; re-running at `forward_tested` refreshes the live-wall
   certificate without changing the stage.
+- **Authenticated `--actor human` (#329).** `--actor human` on `research promote` / `paper promote`
+  is NOT a bare string anymore: run once with `--actor human` to print a single-use challenge, sign
+  it (`ssh-keygen -Y sign -n algua-human-actor -f <key> <file>`), then re-run with `--actor-signature
+  <file>.sig`. The signature binds the command + strategy + artifact identity + the exact run
+  (every flag incl. the relaxation set) + a nonce, so it cannot be replayed onto another run/artifact
+  /relaxation. A bare `--actor human` unlocks NOTHING. Enroll a human-actor key with `registry
+  enroll-approver --namespace human-actor` (or `--namespace both` for a key that also does go-live);
+  the anchor is `approvers/allowed_signers`, shared with the go-live gate under a distinct namespace.
 - `uv run algua registry transition <name> --to live --actor human` — step 1 of go-live: prints a
   challenge (includes forward certificate summary). Sign it, then re-run with
   `--signature <file>.sig` to complete the transition. Requires a fresh, matching forward

@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -253,6 +253,28 @@ CREATE TABLE IF NOT EXISTS live_challenges (
     code_hash       TEXT NOT NULL,
     config_hash     TEXT NOT NULL,
     dependency_hash TEXT,
+    issued_at       TEXT NOT NULL,
+    expires_at      TEXT NOT NULL,
+    consumed_at     TEXT
+);
+-- Human-actor authentication challenges (#329). Mirrors live_challenges: a bare `--actor human`
+-- string is forgeable, so asserting a human actor on a gated command (research/paper promote) now
+-- requires an SSH signature (namespace algua-human-actor) over a fresh single-use challenge. The
+-- signed payload binds the command + strategy + RECOMPUTED artifact identity + the FULL canonical
+-- run_context (every gate-relevant input, incl. the exact relaxation set) + nonce + expiry, so a
+-- captured signature cannot be replayed onto a different artifact/run/relaxation/command/strategy
+-- or a second run. Like live_challenges we persist only the non-identity parts (verify REBUILDS
+-- the identity + run_context), and consume the nonce single-use.
+CREATE TABLE IF NOT EXISTS actor_challenges (
+    nonce           TEXT PRIMARY KEY,
+    command         TEXT NOT NULL,
+    strategy_id     INTEGER NOT NULL REFERENCES strategies(id),
+    stage_from      TEXT NOT NULL,
+    stage_to        TEXT NOT NULL,
+    code_hash       TEXT NOT NULL,
+    config_hash     TEXT NOT NULL,
+    dependency_hash TEXT,
+    run_context     TEXT NOT NULL,
     issued_at       TEXT NOT NULL,
     expires_at      TEXT NOT NULL,
     consumed_at     TEXT
@@ -724,6 +746,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v33 (#324): fdr_cohort column + (cohort, index) composite unique index + legacy backfill
     # handled above (before the index swap so the new composite index sees the rewritten indices).
+    # v34 (#329): actor_challenges is a brand-new table; executescript(_SCHEMA) above creates it
+    # (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

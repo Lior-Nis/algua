@@ -12,9 +12,11 @@ import sys
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 from algua.backtest._sample import SyntheticProvider
 from algua.config.settings import get_settings
+from algua.contracts.lifecycle import Actor
 from algua.contracts.types import DataProvider
 from algua.data.serve import StoreBackedProvider
 from algua.data.store import DataStore
@@ -74,6 +76,57 @@ def registry_conn() -> Iterator[sqlite3.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+def authenticate_actor(
+    conn: sqlite3.Connection, *, command: str, name: str, rec: object, stage_to: str,
+    declared_actor: Actor, actor_signature: str | None, run_context: str,
+) -> Actor:
+    """Turn a declared ``--actor`` + optional ``--actor-signature`` into the EFFECTIVE actor the
+    downstream human-only guards may trust (#329). The single shared chokepoint for the gated
+    promote commands (research + paper), so the authentication is wired identically in one place.
+
+    - declared agent/system -> returned unchanged (agents never sign).
+    - declared human, NO signature -> a fresh single-use challenge is issued+persisted and PRINTED
+      as JSON (mirrors the go-live challenge print), then the command EXITS 0 having run nothing.
+    - declared human + signature -> the SSH signature is verified (namespace algua-human-actor) over
+      the REBUILT payload bound to this command + strategy + RECOMPUTED artifact identity + the full
+      ``run_context``; on success the effective actor is HUMAN, else a ValueError is raised
+      (fail closed — a forged/replayed/expired/cross-run signature is refused).
+
+    ``rec`` is the strategy record (used for ``rec.id`` + ``rec.stage``). Imports the gate module +
+    ``emit`` lazily so ``_common`` stays free of a cli->cli / heavy-registry import at module load.
+    """
+    import typer
+
+    from algua.cli.app import emit
+    from algua.registry.approvals import compute_artifact_hashes
+    from algua.registry.human_actor import (
+        HumanActorChallengeRequired,
+        resolve_effective_actor,
+    )
+
+    if declared_actor is not Actor.HUMAN:
+        return declared_actor
+    identity = compute_artifact_hashes(name)
+    signature = Path(actor_signature).read_bytes() if actor_signature else None
+    try:
+        return resolve_effective_actor(
+            conn, command=command, strategy=name, strategy_id=rec.id,  # type: ignore[attr-defined]
+            stage_from=rec.stage.value, stage_to=stage_to,  # type: ignore[attr-defined]
+            code_hash=identity.code_hash, config_hash=identity.config_hash,
+            dependency_hash=identity.dependency_hash, declared_actor=declared_actor,
+            run_context=run_context, signature=signature)
+    except HumanActorChallengeRequired as exc:
+        emit(ok({
+            "action": "human_actor_challenge", "strategy": name, "command": command,
+            **exc.challenge,
+            "instructions": (
+                "sign the 'challenge' value with your enrolled algua-human-actor key: "
+                "ssh-keygen -Y sign -n algua-human-actor -f <key> <file>; "
+                "then re-run this command with --actor-signature <file>.sig"),
+        }))
+        raise typer.Exit() from None
 
 
 def now_iso() -> str:

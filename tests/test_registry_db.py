@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 33
+    assert SCHEMA_VERSION == 34
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -366,8 +366,19 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
     migrate(c2)
     cols = {row["name"] for row in c2.execute("PRAGMA table_info(search_trials)")}
     assert {"trial_sharpe_count", "trial_sharpe_mean", "trial_sharpe_var_ann"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     c2.close()
+
+
+def test_v34_actor_challenges_table_created(tmp_path):
+    # #329: actor_challenges is a brand-new table created by executescript(_SCHEMA) on migrate.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(actor_challenges)")}
+    assert {"nonce", "command", "strategy_id", "stage_from", "stage_to", "code_hash",
+            "config_hash", "dependency_hash", "run_context", "issued_at", "expires_at",
+            "consumed_at"} <= cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_v26_adds_fdr_columns_to_gate_evaluations(tmp_path):
@@ -377,7 +388,7 @@ def test_v26_adds_fdr_columns_to_gate_evaluations(tmp_path):
     # #324 (v33) adds fdr_cohort alongside the v26 FDR columns.
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
             "fdr_test_index", "fdr_cohort"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_v33_backfills_legacy_binding_rows_into_cohorts(tmp_path):
@@ -465,7 +476,7 @@ def test_v26_migration_is_idempotent(tmp_path):
     cols = {r["name"] for r in c2.execute("PRAGMA table_info(gate_evaluations)")}
     assert {"fdr_binding", "fdr_p_value", "fdr_alpha_level", "fdr_rejected",
             "fdr_test_index", "fdr_cohort"} <= cols
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     c2.close()
 
 
@@ -482,7 +493,7 @@ def test_v28_upgrade_adds_quarantine_table(tmp_path):
     migrate(c2)
     tables = {r["name"] for r in c2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "live_activity_quarantine" in tables
-    assert c2.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert c2.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     c2.close()
 
 
@@ -514,7 +525,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 33
+    assert SCHEMA_VERSION == 34
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -522,7 +533,7 @@ def test_paper_venue_tables_created_at_v30(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"paper_venue_orders", "paper_venue_fills", "paper_venue_activities",
             "paper_venue_fill_cursor", "paper_venue_activity_quarantine"} <= names
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     # partial-unique broker_order_id index allows many NULLs, one non-null owner
     conn.execute("INSERT INTO paper_venue_orders(strategy,symbol,side,client_order_id,"
                  "strategy_id,status,submitted_ts) VALUES ('s','AAA','buy','c1',1,'submitted','t')")
@@ -538,7 +549,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 33
+    assert SCHEMA_VERSION == 34
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -553,4 +564,4 @@ def test_v32_negative_results_table_created(tmp_path):
     assert {"id", "created_at", "strategy_name", "gate_evaluation_id", "kind", "verdict",
             "actor", "reason", "hypothesis", "params_json", "tags", "source"} <= cols
     migrate(conn)  # idempotent re-run must not raise
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

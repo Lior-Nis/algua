@@ -7,7 +7,14 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.calendar.market_calendar import MarketCalendar
-from algua.cli._common import breach_payload, ok, registry_conn, sync_kb_doc, utc
+from algua.cli._common import (
+    authenticate_actor,
+    breach_payload,
+    ok,
+    registry_conn,
+    sync_kb_doc,
+    utc,
+)
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -71,6 +78,7 @@ from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
+from algua.registry.human_actor import canonical_run_context
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
@@ -529,6 +537,13 @@ def trade_tick(
 def promote(
     name: str,
     actor: str = typer.Option("agent", "--actor", help="human | agent"),
+    actor_signature: str = typer.Option(
+        None, "--actor-signature",
+        help="path to the SSH signature over the printed human-actor challenge (#329). Required to "
+             "authenticate --actor human: a bare --actor human unlocks NO threshold relaxation — "
+             "run once without this to print a challenge, sign it with your enrolled "
+             "algua-human-actor key (ssh-keygen -Y sign -n algua-human-actor), then re-run with "
+             "--actor-signature."),
     degradation_factor: float = typer.Option(
         DEGRADATION_FACTOR, "--degradation-factor",
         help="realized Sharpe must beat this fraction of the qualified holdout Sharpe "
@@ -573,6 +588,23 @@ def promote(
     )
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
+        rec = repo.get(name)  # StrategyNotFound -> JSON error before any work
+        # AUTHENTICATE the human actor (#329) BEFORE the relaxation guard is even consulted. A bare
+        # `--actor human` is forgeable, so asserting a human actor here requires an SSH signature
+        # (namespace algua-human-actor) over a fresh single-use challenge binding this command +
+        # strategy + RECOMPUTED artifact identity + the FULL ForwardGateCriteria (all 7 thresholds).
+        # No signature => a challenge is issued+printed and NOTHING runs. A declared agent is
+        # returned unchanged (the relaxation guard refuses its relaxations exactly as before).
+        actor_enum = authenticate_actor(
+            conn, command="paper promote", name=name, rec=rec,
+            stage_to=Stage.FORWARD_TESTED.value, declared_actor=actor_enum,
+            actor_signature=actor_signature,
+            run_context=canonical_run_context({
+                "min_observations": min_observations, "min_coverage": min_coverage,
+                "degradation_factor": degradation_factor, "sharpe_floor": sharpe_floor,
+                "min_vol": min_vol, "max_drawdown": max_drawdown, "max_staleness": max_staleness,
+            }),
+        )
         # PREFLIGHT: actor legality + relaxations-need-human + stage legality. Refuses here,
         # before the broker is even constructed (TransitionError is a ValueError -> JSON error).
         forward_promotion_preflight(repo, name, actor=actor_enum, criteria=criteria)

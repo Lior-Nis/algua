@@ -304,14 +304,32 @@ def backfill_from_kb() -> None:
     }))
 
 
+# The two signing namespaces the trust anchor authenticates: the go-live gate and the human-actor
+# gate (#329). Enrollment is per-namespace; a go-live-only key does NOT authenticate a human actor.
+_NAMESPACE_CHOICES = {
+    "go-live": "algua-go-live",
+    "human-actor": "algua-human-actor",
+    "both": "algua-go-live,algua-human-actor",
+}
+
+
 @registry_app.command("enroll-approver")
 @json_errors
 def enroll_approver(
     name: str = typer.Option(..., "--name", help="approver identity (allowed_signers principal)"),
     pubkey: str = typer.Option(..., "--pubkey", help="SSH public key (ssh-ed25519 AAAA...)"),
+    namespace: str = typer.Option(
+        "go-live", "--namespace",
+        help="which gate(s) this key authenticates: 'go-live' (paper->live signature), "
+             "'human-actor' (authenticated --actor human for gate relaxations, #329), or 'both'"),
 ) -> None:
-    """Enroll a go-live approver PUBLIC key. The trust comes from committing this through code-owner
-    review — the live gate uses the reviewed copy on main."""
+    """Enroll an approver PUBLIC key for one or both signing namespaces. The trust comes from
+    committing this through code-owner review — the gates use the reviewed copy on main. A key
+    enrolled only for 'go-live' cannot authenticate a human actor, and vice versa."""
+    if namespace not in _NAMESPACE_CHOICES:
+        raise ValueError(
+            f"--namespace must be one of {sorted(_NAMESPACE_CHOICES)}, got {namespace!r}")
+    namespaces_field = _NAMESPACE_CHOICES[namespace]
     # Strict principal: a single token, so a crafted --name can't inject a second allowed_signers
     # line (e.g. a newline + an extra key) into the trust anchor (codex review).
     if not re.fullmatch(r"[A-Za-z0-9_.@-]+", name):
@@ -331,7 +349,9 @@ def enroll_approver(
                     enrolled.add(fields[i + 1])
     if keyblob in enrolled:
         raise ValueError("that public key is already enrolled")
-    line = f'{name} namespaces="algua-go-live" {keytype} {keyblob}\n'
+    # ALWAYS write an explicit namespaces= restriction (never an unscoped line): an unscoped line
+    # would authenticate EVERY namespace and collapse the go-live/human-actor separation (#329).
+    line = f'{name} namespaces="{namespaces_field}" {keytype} {keyblob}\n'
     with ALLOWED_SIGNERS_PATH.open("a") as fh:
         fh.write(line)
-    emit(ok({"enrolled": name, "keytype": keytype}))
+    emit(ok({"enrolled": name, "keytype": keytype, "namespaces": namespaces_field}))

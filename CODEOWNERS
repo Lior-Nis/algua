@@ -19,3 +19,8 @@
 /algua/registry/promotion.py    @Lior-Nis   # promotion policy (breadth/PIT/floor + shortlist gate)
 /algua/research/forward_gates.py      @Lior-Nis   # forward-test gate criteria (#124)
 /algua/registry/forward_promotion.py  @Lior-Nis   # forward-test evidence assembly + live certificate
+/algua/registry/human_actor.py        @Lior-Nis   # authenticated --actor human gate (#329)
+/algua/cli/_common.py                  @Lior-Nis   # authenticate_actor chokepoint — the enforcement call (#329)
+/algua/cli/research_cmd.py             @Lior-Nis   # research-promote enforcement call site (#329)
+/algua/cli/paper_cmd.py                @Lior-Nis   # paper-promote enforcement call site (#329)
+/CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners
