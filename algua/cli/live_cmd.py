@@ -5,7 +5,7 @@ import math
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.cli._common import breach_payload, ok, registry_conn, utc
+from algua.cli._common import breach_payload, ok, registry_conn, resolve_drawdown_breaker, utc
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -13,7 +13,7 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.execution import live_reconcile
-from algua.execution.alpaca_broker import AlpacaLiveBroker
+from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
 from algua.execution.flatten import flatten_strategy
 from algua.execution.live_ledger import (
     LedgerKind,
@@ -53,6 +53,8 @@ from algua.registry.live_gate import (
 )
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
+from algua.risk.book_breaker import BookBreach, BookBreakerLimits, evaluate_book_breaker
+from algua.risk.book_equity import update_book_peak
 from algua.risk.book_limits import BookExposure, BookRiskLimits
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
@@ -269,6 +271,42 @@ def _latest_marks(bars) -> dict[str, float]:
     return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
 
 
+def _evaluate_book_loss_breaker(conn, broker):
+    """Evaluate the book-level loss/drawdown circuit breaker (#390) for the whole account.
+
+    Reads ONE ``broker.account()`` snapshot (equity + prior-session close). Returns a ``BookBreach``
+    to halt+flatten, or None to proceed. Equity is validated BEFORE the high-water mark is ratcheted
+    so a non-finite/non-positive read can never corrupt the peak (GATE-1): an unusable equity
+    short-circuits to a breach without touching the peak. Otherwise the peak ratchets to include
+    this cycle (a fresh all-time high => zero drawdown), and the daily-loss baseline is the broker's
+    prior trading-session close (``account.last_equity``).
+
+    A BrokerError reading / parsing the account (missing or malformed equity / last_equity) is
+    itself a fail-closed breach: without a trustworthy account snapshot the book is unvaluable, so
+    it must engage the persistent halt rather than fall through to a retryable JSON error (GATE-2).
+    """
+    try:
+        account = broker.account()
+        equity = float(account.equity)
+        last_equity = float(account.last_equity)
+    except BrokerError as exc:
+        return BookBreach(
+            "book_account_read_failed",
+            f"could not read a trustworthy account snapshot for the book breaker ({exc}) — "
+            "refusing to trade the shared book blind",
+        )
+    limits = BookBreakerLimits(
+        max_drawdown=get_settings().book_max_drawdown,
+        max_daily_loss=get_settings().book_max_daily_loss,
+    )
+    if not math.isfinite(equity) or equity <= 0.0:
+        # Do NOT ratchet the peak on an unusable read; evaluate_book_breaker returns the
+        # book_equity_unusable breach (peak value is irrelevant on this branch).
+        return evaluate_book_breaker(equity, 0.0, last_equity, limits)
+    peak = update_book_peak(conn, equity)
+    return evaluate_book_breaker(equity, peak, last_equity, limits)
+
+
 def _build_book_exposure(
     broker, provider, net_positions: dict[str, float], start: str, end: str,
 ) -> tuple[BookExposure | None, str | None]:
@@ -325,7 +363,15 @@ def run_all(
     snapshot: str = typer.Option(..., "--snapshot"),
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
-    max_drawdown: float = typer.Option(None, "--max-drawdown"),
+    max_drawdown: float | None = typer.Option(
+        None, "--max-drawdown",
+        help="per-strategy drawdown breaker fraction; omit to use the conservative default-ON "
+             "bound (settings.strategy_max_drawdown_default)",
+    ),
+    disable_drawdown_breaker: bool = typer.Option(
+        False, "--disable-drawdown-breaker",
+        help="HUMAN-ONLY emergency: turn the per-strategy drawdown breaker fully OFF (audited)",
+    ),
     grace_cycles: int = typer.Option(
         3, "--grace-cycles",
         help="cycles a reconcile mismatch may persist before halting",
@@ -334,9 +380,12 @@ def run_all(
 ) -> None:
     """One sequenced portfolio cycle over ALL live strategies: re-verify each, ingest fills,
     reconcile the account against the broker, then tick each (scoped cancel). Trades only when the
-    account reconciles clean; a persistent unexplained drift engages the global halt."""
+    account reconciles clean; a persistent unexplained drift engages the global halt. The book-level
+    loss circuit breaker (#390) halts + flattens the WHOLE account on aggregate drawdown / daily
+    loss before any strategy can order."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
+    max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
     configure_logging()
     counters = CycleCounters()
     # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives
@@ -345,6 +394,10 @@ def run_all(
         log.info("cycle_start", extra={"fields": {"lane": "live", "snapshot": snapshot}})
         try:
             with registry_conn() as conn:
+                if disable_drawdown_breaker:
+                    audit_append(conn, actor="human", action="drawdown_breaker_disabled",
+                                 reason="live run-all invoked with --disable-drawdown-breaker",
+                                 strategy=None)
                 repo = SqliteStrategyRepository(conn)
                 live = repo.list_strategies(Stage.LIVE)
                 if not live:
@@ -410,6 +463,36 @@ def run_all(
                         "strategies": [],
                     }))
                     return
+                # BOOK-LEVEL LOSS CIRCUIT BREAKER (#390): before ANY strategy can order, check the
+                # WHOLE-account equity against the account high-water mark (drawdown) and the prior
+                # trading-session close (daily loss). A breach halts + flattens the ENTIRE account —
+                # the per-strategy drawdown breaker can't see a correlated crash across the book.
+                # ONE broker.account() snapshot feeds both equity and the daily-loss baseline.
+                book_breach = _evaluate_book_loss_breaker(conn, broker)
+                if book_breach is not None:
+                    counters.breaches += 1
+                    # Engage the persistent halt FIRST (fail-safe: no-trade even if the close then
+                    # errors), audit, THEN flatten the whole account (cancel-all + close-all —
+                    # reaches orphan/dormant/unverified holdings the per-strategy loop never would).
+                    global_halt.engage(conn, reason=book_breach.detail, actor="system")
+                    audit_append(conn, actor="system", action="book_circuit_breaker",
+                                 reason=f"{book_breach.kind}: {book_breach.detail}", strategy=None)
+                    log.error("book_circuit_breaker",
+                              extra={"fields": {"lane": "live", "kind": book_breach.kind}})
+                    payload = {"ok": False, "book_breach": {"kind": book_breach.kind,
+                                                            "detail": book_breach.detail},
+                               "global_halt": "set", "reconcile": recon_payload,
+                               "skipped": skipped}
+                    try:
+                        broker.close_all_positions()
+                    except Exception as exc:  # noqa: BLE001 — surface + persist halt, never swallow
+                        counters.flatten_failures += 1
+                        log.error("book_flatten_failed",
+                                  extra={"fields": {"lane": "live"}}, exc_info=True)
+                        emit({**payload, "liquidation_submitted": False, "flatten_error": str(exc)})
+                        raise typer.Exit(1) from exc
+                    emit({**payload, "liquidation_submitted": True})
+                    raise typer.Exit(1)
                 # BOOK-LEVEL aggregate risk (#389): build ONE account-scoped exposure accumulator
                 # seeded from the reconciled whole-account net book, capping aggregate gross / net /
                 # single-name concentration ACROSS all strategies (per-strategy walls can't see the

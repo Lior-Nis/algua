@@ -7,7 +7,14 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.calendar.market_calendar import MarketCalendar
-from algua.cli._common import breach_payload, ok, registry_conn, sync_kb_doc, utc
+from algua.cli._common import (
+    breach_payload,
+    ok,
+    registry_conn,
+    resolve_drawdown_breaker,
+    sync_kb_doc,
+    utc,
+)
 from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -83,6 +90,7 @@ from algua.research.forward_gates import (
     ForwardGateCriteria,
 )
 from algua.risk import global_halt, kill_switch
+from algua.risk.book_equity import clear_book_peak
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_strategy
@@ -209,15 +217,22 @@ def run(
     demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
     snapshot: str = typer.Option(None, "--snapshot", help="paper-run an ingested bars snapshot"),
     cash: float = typer.Option(100_000.0, "--cash", help="starting paper cash"),
-    max_drawdown: float = typer.Option(None, "--max-drawdown",
-                                       help="trip the kill-switch if equity falls this fraction below peak (omit to disable)"),  # noqa: E501
+    max_drawdown: float | None = typer.Option(None, "--max-drawdown",
+                                       help="per-strategy drawdown breaker fraction; omit for the default-ON bound"),  # noqa: E501
+    disable_drawdown_breaker: bool = typer.Option(
+        False, "--disable-drawdown-breaker",
+        help="HUMAN-ONLY emergency: turn the drawdown breaker fully OFF (audited)"),
 ) -> None:
     """Replay a paper-stage strategy through the sim broker and persist orders/fills."""
     if cash <= 0:
         raise ValueError("--cash must be > 0")
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
+    max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
     with registry_conn() as conn:
+        if disable_drawdown_breaker:
+            audit_append(conn, actor="human", action="drawdown_breaker_disabled",
+                         reason="paper run invoked with --disable-drawdown-breaker", strategy=name)
         strategy, _rec = load_gated_strategy(conn, name, "paper run")
         provider = _select_provider(demo, snapshot)
         try:
@@ -443,14 +458,18 @@ def trade_tick(
     snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
     start: str = typer.Option("2023-01-01", "--start"),
     end: str = typer.Option("2023-12-31", "--end"),
-    max_drawdown: float = typer.Option(None, "--max-drawdown",
-                                       help="halt + flatten if equity falls this fraction below the persisted peak (omit to disable)"),  # noqa: E501
+    max_drawdown: float | None = typer.Option(None, "--max-drawdown",
+                                       help="per-strategy drawdown breaker fraction; omit for the default-ON bound"),  # noqa: E501
+    disable_drawdown_breaker: bool = typer.Option(
+        False, "--disable-drawdown-breaker",
+        help="HUMAN-ONLY emergency: turn the drawdown breaker fully OFF (audited)"),
 ) -> None:
     """Run ONE wall-clock tick against the PAPER venue: submit Alpaca market-order deltas toward
     the strategy's target. Each accepted order persists immediately; a drawdown/exposure/reconcile
     breach trips the kill-switch and flattens. Never trades live (the broker refuses a live URL)."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
+    max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
     configure_logging()
     counters = CycleCounters()
     # One correlation id per wall-clock tick; golden_signals flushes in `finally` so the rollup
@@ -460,6 +479,10 @@ def trade_tick(
                  extra={"fields": {"lane": "paper", "strategy": name, "snapshot": snapshot}})
         try:
             with registry_conn() as conn:
+                if disable_drawdown_breaker:
+                    audit_append(conn, actor="human", action="drawdown_breaker_disabled",
+                                 reason="paper trade-tick invoked with --disable-drawdown-breaker",
+                                 strategy=name)
                 strategy, rec = load_gated_strategy(conn, name, "trade-tick")
                 broker = _alpaca_broker_from_settings()
                 provider = _select_provider(False, snapshot)
@@ -704,6 +727,10 @@ def resume_all(
             # re-base on their next tick rather than re-tripping a stale peak (codex C1 review).
             clear_all_peaks(conn)
             clear_all_nav_peaks(conn)
+            # Also re-base the ACCOUNT-WIDE book high-water mark (#390): after a flatten-to-cash the
+            # book breaker must not re-trip against the pre-loss peak. The daily-loss baseline
+            # auto-re-bases next session via the broker's prior-session close.
+            clear_book_peak(conn)
             global_halt.clear(conn)
     result: dict = {"global_halt": "reset" if was_set else "not_set"}
     if not_flat:
