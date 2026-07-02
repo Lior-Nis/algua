@@ -256,6 +256,7 @@ modules = [
     "algua.cli.backtest_cmd",
     "algua.cli.data_cmd",
     "algua.cli.factor_cmd",
+    "algua.cli.fleet_cmd",
     "algua.cli.idea_cmd",
     "algua.cli.live_cmd",
     "algua.cli.monitoring_cmd",
