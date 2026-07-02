@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # keep contracts import-light; pandas only needed for typing
     import pandas as pd
@@ -239,6 +239,77 @@ class Broker(Protocol):
     def get_positions(self) -> pd.Series: ...
 
     def submit(self, intent: OrderIntent) -> str: ...
+
+
+# --- Narrow broker seams (issue #385) ----------------------------------------------------------
+# The reconcile / flatten / cancel helpers each reach a SUBSET of a concrete broker's methods that
+# the base `Broker` protocol doesn't declare. Rather than typing those call sites as bare `object`
+# and silencing mypy with `# type: ignore[attr-defined]` — which blinds the type checker at the
+# real-money order-routing seam — each capability is declared here as a narrow, single-purpose
+# protocol (Interface Segregation). Return types are pure (list/dict/pd.Series), so contracts stays
+# import-light. These are STATIC annotations only: no `isinstance(x, Proto)` capability checks are
+# made against them (a structurally-matching read-only broker whose writes raise must not be treated
+# as write-capable at runtime).
+
+
+@runtime_checkable
+class PositionsBroker(Protocol):
+    """Net positions per symbol (a pandas Series symbol -> signed qty)."""
+
+    def get_positions(self) -> pd.Series: ...
+
+
+@runtime_checkable
+class AccountActivityBroker(Protocol):
+    """The account activity feed (fills + cash), oldest-first, from an optional cursor."""
+
+    def account_activities(self, after: str | None = None) -> list[Any]: ...
+
+
+@runtime_checkable
+class ActivityWindowBroker(Protocol):
+    """A paginated, exhaustive (after, until] account-activity window (paper-venue ingest)."""
+
+    def account_activities_window(self, after: str, until: str) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class OpenOrderReader(Protocol):
+    """List the account's currently-open orders (to scope cancellation per strategy)."""
+
+    def list_open_orders(self) -> list[Any]: ...
+
+
+@runtime_checkable
+class OrderCanceller(Protocol):
+    """Cancel one order by its broker order id."""
+
+    def cancel_order(self, order_id: str) -> None: ...
+
+
+@runtime_checkable
+class OrderLookupBroker(Protocol):
+    """Look up one order by its client_order_id (crash-stranded broker-id recovery, #312)."""
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None: ...
+
+
+@runtime_checkable
+class OffsetBroker(Protocol):
+    """Submit a market order to offset a believed position (emergency flatten, #336)."""
+
+    def submit_offset(self, symbol: str, signed_qty: float, client_order_id: str) -> str: ...
+
+
+@runtime_checkable
+class ScopedCancelBroker(OpenOrderReader, OrderCanceller, Protocol):
+    """List open orders AND cancel by id — the per-strategy scoped-cancel path needs both."""
+
+
+@runtime_checkable
+class LiveReconcileBroker(PositionsBroker, AccountActivityBroker, OrderLookupBroker, Protocol):
+    """The read-only surface the live/paper resume reconcile reaches: net positions + the activity
+    feed + per-coid order lookup (the last via the stranded-order recovery it forwards into)."""
 
 
 @dataclass(frozen=True)
