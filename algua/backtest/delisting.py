@@ -58,9 +58,19 @@ def apply_delisting_exits(
     records: Mapping[str, list[DelistingRecord]] | None = None,
     *,
     assume_terminal_last_close: bool = False,
+    terminal_price_grid: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[dict]]:
-    """Return (adj_exec, weights_exec, forced_exits). See module docstring + spec."""
+    """Return (adj_exec, weights_exec, forced_exits). See module docstring + spec.
+
+    `adj` is the ORDINARY fill-price grid (adj_close, or adj_open under issue #383's open-fill
+    basis). `terminal_price_grid` (default: `adj`) is the grid the human-only
+    `assume_terminal_last_close` fallback reads the last-bar terminal price from — pinned to
+    adj_close by the caller so a delisting realizes at the last CLOSE (a close-of-book event),
+    never the last open, regardless of the ordinary fill basis. Record-backed terminal prices are
+    explicit adj_close-unit values and are unaffected."""
     records = records or {}
+    if terminal_price_grid is None:
+        terminal_price_grid = adj
     adj_exec = adj.copy()
     weights_exec = weights_eff.copy()
     forced_exits: list[dict] = []
@@ -127,11 +137,18 @@ def apply_delisting_exits(
                     f"delisting record (provide one or pass --assume-terminal-last-close)"
                 )
             weights_exec.loc[T:, c] = 0.0
+            # Last adj_CLOSE (from terminal_price_grid), NOT the ordinary fill grid — a delisting
+            # realizes at the close-of-book, never the open (issue #383). Write it into adj_exec so
+            # the forced liquidation at bar T actually fills at that close, matching the reported
+            # terminal_price; under the legacy close-fill basis terminal_price_grid IS `adj`, so
+            # this is a byte-identical no-op there.
+            terminal = float(terminal_price_grid.loc[T, c])
+            adj_exec.loc[T, c] = terminal
             forced_exits.append(
                 {
                     "symbol": c,
                     "bar": T.isoformat(),
-                    "terminal_price": float(col.loc[T]),
+                    "terminal_price": terminal,
                     "source": "assumed_last_close",
                 }
             )

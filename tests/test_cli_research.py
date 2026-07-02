@@ -485,14 +485,16 @@ def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
                                  *_PASS, "--n-combos", "9", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
-    # Net of the default transaction costs (#325), cross_sectional_momentum is market-beta with a
-    # NEGATIVE idiosyncratic alpha (market_beta ~1.0, appraisal_ratio < 0), so it fails the
-    # idiosyncratic-alpha screen (#328) — ir_binding is not relaxed by _PASS. This test's subject is
-    # PIT-provenance THREADING, which is recorded on the run regardless of the pass/fail verdict, so
-    # we assert the (now correct) net-of-cost FAIL and keep every provenance assertion.
+    # Net of the default transaction costs (#325) AND the next-bar-OPEN fill basis (#383, which
+    # reprices every fill from adj_close(t+1) to adj_open(t+1)), cross_sectional_momentum is
+    # market-beta (market_beta ~1.0) and still FAILS the gate — ir_binding is not relaxed by _PASS.
+    # This test's subject is PIT-provenance THREADING, recorded on the run regardless of the
+    # pass/fail verdict, so we assert the (now correct, open-fill) FAIL and keep every provenance
+    # assertion. The open-fill basis lifted the idiosyncratic alpha into positive territory, so we
+    # no longer pin the appraisal_ratio SIGN — only that the run failed and ir_binding is present.
     assert payload["passed"] is False
     assert payload["promoted"] is False
-    assert payload["ir_binding"] is True and payload["appraisal_ratio"] < 0.0
+    assert payload["ir_binding"] is True
     assert payload["universe_name"] == "pit_core"
     eff = [s["effective_date"] for s in payload["universe_snapshots"]]
     assert eff == ["2022-01-01", "2023-01-01"]

@@ -22,7 +22,8 @@ class Fill:
 
 
 class SimBroker:
-    """In-process paper broker: fills submitted orders at the next bar's open, no slippage. Sells
+    """In-process paper broker: fills submitted orders at the next bar's contract-pinned reference
+    price (the loop passes the series — next-bar open by default; see #383), no slippage. Sells
     are applied before buys so freed cash funds buys; cash never goes negative. Implements the
     contracts Broker surface (submit, get_positions) plus the sim-only equity()/fill_pending() the
     replay loop drives.
@@ -53,16 +54,17 @@ class SimBroker:
         held = sum(q * float(prices.get(s, 0.0)) for s, q in self.positions.items())
         return self.cash + held
 
-    def fill_pending(self, opens: pd.Series, fill_ts: datetime) -> list[Fill]:
-        """Fill every pending order against `opens`, returning one Fill per order. The equity
-        snapshot is taken once here and used as the sizing denominator for all orders so sizing
-        does not drift as earlier orders fill."""
-        eq = self.equity(opens)
+    def fill_pending(self, fill_prices: pd.Series, fill_ts: datetime) -> list[Fill]:
+        """Fill every pending order against `fill_prices` (the contract-pinned next-bar reference —
+        next-bar open by default; #383), returning one Fill per order. The equity snapshot is taken
+        once here and used as the sizing denominator for all orders so sizing does not drift as
+        earlier orders fill."""
+        eq = self.equity(fill_prices)
         # id, intent, intended signed qty, price (price is NaN when the symbol is untradeable)
         planned: list[tuple[str, OrderIntent, float, float]] = []
         rejected: list[Fill] = []
         for order_id, intent in self._pending:
-            price = float(opens.get(intent.symbol, float("nan")))
+            price = float(fill_prices.get(intent.symbol, float("nan")))
             if not price > 0:
                 rejected.append(Fill(intent.symbol, 0.0, 0.0, intent.decision_ts, fill_ts,
                                      order_id, status="rejected"))
