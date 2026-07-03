@@ -256,11 +256,13 @@ def evaluate_book(
         scale = max(0.0, (sum_p - overflow) / sum_p)
         p = {sym: v * scale for sym, v in p.items()}
 
-    # ---- step 5: rounding-safe NOTIONAL distribution ------------------------------------------
-    # Split each symbol's P across the requesting strategies proportional to request, FLOOR every
-    # leg to the dollar step (never up → Σq ≤ P), then hand at most ONE step of the per-symbol
-    # remainder to a single strategy, and ONLY if the full quantized book still passes every cap.
+    # ---- step 5: rounding-safe NOTIONAL distribution (two-pass) --------------------------------
+    # PASS 1 — base floors. Split each symbol's P across the requesting strategies proportional to
+    # request and FLOOR every leg to the dollar step (never up → Σq ≤ P per symbol, so the floored
+    # book satisfies every step-3/step-4 cap by construction).
     q: dict[tuple[str, str], float] = {}
+    legs_by_symbol: dict[str, list[tuple[str, float]]] = {}
+    granted_by_symbol: dict[str, dict[str, float]] = {}
     for sym in sorted(p):
         p_sym = p[sym]
         if p_sym <= 0.0:
@@ -282,21 +284,41 @@ def evaluate_book(
                 floored = 0.0
             if floored > 0.0:
                 granted[strat] = floored
-        # per-symbol remainder → at most ONE extra step to ONE strategy, only if re-validation of
-        # the FULL quantized book (all committed q + this symbol's grants + the extra step) passes.
+        legs_by_symbol[sym] = legs
+        granted_by_symbol[sym] = granted
+
+    # The FULL floored book (seed + EVERY symbol's base grants — not a prefix). Every remainder
+    # re-validation below starts from this whole book, so a remainder for one symbol is checked
+    # against the base legs of the symbols processed BEFORE and AFTER it. That closes the MEDIUM:
+    # a remainder can never combine with a not-yet-processed symbol's floored leg to overshoot the
+    # aggregate gross cap, so step 6 can never hard-fail on a pure gross overshoot.
+    book_now: dict[str, float] = {s: _seed(s) for s in symbols}
+    for sym, granted in granted_by_symbol.items():
+        book_now[sym] = book_now.get(sym, 0.0) + sum(granted.values())
+
+    # PASS 2 — remainders. Hand at most ONE step of each symbol's floor-remainder to a single
+    # strategy, and ONLY if re-adding it keeps the whole quantized book (`book_now`, incl. every
+    # symbol's base legs + remainders already granted this pass) under every cap.
+    for sym in sorted(granted_by_symbol):
+        p_sym = p[sym]
+        step = _step(sym)
+        granted = granted_by_symbol[sym]
         remainder = p_sym - sum(granted.values())
-        if remainder >= step - _FLOOR_SLACK:
-            for strat, _req in legs:
-                candidate = granted.get(strat, 0.0) + step
-                if candidate < min_notional:
-                    continue
-                trial_book: dict[str, float] = {s: _seed(s) for s in symbols}
-                for (_gs, _gsym), gv in q.items():
-                    trial_book[_gsym] = trial_book.get(_gsym, 0.0) + gv
-                trial_book[sym] = _seed(sym) + sum(granted.values()) + step
-                if _caps_ok(trial_book, cap_gross, cap_sym, conc_bound, eps):
-                    granted[strat] = candidate
-                break
+        if remainder < step - _FLOOR_SLACK:
+            continue
+        for strat, _req in legs_by_symbol[sym]:
+            candidate = granted.get(strat, 0.0) + step
+            if candidate < min_notional:
+                continue
+            trial = book_now.get(sym, 0.0) + step
+            trial_book = dict(book_now)
+            trial_book[sym] = trial
+            if _caps_ok(trial_book, cap_gross, cap_sym, conc_bound, eps):
+                granted[strat] = candidate
+                book_now[sym] = trial  # commit so later symbols' remainders see it
+            break
+
+    for sym, granted in granted_by_symbol.items():
         for strat, val in granted.items():
             if val > 0.0:
                 q[(strat, sym)] = val

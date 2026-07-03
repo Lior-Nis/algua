@@ -54,6 +54,7 @@ from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
 from algua.risk.book_breaker import BookBreach, BookBreakerLimits, evaluate_book_breaker
 from algua.risk.book_equity import update_book_peak
+from algua.risk.book_limits import BookRiskLimits
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_tradable_strategy
@@ -262,6 +263,116 @@ def _broker_buying_power(broker) -> float:
     return float(broker.account().buying_power)
 
 
+def _latest_marks(bars) -> dict[str, float]:
+    """Latest closed-bar close per symbol from a bars frame ({symbol: close}); empty on no bars."""
+    if bars is None or getattr(bars, "empty", True):
+        return {}
+    return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
+
+
+class _InterimBookHeadroom:
+    """INTERIM (design-v4, #389 Task-1 slice) account-level BUY trimmer over the SHARED live book.
+
+    Enforces ONLY the two prefix-SAFE, monotone book caps across all strategies on the one account:
+      - aggregate GROSS (== aggregate NET for a long-only book): Σ notional <= min(max_gross,
+        max_net) * equity;
+      - single-name NOTIONAL: symbol notional <= max_symbol_notional * equity.
+    Both are monotone under BUY-only accumulation and stay valid regardless of this cycle's SELLs
+    (a SELL only ever SHRINKS the real book, so trimming BUYs against the un-credited seed is
+    conservative). Each BUY consumes shared gross + per-symbol headroom and MUTATES the running
+    book, so the next strategy sees the compounded exposure ("first buyer consumes headroom").
+
+    The single-name CONCENTRATION cap (symbol / gross) is deliberately NOT enforced here: it is
+    prefix-UNSAFE under a same-cycle SELL — a SELL in one name shrinks gross and RAISES another
+    held name's symbol/gross ratio, so a BUY-by-BUY concentration check computed before those SELLs
+    land is too lenient. That hole is exactly what the whole-cycle, fixed-denominator
+    ``evaluate_book`` (this module's sibling) closes. Until the PLAN -> AGGREGATE-GATE -> SETTLE ->
+    APPLY wiring of that evaluator lands (a later slice of #389), ``run-all`` enforces only these
+    two caps at the book level and MUST NOT be operated on a real live account (see the run-all
+    docstring / the #389 deployment gate).
+    """
+
+    def __init__(self, book_notionals: dict[str, float], cap_gross: float, cap_sym: float) -> None:
+        self._book = dict(book_notionals)
+        self._gross = sum(book_notionals.values())
+        self._cap_gross = cap_gross
+        self._cap_sym = cap_sym
+
+    def permit_buy(self, symbol: str, requested: float) -> float:
+        """Trim a requested BUY notional to the remaining shared gross + per-symbol headroom, then
+        commit it to the running book. Returns the permitted (<= requested) notional."""
+        if not (requested > 0.0):
+            return 0.0
+        gross_headroom = max(0.0, self._cap_gross - self._gross)
+        sym_headroom = max(0.0, self._cap_sym - self._book.get(symbol, 0.0))
+        permitted = min(requested, gross_headroom, sym_headroom)
+        if not (permitted > 0.0):
+            return 0.0
+        self._book[symbol] = self._book.get(symbol, 0.0) + permitted
+        self._gross += permitted
+        return permitted
+
+
+def _build_interim_book_headroom(
+    broker, provider, net_positions: dict[str, float], start: str, end: str,
+) -> tuple[_InterimBookHeadroom | None, str | None]:
+    """Build the INTERIM account-level book-headroom trimmer (#389 Task-1 slice) that caps
+    aggregate gross / net + single-name notional across ALL strategies sharing the live account.
+    Seeds from the RECONCILED broker net positions (whole-account truth, incl. non-ticked / dormant
+    / orphan residuals) valued at latest closed-bar marks, against ACCOUNT equity.
+
+    Returns ``(_InterimBookHeadroom, None)`` on success, or ``(None, reason)`` to FAIL CLOSED
+    (caller skips trading this cycle). Fail-closed cases, per the long-only precondition + valuation
+    safety:
+      - any reconciled nonzero position with qty < 0 (a short — long-only anomaly);
+      - any reconciled nonzero position with a missing / non-finite / <= 0 mark (unvaluable book);
+      - a seed book that ALREADY breaches the aggregate-gross or single-name-notional cap at
+        reconcile time (market drift, not our orders) — adding exposure through an already-over
+        book is unsound, so the whole cycle fails closed and self-heals once the book de-risks.
+    A partially-valued book is never built — one bad symbol makes gross for the WHOLE book
+    unknowable, so the whole cycle fails closed. (The CONCENTRATION cap is intentionally not
+    seed-checked here; it is enforced only by the whole-cycle ``evaluate_book`` — see
+    ``_InterimBookHeadroom``.)"""
+    nonzero = {s: float(q) for s, q in net_positions.items() if float(q) != 0.0}
+    shorts = sorted(s for s, q in nonzero.items() if q < 0.0)
+    if shorts:
+        return None, f"account holds short position(s) {shorts} — book-risk precondition is " \
+                     "long-only; refusing to trade this cycle"
+    fetch = sorted(nonzero)
+    bars = provider.get_bars(fetch, utc(start), utc(end), "1d") if fetch else None
+    marks = _latest_marks(bars)
+    book_notionals: dict[str, float] = {}
+    for sym, qty in nonzero.items():
+        mark = marks.get(sym)
+        if mark is None or not math.isfinite(mark) or mark <= 0.0:
+            return None, f"held symbol {sym!r} has no usable mark (got {mark!r}) — cannot value " \
+                         "the book; refusing to trade this cycle"
+        book_notionals[sym] = qty * mark
+    equity = float(broker.account().equity)
+    if not math.isfinite(equity) or equity <= 0.0:
+        return None, f"account equity is unusable (got {equity!r}) — cannot scale the book caps; " \
+                     "refusing to trade this cycle"
+    s = get_settings()
+    limits = BookRiskLimits(
+        max_gross=s.book_max_gross,
+        max_net=s.book_max_net,
+        max_symbol_concentration=s.book_max_symbol_concentration,
+        max_symbol_notional=s.book_max_symbol_notional,
+    )
+    cap_gross = min(limits.max_gross, limits.max_net) * equity  # long-only => gross == net
+    cap_sym = limits.max_symbol_notional * equity
+    eps = 1e-6 * equity
+    gross = sum(book_notionals.values())
+    if gross > cap_gross + eps:
+        return None, "account book already breaches the aggregate gross/net cap at reconcile " \
+                     "— refusing to trade this cycle"
+    over_sym = sorted(sym for sym, n in book_notionals.items() if n > cap_sym + eps)
+    if over_sym:
+        return None, f"account book already breaches the single-name notional cap for {over_sym} " \
+                     "at reconcile — refusing to trade this cycle"
+    return _InterimBookHeadroom(book_notionals, cap_gross, cap_sym), None
+
+
 def _evaluate_book_loss_breaker(conn, broker):
     """Evaluate the book-level loss/drawdown circuit breaker (#390) for the whole account.
 
@@ -325,7 +436,13 @@ def run_all(
     reconcile the account against the broker, then tick each (scoped cancel). Trades only when the
     account reconciles clean; a persistent unexplained drift engages the global halt. The book-level
     loss circuit breaker (#390) halts + flattens the WHOLE account on aggregate drawdown / daily
-    loss before any strategy can order."""
+    loss before any strategy can order.
+
+    DEPLOYMENT GATE (#389): the aggregate book-risk enforcement here is INTERIM — it caps only the
+    two prefix-safe monotone book caps (aggregate gross/net + single-name notional) across
+    strategies; the single-name CONCENTRATION cap is NOT yet wired into this driver (it needs the
+    whole-cycle `evaluate_book` PLAN->AGGREGATE-GATE->SETTLE->APPLY path, a later slice of #389).
+    Until that wiring lands, this command MUST NOT be operated on a real live account."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
@@ -436,22 +553,46 @@ def run_all(
                         raise typer.Exit(1) from exc
                     emit({**payload, "liquidation_submitted": True})
                     raise typer.Exit(1)
-                # BOOK-LEVEL aggregate risk (#389): the account-scoped aggregate gross / net /
-                # single-name-concentration gate is being rewired from the retired per-BUY
-                # `BookExposure.permit_buy` accumulator onto the whole-cycle, prefix-safe
-                # `evaluate_book` PLAN -> AGGREGATE-GATE -> SETTLE -> APPLY path (design v4). Until
-                # that batch wiring lands (a later slice of #389), this cycle applies only the
-                # per-cycle buying-power pool below; the pure `evaluate_book` evaluator and its unit
-                # coverage are in place (algua/risk/book_limits.py, tests/test_book_limits.py).
+                # BOOK-LEVEL aggregate risk (#389). The full account-scoped gate — aggregate gross /
+                # net / single-name notional AND concentration, prefix-safe under same-cycle SELLs —
+                # is the whole-cycle `evaluate_book` PLAN -> AGGREGATE-GATE -> SETTLE -> APPLY path
+                # (design v4), whose pure evaluator + unit coverage already ship
+                # (algua/risk/book_limits.py, tests/test_book_limits.py). Until that batch wiring
+                # lands (a later slice of #389), run-all enforces the two PREFIX-SAFE monotone book
+                # caps inline — aggregate gross/net and single-name notional — via the interim
+                # trimmer, seeded from the reconciled marked book and composed under the
+                # buying-power pool. The single-name CONCENTRATION cap is NOT enforced by this
+                # interim path (it is prefix-unsafe BUY-by-BUY under a shrinking-gross SELL), so
+                # run-all MUST NOT be operated on a real live account until the `evaluate_book`
+                # wiring slice lands. Fail closed (skip trading this cycle) if the book can't be
+                # valued safely — a short (long-only precondition), an unvaluable held name, or an
+                # already-breached seed.
+                book, book_reason = _build_interim_book_headroom(
+                    broker, provider, net_positions, start, end
+                )
+                if book is None:
+                    log.info("book_risk_deferred",
+                             extra={"fields": {"lane": "live", "reason": book_reason}})
+                    emit(ok({
+                        "reconcile": recon_payload,
+                        "skipped": skipped,
+                        "note": f"book-level risk precondition failed: {book_reason}; "
+                                "deferring trades this cycle",
+                        "strategies": [],
+                    }))
+                    return
                 pool = {"available": _broker_buying_power(broker)}
 
                 def _reserve_for(strategy_name):
                     def _reserve(symbol: str, notional: float) -> float:
-                        # Buying-power pool trim across strategies (strategy order). Audit any
-                        # shortfall vs the intended notional.
-                        permitted = min(notional, max(0.0, pool["available"]))
+                        # Buying-power pool trims first; the interim book trimmer then caps the
+                        # pool-permitted amount to the account-level gross/net + single-name
+                        # notional headroom and MUTATES the running book by the FINAL permitted (so
+                        # the next strategy's buys see the compounded book). Audit any shortfall.
+                        pool_permitted = min(notional, max(0.0, pool["available"]))
+                        permitted = book.permit_buy(symbol, pool_permitted)
                         pool["available"] -= permitted
-                        if permitted < notional:  # trimmed -> audit the shortfall
+                        if permitted < notional:  # trimmed/skipped -> audit the shortfall
                             record_reservation(
                                 conn, cycle, strategy_name, symbol, notional, permitted
                             )

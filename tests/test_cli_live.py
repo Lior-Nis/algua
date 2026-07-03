@@ -41,9 +41,16 @@ def _auth():
 
 
 def _permissive_book(monkeypatch):
-    """No-op the #390 book-level LOSS circuit breaker for run-all tests that assert the pre-existing
-    tick/pool/breach behavior. (The #389 aggregate book-exposure gate's pure evaluator is covered by
-    test_book_limits.py; the loss breaker by test_book_breaker.py + test_live_book_breaker.py.)"""
+    """Stub the #389 INTERIM book-headroom build with a large-headroom empty book so the aggregate
+    book caps never bind, AND no-op the #390 book-level LOSS circuit breaker — for run-all tests
+    that assert the pre-existing tick/pool/breach behavior. (The #389 gate's interim wiring is
+    covered by test_live_book_limits.py and its pure evaluator by test_book_limits.py; the loss
+    breaker by test_book_breaker.py + test_live_book_breaker.py.)"""
+    from algua.cli.live_cmd import _InterimBookHeadroom
+    monkeypatch.setattr(
+        "algua.cli.live_cmd._build_interim_book_headroom",
+        lambda *a, **k: (_InterimBookHeadroom({}, 1e15, 1e15), None),
+    )
     monkeypatch.setattr(
         "algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None
     )

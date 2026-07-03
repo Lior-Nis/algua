@@ -394,6 +394,34 @@ def test_remainder_not_granted_when_it_would_breach():
     assert v.permitted_buys[("s", "AAA")] <= 250.0 + 1e-6
 
 
+def test_remainder_revalidation_accounts_for_every_symbol_floored_legs():
+    # MEDIUM (design-v4 GATE-2): step-5 grants each symbol's remainder step over the WHOLE floored
+    # book (every symbol's base legs, not a processed-so-far prefix), and step 6 re-validates the
+    # exact quantized book — so a multi-symbol remainder distribution under a TIGHT aggregate gross
+    # cap never hard-fails on gross. equity=1000, cap_gross = 1.0*equity = 1000. Two names, two
+    # strategies each; step 100. Each name's aggregate request is 78 (per strat 39) *10 scaling ...
+    # Concretely: request 780 per name (390/strat) -> step3 p = 500 per name (cap_sym 500) capped by
+    # gross: sum_p 1000 == cap_gross, no scale. Floors to 400/name (two legs of 200 each), remainder
+    # 100 each -> both remainders granted, landing the book exactly at the 1000 gross cap.
+    lim = BookRiskLimits(max_gross=1.0, max_net=1.0, max_symbol_concentration=1.0,
+                         max_symbol_notional=0.5)  # cap_gross=1000, cap_sym=500
+    v = evaluate_book(
+        1000.0, {}, {},
+        {("s1", "AAA"): 390.0, ("s2", "AAA"): 390.0,
+         ("s1", "BBB"): 390.0, ("s2", "BBB"): 390.0},
+        lim, buy_notional_step=100.0,
+    )
+    assert v.ok is True  # never a step-6 gross hard-fail
+    book: dict[str, float] = {}
+    for (_strat, sym), val in v.permitted_buys.items():
+        book[sym] = book.get(sym, 0.0) + val
+        assert val == pytest.approx(round(val / 100.0) * 100.0, abs=1e-9)  # multiple of the step
+    # both names land at their 500 cap_sym via the remainder grants; aggregate at the gross cap.
+    assert book["AAA"] == pytest.approx(500.0)
+    assert book["BBB"] == pytest.approx(500.0)
+    assert sum(book.values()) <= 1000.0 + 1e-6  # gross cap respected on the quantized book
+
+
 def test_min_notional_floor_drops_sub_minimum_legs():
     # A leg quantized into (0, min_notional) is dropped to 0 (PLAN/APPLY agreement).
     lim = _relaxed(max_symbol_notional=100.0)
