@@ -464,3 +464,40 @@ def test_fleet_health_cadence_is_market_sessions_not_wallclock(monkeypatch, tmp_
         rows = fleet_status(conn, cal, now=now)
         assert rows[0]["health"] == "ok"
         assert fleet_alert(rows, halted_globally=False) == []
+
+
+def test_staleness_uses_exchange_session_not_utc_date(monkeypatch, tmp_path):
+    """GATE-2 HIGH: an after-close tick whose UTC date is the NEXT calendar day must be mapped to
+    the session it belongs to in EXCHANGE time. tick=2023-06-01T00:30:00+00:00 = 2023-05-31 20:30
+    America/New_York (after the May 31 close) belongs to the MAY 31 session; now=2023-06-08 20:00Z.
+    Six NYSE sessions elapsed (Jun 1,2,5,6,7,8), so at STALE_AFTER_SESSIONS=5 this must read STALE.
+    Counting the UTC date (Jun 1) would give only 5 and falsely read 'ok' — the dead-loop miss."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    cal = MarketCalendar()
+    tick = datetime(2023, 6, 1, 0, 30, tzinfo=UTC)  # 2023-05-31 20:30 ET, after the close
+    now = datetime(2023, 6, 8, 20, 0, tzinfo=UTC)
+    # the two mappings disagree by exactly one session — that is the bug this test pins
+    assert cal.sessions_between(tick.date(), now.date()) == 5           # UTC-date (wrong): ok
+    assert cal.sessions_between_instants(tick, now) == 6                # session (right): stale
+    with closing(_conn()) as conn:
+        rec = _register(conn, "h_afterclose", stage=Stage.PAPER)
+        _tick(conn, rec, tick_ts=tick.isoformat())
+        rows = fleet_status(conn, cal, now=now)
+    assert rows[0]["staleness_sessions"] == 6
+    assert rows[0]["health"] == "stale"
+    assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_fleet_health_global_halt_sampled_once(monkeypatch, tmp_path):
+    """GATE-2 HIGH: fleet health threads ONE global-halt sample into both the rollup and the alert
+    decision — a status engine that observed a DIFFERENT halt value must not be able to disagree
+    with the gate. We assert fleet_status honours the passed-in halt (single source of truth)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    now = _now()
+    with closing(_conn()) as conn:
+        rec = _register(conn, "s", stage=Stage.PAPER)
+        _tick(conn, rec, tick_ts=now.isoformat())
+        # DB has no global halt, but the caller passes halted_globally=True: the rollup must use
+        # the caller's value, not re-sample the DB.
+        rows = fleet_status(conn, MarketCalendar(), now=now, halted_globally=True)
+    assert rows[0]["health"] == "halted"

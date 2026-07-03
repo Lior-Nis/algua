@@ -46,14 +46,20 @@ def health() -> None:
     supervisor (systemd ``OnFailure=``, cron, k8s liveness) polls to distinguish 'market closed,
     correctly quiet' from 'loop dead, silently unmonitored'.
 
-    Pure read of persisted state (no broker call, no writes) — cadence is measured in COMPLETED
-    NYSE sessions since the last tick (via ``strategy_health``), never wall-clock, so a weekend/
-    holiday gap does not false-alarm. Emits a stable summary object AND exits 0 (healthy) / 1
-    (alerting); ``@json_errors`` turns even a status-engine crash into ``{ok:false}`` + exit 1
-    (fail closed)."""
+    DOMAIN read-only (like ``fleet status``): no broker call, no order/kill-switch/allocation
+    mutation. It opens the DB via ``registry_conn()``, whose idempotent ``migrate()`` may run
+    schema DDL on a stale DB — so it is not byte-literally read-only, only trading-state
+    read-only. Cadence is measured in COMPLETED NYSE sessions since the last tick (via
+    ``strategy_health``), never wall-clock, so a weekend/holiday gap does not false-alarm. Emits a
+    stable summary object AND exits 0 (healthy) / 1 (alerting); ``@json_errors`` turns even a
+    status-engine crash into ``{ok:false}`` + exit 1 (fail closed)."""
     with registry_conn() as conn:
+        # Sample the account-wide global halt ONCE and thread that SAME value through both the
+        # rollup and the alert decision, so an engage/clear landing between two reads can't produce
+        # an inconsistent verdict (rows say ok while the gate says halted, or vice-versa).
         halted_globally = global_halt.is_engaged(conn)
-        rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC))
+        rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC),
+                            halted_globally=halted_globally)
     alerting = fleet_alert(rows, halted_globally=halted_globally)
     by_health: dict[str, int] = {}
     for r in alerting:
