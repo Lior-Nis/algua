@@ -111,9 +111,10 @@ def _live_return_series(
 
     Reuses the forward gate's own admissibility filter (``_inadmissible_reason``: broker clock,
     identity match, non-null account, well-formed non-future ``tick_ts``, fresh ``decision_ts``)
-    so a malformed/future/identity-drifted tick can never leak into the realized read. Ticks at or
-    before ``after_ts`` (the certificate instant) are additionally dropped so a certificate
-    refreshed mid-live never mixes pre-refresh returns into the comparison.
+    so a malformed/future/identity-drifted tick can never leak into the realized read. Ticks whose
+    DECISION session is on or before the certificate session are additionally dropped so a
+    certificate refreshed mid-live never mixes pre-refresh returns into the comparison, and so the
+    coverage numerator and denominator share exactly one window boundary.
 
     Returns ``(daily_returns, session_coverage, n_inadmissible)``. Coverage is decided sessions
     over the trading sessions from the FIRST session strictly after the certificate (``after_dt``)
@@ -131,16 +132,23 @@ def _live_return_series(
         (strategy_id,),
     ).fetchall()
 
+    # The observation window is the trading sessions from the first session strictly after the
+    # certificate onward. Anchoring the numerator AND the denominator on the SAME boundary closes
+    # a same-session edge: a tick whose tick_ts is after the cert instant but whose DECISION
+    # session is the cert's own trading date must not add a numerator observation the denominator
+    # never counts (which would overstate coverage and risk a false `ok`).
+    first_post_cert = calendar.next_session(after_dt.date())
+
     admissible: list[sqlite3.Row] = []
     n_inadmissible = 0
     for row in rows:
         if _inadmissible_reason(row, identity, calendar, now_utc) is not None:
             n_inadmissible += 1
             continue
-        tick_dt = _parse_dt(row["tick_ts"])
-        # Window start: strictly AFTER the certification instant (admissibility already proved
-        # tick_ts parses). A tick at or before the certificate is pre-certification evidence.
-        if tick_dt is not None and tick_dt <= after_dt:
+        decision_dt = _parse_dt(row["decision_ts"])
+        assert decision_dt is not None  # admissibility proved decision_ts parses
+        # A decision session on or before the certificate session is pre-certification evidence.
+        if calendar.session_on_or_before(decision_dt.date()) < first_post_cert:
             continue
         admissible.append(row)
 
@@ -154,14 +162,13 @@ def _live_return_series(
     equities = [float(by_session[s]["equity"]) for s in sessions]
     returns = pd.Series(equities, dtype=float).pct_change().dropna()
     # Coverage numerator is RETURN observations (one fewer than equity sessions); the denominator
-    # is the trading sessions from the FIRST session strictly after the certificate through the
-    # last observation, minus one (the boundary session has no prior equity to return against).
-    # Anchoring at the certificate — not at sessions[0] — means a long post-cert silence before a
-    # dense recent burst reads as sparse coverage (fails the floor), never a false 1.0.
+    # is the trading sessions from first_post_cert through the last observation, minus one (the
+    # first window session has no prior equity to return against). Since numerator sessions are now
+    # all >= first_post_cert, a long post-cert silence before a dense recent burst reads as sparse
+    # coverage (fails the floor, never a false 1.0), and the two windows can never disagree.
     n_returns = int(len(returns))
     if n_returns > 0:
-        cert_session = calendar.session_on_or_before(after_dt.date())
-        expected_sessions = len(calendar.sessions_in_range(cert_session, sessions[-1])) - 1
+        expected_sessions = len(calendar.sessions_in_range(first_post_cert, sessions[-1])) - 1
         coverage = n_returns / expected_sessions if expected_sessions > 0 else 0.0
     else:
         coverage = 0.0

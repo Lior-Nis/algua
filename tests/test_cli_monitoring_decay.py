@@ -185,6 +185,33 @@ def test_long_post_cert_gap_is_insufficient_not_ok():
     assert payload["verdict"] == "insufficient_data"
 
 
+def test_same_session_post_cert_tick_excluded_from_window():
+    # The certificate is pinned INSIDE the first seeded session (same trading date, earlier
+    # instant). That first observation's decision session equals the cert session, so it must be
+    # DROPPED (window starts at next_session(cert)). With the boundary anchored consistently, the
+    # coverage numerator == observations strictly after the cert session, and the denominator
+    # spans the same window — so the reported coverage matches a hand computation that also drops
+    # the cert-session observation. If the old logic had counted the same-session tick in the
+    # numerator while the denominator started later, coverage would exceed this bound.
+    _register()
+    ident = compute_artifact_hashes(STRAT)
+    conn = _open()
+    sid = SqliteStrategyRepository(conn).get(STRAT).id
+    n = MIN_FORWARD_OBSERVATIONS + 20
+    sessions = _seed_live_ticks(conn, sid, ident, sharpe_target=1.5, n=n, start_after=None)
+    cert_dt = datetime.combine(sessions[0], datetime.min.time(), UTC).replace(hour=1)
+    _seed_cert(conn, sid, ident, holdout=1.0, created_at=cert_dt.isoformat())
+    conn.close()
+
+    payload = _json(runner.invoke(app, ["monitoring", "decay", STRAT]))
+    # n contiguous equity sessions, first one dropped as the cert session -> n-1 equity sessions
+    # post-boundary -> n-2 returns over an (n-2)-session expected window -> coverage ~1.0, and the
+    # observation count (n-2) still clears the floor, so a healthy series is still `ok`.
+    assert payload["n_live_observations"] == n - 2
+    assert payload["session_coverage"] == pytest.approx(1.0)
+    assert payload["verdict"] == "ok"
+
+
 def test_unparseable_certificate_created_at_is_unknown():
     # A passing certificate with a malformed created_at is UNUSABLE: no parseable window boundary
     # means an unbounded live window, so it must fail closed to unknown, never a false ok.
