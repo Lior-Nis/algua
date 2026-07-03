@@ -157,6 +157,19 @@ source_modules = ["algua.features"]
 forbidden_modules = ["algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies", "algua.observability"]
 
 [[tool.importlinter.contracts]]
+# The PIT feature-scaler FITTERS (issue #388) derive statistics from data, so they are the one
+# place a scaler can be fit. They must be structurally unreachable from any runtime/decision lane
+# — otherwise a strategy could refit a scaler at serve time over the whole (incl. future) series,
+# the classic train/serve-skew leak. `algua.features.scaling` (FrozenScaler + transform) stays
+# importable by serve; only `algua.features.scaling_fit` is walled off here.
+name = "scaler fitters (scaling_fit) are unreachable from runtime/decision lanes"
+type = "forbidden"
+source_modules = [
+    "algua.strategies", "algua.backtest", "algua.live", "algua.execution", "algua.research",
+]
+forbidden_modules = ["algua.features.scaling_fit"]
+
+[[tool.importlinter.contracts]]
 name = "portfolio construction layer is pure (no algua imports beyond contracts + features)"
 type = "forbidden"
 source_modules = ["algua.portfolio"]
