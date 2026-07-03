@@ -99,15 +99,35 @@ def test_bad_task_is_isolated_siblings_still_run(tmp_path):
 
 def test_holdout_single_use_preserved_across_warm_batch(tmp_path):
     bid, end_iso = _seed_bars(tmp_path)
-    # register -> backtested first (batch backtest task with --register)
+    # A batch worker is AGENT-only — a human actor cannot sign a challenge inside a batch (#329), so
+    # this exercises the holdout guard on the agent-legal path: MEASURED breadth (a sweep task) +
+    # a PIT universe, no human-only relaxation.
+    runner.invoke(app, ["data", "ingest-universe", "csm_uni", "--symbols", "AAPL,MSFT,NVDA",
+                        "--effective-date", "2024-12-31"])
     assert _run_all(tmp_path, [
         {"action": "backtest", "name": "cross_sectional_momentum", "snapshot": bid,
          "start": "2025-01-01", "end": end_iso, "register": True},
+        {"action": "sweep", "name": "cross_sectional_momentum", "snapshot": bid,
+         "start": "2025-01-01", "end": end_iso, "universe": "csm_uni", "windows": 2,
+         "param": ["lookback=20,40"], "top": 3},
     ]).exit_code == 0
+    # Pre-seed an existing family membership so the agent promote classifies MERGE (an agent
+    # cannot mint a NOVEL family — the separate #222 human wall, out of scope here).
+    from algua.registry.store import SqliteStrategyRepository
+    _c = sqlite3.connect(tmp_path / "r.db")
+    _c.row_factory = sqlite3.Row
+    try:
+        _repo = SqliteStrategyRepository(_c)
+        _fid = _repo.create_family("csm", actor="human")
+        _repo.assign_strategy_to_family(
+            "cross_sectional_momentum", _fid, actor="human", verdict="MERGE",
+            similarity_score=1.0, clustering_version="t", clustering_config_json="{}",
+            axis_json="{}")
+    finally:
+        _c.close()
     relax = {"min_holdout_sharpe": -100.0, "min_holdout_return": -100.0, "min_pct_positive": 0.0,
-             "min_window_sharpe": -100.0, "windows": 2, "n_combos": 9, "allow_non_pit": True,
-             "actor": "human", "new_family": "csm", "snapshot": bid,
-             "start": "2025-01-01", "end": end_iso}
+             "min_window_sharpe": -100.0, "windows": 2, "universe": "csm_uni",
+             "snapshot": bid, "start": "2025-01-01", "end": end_iso}
     # TWO promote tasks on the SAME holdout window in ONE warm process: the 2nd must fail closed
     # exactly as two separate cold processes would (the burn is a committed DB row).
     r = _run_all(tmp_path, [

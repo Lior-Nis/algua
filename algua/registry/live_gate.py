@@ -84,13 +84,38 @@ class SignatureError(RuntimeError):
     """ssh-keygen is unavailable or failed in an unexpected way (not a plain bad signature)."""
 
 
-def verify_signature(allowed_signers_path: Path, payload: str, signature: bytes) -> str | None:
-    """Verify an SSH signature over `payload` against the enrolled keys in `allowed_signers_path`.
-    Returns the matched principal on success, or None if the signature is invalid / the signer is
-    not enrolled. Raises SignatureError when ssh-keygen can't run OR the trust anchor file is
-    missing — a missing anchor is a configuration error, never a silent pass (codex review)."""
+def _assert_all_lines_namespace_scoped(allowed_signers_path: Path) -> None:
+    """Fail closed if ANY enrolled line lacks an explicit `namespaces="..."` restriction.
+
+    OpenSSH treats an allowed_signers line with no `namespaces=` field as valid for EVERY namespace,
+    so a single unscoped line would let a key enrolled for one namespace (e.g. go-live) authenticate
+    a DIFFERENT namespace (e.g. human-actor) — collapsing the namespace separation this design
+    depends on (#329, codex GATE-1). Every enrolled key MUST carry an explicit namespaces= token;
+    the enroll-approver command always writes one, and this backstops a hand-edited anchor."""
+    for raw in allowed_signers_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # allowed_signers option fields (namespaces=, valid-after=, ...) sit BEFORE the key type.
+        # Require a namespaces= option token somewhere before the `ssh-`/`sk-` key blob.
+        pre_key = line.split(" ssh-", 1)[0].split(" sk-", 1)[0]
+        if "namespaces=" not in pre_key:
+            raise SignatureError(
+                "unscoped allowed_signers line (no namespaces= restriction) — refusing to verify: "
+                f"{line!r}")
+
+
+def verify_signature(allowed_signers_path: Path, payload: str, signature: bytes,
+                     namespace: str = _NAMESPACE) -> str | None:
+    """Verify an SSH signature over `payload` for `namespace` against the enrolled keys in
+    `allowed_signers_path`. Returns the matched principal on success, or None if the signature is
+    invalid / the signer is not enrolled FOR THIS NAMESPACE. Raises SignatureError when ssh-keygen
+    can't run, the trust anchor file is missing, or any enrolled line is unscoped — never a silent
+    pass (codex review). `namespace` defaults to the go-live namespace so existing callers are
+    unchanged; the human-actor path passes `algua-human-actor` to reuse this one primitive."""
     if not allowed_signers_path.is_file():
         raise SignatureError(f"allowed_signers trust anchor not found: {allowed_signers_path}")
+    _assert_all_lines_namespace_scoped(allowed_signers_path)
     with tempfile.NamedTemporaryFile("wb", suffix=".sig", delete=True) as sigf:
         sigf.write(signature)
         sigf.flush()
@@ -109,9 +134,11 @@ def verify_signature(allowed_signers_path: Path, payload: str, signature: bytes)
         principal = out[0].strip() if out and out[0].strip() else ""
         if not principal:
             return None
+        # The `-n namespace` here is the AUTHORITATIVE namespace gate: a key enrolled only for a
+        # different namespace fails this step even though find-principals matched the key blob.
         verified = subprocess.run(
             ["ssh-keygen", "-Y", "verify", "-f", str(allowed_signers_path), "-I", principal,
-             "-n", _NAMESPACE, "-s", sigf.name],
+             "-n", namespace, "-s", sigf.name],
             input=data, capture_output=True,
         )
         return principal if verified.returncode == 0 else None

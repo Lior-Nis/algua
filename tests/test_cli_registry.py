@@ -256,6 +256,27 @@ def test_enroll_approver_appends_line(tmp_path, monkeypatch):
     assert r2.exit_code == 1  # duplicate pubkey rejected
 
 
+def test_enroll_approver_namespace_choice(tmp_path, monkeypatch):
+    import json as _json
+
+    signers = tmp_path / "allowed_signers"
+    signers.write_text("# header\n")
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+    r = runner.invoke(app, ["registry", "enroll-approver", "--name", "lior", "--namespace",
+                            "human-actor", "--pubkey", "ssh-ed25519 AAAAhumanactor lior@dev"])
+    assert r.exit_code == 0, r.stdout
+    assert _json.loads(r.stdout)["namespaces"] == "algua-human-actor"
+    assert 'namespaces="algua-human-actor" ssh-ed25519 AAAAhumanactor' in signers.read_text()
+    r2 = runner.invoke(app, ["registry", "enroll-approver", "--name", "lior", "--namespace",
+                             "both", "--pubkey", "ssh-ed25519 AAAAboth lior@dev"])
+    assert r2.exit_code == 0
+    _body = signers.read_text()
+    assert 'namespaces="algua-go-live,algua-human-actor" ssh-ed25519 AAAAboth' in _body
+    r3 = runner.invoke(app, ["registry", "enroll-approver", "--name", "x", "--namespace",
+                             "bogus", "--pubkey", "ssh-ed25519 AAAAbogus x"])
+    assert r3.exit_code == 1  # unknown namespace rejected
+
+
 def test_enroll_approver_rejects_bad_principal(tmp_path, monkeypatch):
     import json as _json
     signers = tmp_path / "allowed_signers"

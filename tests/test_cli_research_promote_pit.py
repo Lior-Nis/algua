@@ -11,14 +11,30 @@ from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.data.store import DataStore
+from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
 runner = CliRunner()
+
+# --- #329 authenticated --actor human plumbing ---------------------------------------------------
+_HUMAN_KEY = None
+_TMP_PATH = None
+
+
+def _promote(args):
+    """Drop-in for `runner.invoke(app, args)` at gated promote call sites: when `args` requests
+    `--actor human`, run the signed challenge dance; otherwise a plain invoke."""
+    if "human" in args:
+        return promote_signed(runner, app, args, _HUMAN_KEY, _TMP_PATH)
+    return runner.invoke(app, args)
 
 
 @pytest.fixture(autouse=True)
 def _tmp(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    global _HUMAN_KEY, _TMP_PATH
+    _HUMAN_KEY = install_human_actor_anchor(monkeypatch, tmp_path)
+    _TMP_PATH = tmp_path
 
 
 def _seed(data_dir):
@@ -98,7 +114,7 @@ def _latest_gate_snapshots(tmp_path):
 def test_news_snapshot_on_plain_strategy_is_misuse(tmp_path):
     bid, nid, _fid = _seed(tmp_path)
     assert _backtest_to_backtested("cross_sectional_momentum", "--snapshot", bid).exit_code == 0
-    r = runner.invoke(app, ["research", "promote", "cross_sectional_momentum",
+    r = _promote(["research", "promote", "cross_sectional_momentum",
                             "--snapshot", bid, "--news-snapshot", nid, *_WINDOW, *_RELAX])
     assert r.exit_code != 0, r.stdout
     assert "needs_news" in r.stdout
@@ -109,7 +125,7 @@ def test_needs_news_without_snapshot_fails_closed_before_reservation(tmp_path):
     assert _backtest_to_backtested(
         "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", _nid).exit_code == 0
     # Promote WITHOUT --news-snapshot: must fail closed.
-    r = runner.invoke(app, ["research", "promote", "news_coverage_tilt",
+    r = _promote(["research", "promote", "news_coverage_tilt",
                             "--snapshot", bid, *_WINDOW, *_RELAX])
     assert r.exit_code != 0, r.stdout
     assert "needs_news" in r.stdout
@@ -127,7 +143,7 @@ def test_news_lane_unblocked_through_funnel(tmp_path):
     bid, nid, _fid = _seed(tmp_path)
     assert _backtest_to_backtested(
         "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", nid).exit_code == 0
-    r = runner.invoke(app, ["research", "promote", "news_coverage_tilt",
+    r = _promote(["research", "promote", "news_coverage_tilt",
                             "--snapshot", bid, "--news-snapshot", nid, *_WINDOW, *_RELAX,
                             "--new-family", "news_fam"])  # #222: seed the first family (human)
     assert r.exit_code == 0, r.stdout
@@ -158,7 +174,7 @@ def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
     bid, _nid, fid = _seed(tmp_path)
     assert _backtest_to_backtested(
         "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", _nid).exit_code == 0
-    r = runner.invoke(app, ["research", "promote", "news_coverage_tilt",
+    r = _promote(["research", "promote", "news_coverage_tilt",
                             "--snapshot", bid, "--news-snapshot", fid,  # wrong kind
                             *_WINDOW, *_RELAX])
     assert r.exit_code != 0, r.stdout
@@ -178,7 +194,7 @@ def test_fundamentals_lane_unblocked_through_funnel(tmp_path):
     assert _backtest_to_backtested(
         "fundamentals_earnings_tilt", "--snapshot", bid,
         "--fundamentals-snapshot", fid).exit_code == 0
-    r = runner.invoke(app, ["research", "promote", "fundamentals_earnings_tilt",
+    r = _promote(["research", "promote", "fundamentals_earnings_tilt",
                             "--snapshot", bid, "--fundamentals-snapshot", fid, *_WINDOW, *_RELAX,
                             "--new-family", "fund_fam"])  # #222: seed the first family (human)
     assert r.exit_code == 0, r.stdout

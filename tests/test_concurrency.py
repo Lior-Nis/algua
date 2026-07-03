@@ -458,21 +458,52 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
     db = tmp_path / "e2e.db"
     env = {**os.environ, "ALGUA_DB_PATH": str(db), "ALGUA_DATA_DIR": str(tmp_path)}
 
-    # idea -> backtested: a single backtest run that also registers the strategy.
+    # #329: a real subprocess cannot authenticate `--actor human` (no interactive signature), so the
+    # race is run on the AGENT-LEGAL path — a reproducible bars snapshot + a PIT universe + MEASURED
+    # breadth from `backtest sweep`, no human-only relaxation. The burn race is actor-independent
+    # (a committed DB row), so this exercises exactly the same single-use guard as before.
+    import numpy as _np
+    import pandas as _pd
+
+    from algua.data.store import DataStore as _DataStore
+    store = _DataStore(tmp_path)
+    _syms = ["AAPL", "MSFT", "NVDA"]
+    _idx = _pd.date_range("2022-01-01", "2023-12-31", freq="B", tz="UTC")
+    _rng = _np.random.default_rng(7)
+    _rows = []
+    for _s in _syms:
+        _close = 100.0 * _np.exp(_np.cumsum(_rng.normal(0.0006, 0.02, len(_idx))))
+        for _t, _c in zip(_idx, _close, strict=True):
+            _rows.append([_t, _s, _c, _c * 1.01, _c * 0.99, _c, _c, 1000.0])
+    _bars = _pd.DataFrame(_rows, columns=["ts", "symbol", "open", "high", "low", "close",
+                                          "adj_close", "volume"])
+    _brec = store.ingest_bars(provider="synthetic", symbols=_syms, start="2022-01-01",
+                              end="2023-12-31", as_of="2024-01-01T00:00:00Z", source="test",
+                              frame=_bars)
+    snap = _brec.snapshot_id
+    store.ingest_universe(universe="pit_core", symbols=_syms, effective_date="2021-12-31",
+                          as_of="2022-01-01T00:00:00+00:00", source="test")
+
+    common = ["--snapshot", snap, "--universe", "pit_core",
+              "--start", "2022-01-01", "--end", "2023-12-31"]
     seed = subprocess.run(
-        [str(ALGUA_BIN), "backtest", "run", STRATEGY_E2E, "--demo",
-         "--start", "2022-01-01", "--end", "2023-12-31", "--register"],
+        [str(ALGUA_BIN), "backtest", "run", STRATEGY_E2E, "--register", *common],
         cwd=REPO_ROOT, capture_output=True, text=True, env=env)
     assert seed.returncode == 0, f"backtest seed failed:\n{seed.stderr}\n{seed.stdout}"
+    # MEASURED breadth: an agent must have recorded search_trials before promote.
+    sweep = subprocess.run(
+        [str(ALGUA_BIN), "backtest", "sweep", STRATEGY_E2E, *common,
+         "--param", "lookback=20,40", "--windows", "2"],
+        cwd=REPO_ROOT, capture_output=True, text=True, env=env)
+    assert sweep.returncode == 0, f"sweep failed:\n{sweep.stderr}\n{sweep.stdout}"
 
     # Task 4 (#222): pre-assign family so the clustering guard passes in both concurrent processes.
     _ensure_family_in_db(db, STRATEGY_E2E, "csm_e2e_family")
 
-    promote_args = [str(ALGUA_BIN), "research", "promote", STRATEGY_E2E, "--demo",
-                    "--start", "2022-01-01", "--end", "2023-12-31",
+    promote_args = [str(ALGUA_BIN), "research", "promote", STRATEGY_E2E, *common,
                     "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
                     "--min-pct-positive", "0", "--min-window-sharpe", "-100",
-                    "--n-combos", "9", "--allow-non-pit", "--actor", "human"]
+                    "--windows", "2", "--actor", "agent"]
 
     def _launch():
         return subprocess.Popen(promote_args, cwd=REPO_ROOT, stdout=subprocess.PIPE,
@@ -492,19 +523,17 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
                 p.communicate()
         pytest.fail("e2e promote processes timed out after 180s")
 
+    # The single-use HOLDOUT BURN is the concurrency invariant under test, and it is
+    # actor-INDEPENDENT (a committed DB row reserved under BEGIN IMMEDIATE). On the agent path the
+    # measured-breadth strategy faces the funnel-wide FDR gate (which declared/human breadth would
+    # skip), so the gate verdict here may be a FAIL — but a FAIL still burns the holdout exactly
+    # once (see test_failing_first_promote_still_burns_holdout). What must hold regardless of the
+    # verdict: the two racing processes commit EXACTLY ONE burn and leave EXACTLY ONE holdout row —
+    # one process wins the reservation, the other fails closed at reserve (or preflight).
     procs = [(p1, out1, err1), (p2, out2, err2)]
-    winners = [(p, out, err) for p, out, err in procs if p.returncode == 0]
-    losers = [(p, out, err) for p, out, err in procs if p.returncode != 0]
-    assert len(winners) == 1, (
-        f"expected exactly one winner, got {len(winners)}; "
-        f"rc={[p.returncode for p, _, _ in procs]}\n"
-        f"out1={out1}\nerr1={err1}\nout2={out2}\nerr2={err2}")
-
-    # the winner promoted; final stage is candidate. Each command emits one (pretty-printed)
-    # JSON document on stdout, so parse the whole stream, not a single line.
-    _, win_out, _ = winners[0]
-    win_payload = json.loads(win_out)
-    assert win_payload["promoted"] is True, win_payload
+    for p, out, err in procs:
+        assert p.returncode in (0, 1), (
+            f"unexpected rc={p.returncode}\nout={out}\nerr={err}")
 
     check = connect(db)
     n_burn = check.execute(
@@ -515,14 +544,10 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
         "SELECT COUNT(*) c FROM holdout_evaluations WHERE strategy_id="
         "(SELECT id FROM strategies WHERE name=?)", (STRATEGY_E2E,)).fetchone()["c"]
     assert n_total == 1, f"expected exactly one holdout row total, found {n_total}"
-    stage = check.execute(
-        "SELECT stage FROM strategies WHERE name=?", (STRATEGY_E2E,)
-    ).fetchone()["stage"]
-    assert stage == "candidate", stage
 
-    # best-effort: loser emitted parseable fail-closed JSON (don't gate flakiness on the message)
-    _, lose_out, _ = losers[0]
-    if lose_out.strip():
-        with contextlib.suppress(json.JSONDecodeError):
-            lose_payload = json.loads(lose_out)
-            assert lose_payload.get("ok") is False, lose_payload
+    # Each command emits one JSON document on stdout; every process that produced output must be a
+    # well-formed envelope (a pass OR a fail-closed), never a crash/traceback.
+    for _p, out, _err in procs:
+        if out.strip():
+            payload = json.loads(out)  # raises if a process crashed instead of emitting JSON
+            assert "ok" in payload, payload

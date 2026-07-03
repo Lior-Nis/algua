@@ -16,8 +16,21 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
+from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
 runner = CliRunner()
+
+# --- #329 authenticated --actor human plumbing ---------------------------------------------------
+_HUMAN_KEY = None
+_TMP_PATH = None
+
+
+def _promote(args):
+    """Drop-in for `runner.invoke(app, args)` at gated promote call sites: when `args` requests
+    `--actor human`, run the signed challenge dance; otherwise a plain invoke."""
+    if "human" in args:
+        return promote_signed(runner, app, args, _HUMAN_KEY, _TMP_PATH)
+    return runner.invoke(app, args)
 
 _SNAP = "snap1"
 
@@ -26,6 +39,9 @@ _SNAP = "snap1"
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    global _HUMAN_KEY, _TMP_PATH
+    _HUMAN_KEY = install_human_actor_anchor(monkeypatch, tmp_path)
+    _TMP_PATH = tmp_path
 
 
 def _to_paper(name="cross_sectional_momentum"):

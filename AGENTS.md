@@ -98,10 +98,18 @@ The current code is **only sub-project 1 (foundation)**. The following are *know
 absences*, scoped to later sub-projects in the spec — do not "fix" them or report them as bugs:
 
 - **No data layer, backtest engine, features, execution, or paper/live runner yet** (sub-projects 2–5).
-- **Live-gate authenticity is mechanism-only.** Genuine enforcement that `--actor human` is real
-  and that `record_approval` is human-only is **deferred to sub-project 6 (live hardening)**.
-  Today an operator/agent could pass `--actor human`; that's expected at this stage. You may
-  *note* it, but it is not a foundation defect.
+- **`--actor human` below the live wall is now AUTHENTICATED (#329).** Asserting `--actor human`
+  on a gated command (`research promote`, `paper promote`) requires an SSH signature (namespace
+  `algua-human-actor`, enrolled via `registry enroll-approver --namespace human-actor`) over a
+  fresh single-use challenge that binds the command + strategy + recomputed artifact identity + the
+  full run context (every gate-relevant input incl. the exact relaxation set). A bare `--actor
+  human` no longer unlocks any human-only path — it just prints a challenge and runs nothing. The
+  gate reuses the go-live trust anchor (`approvers/allowed_signers`) under a distinct namespace and
+  fails closed on a forged/replayed/expired/cross-run signature. So the human-only relaxations
+  (declared breadth, holdout reuse, non-PIT, assume-terminal-last-close, NOVEL-family mint, the
+  paper thresholds) are a cryptographic boundary against a same-CLI agent that cannot write the
+  tree/DB — no longer "discipline." The go-live `registry transition --to live` signed ceremony was
+  already authenticated. The RESIDUAL deferred half is deploy-time anchor immutability (below).
 - **Deferred to live-hardening:** full economic-state reconciliation, crash/restart playbook,
   real monitoring/alerting, production secrets (keyring/mounted vs `.env`), Docker/cloud deploy,
   kill-switch hardening.
@@ -120,11 +128,15 @@ named mitigation — not defects to fix:
   `importlib` string imports and non-source data files are outside the closure). A true execution
   sandbox is future live-hardening work.
 
-**Deployment hardening (enforce when deployment lands).** The signed-live-gate trust anchor
-`approvers/allowed_signers` is the root of go-live authority. In any real deployment it MUST NOT be
-writable by the runtime (agent/operator) user — only by the human who controls CODEOWNERS — else the
-runtime could enroll its own key and self-authorize. No deployment exists yet (see Docker/cloud deploy
-above), so this is a requirement to enforce at deploy time, not a code check today.
+**Deployment hardening (enforce when deployment lands).** The trust anchor
+`approvers/allowed_signers` is the root of BOTH go-live authority AND (since #329) authenticated
+`--actor human`. In any real deployment it MUST NOT be writable by the runtime (agent/operator)
+user — only by the human who controls CODEOWNERS — else the runtime could enroll its own key and
+self-authorize (this is the explicit RESIDUAL of #329: the gate code reads the anchor from the
+running tree, so a tree/DB writer defeats it exactly as it defeats go-live). No deployment exists
+yet (see Docker/cloud deploy above), so this is a requirement to enforce at deploy time — a
+deploy-time-immutable installed anchor distinct from the mutable worktree copy — not a code check
+today.
 
 If you believe something deferred is mis-scoped or risky, **flag it with reasoning** — don't build it.
 
