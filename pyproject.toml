@@ -157,6 +157,19 @@ source_modules = ["algua.features"]
 forbidden_modules = ["algua.cli", "algua.registry", "algua.data", "algua.backtest", "algua.strategies", "algua.observability"]
 
 [[tool.importlinter.contracts]]
+# The PIT feature-scaler FITTERS (issue #388) derive statistics from data, so they are the one
+# place a scaler can be fit. They must be structurally unreachable from any runtime/decision lane
+# — otherwise a strategy could refit a scaler at serve time over the whole (incl. future) series,
+# the classic train/serve-skew leak. `algua.features.scaling` (FrozenScaler + transform) stays
+# importable by serve; only `algua.features.scaling_fit` is walled off here.
+name = "scaler fitters (scaling_fit) are unreachable from runtime/decision lanes"
+type = "forbidden"
+source_modules = [
+    "algua.strategies", "algua.backtest", "algua.live", "algua.execution", "algua.research",
+]
+forbidden_modules = ["algua.features.scaling_fit"]
+
+[[tool.importlinter.contracts]]
 name = "portfolio construction layer is pure (no algua imports beyond contracts + features)"
 type = "forbidden"
 source_modules = ["algua.portfolio"]
@@ -290,5 +303,40 @@ modules = [
     "algua.cli.paper_cmd",
     "algua.cli.registry_cmd",
     "algua.cli.research_cmd",
+    "algua.cli.shadow_cmd",
     "algua.cli.strategy_cmd",
 ]
+
+[[tool.importlinter.contracts]]
+# The shadow lane (#392) is an ADVISORY champion-challenger evaluator: it replays a strategy through
+# an in-process SimBroker and records hypothetical, order-free P&L. It must be STRUCTURALLY incapable
+# of reaching a real order, a real allocation, or the risk kill-switch/global-halt. Forbidding the
+# whole `algua.live` lane (not just the submit loop) is deliberate: shadow re-composes the pure
+# decision primitives (strategy.target_weights + algua.risk.limits) rather than importing
+# paper_loop.decide, so no future edit can quietly pull the live submit path into shadow.
+name = "shadow lane cannot reach real orders, allocations, or the risk machinery"
+type = "forbidden"
+source_modules = ["algua.shadow"]
+forbidden_modules = [
+    "algua.cli",
+    "algua.data",
+    "algua.live",
+    "algua.execution.alpaca_broker",
+    "algua.execution.live_ledger",
+    "algua.execution.live_reservations",
+    "algua.execution.live_reconcile",
+    "algua.execution.paper_reconcile",
+    "algua.risk.kill_switch",
+    "algua.risk.global_halt",
+    "algua.registry.allocations",
+    "algua.registry.live_gate",
+]
+
+[[tool.importlinter.contracts]]
+# The real trading + research lanes stay OFF the advisory shadow lane: a promotion gate, the
+# live/paper loop, or the backtester must never read a shadow evaluation as if it were authoritative
+# evidence. Shadow output is a decision aid for a human/agent, never a gate input.
+name = "trading and research lanes stay off the advisory shadow lane"
+type = "forbidden"
+source_modules = ["algua.live", "algua.execution", "algua.backtest", "algua.registry"]
+forbidden_modules = ["algua.shadow"]

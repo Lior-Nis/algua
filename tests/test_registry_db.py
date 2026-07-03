@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 35
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -370,7 +370,7 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
     c2.close()
 
 
-def test_v34_actor_challenges_table_created(tmp_path):
+def test_v35_actor_challenges_table_created(tmp_path):
     # #329: actor_challenges is a brand-new table created by executescript(_SCHEMA) on migrate.
     conn = connect(tmp_path / "r.db")
     migrate(conn)
@@ -525,7 +525,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 35
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -549,7 +549,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 34
+    assert SCHEMA_VERSION == 35
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -563,5 +563,22 @@ def test_v32_negative_results_table_created(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(negative_results)")}
     assert {"id", "created_at", "strategy_name", "gate_evaluation_id", "kind", "verdict",
             "actor", "reason", "hypothesis", "params_json", "tags", "source"} <= cols
+    migrate(conn)  # idempotent re-run must not raise
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v34_shadow_evaluations_table_created(tmp_path):
+    # #392: advisory shadow_evaluations (champion-challenger) table is brand-new via CREATE TABLE
+    # IF NOT EXISTS; a legacy DB predating it gains the table on migrate, idempotently.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "shadow_evaluations" in tables
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(shadow_evaluations)")}
+    assert {"id", "challenger", "champion", "snapshot_id", "timeframe", "start", "end", "cash",
+            "universe", "code_hash", "config_hash", "final_equity", "sharpe", "max_drawdown",
+            "n_bars", "final_positions", "equity_curve", "recorded_at"} <= cols
     migrate(conn)  # idempotent re-run must not raise
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
