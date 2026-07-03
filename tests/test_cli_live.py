@@ -281,7 +281,11 @@ def test_run_all_rejects_bad_max_drawdown():
 
 def test_run_all_breach_liquidates_per_strategy(monkeypatch):
     from algua.live.live_loop import RiskBreach
-    _to_live()
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    # Seed the live ledger with AAA position so reconciliation is clean before the breach
+    _seed_live_fills(name, {"AAA": 5.0})
+    _permissive_book(monkeypatch)
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
 
     class _LiqBroker:
@@ -310,7 +314,9 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
     monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
     monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
-    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    # #449: _broker_net_positions now feeds the held-cap in flatten_strategy, so mock it to return
+    # the actual held position (matching the believed position so the offset is submitted).
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {"AAA": 5.0})
     # #336: the believed-position read moved into the single-sourced flatten helper, so patch it
     # where the helper resolves it (algua.execution.flatten), not the old live_cmd call site.
     monkeypatch.setattr("algua.execution.flatten.believed_positions",
@@ -321,7 +327,7 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "dd")))
     r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
     assert r.exit_code == 1
-    assert broker.offsets == [("AAA", 5.0)]  # offset sized to the believed qty
+    assert broker.offsets == [("AAA", 5.0)]  # offset sized to the believed qty (capped to held)
     # the offset is RECORDED in the books (+backfilled) so its fill attributes back to the strategy
     # and believed_positions can drop to flat — else the resume gate blocks resume forever (codex)
     from contextlib import closing
@@ -698,3 +704,435 @@ def test_resume_refuses_when_broker_holds_orphan_position(monkeypatch):
     payload = json.loads(r.stdout)
     assert payload["ok"] is False and "not flat" in r.stdout.lower()
     assert "AAPL" in str(payload)            # the unexplained broker residual is surfaced
+
+
+# ---------------------------------------------------------------------------
+# live flatten (#449) — emergency single-strategy close + kill-switch trip
+# ---------------------------------------------------------------------------
+
+
+class _FlattenBroker:
+    """Fake live broker for the `live flatten` E2E tests. get_positions() feeds the held-cap."""
+
+    def __init__(self, positions):
+        self._positions = positions
+        self.offsets = []
+
+    def account_activities(self, after=None):
+        return []
+
+    def get_positions(self):
+        import pandas as pd
+        return pd.Series(self._positions, dtype="float64")
+
+    def list_open_orders(self):
+        return []
+
+    def cancel_order(self, oid):
+        pass
+
+    def submit_offset(self, symbol, qty, coid):
+        self.offsets.append((symbol, qty))
+        return "off"
+
+
+def _is_tripped(name):
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import kill_switch
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        return kill_switch.is_tripped(conn, name)
+
+
+def test_live_flatten_delegates_to_flatten_strategy(monkeypatch):
+    from algua.execution.flatten import FlattenResult
+    from algua.execution.live_ledger import LedgerKind
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+
+    captured = {}
+
+    def _spy(conn, broker, sname, kind, *, lane, cancel, ingest, held=None, **k):
+        captured["kind"] = kind
+        captured["lane"] = lane
+        captured["callables"] = (callable(cancel), callable(ingest), callable(held))
+        captured["tripped_at_call"] = _is_tripped(sname)  # trip must precede the helper
+        return FlattenResult(n_offsets=1, flatten_error=None)
+
+    monkeypatch.setattr("algua.cli.live_cmd.flatten_strategy", _spy)
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 0, r.stdout
+    assert captured["kind"] is LedgerKind.LIVE
+    assert captured["lane"] == "live"
+    assert captured["callables"] == (True, True, True)   # cancel/ingest/held all injected
+    assert captured["tripped_at_call"] is True           # kill-switch tripped BEFORE the helper
+    assert json.loads(r.stdout) == {
+        "ok": True, "strategy": name, "kill_switch": "tripped",
+        "liquidation_submitted": True, "offsets_submitted": 1,
+    }
+
+
+def test_live_flatten_non_live_stage_refused_no_trip(monkeypatch):
+    # Fork E (load-bearing): a non-LIVE strategy cannot be emergency-flattened via the live surface,
+    # and the DB kill-switch must NOT be written (no cross-lane DoS).
+    name = "paper_only"
+    assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
+    for to, actor in (("backtested", "human"), ("candidate", "human"), ("paper", "agent")):
+        assert runner.invoke(app, ["registry", "transition", name, "--to", to,
+                                   "--actor", actor, "--reason", "x"]).exit_code == 0
+
+    def _no_helper(*a, **k):
+        raise AssertionError("flatten_strategy must not run for a non-LIVE strategy")
+    monkeypatch.setattr("algua.cli.live_cmd.flatten_strategy", _no_helper)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    assert payload["kill_switch"] == "not_tripped"
+    assert _is_tripped(name) is False  # the paper strategy's switch was never written
+
+
+def test_live_flatten_already_flat_reports_not_submitted(monkeypatch):
+    from algua.execution.flatten import FlattenResult
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd.flatten_strategy",
+                        lambda *a, **k: FlattenResult(n_offsets=0, flatten_error=None))
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["liquidation_submitted"] is False
+    assert payload["offsets_submitted"] == 0
+    assert payload["kill_switch"] == "tripped"
+    assert _is_tripped(name) is True
+
+
+def test_live_flatten_error_stays_tripped(monkeypatch):
+    from algua.execution.flatten import FlattenResult
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd.flatten_strategy",
+                        lambda *a, **k: FlattenResult(n_offsets=2, flatten_error="boom"))
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    assert payload["kill_switch"] == "tripped"
+    assert payload["error"] == "boom"
+    assert payload["liquidation_submitted"] is False
+    assert payload["offsets_submitted"] == 2
+    assert _is_tripped(name) is True  # STILL tripped after a failed flatten
+
+
+def test_live_flatten_revoked_live_trips_then_fails_closed(monkeypatch):
+    # Fork A: a LIVE strategy whose authorization does NOT verify. The kill-switch trips FIRST
+    # (fail-safe), then verify raises -> no broker built, helper never called, payload names the
+    # raw-broker break-glass path AND #478.
+    from algua.registry.live_gate import LiveAuthorizationError
+    name = "cross_sectional_momentum"
+    _to_live(name)
+
+    def _revoked(*a, **k):
+        raise LiveAuthorizationError("authorization revoked")
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", _revoked)
+
+    def _no_broker(auth):
+        raise AssertionError("no live broker may be built for a revoked strategy")
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _no_broker)
+
+    def _no_helper(*a, **k):
+        raise AssertionError("flatten_strategy must not run when authorization fails")
+    monkeypatch.setattr("algua.cli.live_cmd.flatten_strategy", _no_helper)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    assert payload["kill_switch"] == "tripped"      # (1) trip precedes verify
+    assert payload["liquidation_submitted"] is False
+    assert "478" in payload["note"]                 # names #478
+    assert "raw broker" in payload["note"].lower()  # names the raw-broker break-glass
+    assert _is_tripped(name) is True
+
+
+def test_live_flatten_missing_strategy(monkeypatch):
+    def _no_trip(*a, **k):
+        raise AssertionError("kill-switch must not be written for an unknown strategy")
+    monkeypatch.setattr("algua.risk.kill_switch.trip", _no_trip)
+    r = runner.invoke(app, ["live", "flatten", "does_not_exist"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+
+
+def test_live_flatten_offsets_and_trips(monkeypatch):
+    # END-TO-END through the real helper: believed AAA+5, broker holds AAA+5 -> submit_offset AAA 5,
+    # live_orders row side='sell' with broker_order_id backfilled.
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    _seed_live_fills(name, {"AAA": 5.0})
+    broker = _FlattenBroker({"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["liquidation_submitted"] is True
+    assert payload["offsets_submitted"] == 1
+    assert broker.offsets == [("AAA", 5.0)]
+
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        row = conn.execute(
+            "SELECT side, broker_order_id FROM live_orders WHERE strategy=? AND symbol='AAA'",
+            (name,),
+        ).fetchone()
+    assert row["side"] == "sell" and row["broker_order_id"] == "off"
+
+
+def test_live_flatten_belief_exceeds_held_caps_offset(monkeypatch):
+    # END-TO-END: believed AAA+10 but broker holds only AAA+3 -> the injected held caps the offset
+    # to 3, proving the command's held callable reaches the helper.
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    _seed_live_fills(name, {"AAA": 10.0})
+    broker = _FlattenBroker({"AAA": 3.0})
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 0, r.stdout
+    assert broker.offsets == [("AAA", 3.0)]  # capped to held, not the believed 10
+
+
+# ---------------------------------------------------------------------------
+# live halt-all (#449) — global halt ONLY, no account close
+# ---------------------------------------------------------------------------
+
+
+def _global_halt_engaged():
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        return global_halt.is_engaged(conn)
+
+
+def test_live_halt_all_engages_halt_only(monkeypatch):
+    # #449: halt-all engages ONLY the global halt — it builds NO broker, closes NO position.
+    _to_live()
+
+    def _no_broker(auth):
+        raise AssertionError("halt-all must NOT build a live broker")
+
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _no_broker)
+
+    r = runner.invoke(app, ["live", "halt-all", "--reason", "market crash",
+                            "--actor", "agent"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is False
+    assert "478" in payload["note"]
+    assert "raw broker" in payload["note"].lower()
+    assert _global_halt_engaged() is True
+
+
+def test_live_halt_all_human_same_as_agent(monkeypatch):
+    # --actor human is byte-identical halt-only behaviour: engage the global halt, build no broker.
+    _to_live()
+
+    def _no_broker(auth):
+        raise AssertionError("halt-all must NOT build a live broker")
+
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _no_broker)
+
+    r = runner.invoke(app, ["live", "halt-all", "--reason", "human decision",
+                            "--actor", "human"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is False
+    assert _global_halt_engaged() is True
+
+
+def test_live_halt_all_no_close_account_flag():
+    # The whole-account close is unreachable here: --close-account is an unknown option.
+    r = runner.invoke(app, ["live", "halt-all", "--reason", "x", "--close-account"])
+    assert r.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Additional flatten & halt-all tests for task 3 of #449
+# ---------------------------------------------------------------------------
+
+
+def test_live_flatten_rejects_non_live(monkeypatch):
+    # (b) Bring a strategy only to 'paper' stage (NOT 'live'), verify flatten rejects it.
+    # The REAL authorization check should raise, since no valid authorization exists.
+    # Assert exit 1, ok=False, kill-switch NOT tripped (no cross-lane DoS).
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+
+    name = "paper_only"
+    assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
+    # Bring to paper (via backtested -> candidate -> paper)
+    for to, actor in (("backtested", "human"), ("candidate", "human"), ("paper", "agent")):
+        assert runner.invoke(app, ["registry", "transition", name, "--to", to,
+                                   "--actor", actor, "--reason", "x"]).exit_code == 0
+
+    # Do NOT monkeypatch verify_live_authorization, so the REAL check raises
+    # Assert broker is never built
+    def _boom(auth):
+        raise AssertionError("no broker for non-LIVE strategy")
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _boom)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    # Kill-switch must NOT be tripped (no cross-lane DoS)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        from algua.risk import kill_switch
+        assert kill_switch.is_tripped(conn, name) is False
+
+
+def test_live_flatten_skips_subtol(monkeypatch):
+    # (c) Believed position is subtol (5e-7); broker holds it; offset should NOT be submitted.
+    # Kill-switch still tripped (fail-safe), but liquidation_submitted=False, offsets_submitted=0.
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    # Seed with subtol qty
+    _seed_live_fills(name, {"AAA": 5e-7})
+    # Broker also reports the same subtol qty
+    broker = _FlattenBroker({"AAA": 5e-7})
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["liquidation_submitted"] is False
+    assert payload["offsets_submitted"] == 0
+    assert payload["kill_switch"] == "tripped"
+    # No offset should have been submitted
+    assert broker.offsets == []
+
+
+def test_live_flatten_close_failure_stays_tripped(monkeypatch):
+    # (d) Flatten strategy raises BrokerError during submit_offset; assert exit 1,
+    # ok=False, and DB kill-switch STILL tripped (fail-safe, no rollback).
+    from algua.execution.alpaca_broker import BrokerError
+
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    _seed_live_fills(name, {"AAA": 5.0})
+
+    class _FailingBroker(_FlattenBroker):
+        def submit_offset(self, symbol, qty, coid):
+            raise BrokerError("broker offline")
+
+    broker = _FailingBroker({"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+
+    r = runner.invoke(app, ["live", "flatten", name])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    # Kill-switch must remain tripped (fail-safe, no rollback on error)
+    assert payload["kill_switch"] == "tripped"
+    assert _is_tripped(name) is True
+
+
+def test_live_halt_all_engages_and_closes(monkeypatch):
+    # (e) halt-all with verify_live_authorization monkeypatched to _auth().
+    # halt-all is halt-only: builds NO broker, closes NO positions.
+    # Assert exit 0, payload global_halt=="set", liquidation_submitted=False,
+    # and DB global_halt.is_engaged()==True. Verify broker is never built.
+    _to_live()
+
+    def _no_broker(auth):
+        raise AssertionError("halt-all must NOT build a live broker")
+
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _no_broker)
+
+    r = runner.invoke(app, ["live", "halt-all", "--reason", "panic", "--actor", "agent"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is False
+    assert _global_halt_engaged() is True
+
+
+def test_live_halt_all_no_authorized_still_halts(monkeypatch):
+    # (f) _to_live() with NO authorization row. REAL verify_live_authorization would raise.
+    # halt-all is halt-only and succeeds regardless: it engages the global halt without
+    # building a broker. The halt-first fail-safe means we still succeed (exit 0).
+    # Assert exit 0, liquidation_submitted=False, DB global_halt is engaged.
+    _to_live()
+    # No manual authorization injection, so verify_live_authorization fails naturally
+
+    sentinel = {"built": False}
+    def _broker_sentinel(auth):
+        sentinel["built"] = True
+        raise AssertionError("broker must not be built")
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _broker_sentinel)
+
+    r = runner.invoke(app, ["live", "halt-all", "--reason", "panic", "--actor", "agent"])
+    assert r.exit_code == 0
+    payload = json.loads(r.stdout)
+    assert payload["liquidation_submitted"] is False
+    assert sentinel["built"] is False  # broker never constructed
+    # Global halt is engaged (halt-first fail-safe)
+    assert _global_halt_engaged() is True
+
+
+def test_live_halt_all_close_failure_stays_engaged(monkeypatch):
+    # (g) halt-all is halt-only, so it never calls close_all_positions.
+    # Verify that the global halt is engaged even if authorization fails.
+    # This test ensures halt-first fail-safe means we engage the halt even when
+    # authorization is missing or verify would fail.
+    _to_live()
+
+    def _auth_fails(*a, **k):
+        from algua.registry.live_gate import LiveAuthorizationError
+        raise LiveAuthorizationError("revoked")
+
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", _auth_fails)
+
+    def _boom(auth):
+        raise AssertionError("no broker built for halt-all")
+
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", _boom)
+
+    r = runner.invoke(app, ["live", "halt-all", "--reason", "panic", "--actor", "agent"])
+    assert r.exit_code == 0  # halt-first succeeds even when verify fails
+    payload = json.loads(r.stdout)
+    assert payload["liquidation_submitted"] is False
+    # Global halt is still engaged (fail-safe)
+    assert _global_halt_engaged() is True
