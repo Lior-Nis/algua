@@ -41,16 +41,9 @@ def _auth():
 
 
 def _permissive_book(monkeypatch):
-    """Stub the #389 book-level exposure build with a large-equity, empty long-only book so book
-    caps never bind, AND no-op the #390 book-level LOSS circuit breaker — for run-all tests that
-    assert the pre-existing tick/pool/breach behavior. (Book-exposure enforcement is covered by
-    test_book_limits.py + test_live_book_limits.py; the loss breaker by test_book_breaker.py +
-    test_live_book_breaker.py.)"""
-    from algua.risk.book_limits import BookExposure, BookRiskLimits
-    monkeypatch.setattr(
-        "algua.cli.live_cmd._build_book_exposure",
-        lambda *a, **k: (BookExposure(1e15, {}, BookRiskLimits()), None),
-    )
+    """No-op the #390 book-level LOSS circuit breaker for run-all tests that assert the pre-existing
+    tick/pool/breach behavior. (The #389 aggregate book-exposure gate's pure evaluator is covered by
+    test_book_limits.py; the loss breaker by test_book_breaker.py + test_live_book_breaker.py.)"""
     monkeypatch.setattr(
         "algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None
     )

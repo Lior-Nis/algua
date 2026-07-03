@@ -33,7 +33,6 @@ from algua.execution.order_state import (
     record_tick_snapshot,
     update_nav_peak,
 )
-from algua.execution.sizing import MIN_NOTIONAL
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
 from algua.observability import (
@@ -55,7 +54,6 @@ from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
 from algua.risk.book_breaker import BookBreach, BookBreakerLimits, evaluate_book_breaker
 from algua.risk.book_equity import update_book_peak
-from algua.risk.book_limits import BookExposure, BookRiskLimits
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_tradable_strategy
@@ -264,13 +262,6 @@ def _broker_buying_power(broker) -> float:
     return float(broker.account().buying_power)
 
 
-def _latest_marks(bars) -> dict[str, float]:
-    """Latest closed-bar close per symbol from a bars frame ({symbol: close}); empty on no bars."""
-    if bars is None or getattr(bars, "empty", True):
-        return {}
-    return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
-
-
 def _evaluate_book_loss_breaker(conn, broker):
     """Evaluate the book-level loss/drawdown circuit breaker (#390) for the whole account.
 
@@ -307,54 +298,6 @@ def _evaluate_book_loss_breaker(conn, broker):
     return evaluate_book_breaker(equity, peak, last_equity, limits)
 
 
-def _build_book_exposure(
-    broker, provider, net_positions: dict[str, float], start: str, end: str,
-) -> tuple[BookExposure | None, str | None]:
-    """Build the account-level book-exposure accumulator (#389) that caps aggregate gross / net /
-    single-name concentration across ALL strategies sharing the live account. Seeds from the
-    RECONCILED broker net positions (whole-account truth, incl. non-ticked/dormant/orphan
-    residuals) valued at latest closed-bar marks, against ACCOUNT equity (not a subaccount).
-
-    Returns (BookExposure, None) on success, or (None, reason) to FAIL CLOSED (caller skips
-    trading this cycle). Fail-closed cases, per the long-only precondition + valuation safety:
-      - any reconciled nonzero position with qty < 0 (a short — long-only anomaly);
-      - any reconciled nonzero position with a missing / non-finite / <= 0 mark (unvaluable book).
-    A partially-valued book is never built — one bad symbol makes gross/net/concentration for the
-    WHOLE book unknowable, so the whole cycle fails closed."""
-    nonzero = {s: float(q) for s, q in net_positions.items() if float(q) != 0.0}
-    shorts = sorted(s for s, q in nonzero.items() if q < 0.0)
-    if shorts:
-        return None, f"account holds short position(s) {shorts} — book-risk precondition is " \
-                     "long-only; refusing to trade this cycle"
-    # Marks for EVERY held symbol (the book is valued on the reconciled account positions; a
-    # strategy's not-yet-held universe symbols carry no book notional, so they need no mark here).
-    fetch = sorted(nonzero)
-    bars = provider.get_bars(fetch, utc(start), utc(end), "1d") if fetch else None
-    marks = _latest_marks(bars)
-    book_notionals: dict[str, float] = {}
-    for sym, qty in nonzero.items():
-        mark = marks.get(sym)
-        if mark is None or not math.isfinite(mark) or mark <= 0.0:
-            return None, f"held symbol {sym!r} has no usable mark (got {mark!r}) — cannot value " \
-                         "the book; refusing to trade this cycle"
-        book_notionals[sym] = qty * mark
-    equity = float(broker.account().equity)
-    s = get_settings()
-    limits = BookRiskLimits(
-        max_gross=s.book_max_gross,
-        max_net=s.book_max_net,
-        max_symbol_concentration=s.book_max_symbol_concentration,
-        max_symbol_notional=s.book_max_symbol_notional,
-    )
-    book = BookExposure(equity, book_notionals, limits)
-    # An account book that ALREADY breaches a cap at reconcile time is an anomaly: the per-buy
-    # monotone headroom guarantees no-worse but cannot heal an already-over OTHER symbol via a buy,
-    # so trading through it is unsound (Codex #389 GATE-2). Fail closed — skip the whole cycle.
-    breaches = book.seed_breaches()
-    if breaches:
-        return None, f"account book already breaches book-level cap(s) {breaches} at reconcile " \
-                     "— refusing to trade this cycle"
-    return book, None
 
 
 @live_app.command("run-all")
@@ -493,41 +436,22 @@ def run_all(
                         raise typer.Exit(1) from exc
                     emit({**payload, "liquidation_submitted": True})
                     raise typer.Exit(1)
-                # BOOK-LEVEL aggregate risk (#389): build ONE account-scoped exposure accumulator
-                # seeded from the reconciled whole-account net book, capping aggregate gross / net /
-                # single-name concentration ACROSS all strategies (per-strategy walls can't see the
-                # compounded book). Fail closed (skip trading this cycle) if the book can't be built
-                # safely — a short position (long-only precondition) or an unvaluable held name.
-                book, book_reason = _build_book_exposure(
-                    broker, provider, net_positions, start, end
-                )
-                if book is None:
-                    log.info("book_risk_deferred",
-                             extra={"fields": {"lane": "live", "reason": book_reason}})
-                    emit(ok({
-                        "reconcile": recon_payload,
-                        "skipped": skipped,
-                        "note": f"book-level risk precondition failed: {book_reason}; "
-                                "deferring trades this cycle",
-                        "strategies": [],
-                    }))
-                    return
+                # BOOK-LEVEL aggregate risk (#389): the account-scoped aggregate gross / net /
+                # single-name-concentration gate is being rewired from the retired per-BUY
+                # `BookExposure.permit_buy` accumulator onto the whole-cycle, prefix-safe
+                # `evaluate_book` PLAN -> AGGREGATE-GATE -> SETTLE -> APPLY path (design v4). Until
+                # that batch wiring lands (a later slice of #389), this cycle applies only the
+                # per-cycle buying-power pool below; the pure `evaluate_book` evaluator and its unit
+                # coverage are in place (algua/risk/book_limits.py, tests/test_book_limits.py).
                 pool = {"available": _broker_buying_power(broker)}
 
                 def _reserve_for(strategy_name):
                     def _reserve(symbol: str, notional: float) -> float:
-                        # Buying-power pool trims first; the book accumulator then trims the pool-
-                        # permitted amount to the account-level gross/net/concentration headroom and
-                        # MUTATES its running book by the FINAL permitted (so the next strategy's
-                        # buys see the compounded book). Audit any shortfall vs intended notional.
-                        pool_permitted = min(notional, max(0.0, pool["available"]))
-                        # min_notional: a sub-minimum book trim is skipped downstream, so the book
-                        # does not burn budget for a phantom fill (accounting stays in step).
-                        permitted = book.permit_buy(
-                            symbol, pool_permitted, min_notional=MIN_NOTIONAL
-                        )
+                        # Buying-power pool trim across strategies (strategy order). Audit any
+                        # shortfall vs the intended notional.
+                        permitted = min(notional, max(0.0, pool["available"]))
                         pool["available"] -= permitted
-                        if permitted < notional:  # trimmed/skipped -> audit the shortfall
+                        if permitted < notional:  # trimmed -> audit the shortfall
                             record_reservation(
                                 conn, cycle, strategy_name, symbol, notional, permitted
                             )

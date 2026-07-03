@@ -1,25 +1,49 @@
 """Book-level aggregate risk limits — a pure risk helper (no I/O, no DB, stdlib only).
 
 Where `algua.risk.limits` caps a SINGLE strategy's decision-weight vector, this module caps
-the BOOK: the aggregate exposure summed across every strategy/tenant on one account. A caller
-seeds `BookExposure` with the current per-symbol notional across the whole account, then asks
-`permit_buy(symbol, requested)` before submitting each incremental buy; the accumulator returns
-the largest notional that keeps every book-level cap satisfied AFTER the add and folds the
-grant into its running totals, so a sequence of buys across strategies can never collectively
-breach a book cap (the first buyer consumes headroom the next one no longer sees).
+the BOOK: the aggregate exposure summed across every strategy/tenant on one account.
 
-Precondition: LONG-ONLY. All seeded notionals and all requested buys are >= 0; under it gross
-(abs sum) == net (signed sum), but both are tracked independently for defense-in-depth.
+The public surface is a frozen `BookRiskLimits` config plus one pure function `evaluate_book`
+that takes the WHOLE cycle at once — the reconciled per-symbol seed notionals, the aggregated
+cross-strategy SELL and BUY intents — and returns a `BookVerdict`: whether to trade, and (on a
+pass) the quantized per-(strategy, symbol) BUY notionals that keep every book-level cap satisfied
+at EVERY reachable order-submission prefix, not merely at the terminal book (#389 design v4).
+
+Prefix-safety crux (design v4, §v4-9). Concentration is enforced against a FIXED per-cycle
+denominator `D = max(equity, ΣB)` where `B[s] = seed[s] − sell_total[s]` is the post-SELL lower
+bound on the book (SELLs shrink gross; a SELL-reduced intermediate prefix can drive gross all the
+way down to ΣB). Validating single-name concentration against `c·D` — NOT against the friendlier
+terminal gross `ΣQ` — certifies `Q[s] ≤ c·max(equity, gross_I)` for every intermediate prefix `I`.
+The equity floor in `D` is definitional, not a fudge: `symbol ≤ c·max(equity, gross)` measures a
+name against total capital while the book is unlevered, so a SELL that shrinks *gross* can never
+retroactively push a held name over the raw `symbol/gross` ratio (which the discarded raw-ratio
+form would miss — Codex counterexample: equity=100, c=0.5, hold A=50 / B=50, sell all B leaves A
+at 50/50 = 100% of gross but only 50% of equity).
+
+Precondition: LONG-ONLY. All seed notionals, all SELL totals, and all BUY requests are >= 0; the
+aggregate SELL in a name is bounded by its seed (no over-sell — a hard assert, step 0b), so
+`B[s] >= 0` and no reachable intermediate book goes short.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
-# Absolute tolerance for a seed "already breached" comparison — absorbs float noise in the
-# mark×qty book valuation so a book exactly at a cap isn't spuriously flagged as over it.
-_EPS = 1e-6
+# Arithmetic dust ONLY (~1e-6 * equity): absorbs float round-off in the cap sums so a book exactly
+# at a cap isn't spuriously flagged over it. It is NEVER used to reconcile a valuation basis
+# difference — the caller values the entire book on ONE mark basis before calling (design v4,
+# Finding 3), so `_EPS` here is pure round-off slack.
+_EPS_REL = 1e-6
+
+# Default BUY notional quantization step (dollars) — BUYs are submitted as dollar-denominated
+# notional orders, so the step is a DOLLAR step, not a share step (design v4, §v4-7).
+DEFAULT_BUY_NOTIONAL_STEP = 0.01
+
+# Small positive nudge so a float share that is mathematically an exact multiple of `step` (but
+# lands microscopically under it after division) still floors to that multiple, not one step below.
+_FLOOR_SLACK = 1e-9
 
 
 def _finite(x: float) -> bool:
@@ -65,115 +89,228 @@ class BookRiskLimits:
             )
 
 
-class BookExposure:
-    """Stateful accumulator over the account's aggregate long book.
+@dataclass(frozen=True)
+class BookVerdict:
+    """Outcome of one whole-cycle book evaluation.
 
-    Seed with the current signed notional per symbol summed across the whole account, then call
-    `permit_buy` per incremental buy. `permit_buy` returns the largest permitted notional and
-    mutates the running book/gross/net on a positive grant, so subsequent calls see the effect.
+    - ok: True → trade this cycle (SELLs in full; BUYs per `permitted_buys`). False → de-risk only
+      (permit SELLs, submit NO BUYs) — a hard fail-closed (degenerate equity, over-sell, or the
+      final-net miss).
+    - reason: a short machine token on a fail-closed or a global reduce-only (`"equity"`,
+      `"oversell:<symbol>"`, `"seed_breach:<which>"`, `"final_net:<which>"`); None on a clean pass.
+    - permitted_buys: the quantized BUY notionals to submit, keyed by (strategy, symbol). Empty on
+      any fail-closed or global reduce-only. SELLs are ALWAYS permitted in full (not represented
+      here) whenever `ok` is True.
     """
 
-    def __init__(
-        self, equity: float, book_notionals: dict[str, float], limits: BookRiskLimits
-    ) -> None:
-        self.equity = equity
-        self.limits = limits
-        # Mutable working copy; unseen symbols default to 0.0 on access.
-        self.book: dict[str, float] = dict(book_notionals)
-        # Running aggregates. gross = Σ|v| (abs sum), net = Σ v (signed sum). Under the long-only
-        # precondition these coincide at seed, but we track them independently for defense.
-        self.gross: float = sum(abs(v) for v in book_notionals.values())
-        self.net: float = sum(book_notionals.values())
+    ok: bool
+    reason: str | None
+    permitted_buys: dict[tuple[str, str], float] = field(default_factory=dict)
 
-    def seed_breaches(self) -> list[str]:
-        """Names of book caps ALREADY breached by the seed (before any buy). A non-empty result
-        means the whole account book is over a limit at reconcile time — an anomaly the caller must
-        treat as fail-closed (skip the cycle), because the per-buy monotone headroom only guarantees
-        NO-worse; it cannot heal an already-breached OTHER symbol via a buy (Codex #389 GATE-2). An
-        empty book (equity <= 0 or non-finite) is reported as breached ('equity') so a degenerate
-        seed also fails closed. Concentration checked with the same equity-floored base as buys."""
-        e = self.equity
-        if not _finite(e) or e <= 0:
-            return ["equity"]
-        lim = self.limits
-        breaches: list[str] = []
-        if self.gross > lim.max_gross * e + _EPS:
-            breaches.append("gross")
-        if self.net > lim.max_net * e + _EPS:
-            breaches.append("net")
-        over_notional = [
-            s for s, v in self.book.items() if abs(v) > lim.max_symbol_notional * e + _EPS
-        ]
-        if over_notional:
-            breaches.append("symbol_notional")
-        if lim.max_symbol_concentration < 1.0:
-            denom = max(self.gross, e)
-            over_conc = [
-                s for s, v in self.book.items()
-                if abs(v) > lim.max_symbol_concentration * denom + _EPS
-            ]
-            if over_conc:
-                breaches.append("concentration")
-        return breaches
 
-    def permit_buy(
-        self, symbol: str, requested_notional: float, *, min_notional: float = 0.0
-    ) -> float:
-        """Largest permitted BUY notional (0 <= permitted <= requested_notional) that keeps
-        every book cap satisfied after the add; mutate the accumulator iff permitted > 0.
+def _sorted_symbols(*maps: Mapping[str, float]) -> list[str]:
+    """Deterministic union of symbol keys across the given maps."""
+    seen: set[str] = set()
+    for m in maps:
+        seen.update(m.keys())
+    return sorted(seen)
 
-        `min_notional`: a venue minimum — if the trimmed permitted lands in (0, min_notional) the
-        buy would be SKIPPED downstream (below the broker minimum), so return 0 WITHOUT mutating,
-        keeping the accumulator's book in step with what actually reaches the venue (Codex #389).
 
-        Fail-closed on: requested <= 0, non-finite requested, equity <= 0, non-finite equity.
-        """
-        if not _finite(requested_notional) or requested_notional <= 0:
-            return 0.0
-        e = self.equity
-        if not _finite(e) or e <= 0:
-            return 0.0
+def _caps_ok(book: Mapping[str, float], cap_gross: float, cap_sym: float,
+             conc_bound: float, eps: float) -> bool:
+    """True iff `book` satisfies gross, per-symbol-notional, and (fixed-D) concentration within eps.
 
-        lim = self.limits
-        sb = self.book.get(symbol, 0.0)  # >= 0 under precondition
-        g = self.gross
-        n = self.net
-        c = lim.max_symbol_concentration
+    `conc_bound` is `c·D` (the FIXED per-cycle denominator, or +inf when concentration is off)."""
+    if sum(book.values()) > cap_gross + eps:
+        return False
+    for val in book.values():
+        if val > cap_sym + eps or val > conc_bound + eps:
+            return False
+    return True
 
-        # Each headroom floored at 0 — an already-breached seed yields 0 headroom, not negative.
-        gross_hr = max(0.0, lim.max_gross * e - g)
-        net_hr = max(0.0, lim.max_net * e - n)
-        symbol_notional_hr = max(0.0, lim.max_symbol_notional * e - sb)
-        if c >= 1.0:
-            concentration_hr = math.inf  # no binding concentration cap
+
+def evaluate_book(
+    equity: float,
+    seed_notionals: Mapping[str, float],
+    sell_total: Mapping[str, float],
+    buy_request: Mapping[tuple[str, str], float],
+    limits: BookRiskLimits,
+    *,
+    buy_notional_step: Mapping[str, float] | float = DEFAULT_BUY_NOTIONAL_STEP,
+    min_notional: float = 0.0,
+) -> BookVerdict:
+    """Evaluate the WHOLE cycle's aggregate book in one shot; return a `BookVerdict`.
+
+    NOTIONAL-ONLY. Every input is a dollar notional valued on the caller's single mark basis; the
+    share-quantity SELL bound and any notional<->share conversion live in the I/O layer, not here.
+
+    Args:
+      equity: account equity (already source/freshness/consistency-validated by the I/O layer).
+      seed_notionals: reconciled per-symbol held notional across the whole account (>= 0).
+      sell_total: aggregated cross-strategy SELL notional per symbol (>= 0).
+      buy_request: aggregated per-(strategy, symbol) BUY notional request (>= 0), already
+        pool-limited by the caller.
+      limits: the book caps.
+      buy_notional_step: DOLLAR quantization step for BUY legs — a per-symbol map or one scalar
+        (default $0.01). BUY legs are floored (never rounded up) to this step.
+      min_notional: a quantized BUY leg landing in (0, min_notional) is dropped to 0 (matches the
+        downstream venue-minimum skip so PLAN and APPLY agree).
+
+    Steps (design v4):
+      0  degenerate equity → fail closed "equity".
+      0b sell-bound HARD assert 0 <= sell_total[s] <= seed[s]+eps → over-sell fails "oversell:<s>".
+      1  B[s] = seed − sell (>= 0 by 0b); D = max(equity, ΣB) — FIXED per-cycle constant.
+      2  seed breach anywhere → GLOBAL reduce-only: P[s]=0 for every s, SELLs in full,
+         ok=True reason "seed_breach:<which>", empty permitted_buys.
+      3  per-symbol closed-form BUY bound P[s] = max(0, min(request, cap_sym−seed, c·D−seed)).
+      4  gross cap in ONE proportional pass over P[s] > 0.
+      5  rounding-safe NOTIONAL distribution across requesting strategies (floor to step; grant one
+         step of remainder only if re-validation still passes; drop legs in (0, min_notional)).
+      6  FINAL VALIDATION over the exact quantized q, concentration vs the FIXED D (not ΣQ);
+         any miss → ok=False (SELLs only), reason "final_net:<which>".
+    """
+    # ---- step 0: degenerate equity ------------------------------------------------------------
+    if not _finite(equity) or equity <= 0.0:
+        return BookVerdict(ok=False, reason="equity", permitted_buys={})
+
+    eps = _EPS_REL * equity
+    symbols = _sorted_symbols(seed_notionals, sell_total)
+
+    def _seed(s: str) -> float:
+        return float(seed_notionals.get(s, 0.0))
+
+    def _sell(s: str) -> float:
+        return float(sell_total.get(s, 0.0))
+
+    def _step(s: str) -> float:
+        if isinstance(buy_notional_step, Mapping):
+            step = float(buy_notional_step.get(s, DEFAULT_BUY_NOTIONAL_STEP))
         else:
-            # Post-add (sb + p) <= c * max(g + p, e), equity-floored so a first fill into a
-            # flat/small book isn't spuriously "100% of a tiny gross". `sb + p - c*max(g+p, e)`
-            # is continuous & strictly increasing in p (slope 1 below the kink p*=e-g, 1-c above),
-            # so the feasible set is [0, h] — closed form (Codex #389):
-            if g >= e:
-                concentration_hr = max(0.0, (c * g - sb) / (1 - c))  # already levered: gross base
-            else:
-                h_floor = c * e - sb                # regime gross+p <= e: base is equity
-                kink = e - g                         # p* where gross+p crosses e
-                if h_floor < kink:                   # binding while still unlevered
-                    concentration_hr = max(0.0, h_floor)
-                else:                                # headroom extends past the kink -> gross base
-                    concentration_hr = max(0.0, (c * g - sb) / (1 - c))
+            step = float(buy_notional_step)
+        if not _finite(step) or step <= 0.0:
+            return DEFAULT_BUY_NOTIONAL_STEP
+        return step
 
-        permitted = max(
-            0.0,
-            min(requested_notional, gross_hr, net_hr, symbol_notional_hr, concentration_hr),
+    # ---- step 0b: sell-bound hard assert (no over-sell) ---------------------------------------
+    # A negative sell or an aggregate sell exceeding the held notional is a caller bug / naked
+    # short — fail closed, never silently clamp (clamping would hide the over-sell and break the
+    # B[s] lower bound the prefix-proof rests on).
+    for s in symbols:
+        sell = _sell(s)
+        seed = _seed(s)
+        if not _finite(sell) or not _finite(seed) or sell < -eps or sell > seed + eps:
+            return BookVerdict(ok=False, reason=f"oversell:{s}", permitted_buys={})
+
+    # ---- step 1: denominator floor (FIXED per-cycle constant) ---------------------------------
+    b = {s: max(0.0, _seed(s) - _sell(s)) for s in symbols}
+    sum_b = sum(b.values())
+    d = max(equity, sum_b)  # worst-case (minimum) gross denominator any prefix can reach
+
+    lim = limits
+    cap_gross = min(lim.max_gross, lim.max_net) * equity  # long-only ⇒ gross == net; take tighter
+    cap_sym = lim.max_symbol_notional * equity
+    c = lim.max_symbol_concentration
+    conc_bound = math.inf if c >= 1.0 else c * d
+
+    # ---- step 2: seed breach anywhere → GLOBAL reduce-only ------------------------------------
+    sum_seed = sum(_seed(s) for s in symbols)
+    seed_breach: str | None = None
+    if sum_seed > cap_gross + eps:
+        seed_breach = "gross"
+    else:
+        for s in symbols:
+            if _seed(s) > cap_sym + eps:
+                seed_breach = "symbol_notional"
+                break
+        if seed_breach is None and c < 1.0:
+            for s in symbols:
+                if _seed(s) > conc_bound + eps:
+                    seed_breach = "concentration"
+                    break
+    if seed_breach is not None:
+        # A book that breaches ANYWHERE at the account level must de-risk EVERYWHERE: no new
+        # exposure to any name (even unbreached) once the aggregate is over a cap. SELLs still
+        # permitted (they only shrink the book). Skip steps 3-6.
+        return BookVerdict(ok=True, reason=f"seed_breach:{seed_breach}", permitted_buys={})
+
+    # ---- step 3: per-symbol closed-form BUY bound (no iteration) -------------------------------
+    # P[s] simultaneously clears the per-symbol-notional cap and the FIXED-denominator
+    # concentration cap. Both `cap_sym − seed` and `c·D − seed` are fixed constants (D does not
+    # move), so this is a single closed-form min — never a fixpoint loop.
+    request_by_symbol: dict[str, float] = {}
+    for (_strat, sym), req in buy_request.items():
+        request_by_symbol[sym] = request_by_symbol.get(sym, 0.0) + max(0.0, float(req))
+    p: dict[str, float] = {}
+    for sym, req in request_by_symbol.items():
+        seed = _seed(sym)
+        bound = min(req, cap_sym - seed, conc_bound - seed)
+        p[sym] = max(0.0, bound)
+
+    # ---- step 4: gross cap — ONE proportional pass --------------------------------------------
+    # Reducing P only relaxes the step-3 per-symbol / concentration bounds, so a single
+    # proportional pass suffices (no iteration). Overflow is spread across P[s] > 0 in proportion
+    # to P[s].
+    sum_p = sum(p.values())
+    overflow = sum_seed + sum_p - cap_gross
+    if overflow > eps and sum_p > 0.0:
+        scale = max(0.0, (sum_p - overflow) / sum_p)
+        p = {sym: v * scale for sym, v in p.items()}
+
+    # ---- step 5: rounding-safe NOTIONAL distribution ------------------------------------------
+    # Split each symbol's P across the requesting strategies proportional to request, FLOOR every
+    # leg to the dollar step (never up → Σq ≤ P), then hand at most ONE step of the per-symbol
+    # remainder to a single strategy, and ONLY if the full quantized book still passes every cap.
+    q: dict[tuple[str, str], float] = {}
+    for sym in sorted(p):
+        p_sym = p[sym]
+        if p_sym <= 0.0:
+            continue
+        step = _step(sym)
+        legs = sorted(
+            ((strat, float(req)) for (strat, s), req in buy_request.items()
+             if s == sym and float(req) > 0.0),
+            key=lambda kv: kv[0],
         )
+        total_req = sum(req for _, req in legs)
+        if total_req <= 0.0:
+            continue
+        granted: dict[str, float] = {}
+        for strat, req in legs:
+            share = p_sym * (req / total_req)
+            floored = math.floor(share / step + _FLOOR_SLACK) * step
+            if floored < min_notional:
+                floored = 0.0
+            if floored > 0.0:
+                granted[strat] = floored
+        # per-symbol remainder → at most ONE extra step to ONE strategy, only if re-validation of
+        # the FULL quantized book (all committed q + this symbol's grants + the extra step) passes.
+        remainder = p_sym - sum(granted.values())
+        if remainder >= step - _FLOOR_SLACK:
+            for strat, _req in legs:
+                candidate = granted.get(strat, 0.0) + step
+                if candidate < min_notional:
+                    continue
+                trial_book: dict[str, float] = {s: _seed(s) for s in symbols}
+                for (_gs, _gsym), gv in q.items():
+                    trial_book[_gsym] = trial_book.get(_gsym, 0.0) + gv
+                trial_book[sym] = _seed(sym) + sum(granted.values()) + step
+                if _caps_ok(trial_book, cap_gross, cap_sym, conc_bound, eps):
+                    granted[strat] = candidate
+                break
+        for strat, val in granted.items():
+            if val > 0.0:
+                q[(strat, sym)] = val
 
-        # A trim that lands below the venue minimum is SKIPPED downstream (no order posted), so do
-        # not burn book budget for a phantom fill — return 0 without mutating (Codex #389 GATE-2).
-        if permitted < min_notional:
-            return 0.0
+    # ---- step 6: FINAL VALIDATION over the EXACT quantized q, concentration vs FIXED D ---------
+    final_book: dict[str, float] = {s: _seed(s) for s in symbols}
+    for (_strat, sym), val in q.items():
+        final_book[sym] = final_book.get(sym, 0.0) + val
+    if sum(final_book.values()) > cap_gross + eps:
+        return BookVerdict(ok=False, reason="final_net:gross", permitted_buys={})
+    for val in final_book.values():
+        if val > cap_sym + eps:
+            return BookVerdict(ok=False, reason="final_net:symbol_notional", permitted_buys={})
+        if c < 1.0 and val > conc_bound + eps:
+            return BookVerdict(ok=False, reason="final_net:concentration", permitted_buys={})
 
-        if permitted > 0.0:
-            self.book[symbol] = sb + permitted
-            self.gross = g + permitted
-            self.net = n + permitted
-
-        return permitted
+    return BookVerdict(ok=True, reason=None, permitted_buys=q)
