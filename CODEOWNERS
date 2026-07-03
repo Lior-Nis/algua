@@ -23,4 +23,5 @@
 /algua/cli/_common.py                  @Lior-Nis   # authenticate_actor chokepoint — the enforcement call (#329)
 /algua/cli/research_cmd.py             @Lior-Nis   # research-promote enforcement call site (#329)
 /algua/cli/paper_cmd.py                @Lior-Nis   # paper-promote enforcement call site (#329)
+/.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners
