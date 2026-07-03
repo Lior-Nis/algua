@@ -7,6 +7,7 @@ private-import smell): the public names here are the sanctioned shared surface.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import sys
 from collections.abc import Collection, Iterator, Mapping
@@ -59,6 +60,31 @@ def breach_payload(error: str, **extra: object) -> dict:
     command module (so paper and live share it without a cli→cli import).
     """
     return {"ok": False, "kill_switch": "tripped", "error": error, **extra}
+
+
+def resolve_drawdown_breaker(max_drawdown: float | None, disabled: bool) -> float | None:
+    """Resolve the effective per-strategy drawdown breaker for a trading loop (#390).
+
+    The breaker is default-ON: an omitted ``--max-drawdown`` (None) resolves to the conservative
+    ``settings.strategy_max_drawdown_default`` rather than leaving the breaker OFF. An explicit
+    ``--max-drawdown`` value is honored as-is. The breaker is turned OFF (returns None, the
+    ``DRAWDOWN_DISABLED`` sentinel ``check_drawdown`` recognizes) ONLY via the explicit human-only
+    ``--disable-drawdown-breaker`` flag; the caller audits that disable. Shared by paper and live
+    so the default-ON policy can never drift between the lanes.
+    """
+    if disabled:
+        return None
+    if max_drawdown is None:
+        default = float(get_settings().strategy_max_drawdown_default)
+        # Fail closed on a misconfigured default (env override): a non-finite or out-of-(0,1] value
+        # would silently make the default-ON breaker ineffective without the audited disable path.
+        if not math.isfinite(default) or not 0.0 < default <= 1.0:
+            raise ValueError(
+                "strategy_max_drawdown_default (ALGUA_STRATEGY_MAX_DRAWDOWN_DEFAULT) must be a "
+                f"finite fraction in (0, 1]; got {default!r}"
+            )
+        return default
+    return max_drawdown
 
 
 @contextmanager
