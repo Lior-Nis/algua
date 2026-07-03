@@ -1,14 +1,25 @@
 # algua/cli/monitoring_cmd.py
 from __future__ import annotations
 
+import sqlite3
+from datetime import UTC, datetime
+
+import pandas as pd
 import typer
 
 from algua.backtest.factor_eval import forward_returns as _forward_returns
 from algua.backtest.factor_eval import score_panel as _score_panel
-from algua.cli._common import ok, resolve_eval_inputs, resolve_universe_inputs, utc
+from algua.calendar.market_calendar import MarketCalendar
+from algua.cli._common import ok, registry_conn, resolve_eval_inputs, resolve_universe_inputs, utc
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.monitoring.decay import CertifiedBaseline, decay_report
 from algua.monitoring.drift import drift_report
+from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.forward_promotion import _inadmissible_reason, _parse_dt
+from algua.registry.repository import ArtifactIdentity
+from algua.registry.store import SqliteStrategyRepository
+from algua.research.forward_gates import CERTIFICATE_FRESH_SESSIONS, MIN_FORWARD_OBSERVATIONS
 
 monitoring_app = typer.Typer(
     help="Advisory leading-indicator drift monitoring (gates nothing)", no_args_is_help=True
@@ -84,4 +95,128 @@ def drift(
     payload = report.to_dict()
     payload["strategy"] = name
     payload["horizon"] = horizon
+    emit(ok(payload))
+
+
+def _live_return_series(
+    conn: sqlite3.Connection,
+    strategy_id: int,
+    identity: ArtifactIdentity,
+    calendar: MarketCalendar,
+    now_utc: datetime,
+    *,
+    after_ts: str | None,
+) -> tuple[pd.Series, float, int]:
+    """Build the daily realized-return series from admissible ``lane='live'`` ticks.
+
+    Reuses the forward gate's own admissibility filter (``_inadmissible_reason``: broker clock,
+    identity match, non-null account, well-formed non-future ``tick_ts``, fresh ``decision_ts``)
+    so a malformed/future/identity-drifted tick can never leak into the realized read. Ticks at or
+    before ``after_ts`` (the certificate instant) are additionally dropped so a certificate
+    refreshed mid-live never mixes pre-refresh returns into the comparison.
+
+    Returns ``(daily_returns, session_coverage, n_inadmissible)``. Coverage is decided sessions
+    over the trading sessions spanning the observation window (same denominator as the forward
+    gate), 0.0 when there are no observations.
+    """
+    rows = conn.execute(
+        "SELECT id, tick_ts, decision_ts, equity, clock_source, code_hash, config_hash,"
+        " dependency_hash, account_id FROM tick_snapshots"
+        " WHERE lane='live' AND strategy_id=? ORDER BY id",
+        (strategy_id,),
+    ).fetchall()
+    after_dt = _parse_dt(after_ts) if after_ts else None
+
+    admissible: list[sqlite3.Row] = []
+    n_inadmissible = 0
+    for row in rows:
+        if _inadmissible_reason(row, identity, calendar, now_utc) is not None:
+            n_inadmissible += 1
+            continue
+        tick_dt = _parse_dt(row["tick_ts"])
+        # Window start: strictly AFTER the certification instant (admissibility already proved
+        # tick_ts parses). A tick at or before the certificate is pre-certification evidence.
+        if after_dt is not None and tick_dt is not None and tick_dt <= after_dt:
+            continue
+        admissible.append(row)
+
+    # Last admissible tick per decision session wins (id order -> later assignment is max id).
+    by_session = {}
+    for row in admissible:
+        decision_dt = _parse_dt(row["decision_ts"])
+        assert decision_dt is not None  # admissibility proved decision_ts parses
+        by_session[calendar.session_on_or_before(decision_dt.date())] = row
+    sessions = sorted(by_session)
+    equities = [float(by_session[s]["equity"]) for s in sessions]
+    returns = pd.Series(equities, dtype=float).pct_change().dropna()
+    if sessions:
+        coverage = len(sessions) / len(calendar.sessions_in_range(sessions[0], sessions[-1]))
+    else:
+        coverage = 0.0
+    return returns, coverage, n_inadmissible
+
+
+@monitoring_app.command("decay")
+@json_errors
+def decay(
+    name: str = typer.Argument(..., help="registered strategy name"),
+    min_observations: int = typer.Option(
+        MIN_FORWARD_OBSERVATIONS, "--min-observations",
+        help="minimum admissible live daily-return observations before a verdict is rendered"),
+    recert_stale_sessions: int = typer.Option(
+        CERTIFICATE_FRESH_SESSIONS, "--recert-stale-sessions",
+        help="certificate age (sessions) beyond which recert_needed is flagged"),
+) -> None:
+    """ADVISORY: compare a LIVE strategy's realized return distribution against its certified
+    forward-test baseline, and flag decay / recertification-needed.
+
+    Reads the newest forward-test certificate for the current identity (a non-passing newest row
+    invalidates any prior pass -> verdict `unknown`), builds a realized daily-return series from
+    the strategy's admissible ``lane='live'`` ticks recorded SINCE the certificate, and compares
+    the realized Sharpe against the same degraded bar the promotion gate uses
+    (max(0.5*holdout_sharpe, floor)). Fails closed to `unknown`/`insufficient_data` on any
+    missing/degenerate input — it never emits a false `ok`.
+
+    This gates NOTHING, persists NOTHING, and never touches the registry, promotion/forward gates,
+    or the live/paper order path. `decay_warn` is a re-audition prompt, not an enforcement. Exit
+    code is 0 even when the verdict is `decay_warn` (decay is a finding, not a CLI error).
+    """
+    if min_observations < 1:
+        raise ValueError("--min-observations must be >= 1")
+    if recert_stale_sessions < 0:
+        raise ValueError("--recert-stale-sessions must be >= 0")
+
+    identity = compute_artifact_hashes(name)
+    calendar = MarketCalendar()
+    now_utc = datetime.now(UTC)
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        rec = repo.get(name)  # unknown name -> LookupError -> {ok:false}
+        row = repo.latest_forward_gate_row(
+            rec.id, identity.code_hash, identity.config_hash, identity.dependency_hash)
+        baseline: CertifiedBaseline | None = None
+        if row is not None and row["passed"]:
+            created_at = row["created_at"]
+            cert_dt = _parse_dt(created_at)
+            age = (
+                calendar.sessions_between(cert_dt.date(), now_utc.date())
+                if cert_dt is not None else None
+            )
+            baseline = CertifiedBaseline(
+                holdout_sharpe=row["holdout_sharpe"],
+                certified_realized_sharpe=row["realized_sharpe"],
+                created_at=created_at,
+                age_sessions=age,
+            )
+        after_ts = baseline.created_at if baseline is not None else None
+        returns, coverage, n_inadmissible = _live_return_series(
+            conn, rec.id, identity, calendar, now_utc, after_ts=after_ts)
+
+    report = decay_report(
+        returns, coverage, n_inadmissible, baseline,
+        min_observations=min_observations, recert_stale_sessions=recert_stale_sessions,
+    )
+    payload = report.to_dict()
+    payload["strategy"] = name
+    payload["stage"] = rec.stage.value
     emit(ok(payload))
