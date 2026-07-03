@@ -60,6 +60,11 @@ class AccountState:
     buying_power: float
     # populated by account(); default preserves legacy constructions
     account_id: str = field(default="")
+    # equity at the PRIOR trading-session close (Alpaca `last_equity`): the exchange-session-correct
+    # start-of-day baseline the book-level daily-loss circuit breaker measures against (#390). It
+    # captures overnight/pre-market gaps that a first-cycle-of-day snapshot would miss. Default 0.0
+    # preserves legacy constructions; the breaker fails closed on a non-positive baseline.
+    last_equity: float = field(default=0.0)
 
 
 @dataclass(frozen=True)
@@ -162,6 +167,14 @@ class _AlpacaBroker:
         except (KeyError, TypeError, ValueError) as exc:
             raise BrokerError(f"alpaca {path}: bad or missing field {key!r}") from exc
 
+    @staticmethod
+    def _num_opt(data: dict[str, Any], key: str, path: str) -> float:
+        """Parse an OPTIONAL numeric field: absent -> 0.0 (the caller's breaker fails closed on a
+        non-positive value), present-but-malformed -> BrokerError (an anomaly worth surfacing)."""
+        if key not in data:
+            return 0.0
+        return _AlpacaBroker._num(data, key, path)
+
     def account(self) -> AccountState:
         data = self._read(self._get("/v2/account"), "/v2/account")
         account_id = str(data.get("id") or "") if isinstance(data, dict) else ""
@@ -172,6 +185,7 @@ class _AlpacaBroker:
             cash=self._num(data, "cash", "/v2/account"),
             buying_power=self._num(data, "buying_power", "/v2/account"),
             account_id=account_id,
+            last_equity=self._num_opt(data, "last_equity", "/v2/account"),
         )
 
     def _positions_raw(self) -> list[Any]:

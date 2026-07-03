@@ -106,6 +106,15 @@ CREATE TABLE IF NOT EXISTS strategy_peaks (
     peak_equity REAL NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- book_equity_peak is the ACCOUNT-WIDE high-water mark (single row id=1) that the book-level
+-- drawdown circuit breaker (#390) measures against — the aggregate analog of strategy_peaks /
+-- live_nav_peaks. Ratcheted up each live cycle; cleared by resume-all after a flatten-to-cash so
+-- the account re-bases its drawdown denominator.
+CREATE TABLE IF NOT EXISTS book_equity_peak (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    peak       REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
 -- search_trials records the MEASURED search breadth of each parameter sweep so the promotion
 -- gate's multiple-testing defense can scale on the real count of combinations tried, not a
 -- self-reported flag. One row per `backtest sweep`: n_combos is the actual size of that sweep's
