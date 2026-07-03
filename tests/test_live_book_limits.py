@@ -10,11 +10,18 @@ here — it lands with the `evaluate_book` wiring slice.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pandas as pd
 import pytest
 
 from algua.cli import live_cmd
 from algua.cli.live_cmd import _InterimBookHeadroom
+
+# A fully-closed session date the seed marks are dated on, and a cycle clock strictly AFTER it so
+# those bars survive the closed-session cutoff. Mirrors run-all threading a single per-cycle `now`.
+_CLOSED = datetime(2023, 6, 1, tzinfo=UTC)
+_NOW = datetime(2023, 6, 2, tzinfo=UTC)
 
 
 class _Acct:
@@ -32,7 +39,8 @@ class _Broker:
 
 
 class _Provider:
-    """Returns a bars frame (symbol-indexed rows with a 'close') for the requested symbols."""
+    """Returns a bars frame for the requested symbols: ONE fully-closed bar per symbol dated at
+    ``_CLOSED``, matching the real provider's DatetimeIndex + 'symbol'/'close' shape."""
 
     def __init__(self, marks: dict[str, float]) -> None:
         self._marks = marks
@@ -43,7 +51,32 @@ class _Provider:
             for s in symbols
             if s in self._marks
         ]
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows, index=pd.DatetimeIndex([_CLOSED] * len(rows)))
+
+
+class _PartialBarProvider:
+    """Returns TWO bars per symbol: the last fully-closed bar (dated ``_CLOSED``) and a later,
+    still-forming partial bar dated at/after the cycle cutoff. The partial bar carries a DIFFERENT
+    (typically lower) close and MUST be dropped before valuation — otherwise it would look-ahead
+    into an intraday price (#389 GATE-2)."""
+
+    def __init__(self, closed: dict[str, float], partial: dict[str, float],
+                 partial_date: datetime = _NOW) -> None:
+        self._closed = closed
+        self._partial = partial
+        self._partial_date = partial_date
+
+    def get_bars(self, symbols, start, end, timeframe):  # noqa: ANN001, ARG002
+        rows = []
+        index = []
+        for s in symbols:
+            if s in self._closed:
+                rows.append({"symbol": s, "close": self._closed[s]})
+                index.append(_CLOSED)
+            if s in self._partial:
+                rows.append({"symbol": s, "close": self._partial[s]})
+                index.append(self._partial_date)
+        return pd.DataFrame(rows, index=pd.DatetimeIndex(index))
 
 
 # --------------------------------------------------------------------------- #
@@ -56,7 +89,7 @@ def test_build_interim_book_seeds_from_reconciled_positions_and_equity():
     provider = _Provider({"AAA": 10.0, "BBB": 20.0})
     net_positions = {"AAA": 100.0, "BBB": 50.0}  # 100*10 + 50*20 = 1000 + 1000 = 2000 gross
     book, reason = live_cmd._build_interim_book_headroom(
-        broker, provider, net_positions, "2023-01-01", "2023-12-31"
+        broker, provider, net_positions, "2023-01-01", "2023-12-31", _NOW
     )
     assert reason is None
     assert book is not None
@@ -69,7 +102,7 @@ def test_build_interim_book_seeds_from_reconciled_positions_and_equity():
 
 def test_build_interim_book_empty_account_is_valid_empty_book():
     book, reason = live_cmd._build_interim_book_headroom(
-        _Broker(equity=50_000.0), _Provider({}), {}, "2023-01-01", "2023-12-31"
+        _Broker(equity=50_000.0), _Provider({}), {}, "2023-01-01", "2023-12-31", _NOW
     )
     assert reason is None
     assert book is not None
@@ -79,7 +112,7 @@ def test_build_interim_book_empty_account_is_valid_empty_book():
 def test_build_interim_book_fails_closed_on_short_position():
     # A short in the live account violates the long-only precondition -> fail closed (skip cycle).
     book, reason = live_cmd._build_interim_book_headroom(
-        _Broker(), _Provider({"AAA": 10.0}), {"AAA": -100.0}, "2023-01-01", "2023-12-31"
+        _Broker(), _Provider({"AAA": 10.0}), {"AAA": -100.0}, "2023-01-01", "2023-12-31", _NOW
     )
     assert book is None
     assert reason is not None and "short" in reason.lower()
@@ -88,7 +121,7 @@ def test_build_interim_book_fails_closed_on_short_position():
 def test_build_interim_book_fails_closed_on_missing_mark():
     # A held symbol with no usable mark makes the whole book unvaluable -> fail closed.
     book, reason = live_cmd._build_interim_book_headroom(
-        _Broker(), _Provider({}), {"AAA": 100.0}, "2023-01-01", "2023-12-31"
+        _Broker(), _Provider({}), {"AAA": 100.0}, "2023-01-01", "2023-12-31", _NOW
     )
     assert book is None
     assert reason is not None and "mark" in reason.lower()
@@ -97,7 +130,7 @@ def test_build_interim_book_fails_closed_on_missing_mark():
 @pytest.mark.parametrize("bad_mark", [0.0, -5.0, float("nan"), float("inf")])
 def test_build_interim_book_fails_closed_on_non_positive_or_non_finite_mark(bad_mark):
     book, reason = live_cmd._build_interim_book_headroom(
-        _Broker(), _Provider({"AAA": bad_mark}), {"AAA": 100.0}, "2023-01-01", "2023-12-31"
+        _Broker(), _Provider({"AAA": bad_mark}), {"AAA": 100.0}, "2023-01-01", "2023-12-31", _NOW
     )
     assert book is None
     assert reason is not None
@@ -106,7 +139,7 @@ def test_build_interim_book_fails_closed_on_non_positive_or_non_finite_mark(bad_
 @pytest.mark.parametrize("bad_equity", [0.0, -1.0, float("nan"), float("inf")])
 def test_build_interim_book_fails_closed_on_unusable_equity(bad_equity):
     book, reason = live_cmd._build_interim_book_headroom(
-        _Broker(equity=bad_equity), _Provider({}), {}, "2023-01-01", "2023-12-31"
+        _Broker(equity=bad_equity), _Provider({}), {}, "2023-01-01", "2023-12-31", _NOW
     )
     assert book is None
     assert reason is not None and "equity" in reason.lower()
@@ -118,7 +151,7 @@ def test_build_interim_book_fails_closed_on_already_breached_symbol_notional():
     # anomaly -> fail closed (a buy of ANOTHER symbol must NOT proceed through a breached book).
     book, reason = live_cmd._build_interim_book_headroom(
         _Broker(equity=1000.0), _Provider({"AAA": 6.0}), {"AAA": 100.0},
-        "2023-01-01", "2023-12-31",
+        "2023-01-01", "2023-12-31", _NOW,
     )
     assert book is None
     assert reason is not None and "already breaches" in reason.lower()
@@ -130,10 +163,45 @@ def test_build_interim_book_fails_closed_on_already_breached_gross():
     # (each name individually is fine), so the whole cycle fails closed at reconcile.
     book, reason = live_cmd._build_interim_book_headroom(
         _Broker(equity=1000.0), _Provider({"AAA": 4.5, "BBB": 4.5, "CCC": 4.5}),
-        {"AAA": 100.0, "BBB": 100.0, "CCC": 100.0}, "2023-01-01", "2023-12-31",
+        {"AAA": 100.0, "BBB": 100.0, "CCC": 100.0}, "2023-01-01", "2023-12-31", _NOW,
     )
     assert book is None
     assert reason is not None and "gross" in reason.lower()
+
+
+# --------------------------------------------------------------------------- #
+# closed-session cutoff — the seed valuation must ignore a partial current bar (#389 GATE-2)
+# --------------------------------------------------------------------------- #
+
+
+def test_seed_ignores_partial_current_bar_valuation():
+    # A later, partial (lower-priced) bar for the held name must NOT change the seed valuation vs
+    # the last CLOSED bar. Closed bar close = 10 -> notional 100*10 = 1000; a partial bar dated at
+    # the cutoff carries close = 5 (would value the book at 500) but must be dropped.
+    broker = _Broker(equity=100_000.0)
+    provider = _PartialBarProvider(closed={"AAA": 10.0}, partial={"AAA": 5.0})
+    book, reason = live_cmd._build_interim_book_headroom(
+        broker, provider, {"AAA": 100.0}, "2023-01-01", "2023-12-31", _NOW
+    )
+    assert reason is None
+    assert book is not None
+    # Valued on the CLOSED bar (10), not the partial (5): notional 1000, not 500.
+    assert book._book["AAA"] == pytest.approx(1000.0)
+    assert book._gross == pytest.approx(1000.0)
+
+
+def test_seed_over_cap_on_closed_bar_fails_even_when_partial_bar_would_hide_it():
+    # A seed ALREADY over the single-name notional cap on its last CLOSED bar must fail the
+    # reconcile-time seed check EVEN THOUGH a later partial (lower-priced) bar would value it under
+    # the cap and hide the breach. equity 1000 -> cap_sym = 0.5*1000 = 500. Closed close = 6 ->
+    # notional 100*6 = 600 (> 500, breach). A partial close = 4 -> 400 (< 500) would mask it.
+    broker = _Broker(equity=1000.0)
+    provider = _PartialBarProvider(closed={"AAA": 6.0}, partial={"AAA": 4.0})
+    book, reason = live_cmd._build_interim_book_headroom(
+        broker, provider, {"AAA": 100.0}, "2023-01-01", "2023-12-31", _NOW
+    )
+    assert book is None
+    assert reason is not None and "already breaches" in reason.lower()
 
 
 # --------------------------------------------------------------------------- #

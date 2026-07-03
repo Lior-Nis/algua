@@ -191,7 +191,8 @@ def test_run_all_halts_strategy_benched_to_dormant_mid_cycle(monkeypatch):
 
     seen = {}
 
-    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+    def _fake_run_tick(strategy, broker, provider, start, end, now=None, hooks=None,
+                       max_drawdown=None):
         _bench_to_dormant()  # concurrent live->dormant bench commits mid-tick (revokes allocation)
         seen["halt"] = hooks.should_halt()
         if seen["halt"]:
@@ -419,7 +420,7 @@ def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, now=None):
         calls.append(name)
         if len(calls) == 1:
             return {"strategy": name, "venue": "live", "submitted": []}  # first ticks clean
@@ -449,7 +450,7 @@ def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 30_000.0)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, now=None):
         captured["first"] = reserve_buy("AAA", 50_000.0)   # ask for 50k from a 30k pool
         captured["second"] = reserve_buy("BBB", 50_000.0)  # pool now drained
         return {"strategy": name}
@@ -513,7 +514,7 @@ def test_run_all_forwards_start_end_to_tick(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 1_000.0)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, now=None):
         captured["start"], captured["end"] = start, end
         return {"strategy": name}
 

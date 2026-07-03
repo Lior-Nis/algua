@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 
 import typer
 
@@ -34,7 +35,13 @@ from algua.execution.order_state import (
     update_nav_peak,
 )
 from algua.execution.tick_clock import tick_clock
-from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.live.live_loop import (
+    SubmittedOrder,
+    TickHalted,
+    TickHooks,
+    drop_open_session_bars,
+    run_tick,
+)
 from algua.observability import (
     CycleCounters,
     configure_logging,
@@ -134,6 +141,7 @@ def _still_live_allocated(conn, name: str) -> bool:
 def _run_strategy_tick(  # noqa: PLR0913
     conn, name: str, authorization, broker, provider, max_drawdown,
     start: str = "2023-01-01", end: str = "2023-12-31", reserve_buy=None, cancel=None,
+    now: datetime | None = None,
 ) -> dict:
     """Drive ONE strategy's live tick: hooks (incl. the scoped `cancel`), run_tick, breach handling
     (trip + scoped flatten), snapshot persistence. ALWAYS returns a per-strategy result dict — on
@@ -177,7 +185,7 @@ def _run_strategy_tick(  # noqa: PLR0913
     )
     try:
         result = run_tick(strategy, broker, provider, utc(start), utc(end),
-                          hooks=hooks, max_drawdown=max_drawdown)
+                          now=now, hooks=hooks, max_drawdown=max_drawdown)
     except TickHalted as exc:
         audit_append(conn, actor="system", action="live_trade_tick_halted",
                      reason=str(exc), strategy=name)
@@ -314,7 +322,7 @@ class _InterimBookHeadroom:
 
 
 def _build_interim_book_headroom(
-    broker, provider, net_positions: dict[str, float], start: str, end: str,
+    broker, provider, net_positions: dict[str, float], start: str, end: str, now: datetime,
 ) -> tuple[_InterimBookHeadroom | None, str | None]:
     """Build the INTERIM account-level book-headroom trimmer (#389 Task-1 slice) that caps
     aggregate gross / net + single-name notional across ALL strategies sharing the live account.
@@ -339,7 +347,14 @@ def _build_interim_book_headroom(
         return None, f"account holds short position(s) {shorts} — book-risk precondition is " \
                      "long-only; refusing to trade this cycle"
     fetch = sorted(nonzero)
+    # Value the seed on the SAME closed-session basis run_tick decides on: drop any bar dated on/
+    # after this cycle's ``now`` BEFORE taking marks, so a partial (typically lower-priced) intraday
+    # bar can neither shrink the seed valuation nor mask a book that is already over cap on its last
+    # closed bar (#389 GATE-2 look-ahead). ``now`` is the single per-cycle clock threaded from
+    # run_all so the tick basis and the seed basis are identical.
     bars = provider.get_bars(fetch, utc(start), utc(end), "1d") if fetch else None
+    if bars is not None:
+        bars = drop_open_session_bars(bars, now)
     marks = _latest_marks(bars)
     book_notionals: dict[str, float] = {}
     for sym, qty in nonzero.items():
@@ -447,6 +462,10 @@ def run_all(
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
     configure_logging()
+    # ONE wall-clock reading per cycle. Threaded into BOTH the book-seed valuation and every
+    # strategy's run_tick so their closed-session cutoffs are computed against the identical instant
+    # — the two bases can't straddle a session boundary within a cycle (#389 GATE-2).
+    cycle_now = datetime.now(UTC)
     counters = CycleCounters()
     # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives
     # even when the cycle fails before/around the strategy loop (#346).
@@ -568,7 +587,7 @@ def run_all(
                 # valued safely — a short (long-only precondition), an unvaluable held name, or an
                 # already-breached seed.
                 book, book_reason = _build_interim_book_headroom(
-                    broker, provider, net_positions, start, end
+                    broker, provider, net_positions, start, end, cycle_now
                 )
                 if book is None:
                     log.info("book_risk_deferred",
@@ -607,6 +626,7 @@ def run_all(
                         start=start, end=end,
                         reserve_buy=_reserve_for(name),
                         cancel=lambda n=name: _scoped_cancel(conn, broker, n),
+                        now=cycle_now,
                     )
                     results.append(result)
                     counters.ticks += 1

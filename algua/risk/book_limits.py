@@ -35,6 +35,14 @@ from dataclasses import dataclass, field
 # at a cap isn't spuriously flagged over it. It is NEVER used to reconcile a valuation basis
 # difference — the caller values the entire book on ONE mark basis before calling (design v4,
 # Finding 3), so `_EPS` here is pure round-off slack.
+#
+# ACCEPTED BOUND (#389 GATE-2, LOW): because the step-4 gross pass and the step-6 final validation
+# permit up to `cap + eps`, the quantized OUTPUT book may sit at most `1e-6 * equity` over a cap
+# (e.g. ~$1k over a $1e9 gross cap). This is accepted valuation dust — proportionally negligible and
+# always below the dollar rounding step for any realistic account. `evaluate_book` is not yet wired
+# into any driver (only the interim trimmer is), so this bound is dead today; when it is wired, if a
+# strictly sub-cap output is ever required the permitting comparisons should switch to a fixed
+# sub-cent absolute tolerance rather than this equity-scaled band.
 _EPS_REL = 1e-6
 
 # Default BUY notional quantization step (dollars) — BUYs are submitted as dollar-denominated

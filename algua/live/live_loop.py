@@ -95,6 +95,22 @@ class TickHooks:
     on_noop: Callable[[OrderIntent, str | None], None] | None = None
 
 
+def drop_open_session_bars(bars: Any, now: datetime) -> Any:
+    """Keep only fully-closed sessions: drop any bar dated on/after ``now``'s date so a partial,
+    still-forming current-session bar can never be used.
+
+    This is the ONE closed-session cutoff shared by the two places that must agree within a live
+    cycle: the tick-sizing decision basis (``run_tick``) AND the aggregate book-seed valuation basis
+    (live ``run-all`` reconcile, ``_build_interim_book_headroom``). Factoring it here makes the two
+    bases structurally incapable of diverging — a partial (typically lower-priced) intraday bar can
+    neither drive a decision nor mask a seed book that is already over cap on its last closed bar
+    (#389 GATE-2 look-ahead)."""
+    if getattr(bars, "empty", True):
+        return bars
+    cutoff = now.date()
+    return bars[[ts.date() < cutoff for ts in bars.index]]
+
+
 class TickHalted(RuntimeError):
     """The kill-switch tripped between cancel and submit; the tick aborted before sending orders."""
 
@@ -116,12 +132,11 @@ def run_tick(
     hooks = hooks or TickHooks()
     now = now or datetime.now(UTC)
     bars = provider.get_bars(strategy.universe, start, end, timeframe).sort_index()
-    if not bars.empty:
-        # Only decide on fully-closed sessions: drop any bar dated on/after today so a partial
-        # current-session bar can't drive the decision. (B2b's scheduler can use the exchange
-        # calendar to admit today's bar once its session has closed.)
-        cutoff = now.date()
-        bars = bars[[ts.date() < cutoff for ts in bars.index]]
+    # Only decide on fully-closed sessions: drop any bar dated on/after today so a partial
+    # current-session bar can't drive the decision. (B2b's scheduler can use the exchange
+    # calendar to admit today's bar once its session has closed.) The identical cutoff seeds the
+    # book-risk valuation in live run-all, so the two bases can never diverge (#389).
+    bars = drop_open_session_bars(bars, now)
     if bars.empty:
         return TickResult(None, {}, _early_positions(hooks, broker), [])
 
