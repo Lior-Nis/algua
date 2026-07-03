@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Protocol
 
 from algua.contracts.lifecycle import Stage
 from algua.execution.live_ledger import (
@@ -74,7 +74,7 @@ _ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "idle", "halted"})
 
 
 class _Calendar(Protocol):
-    def sessions_between(self, a: Any, b: Any) -> int: ...
+    def sessions_between_instants(self, a: datetime, b: datetime) -> int: ...
 
 
 def fleet_alert(
@@ -203,7 +203,15 @@ def strategy_health(
         if tick_dt is None or tick_dt > now:
             staleness_sessions = STALE_AFTER_SESSIONS + 1  # fail closed -> stale
         else:
-            staleness_sessions = calendar.sessions_between(tick_dt.date(), now.date())
+            # Count COMPLETED exchange sessions between the tick INSTANT and now, each mapped to
+            # the session it belongs to in EXCHANGE time — an after-close tick (e.g. 20:30 ET =
+            # 00:30 UTC next day) belongs to the CURRENT session, not the next UTC date, so this
+            # can't undercount elapsed sessions and let a dead loop read fresh. An instant before
+            # the calendar's first minute (MinuteOutOfBounds) fails closed to stale.
+            try:
+                staleness_sessions = calendar.sessions_between_instants(tick_dt, now)
+            except Exception:  # noqa: BLE001 — any calendar mapping failure fails closed -> stale
+                staleness_sessions = STALE_AFTER_SESSIONS + 1
 
     if tripped or halted_globally:
         health = "halted"
@@ -235,15 +243,23 @@ def strategy_health(
     }
 
 
-def fleet_status(conn: sqlite3.Connection, calendar: _Calendar, *, now: datetime) -> list[dict]:
+def fleet_status(
+    conn: sqlite3.Connection, calendar: _Calendar, *, now: datetime,
+    halted_globally: bool | None = None,
+) -> list[dict]:
     """Every strategy's health rollup, ranked worst-offender-first.
 
     Reads ``global_halt`` ONCE (account-wide) and ``list_strategies()`` across ALL stages, then
     rolls each up via ``strategy_health``. Ties (same severity) break by name for a stable order.
+
+    ``halted_globally`` may be passed by a caller that ALREADY sampled the halt (e.g. ``fleet
+    health``, so the SAME account-halt value drives both the rollup and the exit-code decision —
+    no second sample that could flip between reads). When ``None`` it is sampled here.
     """
     from algua.registry.store import SqliteStrategyRepository  # lazy: avoid load-time reach-around
 
-    halted_globally = global_halt.is_engaged(conn)
+    if halted_globally is None:
+        halted_globally = global_halt.is_engaged(conn)
     rows = [
         strategy_health(conn, rec, calendar, halted_globally=halted_globally, now=now)
         for rec in SqliteStrategyRepository(conn).list_strategies()
