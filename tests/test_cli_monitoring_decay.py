@@ -56,12 +56,12 @@ def _seed_cert(conn, strategy_id, ident, *, passed=True, holdout=1.0,
     return rid
 
 
-def _seed_live_ticks(conn, strategy_id, ident, *, sharpe_target, n, start_after):
+def _seed_live_ticks(conn, strategy_id, ident, *, sharpe_target, n, start_after=None):
     """Insert n admissible live ticks (broker clock, matching identity, one per recent session).
 
     Equity is a compounding walk whose per-session returns give ~`sharpe_target` annualized. Each
-    tick uses a distinct recent trading session for both tick_ts and decision_ts (lag 0), all
-    strictly after `start_after`.
+    tick uses a distinct recent trading session for both tick_ts and decision_ts (lag 0). Returns
+    the seeded session dates (ascending) so the caller can pin the certificate relative to them.
     """
     cal = MarketCalendar()
     rng = np.random.default_rng(1)
@@ -78,9 +78,7 @@ def _seed_live_ticks(conn, strategy_id, ident, *, sharpe_target, n, start_after)
         sess = cal.previous_session(sess)
         sessions.append(sess)
     sessions.reverse()
-    # Ticks at/before the certificate instant are windowed out downstream by design; the caller
-    # sizes n + the certificate age so enough ticks land strictly after start_after.
-    _ = start_after
+    _ = start_after  # ticks are all recent; the certificate is pinned just before sessions[0].
     equity = 100_000.0
     for i, day in enumerate(sessions):
         equity *= (1.0 + float(rets[i]))
@@ -93,6 +91,14 @@ def _seed_live_ticks(conn, strategy_id, ident, *, sharpe_target, n, start_after)
             (STRAT, ts, ts, equity, strategy_id, ident.code_hash, ident.config_hash,
              ident.dependency_hash))
     conn.commit()
+    return sessions
+
+
+def _cert_ts_before(sessions):
+    """Certificate instant one trading session before the first seeded live tick, so the whole
+    live window is post-certification and session coverage reads ~1.0."""
+    prev = MarketCalendar().previous_session(sessions[0])
+    return datetime.combine(prev, datetime.min.time(), UTC).replace(hour=20).isoformat()
 
 
 def _open():
@@ -112,10 +118,9 @@ def test_healthy_live_is_ok():
     ident = compute_artifact_hashes(STRAT)
     conn = _open()
     sid = SqliteStrategyRepository(conn).get(STRAT).id
-    cert_ts = (datetime.now(UTC) - timedelta(days=200)).isoformat()
-    _seed_cert(conn, sid, ident, holdout=1.0, created_at=cert_ts)
-    _seed_live_ticks(conn, sid, ident, sharpe_target=1.5, n=MIN_FORWARD_OBSERVATIONS + 20,
-                     start_after=datetime.fromisoformat(cert_ts))
+    sessions = _seed_live_ticks(conn, sid, ident, sharpe_target=1.5,
+                                n=MIN_FORWARD_OBSERVATIONS + 20, start_after=None)
+    _seed_cert(conn, sid, ident, holdout=1.0, created_at=_cert_ts_before(sessions))
     conn.close()
 
     payload = _json(runner.invoke(app, ["monitoring", "decay", STRAT]))
@@ -123,6 +128,7 @@ def test_healthy_live_is_ok():
     assert payload["strategy"] == STRAT
     assert payload["verdict"] == "ok"
     assert payload["advisory"] is True
+    assert payload["session_coverage"] >= 0.9  # dense contiguous window since the certificate
     assert payload["certified_baseline"]["holdout_sharpe"] == 1.0
 
 
@@ -131,10 +137,9 @@ def test_decayed_live_is_warn_exit_zero():
     ident = compute_artifact_hashes(STRAT)
     conn = _open()
     sid = SqliteStrategyRepository(conn).get(STRAT).id
-    cert_ts = (datetime.now(UTC) - timedelta(days=200)).isoformat()
-    _seed_cert(conn, sid, ident, holdout=2.0, created_at=cert_ts)  # bar = 1.0
-    _seed_live_ticks(conn, sid, ident, sharpe_target=0.2, n=MIN_FORWARD_OBSERVATIONS + 20,
-                     start_after=datetime.fromisoformat(cert_ts))
+    sessions = _seed_live_ticks(conn, sid, ident, sharpe_target=0.2,
+                                n=MIN_FORWARD_OBSERVATIONS + 20, start_after=None)
+    _seed_cert(conn, sid, ident, holdout=2.0, created_at=_cert_ts_before(sessions))  # bar = 1.0
     conn.close()
 
     result = runner.invoke(app, ["monitoring", "decay", STRAT])
@@ -154,14 +159,46 @@ def test_too_few_live_ticks_is_insufficient():
     ident = compute_artifact_hashes(STRAT)
     conn = _open()
     sid = SqliteStrategyRepository(conn).get(STRAT).id
-    cert_ts = (datetime.now(UTC) - timedelta(days=200)).isoformat()
-    _seed_cert(conn, sid, ident, holdout=1.0, created_at=cert_ts)
-    _seed_live_ticks(conn, sid, ident, sharpe_target=1.5, n=5,
-                     start_after=datetime.fromisoformat(cert_ts))
+    sessions = _seed_live_ticks(conn, sid, ident, sharpe_target=1.5, n=5, start_after=None)
+    _seed_cert(conn, sid, ident, holdout=1.0, created_at=_cert_ts_before(sessions))
     conn.close()
 
     payload = _json(runner.invoke(app, ["monitoring", "decay", STRAT]))
     assert payload["verdict"] == "insufficient_data"
+
+
+def test_long_post_cert_gap_is_insufficient_not_ok():
+    # Dense recent ticks, but the certificate is ~1 year back with no ticks for most of the
+    # window: coverage must read sparse and fail closed to insufficient_data, NOT a false ok.
+    _register()
+    ident = compute_artifact_hashes(STRAT)
+    conn = _open()
+    sid = SqliteStrategyRepository(conn).get(STRAT).id
+    _seed_live_ticks(conn, sid, ident, sharpe_target=1.5,
+                     n=MIN_FORWARD_OBSERVATIONS + 20, start_after=None)
+    old_cert = (datetime.now(UTC) - timedelta(days=365)).isoformat()
+    _seed_cert(conn, sid, ident, holdout=1.0, created_at=old_cert)
+    conn.close()
+
+    payload = _json(runner.invoke(app, ["monitoring", "decay", STRAT]))
+    assert payload["session_coverage"] < 0.9
+    assert payload["verdict"] == "insufficient_data"
+
+
+def test_unparseable_certificate_created_at_is_unknown():
+    # A passing certificate with a malformed created_at is UNUSABLE: no parseable window boundary
+    # means an unbounded live window, so it must fail closed to unknown, never a false ok.
+    _register()
+    ident = compute_artifact_hashes(STRAT)
+    conn = _open()
+    sid = SqliteStrategyRepository(conn).get(STRAT).id
+    _seed_live_ticks(conn, sid, ident, sharpe_target=1.5,
+                     n=MIN_FORWARD_OBSERVATIONS + 20, start_after=None)
+    _seed_cert(conn, sid, ident, holdout=1.0, created_at="not-a-timestamp")
+    conn.close()
+
+    payload = _json(runner.invoke(app, ["monitoring", "decay", STRAT]))
+    assert payload["verdict"] == "unknown"
 
 
 def test_newest_failed_certificate_invalidates_prior_pass():
@@ -174,7 +211,7 @@ def test_newest_failed_certificate_invalidates_prior_pass():
     _seed_cert(conn, sid, ident, passed=True, holdout=1.0, created_at=old)
     _seed_cert(conn, sid, ident, passed=False, holdout=1.0, created_at=new)
     _seed_live_ticks(conn, sid, ident, sharpe_target=1.5, n=MIN_FORWARD_OBSERVATIONS + 20,
-                     start_after=datetime.fromisoformat(new))
+                     start_after=None)
     conn.close()
 
     payload = _json(runner.invoke(app, ["monitoring", "decay", STRAT]))

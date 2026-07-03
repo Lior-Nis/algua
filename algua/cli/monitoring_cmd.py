@@ -105,7 +105,7 @@ def _live_return_series(
     calendar: MarketCalendar,
     now_utc: datetime,
     *,
-    after_ts: str | None,
+    after_dt: datetime,
 ) -> tuple[pd.Series, float, int]:
     """Build the daily realized-return series from admissible ``lane='live'`` ticks.
 
@@ -116,8 +116,13 @@ def _live_return_series(
     refreshed mid-live never mixes pre-refresh returns into the comparison.
 
     Returns ``(daily_returns, session_coverage, n_inadmissible)``. Coverage is decided sessions
-    over the trading sessions spanning the observation window (same denominator as the forward
-    gate), 0.0 when there are no observations.
+    over the trading sessions from the FIRST session strictly after the certificate (``after_dt``)
+    through the last observed session — so a long post-certification gap with no live ticks fails
+    the coverage floor instead of masking as ``1.0``. 0.0 when there are no observations.
+
+    ``after_dt`` MUST be an aware datetime (the parsed certificate instant); the caller fails closed
+    to ``unknown`` when the certificate timestamp does not parse, so this helper never runs with an
+    unbounded window against a real baseline.
     """
     rows = conn.execute(
         "SELECT id, tick_ts, decision_ts, equity, clock_source, code_hash, config_hash,"
@@ -125,7 +130,6 @@ def _live_return_series(
         " WHERE lane='live' AND strategy_id=? ORDER BY id",
         (strategy_id,),
     ).fetchall()
-    after_dt = _parse_dt(after_ts) if after_ts else None
 
     admissible: list[sqlite3.Row] = []
     n_inadmissible = 0
@@ -136,7 +140,7 @@ def _live_return_series(
         tick_dt = _parse_dt(row["tick_ts"])
         # Window start: strictly AFTER the certification instant (admissibility already proved
         # tick_ts parses). A tick at or before the certificate is pre-certification evidence.
-        if after_dt is not None and tick_dt is not None and tick_dt <= after_dt:
+        if tick_dt is not None and tick_dt <= after_dt:
             continue
         admissible.append(row)
 
@@ -149,8 +153,16 @@ def _live_return_series(
     sessions = sorted(by_session)
     equities = [float(by_session[s]["equity"]) for s in sessions]
     returns = pd.Series(equities, dtype=float).pct_change().dropna()
-    if sessions:
-        coverage = len(sessions) / len(calendar.sessions_in_range(sessions[0], sessions[-1]))
+    # Coverage numerator is RETURN observations (one fewer than equity sessions); the denominator
+    # is the trading sessions from the FIRST session strictly after the certificate through the
+    # last observation, minus one (the boundary session has no prior equity to return against).
+    # Anchoring at the certificate — not at sessions[0] — means a long post-cert silence before a
+    # dense recent burst reads as sparse coverage (fails the floor), never a false 1.0.
+    n_returns = int(len(returns))
+    if n_returns > 0:
+        cert_session = calendar.session_on_or_before(after_dt.date())
+        expected_sessions = len(calendar.sessions_in_range(cert_session, sessions[-1])) - 1
+        coverage = n_returns / expected_sessions if expected_sessions > 0 else 0.0
     else:
         coverage = 0.0
     return returns, coverage, n_inadmissible
@@ -195,22 +207,26 @@ def decay(
         row = repo.latest_forward_gate_row(
             rec.id, identity.code_hash, identity.config_hash, identity.dependency_hash)
         baseline: CertifiedBaseline | None = None
+        cert_dt: datetime | None = None
+        # A passing certificate whose `created_at` does not parse to an aware instant is UNUSABLE:
+        # without a parseable boundary the live window is unbounded, so pre-certification ticks
+        # could produce a false `ok`. Fail closed to `unknown` (baseline stays None) in that case.
         if row is not None and row["passed"]:
-            created_at = row["created_at"]
-            cert_dt = _parse_dt(created_at)
-            age = (
-                calendar.sessions_between(cert_dt.date(), now_utc.date())
-                if cert_dt is not None else None
-            )
-            baseline = CertifiedBaseline(
-                holdout_sharpe=row["holdout_sharpe"],
-                certified_realized_sharpe=row["realized_sharpe"],
-                created_at=created_at,
-                age_sessions=age,
-            )
-        after_ts = baseline.created_at if baseline is not None else None
-        returns, coverage, n_inadmissible = _live_return_series(
-            conn, rec.id, identity, calendar, now_utc, after_ts=after_ts)
+            cert_dt = _parse_dt(row["created_at"])
+            if cert_dt is not None:
+                baseline = CertifiedBaseline(
+                    holdout_sharpe=row["holdout_sharpe"],
+                    certified_realized_sharpe=row["realized_sharpe"],
+                    created_at=row["created_at"],
+                    age_sessions=calendar.sessions_between(cert_dt.date(), now_utc.date()),
+                )
+        if baseline is not None and cert_dt is not None:
+            returns, coverage, n_inadmissible = _live_return_series(
+                conn, rec.id, identity, calendar, now_utc, after_dt=cert_dt)
+        else:
+            # No usable baseline -> the verdict is `unknown` regardless of live ticks; skip the
+            # realized read entirely.
+            returns, coverage, n_inadmissible = pd.Series(dtype=float), 0.0, 0
 
     report = decay_report(
         returns, coverage, n_inadmissible, baseline,
