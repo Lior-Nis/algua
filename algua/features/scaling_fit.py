@@ -100,16 +100,22 @@ def fit_quantile_scaler(
         if finite.size == 0:
             raise ScalerError(f"column {col!r}: no finite values to fit a quantile scaler")
         knots = np.quantile(finite, grid)
-        # Collapse duplicate knots (flat regions) to a strictly-increasing set. `transform`
-        # re-derives an equally-spaced [0,1] grid of len(knots), so it stays aligned to whatever
-        # count survives here.
-        unique_knots = np.unique(knots)
+        # Collapse duplicate x-values (flat CDF regions) to a strictly-increasing knot set, keeping
+        # the FITTED probability for each surviving knot — the MAX probability among the collapsed
+        # group (right-continuous CDF). The stored (knots, quantiles) pair is what `transform`
+        # interpolates against, so the frozen map IS the map learned at fit time (no re-derived
+        # grid, no train/serve skew inside the scaler).
+        unique_knots, last_idx = np.unique(knots[::-1], return_index=True)
+        quantiles = grid[::-1][last_idx]  # max probability per collapsed x (right-continuous)
         if unique_knots.size < 2:
             raise ScalerError(
                 f"column {col!r}: fewer than 2 distinct quantile knots (degenerate/constant "
                 f"column) — a quantile scaler is undefined"
             )
-        params[col] = {"knots": [float(k) for k in unique_knots]}
+        params[col] = {
+            "knots": [float(k) for k in unique_knots],
+            "quantiles": [float(q) for q in quantiles],
+        }
     return FrozenScaler(
         kind=QUANTILE,
         columns=tuple(columns),

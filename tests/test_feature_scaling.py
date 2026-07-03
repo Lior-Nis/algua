@@ -83,6 +83,26 @@ def test_quantile_scaler_maps_to_unit_interval_and_is_monotone() -> None:
     assert np.all(np.diff(scaled_sorted) >= -1e-12)
 
 
+def test_quantile_scaler_preserves_fitted_cdf_with_duplicate_knots() -> None:
+    """Regression (GATE-2): a column with many repeated values collapses duplicate quantile knots.
+    The stored (knots, quantiles) pair must still encode the FITTED CDF — a value at a knot maps to
+    the probability it was fit with, not an evenly-re-spaced grid."""
+    idx = pd.date_range("2019-01-01", periods=100, freq="B")
+    # 90 zeros then 10 distinct positives -> the low quantiles all collapse onto x=0.
+    col = np.concatenate([np.zeros(90), np.arange(1.0, 11.0)])
+    train = pd.DataFrame({"a": col}, index=idx)
+    scaler = fit_quantile_scaler(train, columns=["a"], n_quantiles=100)
+    knots = np.asarray(scaler.params["a"]["knots"])
+    quantiles = np.asarray(scaler.params["a"]["quantiles"])
+    assert len(knots) == len(quantiles)
+    assert np.all(np.diff(knots) > 0.0)  # strictly increasing x
+    # ~90% of the mass is at 0, so 0 maps to ~0.9 (right-continuous), NOT 1/len(knots).
+    out = scaler.transform(pd.DataFrame({"a": [0.0]}))
+    assert out["a"].iloc[0] == pytest.approx(0.9, abs=0.02)
+    # The max knot maps to 1.0 (top of the fitted CDF).
+    assert scaler.transform(pd.DataFrame({"a": [10.0]}))["a"].iloc[0] == pytest.approx(1.0)
+
+
 def test_quantile_scaler_rejects_constant_column() -> None:
     idx = pd.date_range("2019-01-01", periods=10, freq="B")
     train = pd.DataFrame({"a": [2.0] * 10}, index=idx)
@@ -138,6 +158,28 @@ def test_transform_preserves_nan() -> None:
 
 
 # --------------------------------------------------------------------------- construction guards
+
+def test_frozen_scaler_rejects_out_of_range_quantile_grid() -> None:
+    # A forged artifact with quantiles outside [0,1] would make transform emit out-of-range values
+    # via the interp left/right bounds — fail closed at construction (GATE-2 rev-2).
+    with pytest.raises(ScalerError, match=r"\[0, 1\]"):
+        FrozenScaler(
+            kind=QUANTILE,
+            columns=("a",),
+            params={"a": {"knots": [0.0, 1.0], "quantiles": [-0.5, 1.5]}},
+            fit_max_timestamp="2019-01-01",
+        )
+
+
+def test_frozen_scaler_rejects_misaligned_quantile_grid() -> None:
+    with pytest.raises(ScalerError, match="aligned 1:1"):
+        FrozenScaler(
+            kind=QUANTILE,
+            columns=("a",),
+            params={"a": {"knots": [0.0, 1.0, 2.0], "quantiles": [0.0, 1.0]}},
+            fit_max_timestamp="2019-01-01",
+        )
+
 
 def test_frozen_scaler_rejects_unknown_kind() -> None:
     with pytest.raises(ScalerError, match="unknown scaler kind"):

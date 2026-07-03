@@ -72,8 +72,11 @@ class FrozenScaler:
         present (fail closed on a missing column).
     params:
         Per-column fitted parameters. For `standard`: `{col: {"mean": float, "std": float}}`.
-        For `quantile`: `{col: {"knots": [float, ...]}}` — `n_quantiles` sorted, strictly
-        increasing quantile values mapped to an equally-spaced grid on [0, 1].
+        For `quantile`: `{col: {"knots": [float, ...], "quantiles": [float, ...]}}` — the fitted
+        CDF as strictly-increasing knot x-values paired 1:1 with their fitted non-decreasing
+        probabilities on [0, 1] (duplicate x-values collapsed to their max probability at fit
+        time). `transform` interpolates against this stored pair, so the frozen map is exactly the
+        map learned at fit — no re-derived grid.
     fit_max_timestamp:
         ISO-8601 max index timestamp of the frame the scaler was fit on (the fit-window evidence).
     """
@@ -112,16 +115,32 @@ class FrozenScaler:
                     raise ScalerError(f"column {col!r}: standard scaler needs a finite mean")
             else:
                 knots = p.get("knots")
+                quantiles = p.get("quantiles")
                 if not isinstance(knots, (list, tuple)) or len(knots) < 2:
                     raise ScalerError(
                         f"column {col!r}: quantile scaler needs >= 2 knots, got {knots!r}"
                     )
+                if not isinstance(quantiles, (list, tuple)) or len(quantiles) != len(knots):
+                    raise ScalerError(
+                        f"column {col!r}: quantile scaler needs a `quantiles` grid aligned 1:1 "
+                        f"with `knots`"
+                    )
                 arr = np.asarray(knots, dtype="float64")
-                if not np.all(np.isfinite(arr)):
-                    raise ScalerError(f"column {col!r}: quantile knots must be finite")
+                qs = np.asarray(quantiles, dtype="float64")
+                if not np.all(np.isfinite(arr)) or not np.all(np.isfinite(qs)):
+                    raise ScalerError(f"column {col!r}: quantile knots/quantiles must be finite")
                 if not np.all(np.diff(arr) > 0.0):
                     raise ScalerError(
                         f"column {col!r}: quantile knots must be strictly increasing"
+                    )
+                if not np.all(np.diff(qs) >= 0.0):
+                    raise ScalerError(
+                        f"column {col!r}: quantile grid must be non-decreasing"
+                    )
+                if qs[0] < 0.0 or qs[-1] > 1.0:
+                    raise ScalerError(
+                        f"column {col!r}: quantile grid must lie in [0, 1] (they are "
+                        f"probabilities); got range [{qs[0]}, {qs[-1]}]"
                     )
 
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -140,9 +159,12 @@ class FrozenScaler:
                 out[col] = (values - float(p["mean"])) / float(p["std"])
             else:
                 knots = np.asarray(p["knots"], dtype="float64")
-                grid = np.linspace(0.0, 1.0, num=len(knots))
-                # Map through the fitted CDF knots (rank-uniform), clipped to [0, 1]. NaNs stay NaN.
-                scaled = np.interp(values, knots, grid, left=0.0, right=1.0)
+                quantiles = np.asarray(p["quantiles"], dtype="float64")
+                # Map through the FITTED CDF (stored knot->quantile pairs, the map learned at fit
+                # time — NOT a re-derived grid), clipped to the fitted range. NaNs stay NaN.
+                scaled = np.interp(
+                    values, knots, quantiles, left=quantiles[0], right=quantiles[-1]
+                )
                 scaled = np.where(np.isnan(values), np.nan, scaled)
                 out[col] = scaled
         return out
