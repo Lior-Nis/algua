@@ -10,9 +10,16 @@ from algua.calendar.market_calendar import MarketCalendar
 from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
-from algua.execution.fleet_health import STALE_AFTER_SESSIONS, fleet_status, strategy_health
+from algua.execution.fleet_health import (
+    OPERATIONAL_STAGES,
+    STALE_AFTER_SESSIONS,
+    fleet_alert,
+    fleet_status,
+    strategy_health,
+)
 from algua.execution.order_state import record_tick_snapshot, update_peak_equity
 from algua.registry.db import connect, migrate
+from algua.registry.gating import load_gated_strategy
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
 
@@ -224,3 +231,236 @@ def test_fleet_status_cli_empty_fleet(monkeypatch, tmp_path):
     result = runner.invoke(app, ["fleet", "status"])
     assert result.exit_code == 0, result.stdout
     assert json.loads(result.stdout) == []
+
+
+# ---------------------------------------------------------------------------
+# #399: fleet_alert() + `fleet health` liveness/heartbeat GATE
+# ---------------------------------------------------------------------------
+
+
+def _row(strategy, stage, health, **extra):
+    """A minimal fleet_status-shaped row for the pure fleet_alert() unit tests."""
+    return {"strategy": strategy, "stage": stage, "health": health, **extra}
+
+
+def test_alert_operational_stale_alerts():
+    rows = [_row("s", "paper", "stale")]
+    assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_alert_operational_idle_alerts():
+    """A live/paper/forward_tested strategy that NEVER ticked is a loop that never started."""
+    for stage in ("live", "paper", "forward_tested"):
+        rows = [_row("s", stage, "idle")]
+        assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_alert_operational_drift_and_halted_alert():
+    for health in ("drift", "halted"):
+        rows = [_row("s", "paper", health)]
+        assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_alert_operational_ok_does_not_alert():
+    rows = [_row("s", "live", "ok")]
+    assert fleet_alert(rows, halted_globally=False) == []
+
+
+def test_alert_nonoperational_stale_does_not_alert():
+    """The load-bearing false-positive guard: a RETIRED strategy whose last tick is ancient reads
+    'stale' forever, but it is not run by a loop, so it must NOT wedge the watchdog red."""
+    for stage in ("retired", "dormant", "idea", "backtested", "candidate"):
+        rows = [_row("s", stage, "stale")]
+        assert fleet_alert(rows, halted_globally=False) == []
+
+
+def test_alert_nonoperational_idle_does_not_alert():
+    rows = [_row("s", "retired", "idle")]
+    assert fleet_alert(rows, halted_globally=False) == []
+
+
+def test_alert_nonoperational_killswitch_halted_does_not_alert():
+    """A per-strategy kill-switch left tripped on a retired strategy is 'halted' but must not alert
+    (only an account-wide global halt alerts regardless of stage)."""
+    rows = [_row("s", "retired", "halted")]
+    assert fleet_alert(rows, halted_globally=False) == []
+
+
+def test_alert_global_halt_alerts_every_row_regardless_of_stage():
+    rows = [_row("r", "retired", "ok"), _row("p", "paper", "ok")]
+    assert len(fleet_alert(rows, halted_globally=True)) == 2
+
+
+def test_alert_corrupt_health_fails_closed():
+    rows = [_row("s", "paper", "bogus_verdict")]
+    assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_alert_corrupt_stage_fails_closed():
+    rows = [_row("s", "not_a_stage", "ok")]
+    assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_alert_missing_keys_fail_closed():
+    rows = [{"strategy": "s"}]  # no health / no stage
+    assert fleet_alert(rows, halted_globally=False) == rows
+
+
+def test_alert_ranks_worst_first():
+    rows = [
+        _row("z", "paper", "idle"),
+        _row("a", "paper", "halted"),
+        _row("m", "paper", "stale"),
+        _row("b", "paper", "drift"),
+    ]
+    out = fleet_alert(rows, halted_globally=False)
+    assert [r["health"] for r in out] == ["halted", "drift", "stale", "idle"]
+
+
+def test_operational_stages_match_gating(tmp_path, monkeypatch):
+    """DRIFT GUARD: OPERATIONAL_STAGES' paper-lane members must be EXACTLY the stages the real
+    tick surface (`load_gated_strategy`) accepts, so the gate can never silently disagree with the
+    loop it watches. Probe every Stage through the gate and compare."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "g.db"))
+    accepted: set[str] = set()
+    # load_gated_strategy loads a REAL module by name, so every probe must use the same loadable
+    # strategy name; a fresh per-stage DB keeps the rows isolated without deleting FK children.
+    for stage in Stage:
+        db = tmp_path / f"g_{stage.value}.db"
+        monkeypatch.setenv("ALGUA_DB_PATH", str(db))
+        with closing(_conn()) as conn:
+            name = "cross_sectional_momentum"
+            SqliteStrategyRepository(conn).add(name)
+            conn.execute("UPDATE strategies SET stage = ? WHERE name = ?", (stage.value, name))
+            conn.commit()
+            try:
+                load_gated_strategy(conn, name, "probe")
+                accepted.add(stage.value)
+            except ValueError:
+                pass  # stage rejected by the gate
+    # The paper tick surface accepts exactly PAPER + FORWARD_TESTED. LIVE is ticked by the live
+    # lane (live run-all), so OPERATIONAL_STAGES = paper-accepted ∪ {live}.
+    assert accepted == {Stage.PAPER.value, Stage.FORWARD_TESTED.value}
+    assert OPERATIONAL_STAGES == accepted | {Stage.LIVE.value}
+
+
+# --- CLI exit-code gate ---
+
+
+def test_fleet_health_cli_ok_exit_zero(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "h_ok", stage=Stage.PAPER)
+        _tick(conn, rec, tick_ts=datetime.now(UTC).isoformat())
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["alerting"] == []
+    assert payload["global_halt"] is False
+    assert payload["summary"]["total"] == 1
+    assert payload["stale_after_sessions"] == STALE_AFTER_SESSIONS
+    assert payload["operational_stages"] == sorted(OPERATIONAL_STAGES)
+    assert len(payload["rows"]) == 1
+
+
+def test_fleet_health_cli_dead_paper_loop_exits_one(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "h_dead", stage=Stage.PAPER)
+        _tick(conn, rec, tick_ts=(datetime.now(UTC) - timedelta(days=60)).isoformat())
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert [r["strategy"] for r in payload["alerting"]] == ["h_dead"]
+    assert payload["alerting"][0]["health"] == "stale"
+
+
+def test_fleet_health_cli_never_started_live_loop_exits_one(monkeypatch, tmp_path):
+    """A LIVE strategy with no tick at all is a loop that never started -> exit 1 (#399 F1/F6)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        _register(conn, "h_live_idle", stage=Stage.LIVE)  # never ticked
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["alerting"][0]["health"] == "idle"
+
+
+def test_fleet_health_cli_retired_stale_is_healthy(monkeypatch, tmp_path):
+    """A retired strategy with an ancient tick must NOT trip the gate (false-positive guard)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "h_retired", stage=Stage.RETIRED)
+        _tick(conn, rec, tick_ts=(datetime.now(UTC) - timedelta(days=365)).isoformat())
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["ok"] is True
+
+
+def test_fleet_health_cli_global_halt_with_only_retired_exits_one(monkeypatch, tmp_path):
+    """Global halt is account state: it trips the gate even when only a non-operational strategy
+    exists (#399 F4)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "h_ret", stage=Stage.RETIRED)
+        _tick(conn, rec, tick_ts=datetime.now(UTC).isoformat())
+        global_halt.engage(conn, reason="panic", actor="agent")
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["global_halt"] is True
+
+
+def test_fleet_health_cli_global_halt_empty_fleet_exits_one(monkeypatch, tmp_path):
+    """Global halt with ZERO strategies still trips the gate (#399 F4 zero-rows)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        global_halt.engage(conn, reason="panic", actor="agent")
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["global_halt"] is True
+    assert payload["summary"]["total"] == 0
+
+
+def test_fleet_health_cli_empty_fleet_is_healthy(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout)["ok"] is True
+
+
+def test_fleet_health_cli_status_engine_crash_fails_closed(monkeypatch, tmp_path):
+    """If the status engine itself raises, @json_errors must still emit {ok:false} + exit 1
+    (#399 iter-2 #3 — a crash is never a silent healthy)."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+
+    def _boom(*a, **k):
+        raise RuntimeError("corrupt fleet state")
+
+    monkeypatch.setattr("algua.cli.fleet_cmd.fleet_status", _boom)
+    result = runner.invoke(app, ["fleet", "health"])
+    assert result.exit_code == 1, result.stdout
+    assert json.loads(result.stdout)["ok"] is False
+
+
+def test_fleet_health_cadence_is_market_sessions_not_wallclock(monkeypatch, tmp_path):
+    """A tick across a long weekend/holiday gap that is < STALE_AFTER_SESSIONS *sessions* old (but
+    many wall-clock days) must NOT alert — proving the gate counts market sessions, not wall-clock
+    (#399 F9). 2023-11-22 (Wed) -> 2023-11-27 (Mon): Thu 23rd = Thanksgiving holiday, Fri 24th is
+    a session, weekend closed -> only ~2 completed sessions across 5 calendar days."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    cal = MarketCalendar()
+    tick = datetime(2023, 11, 22, 20, 0, tzinfo=UTC)
+    now = datetime(2023, 11, 27, 20, 0, tzinfo=UTC)
+    wall_days = (now - tick).days
+    sessions = cal.sessions_between(tick.date(), now.date())
+    assert wall_days >= 5 and sessions <= STALE_AFTER_SESSIONS  # many days, few sessions
+    with closing(_conn()) as conn:
+        rec = _register(conn, "h_holiday", stage=Stage.PAPER)
+        _tick(conn, rec, tick_ts=tick.isoformat())
+        rows = fleet_status(conn, cal, now=now)
+        assert rows[0]["health"] == "ok"
+        assert fleet_alert(rows, halted_globally=False) == []

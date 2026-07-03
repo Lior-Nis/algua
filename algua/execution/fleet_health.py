@@ -48,9 +48,75 @@ STALE_AFTER_SESSIONS = 5
 # Worst-first severity ordering for both the ``health`` verdict and the fleet ranking.
 _SEVERITY = {"halted": 0, "drift": 1, "stale": 2, "idle": 3, "ok": 4}
 
+# The complete set of verdicts ``strategy_health`` can emit. Any OTHER value on a row is a
+# corrupt/unknown verdict and the active liveness gate fails closed on it (never a silent ``ok``).
+_KNOWN_HEALTHS = frozenset(_SEVERITY)
+
+# Every legal lifecycle stage value. A row whose ``stage`` is outside this set is corrupt and the
+# active gate fails closed on it (never a silent ``ok``).
+_ALL_STAGES = frozenset(s.value for s in Stage)
+
+# Stages an operator loop actually ticks — the ONLY stages for which a dead/stalled/never-started
+# loop is a real alert. VERIFIED against origin/main: ``registry.gating.load_gated_strategy`` gates
+# every paper tick surface (``paper run`` / ``paper trade-tick``) to PAPER or FORWARD_TESTED, and
+# ``live run-all`` ticks LIVE. A strategy in any other stage (idea/backtested/candidate/dormant/
+# retired) is NOT run by a loop, so its old/absent tick is expected — not a heartbeat failure. The
+# ``test_operational_stages_match_gating`` drift-guard pins this to the real tick surface so it can
+# never silently diverge from the loop it watches (#399).
+OPERATIONAL_STAGES = frozenset({Stage.LIVE.value, Stage.PAPER.value, Stage.FORWARD_TESTED.value})
+
+# For an OPERATIONAL strategy these verdicts each mean a loop that is stopped, stalled, drifted, or
+# never started — every one an actively-alertable liveness failure. ``idle`` (never ticked) alerts
+# here because a live/paper loop that never produced a tick is a loop that never started; on a
+# NON-operational stage ``idle`` is correctly quiet (see :func:`fleet_alert`). ``halted`` alerts
+# because a stopped, unmonitored operational loop is exactly the silent failure #399 targets.
+_ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "idle", "halted"})
+
 
 class _Calendar(Protocol):
     def sessions_between(self, a: Any, b: Any) -> int: ...
+
+
+def fleet_alert(
+    rows: list[dict], *, halted_globally: bool,
+    operational_stages: frozenset[str] = OPERATIONAL_STAGES,
+) -> list[dict]:
+    """The rows that should ALERT an external liveness watchdog, worst-offender-first (#399).
+
+    This is the ACTIVE half of loop-liveness monitoring: #400 computes the fail-closed staleness
+    verdict per strategy (``strategy_health``); this turns that standing view into a heartbeat
+    ALARM an external supervisor (systemd ``OnFailure=``, cron, k8s liveness) can poll via the
+    ``fleet health`` exit code. Pure — no I/O, classifies pre-computed ``fleet_status`` rows.
+
+    A row alerts iff ANY of:
+
+    * ``halted_globally`` — an account-wide global halt makes EVERY row alert (the whole book is
+      stopped); it is also surfaced at the command level so an engaged halt trips the gate even
+      with zero strategy rows.
+    * its ``health`` is UNKNOWN, or its ``stage`` is UNKNOWN — a corrupt/malformed row is never a
+      silent pass for an active gate; it fails closed to an alert.
+    * its ``stage`` is operational AND its ``health`` is one of ``stale``/``drift``/``idle``/
+      ``halted`` — a stopped, stalled, drifted, or never-started operator loop.
+
+    A per-strategy kill-switch (``halted``) on a NON-operational strategy (e.g. a retired strategy
+    with a lingering kill-switch) does NOT alert via the row rule — only a global halt does — so a
+    benched strategy can never wedge the watchdog permanently red. An ``idle`` non-operational
+    strategy (never ticked, not being run) is correctly quiet.
+    """
+    def _alerts(row: dict) -> bool:
+        if halted_globally:
+            return True
+        health = row.get("health")
+        stage = row.get("stage")
+        if health not in _KNOWN_HEALTHS or stage not in _ALL_STAGES:  # corrupt row -> fail closed
+            return True
+        return stage in operational_stages and health in _ALERT_HEALTHS_OPERATIONAL
+
+    alerting = [r for r in rows if _alerts(r)]
+    alerting.sort(
+        key=lambda r: (_SEVERITY.get(str(r.get("health")), 99), str(r.get("strategy", "")))
+    )
+    return alerting
 
 
 def _safe_latest_tick(conn: sqlite3.Connection, name: str) -> tuple[dict | None, str | None]:
