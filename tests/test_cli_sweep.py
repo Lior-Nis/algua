@@ -6,14 +6,30 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
 runner = CliRunner()
+
+# --- #329 authenticated --actor human plumbing ---------------------------------------------------
+_HUMAN_KEY = None
+_TMP_PATH = None
+
+
+def _promote(args):
+    """Drop-in for `runner.invoke(app, args)` at gated promote call sites: when `args` requests
+    `--actor human`, run the signed challenge dance; otherwise a plain invoke."""
+    if "human" in args:
+        return promote_signed(runner, app, args, _HUMAN_KEY, _TMP_PATH)
+    return runner.invoke(app, args)
 
 
 @pytest.fixture(autouse=True)
 def _tmp(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    global _HUMAN_KEY, _TMP_PATH
+    _HUMAN_KEY = install_human_actor_anchor(monkeypatch, tmp_path)
+    _TMP_PATH = tmp_path
 
 
 def _ensure_family(strategy_name: str = "cross_sectional_momentum",
@@ -113,7 +129,7 @@ def test_pre_registration_sweep_breadth_used_by_promote():
     assert backtested.exit_code == 0, backtested.stdout
     _ensure_family()
 
-    promote = runner.invoke(app, ["research", "promote", "cross_sectional_momentum", "--demo",
+    promote = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                   "--start", "2022-01-01", "--end", "2023-12-31",
                                   "--min-holdout-sharpe", "-100", "--min-holdout-return", "-100",
                                   "--min-pct-positive", "0", "--min-window-sharpe", "-100",
@@ -150,7 +166,7 @@ def test_promote_full_emits_deep_diagnostics():
     # The single-use holdout is per-DB, so a full and a summary promote can't share a window in
     # one test; assert the FULL surface here and the SUMMARY surface in the next test (#349).
     base = _promote_to_backtested_with_breadth()
-    res = runner.invoke(app, base)
+    res = _promote(base)
     assert res.exit_code == 0, res.stdout
     payload = json.loads(res.stdout)
     # full output is unchanged: deep gate diagnostics present, no summary marker
@@ -161,7 +177,7 @@ def test_promote_full_emits_deep_diagnostics():
 
 def test_promote_summary_drops_deep_diagnostics():
     base = _promote_to_backtested_with_breadth()
-    res = runner.invoke(app, base + ["--summary"])
+    res = _promote(base + ["--summary"])
     assert res.exit_code == 0, res.stdout
     payload = json.loads(res.stdout)
     # summary drops the ~25 deep dsr_*/fdr_*/regime/shadow-audit fields

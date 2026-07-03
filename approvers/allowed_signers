@@ -1,4 +1,14 @@
-# Enrolled go-live approver PUBLIC keys (SSH allowed_signers format, namespace algua-go-live).
-# This file is the TRUST ANCHOR for the paper->live gate and is CODEOWNERS-protected: an agent
-# may edit it in a worktree but the real gate uses the reviewed copy on main. One line per key:
+# Enrolled approver PUBLIC keys (SSH allowed_signers format). This file is the TRUST ANCHOR for
+# two gates and is CODEOWNERS-protected: an agent may edit it in a worktree but the real gates use
+# the reviewed copy on main. Two signing namespaces are authenticated here:
+#   algua-go-live      — the paper->live signed go-live ceremony (live_gate.py).
+#   algua-human-actor  — an authenticated `--actor human` that unlocks gate relaxations (#329).
+# A key enrolled only for one namespace does NOT authenticate the other.
+#
+# EVERY line MUST carry an explicit namespaces="..." restriction. An UNSCOPED line (no namespaces=)
+# would be valid for EVERY namespace and collapse the separation above — verify_signature FAILS
+# CLOSED if any enrolled line is unscoped. `registry enroll-approver --namespace <go-live|
+# human-actor|both>` always writes a scoped line. One line per key:
 #   <principal> namespaces="algua-go-live" ssh-ed25519 AAAA... comment
+#   <principal> namespaces="algua-human-actor" ssh-ed25519 AAAA... comment
+#   <principal> namespaces="algua-go-live,algua-human-actor" ssh-ed25519 AAAA... comment

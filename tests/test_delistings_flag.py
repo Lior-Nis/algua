@@ -15,8 +15,21 @@ from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.data.store import DataStore
+from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
 runner = CliRunner()
+
+# --- #329 authenticated --actor human plumbing ---------------------------------------------------
+_HUMAN_KEY = None
+_TMP_PATH = None
+
+
+def _promote(args):
+    """Drop-in for `runner.invoke(app, args)` at gated promote call sites: when `args` requests
+    `--actor human`, run the signed challenge dance; otherwise a plain invoke."""
+    if "human" in args:
+        return promote_signed(runner, app, args, _HUMAN_KEY, _TMP_PATH)
+    return runner.invoke(app, args)
 
 STRATEGY = "cross_sectional_momentum"
 
@@ -25,6 +38,9 @@ STRATEGY = "cross_sectional_momentum"
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    global _HUMAN_KEY, _TMP_PATH
+    _HUMAN_KEY = install_human_actor_anchor(monkeypatch, tmp_path)
+    _TMP_PATH = tmp_path
 
 
 def _seed_delistings(tmp_path):
@@ -132,7 +148,7 @@ def test_research_promote_human_actor_can_pass_assume_terminal_last_close(tmp_pa
     promote will fail for other reasons (no registered strategy, no breadth, etc.),
     which is fine as long as the failure is NOT the human-only guard message.
     """
-    res = runner.invoke(app, [
+    res = _promote([
         "research", "promote", STRATEGY,
         "--start", "2020-01-01", "--end", "2020-12-31",
         "--demo",
