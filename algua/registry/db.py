@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 33
+SCHEMA_VERSION = 34
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -600,6 +600,37 @@ CREATE TABLE IF NOT EXISTS negative_results (
 CREATE INDEX IF NOT EXISTS ix_negative_results_strategy ON negative_results(strategy_name);
 CREATE INDEX IF NOT EXISTS ix_negative_results_created ON negative_results(created_at);
 CREATE INDEX IF NOT EXISTS ix_negative_results_kind ON negative_results(kind);
+-- v34 (#392): shadow_evaluations is an ADVISORY champion-challenger log — the hypothetical,
+-- paper-accounted (order-free) performance of a strategy replayed in SHADOW on the same
+-- point-in-time data a live champion sees. It NEVER gates a promotion, NEVER mints a token, and
+-- NEVER touches the live/paper order or allocation path; it is written by `algua shadow run`/
+-- `compare` only. The full evaluation surface ({snapshot_id, timeframe, start, end, cash, universe}
+-- + code/config identity) is recorded so a comparison can prove champion and challenger were scored
+-- on IDENTICAL inputs. `champion` is a NULLABLE advisory label for the incumbent being shadowed.
+CREATE TABLE IF NOT EXISTS shadow_evaluations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    challenger      TEXT NOT NULL,
+    champion        TEXT,
+    snapshot_id     TEXT,
+    timeframe       TEXT NOT NULL,
+    start           TEXT NOT NULL,
+    end             TEXT NOT NULL,
+    cash            REAL NOT NULL,
+    universe        TEXT NOT NULL,
+    code_hash       TEXT NOT NULL,
+    config_hash     TEXT NOT NULL,
+    final_equity    REAL NOT NULL,
+    total_return    REAL NOT NULL,
+    ann_return      REAL NOT NULL,
+    ann_volatility  REAL NOT NULL,
+    sharpe          REAL NOT NULL,
+    max_drawdown    REAL NOT NULL,
+    n_bars          INTEGER NOT NULL,
+    final_positions TEXT NOT NULL,
+    equity_curve    TEXT NOT NULL,
+    recorded_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_shadow_evaluations_challenger ON shadow_evaluations(challenger);
 """
 
 
@@ -733,6 +764,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v33 (#324): fdr_cohort column + (cohort, index) composite unique index + legacy backfill
     # handled above (before the index swap so the new composite index sees the rewritten indices).
+    # v34 (#392): shadow_evaluations is a brand-new ADVISORY table; executescript(_SCHEMA) above
+    # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 
