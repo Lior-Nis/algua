@@ -30,7 +30,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     strategy_cmd,
 )
 from algua.cli.app import app, emit
-from algua.cli.errors import error_code
+from algua.cli.errors import error_code, is_retryable
 
 # Composition root: mount idea_app under research_app HERE (not inside idea_cmd) so no cli command
 # module imports a sibling. Typer builds the command tree lazily at get_command(app) inside main(),
@@ -59,19 +59,23 @@ def main(args: list[str] | None = None) -> None:
     try:
         result = command.main(args=args, prog_name="algua", standalone_mode=False)
     except _click_exc.UsageError as exc:
-        emit({"ok": False, "error": exc.format_message(), "code": "usage_error"})
+        msg = exc.format_message()
+        code = "usage_error"
+        emit({"ok": False, "error": msg, "code": code, "retryable": is_retryable(code)})
         sys.exit(1)
     except _click_exc.Exit as exc:  # raised by typer.Exit / json_errors (a subclass of this)
         sys.exit(exc.exit_code)
     except _click_exc.Abort:
-        emit({"ok": False, "error": "aborted", "code": "aborted"})
+        code = "aborted"
+        emit({"ok": False, "error": "aborted", "code": code, "retryable": is_retryable(code)})
         sys.exit(1)
     except Exception as exc:  # noqa: BLE001 - last-resort net: any exception escaping an UNDECORATED
         # command body, the Typer callback, or arg parsing still renders as the JSON error envelope
         # (never a raw traceback), so an agent's stdout parser is never broken (issue #337). Exit/
         # UsageError/Abort are caught above (no double-emit); SystemExit/KeyboardInterrupt are
-        # BaseException and pass straight through. `code` reuses the shared registry (DRY).
-        emit({"ok": False, "error": str(exc), "code": error_code(exc)})
+        # BaseException and pass straight through. `code`/`retryable` reuse the shared seam (DRY).
+        code = error_code(exc)
+        emit({"ok": False, "error": str(exc), "code": code, "retryable": is_retryable(code)})
         sys.exit(1)
     if isinstance(result, int) and result != 0:
         sys.exit(result)

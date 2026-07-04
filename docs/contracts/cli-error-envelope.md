@@ -7,11 +7,11 @@ free-text English (issue #337).
 ## The standard failure envelope
 
 ```json
-{ "ok": false, "error": "<human-readable message>", "code": "<stable code>" }
+{ "ok": false, "error": "<human-readable message>", "code": "<stable code>", "retryable": false }
 ```
 
-`code` is **guaranteed present** on exactly these three surfaces, all rendered by the CLI seam
-(`algua/cli/errors.py`, `algua/cli/main.py`):
+`code` and `retryable` are **guaranteed present** on exactly these three surfaces, all rendered by
+the CLI seam (`algua/cli/errors.py`, `algua/cli/main.py`):
 
 1. **`@json_errors` command-body failures.** The decorator wraps every command body as a *catch-all*:
    ANY exception (including one no author anticipated — a `KeyError`/pandas error deep in
@@ -25,6 +25,21 @@ free-text English (issue #337).
 `error` carries `str(exc)` — the message, **never** a traceback. On this local, single-operator CLI a
 message may include a local path or symbol; that is an accepted, documented tradeoff (there is no
 remote consumer to leak to), matching the issue's own recommendation.
+
+`retryable` is a boolean **derived from `code`** (single source of truth:
+`algua/cli/errors.py::RETRYABLE_CODES` + `is_retryable`) so an operator — human or agent — can branch
+*retry-with-backoff* vs *abort* without pattern-matching English. It is deliberately conservative:
+`retryable` defaults to **`false`**, and only a *transient environmental* failure (one that could
+succeed identically on replay) opts a code in. A deterministic input/logic error is never retryable —
+re-running it just burns the same failure. Today exactly one code is retryable:
+
+| `code` | `retryable` | why |
+|---|---|---|
+| `db_unavailable` (`sqlite3.OperationalError`, e.g. a busy/locked registry DB) | `true` | transient contention — a bounded backoff-and-retry can clear it |
+| every other code (incl. `internal`, `usage_error`, `aborted`, all input/logic/domain errors) | `false` | deterministic — replay reproduces the same failure |
+
+Like `code`, `retryable` is an **additive** contract: `false` is the safe default, and a future code
+may opt into `true` by joining `RETRYABLE_CODES` (a single-line change, never per-command).
 
 `typer.Exit` / `typer.Abort` are treated as control flow (a command that emitted its *own* envelope
 and asked to exit) and pass through unchanged; `SystemExit` / `KeyboardInterrupt` are never swallowed.
