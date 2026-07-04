@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from algua.backtest._sample import SyntheticProvider
@@ -87,6 +87,22 @@ def resolve_drawdown_breaker(max_drawdown: float | None, disabled: bool) -> floa
             )
         return default
     return max_drawdown
+
+
+def resolve_wall_clock_window(start: str | None, end: str | None) -> tuple[str, str]:
+    """Fill an unspecified live/paper wall-clock window with a recent rolling window (#452).
+
+    Default wall-clock runs without explicit --start/--end should NOT size/risk-check against a
+    frozen stale window (e.g., 2023-01-01 to 2023-12-31); instead they should default to a recent
+    rolling window (end=today UTC, start=today-LIVE_WINDOW_LOOKBACK_DAYS).
+
+    Explicit values pass through unchanged. Returns (start_iso, end_iso) both as ISO date strings.
+    """
+    LIVE_WINDOW_LOOKBACK_DAYS = 400  # ~275 sessions; covers typical warmups with slack
+    today = datetime.now(UTC).date()
+    end_iso = end or today.isoformat()
+    start_iso = start or (today - timedelta(days=LIVE_WINDOW_LOOKBACK_DAYS)).isoformat()
+    return start_iso, end_iso
 
 
 @contextmanager

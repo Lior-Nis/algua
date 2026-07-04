@@ -70,12 +70,18 @@ def test_paper_held_symbol_missing_mark_fails_closed(tmp_path):
         S.build_paper_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars, universe=["AAA"])
 
 
-def test_paper_nav_collapse_fails_closed(tmp_path):
+def test_paper_nav_collapse_returns_non_positive_equity_snapshot(tmp_path):
+    # Shared build_sizing_snapshot no longer raises on a NAV wipe (#452): it RETURNS the
+    # non-positive-equity snapshot so run_tick's uniform `not (snap.equity > 0.0)` guard fires
+    # RiskBreach('non_positive_equity') on the paper lane too — trip + flatten, not a silent skip.
     conn = _conn(tmp_path)
     _paper_fill(conn, "a1", "s1", "AAA", 10.0, 100.0)
     bars = _bars({"AAA": [100.0, 1.0]})                      # NAV 100 - 990 < 0
-    with pytest.raises(S.LiveSizingError, match="non-positive"):
-        S.build_paper_sizing_snapshot(conn, "s1", allocation=100.0, bars=bars, universe=["AAA"])
+    snap, nav = S.build_paper_sizing_snapshot(conn, "s1", allocation=100.0, bars=bars,
+                                              universe=["AAA"])
+    assert nav == 100.0 + 10.0 * (1.0 - 100.0)              # -890
+    assert snap.equity == nav
+    assert not (snap.equity > 0.0)
 
 
 def test_live_paper_parity_identical_fills(tmp_path):

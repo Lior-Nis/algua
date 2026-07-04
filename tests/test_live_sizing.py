@@ -70,11 +70,17 @@ def test_held_symbol_missing_mark_fails_closed(tmp_path):
         S.build_live_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars, universe=["AAA"])
 
 
-def test_nav_collapse_fails_closed(tmp_path):
-    # NAV driven negative by a large unrealized loss against a small allocation -> non-positive
-    # sizing denominator must fail closed, not ZeroDivision/invert weights in run_tick (codex)
+def test_nav_collapse_returns_non_positive_equity_snapshot(tmp_path):
+    # NAV driven negative by a large unrealized loss against a small allocation. build_sizing_
+    # snapshot does NOT raise here (#452): it RETURNS the non-positive-equity snapshot so run_tick's
+    # single uniform guard `if not (snap.equity > 0.0): raise RiskBreach('non_positive_equity')`
+    # fires on BOTH snapshot sources (ledger AND broker.snapshot) and routes a wiped book to trip +
+    # FLATTEN, not a silent LiveSizingError skip. (The CLI-lane flatten is proved in test_cli_live.)
     conn = _conn(tmp_path)
     _fill(conn, "a1", "s1", "AAA", 10.0, 100.0)        # long 10 @100
     bars = _bars({"AAA": [100.0, 1.0]})                # mark 1 -> unrealized -990 -> NAV 100-990<0
-    with pytest.raises(S.LiveSizingError, match="non-positive"):
-        S.build_live_sizing_snapshot(conn, "s1", allocation=100.0, bars=bars, universe=["AAA"])
+    snap, nav = S.build_live_sizing_snapshot(conn, "s1", allocation=100.0, bars=bars,
+                                             universe=["AAA"])
+    assert nav == 100.0 + 10.0 * (1.0 - 100.0)         # 100 - 990 = -890
+    assert snap.equity == nav                          # min(allocation, NAV) = NAV, and it is <= 0
+    assert not (snap.equity > 0.0)                     # the exact predicate run_tick's guard tests

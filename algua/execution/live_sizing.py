@@ -28,9 +28,16 @@ class SizingSnapshot:
 
 
 def _latest_marks(bars: pd.DataFrame) -> dict[str, float]:
-    if bars.empty:
+    """{symbol: latest kept close} from the SAME null-preserving latest-row selection the freshness
+    wall reads (live_loop._latest_rows): the frame is `sort_index()`-ed, so
+    `groupby('symbol').tail(1)` returns the newest row per symbol WITHOUT dropping a NaN close —
+    unlike `groupby(...).last()`, which skips NaN and would value the book off an older finite close
+    while the freshness wall saw a NaN-latest mark, splitting the atomic latest row across the two
+    reads (#452)."""
+    if bars.empty or "symbol" not in bars.columns:
         return {}
-    return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
+    tail = bars.groupby("symbol", sort=False).tail(1)
+    return {str(sym): float(c) for sym, c in zip(tail["symbol"], tail["close"], strict=True)}
 
 
 def build_sizing_snapshot(
@@ -54,6 +61,10 @@ def build_sizing_snapshot(
         qtys[sym] = qty
         mark = marks.get(sym)
         if qty != 0.0 and (mark is None or mark <= 0.0):
+            # Non-wall defense-in-depth ONLY: on the live/paper wall path this is UNREACHABLE — the
+            # caller's HELD-book gate (run_tick's assert_marks_usable) already tripped RiskBreach on
+            # any absent/unvaluable held mark before build_*_sizing_snapshot is ever called. Kept so
+            # a direct non-wall caller still fails closed rather than sizing off a fail-closed mark.
             raise LiveSizingError(
                 f"{strategy}: held symbol {sym!r} has no usable mark (got {mark!r}) — refusing to "
                 "size on a fail-closed mark"
@@ -73,10 +84,12 @@ def build_sizing_snapshot(
             nav += pnl.realized + pnl.unrealized
 
     equity = min(allocation, nav)
-    if equity <= 0.0:
-        # A non-positive sizing denominator would ZeroDivision / invert weights in run_tick — fail
-        # closed (skip the strategy) rather than size off it (codex C1 review).
-        raise LiveSizingError(f"{strategy}: NAV {nav:.2f} leaves a non-positive sizing equity")
+    # Return the (possibly non-positive-equity) snapshot rather than raising here: run_tick's
+    # guard `if not (snap.equity > 0.0): raise RiskBreach('non_positive_equity', ...)` sits ahead of
+    # every division/sign-flip and fires on BOTH snapshot sources (this ledger path AND
+    # broker.snapshot). Routing a wiped live book through that guard sends it to the trip + flatten
+    # economic-breach handler instead of a silent LiveSizingError skip that leaves a position
+    # dangling.
     return SizingSnapshot(equity=equity, market_values=market_values, qtys=qtys), nav
 
 

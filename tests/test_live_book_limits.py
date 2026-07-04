@@ -6,10 +6,18 @@ is covered by `tests/test_book_limits.py`; here we test the CLI wiring + fail-cl
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pandas as pd
 import pytest
 
 from algua.cli import live_cmd
+from algua.risk.limits import RiskBreach
+
+# Fixed session dates + a `now` where all three sessions are fully closed (staleness 0) so the
+# shared mark-freshness wall (#452 HIGH#2) passes deterministically regardless of the real clock.
+_DATES = [datetime(2023, 1, d, tzinfo=UTC) for d in (2, 3, 4)]
+_NOW = datetime(2023, 1, 5, tzinfo=UTC)
 
 
 class _Acct:
@@ -27,18 +35,22 @@ class _Broker:
 
 
 class _Provider:
-    """Returns a bars frame (symbol-indexed rows with a 'close') for the requested symbols."""
+    """Returns a timestamp-indexed bars frame (one row per session per requested+known symbol) so
+    the null-preserving latest-row selection + freshness wall (#452) read a real dated close."""
 
     def __init__(self, marks: dict[str, float]) -> None:
         self._marks = marks
 
     def get_bars(self, symbols, start, end, timeframe):  # noqa: ANN001, ARG002
         rows = [
-            {"symbol": s, "close": self._marks[s]}
+            {"timestamp": ts, "symbol": s, "close": self._marks[s]}
             for s in symbols
             if s in self._marks
+            for ts in _DATES
         ]
-        return pd.DataFrame(rows)
+        if not rows:
+            return pd.DataFrame(columns=["symbol", "close"])
+        return pd.DataFrame(rows).set_index("timestamp")
 
 
 # --------------------------------------------------------------------------- #
@@ -51,7 +63,7 @@ def test_build_book_exposure_seeds_from_reconciled_positions_and_equity():
     provider = _Provider({"AAA": 10.0, "BBB": 20.0})
     net_positions = {"AAA": 100.0, "BBB": 50.0}  # 100*10 + 50*20 = 1000 + 1000 = 2000 gross
     book, reason = live_cmd._build_book_exposure(
-        broker, provider, net_positions, "2023-01-01", "2023-12-31"
+        broker, provider, net_positions, "2023-01-01", "2023-12-31", now=_NOW
     )
     assert reason is None
     assert book is not None
@@ -63,7 +75,7 @@ def test_build_book_exposure_seeds_from_reconciled_positions_and_equity():
 
 def test_build_book_exposure_empty_account_is_valid_empty_book():
     book, reason = live_cmd._build_book_exposure(
-        _Broker(equity=50_000.0), _Provider({}), {}, "2023-01-01", "2023-12-31"
+        _Broker(equity=50_000.0), _Provider({}), {}, "2023-01-01", "2023-12-31", now=_NOW
     )
     assert reason is None
     assert book is not None
@@ -71,39 +83,45 @@ def test_build_book_exposure_empty_account_is_valid_empty_book():
 
 
 def test_build_book_exposure_fails_closed_on_short_position():
-    # A short in the live account violates the long-only precondition -> fail closed (skip cycle).
+    # A short in the live account violates the long-only precondition -> BENIGN defer (skip cycle),
+    # NOT a data-integrity RiskBreach (this is a policy/economic state, checked before the wall).
     book, reason = live_cmd._build_book_exposure(
-        _Broker(), _Provider({"AAA": 10.0}), {"AAA": -100.0}, "2023-01-01", "2023-12-31"
+        _Broker(), _Provider({"AAA": 10.0}), {"AAA": -100.0}, "2023-01-01", "2023-12-31", now=_NOW
     )
     assert book is None
     assert reason is not None and "short" in reason.lower()
 
 
-def test_build_book_exposure_fails_closed_on_missing_mark():
-    # A held symbol with no usable mark makes the whole book unvaluable -> fail closed.
-    book, reason = live_cmd._build_book_exposure(
-        _Broker(), _Provider({}), {"AAA": 100.0}, "2023-01-01", "2023-12-31"
-    )
-    assert book is None
-    assert reason is not None and "mark" in reason.lower()
+def test_build_book_exposure_raises_on_missing_mark():
+    # #452 HIGH#2: a held symbol with no bar at all is a DATA-INTEGRITY failure -> the shared wall
+    # raises RiskBreach('stale_marks', no_mark => infinite staleness), which run-all HALTS on.
+    with pytest.raises(RiskBreach) as exc:
+        live_cmd._build_book_exposure(
+            _Broker(), _Provider({}), {"AAA": 100.0}, "2023-01-01", "2023-12-31", now=_NOW
+        )
+    assert exc.value.kind == "stale_marks"
 
 
 @pytest.mark.parametrize("bad_mark", [0.0, -5.0, float("nan"), float("inf")])
-def test_build_book_exposure_fails_closed_on_non_positive_or_non_finite_mark(bad_mark):
-    book, reason = live_cmd._build_book_exposure(
-        _Broker(), _Provider({"AAA": bad_mark}), {"AAA": 100.0}, "2023-01-01", "2023-12-31"
-    )
-    assert book is None
-    assert reason is not None
+def test_build_book_exposure_raises_on_non_positive_or_non_finite_mark(bad_mark):
+    # #452 HIGH#2: a non-positive / non-finite latest mark is unvaluable -> RiskBreach (dark feed),
+    # routed by run-all to a HALT (no flatten), not a benign (None, reason) defer.
+    with pytest.raises(RiskBreach) as exc:
+        live_cmd._build_book_exposure(
+            _Broker(), _Provider({"AAA": bad_mark}), {"AAA": 100.0},
+            "2023-01-01", "2023-12-31", now=_NOW,
+        )
+    assert exc.value.kind == "unvaluable_marks"
 
 
 def test_build_book_exposure_fails_closed_on_already_breached_seed():
     # Seed a single name over its per-symbol notional cap (0.5*equity): AAA notional = 600 on a
     # 1000 equity account (max_symbol_notional default 0.5 => 500). An already-breached book is an
-    # anomaly -> fail closed (a buy of ANOTHER symbol must NOT proceed through a breached book).
+    # anomaly -> BENIGN defer (a buy of ANOTHER symbol must NOT proceed through a breached book).
+    # The mark is fresh + valuable, so this is an economic state, NOT a data-integrity RiskBreach.
     book, reason = live_cmd._build_book_exposure(
         _Broker(equity=1000.0), _Provider({"AAA": 6.0}), {"AAA": 100.0},
-        "2023-01-01", "2023-12-31",
+        "2023-01-01", "2023-12-31", now=_NOW,
     )
     assert book is None
     assert reason is not None and "already breaches" in reason.lower()
