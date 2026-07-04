@@ -79,10 +79,23 @@ def error_code(exc: BaseException) -> str:
     return "internal"
 
 
+# The set of codes an operator (human or agent) MAY safely retry with backoff — the failure is a
+# transient environmental condition (a busy/locked SQLite DB), NOT a deterministic input/logic error
+# that would fail identically on replay. Deliberately conservative: retry defaults to FALSE and a
+# code is opt-in here. Single shared definition — every envelope surface derives `retryable` from
+# this set (see ``docs/contracts/cli-error-envelope.md``), never duplicating the policy per command.
+RETRYABLE_CODES: frozenset[str] = frozenset({"db_unavailable"})
+
+
+def is_retryable(code: str) -> bool:
+    """Whether a resolved error ``code`` denotes a transient, safe-to-retry-with-backoff failure."""
+    return code in RETRYABLE_CODES
+
+
 def json_errors(fn: Callable[..., None]) -> Callable[..., None]:
-    """Render ANY command-body failure as the JSON error envelope ``{"ok": false, "error", "code"}``
-    and exit non-zero — so an unexpected exception can never leak a raw traceback and break the JSON
-    contract mid-run (issue #337).
+    """Render ANY command-body failure as the JSON error envelope
+    ``{"ok": false, "error", "code", "retryable"}`` and exit non-zero — so an unexpected exception
+    can never leak a raw traceback and break the JSON contract mid-run (issue #337).
 
     Catch-all by design: unlike the old per-command exception-tuple, every exception type renders as
     JSON. ``typer.Exit``/``typer.Abort`` are re-raised first — they are control flow (a command that
@@ -90,7 +103,8 @@ def json_errors(fn: Callable[..., None]) -> Callable[..., None]:
     ``KeyboardInterrupt`` are ``BaseException`` and pass straight through untouched.
 
     The ``error`` field carries ``str(exc)`` (the message, NEVER a traceback); ``code`` comes from
-    :func:`error_code`. See ``docs/contracts/cli-error-envelope.md``.
+    :func:`error_code`; ``retryable`` is derived from that code via :func:`is_retryable` so an agent
+    can branch retry-with-backoff vs abort. See ``docs/contracts/cli-error-envelope.md``.
     """
 
     @functools.wraps(fn)
@@ -100,7 +114,8 @@ def json_errors(fn: Callable[..., None]) -> Callable[..., None]:
         except (typer.Exit, typer.Abort):
             raise
         except Exception as exc:
-            emit({"ok": False, "error": str(exc), "code": error_code(exc)})
+            code = error_code(exc)
+            emit({"ok": False, "error": str(exc), "code": code, "retryable": is_retryable(code)})
             raise typer.Exit(code=1) from exc
 
     return wrapper

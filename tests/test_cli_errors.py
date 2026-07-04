@@ -9,7 +9,7 @@ import typer
 
 from algua.backtest.engine import BacktestError
 from algua.cli.app import emit
-from algua.cli.errors import error_code, json_errors
+from algua.cli.errors import error_code, is_retryable, json_errors
 from algua.cli.main import main
 from algua.contracts.lifecycle import TransitionError
 from algua.data.store import SnapshotNotFound
@@ -45,7 +45,52 @@ def test_error_code_specific_beats_generic():
     assert isinstance(TransitionError("x"), ValueError)
 
 
+# --- is_retryable: transient env failures opt in; everything else is abort-only ---------------
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        ("db_unavailable", True),   # transient SQLite contention -> retry-with-backoff
+        ("invalid_input", False),   # deterministic input error -> abort
+        ("internal", False),        # bug-class -> abort
+        ("wrong_stage", False),
+        ("usage_error", False),
+        ("aborted", False),
+    ],
+)
+def test_is_retryable(code, expected):
+    assert is_retryable(code) is expected
+
+
 # --- json_errors: catch-all renders ANY exception as the JSON envelope -------------------------
+
+
+def test_json_errors_marks_db_unavailable_retryable(capsys):
+    @json_errors
+    def cmd():
+        raise sqlite3.OperationalError("database is locked")
+
+    with pytest.raises(typer.Exit):
+        cmd()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["code"] == "db_unavailable"
+    assert payload["retryable"] is True
+
+
+def test_json_errors_marks_value_error_not_retryable(capsys):
+    @json_errors
+    def cmd():
+        raise ValueError("bad input")
+
+    with pytest.raises(typer.Exit):
+        cmd()
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "ok": False,
+        "error": "bad input",
+        "code": "invalid_input",
+        "retryable": False,
+    }
 
 def test_json_errors_catch_all_renders_undeclared_exception(capsys):
     @json_errors
@@ -68,7 +113,12 @@ def test_json_errors_stamps_specific_code(capsys):
     with pytest.raises(typer.Exit):
         cmd()
     payload = json.loads(capsys.readouterr().out)
-    assert payload == {"ok": False, "error": "requires stage backtested", "code": "wrong_stage"}
+    assert payload == {
+        "ok": False,
+        "error": "requires stage backtested",
+        "code": "wrong_stage",
+        "retryable": False,
+    }
 
 
 def test_json_errors_reraises_typer_exit_unchanged(capsys):
