@@ -6,6 +6,7 @@ tested here directly, driving ``flatten_strategy`` with an injected ``held`` cal
 helper's own resolution site (``algua.execution.flatten.believed_positions``)."""
 from __future__ import annotations
 
+import sqlite3
 from contextlib import closing
 
 import pytest
@@ -120,3 +121,78 @@ def test_flatten_held_getter_failure_fails_safe(conn, monkeypatch):
     assert broker.offsets == []
     rows = audit_read(conn, action="flatten_failed")
     assert len(rows) == 1 and rows[0]["strategy"] == "cross_sectional_momentum"
+
+
+class _FakeOffsetBrokerWithFailingSubmit:
+    """Raises an exception during submit_offset to test the fail-safe exception-capture path."""
+
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def submit_offset(self, symbol: str, qty: float, coid: str) -> str:
+        raise self.exc
+
+
+@pytest.mark.parametrize("exc", [
+    sqlite3.OperationalError("database is locked"),
+    ValueError("bad coid"),
+])
+@pytest.mark.parametrize("kind", [LedgerKind.LIVE, LedgerKind.PAPER])
+def test_flatten_submit_exception_captured_both_lanes(conn, monkeypatch, exc, kind):
+    """Verify that NON-BrokerError exceptions raised during submit_offset are captured into
+    FlattenResult.flatten_error (never propagated), with lane parity for LIVE and PAPER.
+
+    This tests the #450 scenario: a database lock or other system exception during the critical
+    offset-submission step is caught by the ``except Exception`` wrapper and recorded in the
+    books as a flatten_failed audit entry, allowing safe emergency exit.
+    """
+    # Stub out all record/backfill operations to isolate the submit exception path
+    monkeypatch.setattr(
+        "algua.execution.flatten.record_live_order",
+        lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "algua.execution.flatten.record_paper_venue_order",
+        lambda *a, **k: True
+    )
+    monkeypatch.setattr(
+        "algua.execution.flatten.backfill_broker_order_id",
+        lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "algua.execution.flatten.backfill_paper_venue_broker_order_id",
+        lambda *a, **k: None
+    )
+
+    # Stub believed positions at the helper's resolution site
+    monkeypatch.setattr(
+        "algua.execution.flatten.believed_positions",
+        lambda conn, name, kind: {"AAA": 5.0}
+    )
+    monkeypatch.setattr(
+        "algua.execution.flatten.paper_believed_positions",
+        lambda conn, name: {"AAA": 5.0}
+    )
+
+    broker = _FakeOffsetBrokerWithFailingSubmit(exc)
+    lane = "live" if kind is LedgerKind.LIVE else "paper"
+    strategy_id = None if kind is LedgerKind.LIVE else 1
+
+    res = flatten_strategy(
+        conn, broker, "cross_sectional_momentum", kind, lane=lane,
+        cancel=lambda: None, ingest=lambda: None,
+        strategy_id=strategy_id,
+        held=None if kind is LedgerKind.LIVE else None,  # LIVE: use believed directly
+    )
+
+    # Assert the exception message was captured
+    assert res.flatten_error is not None
+    assert str(exc) in res.flatten_error or exc.args[0] in res.flatten_error
+
+    # Assert no offsets were submitted (exception happened before any successful submit)
+    assert res.n_offsets == 0
+
+    # Assert the failure was audited
+    rows = audit_read(conn, action="flatten_failed")
+    assert len(rows) == 1
+    assert rows[0]["strategy"] == "cross_sectional_momentum"
