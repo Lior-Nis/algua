@@ -8,25 +8,101 @@ on:
 
 jobs:
   opencode:
-    if: |
-      contains(github.event.comment.body, ' /oc') ||
-      startsWith(github.event.comment.body, '/oc') ||
-      contains(github.event.comment.body, ' /opencode') ||
-      startsWith(github.event.comment.body, '/opencode')
+    # Two-part gate (see docs/superpowers/specs/2026-07-03-harden-opencode-workflow-456-design.md):
+    #  1. Trusted-trigger allow-list: only the repo OWNER or an explicitly-added COLLABORATOR
+    #     (MEMBER deliberately excluded — any org member is too wide for a secret-bearing trigger
+    #     on a public repo). Explicit enum equality, never substring-over-enum.
+    #  2. Whitespace-tokenized command match so /octopus, /opencode-now, /ocarina do NOT false-accept.
+    # Both groups are parenthesized so the top-level && binds the whole association group to the
+    # whole command group.
+    if: >-
+      (
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'COLLABORATOR'
+      ) &&
+      (
+        github.event.comment.body == '/oc' ||
+        startsWith(github.event.comment.body, '/oc ') ||
+        endsWith(github.event.comment.body, ' /oc') ||
+        contains(github.event.comment.body, ' /oc ') ||
+        github.event.comment.body == '/opencode' ||
+        startsWith(github.event.comment.body, '/opencode ') ||
+        endsWith(github.event.comment.body, ' /opencode') ||
+        contains(github.event.comment.body, ' /opencode ')
+      )
     runs-on: ubuntu-latest
+    # Manual approval gate: the secret-bearing job pauses at this protected environment's
+    # required-reviewer rule before any step runs, so an independent human releases the run with
+    # the triggering content in view. Load-bearing repo settings (required reviewer, prevent
+    # self-review, no admin bypass) are a REQUIRED release checklist — the guard step below fails
+    # closed if they are missing.
+    environment: opencode
     permissions:
-      id-token: write
       contents: read
       pull-requests: read
       issues: read
+      actions: read   # authorizes the environments-API read in the fail-closed guard (decision 2a)
     steps:
+      - name: Assert opencode environment is gated (fail closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # This guard's sole load-bearing job is the MISCONFIGURED case: if the `opencode`
+          # environment is missing or has no required-reviewer rule, GitHub does NOT pause and the
+          # job runs with no human in the loop. This step runs first, sees the absent/ungated
+          # protection, and exits non-zero — turning a silent unapproved secret-bearing run into a
+          # job failure. When the environment IS correctly protected, GitHub already paused for a
+          # human before this step ran, so here it is a redundant post-approval re-assertion.
+          # Uses the read-only github.token; references no opencode secret.
+
+          # 1) a required-reviewers rule must exist
+          n_rr=$(gh api "repos/${{ github.repository }}/environments/opencode" \
+            --jq '[.protection_rules[]? | select(.type=="required_reviewers")] | length' 2>/dev/null || echo 0)
+          if [ "$n_rr" -lt 1 ]; then
+            echo "::error::opencode environment has no required-reviewer rule — refusing to run (silent-bypass guard)"
+            exit 1
+          fi
+          # 2) that rule must forbid self-review (trigger==approver would collapse the two-phase split)
+          self_ok=$(gh api "repos/${{ github.repository }}/environments/opencode" \
+            --jq '[.protection_rules[]? | select(.type=="required_reviewers") | .prevent_self_review] | all' 2>/dev/null || echo false)
+          if [ "$self_ok" != "true" ]; then
+            echo "::error::opencode environment allows self-review — refusing to run (would collapse trigger==approver)"
+            exit 1
+          fi
+          # 3) admin bypass must be off where the API exposes it (tighten-only: only fails if explicitly true)
+          admin_bypass=$(gh api "repos/${{ github.repository }}/environments/opencode" \
+            --jq '.can_admins_bypass' 2>/dev/null || echo null)
+          if [ "$admin_bypass" = "true" ]; then
+            echo "::error::opencode environment allows admin bypass — refusing to run"
+            exit 1
+          fi
+          # 4) PR-head drift check — ONLY for pull_request_review_comment, which carries an
+          #    event-time anchored commit_id (github.event.comment.commit_id /
+          #    github.event.pull_request.head.sha). Compare it to the PR head at job time and fail
+          #    closed on drift (attacker force-pushed after the human released the approved diff).
+          #    An issue comment carries no event-time SHA, so any resolve-and-compare there would be
+          #    tautological (current head vs itself) — we deliberately do NOT drift-check that path.
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            event_sha="${{ github.event.comment.commit_id }}"
+            if [ -z "$event_sha" ]; then
+              event_sha="${{ github.event.pull_request.head.sha }}"
+            fi
+            pr_number="${{ github.event.pull_request.number }}"
+            job_time_sha=$(gh api "repos/${{ github.repository }}/pulls/${pr_number}" \
+              --jq '.head.sha' 2>/dev/null || echo "")
+            if [ -z "$event_sha" ] || [ -z "$job_time_sha" ] || [ "$event_sha" != "$job_time_sha" ]; then
+              echo "::error::PR head drifted since the review comment was created (approved ${event_sha}, now ${job_time_sha}) — refusing to run"
+              exit 1
+            fi
+          fi
+
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Run opencode
-        uses: anomalyco/opencode/github@latest
+        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a # latest @ 2026-07-03
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         with:
