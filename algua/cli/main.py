@@ -60,12 +60,14 @@ def main(args: list[str] | None = None) -> None:
         result = command.main(args=args, prog_name="algua", standalone_mode=False)
     except _click_exc.UsageError as exc:
         msg = exc.format_message()
-        emit({"ok": False, "error": msg, "code": "usage_error", "retryable": False})
+        code = "usage_error"
+        emit({"ok": False, "error": msg, "code": code, "retryable": is_retryable(code)})
         sys.exit(1)
     except _click_exc.Exit as exc:  # raised by typer.Exit / json_errors (a subclass of this)
         sys.exit(exc.exit_code)
     except _click_exc.Abort:
-        emit({"ok": False, "error": "aborted", "code": "aborted", "retryable": False})
+        code = "aborted"
+        emit({"ok": False, "error": "aborted", "code": code, "retryable": is_retryable(code)})
         sys.exit(1)
     except Exception as exc:  # noqa: BLE001 - last-resort net: any exception escaping an UNDECORATED
         # command body, the Typer callback, or arg parsing still renders as the JSON error envelope
