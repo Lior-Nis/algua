@@ -1,12 +1,13 @@
 import json
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
 from algua.backtest._sample import SyntheticProvider
+from algua.cli._common import resolve_wall_clock_window
 from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState, BrokerError
@@ -33,6 +34,30 @@ def _promote(args):
     return runner.invoke(app, args)
 
 _SNAP = "snap1"
+
+
+# --- resolve_wall_clock_window tests (#452 Layer B) ---
+
+def test_resolve_wall_clock_window_defaults_to_rolling_window():
+    """When both start and end are None, resolve to a rolling window ending today."""
+    start, end = resolve_wall_clock_window(None, None)
+    today = datetime.now(UTC).date()
+    end_date = datetime.fromisoformat(end).date()
+    start_date = datetime.fromisoformat(start).date()
+
+    assert end_date == today
+    expected_start = today - timedelta(days=400)
+    assert start_date == expected_start
+
+
+def test_resolve_wall_clock_window_respects_explicit_values():
+    """Explicit --start/--end values should pass through unchanged."""
+    explicit_start = "2023-06-01"
+    explicit_end = "2024-06-01"
+    start, end = resolve_wall_clock_window(explicit_start, explicit_end)
+
+    assert start == explicit_start
+    assert end == explicit_end
 
 
 @pytest.fixture(autouse=True)
@@ -307,6 +332,82 @@ def test_trade_tick_submits_and_persists(monkeypatch):
     assert row is not None, "paper_venue_orders row missing after trade-tick"
     assert row["client_order_id"] == "c-1"
     assert row["broker_order_id"] == "o-1"
+
+
+@pytest.mark.parametrize("kind", ["stale_marks", "unvaluable_marks"])
+def test_trade_tick_dark_feed_breach_halts_without_flatten(monkeypatch, kind):
+    # #452 HIGH#3 (paper lane): a stale / unvaluable mark (dark BAR feed, broker still alive) must
+    # ENGAGE THE GLOBAL HALT and PRESERVE positions — it must NOT flatten the book at unknown
+    # prices. Mirrors test_cli_live.test_run_all_dark_feed_breach_halts_without_flatten.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_allocation("cross_sectional_momentum")
+
+    flatten_calls: list = []
+    monkeypatch.setattr("algua.cli.paper_cmd.flatten_strategy",
+                        lambda *a, **k: flatten_calls.append(k.get("lane", a)))
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda *a, **k: (_ for _ in ()).throw(RiskBreach(kind, f"{kind} dark feed")),
+    )
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["kind"] == kind
+    assert payload["halted"] is True
+    assert payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is False
+    assert flatten_calls == []  # dark feed HALTS — flatten_strategy is never called
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is True  # systemic: whole account halted
+
+
+@pytest.mark.parametrize("kind", ["drawdown", "gross_exposure_realized"])
+def test_trade_tick_economic_breach_still_flattens(monkeypatch, kind):
+    # #452 HIGH#3 (paper lane): an ECONOMIC/integrity breach keeps the UNCHANGED trip +
+    # scoped-flatten path — only the dark-feed kinds divert to halt-only.
+    from algua.execution.flatten import FlattenResult
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    _to_paper()
+    _seed_allocation("cross_sectional_momentum")
+
+    flatten_calls: list = []
+
+    def _fake_flatten(*a, **k):
+        flatten_calls.append(k.get("lane"))
+        return FlattenResult(n_offsets=1, flatten_error=None)
+
+    # the economic branch passes cancel=broker.cancel_open_orders (evaluated eagerly)
+    monkeypatch.setattr(_MinimalBroker, "cancel_open_orders", lambda self: None, raising=False)
+    monkeypatch.setattr("algua.cli.paper_cmd.flatten_strategy", _fake_flatten)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _MinimalBroker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda *a, **k: (_ for _ in ()).throw(RiskBreach(kind, f"{kind} economic")),
+    )
+    result = runner.invoke(app, ["paper", "trade-tick", "cross_sectional_momentum",
+                                 "--snapshot", "snap1"])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["kind"] == kind
+    assert payload["liquidation_submitted"] is True
+    assert flatten_calls == ["paper"]  # economic breach DID flatten (scoped)
+    assert payload.get("halted") is not True  # not a halt-only marker
+    assert payload.get("global_halt") != "set"  # economic breach does not globally halt
+    from algua.risk import global_halt
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        assert global_halt.is_engaged(conn) is False
 
 
 def test_trade_tick_venue_order_recording(monkeypatch):
@@ -1293,7 +1394,6 @@ def _past_weekdays(n):
     """The n weekdays strictly before today (UTC), oldest first — every seeded tick_ts is in
     the past and the newest is at most one session stale, so the gate's now=datetime.now(UTC)
     needs no pinning."""
-    from datetime import date, timedelta
     out, d = [], date.today() - timedelta(days=1)
     while len(out) < n:
         if d.weekday() < 5:
@@ -1797,8 +1897,14 @@ def test_trade_tick_sizes_off_allocation_not_account(monkeypatch, tmp_path):
                                            account_equity=1_000_000.0)
     broker = _FakePaperBroker(account_equity=1_000_000.0, positions={}, marks={"AAA": 100.0})
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    # A wall-clock trade-tick values the book off bar marks, which the #452 freshness wall requires
+    # to be RECENT (<= 2 completed sessions old). Use a rolling window ending today so the synthetic
+    # marks are fresh rather than months-stale.
+    from datetime import timedelta
+    _end = datetime.now(UTC).date()
+    _start = (_end - timedelta(days=90)).isoformat()
     result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
-                                 "--start", "2026-01-01", "--end", "2026-02-01"])
+                                 "--start", _start, "--end", _end.isoformat()])
     assert result.exit_code == 0, result.output
     # the recorded tick snapshot equity is the per-strategy NAV (~allocation), not 1_000_000
     snap = _latest_tick(name)

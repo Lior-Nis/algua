@@ -195,9 +195,17 @@ def test_trade_tick_no_phantom_flatten_after_fill(monkeypatch, tmp_path):
     monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
                         lambda demo, snapshot: SyntheticProvider())
 
+    # A wall-clock trade-tick values the book off bar marks, which the #452 freshness wall requires
+    # to be RECENT (<= 2 completed sessions old). Use a rolling window ending today so the synthetic
+    # marks are fresh, rather than the frozen 2023 window (which would trip stale_marks).
+    from datetime import UTC, datetime, timedelta
+    _end = datetime.now(UTC).date()
+    _start = (_end - timedelta(days=500)).isoformat()
+    _end = _end.isoformat()
+
     # Tick 1: broker flat, no activities → strategy decides and submits orders
     result1 = runner.invoke(app, ["paper", "trade-tick", _NAME, "--snapshot", "snap1",
-                                  "--start", _START, "--end", _END])
+                                  "--start", _start, "--end", _end])
     assert result1.exit_code == 0, result1.stdout
     assert broker.submitted_orders, "Tick 1 must submit at least one order for the regression"
 
@@ -219,7 +227,7 @@ def test_trade_tick_no_phantom_flatten_after_fill(monkeypatch, tmp_path):
 
     # Tick 2: fills ingested into paper_venue_fills → belief matches broker snapshot → clean
     result2 = runner.invoke(app, ["paper", "trade-tick", _NAME, "--snapshot", "snap1",
-                                  "--start", _START, "--end", _END])
+                                  "--start", _start, "--end", _end])
     assert result2.exit_code == 0, result2.stdout
     payload2 = json.loads(result2.stdout)
     assert payload2["ok"] is True

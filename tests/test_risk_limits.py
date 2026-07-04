@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 import pytest
 
@@ -199,3 +201,38 @@ def test_finite_weights_rejects_bool_dtype_and_null_labels():
     with pytest.raises(RiskBreach) as ei_null:
         check_finite_weights(pd.Series([0.5], index=[np.nan]), "s")
     assert ei_null.value.kind == "non_finite_weight"
+
+
+def test_check_mark_freshness_passes_when_all_fresh():
+    from algua.risk.limits import check_mark_freshness
+    check_mark_freshness({"AAA": 0.0, "BBB": 1.0}, max_stale=2)
+
+
+def test_check_mark_freshness_passes_on_empty_mapping():
+    from algua.risk.limits import check_mark_freshness
+    check_mark_freshness({}, max_stale=2)
+
+
+def test_check_mark_freshness_raises_on_mixed_fresh_and_stale():
+    from algua.risk.limits import RiskBreach, check_mark_freshness
+    with pytest.raises(RiskBreach) as ei:
+        check_mark_freshness({"AAA": 1.0, "BBB": 3.0}, max_stale=2)
+    assert ei.value.kind == "stale_marks"
+    assert "BBB" in ei.value.detail
+    assert "stale" in ei.value.detail
+
+
+def test_check_mark_freshness_raises_on_no_mark():
+    from algua.risk.limits import RiskBreach, check_mark_freshness
+    with pytest.raises(RiskBreach) as ei:
+        check_mark_freshness({"BBB": math.inf}, max_stale=2)
+    assert ei.value.kind == "stale_marks"
+    assert "no_mark" in ei.value.detail
+
+
+def test_check_mark_freshness_raises_on_future_dated():
+    from algua.risk.limits import RiskBreach, check_mark_freshness
+    with pytest.raises(RiskBreach) as ei:
+        check_mark_freshness({"BBB": -1.0}, max_stale=2)
+    assert ei.value.kind == "stale_marks"
+    assert "future_dated" in ei.value.detail

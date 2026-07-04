@@ -15,6 +15,8 @@ from algua.risk.limits import RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 DATES = [datetime(2023, 1, d, tzinfo=UTC) for d in (2, 3, 4)]
+# All three 2023-01 sessions fully closed; staleness = 0
+NOW = datetime(2023, 1, 5, tzinfo=UTC)
 
 
 def _bars(symbol_prices):
@@ -106,7 +108,7 @@ def test_run_tick_fires_on_noop_when_submit_sized_noops():
         on_submitted=lambda rec_: submits.append(rec_.symbol),
     )
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars),
-                      DATES[0], DATES[-1], hooks=hooks)
+                      DATES[0], DATES[-1], now=NOW, hooks=hooks)
     assert noops == [("AAA", "cfg-AAA")]      # on_noop got the intent + deterministic coid
     assert submits == []                      # a noop is never a real submit
     assert result.submitted == []             # nothing recorded as sent
@@ -119,7 +121,7 @@ def test_run_tick_does_not_fire_on_noop_on_real_submit():
     noops: list[str] = []
     hooks = TickHooks(on_noop=lambda intent, coid: noops.append(intent.symbol))
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars),
-                      DATES[0], DATES[-1], hooks=hooks)
+                      DATES[0], DATES[-1], now=NOW, hooks=hooks)
     assert noops == []
     assert len(result.submitted) == 1
 
@@ -162,7 +164,8 @@ def test_delete_paper_venue_order_removes_null_row_but_not_backfilled(tmp_path):
 def test_run_tick_submits_target_and_cancels_first():
     broker = _FakeBroker()
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      now=NOW)
     assert broker.cancels == 1
     assert broker.snapshots == 1  # #20: ONE snapshot per tick, not per symbol
     assert len(result.submitted) == 1 and result.submitted[0]["symbol"] == "AAA"
@@ -173,7 +176,8 @@ def test_run_tick_submits_target_and_cancels_first():
 def test_run_tick_exits_dropped_symbol():
     broker = _FakeBroker(positions={"BBB": 10.0})  # held but not in target
     bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [50.0, 50.0, 50.0]})
-    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      now=NOW)
     syms = {o["symbol"]: o["target_weight"] for o in result.submitted}
     assert syms["BBB"] == 0.0  # exit order for the dropped name
 
@@ -182,7 +186,7 @@ def test_run_tick_warmup_not_met_submits_nothing():
     broker = _FakeBroker()
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # 3 sessions
     result = run_tick(_strategy({"AAA": 1.0}, warmup_bars=5), broker, _FakeProvider(bars),
-                      DATES[0], DATES[-1])
+                      DATES[0], DATES[-1], now=NOW)
     assert result.submitted == [] and broker.submitted == []
 
 
@@ -329,7 +333,8 @@ def test_run_tick_live_snapshot_equity_flows_into_order_notional(monkeypatch):
     # Derealized ledger snapshot: equity 8k (e.g. min(10k allocation, 8k NAV)), flat book.
     sizing_snap = TickSnapshot(equity=8_000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
     hooks = TickHooks(live_snapshot=lambda b: (sizing_snap, 8_000.0))
-    run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(bars), DATES[0], DATES[-1], hooks=hooks)
+    run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+             now=NOW, hooks=hooks)
     # 0.5 * 8000 derealized = 4000.00 — NOT sized off any 10k allocation / account equity.
     assert fake.posted[0]["notional"] == "4000.00"
 
@@ -339,7 +344,7 @@ def test_run_tick_gross_breach_raises():
     bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0]})
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0, "BBB": 1.0}), broker, _FakeProvider(bars),
-                 DATES[0], DATES[-1])
+                 DATES[0], DATES[-1], now=NOW)
     assert ei.value.kind == "gross_exposure"
 
 
@@ -363,7 +368,7 @@ def test_run_tick_persists_each_order_immediately_with_client_order_id():
         on_submitted=persisted.append,
     )
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                      hooks=hooks)
+                      now=NOW, hooks=hooks)
     assert {r.symbol for r in persisted} == {o["symbol"] for o in result.submitted}
     assert all(isinstance(r, SubmittedOrder) for r in persisted)
     assert all(c is not None for c in broker.client_order_ids)  # coid threaded to the broker
@@ -376,7 +381,7 @@ def test_run_tick_halts_before_submit_when_switch_trips():
     hooks = TickHooks(should_halt=lambda: True)
     with pytest.raises(TickHalted):
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=hooks)
+                 now=NOW, hooks=hooks)
     assert broker.cancels == 0 and broker.submitted == []  # nothing sent
 
 
@@ -387,7 +392,7 @@ def test_run_tick_drawdown_breach_halts_before_trading():
     hooks = TickHooks(peak_equity=100_000.0)
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=hooks, max_drawdown=0.1)  # 20% drop > 10%
+                 now=NOW, hooks=hooks, max_drawdown=0.1)  # 20% drop > 10%
     assert ei.value.kind == "drawdown"
     assert broker.cancels == 0 and broker.submitted == []
 
@@ -401,7 +406,8 @@ def test_run_tick_non_positive_equity_breaches_before_trading(equity):
     broker = _FakeBroker(positions={"AAA": 10.0}, equity=equity)
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     with pytest.raises(RiskBreach) as ei:
-        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 now=NOW)
     assert ei.value.kind == "non_positive_equity"
     assert broker.cancels == 0 and broker.submitted == []  # halted before any cancel/order
 
@@ -413,7 +419,7 @@ def test_run_tick_reconcile_mismatch_raises():
     hooks = TickHooks(venue_belief=lambda: {"AAA": 999.0})  # belief says far more than broker holds
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=hooks)
+                 now=NOW, hooks=hooks)
     assert ei.value.kind == "reconcile"
 
 
@@ -425,7 +431,7 @@ def test_run_tick_reconcile_empty_db_vs_held_broker_raises():
     hooks = TickHooks(venue_belief=lambda: {})  # belief says flat, broker holds 10 -> drift
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=hooks)
+                 now=NOW, hooks=hooks)
     assert ei.value.kind == "reconcile"
     assert broker.cancels == 0 and broker.submitted == []  # halted before any order
 
@@ -435,7 +441,8 @@ def test_run_tick_no_reconcile_hook_does_not_compare():
     # and trades normally.
     broker = _FakeBroker(positions={"AAA": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      now=NOW)
     assert result.reconcile_ok is True
     assert broker.cancels == 1
 
@@ -454,7 +461,7 @@ def test_run_tick_halts_after_cancel_before_submit_when_switch_trips():
     hooks = TickHooks(should_halt=_halt)
     with pytest.raises(TickHalted):
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=hooks)
+                 now=NOW, hooks=hooks)
     assert broker.cancels == 1  # cancel ran
     assert broker.submitted == []  # but nothing was submitted
 
@@ -465,7 +472,8 @@ def test_run_tick_realized_gross_breach_trips_before_submit():
     broker = _FakeBroker(positions={"AAA": 100_000.0, "BBB": 100_000.0}, equity=100_000.0)
     bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [100.0, 100.0, 100.0]})
     with pytest.raises(RiskBreach) as ei:
-        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 now=NOW)
     assert ei.value.kind == "gross_exposure_realized"
     assert broker.cancels == 0 and broker.submitted == []  # tripped before cancel + submit
 
@@ -474,14 +482,15 @@ def test_run_tick_ratchets_peak_equity():
     broker = _FakeBroker(equity=120_000.0)
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                      hooks=TickHooks(peak_equity=100_000.0))
+                      now=NOW, hooks=TickHooks(peak_equity=100_000.0))
     assert result.peak_equity == 120_000.0  # new high
 
 
 def test_run_tick_result_carries_equity():
     broker = _FakeBroker(equity=123_456.0)  # snapshot() returns TickSnapshot(equity=self._equity)
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1])
+    result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                      now=NOW)
     assert result.equity == 123_456.0  # the tick's snapshot equity is surfaced on the result
 
 
@@ -499,7 +508,7 @@ def test_run_tick_should_halt_aborts_between_orders():
     hooks = TickHooks(should_halt=should_halt)
     with pytest.raises(TickHalted):
         run_tick(_strategy({"AAA": 0.5, "BBB": 0.5}), broker, _FakeProvider(bars),
-                 DATES[0], DATES[-1], hooks=hooks)
+                 DATES[0], DATES[-1], now=NOW, hooks=hooks)
     assert len(broker.submitted) == 1  # only the first order went out (adapt attr name if needed)
 
 
@@ -511,7 +520,7 @@ def test_run_tick_uses_cancel_hook_when_supplied():
                                                            called["account_wide"] + 1)
     hooks = TickHooks(cancel=lambda: called.__setitem__("scoped", called["scoped"] + 1))
     run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
-             DATES[0], DATES[-1], hooks=hooks)
+             DATES[0], DATES[-1], now=NOW, hooks=hooks)
     assert called == {"scoped": 1, "account_wide": 0}  # the hook replaced the account-wide cancel
 
 
@@ -525,18 +534,210 @@ def test_run_tick_live_snapshot_sizes_off_hook_and_drawdowns_off_nav(monkeypatch
     hooks = TickHooks(live_snapshot=lambda b: (snap, 6_000.0), peak_equity=10_000.0)
     with pytest.raises(RiskBreach):  # NAV 6k vs peak 10k = 40% drawdown
         run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=hooks, max_drawdown=0.2)
+                 now=NOW, hooks=hooks, max_drawdown=0.2)
 
 
-def test_run_tick_live_positions_on_warmup_early_return():
+def test_run_tick_flat_warming_reports_ledger_positions():
     from algua.live.live_loop import TickHooks
     broker = _FakeBroker()
-    # 3 bars, warmup_bars=5 -> nunique() (3) <= warmup (5) -> warmup early-return
+    # 3 bars, warmup_bars=5 -> nunique() (3) <= warmup (5) -> warm-up. A FLAT book (live_positions
+    # reports a zero qty -> nothing held) takes the unchanged no-op early return and reports the
+    # ledger view (#452: only a FLAT warming book takes the held_qtys no-op path).
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
-    hooks = TickHooks(live_positions=lambda: {"AAA": 7.0})
+    hooks = TickHooks(live_positions=lambda: {"AAA": 0.0})
     res = run_tick(_strategy({"AAA": 0.5}, warmup_bars=5), broker, _FakeProvider(bars),
-                   DATES[0], DATES[-1], hooks=hooks)
-    assert res.positions_before == {"AAA": 7.0}  # ledger positions, not broker's
+                   DATES[0], DATES[-1], now=NOW, hooks=hooks)
+    assert res.positions_before == {"AAA": 0.0}  # ledger positions, not broker's
+    assert res.peak_equity is None and broker.snapshots == 0  # flat warming: no valuation
+
+
+# ---- #452 mark-freshness wall: held-book gate, held-warming valuation, consumed gate ------------
+
+def test_timeframe_not_daily_fails_closed():
+    # #452: the freshness math is daily-session semantics; a non-1d timeframe fails closed at entry
+    # (ValueError, before the fetch), never silently mis-handled. No trade, no venue call.
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})
+    with pytest.raises(ValueError, match="only 1d bars"):
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 timeframe="1h", now=NOW)
+    assert broker.submitted == [] and broker.cancels == 0
+
+
+def test_dead_feed_held_book_trips_no_mark_before_early_return():
+    # #452 finding 1: an EMPTY frame while the book is HELD must trip the held-book gate BEFORE the
+    # empty-bars no-op early return — a dark feed on a held book is a data-integrity failure.
+    broker = _FakeBroker(positions={"AAA": 10.0})
+    empty = _bars({"AAA": [100.0, 100.0, 100.0]}).iloc[0:0]  # same columns, no rows
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(empty), DATES[0], DATES[-1],
+                 now=NOW)
+    assert ei.value.kind == "stale_marks"
+    assert "no_mark" in str(ei.value)
+    assert broker.snapshots == 0  # tripped before any sizing snapshot
+
+
+def test_stale_feed_held_book_trips_before_sizing():
+    # #452: a held book whose freshest bar is >2 completed sessions old trips before sizing.
+    broker = _FakeBroker(positions={"AAA": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # latest bar 2023-01-04
+    far_future = datetime(2026, 7, 4, tzinfo=UTC)
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 now=far_future)
+    assert ei.value.kind == "stale_marks"
+    assert broker.snapshots == 0
+
+
+@pytest.mark.parametrize("bad_close", [0.0, -5.0, float("inf"), float("nan")])
+def test_unvaluable_held_mark_trips(bad_close):
+    # #452 finding 2 + Round-2b: a held symbol whose LATEST close is not a positive finite number
+    # (<= 0, +inf, OR NaN) trips 'unvaluable_marks'. The NaN/inf case (latest bar bad, OLDER bars
+    # finite) also proves the null-preserving latest-row selection does NOT backfill the older
+    # finite close the way groupby(...).last() would (masking the bad latest mark).
+    broker = _FakeBroker(positions={"AAA": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, bad_close]})  # older two finite, latest = bad
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 now=NOW)
+    assert ei.value.kind == "unvaluable_marks"
+    assert broker.snapshots == 0
+
+
+def test_future_dated_mark_fails_closed():
+    # #452 finding 4: a mark dated AHEAD of now's session (negative staleness) is bad data / clock
+    # skew and fails closed as 'future_dated', not clamped to "fresh". Exercised at the shared wall.
+    from algua.live.live_loop import assert_marks_usable
+    with pytest.raises(RiskBreach) as ei:
+        assert_marks_usable(
+            {"AAA"},
+            {"AAA": datetime(2023, 1, 10, tzinfo=UTC)},  # bar ahead of now
+            {"AAA": 100.0},
+            datetime(2023, 1, 5, tzinfo=UTC),
+        )
+    assert ei.value.kind == "stale_marks"
+    assert "future_dated" in str(ei.value)
+
+
+class _RecordingProvider:
+    def __init__(self, bars):
+        self._bars = bars
+        self.asked = None
+
+    def get_bars(self, symbols, start, end, timeframe):
+        self.asked = list(symbols)
+        return self._bars
+
+
+def test_held_out_of_universe_symbol_valued_via_union_fetch():
+    # #452 Round-2c: a held symbol NOT in strategy.universe must be FETCHED (universe ∪ held) so it
+    # gets a real mark and is valued, instead of false-tripping 'no_mark'. Its exit order fires.
+    broker = _FakeBroker(positions={"BBB": 10.0})  # BBB held, out of universe {"AAA"}
+    bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [50.0, 50.0, 50.0]})
+    prov = _RecordingProvider(bars)
+    res = run_tick(_strategy({"AAA": 1.0}), broker, prov, DATES[0], DATES[-1], now=NOW)
+    assert prov.asked == ["AAA", "BBB"]  # union fetch, not universe-only
+    syms = {o["symbol"]: o["target_weight"] for o in res.submitted}
+    assert syms.get("BBB") == 0.0  # out-of-universe held name valued + exited, not no_mark-tripped
+
+
+def test_held_out_of_universe_absent_bar_trips_no_mark():
+    # #452 Round-2c converse: a GENUINELY absent bar for the held out-of-universe symbol (dark feed)
+    # still trips 'no_mark' — the union fetch does not mask a real dark feed.
+    broker = _FakeBroker(positions={"BBB": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # provider returns NO BBB bar
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 now=NOW)
+    assert ei.value.kind == "stale_marks"
+    assert "no_mark" in str(ei.value)
+
+
+def test_decide_view_excludes_out_of_universe_held(monkeypatch):
+    # #452 Round-2c/2d: decide() must see the UNIVERSE-only history, never the widened union frame.
+    import algua.live.live_loop as ll
+    captured: dict[str, set] = {}
+    orig = ll.decide
+
+    def _spy(strategy, view, cw, ts):
+        captured["cols"] = set(view["symbol"].unique())
+        return orig(strategy, view, cw, ts)
+
+    monkeypatch.setattr(ll, "decide", _spy)
+    broker = _FakeBroker(positions={"BBB": 10.0})
+    bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [50.0, 50.0, 50.0]})
+    ll.run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1], now=NOW)
+    assert captured["cols"] == {"AAA"}  # BBB (out-of-universe held) excluded from the decision view
+
+
+def test_partial_frame_decision_path_trips_no_mark():
+    # #452 finding 3: a universe/consumed symbol absent from the frame trips 'no_mark' on the
+    # decision path (after sizing, before decide) — a silently-missing series is a data failure.
+    broker = _FakeBroker()  # flat
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # universe wants AAA + BBB; BBB missing
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 0.5, "BBB": 0.5}), broker, _FakeProvider(bars),
+                 DATES[0], DATES[-1], now=NOW)
+    assert ei.value.kind == "stale_marks"
+    assert "no_mark" in str(ei.value)
+    assert broker.cancels == 0 and broker.submitted == []
+
+
+def test_held_warming_book_trips_drawdown():
+    # #452 CRITICAL: a HELD book that is still WARMING must still be valued and have its breakers
+    # run — warm-up may suppress decide()/new orders, never risk valuation. A book down past the
+    # drawdown limit trips 'drawdown' even though warm-up is not met.
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # 3 sessions, warmup_bars=5 -> warming
+    snap = TickSnapshot(equity=6_000.0, market_values={"AAA": 6_000.0}, qtys={"AAA": 60.0})
+    hooks = TickHooks(live_snapshot=lambda b: (snap, 6_000.0),
+                      live_positions=lambda: {"AAA": 60.0}, peak_equity=10_000.0)
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}, warmup_bars=5), broker, _FakeProvider(bars),
+                 DATES[0], DATES[-1], now=NOW, hooks=hooks, max_drawdown=0.2)
+    assert ei.value.kind == "drawdown"  # NAV 6k vs peak 10k = 40% > 20%, tripped while warming
+
+
+def test_held_warming_book_values_and_persists_peak():
+    # #452 CRITICAL: a held-but-warming book within limits still runs the breakers and RETURNS its
+    # drawdown state (equity/peak/positions_before) so the peak ratchets across warm-up; no submit.
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # warming (3 <= warmup 5)
+    snap = TickSnapshot(equity=12_000.0, market_values={"AAA": 6_000.0}, qtys={"AAA": 60.0})
+    hooks = TickHooks(live_snapshot=lambda b: (snap, 12_000.0),
+                      live_positions=lambda: {"AAA": 60.0}, peak_equity=10_000.0)
+    res = run_tick(_strategy({"AAA": 1.0}, warmup_bars=5), broker, _FakeProvider(bars),
+                   DATES[0], DATES[-1], now=NOW, hooks=hooks, max_drawdown=0.5)
+    assert res.submitted == []                 # warming: no new orders
+    assert res.decision_ts == DATES[-1]        # decision ts still surfaced (universe session)
+    assert res.peak_equity == 12_000.0         # ratcheted new high, persisted across warm-up
+    assert res.equity == 12_000.0
+    assert res.positions_before == {"AAA": 60.0}  # valued held book, from the snapshot
+    assert res.realized_gross == 0.5
+
+
+def test_warmup_isolation_universe_sessions_not_union(monkeypatch):
+    # #452 Round-2d: a held out-of-universe symbol with LONG history must NOT make the UNIVERSE look
+    # warmed. Universe has 3 sessions (< warmup 5) while held BBB has 6; the strategy is still
+    # warming -> the held book is valued (breakers run) but decide() never runs (no submit).
+    import algua.live.live_loop as ll
+    decided = {"called": False}
+    monkeypatch.setattr(ll, "decide",
+                        lambda *a, **k: decided.__setitem__("called", True) or (_ for _ in ()))
+    aaa = _bars({"AAA": [100.0, 100.0, 100.0]})  # 3 sessions
+    bbb, _dates = _bars_n("BBB", 6)              # 6 sessions, out of universe
+    both = pd.concat([aaa, bbb]).sort_index()
+    broker = _FakeBroker()
+    snap = TickSnapshot(equity=10_000.0, market_values={"BBB": 3_000.0}, qtys={"BBB": 30.0})
+    hooks = TickHooks(live_snapshot=lambda b: (snap, 10_000.0),
+                      live_positions=lambda: {"BBB": 30.0}, peak_equity=10_000.0)
+    # BBB's latest bar (2023-02-06) must be fresh vs `now` so the held-book gate passes.
+    now = datetime(2023, 2, 7, tzinfo=UTC)
+    res = ll.run_tick(_strategy({"AAA": 1.0}, warmup_bars=5), broker, _FakeProvider(both),
+                      aaa.index.min(), bbb.index.max(), now=now, hooks=hooks, max_drawdown=0.9)
+    assert decided["called"] is False          # universe (3 sessions) still warming -> no decide
+    assert res.submitted == []
+    assert res.positions_before == {"BBB": 30.0}  # held book still valued while warming
 
 
 def test_run_tick_threads_reserve_buy_to_submit_sized():
@@ -548,7 +749,7 @@ def test_run_tick_threads_reserve_buy_to_submit_sized():
         seen.__setitem__("reserve", reserve) or orig(intent, snap, coid))
     hooks = TickHooks(reserve_buy=lambda sym, n: n)
     run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
-             DATES[0], DATES[-1], hooks=hooks)
+             DATES[0], DATES[-1], now=NOW, hooks=hooks)
     assert seen["reserve"] is hooks.reserve_buy   # run_tick forwarded the hook
 
 
@@ -567,7 +768,7 @@ def test_before_submit_fires_before_submit():
         before_submit=lambda intent, coid: calls.append(("before", coid)),
     )
     run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-             hooks=hooks)
+             now=NOW, hooks=hooks)
     assert calls and calls[0] == ("before", "cid")         # before_submit fired first
     assert ("submit", "cid") in calls                      # broker submit also ran
     assert calls.index(("before", "cid")) < calls.index(("submit", "cid"))  # strict ordering
@@ -579,7 +780,7 @@ def test_reconcile_tolerates_fractional_residual():
     broker = _FakeBroker(positions={"AAA": 5.0 + 4e-7}, equity=100_000.0)
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     result = run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                      hooks=TickHooks(venue_belief=lambda: {"AAA": 5.0}))
+                      now=NOW, hooks=TickHooks(venue_belief=lambda: {"AAA": 5.0}))
     assert result.reconcile_ok is True
 
 
@@ -590,5 +791,19 @@ def test_reconcile_trips_on_unexplained_holding():
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})
     with pytest.raises(RiskBreach) as ei:
         run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
-                 hooks=TickHooks(venue_belief=lambda: {}))
+                 now=NOW, hooks=TickHooks(venue_belief=lambda: {}))
     assert ei.value.kind == "reconcile"
+
+
+def test_run_tick_stale_marks_wall_breaches():
+    # #452: mark-freshness wall: bars are fresh at NOW (2023-01-05), but passing a much-later
+    # `now` (far in the future) makes them stale. The wall must trip with RiskBreach('stale_marks')
+    # before any sizing/risk-check runs. Bars dated 2023-01, now = 2026-07 (>2 sessions stale).
+    broker = _FakeBroker()
+    bars = _bars({"AAA": [100.0, 100.0, 100.0]})  # Latest bar is DATES[-1] = 2023-01-04
+    far_future = datetime(2026, 7, 4, tzinfo=UTC)  # Many sessions later
+    with pytest.raises(RiskBreach) as ei:
+        run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1],
+                 now=far_future)
+    assert ei.value.kind == "stale_marks"
+    assert broker.cancels == 0 and broker.submitted == []  # halted before any cancel/order

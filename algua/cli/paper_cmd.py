@@ -13,6 +13,7 @@ from algua.cli._common import (
     ok,
     registry_conn,
     resolve_drawdown_breaker,
+    resolve_wall_clock_window,
     sync_kb_doc,
     utc,
 )
@@ -45,7 +46,7 @@ from algua.execution.live_ledger import (
     strategy_live_symbols,
 )
 from algua.execution.live_reconcile import attributed_live_net
-from algua.execution.live_sizing import build_paper_sizing_snapshot
+from algua.execution.live_sizing import LiveSizingError, build_paper_sizing_snapshot
 from algua.execution.order_state import (
     clear_all_nav_peaks,
     clear_all_peaks,
@@ -354,7 +355,7 @@ def account() -> None:
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
     tick_ts, clock_source, acct, *, cancel=None,
-    start: str = "2023-01-01", end: str = "2023-12-31",
+    start: str, end: str,
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
     recording, breach trip + scoped flatten, tick-snapshot persistence (equity = per-strategy NAV).
@@ -418,8 +419,22 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         log.error("breach", extra={"fields": {"strategy": name, "lane": "paper",
                                               "tick_ts": str(tick_ts), "kind": exc.kind}},
                   exc_info=True)
-        # Account-wide cancel; ingest fills up to the broker clock, then offset every believed
-        # position — single-sourced in the execution layer (#336).
+        if exc.kind in {"stale_marks", "unvaluable_marks"}:
+            # DARK BAR FEED, broker still alive (#452 HIGH#3): a stale / unvaluable mark means the
+            # risk state cannot be TRUSTED, not that the position is losing money. Flattening blind
+            # off a dead feed would dump the book at unknown prices — exactly the wrong move. A dark
+            # feed is SYSTEMIC (all strategies share one provider), so HALT the whole account and
+            # PRESERVE positions — no flatten.
+            global_halt.engage(conn, reason=exc.detail, actor="system")
+            audit_append(conn, actor="system", action="paper_mark_freshness_halt",
+                         reason=f"{exc.kind}: {exc.detail}", strategy=name)
+            return {"ok": False, "strategy": name,
+                    **breach_payload(exc.detail, strategy=name, kind=exc.kind, halted=True,
+                                     global_halt="set", liquidation_submitted=False)}
+        # ECONOMIC / integrity breach (drawdown, gross_exposure_realized, reconcile,
+        # non_positive_equity, ...): trip + scoped flatten. Account-wide cancel; ingest fills up to
+        # the broker clock, then offset every believed position — single-sourced in the execution
+        # layer (#336).
         res = flatten_strategy(
             conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
             cancel=broker.cancel_open_orders,
@@ -431,6 +446,12 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         if res.flatten_error is not None:
             payload["flatten_error"] = res.flatten_error
         return {"ok": False, "strategy": name, **payload}
+    except LiveSizingError as exc:
+        # Mark-data problems now raise RiskBreach and are HALTED (no flatten) above; only a RESIDUAL
+        # non-wall sizing error reaches here and skips this strategy for the cycle without trading.
+        audit_append(conn, actor="system", action="paper_sizing_skipped",
+                     reason=str(exc), strategy=name)
+        return ok({"strategy": name, "traded": False, "skipped": str(exc)})
 
     if result.peak_equity is not None:
         update_peak_equity(conn, name, result.peak_equity)
@@ -458,8 +479,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
 def trade_tick(
     name: str,
     snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
-    start: str = typer.Option("2023-01-01", "--start"),
-    end: str = typer.Option("2023-12-31", "--end"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
     max_drawdown: float | None = typer.Option(None, "--max-drawdown",
                                        help="per-strategy drawdown breaker fraction; omit for the default-ON bound"),  # noqa: E501
     disable_drawdown_breaker: bool = typer.Option(
@@ -472,6 +493,7 @@ def trade_tick(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
+    start, end = resolve_wall_clock_window(start, end)
     configure_logging()
     counters = CycleCounters()
     # One correlation id per wall-clock tick; golden_signals flushes in `finally` so the rollup

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -19,6 +20,16 @@ WEIGHT_TOL = 1e-9
 # Explicit "drawdown breaker off" sentinel. Passing None disables the check, rather than
 # overloading a magic max_drawdown >= 1.0 to mean "off" (#32).
 DRAWDOWN_DISABLED: None = None
+
+# Mark-freshness bound for the wall-clock live/paper tick (#452). Staleness is counted in
+# COMPLETED exchange sessions (weekends/holidays are already skipped by the session calendar, so
+# they never inflate the count): a normal live tick sees staleness 1 (the last completed session's
+# mark), and a same-session weekend/holiday tick sees 0. A bound of 2 passes normal operation and
+# tolerates one missed / not-yet-published session, while a second consecutive miss (staleness 3)
+# trips. Un-relaxable by design: a data-integrity invariant, NOT a risk-appetite knob, so it is a
+# fixed constant (no CLI flag / settings field) that can't be tuned into the stale-marks footgun it
+# defends against.
+MAX_STALE_SESSIONS = 2
 
 
 class RiskBreach(ValueError):
@@ -144,6 +155,30 @@ def check_drawdown(equity: float, peak: float, max_drawdown: float | None) -> No
             "drawdown",
             f"drawdown {dd:.4f} exceeds max_drawdown {max_drawdown:.4f} "
             f"(equity {equity:.2f}, peak {peak:.2f})",
+        )
+
+
+def check_mark_freshness(stale_by_symbol: dict[str, float], max_stale: int) -> None:
+    """Hard-breach when any symbol's latest mark is unusable — every downstream risk wall
+    (drawdown/gross/NAV) and the sizing denominator are computed off these marks, so a stale,
+    absent, or future-dated feed silently bypasses all of them (#452). Per-symbol staleness is
+    counted in completed exchange sessions; `math.inf` encodes a symbol absent from the frame
+    (no mark at all), and a negative value encodes a bar dated ahead of now (a clock/feed fault).
+    Raises RiskBreach('stale_marks', ...) so the caller trips + flattens rather than sizing real
+    orders against an unreliable world. An empty mapping has no offenders and passes."""
+    offenders: dict[str, str] = {}
+    for s, n in stale_by_symbol.items():
+        if math.isinf(n):
+            offenders[s] = "no_mark"  # absent from the frame (finding 3)
+        elif n < 0:
+            offenders[s] = f"future_dated({n:.0f})"  # bar ahead of now (finding 4)
+        elif n > max_stale:
+            offenders[s] = f"stale({n:.0f})"
+    if offenders:
+        raise RiskBreach(
+            "stale_marks",
+            f"marks unusable beyond {max_stale} completed sessions: {offenders} — "
+            f"refusing to value/size/decide off an unreliable feed",
         )
 
 

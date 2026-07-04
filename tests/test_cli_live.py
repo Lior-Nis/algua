@@ -1,13 +1,64 @@
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from typer.testing import CliRunner
 
+from algua.cli._common import resolve_wall_clock_window
 from algua.cli.main import app
 from algua.contracts.types import LiveAuthorization
 
 runner = CliRunner()
 
+
+# --- resolve_wall_clock_window tests (#452 Layer B) ---
+
+def test_resolve_wall_clock_window_both_none():
+    """When both start and end are None, resolve to a recent rolling window."""
+    start, end = resolve_wall_clock_window(None, None)
+    today = datetime.now(UTC).date()
+    end_date = datetime.fromisoformat(end).date()
+    start_date = datetime.fromisoformat(start).date()
+
+    assert end_date == today, f"end should be today ({today}), got {end_date}"
+    # start should be approximately 400 days ago
+    expected_start = today - timedelta(days=400)
+    assert start_date == expected_start, (
+        f"start should be ~400 days ago ({expected_start}), got {start_date}")
+
+
+def test_resolve_wall_clock_window_explicit_values():
+    """When start and end are explicitly provided, pass them through unchanged."""
+    explicit_start = "2024-01-01"
+    explicit_end = "2024-12-31"
+    start, end = resolve_wall_clock_window(explicit_start, explicit_end)
+
+    assert start == explicit_start
+    assert end == explicit_end
+
+
+def test_resolve_wall_clock_window_partial_explicit():
+    """When only one of start/end is provided, resolve only the missing one."""
+    explicit_start = "2024-01-01"
+    start, end = resolve_wall_clock_window(explicit_start, None)
+
+    assert start == explicit_start
+    today = datetime.now(UTC).date()
+    end_date = datetime.fromisoformat(end).date()
+    assert end_date == today
+
+
+def test_resolve_wall_clock_window_only_end_explicit():
+    """When only end is provided, resolve only start."""
+    explicit_end = "2024-12-31"
+    start, end = resolve_wall_clock_window(None, explicit_end)
+
+    assert end == explicit_end
+    # start should be resolved to ~400 days before today (not before end)
+    today = datetime.now(UTC).date()
+    start_date = datetime.fromisoformat(start).date()
+    expected_start = today - timedelta(days=400)
+    assert start_date == expected_start
 
 
 @pytest.fixture(autouse=True)
@@ -341,6 +392,82 @@ def test_run_all_breach_liquidates_per_strategy(monkeypatch):
             "WHERE strategy = 'cross_sectional_momentum' AND symbol = 'AAA'"
         ).fetchone()
         assert row["side"] == "sell" and row["broker_order_id"] == "off"
+
+
+def test_run_all_flattens_not_skips_on_ledger_nav_wipe(monkeypatch):
+    # #452 regression: a live book whose LEDGER NAV resolves to <= 0 off TRUSTWORTHY, FRESH marks
+    # is a genuine economic WIPE — it must route to trip + FLATTEN (economic-breach handler), NOT to
+    # a silent LiveSizingError {"skipped": ...} envelope that leaves the position dangling. Drives
+    # the REAL CLI lane (_run_strategy_tick -> run_tick -> build_live_sizing_snapshot): the sizing
+    # snapshot RETURNS the non-positive-equity book, run_tick's uniform guard raises
+    # RiskBreach('non_positive_equity'), and the handler flattens. (Before the fix, build_sizing_
+    # snapshot raised LiveSizingError here and the lane SKIPPED instead of flattening.)
+    import pandas as pd
+
+    from algua.calendar.market_calendar import MarketCalendar
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    # Held 5 AAA at $100 cost (seed price). At a fresh $1 mark unrealized = 5*(1-100) = -$495, so
+    # with a $100 allocation NAV = 100 - 495 = -$395 <= 0 -> the sizing equity is a genuine wipe.
+    _seed_live_fills(name, {"AAA": 5.0})
+    _permissive_book(monkeypatch)
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+
+    # A fresh (last completed session), positive, finite mark: passes assert_marks_usable so the
+    # book is TRUSTED, isolating the NAV<=0 economic path (not a stale/unvaluable dark-feed HALT).
+    cal = MarketCalendar()
+    bar_day = cal.previous_session(datetime.now(UTC).date())
+    bar_ts = datetime(bar_day.year, bar_day.month, bar_day.day, tzinfo=UTC)
+
+    class _FreshBarProvider:
+        def get_bars(self, symbols, start, end, timeframe):
+            return pd.DataFrame(
+                [{"timestamp": bar_ts, "symbol": "AAA", "open": 1.0, "high": 1.0, "low": 1.0,
+                  "close": 1.0, "adj_close": 1.0, "volume": 1000}]
+            ).set_index("timestamp").sort_index()
+
+    class _LiqBroker:
+        def __init__(self):
+            self.offsets = []
+        def account_activities(self, after=None):
+            return []
+        def get_positions(self):
+            return pd.Series(dtype=float)
+        def list_open_orders(self):
+            return []
+        def cancel_order(self, oid):
+            pass
+        def submit_offset(self, symbol, qty, coid):
+            self.offsets.append((symbol, qty))
+            return "off"
+        def account(self):
+            from algua.execution.alpaca_broker import AccountState
+            return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0,
+                                last_equity=100_000.0)
+
+    broker = _LiqBroker()
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider",
+                        lambda demo, snapshot: _FreshBarProvider())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {"AAA": 5.0})
+    monkeypatch.setattr("algua.execution.flatten.believed_positions",
+                        lambda conn, name, kind: {"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
+                        lambda conn, sid: {"capital": 100.0})
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1, r.stdout
+    payload = json.loads(r.stdout)
+    strategies = payload["strategies"]
+    assert len(strategies) == 1
+    marker = strategies[0]
+    # FLATTEN, not skip: an economic-breach marker with the non_positive_equity kind + liquidation.
+    assert marker["ok"] is False
+    assert marker["kind"] == "non_positive_equity"
+    assert marker["liquidation_submitted"] is True
+    assert "skipped" not in marker  # NOT a LiveSizingError skip envelope
+    assert broker.offsets == [("AAA", 5.0)]  # the wiped book was actually liquidated
 
 
 def test_run_all_book_loss_breaker_halts_and_flattens_whole_account(monkeypatch):
@@ -1135,4 +1262,272 @@ def test_live_halt_all_close_failure_stays_engaged(monkeypatch):
     payload = json.loads(r.stdout)
     assert payload["liquidation_submitted"] is False
     # Global halt is still engaged (fail-safe)
+    assert _global_halt_engaged() is True
+
+
+# --- #452 HIGH#3: dark-feed breach HALTS (no flatten) vs economic breach flattens ---
+
+
+class _AliveBroker:
+    """A broker that is fully alive (account readable, no positions) — the dark-feed scenario is a
+    dead BAR feed, not a dead broker, so the account/positions calls all succeed."""
+
+    def account_activities(self, after=None):
+        return []
+
+    def get_positions(self):
+        import pandas as pd
+        return pd.Series(dtype=float)
+
+    def list_open_orders(self):
+        return []
+
+    def cancel_order(self, oid):
+        pass
+
+    def account(self):
+        from algua.execution.alpaca_broker import AccountState
+        # equity == last_equity so the #390 book-loss breaker (patched off anyway) never fires.
+        return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0,
+                            last_equity=100_000.0)
+
+
+def _wire_alive_run_all(monkeypatch, broker):
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 100_000.0)
+    monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
+                        lambda conn, sid: {"capital": 10_000.0})
+
+
+@pytest.mark.parametrize("kind", ["stale_marks", "unvaluable_marks"])
+def test_run_all_dark_feed_breach_halts_without_flatten(monkeypatch, kind):
+    # #452 HIGH#3: a stale / unvaluable mark (dark BAR feed, broker still alive) must ENGAGE THE
+    # GLOBAL HALT and PRESERVE positions — it must NOT flatten the book at unknown prices.
+    from algua.live.live_loop import RiskBreach
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    _permissive_book(monkeypatch)
+    broker = _AliveBroker()
+    _wire_alive_run_all(monkeypatch, broker)
+
+    flatten_calls: list = []
+    monkeypatch.setattr(
+        "algua.cli.live_cmd.flatten_strategy",
+        lambda *a, **k: flatten_calls.append(k.get("lane", a)),
+    )
+    monkeypatch.setattr(
+        "algua.cli.live_cmd.run_tick",
+        lambda *a, **k: (_ for _ in ()).throw(RiskBreach(kind, f"{kind} dark feed")),
+    )
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    strat = payload["strategies"][0]
+    assert strat["kind"] == kind
+    assert strat["halted"] is True
+    assert strat["global_halt"] == "set"
+    assert strat["liquidation_submitted"] is False
+    assert flatten_calls == []  # dark feed HALTS — flatten_strategy is never called
+    assert _global_halt_engaged() is True  # systemic: whole account halted
+
+
+@pytest.mark.parametrize("kind", ["drawdown", "gross_exposure_realized"])
+def test_run_all_economic_breach_still_flattens(monkeypatch, kind):
+    # #452 HIGH#3: an ECONOMIC/integrity breach (drawdown, gross_exposure_realized, ...) keeps the
+    # UNCHANGED trip + scoped-flatten path — only the dark-feed kinds are diverted to halt-only.
+    from algua.execution.flatten import FlattenResult
+    from algua.live.live_loop import RiskBreach
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    _permissive_book(monkeypatch)
+    broker = _AliveBroker()
+    _wire_alive_run_all(monkeypatch, broker)
+
+    flatten_calls: list = []
+
+    def _fake_flatten(conn, broker_, name_, kind_, lane, cancel, ingest, held):
+        flatten_calls.append(name_)
+        return FlattenResult(n_offsets=1, flatten_error=None)
+
+    monkeypatch.setattr("algua.cli.live_cmd.flatten_strategy", _fake_flatten)
+    monkeypatch.setattr(
+        "algua.cli.live_cmd.run_tick",
+        lambda *a, **k: (_ for _ in ()).throw(RiskBreach(kind, f"{kind} economic")),
+    )
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    strat = payload["strategies"][0]
+    assert strat["kind"] == kind
+    assert strat["liquidation_submitted"] is True
+    assert flatten_calls == [name]  # economic breach DID flatten (scoped)
+    assert strat.get("halted") is not True  # not a halt-only marker
+    assert strat.get("global_halt") != "set"  # economic breach does not globally halt
+
+
+# --- #452 HIGH#2: _build_book_exposure account-book freshness wall (halt, no flatten) ---
+
+
+class _BookProvider:
+    """Provider returning a fixed bars frame for the account-book valuation fetch."""
+
+    def __init__(self, bars):
+        self._bars = bars
+
+    def get_bars(self, symbols, start, end, timeframe):
+        return self._bars
+
+
+class _BookBroker:
+    def __init__(self, equity=100_000.0):
+        self._equity = equity
+
+    def account(self):
+        from algua.execution.alpaca_broker import AccountState
+        return AccountState(equity=self._equity, cash=self._equity,
+                            buying_power=self._equity, last_equity=self._equity)
+
+
+_BOOK_DATES = [datetime(2023, 1, d, tzinfo=UTC) for d in (2, 3, 4)]
+_BOOK_NOW = datetime(2023, 1, 5, tzinfo=UTC)  # all three sessions closed => staleness 0
+
+
+def _book_bars(symbol_closes):
+    import pandas as pd
+    rows = []
+    for sym, closes in symbol_closes.items():
+        for ts, px in zip(_BOOK_DATES, closes, strict=True):
+            rows.append({"timestamp": ts, "symbol": sym, "open": px, "high": px,
+                         "low": px, "close": px, "adj_close": px, "volume": 1000})
+    return pd.DataFrame(rows).set_index("timestamp").sort_index()
+
+
+def test_build_book_exposure_fresh_account_builds():
+    from algua.cli.live_cmd import _build_book_exposure
+    from algua.risk.book_limits import BookExposure
+    provider = _BookProvider(_book_bars({"AAA": [10.0, 11.0, 12.0]}))
+    book, reason = _build_book_exposure(
+        _BookBroker(), provider, {"AAA": 5.0}, "2023-01-02", "2023-01-04", now=_BOOK_NOW
+    )
+    assert reason is None
+    assert isinstance(book, BookExposure)
+
+
+def test_build_book_exposure_stale_mark_raises_riskbreach():
+    from algua.cli.live_cmd import _build_book_exposure
+    from algua.risk.limits import RiskBreach
+    provider = _BookProvider(_book_bars({"AAA": [10.0, 11.0, 12.0]}))
+    # now is far in the future -> the newest 2023-01-04 bar is many sessions stale.
+    with pytest.raises(RiskBreach) as exc:
+        _build_book_exposure(
+            _BookBroker(), provider, {"AAA": 5.0}, "2023-01-02", "2023-01-04",
+            now=datetime(2024, 1, 5, tzinfo=UTC),
+        )
+    assert exc.value.kind == "stale_marks"
+
+
+def test_build_book_exposure_absent_mark_raises_riskbreach():
+    from algua.cli.live_cmd import _build_book_exposure
+    from algua.risk.limits import RiskBreach
+    # provider returns bars only for BBB, but the account holds AAA -> AAA has no mark at all.
+    provider = _BookProvider(_book_bars({"BBB": [10.0, 11.0, 12.0]}))
+    with pytest.raises(RiskBreach) as exc:
+        _build_book_exposure(
+            _BookBroker(), provider, {"AAA": 5.0}, "2023-01-02", "2023-01-04", now=_BOOK_NOW
+        )
+    assert exc.value.kind == "stale_marks"  # no_mark => infinite staleness
+
+
+def test_build_book_exposure_infinite_mark_raises_riskbreach():
+    from algua.cli.live_cmd import _build_book_exposure
+    from algua.risk.limits import RiskBreach
+    provider = _BookProvider(_book_bars({"AAA": [10.0, 11.0, float("inf")]}))
+    with pytest.raises(RiskBreach) as exc:
+        _build_book_exposure(
+            _BookBroker(), provider, {"AAA": 5.0}, "2023-01-02", "2023-01-04", now=_BOOK_NOW
+        )
+    assert exc.value.kind == "unvaluable_marks"
+
+
+def test_build_book_exposure_short_precondition_benign_defer():
+    from algua.cli.live_cmd import _build_book_exposure
+    provider = _BookProvider(_book_bars({"AAA": [10.0, 11.0, 12.0]}))
+    book, reason = _build_book_exposure(
+        _BookBroker(), provider, {"AAA": -5.0}, "2023-01-02", "2023-01-04", now=_BOOK_NOW
+    )
+    assert book is None
+    assert "short position" in reason  # policy defer, NOT a data-integrity RiskBreach
+
+
+def test_build_book_exposure_seed_breach_benign_defer():
+    from algua.cli.live_cmd import _build_book_exposure
+    # A small equity vs a large single-name notional makes the seed book already breach a cap.
+    provider = _BookProvider(_book_bars({"AAA": [10.0, 11.0, 12.0]}))
+    book, reason = _build_book_exposure(
+        _BookBroker(equity=1.0), provider, {"AAA": 1000.0}, "2023-01-02", "2023-01-04",
+        now=_BOOK_NOW,
+    )
+    assert book is None
+    assert "already breaches" in reason
+
+
+def test_run_all_book_stale_marks_halts_without_close_all(monkeypatch):
+    # #452 HIGH#2: a stale account-book mark makes run-all engage the GLOBAL HALT and NOT call
+    # close_all_positions (halt-only — the broker-truth book-loss breaker already ran this cycle).
+    name = "cross_sectional_momentum"
+    _to_live(name)
+    _seed_live_fills(name, {"AAA": 5.0})  # ledger matches the broker net so reconcile is clean
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None)
+
+    class _StaleBookBroker:
+        def __init__(self):
+            self.closed_all = False
+
+        def account_activities(self, after=None):
+            return []
+
+        def get_positions(self):
+            import pandas as pd
+            return pd.Series(dtype=float)
+
+        def close_all_positions(self):
+            self.closed_all = True
+
+        def account(self):
+            from algua.execution.alpaca_broker import AccountState
+            return AccountState(equity=100_000.0, cash=100_000.0, buying_power=100_000.0,
+                                last_equity=100_000.0)
+
+    broker = _StaleBookBroker()
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: broker)
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider",
+                        lambda demo, snapshot: _BookProvider(_book_bars({"AAA": [10.0, 11.0,
+                                                                                 12.0]})))
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    # the reconciled account holds AAA; the bar frame is far stale relative to real "now".
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {"AAA": 5.0})
+    monkeypatch.setattr("algua.cli.live_cmd.active_allocation",
+                        lambda conn, sid: {"capital": 10_000.0})
+
+    def _no_tick(*a, **k):
+        raise AssertionError("run_tick must not run once the book stale-marks wall trips")
+    monkeypatch.setattr("algua.cli.live_cmd.run_tick", _no_tick)
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    assert payload["book_breach"]["kind"] == "stale_marks"
+    assert payload["global_halt"] == "set"
+    assert payload["liquidation_submitted"] is False
+    assert broker.closed_all is False  # halt-only: NEVER flatten off a dead feed
     assert _global_halt_engaged() is True

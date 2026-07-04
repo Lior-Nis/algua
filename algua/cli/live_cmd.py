@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import math
+from datetime import UTC, datetime
 
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.cli._common import breach_payload, ok, registry_conn, resolve_drawdown_breaker, utc
-from algua.cli._common import select_provider as _select_provider
+from algua.cli._common import (
+    breach_payload,
+    ok,
+    registry_conn,
+    resolve_drawdown_breaker,
+    resolve_wall_clock_window,
+    utc,
+)
+from algua.cli._common import (
+    select_provider as _select_provider,
+)
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -35,7 +45,19 @@ from algua.execution.order_state import (
 )
 from algua.execution.sizing import MIN_NOTIONAL
 from algua.execution.tick_clock import tick_clock
-from algua.live.live_loop import SubmittedOrder, TickHalted, TickHooks, run_tick
+from algua.live.live_loop import (
+    SubmittedOrder,
+    TickHalted,
+    TickHooks,
+    assert_marks_usable,
+    run_tick,
+)
+from algua.live.live_loop import (
+    _latest_bar_ts as _book_latest_bar_ts,
+)
+from algua.live.live_loop import (
+    _latest_marks as _book_latest_marks,
+)
 from algua.observability import (
     CycleCounters,
     configure_logging,
@@ -134,7 +156,7 @@ def _still_live_allocated(conn, name: str) -> bool:
 
 def _run_strategy_tick(  # noqa: PLR0913
     conn, name: str, authorization, broker, provider, max_drawdown,
-    start: str = "2023-01-01", end: str = "2023-12-31", reserve_buy=None, cancel=None,
+    start: str, end: str, reserve_buy=None, cancel=None,
 ) -> dict:
     """Drive ONE strategy's live tick: hooks (incl. the scoped `cancel`), run_tick, breach handling
     (trip + scoped flatten), snapshot persistence. ALWAYS returns a per-strategy result dict — on
@@ -188,11 +210,25 @@ def _run_strategy_tick(  # noqa: PLR0913
         trip_for_breach(conn, name, exc)
         log.error("breach", extra={"fields": {"strategy": name, "lane": "live",
                                               "kind": exc.kind}}, exc_info=True)
-        # Scoped cancel (only our orders); ingest fills up to now, then offset every believed
-        # position capped to the actually broker-held signed quantity (Fork B, #449) so every offset
-        # is provably risk-reducing — single-sourced in the execution layer (#336).
-        # liquidation_submitted mirrors the prior optimistic semantics: True unless the flatten
-        # loop errored.
+        if exc.kind in {"stale_marks", "unvaluable_marks"}:
+            # DARK BAR FEED, broker still alive (#452 HIGH#3): a stale / unvaluable mark means the
+            # risk state cannot be TRUSTED, not that the position is losing money. Flattening blind
+            # off a dead feed would dump the book at unknown prices — exactly the wrong move. A dark
+            # feed is SYSTEMIC (all strategies share one provider), so HALT the whole account and
+            # PRESERVE positions. The broker-truth book-loss breaker (_evaluate_book_loss_breaker,
+            # off broker.account().equity — independent of the bar feed) still catches a real
+            # drawdown on the next cycle.
+            global_halt.engage(conn, reason=exc.detail, actor="system")
+            audit_append(conn, actor="system", action="live_mark_freshness_halt",
+                         reason=f"{exc.kind}: {exc.detail}", strategy=name)
+            return breach_payload(exc.detail, strategy=name, kind=exc.kind, halted=True,
+                                  global_halt="set", liquidation_submitted=False)
+        # ECONOMIC / integrity breach (drawdown, gross_exposure_realized, reconcile,
+        # non_positive_equity, ...): trip + scoped flatten. Scoped cancel (only our orders); ingest
+        # fills up to now, then offset every believed position capped to the actually broker-held
+        # signed quantity (Fork B, #449) so every offset is provably risk-reducing — single-sourced
+        # in the execution layer (#336). liquidation_submitted mirrors the prior optimistic
+        # semantics: True unless the flatten loop errored.
         res = flatten_strategy(
             conn, broker, name, LedgerKind.LIVE, lane="live",
             cancel=lambda: _scoped_cancel(conn, broker, name),
@@ -206,7 +242,11 @@ def _run_strategy_tick(  # noqa: PLR0913
         if res.flatten_error is not None:
             payload["flatten_error"] = res.flatten_error
         return payload
-    except LiveSizingError as exc:        # fail-closed mark -> skip this strategy, don't trade
+    except LiveSizingError as exc:
+        # Mark-data problems (stale / unvaluable / absent marks) now raise RiskBreach and are HALTED
+        # (no flatten) by the branch above; only a RESIDUAL non-wall sizing error (e.g. a degenerate
+        # sizing input that is not a data-freshness failure) reaches here and skips this strategy
+        # for the cycle without trading.
         audit_append(conn, actor="system", action="live_sizing_skipped",
                      reason=str(exc), strategy=name)
         return {"strategy": name, "skipped": str(exc)}
@@ -267,13 +307,6 @@ def _broker_buying_power(broker) -> float:
     return float(broker.account().buying_power)
 
 
-def _latest_marks(bars) -> dict[str, float]:
-    """Latest closed-bar close per symbol from a bars frame ({symbol: close}); empty on no bars."""
-    if bars is None or getattr(bars, "empty", True):
-        return {}
-    return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
-
-
 def _evaluate_book_loss_breaker(conn, broker):
     """Evaluate the book-level loss/drawdown circuit breaker (#390) for the whole account.
 
@@ -312,18 +345,25 @@ def _evaluate_book_loss_breaker(conn, broker):
 
 def _build_book_exposure(
     broker, provider, net_positions: dict[str, float], start: str, end: str,
+    now: datetime | None = None,
 ) -> tuple[BookExposure | None, str | None]:
     """Build the account-level book-exposure accumulator (#389) that caps aggregate gross / net /
     single-name concentration across ALL strategies sharing the live account. Seeds from the
     RECONCILED broker net positions (whole-account truth, incl. non-ticked/dormant/orphan
     residuals) valued at latest closed-bar marks, against ACCOUNT equity (not a subaccount).
 
-    Returns (BookExposure, None) on success, or (None, reason) to FAIL CLOSED (caller skips
-    trading this cycle). Fail-closed cases, per the long-only precondition + valuation safety:
-      - any reconciled nonzero position with qty < 0 (a short — long-only anomaly);
-      - any reconciled nonzero position with a missing / non-finite / <= 0 mark (unvaluable book).
-    A partially-valued book is never built — one bad symbol makes gross/net/concentration for the
-    WHOLE book unknowable, so the whole cycle fails closed."""
+    Data-integrity failures (a stale / absent / future-dated / non-finite mark on a held name) go
+    through the SHARED mark-freshness wall (`assert_marks_usable`, #452 HIGH#2) so the account book
+    and the per-strategy valuation apply the EXACT SAME staleness math + thresholds. That wall
+    raises `RiskBreach('stale_marks' | 'unvaluable_marks')`, which the run-all caller routes to a
+    HALT-WITHOUT-FLATTEN (a dark feed, broker still alive) — NOT a benign defer.
+
+    Returns (BookExposure, None) on success, or (None, reason) to BENIGNLY DEFER (caller skips
+    trading this cycle) only for policy/economic states — NOT data failures:
+      - any reconciled nonzero position with qty < 0 (a short — long-only precondition);
+      - an account book that ALREADY breaches a book-level cap at reconcile time.
+    `now` is injected (default `datetime.now(UTC)`) so the freshness wall is testable."""
+    now = now or datetime.now(UTC)
     nonzero = {s: float(q) for s, q in net_positions.items() if float(q) != 0.0}
     shorts = sorted(s for s, q in nonzero.items() if q < 0.0)
     if shorts:
@@ -332,15 +372,16 @@ def _build_book_exposure(
     # Marks for EVERY held symbol (the book is valued on the reconciled account positions; a
     # strategy's not-yet-held universe symbols carry no book notional, so they need no mark here).
     fetch = sorted(nonzero)
-    bars = provider.get_bars(fetch, utc(start), utc(end), "1d") if fetch else None
-    marks = _latest_marks(bars)
-    book_notionals: dict[str, float] = {}
-    for sym, qty in nonzero.items():
-        mark = marks.get(sym)
-        if mark is None or not math.isfinite(mark) or mark <= 0.0:
-            return None, f"held symbol {sym!r} has no usable mark (got {mark!r}) — cannot value " \
-                         "the book; refusing to trade this cycle"
-        book_notionals[sym] = qty * mark
+    bars = (provider.get_bars(fetch, utc(start), utc(end), "1d").sort_index()
+            if fetch else None)
+    # Null-preserving latest-row selection so the wall and the valuation read the SAME atomic row
+    # and a NaN-latest close is not masked (shared with the per-strategy loop, #452).
+    latest_ts = _book_latest_bar_ts(bars) if bars is not None else {}
+    latest_close = _book_latest_marks(bars) if bars is not None else {}
+    # Data-integrity wall BEFORE building notionals: a stale / absent / future-dated / non-finite
+    # mark raises RiskBreach (dark feed) — the caller HALTS, never flattens.
+    assert_marks_usable(sorted(nonzero), latest_ts, latest_close, now)
+    book_notionals = {sym: qty * latest_close[sym] for sym, qty in nonzero.items()}
     equity = float(broker.account().equity)
     s = get_settings()
     limits = BookRiskLimits(
@@ -364,8 +405,8 @@ def _build_book_exposure(
 @json_errors
 def run_all(
     snapshot: str = typer.Option(..., "--snapshot"),
-    start: str = typer.Option("2023-01-01", "--start"),
-    end: str = typer.Option("2023-12-31", "--end"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
     max_drawdown: float | None = typer.Option(
         None, "--max-drawdown",
         help="per-strategy drawdown breaker fraction; omit to use the conservative default-ON "
@@ -389,6 +430,7 @@ def run_all(
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
+    start, end = resolve_wall_clock_window(start, end)
     configure_logging()
     counters = CycleCounters()
     # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives
@@ -499,11 +541,30 @@ def run_all(
                 # BOOK-LEVEL aggregate risk (#389): build ONE account-scoped exposure accumulator
                 # seeded from the reconciled whole-account net book, capping aggregate gross / net /
                 # single-name concentration ACROSS all strategies (per-strategy walls can't see the
-                # compounded book). Fail closed (skip trading this cycle) if the book can't be built
-                # safely — a short position (long-only precondition) or an unvaluable held name.
-                book, book_reason = _build_book_exposure(
-                    broker, provider, net_positions, start, end
-                )
+                # compounded book). BENIGNLY DEFER (skip trading this cycle) on a policy/economic
+                # precondition — a short position (long-only) or an already-breaching seed book.
+                # A DATA-INTEGRITY failure (stale/absent/future/non-finite mark) instead raises
+                # RiskBreach from the shared freshness wall (#452 HIGH#2): a dark bar feed is
+                # SYSTEMIC (shared provider), so HALT the whole account and PRESERVE positions —
+                # never flatten off a dead feed. The broker-truth book-loss breaker already ran this
+                # cycle (line above, off broker.account().equity) and flattens a REAL drawdown
+                # independently, so this halt is halt-only (no close_all_positions).
+                try:
+                    book, book_reason = _build_book_exposure(
+                        broker, provider, net_positions, start, end
+                    )
+                except RiskBreach as book_exc:
+                    counters.breaches += 1
+                    global_halt.engage(conn, reason=book_exc.detail, actor="system")
+                    audit_append(conn, actor="system", action="book_stale_marks_halt",
+                                 reason=f"{book_exc.kind}: {book_exc.detail}", strategy=None)
+                    log.error("book_stale_marks_halt",
+                              extra={"fields": {"lane": "live", "kind": book_exc.kind}})
+                    emit({"ok": False,
+                          "book_breach": {"kind": book_exc.kind, "detail": book_exc.detail},
+                          "global_halt": "set", "liquidation_submitted": False,
+                          "reconcile": recon_payload, "skipped": skipped})
+                    raise typer.Exit(1) from book_exc
                 if book is None:
                     log.info("book_risk_deferred",
                              extra={"fields": {"lane": "live", "reason": book_reason}})

@@ -72,3 +72,16 @@ class MarketCalendar:
         for a heartbeat/liveness check: it counts COMPLETED market sessions since the last tick
         instant without the UTC-date rounding error of :meth:`sessions_between`."""
         return self.sessions_between(self.session_of_instant(a), self.session_of_instant(b))
+
+    def sessions_stale(self, latest_bar: datetime, now: datetime) -> int:
+        """Completed exchange sessions between the latest decided daily bar and `now`, a
+        mark-freshness liveness metric. Daily bars are stamped at the session's UTC midnight
+        (#262), which session_of_instant would misattribute to the PRIOR session, so map the bar
+        by its session DATE (session date at UTC midnight, #262) and `now` in exchange time via
+        session_of_instant. 0 == the freshest closed session; grows as the feed goes stale.
+
+        The result is NOT clamped. A NEGATIVE result means the bar maps to a session AFTER `now`
+        (clock skew or bad data) and is returned as-is so the caller fails closed as
+        `future_dated`. ``session_of_instant`` may raise ``MinuteOutOfBounds`` for an out-of-range
+        instant; that is propagated for the caller to convert into a fail-closed ``RiskBreach``."""
+        return self.sessions_between(latest_bar.date(), self.session_of_instant(now))
