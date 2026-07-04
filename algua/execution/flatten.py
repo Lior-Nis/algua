@@ -10,6 +10,7 @@ single-sourced; each call site injects only what genuinely varies (``cancel`` sc
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -82,6 +83,7 @@ def flatten_strategy(  # noqa: PLR0913
     ingest: Callable[[], None],
     strategy_id: int | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    held: Callable[[], dict[str, float]] | None = None,
 ) -> FlattenResult:
     """Cancel this strategy's resting orders, reconcile the account, then offset every believed
     position above the dust tolerance.
@@ -95,6 +97,10 @@ def flatten_strategy(  # noqa: PLR0913
     caller before this runs) prevents a re-run from re-offsetting, so the per-attempt
     ``client_order_id`` is safe.
 
+    When ``held`` is provided (LIVE lane only), each offset is capped to the actually broker-held
+    signed quantity: this ensures the offset can never increase exposure or flip sign. The held
+    getter is called once after ingest() and reconciles the broker account.
+
     Sub-tolerance ("dust") positions are skipped: ``submit_offset`` already noops sub-nano residuals
     (#269), and recording a spurious order for a rounding residual would leak a phantom fill.
 
@@ -107,13 +113,33 @@ def flatten_strategy(  # noqa: PLR0913
     try:
         cancel()
         ingest()
+        held_positions = held() if held is not None else None
         for symbol, qty in _believed(conn, name, kind).items():
             if abs(qty) <= DEFAULT_TOLERANCE:
                 continue
+            # If held is provided, cap the offset to the actually-held signed quantity (LIVE lane).
+            if held_positions is not None:
+                h = held_positions.get(symbol, 0.0)
+                if not math.isfinite(h):
+                    # A non-finite broker qty (NaN/inf) cannot bound the offset: min(|qty|, nan)
+                    # would fall back to the full believed qty and bypass the cap. We cannot prove
+                    # risk-reduction, so fail closed loudly (the caller surfaces break-glass).
+                    raise ValueError(
+                        f"non-finite broker-held quantity for {symbol!r} ({h!r}); "
+                        "cannot prove a risk-reducing offset — refusing to submit"
+                    )
+                if abs(h) <= DEFAULT_TOLERANCE:
+                    continue  # Nothing actually held; don't open a fresh position off stale belief
+                close = min(abs(qty), abs(h))
+                if close <= DEFAULT_TOLERANCE:
+                    continue  # Rounding residual; skip
+                offset_qty = math.copysign(close, h)  # Sign follows held direction
+            else:
+                offset_qty = qty
             coid = client_order_id(name, now(), symbol)
-            side = "sell" if qty > 0 else "buy"
+            side = "sell" if offset_qty > 0 else "buy"
             _record(conn, name, symbol, side, coid, kind, strategy_id)
-            oid = broker.submit_offset(symbol, qty, coid)
+            oid = broker.submit_offset(symbol, offset_qty, coid)
             _backfill(conn, coid, oid, kind)
             n_offsets += 1
     except Exception as exc:  # noqa: BLE001 — emergency path must fail safe, never propagate

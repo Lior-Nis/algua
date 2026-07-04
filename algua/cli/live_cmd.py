@@ -10,7 +10,7 @@ from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Stage
+from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
@@ -189,14 +189,17 @@ def _run_strategy_tick(  # noqa: PLR0913
         log.error("breach", extra={"fields": {"strategy": name, "lane": "live",
                                               "kind": exc.kind}}, exc_info=True)
         # Scoped cancel (only our orders); ingest fills up to now, then offset every believed
-        # position — single-sourced in the execution layer (#336). liquidation_submitted mirrors the
-        # prior optimistic semantics: True unless the flatten loop errored.
+        # position capped to the actually broker-held signed quantity (Fork B, #449) so every offset
+        # is provably risk-reducing — single-sourced in the execution layer (#336).
+        # liquidation_submitted mirrors the prior optimistic semantics: True unless the flatten
+        # loop errored.
         res = flatten_strategy(
             conn, broker, name, LedgerKind.LIVE, lane="live",
             cancel=lambda: _scoped_cancel(conn, broker, name),
             ingest=lambda: ingest_activities(
                 conn, _broker_account_activities(broker, fill_cursor(conn, LedgerKind.LIVE)),
                 LedgerKind.LIVE),
+            held=lambda: _broker_net_positions(broker),
         )
         payload = breach_payload(exc.detail, strategy=name, kind=exc.kind,
                                   liquidation_submitted=res.flatten_error is None)
@@ -566,6 +569,111 @@ def run_all(
             raise
         finally:
             log.info("golden_signals", extra={"fields": counters.as_fields()})
+
+
+@live_app.command("flatten")
+@json_errors
+def flatten(
+    name: str,
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+) -> None:
+    """Emergency: flatten THIS strategy's believed positions only and trip its kill-switch.
+
+    The kill-switch is tripped BEFORE any authorization check (fail-safe — future ticks halt even
+    for a revoked/drifted strategy). The offset loop iterates believed_positions (LIVE ledger),
+    reading the broker net positions ONCE, and caps each offset to the actually-held signed
+    quantity so every offset is provably risk-reducing (Fork B, #449). Resting orders for this
+    strategy alone are cancelled; sibling positions on the shared account are never touched.
+    """
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching a switch
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        rec = repo.get(name)  # LookupError if unknown
+        # Require Stage.LIVE before touching the kill-switch (Fork E) — a non-LIVE strategy cannot
+        # be emergency-flattened through the live surface.
+        if rec.stage is not Stage.LIVE:
+            emit({
+                "ok": False,
+                "strategy": name,
+                "error": f"live flatten requires a LIVE strategy; {name} is {rec.stage.value}",
+                "kill_switch": "not_tripped",
+            })
+            raise typer.Exit(1)
+        # Trip the kill-switch FIRST, fail-safe, BEFORE any authorization check (Fork A) — future
+        # ticks halt even for a revoked/drifted strategy whose broker cannot be built.
+        kill_switch.trip(conn, name, reason="flatten", actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="flatten",
+                     reason="manual flatten", strategy=name)
+        # Now verify authorization to build the broker. If it fails, the kill-switch is still
+        # tripped and the payload reports the emergency escalation path.
+        try:
+            authorization = verify_live_authorization(conn, repo, name, ALLOWED_SIGNERS_PATH)
+        except LiveAuthorizationError as exc:
+            emit({
+                "ok": False,
+                "strategy": name,
+                "kill_switch": "tripped",
+                "liquidation_submitted": False,
+                "error": str(exc),
+                "note": ("future ticks are halted (kill-switch tripped); the open position "
+                         "was NOT closed — the live authorization is revoked/absent or the "
+                         "artifact drifted. Break-glass: close via the raw broker "
+                         "(DELETE /v2/positions?cancel_orders=true with the live keys). "
+                         "A signed account-level break-glass path is tracked in #478."),
+            })
+            raise typer.Exit(1) from exc
+        broker = _alpaca_live_broker(authorization)
+        # Delegate the offset-liquidation loop to the single-sourced helper, injecting held so
+        # every offset is capped to the actually-held signed quantity (Fork B, #449).
+        res = flatten_strategy(
+            conn, broker, name, LedgerKind.LIVE, lane="live",
+            cancel=lambda: _scoped_cancel(conn, broker, name),
+            ingest=lambda: ingest_activities(
+                conn, _broker_account_activities(broker, fill_cursor(conn, LedgerKind.LIVE)),
+                LedgerKind.LIVE),
+            held=lambda: _broker_net_positions(broker),
+        )
+        if res.flatten_error is not None:
+            emit(breach_payload(res.flatten_error, strategy=name, liquidation_submitted=False,
+                                offsets_submitted=res.n_offsets))
+            raise typer.Exit(1)
+    # liquidation_submitted reflects whether any offset order ACTUALLY went out (Fork B / GATE-2):
+    # a strategy already flat submits none → False, not a phantom liquidation → True. Accepted
+    # offset fills land async (may be next open).
+    emit(ok({
+        "strategy": name,
+        "kill_switch": "tripped",
+        "liquidation_submitted": res.n_offsets > 0,
+        "offsets_submitted": res.n_offsets,
+    }))
+
+
+@live_app.command("halt-all")
+@json_errors
+def halt_all(
+    reason: str = typer.Option(..., "--reason", help="why the whole live account is being halted"),
+    actor: str = typer.Option("agent", "--actor", help="human | agent"),
+) -> None:
+    """Emergency: engage the global halt — stop ALL future ticks (paper AND live).
+
+    Does NOT close open positions.
+    """
+    actor_enum = Actor(actor)
+    with registry_conn() as conn:
+        global_halt.engage(conn, reason=reason, actor=actor_enum.value)
+        audit_append(conn, actor=actor_enum.value, action="halt_all", reason=reason,
+                     strategy=None)
+    emit(ok({
+        "global_halt": "set",
+        "liquidation_submitted": False,
+        "note": ("global halt engaged — all future ticks (paper AND live) are stopped. "
+                 "This command does NOT close open positions. To exit LIVE positions: "
+                 "run 'live flatten <name>' per live strategy (each is provably "
+                 "risk-reducing). A single-call account-wide close requires the signed "
+                 "account-level emergency-liquidation authority tracked in #478; the "
+                 "interim account-wide break-glass is the raw broker "
+                 "(DELETE /v2/positions?cancel_orders=true with the live keys)."),
+    }))
 
 
 def _scoped_cancel(conn, broker: ScopedCancelBroker, strategy: str) -> None:
