@@ -82,6 +82,59 @@ def test_doctor_advisory_rows_do_not_gate_exit(monkeypatch, tmp_path):
     assert rows["bars_snapshot"]["ok"] is False
 
 
+def test_doctor_clean_env_safety_rows_pass(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    rows = {c["check"]: c for c in payload["checks"]}
+    for name in ("global_halt", "kill_switches", "live_authorizations"):
+        assert rows[name]["required"] is False
+        assert rows[name]["ok"] is True
+
+
+def test_doctor_flags_engaged_global_halt(monkeypatch, tmp_path):
+    from algua.cli._common import registry_conn
+    from algua.risk import global_halt
+
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    with registry_conn() as conn:
+        global_halt.engage(conn, reason="test halt", actor="human")
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0  # advisory, does not gate
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    gh = {c["check"]: c for c in payload["checks"]}["global_halt"]
+    assert gh["ok"] is False
+    assert "ENGAGED" in gh["detail"] and "test halt" in gh["detail"]
+
+
+def test_doctor_flags_tripped_kill_switch(monkeypatch, tmp_path):
+    from algua.cli._common import registry_conn
+    from algua.risk import kill_switch
+
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    with registry_conn() as conn:
+        kill_switch.trip(conn, "alpha", reason="test kill", actor="human")
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    ks = {c["check"]: c for c in payload["checks"]}["kill_switches"]
+    assert ks["ok"] is False
+    assert "alpha" in ks["detail"]
+
+
+def test_doctor_no_live_strategies_authorizations_pass(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    la = {c["check"]: c for c in payload["checks"]}["live_authorizations"]
+    assert la["ok"] is True
+    assert la["detail"] == "no live strategies"
+
+
 def test_has_generated_by_recognizes_plain_and_annotated(tmp_path):
     from algua.cli.app import _has_generated_by
 

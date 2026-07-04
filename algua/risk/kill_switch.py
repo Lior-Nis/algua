@@ -27,6 +27,12 @@ def reset(conn: sqlite3.Connection, strategy: str) -> bool:
     return cur.rowcount > 0
 
 
+def list_tripped(conn: sqlite3.Connection) -> list[str]:
+    """Sorted list of strategy names with a tripped kill switch (empty if none)."""
+    rows = conn.execute("SELECT strategy FROM kill_switches ORDER BY strategy").fetchall()
+    return [r["strategy"] for r in rows]
+
+
 def get(conn: sqlite3.Connection, strategy: str) -> dict[str, str] | None:
     row = conn.execute(
         "SELECT strategy, reason, actor, created_at FROM kill_switches WHERE strategy = ?",

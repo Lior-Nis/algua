@@ -104,6 +104,61 @@ def _bars_snapshot_detail() -> str:
     return f"{len(records)} bars snapshot(s)"
 
 
+def _global_halt_detail() -> str:
+    """Advisory safety-state probe: is the account-wide halt engaged? A green pre-flight while a
+    global halt is live would hide that the trading loops are frozen — so an engaged halt raises."""
+    from algua.cli._common import registry_conn
+    from algua.risk import global_halt
+
+    with registry_conn() as conn:
+        info = global_halt.get(conn)
+    if info is not None:
+        raise RuntimeError(
+            f"global halt ENGAGED: {info['reason']} "
+            f"(by {info['actor']} at {info['created_at']})"
+        )
+    return "no global halt engaged"
+
+
+def _kill_switches_detail() -> str:
+    """Advisory safety-state probe: are any per-strategy kill switches tripped? A tripped switch
+    blocks that strategy from trading; surface it rather than reporting all-green."""
+    from algua.cli._common import registry_conn
+    from algua.risk import kill_switch
+
+    with registry_conn() as conn:
+        tripped = kill_switch.list_tripped(conn)
+    if tripped:
+        raise RuntimeError(f"{len(tripped)} kill switch(es) tripped: {', '.join(tripped)}")
+    return "no kill switches tripped"
+
+
+def _live_authorizations_detail() -> str:
+    """Advisory safety-state probe: is every LIVE strategy still human-authorized at the current
+    trust anchor? Re-verifies each live strategy's signature; a revoked/unverifiable authorization
+    (or one whose artifact hash can't be recomputed) is reported per-strategy so one failure doesn't
+    mask others. Any failure raises with the aggregated per-strategy detail."""
+    from algua.cli._common import registry_conn
+    from algua.contracts.lifecycle import Stage
+    from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_live_authorization
+    from algua.registry.store import SqliteStrategyRepository
+
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        live = repo.list_strategies(Stage.LIVE)
+        if not live:
+            return "no live strategies"
+        failures: list[str] = []
+        for rec in live:
+            try:
+                verify_live_authorization(conn, repo, rec.name, ALLOWED_SIGNERS_PATH)
+            except Exception as exc:  # noqa: BLE001 - per-strategy so one failure doesn't mask others
+                failures.append(f"{rec.name}: {exc}")
+    if failures:
+        raise RuntimeError("; ".join(failures))
+    return f"{len(live)} live strategy(ies) authorized"
+
+
 def _generated_provenance_detail() -> str:
     """Advisory: how many bundled strategy modules carry the ``GENERATED_BY`` provenance marker the
     author-a-strategy contract mandates? Static AST scan of the strategy family dirs — imports
@@ -160,6 +215,9 @@ def doctor() -> None:
         _check("paper_credentials", _paper_credentials_detail, required=False),
         _check("bars_snapshot", _bars_snapshot_detail, required=False),
         _check("generated_provenance", _generated_provenance_detail, required=False),
+        _check("global_halt", _global_halt_detail, required=False),
+        _check("kill_switches", _kill_switches_detail, required=False),
+        _check("live_authorizations", _live_authorizations_detail, required=False),
     ]
     all_ok = all(c["ok"] for c in checks if c["required"])
     emit({"ok": all_ok, "checks": checks})
