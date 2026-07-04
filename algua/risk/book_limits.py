@@ -45,6 +45,14 @@ from dataclasses import dataclass, field
 # sub-cent absolute tolerance rather than this equity-scaled band.
 _EPS_REL = 1e-6
 
+# Over-sell (step 0b naked-short) tolerance: a FIXED tiny absolute notional, deliberately NOT the
+# equity-scaled `_EPS_REL * equity` band. The over-sell assert underpins the B[s] = seed − sell >= 0
+# lower bound the whole prefix-safety proof rests on, so a naked short must fail closed REGARDLESS
+# of account size — a $500 over-sell on a $1e9 account is still a naked short, but an equity-scaled
+# eps (~$1000 there) would wave it through. This absorbs ONLY float round-off in the seed−sell
+# compare; it is dimensionally a raw notional, independent of equity.
+_OVERSELL_ABS_EPS = 1e-6
+
 # Default BUY notional quantization step (dollars) — BUYs are submitted as dollar-denominated
 # notional orders, so the step is a DOLLAR step, not a share step (design v4, §v4-7).
 DEFAULT_BUY_NOTIONAL_STEP = 0.01
@@ -206,7 +214,11 @@ def evaluate_book(
     for s in symbols:
         sell = _sell(s)
         seed = _seed(s)
-        if not _finite(sell) or not _finite(seed) or sell < -eps or sell > seed + eps:
+        # FIXED absolute tolerance here (NOT the equity-scaled `eps`): a naked short must fail
+        # closed regardless of account equity — an equity-scaled band would let a large account
+        # over-sell a name by up to `_EPS_REL * equity` and silently break the B[s] >= 0 bound.
+        if (not _finite(sell) or not _finite(seed)
+                or sell < -_OVERSELL_ABS_EPS or sell > seed + _OVERSELL_ABS_EPS):
             return BookVerdict(ok=False, reason=f"oversell:{s}", permitted_buys={})
 
     # ---- step 1: denominator floor (FIXED per-cycle constant) ---------------------------------

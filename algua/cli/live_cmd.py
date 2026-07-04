@@ -272,10 +272,17 @@ def _broker_buying_power(broker) -> float:
 
 
 def _latest_marks(bars) -> dict[str, float]:
-    """Latest closed-bar close per symbol from a bars frame ({symbol: close}); empty on no bars."""
+    """Latest closed-bar close per symbol from a bars frame ({symbol: close}); empty on no bars.
+
+    Sorts by the (timestamp) index BEFORE ``groupby(...).last()`` so the mark is the TRUE latest
+    closed bar regardless of the provider's row order — ``groupby.last()`` returns the last row in
+    FRAME order, so a descending-order provider frame would otherwise seed the book off the OLDEST
+    bar (mismatching run_tick, which sorts before it decides — #389 GATE-2 look-ahead/valuation
+    divergence)."""
     if bars is None or getattr(bars, "empty", True):
         return {}
-    return {str(sym): float(c) for sym, c in bars.groupby("symbol")["close"].last().items()}
+    ordered = bars.sort_index()
+    return {str(sym): float(c) for sym, c in ordered.groupby("symbol")["close"].last().items()}
 
 
 class _InterimBookHeadroom:
@@ -334,13 +341,15 @@ def _build_interim_book_headroom(
     safety:
       - any reconciled nonzero position with qty < 0 (a short — long-only anomaly);
       - any reconciled nonzero position with a missing / non-finite / <= 0 mark (unvaluable book);
-      - a seed book that ALREADY breaches the aggregate-gross or single-name-notional cap at
-        reconcile time (market drift, not our orders) — adding exposure through an already-over
-        book is unsound, so the whole cycle fails closed and self-heals once the book de-risks.
+      - a seed book that ALREADY breaches the aggregate-gross, single-name-notional, or single-name
+        CONCENTRATION cap at reconcile time (market drift, not our orders) — adding exposure through
+        an already-over book is unsound, so the whole cycle fails closed and self-heals once the
+        book de-risks.
     A partially-valued book is never built — one bad symbol makes gross for the WHOLE book
-    unknowable, so the whole cycle fails closed. (The CONCENTRATION cap is intentionally not
-    seed-checked here; it is enforced only by the whole-cycle ``evaluate_book`` — see
-    ``_InterimBookHeadroom``.)"""
+    unknowable, so the whole cycle fails closed. The single-name CONCENTRATION cap is seed-checked
+    here as a pure t0 check on the fixed reconciled book (prefix-independent); only the BUY-by-BUY
+    concentration trim during accumulation is deferred to the whole-cycle ``evaluate_book`` (see
+    ``_InterimBookHeadroom``)."""
     nonzero = {s: float(q) for s, q in net_positions.items() if float(q) != 0.0}
     shorts = sorted(s for s, q in nonzero.items() if q < 0.0)
     if shorts:
@@ -358,6 +367,13 @@ def _build_interim_book_headroom(
     marks = _latest_marks(bars)
     book_notionals: dict[str, float] = {}
     for sym, qty in nonzero.items():
+        # A non-finite reconciled qty (NaN/inf) would survive the `!= 0.0` filter and the `q < 0`
+        # short check, then yield a NaN notional that makes BOTH the gross and per-symbol
+        # seed-breach comparisons return False — handing back a usable trimmer for an UNVALUABLE
+        # book. Fail closed here, mirroring the mark/equity guards below (#389 GATE-2).
+        if not math.isfinite(qty):
+            return None, f"held symbol {sym!r} has a non-finite reconciled quantity " \
+                         f"(got {qty!r}) — cannot value the book; refusing to trade this cycle"
         mark = marks.get(sym)
         if mark is None or not math.isfinite(mark) or mark <= 0.0:
             return None, f"held symbol {sym!r} has no usable mark (got {mark!r}) — cannot value " \
@@ -385,6 +401,21 @@ def _build_interim_book_headroom(
     if over_sym:
         return None, f"account book already breaches the single-name notional cap for {over_sym} " \
                      "at reconcile — refusing to trade this cycle"
+    # Single-name CONCENTRATION seed-check (mirrors evaluate_book's seed_breach:concentration
+    # branch). This is a PURE t0 check on the RECONCILED book — the seed is fixed before any of
+    # this cycle's orders land, so it is prefix-INDEPENDENT (unlike the BUY-by-BUY concentration
+    # check the interim trimmer deliberately omits, which is prefix-unsafe under a same-cycle SELL
+    # that shrinks gross). A book that already over-concentrates a single name at reconcile (market
+    # drift, not our orders) must add no exposure to ANY name, so the whole cycle fails closed and
+    # self-heals once the book de-risks. Denominator is the same fixed max(gross, equity) the
+    # evaluator uses; c >= 1.0 disables the cap.
+    if limits.max_symbol_concentration < 1.0:
+        denom = max(gross, equity)
+        conc_cap = limits.max_symbol_concentration * denom
+        over_conc = sorted(sym for sym, n in book_notionals.items() if n > conc_cap + eps)
+        if over_conc:
+            return None, "account book already breaches the single-name concentration cap for " \
+                         f"{over_conc} at reconcile — refusing to trade this cycle"
     return _InterimBookHeadroom(book_notionals, cap_gross, cap_sym), None
 
 
@@ -453,11 +484,14 @@ def run_all(
     loss circuit breaker (#390) halts + flattens the WHOLE account on aggregate drawdown / daily
     loss before any strategy can order.
 
-    DEPLOYMENT GATE (#389): the aggregate book-risk enforcement here is INTERIM — it caps only the
-    two prefix-safe monotone book caps (aggregate gross/net + single-name notional) across
-    strategies; the single-name CONCENTRATION cap is NOT yet wired into this driver (it needs the
-    whole-cycle `evaluate_book` PLAN->AGGREGATE-GATE->SETTLE->APPLY path, a later slice of #389).
-    Until that wiring lands, this command MUST NOT be operated on a real live account."""
+    DEPLOYMENT GATE (#389): the aggregate book-risk enforcement here is INTERIM — it caps the
+    prefix-safe monotone book caps (aggregate gross/net + single-name notional) across strategies
+    plus a t0 seed-concentration fail-closed on the reconciled book; the BUY-by-BUY single-name
+    CONCENTRATION wall is NOT yet wired into this driver (it needs the whole-cycle `evaluate_book`
+    PLAN->AGGREGATE-GATE->SETTLE->APPLY path, a later slice of #389). Because every ticked strategy
+    is Stage.LIVE, this command FAILS CLOSED (refuses to trade) unless the operator explicitly opts
+    into the interim caps via ALGUA_ALLOW_INTERIM_BOOK_LIVE — a machine-enforced control, not a
+    prose warning."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
@@ -572,20 +606,45 @@ def run_all(
                         raise typer.Exit(1) from exc
                     emit({**payload, "liquidation_submitted": True})
                     raise typer.Exit(1)
+                # MACHINE-ENFORCED #389 DEPLOYMENT GATE. Every strategy this driver ticks is
+                # Stage.LIVE, so reaching here means submitting orders to a real live account. The
+                # interim book path below enforces only the PREFIX-SAFE caps + a t0
+                # seed-concentration check; the BUY-by-BUY concentration wall still needs the whole-
+                # cycle `evaluate_book` wiring. Until that lands, FAIL CLOSED rather than trade — a
+                # prose "MUST NOT operate" warning is not an acceptable control for a CRITICAL
+                # safe-scaling issue. An operator opts into the interim caps deliberately via
+                # ALGUA_ALLOW_INTERIM_BOOK_LIVE. This sits AFTER reconcile + the loss breaker so the
+                # halt/flatten safety paths still run, and BEFORE any order is planned/submitted.
+                if not get_settings().allow_interim_book_live:
+                    log.info(
+                        "book_risk_deferred",
+                        extra={"fields": {"lane": "live",
+                                          "reason": "interim_book_not_opted_in"}},
+                    )
+                    emit(ok({
+                        "reconcile": recon_payload,
+                        "skipped": skipped,
+                        "note": "live run-all refuses to trade: the #389 book-level concentration "
+                                "wall is not yet wired (interim prefix-safe caps only). Set "
+                                "ALGUA_ALLOW_INTERIM_BOOK_LIVE=1 to operate under interim caps.",
+                        "book_risk_deferred": True,
+                        "strategies": [],
+                    }))
+                    return
                 # BOOK-LEVEL aggregate risk (#389). The full account-scoped gate — aggregate gross /
                 # net / single-name notional AND concentration, prefix-safe under same-cycle SELLs —
                 # is the whole-cycle `evaluate_book` PLAN -> AGGREGATE-GATE -> SETTLE -> APPLY path
                 # (design v4), whose pure evaluator + unit coverage already ship
                 # (algua/risk/book_limits.py, tests/test_book_limits.py). Until that batch wiring
-                # lands (a later slice of #389), run-all enforces the two PREFIX-SAFE monotone book
-                # caps inline — aggregate gross/net and single-name notional — via the interim
-                # trimmer, seeded from the reconciled marked book and composed under the
-                # buying-power pool. The single-name CONCENTRATION cap is NOT enforced by this
-                # interim path (it is prefix-unsafe BUY-by-BUY under a shrinking-gross SELL), so
-                # run-all MUST NOT be operated on a real live account until the `evaluate_book`
-                # wiring slice lands. Fail closed (skip trading this cycle) if the book can't be
-                # valued safely — a short (long-only precondition), an unvaluable held name, or an
-                # already-breached seed.
+                # lands (a later slice of #389), run-all enforces the PREFIX-SAFE monotone book caps
+                # inline — aggregate gross/net and single-name notional — plus a t0
+                # seed-concentration fail-closed, via the interim trimmer, seeded from the
+                # reconciled marked book and composed under the pool. The BUY-by-BUY single-name
+                # CONCENTRATION trim is NOT enforced by this interim path (it is prefix-unsafe under
+                # a shrinking-gross SELL); the machine gate above keeps run-all off a live account
+                # until the `evaluate_book` wiring slice lands. Fail closed (skip this cycle) if the
+                # book can't be valued safely — a short (long-only precondition), an
+                # unvaluable held name, or an already-breached seed.
                 book, book_reason = _build_interim_book_headroom(
                     broker, provider, net_positions, start, end, cycle_now
                 )

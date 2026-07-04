@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     # ALGUA_BOOK_MAX_DAILY_LOSS.
     book_max_drawdown: float = 0.15
     book_max_daily_loss: float = 0.05
+    # Machine-enforced #389 deployment gate. `live run-all` enforces only the PREFIX-SAFE interim
+    # book caps (aggregate gross/net + single-name notional + a t0 seed-concentration check); the
+    # BUY-by-BUY single-name concentration wall still needs the whole-cycle `evaluate_book`
+    # PLAN->AGGREGATE-GATE->SETTLE->APPLY wiring. Until that lands, the driver FAILS CLOSED before
+    # trading any Stage.LIVE strategy unless an operator deliberately opts in by setting this flag.
+    # A prose "MUST NOT operate" warning is not an acceptable control for a CRITICAL safe-scaling
+    # issue, so the refusal is enforced in code. env: ALGUA_ALLOW_INTERIM_BOOK_LIVE.
+    allow_interim_book_live: bool = False
 
     @field_validator("db_path", "data_dir")
     @classmethod

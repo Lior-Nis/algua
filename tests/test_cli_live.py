@@ -54,6 +54,9 @@ def _permissive_book(monkeypatch):
     monkeypatch.setattr(
         "algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None
     )
+    # Opt into the interim book caps so the machine-enforced #389 deployment gate does not fail the
+    # cycle closed before the trading path these tests exercise. env: ALGUA_ALLOW_INTERIM_BOOK_LIVE.
+    monkeypatch.setenv("ALGUA_ALLOW_INTERIM_BOOK_LIVE", "1")
 
 
 
@@ -255,6 +258,41 @@ def test_run_all_ticks_strategy_when_clean(monkeypatch):
     assert payload["strategies"][0]["strategy"] == "cross_sectional_momentum"
 
 
+def test_run_all_machine_gate_refuses_trading_by_default(monkeypatch):
+    # MACHINE-ENFORCED #389 deployment gate: without ALGUA_ALLOW_INTERIM_BOOK_LIVE, run-all reaches
+    # a clean reconcile + passes the loss breaker but then FAILS CLOSED before planning any order —
+    # the interim book path lacks the whole-cycle concentration wall, so a prose warning is replaced
+    # by a code control. Assert it defers (book_risk_deferred, empty strategies) and NEVER ticks a
+    # strategy.
+    from algua.cli.live_cmd import _InterimBookHeadroom
+    # Stub the loss breaker + interim build so a permissive book would otherwise let trading
+    # proceed; the machine gate must still refuse because the opt-in env is unset.
+    monkeypatch.setattr("algua.cli.live_cmd._evaluate_book_loss_breaker", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "algua.cli.live_cmd._build_interim_book_headroom",
+        lambda *a, **k: (_InterimBookHeadroom({}, 1e15, 1e15), None),
+    )
+    monkeypatch.delenv("ALGUA_ALLOW_INTERIM_BOOK_LIVE", raising=False)
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
+    ticked = {"count": 0}
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick",
+                        lambda *a, **k: ticked.__setitem__("count", ticked["count"] + 1))
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["book_risk_deferred"] is True
+    assert payload["strategies"] == []
+    assert payload["reconcile"]["clean"] is True
+    assert ticked["count"] == 0  # no strategy was ticked -> no order planned/submitted
+
+
 def test_live_allocate_records_and_enforces_sum(monkeypatch):
     from contextlib import closing
 
@@ -282,6 +320,9 @@ def test_run_all_rejects_bad_max_drawdown():
 
 def test_run_all_breach_liquidates_per_strategy(monkeypatch):
     from algua.live.live_loop import RiskBreach
+    # Opt into the interim book caps so the machine-enforced #389 gate does not defer this cycle
+    # before the per-strategy breach/liquidation path under test.
+    monkeypatch.setenv("ALGUA_ALLOW_INTERIM_BOOK_LIVE", "1")
     _to_live()
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
 

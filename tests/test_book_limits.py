@@ -94,6 +94,19 @@ def test_sell_exactly_at_seed_is_permitted():
     assert v.reason is None
 
 
+def test_naked_sell_on_large_equity_account_fails_closed():
+    # #389 GATE-2: the step-0b over-sell assert must use a FIXED absolute tolerance, NOT an
+    # equity-scaled eps. On a $1e9 account an equity-scaled band (~$1000) would wave through a
+    # naked short of up to that size; a naked sell of ANY material size must fail closed regardless
+    # of account equity, or the B[s] = seed − sell >= 0 prefix-safety bound breaks.
+    equity = 1e9
+    # sell exceeds seed by $500 — under the old equity-scaled eps ($1000) but a real naked short.
+    v = evaluate_book(equity, {"AAA": 100.0}, {"AAA": 600.0}, {}, BookRiskLimits())
+    assert v.ok is False
+    assert v.reason == "oversell:AAA"
+    assert v.permitted_buys == {}
+
+
 # --------------------------------------------------------------------------- #
 # each cap binding on the AGGREGATE book
 # --------------------------------------------------------------------------- #

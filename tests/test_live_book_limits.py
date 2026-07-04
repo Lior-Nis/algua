@@ -157,6 +157,22 @@ def test_build_interim_book_fails_closed_on_already_breached_symbol_notional():
     assert reason is not None and "already breaches" in reason.lower()
 
 
+def test_build_interim_book_fails_closed_on_already_breached_concentration():
+    # A seed book over the single-name CONCENTRATION cap but UNDER both the gross and per-symbol
+    # notional caps must still fail closed at reconcile. This is the prefix-INDEPENDENT t0 check on
+    # the fixed reconciled book (mirrors evaluate_book's seed_breach:concentration branch), NOT the
+    # deferred BUY-by-BUY concentration trim. equity 1000 -> cap_gross = min(2,1)*1000 = 1000;
+    # cap_sym = 0.5*1000 = 500; conc denom = max(gross, equity) = max(400, 1000) = 1000;
+    # conc_cap = 0.25*1000 = 250. AAA notional = 100*4 = 400: under gross (400<=1000) and under the
+    # per-name notional cap (400<=500), but over concentration (400 > 250) -> fail closed.
+    book, reason = live_cmd._build_interim_book_headroom(
+        _Broker(equity=1000.0), _Provider({"AAA": 4.0}), {"AAA": 100.0},
+        "2023-01-01", "2023-12-31", _NOW,
+    )
+    assert book is None
+    assert reason is not None and "concentration" in reason.lower()
+
+
 def test_build_interim_book_fails_closed_on_already_breached_gross():
     # cap_gross = min(2,1)*1000 = 1000; cap_sym = 0.5*1000 = 500. Three names each 450 notional
     # (under the 500 per-name cap) sum to 1350 gross > 1000 -> the aggregate gross cap trips first
@@ -202,6 +218,63 @@ def test_seed_over_cap_on_closed_bar_fails_even_when_partial_bar_would_hide_it()
     )
     assert book is None
     assert reason is not None and "already breaches" in reason.lower()
+
+
+class _DescendingProvider:
+    """Returns TWO fully-closed bars per symbol in DESCENDING timestamp order (latest row FIRST,
+    oldest row LAST). Both bars are dated strictly before the cycle cutoff so
+    `drop_open_session_bars` keeps both. Exercises the #389 GATE-2 look-ahead fix:
+    `groupby(...).last()` returns the last row in FRAME order, so without sorting the seed would be
+    valued off the OLDEST bar (last row here), not the true latest closed bar."""
+
+    _LATER = datetime(2023, 5, 31, tzinfo=UTC)
+    _EARLIER = datetime(2023, 5, 30, tzinfo=UTC)
+
+    def __init__(self, latest: dict[str, float], earlier: dict[str, float]) -> None:
+        self._latest = latest
+        self._earlier = earlier
+
+    def get_bars(self, symbols, start, end, timeframe):  # noqa: ANN001, ARG002
+        rows = []
+        index = []
+        for s in symbols:
+            # descending: emit the LATER (true-latest) bar first, then the EARLIER bar last
+            if s in self._latest:
+                rows.append({"symbol": s, "close": self._latest[s]})
+                index.append(self._LATER)
+            if s in self._earlier:
+                rows.append({"symbol": s, "close": self._earlier[s]})
+                index.append(self._EARLIER)
+        return pd.DataFrame(rows, index=pd.DatetimeIndex(index))
+
+
+def test_seed_uses_true_latest_bar_under_descending_provider_order():
+    # #389 GATE-2: a descending-order provider frame must still be valued off the TRUE latest closed
+    # bar. equity 1000 -> cap_sym = 0.5*1000 = 500. Latest closed close = 6 -> notional 100*6 = 600
+    # (OVER the 500 cap => must fail closed). The earlier bar close = 4 -> 400 (under cap); if the
+    # seed were (wrongly) valued off the last FRAME row (the earlier bar) it would pass and mask the
+    # breach. The sort_index() fix in _latest_marks makes it fail closed.
+    broker = _Broker(equity=1000.0)
+    provider = _DescendingProvider(latest={"AAA": 6.0}, earlier={"AAA": 4.0})
+    book, reason = live_cmd._build_interim_book_headroom(
+        broker, provider, {"AAA": 100.0}, "2023-01-01", "2023-12-31", _NOW
+    )
+    assert book is None
+    assert reason is not None and "already breaches" in reason.lower()
+
+
+def test_build_interim_book_fails_closed_on_non_finite_reconciled_qty():
+    # #389 GATE-2 (MEDIUM): a NaN reconciled qty survives the `!= 0.0` filter and the `q < 0` short
+    # check, then yields a NaN notional that makes every seed-breach comparison return False — an
+    # unvaluable book must fail closed, not hand back a usable trimmer. The mark is valid, so this
+    # isolates the qty guard.
+    broker = _Broker(equity=100_000.0)
+    provider = _Provider({"AAA": 10.0})
+    book, reason = live_cmd._build_interim_book_headroom(
+        broker, provider, {"AAA": float("nan")}, "2023-01-01", "2023-12-31", _NOW
+    )
+    assert book is None
+    assert reason is not None and "non-finite" in reason.lower()
 
 
 # --------------------------------------------------------------------------- #
