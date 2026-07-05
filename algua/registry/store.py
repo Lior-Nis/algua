@@ -353,6 +353,58 @@ class SqliteStrategyRepository:
                 consume_gate_id, consume_forward_gate_id, _now(),
                 revoke_allocation=False, live_authorization=live_authorization)
 
+    def intake_candidate_to_paper(
+        self,
+        rec: StrategyRecord,
+        capital: float,
+        actor: Actor,
+        account_equity: float,
+        max_concurrent: int,
+    ) -> StrategyRecord:
+        """Admit a CANDIDATE into the paper book in ONE atomic write (#317, finding #1/#3).
+
+        Under a single top-level ``BEGIN IMMEDIATE`` write lock, in order: (1) re-check the
+        max-concurrent count cap, (2) capital cap-check + allocation insert (Σ(active)+slice ≤
+        equity, via the shared commit-less ``allocate_locked``), (3) the ``candidate→paper`` stage
+        CAS + audit row (``_apply_transition_locked``, whose ``WHERE stage='candidate'`` re-asserts
+        the source stage — closing the same ``candidate→…``-during-intake TOCTOU #246 closed for
+        research-promote). Commit or roll back together, so there is no reachable
+        allocated-but-still-candidate NOR transitioned-but-unallocated state. TOP-LEVEL ONLY
+        (mirrors ``apply_transition(revoke_allocation=True)``): a manual ``BEGIN`` inside an open
+        transaction raises, and the blanket ``BaseException`` rollback must own the whole txn.
+
+        Raises ``CountCapReached`` (book full), ``AllocationError`` (no capital headroom), or
+        ``TransitionError`` (the selection went stale — a concurrent transition moved the strategy
+        out of ``candidate`` before the CAS). The count re-read is UNDER the write lock, so two
+        concurrent intakes cannot both see ``count=cap-1`` and both admit.
+        """
+        from algua.registry import allocations
+
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "intake_candidate_to_paper must run at top level, not inside an open transaction")
+        if rec.stage is not Stage.CANDIDATE:
+            # Friendly early error; the authoritative re-assert is the in-txn stage CAS below.
+            raise TransitionError(
+                f"{rec.name!r} is not a candidate (stage {rec.stage.value!r})")
+        now = _now()
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            count = allocations.active_paper_lane_count(self._conn)
+            if count >= max_concurrent:
+                raise allocations.CountCapReached(
+                    f"paper book at capacity ({count}/{max_concurrent} active tenants)")
+            allocations.allocate_locked(
+                self._conn, rec.id, capital, actor.value, account_equity)
+            result = self._apply_transition_locked(
+                rec, Stage.PAPER, actor, "operator paper intake",
+                None, None, None, None, None, now, revoke_allocation=False)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return result
+
     def _assert_flat_for_bench(self, name: str) -> None:
         """Re-check live flatness INSIDE the bench transaction (#247): with the BEGIN IMMEDIATE
         write lock held, no concurrent fill can commit between this check and the revoke+CAS, so a

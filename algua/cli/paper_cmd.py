@@ -21,7 +21,7 @@ from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Actor, Stage
+from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.types import (
     ActivityWindowBroker,
     LiveReconcileBroker,
@@ -84,19 +84,17 @@ from algua.observability import (
     get_logger,
 )
 from algua.registry.allocations import (
+    AllocationError,
+    CountCapReached,
     active_allocation,
-    total_allocated,
-)
-from algua.registry.allocations import (
-    allocate as allocate_capital,
+    active_paper_lane_count,
 )
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import canonical_run_context
-from algua.registry.intake import Candidate, plan_intake
+from algua.registry.intake import Candidate, order_candidates, slice_capital
 from algua.registry.store import SqliteStrategyRepository
-from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
     MAX_FORWARD_DRAWDOWN,
@@ -130,12 +128,15 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-def _candidate_entry_ts(repo: SqliteStrategyRepository, name: str) -> str:
-    """ISO timestamp this strategy most recently ENTERED the candidate stage (FIFO key). Falls
-    back to created_at if — defensively — no candidate transition is recorded."""
-    entered = [t['created_at'] for t in repo.list_transitions(name)
+def _candidate_entry_id(repo: SqliteStrategyRepository, name: str) -> int:
+    """The monotonic ``stage_transitions.id`` of the row that most recently moved this strategy
+    into the ``candidate`` stage — the FIFO ordering key (#317, finding #5). ``list_transitions``
+    returns rows ordered by ``id``, so the last matching row is the current candidate episode. A
+    DB autoincrement id is a true clock-independent insertion order (see intake.Candidate);
+    defensively falls back to ``0`` if — impossibly — no candidate transition is recorded."""
+    entered = [t['id'] for t in repo.list_transitions(name)
                if t['to_stage'] == Stage.CANDIDATE.value]
-    return entered[-1] if entered else repo.get(name).created_at
+    return entered[-1] if entered else 0
 
 
 def _paper_broker_net(broker: PositionsBroker) -> dict[str, float]:
@@ -389,34 +390,59 @@ def intake(
     actor: str = typer.Option('agent', '--actor', help='human | agent'),
 ) -> None:
     """Deterministic paper-book intake: admit candidate strategies into the shared paper book up to
-    capacity. When the book has headroom (Σ allocations + slice ≤ paper account equity AND under the
-    --max-concurrent cap), promote the next candidate candidate→paper (FIFO by candidate-entry time,
-    tie-break strategy id) and allocate it an equal slice = floor(equity / max_concurrent to cents);
-    when full, leave it queued. Reads paper account equity READ-ONLY (no trading). Reuses the
-    allocation primitive whose atomic Σ ≤ equity check re-verifies every grant."""
+    capacity. Each candidate is offered, in FIFO order (by candidate-entry stage_transitions.id,
+    tie-break strategy id), to the ATOMIC ``intake_candidate_to_paper`` primitive, which under ONE
+    write lock re-checks the --max-concurrent count cap, cap-checks + allocates an equal slice =
+    floor(equity / max_concurrent to cents) (Σ allocations + slice ≤ paper account equity), and
+    CASes candidate→paper — commit-or-rollback together, so there is no reachable
+    transitioned-but-unallocated state. On either hard bound (book full / no capital headroom) the
+    remaining candidates are left queued; a candidate raced out of ``candidate`` between selection
+    and the txn is reported in ``skipped_stale`` and passed over. Reads paper account equity
+    READ-ONLY before opening any transaction (no trading).
+
+    ``--actor`` is a plain audit label here, NOT an authorization: ``candidate→paper`` is a
+    non-token-gated transition legal for ``agent`` already (the multiple-testing gates were paid at
+    the ``candidate`` boundary), so ``--actor human`` grants no privilege the agent lacks and needs
+    no authenticated-actor discipline (unlike the ``forward_tested→live`` go-live edge)."""
     if max_concurrent <= 0:
         raise ValueError('--max-concurrent must be positive')
+    actor_enum = Actor(actor)  # fail fast on a bad actor before touching the DB
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        equity = float(_alpaca_broker_from_settings().account().equity)
-        paper_lane = repo.list_strategies(Stage.PAPER) + repo.list_strategies(Stage.FORWARD_TESTED)
-        occupied = sum(1 for r in paper_lane if active_allocation(conn, r.id) is not None)
-        candidates = [Candidate(name=r.name, entry_ts=_candidate_entry_ts(repo, r.name), sid=r.id)
-                      for r in repo.list_strategies(Stage.CANDIDATE)]
-        plan = plan_intake(candidates, occupied_slots=occupied,
-                           total_allocated=total_allocated(conn), equity=equity,
-                           max_concurrent=max_concurrent)
+        equity = float(_alpaca_broker_from_settings().account().equity)  # broker read BEFORE txns
+        occupied = active_paper_lane_count(conn)
+        slc = slice_capital(equity, max_concurrent)
+        ordered = order_candidates(
+            Candidate(name=r.name, entry_id=_candidate_entry_id(repo, r.name), sid=r.id)
+            for r in repo.list_strategies(Stage.CANDIDATE))
         admitted: list[dict] = []
-        for name in plan.admit:
-            transition_strategy(repo, name, to=Stage.PAPER, actor=actor,
-                                reason='operator paper intake')
-            allocate_capital(conn, repo.get(name).id, capital=plan.slice_capital,
-                             actor=actor, account_equity=equity)
-            audit_append(conn, actor=Actor(actor).value, action='paper_intake',
-                         reason=f'slice {plan.slice_capital}', strategy=name)
-            admitted.append({'strategy': name, 'capital': plan.slice_capital})
-    emit(ok({'admitted': admitted, 'queued': plan.queued, 'equity': equity,
-             'slice': plan.slice_capital, 'occupied_before': occupied,
+        queued: list[str] = []
+        skipped_stale: list[str] = []
+        count = occupied
+        for i, cand in enumerate(ordered):
+            if slc <= 0.0 or count >= max_concurrent:
+                # Slice unfundable, or count cap already reached: queue the rest and stop.
+                queued.extend(c.name for c in ordered[i:])
+                break
+            try:
+                repo.intake_candidate_to_paper(
+                    repo.get(cand.name), capital=slc, actor=actor_enum,
+                    account_equity=equity, max_concurrent=max_concurrent)
+            except (CountCapReached, AllocationError):
+                # Hard bound bound in-txn (book full or no capital headroom): queue the rest, stop.
+                queued.extend(c.name for c in ordered[i:])
+                break
+            except TransitionError:
+                # Stale selection: a concurrent transition moved this candidate out of `candidate`
+                # before the CAS. Already handled elsewhere — pass over it, keep admitting.
+                skipped_stale.append(cand.name)
+                continue
+            audit_append(conn, actor=actor_enum.value, action='paper_intake',
+                         reason=f'slice {slc}', strategy=cand.name)
+            admitted.append({'strategy': cand.name, 'capital': slc})
+            count += 1
+    emit(ok({'admitted': admitted, 'queued': queued, 'skipped_stale': skipped_stale,
+             'equity': equity, 'slice': slc, 'occupied_before': occupied,
              'max_concurrent': max_concurrent}))
 
 
@@ -694,11 +720,24 @@ def run_all(
                 # signature (#124). Merge preserving each list's insertion order.
                 paper = repo.list_strategies(Stage.PAPER) + repo.list_strategies(
                     Stage.FORWARD_TESTED)
+                # A trading-stage strategy with NO active allocation is a recovery/demotion
+                # re-entrant (dormant->paper, live->paper), not a book tenant — sizing has no
+                # capital base for it. It is always FLAT (its slice was revoked on the way out),
+                # so we SKIP it, never TICK it: ticking would `raise "no paper allocation"` and
+                # abort the ENTIRE multi-tenant cycle — a book-wide DoS every time one strategy is
+                # recovered/demoted but not yet re-allocated (#317, finding #2). Computed ONCE,
+                # up front, so the skip list is surfaced in EVERY exit envelope (including the
+                # early reconcile-defer / halt returns), never only the loop-completes path.
+                skipped_unallocated = [prec.name for prec in paper
+                                       if active_allocation(conn, prec.id) is None]
+                tickable = [prec for prec in paper if prec.name not in set(skipped_unallocated)]
                 if not paper:
-                    emit(ok({"strategies": [], "note": "no paper-lane strategies"}))
+                    emit(ok({"strategies": [], "skipped_unallocated": skipped_unallocated,
+                             "note": "no paper-lane strategies"}))
                     return
                 if global_halt.is_engaged(conn):
-                    emit(breach_payload("global halt engaged", halted=True))
+                    emit({**breach_payload("global halt engaged", halted=True),
+                          "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1)
                 broker = _alpaca_broker_from_settings()
                 provider = _select_provider(False, snapshot)
@@ -735,12 +774,14 @@ def run_all(
                     global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
                                        actor="system")
                     emit({"ok": False, "deferred": True, "halted": True,
-                          "reconcile": recon_payload})
+                          "reconcile": recon_payload,
+                          "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1)
                 if not recon.clean:
                     counters.reconcile_deferred += 1
                     log.info("reconcile_deferred", extra={"fields": {"lane": "paper"}})
                     emit(ok({"strategies": [], "deferred": True, "reconcile": recon_payload,
+                             "skipped_unallocated": skipped_unallocated,
                              "note": "reconcile pending; deferring trades this cycle"}))
                     return
 
@@ -767,8 +808,11 @@ def run_all(
 
                 results: list[dict] = []
                 breached = False
-                for prec in paper:
+                for prec in tickable:
                     name = prec.name
+                    # The allocation check already happened up front (skipped_unallocated); an
+                    # unallocated non-tenant is never imported, so a broken module on a strategy
+                    # that isn't a book member can't abort the whole book with an import error.
                     strategy, rec = load_gated_strategy(conn, name, "paper run-all")
                     out = _run_paper_strategy_tick(
                         conn, name, strategy, rec, broker, provider, max_drawdown,
@@ -784,7 +828,8 @@ def run_all(
                             counters.flatten_failures += 1
                         breached = True
                         break
-            envelope = {"reconcile": recon_payload, "strategies": results}
+            envelope = {"reconcile": recon_payload, "strategies": results,
+                        "skipped_unallocated": skipped_unallocated}
             if breached:
                 # A strategy breached/halted (already tripped + scoped-flattened): surface the
                 # breaching strategy AND every sibling ticked before it in one envelope, then exit

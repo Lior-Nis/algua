@@ -214,3 +214,70 @@ def test_intake_occupied_slot_blocks_admission(monkeypatch):
     from algua.contracts.lifecycle import Stage
     assert _stage_of(_S1) is Stage.CANDIDATE
     assert not _has_allocation(_S1)
+
+
+# ---------------------------------------------------------------------------
+# The atomic admit primitive directly (findings #1/#3/#4)
+# ---------------------------------------------------------------------------
+
+def test_intake_reports_empty_stale_bucket_on_clean_run(monkeypatch):
+    """`skipped_stale` is always present in the envelope (empty on a race-free run)."""
+    _to_candidate(_S1)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    payload = json.loads(runner.invoke(app, ["paper", "intake"]).output)
+    assert payload["skipped_stale"] == []
+    assert [a["strategy"] for a in payload["admitted"]] == [_S1]
+
+
+def test_primitive_rejects_non_candidate():
+    """`intake_candidate_to_paper` fails closed (TransitionError) on a non-candidate stage — the
+    'stale selection' signal the intake loop treats as skipped_stale."""
+    from algua.contracts.lifecycle import Actor, TransitionError
+    _to_candidate(_S1)
+    _force_stage(_S1, "paper")  # no longer a candidate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        repo = SqliteStrategyRepository(conn)
+        with pytest.raises(TransitionError):
+            repo.intake_candidate_to_paper(
+                repo.get(_S1), capital=10_000.0, actor=Actor.AGENT,
+                account_equity=100_000.0, max_concurrent=5)
+
+
+def test_primitive_count_cap_is_atomic_and_rolls_back():
+    """At the count cap the primitive raises CountCapReached and leaves the candidate exactly
+    candidate with NO allocation (the allocation insert is rolled back with the failed txn)."""
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.allocations import CountCapReached
+    # _S2 occupies the sole slot (allocated paper tenant); _S1 is the queued candidate.
+    _to_candidate(_S2)
+    _force_stage(_S2, "paper")
+    _seed_allocation(_S2)
+    _to_candidate(_S1)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        repo = SqliteStrategyRepository(conn)
+        with pytest.raises(CountCapReached):
+            repo.intake_candidate_to_paper(
+                repo.get(_S1), capital=10_000.0, actor=Actor.AGENT,
+                account_equity=100_000.0, max_concurrent=1)
+        assert repo.get(_S1).stage is Stage.CANDIDATE
+        assert active_allocation(conn, repo.get(_S1).id) is None
+
+
+def test_primitive_capital_bound_rolls_back():
+    """When the slice would breach Σ ≤ equity the primitive raises AllocationError and leaves the
+    strategy candidate + unallocated (atomic rollback of the whole admit)."""
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.allocations import AllocationError
+    _to_candidate(_S1)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        repo = SqliteStrategyRepository(conn)
+        with pytest.raises(AllocationError):
+            repo.intake_candidate_to_paper(
+                repo.get(_S1), capital=200_000.0, actor=Actor.AGENT,
+                account_equity=100_000.0, max_concurrent=5)
+        assert repo.get(_S1).stage is Stage.CANDIDATE
+        assert active_allocation(conn, repo.get(_S1).id) is None
