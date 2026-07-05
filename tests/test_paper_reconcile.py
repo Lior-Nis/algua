@@ -59,3 +59,22 @@ def test_reconcile_clean_when_attributed_explains_broker(tmp_path):
     _add_fill(c, "a1", "pap", "AAPL", 10.0)
     r = P.reconcile(c, {"AAPL": 10.0}, P.next_cycle(c))
     assert r.clean and not r.halt
+
+
+def test_attributed_net_includes_forward_tested(tmp_path):
+    """A forward_tested strategy is still on the paper LANE (parity with load_gated_strategy /
+    `paper run-all`'s stage IN ('paper','forward_tested') admission): its fills must keep
+    explaining its broker holdings, or the account-wide reconcile would treat them as an
+    unattributable residual and defer/halt the whole multi-tenant cycle."""
+    c = _conn(tmp_path)
+    _add_strategy(c, "grad", "forward_tested")
+    _add_fill(c, "a1", "grad", "AAPL", 10.0)
+    assert P.attributed_paper_net(c) == {"AAPL": 10.0}
+
+
+def test_reconcile_clean_when_forward_tested_explains_broker(tmp_path):
+    c = _conn(tmp_path)
+    _add_strategy(c, "grad", "forward_tested")
+    _add_fill(c, "a1", "grad", "AAPL", 10.0)
+    r = P.reconcile(c, {"AAPL": 10.0}, P.next_cycle(c))
+    assert r.clean and not r.halt
