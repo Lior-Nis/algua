@@ -203,6 +203,30 @@ def test_submit_sized_uses_fixed_equity_denominator(monkeypatch):
     assert fake.posted[1]["notional"] == "30000.00"
 
 
+def test_posted_notional_matches_submit_sized(monkeypatch):
+    """`posted_notional(grant)` returns EXACTLY what a reserved BUY of `grant` posts through
+    submit_sized: floor to cents (ROUND_FLOOR), and 0.0 (skip, no POST) below MIN_NOTIONAL. The
+    paper run-all buying-power pool debits by this value, so the two MUST agree."""
+    snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})
+
+    # (a) a fractional grant posts the floored cents; posted_notional agrees
+    fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "order-x"}))
+    monkeypatch.setattr(ab, "requests", fake)
+    oid = _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                                 reserve=lambda _s, _a: 100.999)
+    assert oid == "order-x"
+    assert fake.posted[0]["notional"] == "100.99"
+    assert ab.posted_notional(100.999) == 100.99
+
+    # (b) a sub-MIN_NOTIONAL grant is skipped (no POST); posted_notional is 0.0
+    fake2 = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "nope"}))
+    monkeypatch.setattr(ab, "requests", fake2)
+    assert _broker().submit_sized(OrderIntent("AAA", Side.BUY, 0.5, T0), snap,
+                                  reserve=lambda _s, _a: 0.50) == "skipped"
+    assert fake2.posted == []
+    assert ab.posted_notional(0.50) == 0.0
+
+
 def test_submit_sized_rejects_symbol_outside_universe(monkeypatch):
     # #29: a typo'd symbol absent from the snapshot universe must raise, not size a phantom buy
     fake = _FakeRequests({}, post_resp=_FakeResp(201, {"id": "x"}))

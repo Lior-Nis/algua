@@ -33,12 +33,17 @@ def paper_account_expected_net(conn: sqlite3.Connection) -> dict[str, float]:
 
 
 def attributed_paper_net(conn: sqlite3.Connection) -> dict[str, float]:
-    """Σ paper_venue_fills counting ONLY fills attributed to a CURRENTLY-PAPER strategy. Orphan
-    (strategy IS NULL) and non-paper fills are EXCLUDED so they can never 'explain' a broker
-    position. Zero nets omitted."""
+    """Σ paper_venue_fills counting ONLY fills attributed to a strategy CURRENTLY on the paper
+    LANE (stage 'paper' OR 'forward_tested' — the same admission set as ``load_gated_strategy``
+    / ``paper run-all``: a forward_tested strategy keeps paper-ticking while awaiting the go-live
+    signature, so its fills must keep explaining its broker holdings, or the account-wide
+    reconcile would treat them as an unattributable residual and defer/halt the whole cycle).
+    Orphan (strategy IS NULL) and non-paper-lane fills are EXCLUDED so they can never 'explain' a
+    broker position. Zero nets omitted."""
     rows = conn.execute(
         "SELECT f.symbol AS symbol, SUM(f.qty) AS q FROM paper_venue_fills f "
-        "JOIN strategies s ON s.name = f.strategy AND s.stage = 'paper' "
+        "JOIN strategies s ON s.name = f.strategy "
+        "AND s.stage IN ('paper', 'forward_tested') "
         "GROUP BY f.symbol"
     ).fetchall()
     return {r["symbol"]: float(r["q"]) for r in rows if float(r["q"]) != 0.0}

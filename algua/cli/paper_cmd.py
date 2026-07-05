@@ -28,9 +28,15 @@ from algua.contracts.types import (
     OrderIntent,
     OrderLookupBroker,
     PositionsBroker,
+    ScopedCancelBroker,
 )
 from algua.execution import paper_reconcile
-from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
+from algua.execution.alpaca_broker import (
+    AlpacaLiveReadOnlyBroker,
+    AlpacaPaperBroker,
+    BrokerError,
+    posted_notional,
+)
 from algua.execution.flatten import flatten_strategy
 from algua.execution.fleet_health import strategy_health
 from algua.execution.live_ledger import (
@@ -40,6 +46,7 @@ from algua.execution.live_ledger import (
     delete_paper_venue_order,
     fill_cursor,
     ingest_activities,
+    owned_open_order_ids,
     paper_believed_positions,
     record_paper_venue_order,
     recover_stranded_broker_order_ids,
@@ -144,6 +151,12 @@ def _recover_stranded(
         audit_append(conn, actor="system", action="stranded_recovery_mismatch",
                      reason=f"{len(outcome.mismatched)} broker mismatch: {outcome.mismatched}",
                      strategy=None)
+
+
+def _paper_scoped_cancel(conn, broker: ScopedCancelBroker, name: str) -> None:
+    """Cancel only THIS strategy's open PAPER orders (never a sibling's)."""
+    for oid in owned_open_order_ids(conn, broker, name, kind=LedgerKind.PAPER):
+        broker.cancel_order(oid)
 
 
 def _ingest_paper_venue(
@@ -354,7 +367,7 @@ def account() -> None:
 
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
-    tick_ts, clock_source, acct, *, cancel=None,
+    tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
     start: str, end: str,
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
@@ -400,6 +413,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         on_noop=_on_noop,
         should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
         cancel=cancel,
+        reserve_buy=reserve_buy,
         peak_equity=get_peak_equity(conn, name),
         live_snapshot=lambda bars: build_paper_sizing_snapshot(
             conn, name, allocation, bars, strategy.universe),
@@ -432,12 +446,14 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                     **breach_payload(exc.detail, strategy=name, kind=exc.kind, halted=True,
                                      global_halt="set", liquidation_submitted=False)}
         # ECONOMIC / integrity breach (drawdown, gross_exposure_realized, reconcile,
-        # non_positive_equity, ...): trip + scoped flatten. Account-wide cancel; ingest fills up to
-        # the broker clock, then offset every believed position — single-sourced in the execution
+        # non_positive_equity, ...): trip + scoped flatten. The cancel is scoped when the caller
+        # supplies one (run-all passes a per-strategy scoped cancel so a breach never cancels a
+        # sibling's orders); account-wide fallback for single-strategy trade-tick. Ingest fills up
+        # to the broker clock, then offset every believed position — single-sourced in the execution
         # layer (#336).
         res = flatten_strategy(
             conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
-            cancel=broker.cancel_open_orders,
+            cancel=cancel if cancel is not None else broker.cancel_open_orders,
             ingest=lambda: _ingest_paper_venue(conn, broker, tick_clock(broker.clock)[0]),
         )
         payload = breach_payload(exc.detail, kind=exc.kind,
@@ -566,6 +582,165 @@ def trade_tick(
         except Exception:
             log.error("cycle_failed", extra={"fields": {"strategy": name, "lane": "paper"}},
                       exc_info=True)
+            raise
+        finally:
+            log.info("golden_signals", extra={"fields": counters.as_fields()})
+
+
+@paper_app.command("run-all")
+@json_errors
+def run_all(
+    snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    max_drawdown: float | None = typer.Option(
+        None, "--max-drawdown",
+        help="halt + flatten a strategy if equity falls this fraction below its peak; "
+             "omit for the default-ON bound"),
+    disable_drawdown_breaker: bool = typer.Option(
+        False, "--disable-drawdown-breaker",
+        help="HUMAN-ONLY emergency: turn the drawdown breaker fully OFF (audited)"),
+) -> None:
+    """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest venue fills,
+    reconcile the account against the paper broker, then tick each strategy (scoped cancel on a
+    breach so one strategy never cancels a sibling's resting orders). Trades only when the account
+    reconciles clean; a persistent unexplained drift engages the global halt. A simple whole-account
+    buying-power pool caps the aggregate of this cycle's buys (NO book-level #389 risk here).
+
+    Strategy selection is ``stage IN ('paper','forward_tested')`` — the same admission set as
+    ``load_gated_strategy`` and single-strategy ``paper trade-tick``: a forward_tested strategy
+    keeps paper-ticking while awaiting the go-live signature so its live-wall certificate stays
+    fresh (#124). The "paper" in the name is the LANE, not a paper-only stage filter.
+
+    CONCURRENCY: run-all and ``paper trade-tick`` (and the paper liquidation commands) each ingest
+    venue fills and mutate the shared paper account; they are NOT mutually safe under concurrent
+    execution (double-ingest, reconcile races, per-process buying-power over-commit). They are
+    mutually-exclusive BY OPERATOR DISCIPLINE only — do not run two paper-account cycles at once. An
+    advisory paper-lane lock that enforces this is a filed follow-up (see the design doc)."""
+    if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
+        raise ValueError("--max-drawdown must be in (0, 1]")
+    max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
+    start, end = resolve_wall_clock_window(start, end)
+    configure_logging()
+    counters = CycleCounters()
+    # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives even
+    # when the cycle fails before/around the strategy loop (#346).
+    with correlation_context():
+        log.info("cycle_start", extra={"fields": {"lane": "paper", "snapshot": snapshot}})
+        try:
+            with registry_conn() as conn:
+                if disable_drawdown_breaker:
+                    audit_append(conn, actor="human", action="drawdown_breaker_disabled",
+                                 reason="paper run-all invoked with --disable-drawdown-breaker",
+                                 strategy=None)
+                repo = SqliteStrategyRepository(conn)
+                # Both paper-lane stages tick (parity with load_gated_strategy / trade-tick): a
+                # forward_tested strategy keeps accruing evidence ticks awaiting the go-live
+                # signature (#124). Merge preserving each list's insertion order.
+                paper = repo.list_strategies(Stage.PAPER) + repo.list_strategies(
+                    Stage.FORWARD_TESTED)
+                if not paper:
+                    emit(ok({"strategies": [], "note": "no paper-lane strategies"}))
+                    return
+                if global_halt.is_engaged(conn):
+                    emit(breach_payload("global halt engaged", halted=True))
+                    raise typer.Exit(1)
+                broker = _alpaca_broker_from_settings()
+                provider = _select_provider(False, snapshot)
+                acct = broker.account()
+                tick_ts, clock_source = tick_clock(broker.clock)
+                # ingest fills + recover crash-stranded rows BEFORE reconcile; fail closed on any
+                # transport/venue error so a partial ingest can never read as reconcile drift.
+                try:
+                    _ingest_paper_venue(conn, broker, tick_ts)
+                    _recover_stranded(conn, broker, LedgerKind.PAPER)
+                except Exception as exc:  # fail closed on ANY ingest/transport error
+                    audit_append(conn, actor="system", action="venue_ingest_failed",
+                                 reason=str(exc), strategy=None)
+                    log.error("venue_ingest_failed",
+                              extra={"fields": {"lane": "paper"}}, exc_info=True)
+                    emit(breach_payload(str(exc), kind="venue_ingest_failed"))
+                    raise typer.Exit(1) from exc
+
+                # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book.
+                # halt -> global halt; not clean -> defer the whole cycle (no trade); clean -> tick.
+                cycle = paper_reconcile.next_cycle(conn)
+                recon = paper_reconcile.reconcile(conn, _paper_broker_net(broker), cycle)
+                recon_payload = {
+                    "cycle": cycle,
+                    "clean": recon.clean,
+                    "halt": recon.halt,
+                    "mismatches": recon.mismatches,
+                }
+                if recon.halt:
+                    counters.reconcile_halted += 1
+                    log.error("reconcile_halt",
+                              extra={"fields": {"lane": "paper",
+                                                "mismatches": recon.mismatches}})
+                    global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
+                                       actor="system")
+                    emit({"ok": False, "deferred": True, "halted": True,
+                          "reconcile": recon_payload})
+                    raise typer.Exit(1)
+                if not recon.clean:
+                    counters.reconcile_deferred += 1
+                    log.info("reconcile_deferred", extra={"fields": {"lane": "paper"}})
+                    emit(ok({"strategies": [], "deferred": True, "reconcile": recon_payload,
+                             "note": "reconcile pending; deferring trades this cycle"}))
+                    return
+
+                # Simple whole-account buying-power pool: the aggregate of this cycle's buys can
+                # never exceed the paper account's buying power. Each strategy's reserve trims first
+                # against the running pool; a trimmed buy is audited (accounting stays in step).
+                pool = {"available": float(acct.buying_power)}
+
+                def _paper_reserve_for(strategy_name):
+                    def _reserve(symbol: str, notional: float) -> float:
+                        grant = min(notional, max(0.0, pool["available"]))
+                        # Debit the pool by what submit_sized will ACTUALLY post, not the raw grant:
+                        # a grant that floors to cents or falls below MIN_NOTIONAL is skipped by
+                        # submit_sized (posts nothing), so debiting `grant` would phantom-consume
+                        # BP for a buy that never happened and wrongly starve a later sibling. The
+                        # shared `posted_notional` keeps pool == start_BP - sum(real posted buys).
+                        pool["available"] -= posted_notional(grant)
+                        if grant < notional:  # the POOL bound this buy -> audit the shortfall
+                            audit_append(conn, actor="system", action="paper_reserve_trim",
+                                         reason=f"{symbol} {notional}->{grant}",
+                                         strategy=strategy_name)
+                        return grant
+                    return _reserve
+
+                results: list[dict] = []
+                breached = False
+                for prec in paper:
+                    name = prec.name
+                    strategy, rec = load_gated_strategy(conn, name, "paper run-all")
+                    out = _run_paper_strategy_tick(
+                        conn, name, strategy, rec, broker, provider, max_drawdown,
+                        tick_ts, clock_source, acct,
+                        reserve_buy=_paper_reserve_for(name),
+                        cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
+                        start=start, end=end)
+                    results.append(out)
+                    counters.ticks += 1
+                    if out.get("ok") is False:  # breach/halt marker: stop, keep prior results
+                        counters.breaches += 1
+                        if out.get("flatten_error") is not None:
+                            counters.flatten_failures += 1
+                        breached = True
+                        break
+            envelope = {"reconcile": recon_payload, "strategies": results}
+            if breached:
+                # A strategy breached/halted (already tripped + scoped-flattened): surface the
+                # breaching strategy AND every sibling ticked before it in one envelope, then exit
+                # non-zero (#270) — don't discard the prior results.
+                emit({"ok": False, **envelope})
+                raise typer.Exit(1)
+            emit(ok(envelope))
+        except typer.Exit:
+            raise
+        except Exception:
+            log.error("cycle_failed", extra={"fields": {"lane": "paper"}}, exc_info=True)
             raise
         finally:
             log.info("golden_signals", extra={"fields": counters.as_fields()})

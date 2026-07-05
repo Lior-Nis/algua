@@ -1826,6 +1826,7 @@ class _FakePaperBroker:
         self._marks = marks
         self.force_breach = force_breach
         self.submitted: list = []
+        self.account_wide_cancels: int = 0
 
     def account(self) -> AccountState:
         return AccountState(equity=self.account_equity, cash=self.account_equity,
@@ -1841,6 +1842,7 @@ class _FakePaperBroker:
         return pd.Series(self._positions, dtype="float64")
 
     def cancel_open_orders(self) -> None:
+        self.account_wide_cancels += 1
         if self.force_breach:
             raise RiskBreach("drawdown", "forced breach for testing")
 
@@ -1975,3 +1977,38 @@ def test_trade_tick_breach_trips_and_scoped_flattens(monkeypatch, tmp_path):
                                  "--max-drawdown", "0.01"])
     assert result.exit_code != 0
     assert kill_switch_is_tripped(name)
+
+
+def test_run_paper_strategy_tick_breach_uses_scoped_cancel(monkeypatch, tmp_path):
+    # A caller-supplied scoped cancel (run-all passes a per-strategy one) must be used on a breach
+    # flatten — NOT the broker's account-wide cancel, which would nuke a sibling's resting orders.
+    from algua.cli import paper_cmd
+    from algua.cli._common import registry_conn
+    from algua.registry.gating import load_gated_strategy
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0},
+                              force_breach=True)
+    # Force the tick to breach deterministically (no dependence on the synthetic signal).
+    monkeypatch.setattr(paper_cmd, "run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "forced")))
+
+    scoped_cancels = {"n": 0}
+
+    def _scoped_cancel() -> None:
+        scoped_cancels["n"] += 1
+
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        out = paper_cmd._run_paper_strategy_tick(
+            conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+            "tick-ts", "broker", broker.account(), cancel=_scoped_cancel,
+            start="2026-01-01", end="2026-02-01")
+
+    assert out["ok"] is False
+    assert scoped_cancels["n"] >= 1                 # the scoped cancel WAS used
+    assert broker.account_wide_cancels == 0          # the account-wide cancel was NOT

@@ -7,6 +7,7 @@ from algua.execution.live_ledger import (
     fill_cursor,
     fills_table,
     ingest_activities,
+    owned_open_order_ids,
     paper_believed_positions,
     record_paper_venue_order,
 )
@@ -91,3 +92,26 @@ def test_record_then_backfill_attributes_early_fill(tmp_path):
 def test_fills_table_returns_per_kind_table():
     assert fills_table(LedgerKind.LIVE) == "live_fills"
     assert fills_table(LedgerKind.PAPER) == "paper_venue_fills"
+
+
+class _B:
+    def list_open_orders(self):
+        return [
+            {"id": "o1", "client_order_id": "coid-s1"},
+            {"id": "o2", "client_order_id": "coid-s2"},
+        ]
+
+
+def test_owned_open_order_ids_paper_kind_reads_paper_venue_orders(tmp_path):
+    c = _conn(tmp_path)
+    for sid, nm in ((1, "s1"), (2, "s2")):
+        c.execute(
+            "INSERT INTO strategies(id,name,stage,created_at,updated_at)"
+            " VALUES (?,?,?,?,?)",
+            (sid, nm, "paper", "t", "t"),
+        )
+    c.commit()
+    record_paper_venue_order(c, "s1", "AAA", "buy", None, "coid-s1", strategy_id=1)
+    record_paper_venue_order(c, "s2", "BBB", "buy", None, "coid-s2", strategy_id=2)
+    # scoped to s1 AND to the paper order ledger: only s1's open order, never s2's sibling order.
+    assert owned_open_order_ids(c, _B(), "s1", kind=LedgerKind.PAPER) == ["o1"]
