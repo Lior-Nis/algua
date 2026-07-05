@@ -65,7 +65,13 @@ def test_backfill_back_attributes_fill_ingested_before_order_mapping(tmp_path):
     assert post["strategy"] == "s1"                    # attribution attached, fill not orphaned
     assert L.believed_positions(conn, "s1", L.LedgerKind.LIVE) == {"AAA": 10.0}
 
-    # 3. Reconcile against the broker's matching net shows zero drift (clean, no halt).
+    # 3. Reconcile against the broker's matching net shows zero drift (clean, no halt). The
+    #    reconcile (#451) attributes only fills of a CURRENTLY-LIVE strategy, so s1 must be live.
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES (?, 'live', ?, ?)",
+        ("s1", "2026-06-06T00:00:00+00:00", "2026-06-06T00:00:00+00:00"),
+    )
+    conn.commit()
     result = R.reconcile(conn, broker_net={"AAA": 10.0}, cycle=1)
     assert result.clean is True and result.halt is False and result.mismatches == []
 

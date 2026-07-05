@@ -1,5 +1,7 @@
-"""Account-level reconcile for the LIVE lane: the books' expected net (Σ all live_fills) must match
-the broker's netted book per symbol. The grace-window + persisted-state algorithm lives in
+"""Account-level reconcile for the LIVE lane: the books' expected net must match the broker's netted
+book per symbol. The reconcile gates on `attributed_live_net` (only fills attributed to a
+CURRENTLY-LIVE strategy), so an orphan/dormant/retired holding leaves an unexplained residual and
+fails closed — mirroring `paper_reconcile`. The grace-window + persisted-state algorithm lives in
 `reconcile_core`; this module supplies the live `expected` net and the live table names."""
 from __future__ import annotations
 
@@ -55,6 +57,6 @@ def reconcile(
     grace_cycles: int = DEFAULT_GRACE_CYCLES,
 ) -> ReconcileResult:
     return reconcile_account(
-        conn, broker_net, account_expected_net(conn), cycle,
+        conn, broker_net, attributed_live_net(conn), cycle,
         state_table="live_reconcile_state", tolerance=tolerance, grace_cycles=grace_cycles,
     )
