@@ -1,37 +1,65 @@
 # Operator paper intake — admit candidates into the shared paper book (#317)
 
-**Status:** Draft (GATE-1 revision 4 — closes the #317 issue-body TBDs, the three original GATE-1
-blocking findings, the round-2 Codex findings, AND the round-3 Codex BLOCK (4 HIGH + fold-ins). The
-unifying invariant is a **one-way** implication (NOT an iff — Codex round-4), closed at BOTH ends:
+**Status:** Design complete; **PARTIALLY IMPLEMENTED — Slice-1 only** (see the banner below). The
+sections that follow describe the FULL intended design; §§3, 4.1–4.2, 5.2, 5.3, 5.5 are what this PR
+actually ships, while §4.3, §5.1, and §5.4 (the exit-side revoke wiring, `paper allocate`,
+`live allocate` stage-gating, and the shared `allocate_in_lane` primitive) are **DESIGNED BUT NOT
+YET BUILT** and are tracked as follow-up **#497**. Do not read this doc as evidence the end-to-end
+allocation invariant is enforced today — it is not (see the leak note below).
+
+> ### ⚠️ Implementation status — what this PR actually ships vs. #497
+>
+> **SHIPPED in this PR (#317):**
+> - The atomic `intake_candidate_to_paper` primitive — `candidate→paper` admission that, under ONE
+>   `BEGIN IMMEDIATE`, re-checks the max-concurrent count cap, capital-checks + allocates an equal
+>   cents-floored slice (Σ ≤ paper-account equity, via the shared commit-less `allocate_locked`), and
+>   CASes `candidate→paper`, committing/rolling back together (§5.2). This closes finding #3.
+> - The `paper intake` CLI over that primitive (FIFO order by `stage_transitions.id`; `skipped_stale`
+>   on a raced-out selection).
+> - The `paper run-all` `skipped_unallocated` defensive skip: a trading-stage strategy with no active
+>   allocation is skipped, never ticked, so it can't `raise "no paper allocation"` and abort the
+>   whole cycle (§5.5). This is a resilience guard — it is NOT the exit-side revoke.
+> - Supporting `allocations` helpers: `active_paper_lane_count`, `allocate_locked`, `CountCapReached`.
+>
+> **NOT shipped — deferred to #497 (the exit-side half of the invariant):**
+> - Book-exit / lane-crossing revoke wiring in `transitions.py` (`paper→dormant`, `paper→retired`,
+>   `paper→candidate`, `forward_tested→retired`, `live→paper`, `live→retired`) — §5.4.
+> - `paper allocate` CLI, `live allocate` stage-gating to `stage==LIVE` (with in-lock TOCTOU
+>   re-assert), the shared `allocate_in_lane` primitive, deletion of the stage-blind `allocate()`,
+>   the go-live paper-slice shed, and generalizing `_assert_flat_for_bench` to the source stage — §4.3/§5.1.
+> - The Section-8 test coverage for all of the above (book-exit revoke, go-live shed, `live→paper`
+>   mirror, stage-gate rejection). None of these tests exist in this PR.
+>
+> **KNOWN LIMITATION (capital leak) until #497 lands:** because no book-exit revoke is wired,
+> benching / retiring / back-stepping a paper-lane strategy (`paper→dormant`, `paper→retired`,
+> `paper→candidate`, `forward_tested→retired`) leaves its `strategy_allocations` row active
+> (`revoked_ts IS NULL`). Its slice's headroom is **permanently consumed** against `total_allocated()`
+> until #497, so intake will eventually starve. Operators should treat `total_allocated()` as
+> potentially over-counting departed tenants and, until #497, manually revoke on book exit if needed.
+>
+> **The end-to-end invariant below (an active allocation ⟹ trading stage, closed at BOTH ends) is the
+> DESIGN TARGET of #497 — it does NOT hold as shipped in #317.**
+
+The unifying invariant is a **one-way** implication (NOT an iff — Codex round-4), intended to be
+closed at BOTH ends:
 **an active allocation ⟹ the strategy is at `stage ∈ {paper, forward_tested, live}`** — maintained at the
 *entry* points (every allocator refuses to create a row outside those stages: `live allocate` → `LIVE`
 only, `paper allocate` → `{paper, forward_tested}` only, `intake` → `candidate→paper` only, §5.1) and at
 the *exit* points (an allocation is revoked atomically with the stage CAS on every transition that leaves
-those three stages or crosses lanes, §5.4). The **converse does not hold**: a strategy can be at a
+those three stages or crosses lanes, §5.4). Of these, ONLY the `intake` entry-point and its count/capital
+checks ship in #317; the `paper allocate` / `live allocate` entry gates and ALL exit revokes are #497.
+The **converse does not hold**: a strategy can be at a
 trading stage *without* an allocation — a recovery/demotion re-entrant (`dormant→paper`, `live→paper`),
 or a strategy freshly at `live` after go-live shed its paper slice — until it is (re-)allocated. So an
 **active book tenant** is defined as `stage ∈ lane AND has an active allocation`; an unallocated
-trading-stage strategy is a not-yet-(re)admitted non-tenant, skipped by `run-all` (§5.5). Round-3 fixes: (HIGH-1) `live allocate` is gated to `stage ==
-LIVE` only, mirroring the paper gate — closing the lane-agnostic sizing leak at its own source;
-(HIGH-2) the count cap is **moved INSIDE** the atomic `intake_candidate_to_paper` transaction, so it is
-race-proof under the `BEGIN IMMEDIATE` write lock, not merely operator-serialized; (HIGH-3) the
-`live_authorization` acceptance predicate itself is narrowed to the exact edge `source==FORWARD_TESTED
-AND target==LIVE` (not target-only); (HIGH-4) with the entry-point gates in place the revoke table is
-proven **exhaustive** — the previously-missing `live→retired` row is added, and the
-`candidate→backtested` / `candidate→retired` / `dormant→retired` edges provably can never carry a
-stray allocation (no allocator can create one there). The atomic `intake_candidate_to_paper` primitive
-still closes finding #3; `run-all` skips (not raises on) unallocated re-entrants (§5.5). Fold-ins:
-FIFO orders by `stage_transitions` row **id** (not wall-clock ts); the intake loop handles a
-stale-selection CAS failure (surfaced as `skipped_stale`); `run-all` checks the allocation **before**
-loading the strategy module and reports `skipped_unallocated` in **every** envelope; the allocation
-paths use `BaseException` rollback discipline.
-Round-4/5/6 (GATE-1 re-runs, now **APPROVED** by the adversarial Codex pass): the invariant is corrected
-to a **one-way** implication (a trading-stage strategy may be transiently unallocated); the
-`dormant→paper` recovery cap bypass AND its **TOCTOU** variant are both closed by routing `paper
-allocate` and `live allocate` through ONE shared `allocations.allocate_in_lane` primitive that re-reads
-the stage **and** re-checks the count **inside** its `BEGIN IMMEDIATE` (the stage-blind public
-`allocate()` is deleted); broker equity is read before the txn opens; `allocate_locked` is contained to
-two gated callers by a guard test.)
+trading-stage strategy is a not-yet-(re)admitted non-tenant, skipped by `run-all` (§5.5). The intake
+side (this PR): the count cap is enforced INSIDE the atomic `intake_candidate_to_paper` transaction, so it is
+race-proof under the `BEGIN IMMEDIATE` write lock, not merely operator-serialized; the atomic
+`intake_candidate_to_paper` primitive closes finding #3; `run-all` skips (not raises on) unallocated
+re-entrants (§5.5). FIFO orders by `stage_transitions` row **id** (not wall-clock ts); the intake loop
+handles a stale-selection CAS failure (surfaced as `skipped_stale`); `run-all` checks the allocation
+**before** loading the strategy module and reports `skipped_unallocated` in **every** envelope; the
+allocation paths use `BaseException` rollback discipline.
 **Date:** 2026-07-05
 **Issue:** #317 (epic #318 — autonomous paper operator)
 **Depends on:** #316 (`paper run-all`, MERGED), the shared `strategy_allocations` primitive
@@ -87,20 +115,23 @@ transaction (§5.2) — so there is no observable allocated-but-still-candidate 
 **both** bounds are enforced under the same `BEGIN IMMEDIATE` write lock (neither can be raced past;
 §4/§6.1). When the book is full,
 leave the candidate queued (no transition, no allocation). Idempotent and convergent: re-running
-produces the same book. An allocation is **revoked atomically on any book-exit or lane crossing** (§5.4),
-so slots genuinely free and neither lane can ever inherit the other's slice; the resulting unallocated
-re-entrants are skipped, not crashed on, by `run-all` (§5.5).
+produces the same book. In the FULL design an allocation is **revoked atomically on any book-exit or
+lane crossing** (§5.4) so slots genuinely free and neither lane can ever inherit the other's slice —
+but that exit-revoke is **deferred to #497 and does NOT ship in #317** (see the top-of-doc banner); as
+shipped, slots do not auto-free on book exit. The `run-all` skip of unallocated re-entrants (§5.5) does
+ship.
 
 ### Non-goals (deferred, off #317's minimal path)
 - The `is_due` / session scheduler and the systemd timers (epic Group 4) — separate slices.
 - The `family-audit` quarantine guard (epic §6.5) — intake exposes a filter **seam** for it (§4.4)
   but does not build the guard.
 - A `lane` **column** on the shared allocations table (row-level lane attribution) — deferred as a
-  schema bump. #317 does NOT need it: both lane-crossing *sizing* leaks (a paper slice sized by live on
-  go-live, and a live slice sized by paper on demotion) are closed in-scope **without** a column, by
-  revoking the allocation on the crossing edge (§5.4). The column is only needed for a genuinely
-  *concurrent* live+paper book (both lanes allocating against a shared Σ at once), which the paper-only
-  operator never runs (§9).
+  schema bump. The FULL design avoids needing it by revoking the allocation on the crossing edge (§5.4)
+  to close both lane-crossing *sizing* leaks (a paper slice sized by live on go-live, and a live slice
+  sized by paper on demotion) **without** a column — but that revoke is itself **deferred to #497**, so
+  in #317 those sizing leaks are NOT yet closed. The column is only needed for a genuinely *concurrent*
+  live+paper book (both lanes allocating against a shared Σ at once), which the paper-only operator never
+  runs (§9).
 - Per-strategy slice sizing / risk-parity weighting — fixed slice only (epic §7).
 
 ---
@@ -182,7 +213,12 @@ backstop. They are orthogonal and both wanted.
 `paper_cmd.py:365`), via a new `_paper_account_equity()` helper mirroring live's
 `_live_account_equity()`. Read once at the top of an intake run and passed into each `allocate`.
 
-### 4.3 Interaction with the shared allocations table + the go-live sizing gate (finding #2, in-scope)
+### 4.3 Interaction with the shared allocations table + the go-live sizing gate (finding #2)
+
+> **DEFERRED to #497 — NOT shipped in #317.** Everything in this subsection (the `live allocate`
+> stage gate, the `forward_tested→live` paper-slice shed, the exit revokes) is design only. In the
+> shipped code `total_allocated()` still over-counts departed paper tenants; see the leak note at top.
+
 `allocations.total_allocated` sums **all** non-revoked rows regardless of lane. Under the autonomous
 **paper-only** operator there are no live allocations, so `Σ = paper Σ` and the equity denominator is
 the paper account — correct.
@@ -232,6 +268,13 @@ pass-through — the single call-site where the §6.5 guard drops in later.
 ## 5. Decision 3 — composition with `paper allocate` (Slice-1) and `paper run-all` (#316)
 
 ### 5.1 `paper allocate` is built HERE (Slice-1 never landed)
+
+> **DEFERRED to #497 — NOT shipped in #317.** `paper allocate`, `live allocate` stage-gating, and the
+> shared `allocate_in_lane` primitive (with in-lock stage re-read + count check) are design only. The
+> shipped `allocations` module exposes the commit-less `allocate_locked` (used by `intake`) and still
+> retains the stage-blind public `allocate()`; `allocate_in_lane` and the `paper allocate` CLI do not
+> exist yet. The intake path (§5.2) is the ONLY allocator that ships in #317.
+
 The issue says intake "reuses Slice-1 `paper allocate`," but Slice-1 shipped only in PR #288, which
 is being **closed** (see PR #487) — so `paper allocate` is absent from main. #317 builds it as a
 close analog of `live allocate`, but with a **tighter, lane-scoped stage gate** (a naive
@@ -421,7 +464,14 @@ Intake and `run-all` are **decoupled through the registry+allocations state**, n
   tenant (epic §4/§6.1 places intake in the research/merge-back job; `run-all` in the post-close paper
   runtime — naturally intake-then-tick across jobs). Within one job, run intake, then run-all.
 
-### 5.4 The allocation invariant — revoke on any lane change or book exit (findings #1 + #2, in-scope)
+### 5.4 The allocation invariant — revoke on any lane change or book exit (findings #1 + #2)
+
+> **DEFERRED to #497 — NOT shipped in #317.** The revoke table below is design only; in the shipped
+> code only the pre-existing `LIVE→DORMANT` edge revokes. Every other book-exit / lane-crossing edge
+> still leaves the allocation row live — this is the shipped capital leak (see the banner at top). The
+> "provably exhaustive" / "invariant holds by construction" language below describes the #497 END
+> STATE, not #317.
+
 Intake's convergence claim (§6.2) and the go-live gate (§4.3) both rest on one invariant that the
 current transition machinery does **not** yet enforce:
 
@@ -634,6 +684,17 @@ open when #317 implements, this doc cites it as "pending PR #487" and nothing is
 
 ## 8. Surface & files to change
 
+> **DEFERRED-vs-shipped map (see the top-of-doc banner).** Of the surface below, **#317 ships ONLY**:
+> `intake_candidate_to_paper` (store.py), `paper intake` (paper_cmd.py), the `active_paper_lane_count`
+> / `allocate_locked` / `CountCapReached` helpers (allocations.py), and the `paper run-all`
+> `skipped_unallocated` skip (paper_cmd.py). **Everything else in this section is DEFERRED to #497**:
+> `paper allocate`, `live allocate` stage-gating, `allocate_in_lane`, deletion of `allocate()`,
+> `_paper_account_equity()`, ALL of `transitions.py` revoke wiring, the `_assert_flat_for_bench`
+> generalization, the narrowed go-live `live_authorization` guards, and every test below that exercises
+> those (book-exit revoke, `live→retired`, go-live shed, `live→paper` mirror, `live allocate` /
+> `paper allocate` / `allocate_in_lane` stage gates, `allocate_locked` containment). The `[NEW]`/`[CHANGE]`
+> tags below describe the FULL design, NOT this PR's diff.
+
 CLI / non-protected:
 - **[NEW] `paper allocate <name> --capital $X [--max-concurrent 8]`** — `algua/cli/paper_cmd.py`.
   Routes through the shared `allocations.allocate_in_lane(..., allowed_stages={PAPER, FORWARD_TESTED},
@@ -774,12 +835,13 @@ protected changes):
 - An intake→`run-all` composition test (an admitted tenant ticks on its first cycle; an unallocated
   in-book strategy is skipped, never crashes the cycle).
 
-**CODEOWNERS check (REVERSED from revision 1).** Resolving findings #1–#3 correctly and lane-free
-**requires** editing `algua/registry/store.py` and `algua/registry/transitions.py` — **both
-CODEOWNERS-protected**. There is no way to wire the paper-book-exit revoke, the go-live sizing gate, or
-the single-transaction atomic admit *without* touching the protected transition/allocation-revoke
-machinery (the earlier "drive it through the existing transition path untouched" plan cannot deliver
-atomicity or the exit-revoke). Therefore **the PR MUST stay OPEN for human merge (auto-merge disabled)**.
+**CODEOWNERS check (REVERSED from revision 1).** This PR (#317) edits `algua/registry/store.py`
+(the atomic `intake_candidate_to_paper` primitive) — **CODEOWNERS-protected** — so **the PR MUST stay
+OPEN for human merge (auto-merge disabled)** regardless of the #497 split. The single-transaction
+atomic admit cannot deliver atomicity without touching the protected transition/allocation machinery
+in `store.py`. The deferred #497 work additionally edits `algua/registry/transitions.py` (the exit-revoke
+flag wiring) and further `store.py` guards — also protected — so #497 will likewise be human-merged.
+`algua/registry/transitions.py` is **NOT** touched by THIS PR (all revoke wiring is #497).
 `paper_cmd.py` (the `paper allocate`/`paper intake` additions and the §5.5 raise→skip), `live_cmd.py`
 (the round-3 `live allocate` stage gate), `allocations.py`, the FIFO read helper, tests, and this doc
 remain non-protected. `algua/contracts/lifecycle.py` is **NOT** touched — every edge above
@@ -792,6 +854,13 @@ follow-up (only the *concurrent* live+paper book needs it).
 ---
 
 ## 9. Deferred follow-ups (filed, out of scope)
+- **Exit-side allocation invariant — book-exit revoke + lane gating (#497).** The entire exit half of
+  the design (§4.3, §5.1, §5.4): the `transitions.py` revoke wiring on every book-exit / lane-crossing
+  edge, the `paper allocate` CLI, `live allocate` stage-gating (with in-lock TOCTOU re-assert), the
+  shared `allocate_in_lane` primitive, deletion of the stage-blind `allocate()`, the go-live paper-slice
+  shed + narrowed `live_authorization` guards, `_assert_flat_for_bench` generalization, and all the
+  Section-8 tests for them. **Until #497 lands the shipped code has a known capital leak** (benching /
+  retiring / back-stepping a paper tenant permanently consumes its slice's headroom). Tracked as #497.
 - **Lane-tagged allocations** — a `lane` column on `strategy_allocations` + lane-scoped
   `total_allocated`, so a genuinely **concurrent** live+paper book can't cross-count Σ against the wrong
   *equity denominator* (§6.1). Schema bump; only needed if the operator ever runs live and paper books at

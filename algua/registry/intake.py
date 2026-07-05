@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import ROUND_FLOOR, Decimal
 
 
 @dataclass(frozen=True)
@@ -30,14 +31,22 @@ class Candidate:
 
 
 def _to_cents(dollars: float) -> int:
-    """Round a dollar amount to whole integer cents (nearest)."""
-    return round(dollars * 100)
+    """Whole integer cents in ``dollars``, FLOORED (never rounded up).
+
+    Uses ``Decimal`` so the floor is taken on the exact decimal value the operator means (e.g.
+    ``0.019`` → ``1`` cent, not ``2``) rather than on a binary-float artifact — ``round(0.019*100)``
+    would give ``2`` cents (``$0.02``), OVER-counting a sub-cent equity and violating this
+    function's own never-rounds-up contract (and letting ``slice_capital`` return a slice larger
+    than ``equity``). ``Decimal(str(x))`` reads the shortest decimal repr, so ``0.29`` floors to
+    ``29`` cents, not ``28`` from ``0.29*100 == 28.9999…``.
+    """
+    return int((Decimal(str(dollars)) * 100).to_integral_value(rounding=ROUND_FLOOR))
 
 
 def slice_capital(equity: float, max_concurrent: int) -> float:
     """Per-strategy capital slice in dollars, floored to whole cents.
 
-    The floor (never rounding up) is computed in INTEGER CENTS — ``equity_cents //
+    The floor (never rounding up) is computed in INTEGER CENTS — ``floor(equity_cents) //
     max_concurrent`` — so it is exact at the cent boundary and free of the binary-float rounding
     that could let ``k`` slices sum to a hair OVER ``equity`` and mis-admit the ``k``-th. Flooring
     guarantees ``k`` slices sum to ``<= equity`` for any ``k <= max_concurrent``. If ``equity <=

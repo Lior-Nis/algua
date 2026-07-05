@@ -33,6 +33,18 @@ def test_slice_capital_zero_max_concurrent_raises():
         slice_capital(100_000, 0)
 
 
+def test_slice_never_rounds_up_at_sub_cent_equity():
+    # Regression: a sub-cent equity must floor DOWN, never up (round(0.019*100)==2 would give a
+    # $0.02 slice > $0.019 equity, violating the never-rounds-up contract and Σ<=equity).
+    assert slice_capital(0.019, 1) <= 0.019
+    assert slice_capital(0.019, 1) == 0.01
+
+
+def test_slice_floors_binary_float_artifact_at_exact_cent():
+    # 0.29 * 100 == 28.9999… in binary float; the decimal floor must still give 29 cents, not 28.
+    assert slice_capital(0.29, 1) == 0.29
+
+
 # ---------------------------------------------------------------------------
 # order_candidates — FIFO by monotonic entry_id, tie-break sid
 # ---------------------------------------------------------------------------
