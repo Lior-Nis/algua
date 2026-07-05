@@ -1,0 +1,216 @@
+"""Tests for `paper intake` (#317): deterministic candidate → paper book admission.
+
+Three required behaviours:
+  1. Empty book, headroom for all: every candidate is admitted, equal slice, `queued` empty; each
+     admitted strategy is now Stage.PAPER with a non-None active allocation.
+  2. The --max-concurrent count cap binds: exactly one candidate is admitted (FIFO, lower sid), the
+     other stays queued and remains Stage.CANDIDATE with no allocation.
+  3. An already-occupied slot counts against the cap: with the sole slot already taken by an
+     allocated paper-lane strategy, the queued candidate is not admitted.
+"""
+from __future__ import annotations
+
+import json
+from contextlib import closing
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+import algua.strategies.momentum as _momentum_pkg
+from algua.cli.main import app
+from algua.config.settings import get_settings
+from algua.execution.alpaca_broker import AccountState
+from algua.registry.allocations import active_allocation
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+
+runner = CliRunner()
+
+# _S1 is registered first → lower DB id → FIFO tie-break admits it before _S2.
+_S1 = "cross_sectional_momentum"
+_S2 = "liquid10_momentum"
+
+
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+
+
+@pytest.fixture(autouse=True)
+def _second_strategy():
+    """`_S2` is a second REAL, loadable, demo-backtestable strategy in the momentum family so
+    `_index()` discovers it (mirrors tests/test_paper_run_all._second_strategy)."""
+    p = Path(_momentum_pkg.__path__[0]) / f"{_S2}.py"
+    p.write_text(
+        '"""Second demo strategy for paper intake tests: trailing-return momentum, top-k."""\n'
+        "from __future__ import annotations\n"
+        "from typing import Any\n"
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.features.alphas import xs_trailing_return\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        f"CONFIG = StrategyConfig(name={_S2!r},\n"
+        "    universe=['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d', decision_lag_bars=1),\n"
+        "    params={'lookback': 60}, construction='top_k_equal_weight',\n"
+        "    construction_params={'top_k': 3}, feature_lookback=60)\n"
+        "def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:\n"
+        "    return xs_trailing_return(view, params)\n"
+    )
+    try:
+        yield
+    finally:
+        p.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+class _FakeBroker:
+    """Minimal paper broker: `intake` reads only `.account().equity` (READ-ONLY, no trading)."""
+
+    def __init__(self, equity: float) -> None:
+        self._equity = equity
+
+    def account(self) -> AccountState:
+        return AccountState(equity=self._equity, cash=self._equity,
+                            buying_power=self._equity, account_id="t")
+
+
+def _to_candidate(name: str) -> None:
+    """Register a real strategy via a demo backtest, then transition it to `candidate` (human
+    bypasses the shortlist gate — test setup only)."""
+    assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
+    assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
+                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+
+
+def _force_stage(name: str, stage_value: str) -> None:
+    """Force a strategy's lifecycle stage directly (bypasses the promote gate for test setup)."""
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        conn.execute("UPDATE strategies SET stage = ? WHERE id = ?", (stage_value, rec.id))
+        conn.commit()
+
+
+def _seed_allocation(name: str, capital: float = 10_000.0) -> None:
+    """Insert a strategy_allocations row directly (no paper-allocate CLI dependency)."""
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (rec.id, capital, datetime.now(UTC).isoformat(), "agent"),
+        )
+        conn.commit()
+
+
+def _stage_of(name: str):
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        return SqliteStrategyRepository(conn).get(name).stage
+
+
+def _has_allocation(name: str) -> bool:
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        return active_allocation(conn, rec.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# Test 1: empty book, headroom for all candidates
+# ---------------------------------------------------------------------------
+
+def test_intake_admits_all_candidates_when_book_empty(monkeypatch):
+    """Two candidates, empty book, cap 5, equity 100k → BOTH admitted with an equal 20k slice,
+    `queued` empty; both are now Stage.PAPER and each carries an active allocation."""
+    _to_candidate(_S1)
+    _to_candidate(_S2)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "5"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload.get("ok") is True
+
+    admitted = {a["strategy"]: a["capital"] for a in payload["admitted"]}
+    assert admitted == {_S1: 20_000.0, _S2: 20_000.0}
+    assert payload["queued"] == []
+    assert payload["slice"] == 20_000.0
+    assert payload["occupied_before"] == 0
+    assert payload["equity"] == 100_000.0
+
+    from algua.contracts.lifecycle import Stage
+    for name in (_S1, _S2):
+        assert _stage_of(name) is Stage.PAPER
+        assert _has_allocation(name)
+
+
+# ---------------------------------------------------------------------------
+# Test 2: the concurrency cap binds — only the FIFO-first candidate is admitted
+# ---------------------------------------------------------------------------
+
+def test_intake_cap_admits_only_first_candidate(monkeypatch):
+    """cap 1, two candidates → exactly ONE admitted (the earlier-registered / lower-sid _S1); the
+    other stays queued AND remains Stage.CANDIDATE with no allocation."""
+    _to_candidate(_S1)
+    _to_candidate(_S2)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "1"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert [a["strategy"] for a in payload["admitted"]] == [_S1]
+    assert payload["queued"] == [_S2]
+
+    from algua.contracts.lifecycle import Stage
+    assert _stage_of(_S1) is Stage.PAPER
+    assert _has_allocation(_S1)
+    # The un-admitted candidate is untouched: still candidate, still unallocated.
+    assert _stage_of(_S2) is Stage.CANDIDATE
+    assert not _has_allocation(_S2)
+
+
+# ---------------------------------------------------------------------------
+# Test 3: an already-occupied slot counts against the cap
+# ---------------------------------------------------------------------------
+
+def test_intake_occupied_slot_blocks_admission(monkeypatch):
+    """The sole slot (cap 1) is already taken by an allocated paper-lane strategy → the queued
+    candidate is NOT admitted; it stays Stage.CANDIDATE with no allocation."""
+    # _S2 is an already-admitted paper-lane tenant (forced stage + a seeded allocation row).
+    _to_candidate(_S2)
+    _force_stage(_S2, "paper")
+    _seed_allocation(_S2)
+    # _S1 is the queued candidate.
+    _to_candidate(_S1)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "1"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert payload["admitted"] == []
+    assert payload["queued"] == [_S1]
+    assert payload["occupied_before"] == 1
+
+    from algua.contracts.lifecycle import Stage
+    assert _stage_of(_S1) is Stage.CANDIDATE
+    assert not _has_allocation(_S1)

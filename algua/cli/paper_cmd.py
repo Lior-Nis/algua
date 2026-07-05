@@ -83,12 +83,20 @@ from algua.observability import (
     correlation_context,
     get_logger,
 )
-from algua.registry.allocations import active_allocation
+from algua.registry.allocations import (
+    active_allocation,
+    total_allocated,
+)
+from algua.registry.allocations import (
+    allocate as allocate_capital,
+)
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import canonical_run_context
+from algua.registry.intake import Candidate, plan_intake
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
     MAX_FORWARD_DRAWDOWN,
@@ -120,6 +128,14 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
         )
     return AlpacaPaperBroker(api_key=s.alpaca_api_key, api_secret=s.alpaca_api_secret,
                              base_url=s.alpaca_paper_url)
+
+
+def _candidate_entry_ts(repo: SqliteStrategyRepository, name: str) -> str:
+    """ISO timestamp this strategy most recently ENTERED the candidate stage (FIFO key). Falls
+    back to created_at if — defensively — no candidate transition is recorded."""
+    entered = [t['created_at'] for t in repo.list_transitions(name)
+               if t['to_stage'] == Stage.CANDIDATE.value]
+    return entered[-1] if entered else repo.get(name).created_at
 
 
 def _paper_broker_net(broker: PositionsBroker) -> dict[str, float]:
@@ -363,6 +379,45 @@ def account() -> None:
     broker = _alpaca_broker_from_settings()
     acct = broker.account()
     emit(ok({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power}))
+
+
+@paper_app.command('intake')
+@json_errors
+def intake(
+    max_concurrent: int = typer.Option(5, '--max-concurrent',
+        help='max concurrent paper-lane strategies admitted into the shared book'),
+    actor: str = typer.Option('agent', '--actor', help='human | agent'),
+) -> None:
+    """Deterministic paper-book intake: admit candidate strategies into the shared paper book up to
+    capacity. When the book has headroom (Σ allocations + slice ≤ paper account equity AND under the
+    --max-concurrent cap), promote the next candidate candidate→paper (FIFO by candidate-entry time,
+    tie-break strategy id) and allocate it an equal slice = floor(equity / max_concurrent to cents);
+    when full, leave it queued. Reads paper account equity READ-ONLY (no trading). Reuses the
+    allocation primitive whose atomic Σ ≤ equity check re-verifies every grant."""
+    if max_concurrent <= 0:
+        raise ValueError('--max-concurrent must be positive')
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        equity = float(_alpaca_broker_from_settings().account().equity)
+        paper_lane = repo.list_strategies(Stage.PAPER) + repo.list_strategies(Stage.FORWARD_TESTED)
+        occupied = sum(1 for r in paper_lane if active_allocation(conn, r.id) is not None)
+        candidates = [Candidate(name=r.name, entry_ts=_candidate_entry_ts(repo, r.name), sid=r.id)
+                      for r in repo.list_strategies(Stage.CANDIDATE)]
+        plan = plan_intake(candidates, occupied_slots=occupied,
+                           total_allocated=total_allocated(conn), equity=equity,
+                           max_concurrent=max_concurrent)
+        admitted: list[dict] = []
+        for name in plan.admit:
+            transition_strategy(repo, name, to=Stage.PAPER, actor=actor,
+                                reason='operator paper intake')
+            allocate_capital(conn, repo.get(name).id, capital=plan.slice_capital,
+                             actor=actor, account_equity=equity)
+            audit_append(conn, actor=Actor(actor).value, action='paper_intake',
+                         reason=f'slice {plan.slice_capital}', strategy=name)
+            admitted.append({'strategy': name, 'capital': plan.slice_capital})
+    emit(ok({'admitted': admitted, 'queued': plan.queued, 'equity': equity,
+             'slice': plan.slice_capital, 'occupied_before': occupied,
+             'max_concurrent': max_concurrent}))
 
 
 def _run_paper_strategy_tick(  # noqa: PLR0913
