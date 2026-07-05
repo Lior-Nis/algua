@@ -28,6 +28,17 @@ _MAX_RETRIES = 3  # total attempts = 1 + retries on a retryable failure
 _BACKOFF_BASE = 0.5  # seconds; sleep grows _BACKOFF_BASE * 2**attempt between attempts
 
 
+def posted_notional(grant: float) -> float:
+    """The notional a BUY of `grant` dollars ACTUALLY posts: floor to cents (ROUND_FLOOR — never
+    up, so submitted <= granted), then 0.0 if that falls below MIN_NOTIONAL (`submit_sized` returns
+    "skipped" for such a buy and posts nothing). This mirrors the exact floor + min-notional-skip
+    rule inside `submit_sized` so a caller that must know what a reserved buy will REALLY post
+    (e.g. the paper run-all buying-power pool, which must debit only the submitted amount and never
+    a phantom for a buy that skips/floors out) computes the identical value."""
+    floored = float(Decimal(str(grant)).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
+    return 0.0 if floored < MIN_NOTIONAL else floored
+
+
 def _coerce_status(value: Any) -> int:
     """Best-effort int from a 207 item's `status` field. A missing/non-int value is treated as a
     failure status (500) rather than raising — a malformed item must count as a failure, not crash

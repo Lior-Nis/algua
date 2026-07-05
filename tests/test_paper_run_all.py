@@ -90,6 +90,15 @@ def _to_paper(name: str) -> None:
                                "--actor", "agent", "--reason", "paper"]).exit_code == 0
 
 
+def _force_stage(name: str, stage_value: str) -> None:
+    """Force a strategy's lifecycle stage directly (bypasses the promote gate for test setup)."""
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        conn.execute("UPDATE strategies SET stage = ? WHERE id = ?", (stage_value, rec.id))
+        conn.commit()
+
+
 def _seed_allocation(name: str, capital: float = 10_000.0) -> None:
     """Insert a strategy_allocations row directly (no paper-allocate CLI dependency)."""
     with closing(connect(get_settings().db_path)) as conn:
@@ -355,3 +364,76 @@ def test_run_all_reservation_pool_caps_concurrent_buys(monkeypatch):
     assert s2_permitted[0] <= remaining_after_s1
     # And specifically it should equal remaining_after_s1 (not less, pool not over-consumed)
     assert abs(s2_permitted[0] - remaining_after_s1) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Test 5: forward_tested strategies are ticked too (stage IN paper, forward_tested)
+# ---------------------------------------------------------------------------
+
+def test_run_all_ticks_forward_tested_strategies(monkeypatch):
+    """A forward_tested strategy is a paper-lane trading target (parity with load_gated_strategy /
+    trade-tick): run-all must tick it — NOT silently skip it because it filtered stage='paper'."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _force_stage(_S2, "forward_tested")  # S2 is now forward_tested, still paper-lane
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda strategy, broker, provider, start, end, hooks=None, max_drawdown=None:
+            _success_result(),
+    )
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    names = {s["strategy"] for s in payload["strategies"]}
+    assert names == {_S1, _S2}  # the forward_tested strategy was ticked, not dropped
+
+
+# ---------------------------------------------------------------------------
+# Test 6: pool debits only what actually posts (no phantom debit for a skipped buy)
+# ---------------------------------------------------------------------------
+
+def test_run_all_pool_does_not_phantom_debit_skipped_buys(monkeypatch):
+    """A sub-MIN_NOTIONAL grant is SKIPPED by submit_sized (posts nothing), so it must NOT decrement
+    the shared pool. The pool is debited by posted_notional(grant), not the raw grant — otherwise a
+    phantom debit wrongly starves a later sibling of buying power."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    equity = 5_000.0
+    broker = _RunAllBroker(equity=equity)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    s2_permitted: list[float] = []
+    call_n: list[int] = [0]
+    tiny = 0.50  # below MIN_NOTIONAL ($1): submit_sized returns "skipped", posts nothing
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        call_n[0] += 1
+        if call_n[0] == 1 and hooks is not None and hooks.reserve_buy is not None:
+            hooks.reserve_buy("AAA", tiny)  # sub-min buy: skipped, posts nothing
+        elif call_n[0] == 2 and hooks is not None and hooks.reserve_buy is not None:
+            s2_permitted.append(hooks.reserve_buy("BBB", equity))  # asks for the whole account
+        return _success_result()
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code == 0, result.stdout
+    # S1's sub-min buy posted $0, so the pool is still the full account: S2 is granted all of it.
+    # (Under the phantom-debit bug the pool would have decremented by $0.50 and S2 would see only
+    # $4999.50.)
+    assert s2_permitted == [equity]

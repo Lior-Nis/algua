@@ -31,7 +31,12 @@ from algua.contracts.types import (
     ScopedCancelBroker,
 )
 from algua.execution import paper_reconcile
-from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, AlpacaPaperBroker, BrokerError
+from algua.execution.alpaca_broker import (
+    AlpacaLiveReadOnlyBroker,
+    AlpacaPaperBroker,
+    BrokerError,
+    posted_notional,
+)
 from algua.execution.flatten import flatten_strategy
 from algua.execution.fleet_health import strategy_health
 from algua.execution.live_ledger import (
@@ -592,11 +597,22 @@ def run_all(
         None, "--max-drawdown",
         help="halt + flatten a strategy if equity falls this fraction below its peak"),
 ) -> None:
-    """One sequenced multi-tenant cycle over ALL paper strategies: ingest venue fills, reconcile
-    the account against the paper broker, then tick each strategy (scoped cancel on a breach so one
-    strategy never cancels a sibling's resting orders). Trades only when the account reconciles
-    clean; a persistent unexplained drift engages the global halt. A simple whole-account buying-
-    power pool caps the aggregate of this cycle's buys (NO book-level #389 risk here)."""
+    """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest venue fills,
+    reconcile the account against the paper broker, then tick each strategy (scoped cancel on a
+    breach so one strategy never cancels a sibling's resting orders). Trades only when the account
+    reconciles clean; a persistent unexplained drift engages the global halt. A simple whole-account
+    buying-power pool caps the aggregate of this cycle's buys (NO book-level #389 risk here).
+
+    Strategy selection is ``stage IN ('paper','forward_tested')`` — the same admission set as
+    ``load_gated_strategy`` and single-strategy ``paper trade-tick``: a forward_tested strategy
+    keeps paper-ticking while awaiting the go-live signature so its live-wall certificate stays
+    fresh (#124). The "paper" in the name is the LANE, not a paper-only stage filter.
+
+    CONCURRENCY: run-all and ``paper trade-tick`` (and the paper liquidation commands) each ingest
+    venue fills and mutate the shared paper account; they are NOT mutually safe under concurrent
+    execution (double-ingest, reconcile races, per-process buying-power over-commit). They are
+    mutually-exclusive BY OPERATOR DISCIPLINE only — do not run two paper-account cycles at once. An
+    advisory paper-lane lock that enforces this is a filed follow-up (see the design doc)."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     configure_logging()
@@ -608,9 +624,13 @@ def run_all(
         try:
             with registry_conn() as conn:
                 repo = SqliteStrategyRepository(conn)
-                paper = repo.list_strategies(Stage.PAPER)
+                # Both paper-lane stages tick (parity with load_gated_strategy / trade-tick): a
+                # forward_tested strategy keeps accruing evidence ticks awaiting the go-live
+                # signature (#124). Merge preserving each list's insertion order.
+                paper = repo.list_strategies(Stage.PAPER) + repo.list_strategies(
+                    Stage.FORWARD_TESTED)
                 if not paper:
-                    emit(ok({"strategies": [], "note": "no paper strategies"}))
+                    emit(ok({"strategies": [], "note": "no paper-lane strategies"}))
                     return
                 if global_halt.is_engaged(conn):
                     emit(breach_payload("global halt engaged", halted=True))
@@ -666,13 +686,18 @@ def run_all(
 
                 def _paper_reserve_for(strategy_name):
                     def _reserve(symbol: str, notional: float) -> float:
-                        permitted = min(notional, max(0.0, pool["available"]))
-                        pool["available"] -= permitted
-                        if permitted < notional:  # trimmed -> audit the shortfall
+                        grant = min(notional, max(0.0, pool["available"]))
+                        # Debit the pool by what submit_sized will ACTUALLY post, not the raw grant:
+                        # a grant that floors to cents or falls below MIN_NOTIONAL is skipped by
+                        # submit_sized (posts nothing), so debiting `grant` would phantom-consume
+                        # BP for a buy that never happened and wrongly starve a later sibling. The
+                        # shared `posted_notional` keeps pool == start_BP - sum(real posted buys).
+                        pool["available"] -= posted_notional(grant)
+                        if grant < notional:  # the POOL bound this buy -> audit the shortfall
                             audit_append(conn, actor="system", action="paper_reserve_trim",
-                                         reason=f"{symbol} {notional}->{permitted}",
+                                         reason=f"{symbol} {notional}->{grant}",
                                          strategy=strategy_name)
-                        return permitted
+                        return grant
                     return _reserve
 
                 results: list[dict] = []
