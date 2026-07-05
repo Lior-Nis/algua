@@ -47,7 +47,15 @@ def _check(name: str, fn: Callable[[], str], *, required: bool = True) -> dict[s
         detail, ok = fn(), True
     except Exception as exc:  # noqa: BLE001 - any failure is reported as a check result
         detail, ok = str(exc), False
-    return {"check": name, "ok": ok, "required": required, "detail": detail}
+    return {"check": name, "ok": ok, "required": required, "detail": detail, "skipped": False}
+
+
+def _skip_row(name: str, detail: str) -> dict[str, Any]:
+    """A lane-gated probe whose lane flag is absent: emitted at the *call site* so the probe body —
+    and any side effect it carries (a strategy-module import, a network call) — never runs. The
+    ``skipped: true`` boolean is the machine-legible discriminator, so a consumer branching on it
+    can never mistake an un-probed dependency for a passing one (never string-match ``detail``)."""
+    return {"check": name, "ok": True, "required": False, "detail": detail, "skipped": True}
 
 
 def _registry_db_detail() -> str:
@@ -105,8 +113,9 @@ def _bars_snapshot_detail() -> str:
 
 
 def _global_halt_detail() -> str:
-    """Advisory safety-state probe: is the account-wide halt engaged? A green pre-flight while a
-    global halt is live would hide that the trading loops are frozen — so an engaged halt raises."""
+    """Required safety-state probe (gates in EVERY mode): is the account-wide halt engaged? A green
+    pre-flight while a global halt is live would hide that no trading tick can start — every tick
+    raises on its next call — so an engaged halt raises here and flips ``doctor`` red."""
     from algua.cli._common import registry_conn
     from algua.risk import global_halt
 
@@ -134,10 +143,19 @@ def _kill_switches_detail() -> str:
 
 
 def _live_authorizations_detail() -> str:
-    """Advisory safety-state probe: is every LIVE strategy still human-authorized at the current
-    trust anchor? Re-verifies each live strategy's signature; a revoked/unverifiable authorization
-    (or one whose artifact hash can't be recomputed) is reported per-strategy so one failure doesn't
-    mask others. Any failure raises with the aggregated per-strategy detail."""
+    """Live-lane authorization probe — runs ONLY under ``doctor --live`` (its body, not merely its
+    ``required`` flag, is gated at the call site). Re-verifies every ``Stage.LIVE`` strategy's
+    go-live signature against the current trust anchor. STRICT rule: ``ok = (no LIVE strategies) OR
+    (EVERY LIVE strategy re-verifies)`` — any revoked/unverifiable strategy raises with the
+    aggregated per-strategy detail so one failure never masks another. The detail always surfaces
+    ``live_strategies=N`` (an empty book reads as ``live_strategies=0``, ready — not a bare green).
+
+    This body is gated behind ``--live`` because the verification path
+    ``verify_live_authorization -> compute_artifact_hashes -> load_strategy`` **imports strategy
+    modules** (arbitrary import-time code), a side effect the default ``doctor`` must never trigger.
+    ``doctor`` is deliberately stricter than ``live run-all`` (which skips a revoked strategy and
+    trades the rest): the pre-flight's job is to make the operator notice the bad one before a
+    cycle starts. Authorization ONLY — not allocation/kill-switch/candidate presence (#400)."""
     from algua.cli._common import registry_conn
     from algua.contracts.lifecycle import Stage
     from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_live_authorization
@@ -146,8 +164,7 @@ def _live_authorizations_detail() -> str:
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
         live = repo.list_strategies(Stage.LIVE)
-        if not live:
-            return "no live strategies"
+        n = len(live)
         failures: list[str] = []
         for rec in live:
             try:
@@ -155,8 +172,13 @@ def _live_authorizations_detail() -> str:
             except Exception as exc:  # noqa: BLE001 - per-strategy so one failure doesn't mask others
                 failures.append(f"{rec.name}: {exc}")
     if failures:
-        raise RuntimeError("; ".join(failures))
-    return f"{len(live)} live strategy(ies) authorized"
+        raise RuntimeError(
+            f"live_strategies={n}; {len(failures)} unauthorized/unverifiable: "
+            + "; ".join(failures)
+        )
+    if n == 0:
+        return "live_strategies=0 (no live strategies to authorize)"
+    return f"live_strategies={n}; all authorized"
 
 
 def _generated_provenance_detail() -> str:
@@ -202,22 +224,49 @@ def _has_generated_by(path: Path) -> bool:
 
 
 @app.command()
-def doctor() -> None:
-    """Check environment readiness. Exits non-zero if any REQUIRED check fails; advisory rows
-    (``required=false`` — trading-segment / provenance readiness) are reported but never gate exit.
+def doctor(
+    paper: bool = typer.Option(
+        False,
+        "--paper",
+        help="Gate exit on the paper lane's dependencies: promotes paper_credentials to required.",
+    ),
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help=(
+            "Gate exit on the live lane's AUTHORIZATION ONLY: run and require the "
+            "live_authorizations probe so every existing LIVE strategy must re-verify its go-live "
+            "signature. This is the only mode that imports strategy modules. Does NOT assert any "
+            "strategy will actually trade — allocation / kill-switch / candidate presence are "
+            "fleet-status concerns (see `fleet health` / #400)."
+        ),
+    ),
+) -> None:
+    """Check trading-readiness: is it safe and possible to start a trading cycle right now?
+
+    Exits non-zero if any REQUIRED check fails; advisory rows (``required=false``) are reported but
+    never gate exit. ``global_halt`` gates in EVERY mode — an engaged account-wide halt means no
+    trading tick can start. ``--paper`` promotes the paper-credential probe to required; ``--live``
+    runs and requires ``live_authorizations`` (whose body — which imports strategy modules — is
+    skipped without ``--live``). Every row carries a ``skipped`` boolean so a consumer never treats
+    an un-probed dependency as a passing one. (Research/backtest commands ignore this exit code.)
     """
     checks: list[dict[str, Any]] = [
         {"check": "python", "ok": sys.version_info >= (3, 12),
-         "required": True, "detail": sys.version.split()[0]},
+         "required": True, "detail": sys.version.split()[0], "skipped": False},
         _check("registry_db", _registry_db_detail),
         _check("calendar", _calendar_detail),
         _check("knowledge_base", _knowledge_base_detail),
-        _check("paper_credentials", _paper_credentials_detail, required=False),
+        _check("paper_credentials", _paper_credentials_detail, required=paper),
         _check("bars_snapshot", _bars_snapshot_detail, required=False),
         _check("generated_provenance", _generated_provenance_detail, required=False),
-        _check("global_halt", _global_halt_detail, required=False),
+        _check("global_halt", _global_halt_detail, required=True),
         _check("kill_switches", _kill_switches_detail, required=False),
-        _check("live_authorizations", _live_authorizations_detail, required=False),
+        _check("live_authorizations", _live_authorizations_detail, required=True)
+        if live
+        else _skip_row(
+            "live_authorizations", "skipped: pass --live to probe live authorizations"
+        ),
     ]
     all_ok = all(c["ok"] for c in checks if c["required"])
     emit({"ok": all_ok, "checks": checks})
