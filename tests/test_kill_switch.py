@@ -30,3 +30,11 @@ def test_retrip_updates_reason(tmp_path):
     kill_switch.trip(conn, "s", reason="first", actor="agent")
     kill_switch.trip(conn, "s", reason="second", actor="system")
     assert kill_switch.get(conn, "s")["reason"] == "second"
+
+
+def test_list_tripped_returns_sorted_names(tmp_path):
+    conn = _conn(tmp_path)
+    assert kill_switch.list_tripped(conn) == []  # empty DB
+    kill_switch.trip(conn, "zeta", reason="boom", actor="system")
+    kill_switch.trip(conn, "alpha", reason="boom", actor="system")
+    assert kill_switch.list_tripped(conn) == ["alpha", "zeta"]
