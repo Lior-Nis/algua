@@ -54,6 +54,7 @@ def test_next_cycle_is_monotonic_and_persistent(tmp_path):
 
 def test_reconcile_clean_when_books_match_broker(tmp_path):
     conn = _conn(tmp_path)
+    _live_strategy(conn, "s1")
     _fill(conn, "a1", "s1", "AAA", 10.0)
     res = R.reconcile(conn, broker_net={"AAA": 10.0}, cycle=1)
     assert res.clean and not res.halt and res.mismatches == []
@@ -61,6 +62,7 @@ def test_reconcile_clean_when_books_match_broker(tmp_path):
 
 def test_reconcile_tolerates_rounding(tmp_path):
     conn = _conn(tmp_path)
+    _live_strategy(conn, "s1")
     _fill(conn, "a1", "s1", "AAA", 10.0)
     res = R.reconcile(conn, broker_net={"AAA": 10.0 + 5e-7}, cycle=1)
     assert res.clean and not res.halt
@@ -68,6 +70,7 @@ def test_reconcile_tolerates_rounding(tmp_path):
 
 def test_reconcile_pending_then_escalates_to_halt(tmp_path):
     conn = _conn(tmp_path)
+    _live_strategy(conn, "s1")
     _fill(conn, "a1", "s1", "AAA", 10.0)
     broker = {"AAA": 12.0}  # broker holds 2 more than the books explain
     r1 = R.reconcile(conn, broker, cycle=1)
@@ -80,6 +83,7 @@ def test_reconcile_pending_then_escalates_to_halt(tmp_path):
 
 def test_reconcile_clears_pending_when_it_resolves(tmp_path):
     conn = _conn(tmp_path)
+    _live_strategy(conn, "s1")
     _fill(conn, "a1", "s1", "AAA", 10.0)
     R.reconcile(conn, {"AAA": 12.0}, cycle=1)            # pending recorded
     R.reconcile(conn, {"AAA": 10.0}, cycle=2)            # resolves -> row cleared
@@ -90,6 +94,7 @@ def test_reconcile_clears_pending_when_symbol_goes_flat_on_both(tmp_path):
     # a mismatch that resolves to flat on BOTH sides (symbol absent from expected and broker) must
     # still clear its pending row, else a later mismatch reads a stale first_seen_cycle (codex)
     conn = _conn(tmp_path)
+    _live_strategy(conn, "s1")
     _fill(conn, "a1", "s1", "AAA", 10.0)
     R.reconcile(conn, {"AAA": 12.0}, cycle=1)            # pending recorded for AAA
     # now AAA is flat on both: remove the books' fills and the broker shows nothing
@@ -98,3 +103,18 @@ def test_reconcile_clears_pending_when_symbol_goes_flat_on_both(tmp_path):
     res = R.reconcile(conn, {}, cycle=2)                 # AAA absent from expected AND broker
     assert res.clean
     assert conn.execute("SELECT COUNT(*) FROM live_reconcile_state").fetchone()[0] == 0
+
+
+def test_reconcile_fails_closed_on_demoted_strategy_orphan_holding(tmp_path):
+    # #451: a strategy that left live (dormant/retired) whose broker position was never flattened
+    # must NOT be explained away. Its fill is no longer attributed to a currently-live strategy, so
+    # attributed_live_net drops it and the un-flattened broker holding becomes an unexplained
+    # residual that fails closed and escalates to halt.
+    conn = _conn(tmp_path)
+    _fill(conn, "a1", "demoted", "AAA", 10.0)  # 'demoted' is NOT registered as live
+    r1 = R.reconcile(conn, {"AAA": 10.0}, cycle=1)
+    assert not r1.clean and r1.mismatches[0]["symbol"] == "AAA"
+    r2 = R.reconcile(conn, {"AAA": 10.0}, cycle=2)
+    assert not r2.halt  # still within grace
+    r3 = R.reconcile(conn, {"AAA": 10.0}, cycle=4)  # cycle - first_seen (1) >= 3 -> unexplained
+    assert r3.halt and r3.mismatches[0]["status"] == "unexplained"
