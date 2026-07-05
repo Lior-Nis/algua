@@ -91,6 +91,40 @@ def test_cash_credit_excludes_non_dividend_and_untraded(tmp_path):
     assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
 
 
+def test_same_day_fill_after_dividend_is_entitled(tmp_path):
+    # #437 (GATE-2 finding #1): the entitlement bound is DELIBERATELY date-level, not
+    # full-timestamp, because broker DIV rows carry a date-only `date` field. A fill placed the SAME
+    # DAY the dividend posts — even one stamped strictly AFTER the DIV row's own instant — shares
+    # its date and is therefore treated as entitled. This asserts that DISCLOSED behavior
+    # (design-doc limitation #3) so it can't regress silently.
+    conn = _conn(tmp_path)
+    _activity(conn, "d1", "DIV", "AAA", 30.0, ts="2026-06-06")   # date-only DIV, as brokers book it
+    # the ONLY holder's buy is stamped later the same day than the DIV's date bound
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0, ts="2026-06-06T15:30:00+00:00")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 30.0
+
+
+def test_dividend_with_null_ts_is_residual(tmp_path):
+    # #437 (GATE-2 finding #2): a DIV row with a NULL ts carries no trustworthy entitlement window,
+    # so it fails closed to an unattributed account-level residual (credit 0.0) rather than being
+    # silently zero-credited by an empty-string fallback OR crediting an unbounded all-fills window.
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0)
+    _activity(conn, "d1", "DIV", "AAA", 30.0, ts=None)
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+
+
+def test_dividend_with_malformed_ts_is_residual(tmp_path):
+    # #437 (GATE-2 finding #2): a non-ISO-parseable ts is the dangerous case — as a raw string it
+    # sorts BELOW every real fill date ("not-a-date" vs "2026-…"), which a naive substr comparison
+    # would read as "every fill is on-or-before the dividend" and credit the whole book. The parse
+    # guard fails it closed to an account-level residual (credit 0.0).
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0)
+    _activity(conn, "d1", "DIV", "AAA", 30.0, ts="not-a-date")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+
+
 def test_long_then_partial_close_realizes():
     # buy 10@100, buy 10@110 -> avg 105, qty 20; sell 5@120 -> realized 5*(120-105)=75
     fills = [(10.0, 100.0), (10.0, 110.0), (-5.0, 120.0)]

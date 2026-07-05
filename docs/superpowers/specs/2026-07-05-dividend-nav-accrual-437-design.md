@@ -56,7 +56,18 @@ rows.
    booked cash and never blows up.
 3. **The entitlement bound is the activity date, not a calendar ex-date/record-date rule.** For the
    current regular-hours daily rail this is a close approximation; it is not the exchange
-   record-date convention.
+   record-date convention. The bound is deliberately **date-level, not full-timestamp**: broker
+   `DIV` rows carry a date-only `date` field (no intraday time), so a finer bound would be false
+   precision. A direct consequence — accepted, not a bug — is that **a fill placed the same day the
+   dividend posts, even one timestamped strictly *after* the `DIV` row's own instant, is treated as
+   entitled** (it shares the activity's date). The exact ex-date/record-date rule is deferred to the
+   declaration-sourced design below. Asserted by `test_same_day_fill_after_dividend_is_entitled`.
+4. **A `DIV` row with a NULL or non-ISO-parseable `ts` is failed closed to an account-level
+   residual.** Such a row carries no entitlement window we can trust (a malformed `ts` sorting below
+   every fill date would otherwise credit an unbounded all-fills window), so it is excluded from
+   attribution (`AND ts IS NOT NULL` plus a parse guard) and left unattributed rather than
+   silently zero-credited by an empty-string fallback. Asserted by
+   `test_dividend_with_null_ts_is_residual` and `test_dividend_with_malformed_ts_is_residual`.
 
 These are acceptable for closing the *gross* parity break (dividend excluded → phantom drawdown) that
 #437 is about. The exact, declaration-sourced accrual is deferred (below).

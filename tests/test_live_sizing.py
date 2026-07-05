@@ -30,6 +30,25 @@ def _activity(conn, aid, type_, symbol, amount):
     conn.commit()
 
 
+def _paper_fill(conn, aid, strategy, symbol, qty, price):
+    conn.execute(
+        "INSERT INTO paper_venue_fills"
+        "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
+        " VALUES (?,?,?,?,?,?,?)",
+        (aid, "b", strategy, symbol, qty, price, "2026-06-06T00:00:00+00:00"),
+    )
+    conn.commit()
+
+
+def _paper_activity(conn, aid, type_, symbol, amount):
+    conn.execute(
+        "INSERT INTO paper_venue_activities(activity_id, type, symbol, amount, ts, raw) "
+        "VALUES (?,?,?,?,?,?)",
+        (aid, type_, symbol, amount, "2026-06-06T00:00:00+00:00", "{}"),
+    )
+    conn.commit()
+
+
 def _bars(close_by_symbol):
     rows = []
     for sym, closes in close_by_symbol.items():
@@ -87,6 +106,28 @@ def test_dividend_cash_credits_nav(tmp_path):
     assert nav == nav_without_dividend + 200.0               # 10_100 — dividend cushions the DD
     assert nav > nav_without_dividend
     assert snap.equity == min(10_000.0, nav)                 # 10_000
+
+
+def test_paper_lane_dividend_cash_credits_nav(tmp_path):
+    # #437 (GATE-2 finding #3): the dividend credit is kind-parameterized, but only the LIVE lane
+    # was exercised. This proves the PAPER lane too — build_paper_sizing_snapshot must read the
+    # paper_venue_* tables and credit the paper strategy's virtual NAV identically, so a paper
+    # book's drawdown breaker doesn't trip on the phantom dividend drawdown the live lane guards.
+    conn = _conn(tmp_path)
+    _paper_fill(conn, "a1", "s1", "AAA", 10.0, 100.0)     # long 10 @100 in the PAPER venue
+    _paper_activity(conn, "d1", "DIV", "AAA", 200.0)      # $200 paper-venue dividend on AAA
+    bars = _bars({"AAA": [100.0, 100.0]})                 # mark AT cost -> unrealized 0
+    snap, nav = S.build_paper_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars,
+                                              universe=["AAA"])
+    assert nav == 10_000.0 + 200.0                        # NAV = allocation + paper dividend credit
+    assert snap.equity == 10_000.0                        # min(allocation, NAV) = allocation
+
+    # a LIVE-lane dividend must NOT leak into the paper NAV (separate tables): booking a live DIV
+    # leaves the paper snapshot unchanged.
+    _activity(conn, "d2", "DIV", "AAA", 999.0)
+    snap2, nav2 = S.build_paper_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars,
+                                                universe=["AAA"])
+    assert nav2 == nav                                    # unchanged: live DIV is a different lane
 
 
 def test_universe_symbol_with_no_position_is_flat(tmp_path):

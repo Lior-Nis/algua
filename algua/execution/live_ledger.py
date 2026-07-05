@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 
 from algua.contracts.types import OpenOrderReader, OrderLookupBroker
@@ -108,11 +108,23 @@ def strategy_cash_credit(
     - Entitlement is bounded to the dividend's own date: a strategy's share base is its signed
       position reconstructed from fills on or before the activity date (``date(fill_ts) <=
       date(ts)``), so a past dividend's attributed credit is DETERMINISTIC and never drifts as
-      later, unrelated fills accumulate.
+      later, unrelated fills accumulate. The bound is DELIBERATELY date-level, not full-timestamp:
+      broker ``DIV`` rows carry a date-only ``date`` field (no intraday time), so a finer bound
+      would be false precision. A consequence — DISCLOSED, not a bug — is that a fill placed the
+      SAME DAY the dividend posts, even one timestamped strictly AFTER the ``DIV`` row's own
+      instant, is counted as entitled (it shares the activity's date). On the regular-hours daily
+      rail this is a close approximation of the exchange record-date convention (see design-doc
+      limitation #3); the exact ex-date/record-date rule is deferred to the declaration-sourced one.
 
     Divides only when the same-side share base is positive, so it never divides by zero; a row whose
     entitled side is empty in the ledger (e.g. a short-debit row with no ledger short) contributes
     nothing to any strategy and stays an account-level residual.
+
+    Fail-closed on an un-boundable timestamp: a ``DIV`` row whose ``ts`` is NULL or does not parse
+    as an ISO date carries no entitlement window we can trust, so it is EXCLUDED from attribution
+    (SQL ``AND ts IS NOT NULL`` plus a parse guard) and left as an unattributed account-level
+    residual — it is never credited against an unbounded (all-fills) window, which a malformed
+    ``ts`` sorting below every fill date would otherwise produce.
 
     Minimal-slice limitation: the per-share figure is IMPLIED from the account cash, not sourced
     from a corporate-action declaration, and a single broker-netted row (one row for an internally
@@ -121,7 +133,7 @@ def strategy_cash_credit(
     t = _TABLES[kind]
     divs = conn.execute(
         f"SELECT symbol, amount, ts FROM {t.activities} "
-        "WHERE type = 'DIV' AND symbol IS NOT NULL AND amount IS NOT NULL"
+        "WHERE type = 'DIV' AND symbol IS NOT NULL AND amount IS NOT NULL AND ts IS NOT NULL"
     ).fetchall()
     if not divs:
         return 0.0
@@ -129,7 +141,12 @@ def strategy_cash_credit(
     for row in divs:
         sym = row["symbol"]
         amt = float(row["amount"])
-        as_of = (row["ts"] or "")[:10]  # date-vs-date entitlement bound (clean, tz-free)
+        try:
+            # date-vs-date entitlement bound (clean, tz-free); a non-ISO ts is un-boundable, so
+            # the row fails closed to a residual rather than crediting an all-fills window.
+            as_of = date.fromisoformat(str(row["ts"])[:10]).isoformat()
+        except ValueError:
+            continue
         positions = {
             r["strategy"]: float(r["q"])
             for r in conn.execute(
