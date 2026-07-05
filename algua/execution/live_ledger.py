@@ -83,6 +83,57 @@ def position_pnl(fills: list[tuple[float, float]], mark: float) -> PositionPnl:
     return PositionPnl(qty=qty, avg_cost=avg, realized=realized, unrealized=unrealized)
 
 
+def strategy_cash_credit(
+    conn: sqlite3.Connection, strategy: str, kind: LedgerKind
+) -> float:
+    """The dividend/cash cash-flow this strategy's virtual NAV should include (#437).
+
+    Broker cash activities are booked at the ACCOUNT level per symbol (the {kind}_activities table
+    has no strategy column), while the backtest simulates on total-return adj_close which reinvests
+    dividends. So live/paper NAV must credit that cash or it understates the sizing denominator and
+    trips the drawdown breaker on a phantom drawdown.
+
+    Each symbol-scoped cash activity's net `amount` is split across the strategies that traded that
+    symbol PRO-RATA by gross traded volume (Σ|qty| of that strategy's fills in the symbol) — exact
+    (100%) for the single-strategy-per-symbol norm, a principled split otherwise. Symbol-less
+    account cash (interest/fees with NULL symbol) and NULL amounts are NOT security-attributable and
+    are excluded (the backtest models per-security total return only). `amount` may be negative (a
+    dividend paid on a short); the arithmetic is correct as-is. Only symbols where this strategy has
+    positive gross volume AND total gross volume is positive contribute, so it never divides by
+    zero."""
+    t = _TABLES[kind]
+    cash = {
+        r["symbol"]: float(r["amt"])
+        for r in conn.execute(
+            f"SELECT symbol, SUM(amount) AS amt FROM {t.activities} "
+            "WHERE symbol IS NOT NULL AND amount IS NOT NULL GROUP BY symbol"
+        )
+    }
+    if not cash:
+        return 0.0
+    mine = {
+        r["symbol"]: float(r["v"])
+        for r in conn.execute(
+            f"SELECT symbol, SUM(ABS(qty)) AS v FROM {t.fills} WHERE strategy = ? GROUP BY symbol",
+            (strategy,),
+        )
+    }
+    total = {
+        r["symbol"]: float(r["v"])
+        for r in conn.execute(
+            f"SELECT symbol, SUM(ABS(qty)) AS v FROM {t.fills} "
+            "WHERE strategy IS NOT NULL GROUP BY symbol"
+        )
+    }
+    credit = 0.0
+    for sym, amt in cash.items():
+        my_v = mine.get(sym, 0.0)
+        tot_v = total.get(sym, 0.0)
+        if my_v > 0.0 and tot_v > 0.0:
+            credit += amt * (my_v / tot_v)
+    return credit
+
+
 def record_live_order(
     conn: sqlite3.Connection,
     strategy: str,
@@ -311,8 +362,9 @@ def _fills_for(
 def strategy_nav(
     conn: sqlite3.Connection, strategy: str, allocation: float, marks: dict[str, float]
 ) -> float:
-    """NAV = allocation + Σ realized + Σ unrealized across the strategy's symbols. `marks` supplies
-    the current price per symbol (a missing mark falls back to the average cost → 0 unrealized)."""
+    """NAV = allocation + Σ realized + Σ unrealized across the strategy's symbols, plus credited
+    dividend/cash activities (#437). `marks` supplies the current price per symbol (a missing mark
+    falls back to the average cost → 0 unrealized)."""
     symbols = {
         r["symbol"]
         for r in conn.execute(
@@ -324,6 +376,7 @@ def strategy_nav(
         fills = _fills_for(conn, strategy, sym)
         pnl = position_pnl(fills, mark=marks.get(sym, fills[-1][1] if fills else 0.0))
         total += pnl.realized + pnl.unrealized
+    total += strategy_cash_credit(conn, strategy, LedgerKind.LIVE)
     return total
 
 

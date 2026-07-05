@@ -92,6 +92,22 @@ def test_strategy_nav(tmp_path):
     assert nav == 10_050.0
 
 
+def test_strategy_nav_includes_dividends(tmp_path):
+    # #437: strategy_nav must also credit broker-paid dividend cash so live/paper NAV stays in step
+    # with the total-return adj_close the backtest reinvests on.
+    conn = _conn(tmp_path)
+    _fill(conn, "a1", "s1", "AAA", 10.0, 100.0)  # long 10 @100
+    conn.execute(
+        "INSERT INTO live_activities(activity_id, type, symbol, amount, ts, raw) "
+        "VALUES (?,?,?,?,?,?)",
+        ("d1", "DIV", "AAA", 50.0, "2026-06-06T00:00:00+00:00", "{}"),
+    )
+    conn.commit()
+    # mark 105 -> unrealized 50, realized 0 -> base NAV 10_050; + 50 dividend -> 10_100
+    nav = L.strategy_nav(conn, "s1", allocation=10_000.0, marks={"AAA": 105.0})
+    assert nav == 10_050.0 + 50.0
+
+
 def test_owned_open_order_ids_filters_to_strategy(tmp_path):
     conn = _conn(tmp_path)
     L.record_live_order(conn, "s1", "AAA", "buy", 1000.0, "c1")

@@ -21,6 +21,15 @@ def _fill(conn, aid, strategy, symbol, qty, price):
     conn.commit()
 
 
+def _activity(conn, aid, type_, symbol, amount):
+    conn.execute(
+        "INSERT INTO live_activities(activity_id, type, symbol, amount, ts, raw) "
+        "VALUES (?,?,?,?,?,?)",
+        (aid, type_, symbol, amount, "2026-06-06T00:00:00+00:00", "{}"),
+    )
+    conn.commit()
+
+
 def _bars(close_by_symbol):
     rows = []
     for sym, closes in close_by_symbol.items():
@@ -50,6 +59,34 @@ def test_sizing_equity_derisks_when_nav_below_allocation(tmp_path):
                                              universe=["AAA"])
     assert nav == 9_500.0
     assert snap.equity == 9_500.0                        # min(allocation, NAV) = NAV (de-risked)
+
+
+def test_dividend_cash_credits_nav(tmp_path):
+    # #437: a broker-paid dividend must credit the strategy's virtual NAV, matching the total-return
+    # adj_close the backtest reinvests on — otherwise NAV understates and the drawdown breaker trips
+    # on a phantom drawdown.
+    conn = _conn(tmp_path)
+    _fill(conn, "a1", "s1", "AAA", 10.0, 100.0)          # long 10 @100
+    _activity(conn, "d1", "DIV", "AAA", 200.0)           # $200 dividend on AAA
+
+    # mark AT cost -> unrealized 0 -> NAV = allocation + dividend; equity caps at allocation.
+    bars = _bars({"AAA": [100.0, 100.0]})
+    snap, nav = S.build_live_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars,
+                                             universe=["AAA"])
+    assert nav == 10_000.0 + 200.0
+    assert snap.equity == 10_000.0                        # min(allocation, NAV) = allocation
+
+    # mark BELOW cost -> NAV = allocation + unrealized_loss + dividend; the dividend cushions the
+    # drawdown basis. Unrealized = 10*(90-100) = -100, so nav = 10_000 - 100 + 200 = 10_100 (>
+    # allocation still, so equity stays at allocation) — but crucially nav is 200 higher than the
+    # 9_900 it would be WITHOUT the credit.
+    bars = _bars({"AAA": [100.0, 90.0]})
+    snap, nav = S.build_live_sizing_snapshot(conn, "s1", allocation=10_000.0, bars=bars,
+                                             universe=["AAA"])
+    nav_without_dividend = 10_000.0 + 10.0 * (90.0 - 100.0)   # 9_900
+    assert nav == nav_without_dividend + 200.0               # 10_100 — dividend cushions the DD
+    assert nav > nav_without_dividend
+    assert snap.equity == min(10_000.0, nav)                 # 10_000
 
 
 def test_universe_symbol_with_no_position_is_flat(tmp_path):
