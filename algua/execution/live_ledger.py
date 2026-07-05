@@ -86,51 +86,68 @@ def position_pnl(fills: list[tuple[float, float]], mark: float) -> PositionPnl:
 def strategy_cash_credit(
     conn: sqlite3.Connection, strategy: str, kind: LedgerKind
 ) -> float:
-    """The dividend/cash cash-flow this strategy's virtual NAV should include (#437).
+    """The dividend cash-flow this strategy's virtual NAV should include (#437, minimal slice).
 
-    Broker cash activities are booked at the ACCOUNT level per symbol (the {kind}_activities table
-    has no strategy column), while the backtest simulates on total-return adj_close which reinvests
-    dividends. So live/paper NAV must credit that cash or it understates the sizing denominator and
-    trips the drawdown breaker on a phantom drawdown.
+    Broker dividend (``DIV``) activities are booked at the ACCOUNT level per symbol (the
+    ``{kind}_activities`` table has no strategy column), while the backtest simulates on the
+    total-return ``adj_close`` which reinvests dividends. So live/paper NAV must credit that cash or
+    it understates the sizing denominator and trips the drawdown breaker on a phantom drawdown.
 
-    Each symbol-scoped cash activity's net `amount` is split across the strategies that traded that
-    symbol PRO-RATA by gross traded volume (Σ|qty| of that strategy's fills in the symbol) — exact
-    (100%) for the single-strategy-per-symbol norm, a principled split otherwise. Symbol-less
-    account cash (interest/fees with NULL symbol) and NULL amounts are NOT security-attributable and
-    are excluded (the backtest models per-security total return only). `amount` may be negative (a
-    dividend paid on a short); the arithmetic is correct as-is. Only symbols where this strategy has
-    positive gross volume AND total gross volume is positive contribute, so it never divides by
-    zero."""
+    Attribution is SIGNED and per-SIDE — each ``DIV`` activity row is attributed to the entitled
+    side from each strategy's OWN signed position, never from a netted account total:
+
+    - Only ``type = 'DIV'`` rows are attributed. Non-dividend cash (interest, fees, journals,
+      deposits) and NULL/symbol-less rows are NOT per-security total-return and are excluded.
+    - Each row is handled INDIVIDUALLY (never summed across rows first). A positive amount is a
+      long-side credit, split across the strategies LONG the symbol pro-rata by their long shares; a
+      negative amount is a short-dividend debit, split across the strategies SHORT the symbol
+      pro-rata by their short shares. A long is thus credited and a short debited independently —
+      there is NO shared long+short divisor, so an offsetting book (A long, B short, booked as a
+      credit row and a debit row) attributes both sides correctly and oppositely-signed instead of
+      cancelling to ~0.
+    - Entitlement is bounded to the dividend's own date: a strategy's share base is its signed
+      position reconstructed from fills on or before the activity date (``date(fill_ts) <=
+      date(ts)``), so a past dividend's attributed credit is DETERMINISTIC and never drifts as
+      later, unrelated fills accumulate.
+
+    Divides only when the same-side share base is positive, so it never divides by zero; a row whose
+    entitled side is empty in the ledger (e.g. a short-debit row with no ledger short) contributes
+    nothing to any strategy and stays an account-level residual.
+
+    Minimal-slice limitation: the per-share figure is IMPLIED from the account cash, not sourced
+    from a corporate-action declaration, and a single broker-netted row (one row for an internally
+    long+short book) cannot recover the per-side split — the full declaration-sourced design in
+    ``docs/superpowers/specs/2026-07-05-dividend-nav-accrual-437-design.md`` is deferred."""
     t = _TABLES[kind]
-    cash = {
-        r["symbol"]: float(r["amt"])
-        for r in conn.execute(
-            f"SELECT symbol, SUM(amount) AS amt FROM {t.activities} "
-            "WHERE symbol IS NOT NULL AND amount IS NOT NULL GROUP BY symbol"
-        )
-    }
-    if not cash:
+    divs = conn.execute(
+        f"SELECT symbol, amount, ts FROM {t.activities} "
+        "WHERE type = 'DIV' AND symbol IS NOT NULL AND amount IS NOT NULL"
+    ).fetchall()
+    if not divs:
         return 0.0
-    mine = {
-        r["symbol"]: float(r["v"])
-        for r in conn.execute(
-            f"SELECT symbol, SUM(ABS(qty)) AS v FROM {t.fills} WHERE strategy = ? GROUP BY symbol",
-            (strategy,),
-        )
-    }
-    total = {
-        r["symbol"]: float(r["v"])
-        for r in conn.execute(
-            f"SELECT symbol, SUM(ABS(qty)) AS v FROM {t.fills} "
-            "WHERE strategy IS NOT NULL GROUP BY symbol"
-        )
-    }
     credit = 0.0
-    for sym, amt in cash.items():
-        my_v = mine.get(sym, 0.0)
-        tot_v = total.get(sym, 0.0)
-        if my_v > 0.0 and tot_v > 0.0:
-            credit += amt * (my_v / tot_v)
+    for row in divs:
+        sym = row["symbol"]
+        amt = float(row["amount"])
+        as_of = (row["ts"] or "")[:10]  # date-vs-date entitlement bound (clean, tz-free)
+        positions = {
+            r["strategy"]: float(r["q"])
+            for r in conn.execute(
+                f"SELECT strategy, SUM(qty) AS q FROM {t.fills} "
+                "WHERE strategy IS NOT NULL AND symbol = ? AND substr(fill_ts, 1, 10) <= ? "
+                "GROUP BY strategy",
+                (sym, as_of),
+            )
+        }
+        my_q = positions.get(strategy, 0.0)
+        if amt >= 0.0:  # long-side credit
+            base = sum(q for q in positions.values() if q > 0.0)
+            my_share = my_q if my_q > 0.0 else 0.0
+        else:  # short-side dividend debit
+            base = sum(-q for q in positions.values() if q < 0.0)
+            my_share = -my_q if my_q < 0.0 else 0.0
+        if base > 0.0 and my_share > 0.0:
+            credit += amt * (my_share / base)
     return credit
 
 

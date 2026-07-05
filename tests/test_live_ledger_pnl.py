@@ -8,21 +8,21 @@ def _conn(tmp_path):
     return conn
 
 
-def _fill(conn, aid, strategy, symbol, qty, price):
+def _fill(conn, aid, strategy, symbol, qty, price, ts="2026-06-06T00:00:00+00:00"):
     conn.execute(
         "INSERT INTO live_fills"
         "(activity_id, broker_order_id, strategy, symbol, qty, price, fill_ts)"
         " VALUES (?,?,?,?,?,?,?)",
-        (aid, "b", strategy, symbol, qty, price, "2026-06-06T00:00:00+00:00"),
+        (aid, "b", strategy, symbol, qty, price, ts),
     )
     conn.commit()
 
 
-def _activity(conn, aid, type_, symbol, amount):
+def _activity(conn, aid, type_, symbol, amount, ts="2026-06-06T00:00:00+00:00"):
     conn.execute(
         "INSERT INTO live_activities(activity_id, type, symbol, amount, ts, raw) "
         "VALUES (?,?,?,?,?,?)",
-        (aid, type_, symbol, amount, "2026-06-06T00:00:00+00:00", "{}"),
+        (aid, type_, symbol, amount, ts, "{}"),
     )
     conn.commit()
 
@@ -34,19 +34,59 @@ def test_cash_credit_single_holder_gets_full_amount(tmp_path):
     assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 25.0
 
 
-def test_cash_credit_splits_pro_rata_by_gross_volume(tmp_path):
+def test_cash_credit_splits_long_credit_by_long_shares(tmp_path):
     conn = _conn(tmp_path)
-    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0)          # s1 gross vol 10
-    _fill(conn, "f2", "s2", "AAA", -30.0, 100.0)         # s2 gross vol 30 (abs)
-    _activity(conn, "d1", "DIV", "AAA", 40.0)            # 40 split 10:30
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0)          # long 10
+    _fill(conn, "f2", "s2", "AAA", 30.0, 100.0)          # long 30
+    _activity(conn, "d1", "DIV", "AAA", 40.0)            # +40 credit split across LONGS 10:30
     assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 10.0
     assert strategy_cash_credit(conn, "s2", LedgerKind.LIVE) == 30.0
 
 
-def test_cash_credit_excludes_symbolless_and_untraded(tmp_path):
+def test_short_position_is_debited_on_dividend(tmp_path):
+    # #437: a short owes the dividend — the broker books a NEGATIVE DIV amount, which must land as a
+    # NEGATIVE credit (a debit) on the short's NAV, never a positive credit.
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", -20.0, 100.0)         # short 20
+    _activity(conn, "d1", "DIV", "AAA", -50.0)           # short-dividend debit
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == -50.0
+
+
+def test_offsetting_book_both_sides_signed_and_nonzero(tmp_path):
+    # #437: an offsetting long/short book must NOT cancel. The broker books the long credit and the
+    # short debit as two separate signed rows; each side is attributed independently, so the long is
+    # credited (+) and the short debited (-) — both nonzero, oppositely signed. The old net-pooling
+    # split collapsed these to ~0.
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s_long", "AAA", 100.0, 100.0)     # long 100
+    _fill(conn, "f2", "s_short", "AAA", -100.0, 100.0)   # short 100
+    _activity(conn, "d1", "DIV", "AAA", 200.0)           # +200 long-side credit
+    _activity(conn, "d2", "DIV", "AAA", -200.0)          # -200 short-side debit
+    assert strategy_cash_credit(conn, "s_long", LedgerKind.LIVE) == 200.0
+    assert strategy_cash_credit(conn, "s_short", LedgerKind.LIVE) == -200.0
+
+
+def test_credit_is_deterministic_under_later_unrelated_fills(tmp_path):
+    # #437: a computed historical credit must not drift as unrelated FUTURE fills accumulate. The
+    # entitled share base is the position as of the dividend's own date, so fills stamped after the
+    # ex/activity date never change a past dividend's attribution.
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0, ts="2026-06-01T00:00:00+00:00")
+    _activity(conn, "d1", "DIV", "AAA", 30.0, ts="2026-06-02T00:00:00+00:00")
+    before = strategy_cash_credit(conn, "s1", LedgerKind.LIVE)
+    assert before == 30.0
+    # later, unrelated fills (after the dividend date), including a second strategy piling into AAA
+    _fill(conn, "f2", "s1", "AAA", 90.0, 110.0, ts="2026-07-01T00:00:00+00:00")
+    _fill(conn, "f3", "s2", "AAA", 500.0, 110.0, ts="2026-07-01T00:00:00+00:00")
+    after = strategy_cash_credit(conn, "s1", LedgerKind.LIVE)
+    assert after == before                                # unchanged — bounded to the dividend date
+
+
+def test_cash_credit_excludes_non_dividend_and_untraded(tmp_path):
     conn = _conn(tmp_path)
     _fill(conn, "f1", "s1", "AAA", 10.0, 100.0)          # s1 only traded AAA
     _activity(conn, "i1", "INT", None, 5.0)              # symbol-less account cash -> excluded
+    _activity(conn, "j1", "JNLC", "AAA", 99.0)           # non-DIV symbol cash -> excluded
     _activity(conn, "d1", "DIV", "BBB", 7.0)             # symbol s1 never traded -> excluded
     assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
 

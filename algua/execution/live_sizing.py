@@ -1,8 +1,9 @@
 """The ledger-backed sizing view for a strategy's virtual subaccount (live or paper). Equity is the
-SIZING denominator = min(allocation, NAV); NAV (allocation + realized + unrealized + credited
-dividend/cash activities, #437) is the drawdown basis. Crediting broker-paid dividend cash keeps NAV
-in step with the total-return adj_close the backtest reinvests on, so a dividend does not read as a
-phantom drawdown. Marks are the latest closed bar; a held symbol with no usable mark FAILS CLOSED
+SIZING denominator = min(allocation, NAV); NAV (allocation + realized + unrealized + signed
+per-strategy dividend credits, #437) is the drawdown basis. Crediting broker-paid dividend cash
+(a long credited, a short debited) keeps NAV in step with the total-return adj_close the backtest
+reinvests on, so a dividend does not read as a phantom drawdown. Marks are the latest closed bar; a
+held symbol with no usable mark FAILS CLOSED
 (the loop skips the strategy) rather than falling back to average cost — which would hide a loss and
 suppress the drawdown breaker."""
 from __future__ import annotations
