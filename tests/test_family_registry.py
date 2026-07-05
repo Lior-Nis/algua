@@ -254,22 +254,39 @@ def test_add_parent_edge_writes_event_row() -> None:
     assert len(rows) == 1
 
 
-def test_add_parent_edge_atomic_race() -> None:
-    """Two threads: one adds A→B, one adds B→A; exactly one raises ValueError.
+def test_add_parent_edge_atomic_race(tmp_path) -> None:
+    """Two threads on SEPARATE connections race A→B vs B→A; exactly one wins.
 
-    With a shared connection the GIL serializes Python execution, so one thread
-    completes the full BEGIN IMMEDIATE…COMMIT before the other thread's BFS runs.
-    The second thread then detects the cycle and raises ValueError.
+    Each thread uses its OWN connection to a shared on-disk DB, mirroring how
+    real concurrent promotions run in separate processes. A SQLite transaction
+    is per-connection, so BEGIN IMMEDIATE serializes the two writers via the
+    SQLite write lock: exactly one edge commits, and the loser — which blocks
+    until the winner commits — then runs its BFS cycle scan against the winner's
+    committed edge and rejects the reverse edge with ValueError('cycle'). With
+    busy_timeout=5000ms the loser always waits out the lock rather than raising
+    a busy-timeout OperationalError.
     """
-    conn = sqlite3.connect(":memory:", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    db.migrate(conn)
-    repo = SqliteStrategyRepository(conn)
+    db_path = tmp_path / "family.db"
 
-    a = repo.create_family("A", actor="agent")
-    b = repo.create_family("B", actor="agent")
+    def _open() -> sqlite3.Connection:
+        c = sqlite3.connect(str(db_path), check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA foreign_keys=ON;")
+        c.execute("PRAGMA busy_timeout=5000;")
+        return c
+
+    setup = _open()
+    db.migrate(setup)
+    setup_repo = SqliteStrategyRepository(setup)
+    a = setup_repo.create_family("A", actor="agent")
+    b = setup_repo.create_family("B", actor="agent")
+    setup.commit()
+    setup.close()
+
+    c1 = _open()
+    c2 = _open()
+    r1 = SqliteStrategyRepository(c1)
+    r2 = SqliteStrategyRepository(c2)
 
     errors: list[Exception] = []
     successes: list[str] = []
@@ -278,17 +295,17 @@ def test_add_parent_edge_atomic_race() -> None:
     def add_a_b() -> None:
         barrier.wait()
         try:
-            repo.add_parent_edge(a, b)
+            r1.add_parent_edge(a, b)
             successes.append("a->b")
-        except (ValueError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
     def add_b_a() -> None:
         barrier.wait()
         try:
-            repo.add_parent_edge(b, a)
+            r2.add_parent_edge(b, a)
             successes.append("b->a")
-        except (ValueError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
     t1 = threading.Thread(target=add_a_b)
@@ -298,9 +315,16 @@ def test_add_parent_edge_atomic_race() -> None:
     t1.join()
     t2.join()
 
-    # Exactly one must succeed, exactly one must fail.
+    c1.close()
+    c2.close()
+
+    # Exactly one must succeed, exactly one must fail — and the failure must be
+    # the cycle guard firing (not a busy-timeout), proving true write-lock
+    # serialization rather than a spurious lock contention error.
     assert len(successes) == 1
     assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert "cycle" in str(errors[0])
 
 
 def test_add_parent_edge_must_be_top_level() -> None:
