@@ -92,7 +92,7 @@ diagnostic, not a persisted ledger row).
 | probe | required in mode | row `ok` is false when |
 |---|---|---|
 | `global_halt` | **all modes** | a halt row exists (`global_halt.get(conn)` non-None) |
-| `kill_switches` | never (advisory) | never — always `ok:true`; detail lists any tripped switch names |
+| `kill_switches` | never (advisory) | any tripped switch (`ok:false`, `required:false` — reported but never gates exit); detail lists tripped switch names |
 | `live_authorizations` | **`--live`** | runs **only under `--live`**; `ok` false when **any** existing `Stage.LIVE` strategy fails to re-verify (`ok = no-LIVE OR ALL-authorized`). Outside `--live`: `skipped:true` row (`ok:true`), **no strategy-module import** |
 | `paper_credentials` (already merged) | **`--paper`** | Alpaca paper key/secret unset (advisory default; required under `--paper`) |
 
