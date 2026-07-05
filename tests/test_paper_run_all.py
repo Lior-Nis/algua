@@ -437,3 +437,79 @@ def test_run_all_pool_does_not_phantom_debit_skipped_buys(monkeypatch):
     # (Under the phantom-debit bug the pool would have decremented by $0.50 and S2 would see only
     # $4999.50.)
     assert s2_permitted == [equity]
+
+
+# ---------------------------------------------------------------------------
+# Test 7: an omitted --max-drawdown still trips a breach at the default bound
+# ---------------------------------------------------------------------------
+
+def test_run_all_omitted_max_drawdown_uses_default_bound(monkeypatch):
+    """Parity with trade-tick / live run-all (#452 GATE-2): an omitted --max-drawdown must resolve
+    to the default-ON ``settings.strategy_max_drawdown_default`` bound, NOT leave the breaker OFF.
+    The fake run_tick asserts the bound threaded into it equals that default and then breaches, so
+    the envelope surfaces a scoped-flattened breach and exits non-zero."""
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+    _seed_paper_venue_order(_S1, "AAA", "coid-s1-AAA", "oid-s1-AAA")
+
+    broker = _RunAllBroker(
+        open_orders=[{"id": "oid-s1-AAA", "client_order_id": "coid-s1-AAA"}]
+    )
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    default_bound = get_settings().strategy_max_drawdown_default
+    seen_max_dd: list = []
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        seen_max_dd.append(max_drawdown)
+        # The omitted flag must have resolved to the default-ON bound, not None (breaker OFF).
+        raise RiskBreach("drawdown", f"drawdown 0.99 exceeds max_drawdown {max_drawdown}")
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    # NOTE: no --max-drawdown passed
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout
+    assert seen_max_dd == [default_bound]
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    assert any(s.get("ok") is False for s in payload["strategies"])
+
+
+# ---------------------------------------------------------------------------
+# Test 8: omitted --start/--end resolve to a rolling window ending today
+# ---------------------------------------------------------------------------
+
+def test_run_all_omitted_window_resolves_to_rolling_today(monkeypatch):
+    """Parity with trade-tick / live run-all (#452 GATE-2): omitted --start/--end must resolve to a
+    recent rolling wall-clock window ending TODAY (UTC), NOT the literal 2023 defaults that would
+    size/risk-check against a frozen stale window. The fake run_tick captures the (start, end)
+    threaded into it (parsed to datetimes via ``utc()``) and asserts end == today and start is a
+    recent (not-2023) date."""
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    seen_window: list = []
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        seen_window.append((start, end))
+        return _success_result()
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    # NOTE: no --start/--end passed
+    result = runner.invoke(app, ["paper", "run-all", "--snapshot", _SNAP])
+    assert result.exit_code == 0, result.stdout
+    assert len(seen_window) == 1
+    start, end = seen_window[0]
+    today = datetime.now(UTC).date()
+    assert end.date() == today  # end resolves to today, not literal 2023-12-31
+    assert start.year != 2023  # start is a recent rolling date, not the 2023 default
+    assert start < end  # a real lookback window

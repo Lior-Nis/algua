@@ -91,6 +91,22 @@ broker.cancel_open_orders` (account-wide fallback for single-strategy trade-tick
 cancels a sibling's resting orders. (Tests: `test_run_all_breach_scoped_flatten_surfaces_siblings`,
 `tests/test_live_ledger_ledgerkind.py`.)
 
+### Default-ON drawdown breaker + rolling wall-clock window (GATE-2 parity fix)
+`run-all` was shipping with the SAME literal defaults as the original single-strategy CLI it mirrors
+pre-#390/#452 (`--start 2023-01-01 --end 2023-12-31`, and an omitted `--max-drawdown` left the breaker
+OFF) instead of the parity these two commands already established for `paper trade-tick` and `live
+run-all`. Both are now threaded through the shared `algua/cli/_common.py` helpers so the three CLIs can
+never drift apart:
+- `--max-drawdown` defaults to `None` and `--disable-drawdown-breaker` (human-only, audited) is added;
+  `resolve_drawdown_breaker` resolves an omitted flag to the default-ON `strategy_max_drawdown_default`
+  bound rather than silently disabling the breaker (#390 parity). An explicit `--disable-drawdown-breaker`
+  is audited (`drawdown_breaker_disabled`) inside the same connection used for the rest of the cycle.
+- `--start`/`--end` default to `None` and `resolve_wall_clock_window` fills them with a recent rolling
+  window (`end=today UTC`, `start=today-400d`) instead of the frozen 2023 literal (#452 parity), so a
+  default invocation sizes/risk-checks against current data.
+(Tests: `test_run_all_omitted_max_drawdown_uses_default_bound`,
+`test_run_all_omitted_window_resolves_to_rolling_today`.)
+
 ### Breach handling — break on any `ok: False` marker (stop-the-world)
 The tick loop `break`s on the FIRST strategy that returns an `ok: False` marker (a breach/halt), the
 same conservative posture as `live run-all`. The breaching strategy has already tripped its kill-switch

@@ -591,11 +591,15 @@ def trade_tick(
 @json_errors
 def run_all(
     snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
-    start: str = typer.Option("2023-01-01", "--start"),
-    end: str = typer.Option("2023-12-31", "--end"),
-    max_drawdown: float = typer.Option(
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    max_drawdown: float | None = typer.Option(
         None, "--max-drawdown",
-        help="halt + flatten a strategy if equity falls this fraction below its peak"),
+        help="halt + flatten a strategy if equity falls this fraction below its peak; "
+             "omit for the default-ON bound"),
+    disable_drawdown_breaker: bool = typer.Option(
+        False, "--disable-drawdown-breaker",
+        help="HUMAN-ONLY emergency: turn the drawdown breaker fully OFF (audited)"),
 ) -> None:
     """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest venue fills,
     reconcile the account against the paper broker, then tick each strategy (scoped cancel on a
@@ -615,6 +619,8 @@ def run_all(
     advisory paper-lane lock that enforces this is a filed follow-up (see the design doc)."""
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
+    max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
+    start, end = resolve_wall_clock_window(start, end)
     configure_logging()
     counters = CycleCounters()
     # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives even
@@ -623,6 +629,10 @@ def run_all(
         log.info("cycle_start", extra={"fields": {"lane": "paper", "snapshot": snapshot}})
         try:
             with registry_conn() as conn:
+                if disable_drawdown_breaker:
+                    audit_append(conn, actor="human", action="drawdown_breaker_disabled",
+                                 reason="paper run-all invoked with --disable-drawdown-breaker",
+                                 strategy=None)
                 repo = SqliteStrategyRepository(conn)
                 # Both paper-lane stages tick (parity with load_gated_strategy / trade-tick): a
                 # forward_tested strategy keeps accruing evidence ticks awaiting the go-live
