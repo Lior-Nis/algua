@@ -753,7 +753,8 @@ def run_all(
                                  reason=str(exc), strategy=None)
                     log.error("venue_ingest_failed",
                               extra={"fields": {"lane": "paper"}}, exc_info=True)
-                    emit(breach_payload(str(exc), kind="venue_ingest_failed"))
+                    emit({**breach_payload(str(exc), kind="venue_ingest_failed"),
+                          "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1) from exc
 
                 # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book.
