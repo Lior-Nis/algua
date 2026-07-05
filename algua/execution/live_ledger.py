@@ -457,16 +457,18 @@ def _quarantine_activity(
 
 
 def owned_open_order_ids(
-    conn: sqlite3.Connection, broker: OpenOrderReader, strategy: str
+    conn: sqlite3.Connection, broker: OpenOrderReader, strategy: str,
+    *, kind: LedgerKind = LedgerKind.LIVE,
 ) -> list[str]:
     """The broker order ids of THIS strategy's currently-open orders: list the account's open
-    orders and keep those whose client_order_id maps (via live_orders) to `strategy`. Used to
-    scope cancellation so one strategy never cancels a sibling's orders."""
+    orders and keep those whose client_order_id maps (via the order ledger) to `strategy`. Used to
+    scope cancellation so one strategy never cancels a sibling's orders. `kind` selects the order
+    ledger (live_orders / paper_venue_orders)."""
     open_orders = broker.list_open_orders()
     owned = {
         r["client_order_id"]
         for r in conn.execute(
-            "SELECT client_order_id FROM live_orders WHERE strategy = ?", (strategy,)
+            f"SELECT client_order_id FROM {_TABLES[kind].orders} WHERE strategy = ?", (strategy,)
         )
     }
     return [o["id"] for o in open_orders if o.get("client_order_id") in owned]
