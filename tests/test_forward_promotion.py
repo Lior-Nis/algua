@@ -587,6 +587,51 @@ def test_no_admissible_ticks_skips_broker_and_zeroes_evidence(conn):
 
 
 # ---------------------------------------------------------------------------
+# Optional-stopping count: prior forward-gate evaluations (#431)
+# ---------------------------------------------------------------------------
+
+def seed_forward_eval_row(conn, *, strategy_id=1, passed=1, code_hash="c", config_hash="g",
+                          dependency_hash="d"):
+    """Minimal forward_gate_evaluations row (NOT NULL columns only) for the prior-looks count."""
+    conn.execute(
+        "INSERT INTO forward_gate_evaluations (strategy_id, passed, n_forward_observations,"
+        " min_forward_observations, degradation_factor, sharpe_floor, min_forward_vol,"
+        " max_forward_drawdown, max_staleness_sessions, n_reconcile_failures,"
+        " n_concurrent_forward, code_hash, config_hash, dependency_hash, actor, decision_json,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (strategy_id, passed, 63, 63, 0.5, 0.3, 0.02, 0.25, 5, 0, 1, code_hash, config_hash,
+         dependency_hash, "agent", "{}", "2026-06-10T00:00:00+00:00"),
+    )
+    conn.commit()
+
+
+def test_no_prior_forward_evals_is_zero(conn):
+    _two_admissible(conn)
+    res = assemble(conn)
+    assert res.evidence.n_prior_forward_looks == 0
+    assert res.n_prior_forward_looks == 0
+
+
+def test_prior_forward_evals_counted_for_matching_identity(conn):
+    _two_admissible(conn)
+    for _ in range(3):
+        seed_forward_eval_row(conn)  # same identity hashes as IDENT / the assemble helper
+    res = assemble(conn)
+    assert res.evidence.n_prior_forward_looks == 3
+    assert res.n_prior_forward_looks == 3
+
+
+def test_prior_forward_evals_ignore_other_identity(conn):
+    _two_admissible(conn)
+    seed_forward_eval_row(conn)  # counted
+    seed_forward_eval_row(conn, code_hash="OTHER")  # different code_hash -> not counted
+    seed_forward_eval_row(conn, dependency_hash="OTHER")  # different dep_hash -> not counted
+    res = assemble(conn)
+    assert res.evidence.n_prior_forward_looks == 1
+    assert res.n_prior_forward_looks == 1
+
+
+# ---------------------------------------------------------------------------
 # qualified_holdout_sharpe (clause 11)
 # ---------------------------------------------------------------------------
 

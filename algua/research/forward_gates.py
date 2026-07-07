@@ -49,6 +49,15 @@ MAX_FORWARD_DRAWDOWN = 0.25
 # agent-tunable knob.
 MAX_STALENESS_SESSIONS = 5
 
+# Multiple-testing Sharpe tax for the RE-RUNNABLE forward gate (#431). The forward gate can be
+# re-run against the same strategy+identity (optional stopping) and many strategies forward-test
+# concurrently — both inflate the family-wise error rate the single-look bar was calibrated for.
+# The bar is RAISED by MT_SHARPE_PENALTY per natural-log trial (ln(1)=0 => zero tax on a clean
+# first solo look, so today's behavior is preserved). It is a TIGHTEN-ONLY wall, NOT a
+# ForwardGateCriteria knob — an agent can never relax it, and even a human's tighter criteria
+# gets it added ON TOP. Do NOT add it to ForwardGateCriteria.
+MT_SHARPE_PENALTY = 0.05
+
 # Consumable-token freshness for the paper -> forward_tested edge (consumed by transitions.py).
 # Protected — NOT an agent-tunable knob.
 FORWARD_TOKEN_TTL_DAYS = 7
@@ -82,6 +91,10 @@ class ForwardEvidence:
     ``gate_evaluations`` row (passed, PIT, no override, identity-matched) — ``None`` means no
     such row exists and the performance check fails closed. ``staleness_sessions`` is ``None``
     when there are no admissible evidence ticks at all — also fail closed.
+
+    ``n_prior_forward_looks`` (prior forward-gate evaluations of this strategy+identity) and
+    ``n_concurrent_forward`` (distinct strategies forward-testing concurrently in the window)
+    drive the multiple-testing Sharpe penalty raising the performance bar (#431).
     """
 
     n_return_observations: int
@@ -100,6 +113,8 @@ class ForwardEvidence:
     n_external_cash_flows: int
     n_unattributable_fills: int
     staleness_sessions: int | None
+    n_prior_forward_looks: int
+    n_concurrent_forward: int
 
 
 @dataclass
@@ -188,9 +203,22 @@ def evaluate_forward_gate(
             "detail": "non-finite performance criteria (degradation_factor/sharpe_floor)",
         })
     else:
-        bar = max(factor * float(holdout), floor)
-        checks.append(_metric_check(
-            "realized_sharpe", float(evidence.realized_sharpe), ">=", bar))
+        # Multiple-testing tax (#431): RAISE the bar by MT_SHARPE_PENALTY per natural-log trial,
+        # where trials = prior identity-scoped forward looks (optional stopping) + concurrent
+        # forward strategies (breadth). effective_trials is clamped to >=1 so ln(1)=0 gives zero
+        # penalty on a clean first solo look (preserving pre-#431 behavior); it is an int >= 1 so
+        # the penalty is always finite. This is a tighten-only wall — folded into the SAME
+        # realized_sharpe check (no new check name), added ON TOP of the criteria-derived bar so
+        # a human's tighter criteria cannot subtract it.
+        effective_trials = max(1, evidence.n_prior_forward_looks + evidence.n_concurrent_forward)
+        penalty = MT_SHARPE_PENALTY * math.log(effective_trials)
+        bar = max(factor * float(holdout), floor) + penalty
+        chk = _metric_check("realized_sharpe", float(evidence.realized_sharpe), ">=", bar)
+        chk["effective_trials"] = int(effective_trials)
+        chk["n_prior_forward_looks"] = int(evidence.n_prior_forward_looks)
+        chk["n_concurrent_forward"] = int(evidence.n_concurrent_forward)
+        chk["multiple_testing_penalty"] = float(penalty)
+        checks.append(chk)
 
     # 4. Volatility floor — a do-nothing strategy must not pass on an undefined/explosive Sharpe.
     checks.append(_metric_check(

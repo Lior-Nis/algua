@@ -78,6 +78,7 @@ class AssembledEvidence:
     last_tick_ts: str | None
     account_id: str | None
     n_concurrent_forward: int
+    n_prior_forward_looks: int
     excluded: dict[str, int]  # per-filter exclusion counts for the CLI payload
 
 
@@ -287,6 +288,21 @@ def assemble_forward_evidence(
             (admissible[0]["recorded_at"], now_iso),
         ).fetchone()[0]
 
+    # 8b. Optional-stopping count (#431): PRIOR forward-gate evaluations of THIS strategy+identity
+    # in the ledger — the re-runnable forward gate lets an agent take repeated looks at the same
+    # strategy, inflating the family-wise error rate. Identity-scoped: a code change (new identity)
+    # legitimately resets it, because it forces a fresh research-gate pass. Counts PRIOR rows only;
+    # assemble runs BEFORE the new row is recorded (run_forward_gate ordering), so this never
+    # counts the in-flight evaluation. A None dependency_hash matches nothing (SQL `= NULL` never
+    # matches, and the holdout check already fails closed there) — leave 0.
+    n_prior_forward_looks = 0
+    if identity.dependency_hash is not None:
+        n_prior_forward_looks = conn.execute(
+            "SELECT COUNT(*) FROM forward_gate_evaluations WHERE strategy_id=? AND code_hash=?"
+            " AND config_hash=? AND dependency_hash=?",
+            (strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash),
+        ).fetchone()[0]
+
     # 9-10. Broker activities + staleness. With no admissible ticks there is no window: skip
     # the broker entirely (activities_ok=True, zeros — the gate already fails on observations)
     # and staleness is None (fail closed in the evaluator). Any fetch/classify failure means
@@ -334,6 +350,8 @@ def assemble_forward_evidence(
         n_external_cash_flows=n_external_cash_flows,
         n_unattributable_fills=n_unattributable_fills,
         staleness_sessions=staleness_sessions,
+        n_prior_forward_looks=int(n_prior_forward_looks),
+        n_concurrent_forward=int(n_concurrent_forward),
     )
     return AssembledEvidence(
         evidence=evidence,
@@ -343,6 +361,7 @@ def assemble_forward_evidence(
         last_tick_ts=admissible[-1]["tick_ts"] if admissible else None,
         account_id=account_id,
         n_concurrent_forward=int(n_concurrent_forward),
+        n_prior_forward_looks=int(n_prior_forward_looks),
         excluded=excluded,
     )
 
