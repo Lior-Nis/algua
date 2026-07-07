@@ -719,6 +719,17 @@ def test_guard_human_may_relax_anything():
         max_staleness_sessions=99, forward_sharpe_confidence=0.5))
 
 
+@pytest.mark.parametrize("actor", [Actor.AGENT, Actor.HUMAN])
+@pytest.mark.parametrize("bad", [
+    float("nan"), float("inf"), float("-inf"), 0.0, 1.0, 1.5, -0.1])
+def test_guard_rejects_nonfinite_or_out_of_range_confidence(actor, bad):
+    # A nan/inf or out-of-(0,1) forward_sharpe_confidence would slip past the tighten-only
+    # comparison (nan < 0.95 is False) and blow up NormalDist.inv_cdf at the 0/1 edges — the guard
+    # fails closed for BOTH actors rather than passing it silently downstream.
+    with pytest.raises(ValueError, match="finite probability"):
+        guard_forward_relaxations(actor, ForwardGateCriteria(forward_sharpe_confidence=bad))
+
+
 def _pin_identity(monkeypatch):
     """One IDENT for BOTH the orchestrator's row and the token-consume recheck (in production
     both call algua.registry.approvals.compute_artifact_hashes)."""

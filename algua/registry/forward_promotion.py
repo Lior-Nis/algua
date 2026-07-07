@@ -17,6 +17,7 @@ strategy's favor.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -472,6 +473,15 @@ def verify_forward_certificate(
 def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> None:
     """Each threshold has a strict direction; an agent may only move it stricter (#124).
     Mirrors ``guard_agent_relaxations``: the agent only ever sees the strict gate."""
+    # forward_sharpe_confidence feeds NormalDist.inv_cdf (blows up at the 0/1 edges) and the
+    # tighten-only comparison below (nan < 0.95 is False, so a non-finite value would slip through
+    # the relaxation guard un-flagged). A confidence outside the open unit interval is nonsensical
+    # for ANY actor — fail closed here at the boundary rather than pass it silently downstream.
+    conf = criteria.forward_sharpe_confidence
+    if not (math.isfinite(conf) and 0.0 < conf < 1.0):
+        raise ValueError(
+            "forward_sharpe_confidence must be a finite probability in (0, 1), got "
+            f"{conf!r}")
     if actor is Actor.HUMAN:
         return
     defaults = ForwardGateCriteria()

@@ -788,8 +788,8 @@ def promote(
              "(lowering is stricter; raising is human-only)"),
     forward_sharpe_confidence: float = typer.Option(
         FORWARD_SHARPE_CONFIDENCE, "--forward-sharpe-confidence",
-        help="one-sided confidence that the true forward Sharpe > 0 that the realized-Sharpe "
-             "lower bound must clear (raising is stricter; lowering is human-only)"),
+        help="one-sided confidence at which the realized-Sharpe lower bound must clear the "
+             "performance bar (raising is stricter; lowering is human-only)"),
 ) -> None:
     """Forward-test evidence gate (#124): evaluate this strategy's wall-clock paper evidence
     and promote paper -> forward_tested on pass. At forward_tested: re-evaluate, refreshing

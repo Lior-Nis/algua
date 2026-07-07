@@ -20,9 +20,10 @@ from algua.research.forward_gates import (
 
 
 def passing_evidence(**over):
-    # realized_sharpe=4.0 clears the 95% PSR wall at n=63 (needs an observed annual Sharpe ~3.32);
-    # skew=0.0, kurtosis=3.0 are the Gaussian (neutral) moments for the Sharpe-SE adjustment.
-    base = dict(n_return_observations=63, session_coverage=0.95, realized_sharpe=4.0,
+    # realized_sharpe=5.0 clears the 95% Sharpe-LCB wall against the bar at n=63 (holdout=1.0 ->
+    # bar 0.5; the one-sided lower bound ~1.60 >= 0.5, comfortable margin); skew=0.0, kurtosis=3.0
+    # are the Gaussian (neutral) moments for the Sharpe-SE adjustment.
+    base = dict(n_return_observations=63, session_coverage=0.95, realized_sharpe=5.0,
                 realized_skew=0.0, realized_kurtosis=3.0,
                 realized_vol=0.10, realized_max_drawdown=0.10, holdout_sharpe=1.0,
                 n_reconcile_failures=0, n_defective_ticks=0, kill_switch_tripped=False,
@@ -164,34 +165,38 @@ def test_point_bar_just_above_floor():
     assert _check(d, "realized_sharpe")["passed"] is True
 
 
-# --- statistical-significance wall (realized_sharpe_lcb / PSR) ----------------------------------
+# --- statistical-significance wall (realized_sharpe_lcb): LCB must clear the BAR, not zero ------
 
 
 def test_significant_point_but_insignificant_fails():
-    # The #432 scenario: a 63-obs draw clears the point bar (0.5) at realized Sharpe 1.0 but is
-    # NOT statistically distinguishable from zero -> the significance wall fails the gate.
+    # The #432 regression. realized_sharpe=3.4 at n=63 clears the point bar (holdout=1.0 -> bar
+    # 0.5) AND clears the OLD zero-benchmark PSR wall (its LCB ~0.05 barely > 0). But the LCB is
+    # far BELOW the bar (0.05 << 0.5), so the corrected wall — LCB vs the bar, not vs zero — fails
+    # the gate. This is exactly the value that exposed the "significance against zero" bug.
     d = evaluate_forward_gate(
-        passing_evidence(holdout_sharpe=1.0, realized_sharpe=1.0, n_return_observations=63),
+        passing_evidence(holdout_sharpe=1.0, realized_sharpe=3.4, n_return_observations=63),
         ForwardGateCriteria())
     assert _check(d, "realized_sharpe")["passed"] is True
     lcb = _check(d, "realized_sharpe_lcb")
     assert lcb["passed"] is False
     assert lcb["op"] == ">="
-    assert lcb["threshold"] == FORWARD_SHARPE_CONFIDENCE
+    # threshold is the performance bar (0.5), NOT the confidence level; value is the annualized LCB
+    assert lcb["threshold"] == 0.5
+    assert lcb["value"] < 0.5
     assert d.passed is False
     json.dumps(d.to_dict(), allow_nan=False)
 
 
 def test_lcb_pass_baseline():
-    # The realized_sharpe=4.0 baseline clears the 95% PSR wall at n=63.
+    # The realized_sharpe=5.0 baseline clears the 95% LCB wall against the bar (0.5) at n=63.
     d = evaluate_forward_gate(passing_evidence(), ForwardGateCriteria())
     lcb = _check(d, "realized_sharpe_lcb")
     assert lcb["passed"] is True
-    assert lcb["value"] >= FORWARD_SHARPE_CONFIDENCE
+    assert lcb["value"] >= lcb["threshold"] == 0.5
 
 
 def test_lcb_fail_closed_on_underpowered():
-    # n<=1 has no standard error (sqrt(T-1)==0) -> the PSR is undefined and fails closed. (The
+    # n<=1 has no standard error (sqrt(T-1)==0) -> the LCB is undefined and fails closed. (The
     # obs-floor check also fails here, which is fine; we assert only the lcb check's fields.)
     d = evaluate_forward_gate(
         passing_evidence(n_return_observations=1), ForwardGateCriteria())
@@ -203,21 +208,31 @@ def test_lcb_fail_closed_on_underpowered():
 
 
 def test_lcb_more_observations_rescue_significance():
-    # A marginal realized Sharpe (1.2) that fails at n=63 clears the wall with a much longer
-    # window (700 obs) — the SE shrinks with T, which is the sanctioned remedy, not a weaker bar.
+    # A realized Sharpe (2.0) whose LCB is below the bar at n=63 clears the wall with a much
+    # longer window (1000 obs) — the SE shrinks with T, which is the sanctioned remedy for a
+    # marginal significance, not a weaker bar.
     short = evaluate_forward_gate(
-        passing_evidence(realized_sharpe=1.2, n_return_observations=63), ForwardGateCriteria())
+        passing_evidence(realized_sharpe=2.0, n_return_observations=63), ForwardGateCriteria())
     assert _check(short, "realized_sharpe_lcb")["passed"] is False
     long = evaluate_forward_gate(
-        passing_evidence(realized_sharpe=1.2, n_return_observations=700), ForwardGateCriteria())
+        passing_evidence(realized_sharpe=2.0, n_return_observations=1000), ForwardGateCriteria())
     assert _check(long, "realized_sharpe_lcb")["passed"] is True
 
 
 def test_lcb_tightened_confidence_is_agent_allowed():
-    # Agents may TIGHTEN (raise) the confidence; a baseline that clears 0.95 can fail at 0.999.
+    # Agents may TIGHTEN (raise) the confidence; a baseline that clears 0.95 can fail at 0.999
+    # (a wider z pushes the lower bound below the bar).
     d = evaluate_forward_gate(
         passing_evidence(), ForwardGateCriteria(forward_sharpe_confidence=0.999))
     assert _check(d, "realized_sharpe_lcb")["passed"] is False
+
+
+def test_lcb_threshold_is_bar_not_confidence():
+    # Guards the fix: the significance wall's threshold tracks the performance bar (which moves
+    # with the holdout), not the fixed confidence constant.
+    d = evaluate_forward_gate(
+        passing_evidence(holdout_sharpe=3.0), ForwardGateCriteria())  # bar = max(0.5*3.0, 0.3)=1.5
+    assert _check(d, "realized_sharpe_lcb")["threshold"] == 1.5
 
 
 # --- fail-closed paths -------------------------------------------------------------------------
