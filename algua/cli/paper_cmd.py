@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import importlib
+import json
 import sqlite3
+import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import typer
 
@@ -83,6 +87,8 @@ from algua.observability import (
     correlation_context,
     get_logger,
 )
+from algua.operator.journal import JsonlJournal
+from algua.operator.mergeback import RealGitOps, merge_back_lock, run_merge_back
 from algua.registry.allocations import (
     AllocationError,
     CountCapReached,
@@ -382,6 +388,61 @@ def account() -> None:
     emit(ok({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power}))
 
 
+def _run_intake(
+    conn: sqlite3.Connection, *, equity: float, max_concurrent: int, actor: Actor,
+) -> dict:
+    """The FIFO candidate→paper book-admission loop over ONE registry connection — shared by the
+    ``paper intake`` command and the ``paper merge-back`` driver (#485) so there is exactly one
+    admit path, never a dual one.
+
+    Offers each candidate, in FIFO order (candidate-entry ``stage_transitions.id``, tie-break
+    strategy id), to the ATOMIC ``intake_candidate_to_paper`` primitive, which under ONE write lock
+    re-checks the ``max_concurrent`` count cap, cap-checks + allocates an equal slice =
+    floor(equity / max_concurrent to cents) (Σ allocations + slice ≤ ``equity``), and CASes
+    candidate→paper — commit-or-rollback together, so there is no reachable transitioned-but-
+    unallocated state. On either hard bound (book full / no capital headroom) the remaining
+    candidates are left queued; a candidate raced out of ``candidate`` between selection and the txn
+    is reported in ``skipped_stale`` and passed over. Returns the intake envelope dict.
+
+    The caller is responsible for reading ``equity`` READ-ONLY from the broker BEFORE opening
+    ``conn`` (no trading) and for validating ``max_concurrent`` > 0."""
+    repo = SqliteStrategyRepository(conn)
+    occupied = active_paper_lane_count(conn)
+    slc = slice_capital(equity, max_concurrent)
+    ordered = order_candidates(
+        Candidate(name=r.name, entry_id=_candidate_entry_id(repo, r.name), sid=r.id)
+        for r in repo.list_strategies(Stage.CANDIDATE))
+    admitted: list[dict] = []
+    queued: list[str] = []
+    skipped_stale: list[str] = []
+    count = occupied
+    for i, cand in enumerate(ordered):
+        if slc <= 0.0 or count >= max_concurrent:
+            # Slice unfundable, or count cap already reached: queue the rest and stop.
+            queued.extend(c.name for c in ordered[i:])
+            break
+        try:
+            repo.intake_candidate_to_paper(
+                repo.get(cand.name), capital=slc, actor=actor,
+                account_equity=equity, max_concurrent=max_concurrent)
+        except (CountCapReached, AllocationError):
+            # Hard bound in-txn (book full or no capital headroom): queue the rest, stop.
+            queued.extend(c.name for c in ordered[i:])
+            break
+        except TransitionError:
+            # Stale selection: a concurrent transition moved this candidate out of `candidate`
+            # before the CAS. Already handled elsewhere — pass over it, keep admitting.
+            skipped_stale.append(cand.name)
+            continue
+        audit_append(conn, actor=actor.value, action='paper_intake',
+                     reason=f'slice {slc}', strategy=cand.name)
+        admitted.append({'strategy': cand.name, 'capital': slc})
+        count += 1
+    return {'admitted': admitted, 'queued': queued, 'skipped_stale': skipped_stale,
+            'equity': equity, 'slice': slc, 'occupied_before': occupied,
+            'max_concurrent': max_concurrent}
+
+
 @paper_app.command('intake')
 @json_errors
 def intake(
@@ -407,43 +468,148 @@ def intake(
     if max_concurrent <= 0:
         raise ValueError('--max-concurrent must be positive')
     actor_enum = Actor(actor)  # fail fast on a bad actor before touching the DB
+    equity = float(_alpaca_broker_from_settings().account().equity)  # broker read BEFORE any txn
     with registry_conn() as conn:
-        repo = SqliteStrategyRepository(conn)
-        equity = float(_alpaca_broker_from_settings().account().equity)  # broker read BEFORE txns
-        occupied = active_paper_lane_count(conn)
-        slc = slice_capital(equity, max_concurrent)
-        ordered = order_candidates(
-            Candidate(name=r.name, entry_id=_candidate_entry_id(repo, r.name), sid=r.id)
-            for r in repo.list_strategies(Stage.CANDIDATE))
-        admitted: list[dict] = []
-        queued: list[str] = []
-        skipped_stale: list[str] = []
-        count = occupied
-        for i, cand in enumerate(ordered):
-            if slc <= 0.0 or count >= max_concurrent:
-                # Slice unfundable, or count cap already reached: queue the rest and stop.
-                queued.extend(c.name for c in ordered[i:])
-                break
-            try:
-                repo.intake_candidate_to_paper(
-                    repo.get(cand.name), capital=slc, actor=actor_enum,
-                    account_equity=equity, max_concurrent=max_concurrent)
-            except (CountCapReached, AllocationError):
-                # Hard bound bound in-txn (book full or no capital headroom): queue the rest, stop.
-                queued.extend(c.name for c in ordered[i:])
-                break
-            except TransitionError:
-                # Stale selection: a concurrent transition moved this candidate out of `candidate`
-                # before the CAS. Already handled elsewhere — pass over it, keep admitting.
-                skipped_stale.append(cand.name)
-                continue
-            audit_append(conn, actor=actor_enum.value, action='paper_intake',
-                         reason=f'slice {slc}', strategy=cand.name)
-            admitted.append({'strategy': cand.name, 'capital': slc})
-            count += 1
-    emit(ok({'admitted': admitted, 'queued': queued, 'skipped_stale': skipped_stale,
-             'equity': equity, 'slice': slc, 'occupied_before': occupied,
-             'max_concurrent': max_concurrent}))
+        payload = _run_intake(conn, equity=equity, max_concurrent=max_concurrent, actor=actor_enum)
+    emit(ok(payload))
+
+
+def _run_quality_gate(repo_root: Path) -> bool:
+    """Run the FULL quality gate against ``repo_root``'s working tree, returning True iff ALL of
+    ``pytest -q``, ``ruff check .``, ``mypy algua``, and ``lint-imports`` exit 0 — short-circuiting
+    on the FIRST failure (a later stage is not run once an earlier one is red).
+
+    This is the ``run_gate`` seam ``run_merge_back`` invokes against the ``--no-ff --no-commit``
+    merge preview before it will commit + promote: a red gate aborts the merge with ``main``
+    untouched, so a branch that breaks the suite (or weakens the very tests/config the gate runs) is
+    never landed. Each check is a separate subprocess so a crash in one is a red gate, not an
+    unhandled exception."""
+    for cmd in (
+        ["uv", "run", "pytest", "-q"],
+        ["uv", "run", "ruff", "check", "."],
+        ["uv", "run", "mypy", "algua"],
+        ["uv", "run", "lint-imports"],
+    ):
+        if subprocess.run(cmd, cwd=repo_root).returncode != 0:  # noqa: S603 — fixed argv, no shell
+            return False
+    return True
+
+
+@paper_app.command('merge-back')
+@json_errors
+def merge_back(
+    branch: str = typer.Option(..., '--branch',
+        help='the research candidate branch to merge back onto main'),
+    strategy: str = typer.Option(..., '--strategy', help='the strategy authored on --branch'),
+    universe: str = typer.Option(..., '--universe',
+        help='PIT universe for the strict-agent promote gate (non-PIT fails closed)'),
+    start: str = typer.Option(..., '--start', help='promote-window start (YYYY-MM-DD)'),
+    end: str = typer.Option(..., '--end', help='promote-window end (YYYY-MM-DD)'),
+    max_concurrent: int = typer.Option(5, '--max-concurrent',
+        help='max concurrent paper-lane strategies admitted into the shared book'),
+    actor: str = typer.Option('agent', '--actor', help='human | agent (audit label)'),
+) -> None:
+    """Autonomous research-cycle merge-back (#485): turn a research candidate branch into an
+    on-``main``, allocated paper strategy with no human merging the branch. One repo-global-locked
+    cycle: preview-merge ``--branch`` (``--no-ff --no-commit``), run the FULL quality gate on the
+    staged tree, commit only on green, run the metered strict-agent ``research promote`` (hard-wired
+    to ``actor=agent`` — no relaxation flags), and on a PASS run the FIFO paper intake to allocate a
+    book slice; a proven promote FAILURE reverts the merge, leaving ``main`` as it was.
+
+    Terminal ``status`` is one of ``already_done`` (strategy already at ``paper``), ``gate_failed``
+    (quality gate red — merge aborted, ``main`` untouched), ``promote_failed`` (gate green but
+    promote rejected — merge reverted), or ``promoted_allocated`` (promoted + intake ran). A
+    completed-but-not-promoted cycle (``gate_failed``/``promote_failed``) is NOT a command error —
+    it emits ``ok`` with the honest status.
+
+    MUTUAL EXCLUSION: like ``paper trade-tick``/``run-all`` (#316), ``merge-back`` mutates shared
+    state (the working tree + the registry) and is mutually exclusive with the paper-account cycles
+    BY OPERATOR DISCIPLINE — do not run a paper trade-tick / run-all concurrently with a merge-back.
+    Concurrent merge-back invocations are hard-serialized by a repo-global ``merge_back.lock``
+    flock; a second live invocation fails closed."""
+    if max_concurrent <= 0:
+        raise ValueError('--max-concurrent must be positive')
+    actor_enum = Actor(actor)  # fail fast on a bad actor before any git mutation
+    settings = get_settings()
+    # Repo-global exclusive flock for the whole saga: a live concurrent cycle fails closed rather
+    # than mutating the shared checkout under a second driver (kernel-released on death).
+    with merge_back_lock(settings.db_path.parent / 'merge_back.lock'):
+        repo_root = Path(subprocess.run(  # noqa: S603,S607 — fixed argv, no shell
+            ['git', 'rev-parse', '--show-toplevel'],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True, text=True, check=True).stdout.strip())
+        git = RealGitOps(repo_root)
+        # The driver's OWN durable recovery journal (per-strategy JSONL beside the registry db); NOT
+        # registry-domain state, so no schema bump. The CODEOWNERS text feeds the diff-policy
+        # denylist (fail closed if it cannot be read).
+        journal = JsonlJournal(settings.db_path.parent)
+        codeowners_text = (repo_root / 'CODEOWNERS').read_text(encoding='utf-8')
+
+        def stage_of(name: str) -> str:
+            # Its OWN short-lived registry_conn (own tx) — the saga never holds one conn across the
+            # whole cycle. Returns the raw lifecycle stage string run_merge_back dispatches on.
+            with registry_conn() as conn:
+                return SqliteStrategyRepository(conn).get(name).stage.value
+
+        def promote(attempt_token: str) -> object:
+            # Reach research_cmd.promote_task via a DYNAMIC import (importlib), not a static
+            # `from algua.cli.research_cmd import ...` — the cli-independence import-linter contract
+            # forbids a paper_cmd->research_cmd sibling edge (#165), and it traces static imports
+            # even inside a function; a dynamic import keeps the two command modules structurally
+            # independent while still driving the promote at runtime. Strict-agent inputs ONLY — no
+            # relaxation flags reach the seam, so a human-only relaxation is impossible by
+            # construction. The per-attempt ``attempt_token`` is stamped on the gate row so the
+            # driver reads the outcome authoritatively (finding #5). promote_task opens+closes its
+            # OWN registry_conn (per its contract).
+            promote_task = importlib.import_module("algua.cli.research_cmd").promote_task
+            return promote_task(
+                name=strategy, universe=universe, start=start, end=end,
+                actor='agent', attempt_token=attempt_token)
+
+        def passing_gate_by_token(attempt_token: str) -> int | None:
+            with registry_conn() as conn:
+                return SqliteStrategyRepository(conn).passing_gate_by_token(strategy, attempt_token)
+
+        def intake() -> dict:
+            # Read paper equity READ-ONLY BEFORE opening the intake txn (no trading), then run the
+            # shared FIFO admit over its OWN short-lived registry_conn.
+            equity = float(_alpaca_broker_from_settings().account().equity)
+            with registry_conn() as conn:
+                return _run_intake(conn, equity=equity, max_concurrent=max_concurrent,
+                                   actor=actor_enum)
+
+        def target_allocated(name: str) -> bool:
+            # Did intake allocate THIS strategy (now paper WITH an active allocation)? FIFO intake
+            # may admit an older queued candidate ahead of ours, so outcome is target-verified,
+            # never inferred from "intake admitted something".
+            with registry_conn() as conn:
+                repo = SqliteStrategyRepository(conn)
+                if repo.get(name).stage is not Stage.PAPER:
+                    return False
+                return active_allocation(conn, repo.get(name).id) is not None
+
+        def audit_log(event: dict) -> None:
+            # Every autonomous push/revert is attributable after the fact (the accountability record
+            # the bypassed local push hook never produced).
+            with registry_conn() as conn:
+                audit_append(conn, actor='merge_back_driver',
+                             action=str(event.get('event', 'merge_back')),
+                             reason=json.dumps(event, sort_keys=True), strategy=strategy)
+
+        result = run_merge_back(
+            git=git, journal=journal, strategy=strategy, branch=branch,
+            codeowners_text=codeowners_text,
+            stage_of=stage_of, run_gate=lambda: _run_quality_gate(repo_root),
+            promote=promote, passing_gate_by_token=passing_gate_by_token,
+            intake=intake, target_allocated=target_allocated, audit_log=audit_log)
+    # A completed cycle is a successful invocation regardless of the promote outcome: emit ok() with
+    # the terminal status (gate_failed/promote_failed/diff_policy_rejected carry honest statuses).
+    emit(ok({
+        'strategy': strategy, 'branch': branch, 'status': result.status,
+        'merged': result.merged, 'reverted': result.reverted,
+        'promoted': result.promoted, 'intake': result.intake,
+        'attempt_token': result.attempt_token, 'gate_id': result.gate_id,
+    }))
 
 
 def _run_paper_strategy_tick(  # noqa: PLR0913

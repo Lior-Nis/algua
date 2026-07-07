@@ -219,6 +219,7 @@ def promote_task(  # noqa: PLR0913, PLR0915
     assume_terminal_last_close: bool = False, actor: str = "agent",
     actor_signature: str | None = None,
     new_family: str | None = None, reload: bool = False,
+    attempt_token: str | None = None,
 ) -> dict:
     """Run the backtested->candidate gate and return the (pre-``--summary``) payload dict — the
     body of ``research promote``, shared with the ``research run-all`` batch worker (#326).
@@ -376,7 +377,7 @@ def promote_task(  # noqa: PLR0913, PLR0915
             universe_name=universe, universe_snapshots=universe_prov,
             period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
             data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
-            holdout_evaluation_id=reservation_id,
+            holdout_evaluation_id=reservation_id, attempt_token=attempt_token,
             reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
         decision, promoted = outcome.decision, outcome.promoted
         # Advisory negative-result capture (#332): on a gate FAIL only, record the refuted

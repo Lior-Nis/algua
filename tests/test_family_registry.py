@@ -52,21 +52,21 @@ def _assign(
 # Schema / migration
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_35() -> None:
+def test_schema_version_is_36() -> None:
     repo = _make_repo()
     version = repo.connection.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 35
+    assert version == 36
 
 
 def test_schema_migration_idempotent() -> None:
-    """Running migrate() twice must not raise and must leave SCHEMA_VERSION == 35."""
+    """Running migrate() twice must not raise and must leave SCHEMA_VERSION == 36."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON;")
     db.migrate(conn)
     db.migrate(conn)  # second call must be a no-op
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 35
+    assert version == 36
 
 
 def test_family_tables_exist() -> None:

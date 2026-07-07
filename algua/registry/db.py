@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -232,9 +232,18 @@ CREATE TABLE IF NOT EXISTS gate_evaluations (
     actor TEXT NOT NULL,
     decision_json TEXT NOT NULL,
     consumed INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    -- v36 (#485): opaque per-attempt idempotency key stamped by the autonomous merge-back driver so
+    -- promote-outcome attribution binds to the branch identity, not the ambient stage. NULL for
+    -- every non-driver caller (backward-compatible). A partial unique index on non-null
+    -- (strategy_id, attempt_token) makes a second insert of the same token a hard DB error.
+    attempt_token TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_gate_evaluations_strategy ON gate_evaluations(strategy_id);
+-- NOTE: the partial unique index on (strategy_id, attempt_token) is created in migrate() AFTER
+-- _add_missing_columns adds the column, NOT here: on an existing DB the CREATE TABLE above is a
+-- no-op and the column would not yet exist for the index to reference (same reason the FDR index
+-- lives in migrate()).
 -- Append-only per-tick operability record (equity + positions per completed tick); the equity
 -- time-series `paper show` and the future dashboard read. Permanent history — no pruning path yet
 -- (`trade-tick` is wall-clock-per-invocation, so growth is modest); add retention when it matters.
@@ -790,6 +799,15 @@ def migrate(conn: sqlite3.Connection) -> None:
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v35 (#329): actor_challenges is a brand-new table; executescript(_SCHEMA) above creates it
     # (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # v36 (#485): attempt_token on gate_evaluations — the merge-back driver's per-attempt idem
+    # key. Additive nullable (NULL for every existing/non-driver row). The partial unique index is
+    # created AFTER the column exists (it references attempt_token, absent from an existing DB's
+    # table until _add_missing_columns runs), so it lives here rather than in _SCHEMA.
+    _add_missing_columns(conn, "gate_evaluations", {"attempt_token": "TEXT"})
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_gate_evaluations_attempt_token"
+        " ON gate_evaluations(strategy_id, attempt_token) WHERE attempt_token IS NOT NULL"
+    )
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

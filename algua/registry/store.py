@@ -1433,8 +1433,8 @@ class SqliteStrategyRepository:
                 " fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,"
                 " fdr_cohort,"
                 " family_id, family_lifetime_effective,"
-                " fundamentals_snapshot, news_snapshot)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " fundamentals_snapshot, news_snapshot, attempt_token)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 # Agent passing rows are born-consumed: the stage has already advanced inside
                 # this transaction, so the token is spent. Leaving consumed=0 would let a
                 # future `registry transition --to candidate --actor agent` reuse the old row
@@ -1457,7 +1457,8 @@ class SqliteStrategyRepository:
                  t_next if fdr_binding else None,
                  cohort_index if fdr_binding else None,
                  gate_row.get("family_id"), gate_row.get("family_lifetime_effective"),
-                 gate_row.get("fundamentals_snapshot"), gate_row.get("news_snapshot")),
+                 gate_row.get("fundamentals_snapshot"), gate_row.get("news_snapshot"),
+                 gate_row.get("attempt_token")),
             )
             gate_id = cur.lastrowid
             assert gate_id is not None
@@ -1503,6 +1504,27 @@ class SqliteStrategyRepository:
             fdr_discoveries=discoveries_after,
             fdr_expected_false_discoveries=expected_false_discoveries,
         )
+
+    def passing_gate_by_token(self, strategy: str, attempt_token: str) -> int | None:
+        """The ``gate_evaluations.id`` of the PASSING, STRICT-AGENT row stamped with this exact
+        ``attempt_token`` for ``strategy`` — the authoritative read the merge-back driver (#485)
+        uses to attribute a promote outcome to THIS attempt, never to the ambient stage nor to "did
+        the call raise". Returns None if no such row exists.
+
+        The match is by exact ``attempt_token`` equality AND strict-agent context
+        (``actor='agent'``, ``passed=1``): the token is a caller-supplied opaque per-attempt key
+        (enforced unique by the partial index on non-null ``(strategy_id, attempt_token)``), so a
+        concurrent external ``research promote`` of the same strategy — which supplies a different
+        token, or NULL — can never be mistaken for this attempt's own gate row even if it mints a
+        higher-id passing row in the same window.
+        """
+        row = self._conn.execute(
+            "SELECT g.id FROM gate_evaluations g JOIN strategies s ON s.id = g.strategy_id"
+            " WHERE s.name = ? AND g.attempt_token = ? AND g.passed = 1 AND g.actor = 'agent'"
+            " ORDER BY g.id DESC LIMIT 1",
+            (strategy, attempt_token),
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
 
     # -------------------------------------------------------------------------
     # Factor-evaluation ledger (#219, slice E of #140)
