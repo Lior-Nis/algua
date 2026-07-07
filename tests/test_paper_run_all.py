@@ -513,3 +513,65 @@ def test_run_all_omitted_window_resolves_to_rolling_today(monkeypatch):
     assert end.date() == today  # end resolves to today, not literal 2023-12-31
     assert start.year != 2023  # start is a recent rolling date, not the 2023 default
     assert start < end  # a real lookback window
+
+
+# ---------------------------------------------------------------------------
+# Test: an unallocated paper-lane strategy is SKIPPED (not ticked, not abort) (#317, finding #2)
+# ---------------------------------------------------------------------------
+
+def test_run_all_skips_unallocated_strategy_without_aborting_cycle(monkeypatch):
+    """Two paper strategies; only _S1 is allocated. Before #317, ticking _S2 raised "no paper
+    allocation" and aborted the ENTIRE cycle. Now _S2 is skipped: only _S1 ticks, the envelope
+    lists _S2 under ``skipped_unallocated``, and the cycle exits 0."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    # _S2 intentionally has NO allocation (a recovery/demotion re-entrant).
+
+    ticked: list = []
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        ticked.append(strategy.name)
+        return _success_result()
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is True
+    assert {s["strategy"] for s in payload["strategies"]} == {_S1}
+    assert payload["skipped_unallocated"] == [_S2]
+    assert ticked == [_S1]  # the unallocated strategy's module still ticked exactly nobody extra
+
+
+def test_run_all_venue_ingest_failure_still_surfaces_skipped_unallocated(monkeypatch):
+    """Codex GATE-2 regression: the venue-ingest-failure exit envelope must ALSO carry
+    ``skipped_unallocated`` (every early-return envelope does, #317 §5.5) — a broker/transport
+    error on ingest must not hide which tenants are unallocated re-entrants."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    # _S2 intentionally has NO allocation (a recovery/demotion re-entrant).
+
+    class _FailingIngestBroker(_RunAllBroker):
+        def account_activities_window(self, after: str, until: str) -> list:
+            raise RuntimeError("broker transport error")
+
+    broker = _FailingIngestBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code == 1, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["kind"] == "venue_ingest_failed"
+    assert payload["skipped_unallocated"] == [_S2]
