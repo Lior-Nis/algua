@@ -67,7 +67,9 @@ class _FakeGit:
     def current_branch(self): return "main"
     def working_tree_clean(self): return True
     def fetch_remote(self, ref): pass
-    def resolve(self, ref): return "TIP"
+    # Local `main` HEAD tracks origin (no drift); any other ref resolves to the branch tip. This
+    # keeps the finding #1 precondition (local main == freshly-fetched origin/main) satisfied.
+    def resolve(self, ref): return self.origin_main if ref == "main" else "TIP"
     def remote_tip(self, ref): return self.origin_main
     def merge_base(self, a, b): return "MB"
     def changed_entries(self, base, tip): return self.entries
