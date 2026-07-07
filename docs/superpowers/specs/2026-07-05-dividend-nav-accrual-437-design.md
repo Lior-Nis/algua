@@ -65,9 +65,13 @@ rows.
 4. **A `DIV` row with a NULL or non-ISO-parseable `ts` is failed closed to an account-level
    residual.** Such a row carries no entitlement window we can trust (a malformed `ts` sorting below
    every fill date would otherwise credit an unbounded all-fills window), so it is excluded from
-   attribution (`AND ts IS NOT NULL` plus a parse guard) and left unattributed rather than
-   silently zero-credited by an empty-string fallback. Asserted by
-   `test_dividend_with_null_ts_is_residual` and `test_dividend_with_malformed_ts_is_residual`.
+   attribution (`AND ts IS NOT NULL` plus the `_entitlement_as_of` parse guard) and left
+   unattributed rather than silently zero-credited by an empty-string fallback. The guard validates
+   the **whole `ts` string** — a date-only broker `date` field OR a full ISO `transaction_time` —
+   not a 10-char prefix slice, so a value with a well-formed date prefix but malformed suffix (e.g.
+   `2026-06-06 garbage`) also fails closed rather than being accepted on its prefix. Asserted by
+   `test_dividend_with_null_ts_is_residual`, `test_dividend_with_malformed_ts_is_residual`, and
+   `test_dividend_with_valid_date_prefix_malformed_suffix_is_residual`.
 
 These are acceptable for closing the *gross* parity break (dividend excluded → phantom drawdown) that
 #437 is about. The exact, declaration-sourced accrual is deferred (below).

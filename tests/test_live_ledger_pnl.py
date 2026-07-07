@@ -125,6 +125,21 @@ def test_dividend_with_malformed_ts_is_residual(tmp_path):
     assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
 
 
+def test_dividend_with_valid_date_prefix_malformed_suffix_is_residual(tmp_path):
+    # #437 (GATE-2 finding #2, follow-up): a ts whose first 10 chars are a valid date but whose
+    # SUFFIX is garbage ("2026-06-06 garbage") must NOT be accepted on its clean prefix. The guard
+    # validates the WHOLE string (date-only OR full ISO datetime), never a prefix slice, so this
+    # fails closed to an account-level residual (credit 0.0) exactly like a wholly-malformed ts.
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0, ts="2026-06-06T00:00:00+00:00")
+    _activity(conn, "d1", "DIV", "AAA", 30.0, ts="2026-06-06 garbage")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+    # a genuine full ISO datetime with the same date IS accepted (bounds to its date) — proving the
+    # residual above is the malformed suffix, not the date itself.
+    _activity(conn, "d2", "DIV", "AAA", 30.0, ts="2026-06-06T13:00:00+00:00")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 30.0
+
+
 def test_long_then_partial_close_realizes():
     # buy 10@100, buy 10@110 -> avg 105, qty 20; sell 5@120 -> realized 5*(120-105)=75
     fills = [(10.0, 100.0), (10.0, 110.0), (-5.0, 120.0)]

@@ -83,6 +83,29 @@ def position_pnl(fills: list[tuple[float, float]], mark: float) -> PositionPnl:
     return PositionPnl(qty=qty, avg_cost=avg, realized=realized, unrealized=unrealized)
 
 
+def _entitlement_as_of(ts: object) -> str | None:
+    """The date (``YYYY-MM-DD``) that bounds a ``DIV`` row's entitlement window, or ``None`` if
+    ``ts`` is not a FULLY-valid ISO value we can trust.
+
+    A broker ``DIV`` row carries either a date-only ``date`` field (``2026-06-06``) or a full ISO
+    ``transaction_time`` (``2026-06-06T15:30:00+00:00``); both are accepted and reduced to their
+    date. Validation is on the WHOLE string, never a prefix slice: an earlier ``str(ts)[:10]`` cut
+    would have accepted a value like ``2026-06-06 garbage`` on its clean 10-char date prefix while
+    the rest was malformed. Anything that is not entirely a valid ISO date OR ISO datetime is
+    un-boundable and returns ``None`` (the caller drops the row to an account-level residual) — this
+    is the fail-closed guard against a malformed ``ts`` that, sorting below every fill date, would
+    otherwise credit an unbounded all-fills window."""
+    s = str(ts)
+    try:
+        return date.fromisoformat(s).isoformat()      # date-only broker field, fully validated
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(s).date().isoformat()   # full ISO timestamp, fully validated
+    except ValueError:
+        return None
+
+
 def strategy_cash_credit(
     conn: sqlite3.Connection, strategy: str, kind: LedgerKind
 ) -> float:
@@ -120,11 +143,14 @@ def strategy_cash_credit(
     entitled side is empty in the ledger (e.g. a short-debit row with no ledger short) contributes
     nothing to any strategy and stays an account-level residual.
 
-    Fail-closed on an un-boundable timestamp: a ``DIV`` row whose ``ts`` is NULL or does not parse
-    as an ISO date carries no entitlement window we can trust, so it is EXCLUDED from attribution
-    (SQL ``AND ts IS NOT NULL`` plus a parse guard) and left as an unattributed account-level
-    residual — it is never credited against an unbounded (all-fills) window, which a malformed
-    ``ts`` sorting below every fill date would otherwise produce.
+    Fail-closed on an un-boundable timestamp: a ``DIV`` row whose ``ts`` is NULL, or is not
+    ENTIRELY a valid ISO date/datetime, carries no entitlement window we can trust, so it is
+    EXCLUDED from attribution (SQL ``AND ts IS NOT NULL`` plus the ``_entitlement_as_of`` full-
+    string parse guard) and left as an unattributed account-level residual — it is never credited
+    against an unbounded (all-fills) window, which a malformed ``ts`` sorting below every fill date
+    would otherwise produce. The parse validates the WHOLE ``ts`` (not a 10-char prefix slice), so a
+    value like ``2026-06-06 garbage`` with a well-formed date prefix but malformed suffix also fails
+    closed rather than being accepted on its prefix.
 
     Minimal-slice limitation: the per-share figure is IMPLIED from the account cash, not sourced
     from a corporate-action declaration, and a single broker-netted row (one row for an internally
@@ -141,11 +167,11 @@ def strategy_cash_credit(
     for row in divs:
         sym = row["symbol"]
         amt = float(row["amount"])
-        try:
-            # date-vs-date entitlement bound (clean, tz-free); a non-ISO ts is un-boundable, so
-            # the row fails closed to a residual rather than crediting an all-fills window.
-            as_of = date.fromisoformat(str(row["ts"])[:10]).isoformat()
-        except ValueError:
+        # date-vs-date entitlement bound (clean, tz-free), validating the WHOLE ts; a not-fully-ISO
+        # ts is un-boundable, so the row fails closed to a residual rather than crediting an
+        # all-fills window (see _entitlement_as_of).
+        as_of = _entitlement_as_of(row["ts"])
+        if as_of is None:
             continue
         positions = {
             r["strategy"]: float(r["q"])
