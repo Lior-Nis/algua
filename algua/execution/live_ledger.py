@@ -4,6 +4,7 @@ truth for per-strategy attribution. Pure derivations are kept side-effect-free f
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -152,6 +153,19 @@ def strategy_cash_credit(
     value like ``2026-06-06 garbage`` with a well-formed date prefix but malformed suffix also fails
     closed rather than being accepted on its prefix.
 
+    The SAME full-string validation is applied per FILL when reconstructing the entitled share base:
+    each fill's ``fill_ts`` is run through ``_entitlement_as_of``, and only fills whose own date
+    parses AND is on-or-before the dividend's date count toward the base. This closes the mirror of
+    the ``ts`` hole — a fill with an empty/malformed ``fill_ts`` (e.g. ``''``) would otherwise sort
+    below every real date under a raw ``substr(fill_ts, 1, 10) <= as_of`` comparison and be wrongly
+    counted as entitled, inflating the base; instead it is excluded rather than silently satisfying
+    ``<=``.
+
+    Non-finite guard: a corrupt ``DIV`` ``amount``, a non-finite summed fill ``qty``, or a
+    non-finite computed contribution is dropped (``math.isfinite`` — the convention used at
+    ``assert_marks_usable``) so an ``inf``/``nan`` can never propagate into NAV and the persisted
+    drawdown peak.
+
     Minimal-slice limitation: the per-share figure is IMPLIED from the account cash, not sourced
     from a corporate-action declaration, and a single broker-netted row (one row for an internally
     long+short book) cannot recover the per-side split — the full declaration-sourced design in
@@ -167,21 +181,38 @@ def strategy_cash_credit(
     for row in divs:
         sym = row["symbol"]
         amt = float(row["amount"])
+        # Fail closed on a corrupt (non-finite) DIV amount so an inf/nan can never propagate into
+        # NAV and the persisted drawdown peak (matches the assert_marks_usable isfinite convention).
+        if not math.isfinite(amt):
+            continue
         # date-vs-date entitlement bound (clean, tz-free), validating the WHOLE ts; a not-fully-ISO
         # ts is un-boundable, so the row fails closed to a residual rather than crediting an
         # all-fills window (see _entitlement_as_of).
         as_of = _entitlement_as_of(row["ts"])
         if as_of is None:
             continue
-        positions = {
-            r["strategy"]: float(r["q"])
-            for r in conn.execute(
-                f"SELECT strategy, SUM(qty) AS q FROM {t.fills} "
-                "WHERE strategy IS NOT NULL AND symbol = ? AND substr(fill_ts, 1, 10) <= ? "
-                "GROUP BY strategy",
-                (sym, as_of),
-            )
-        }
+        # Reconstruct each strategy's entitled share base by summing ONLY fills whose OWN fill_ts
+        # parses as a full ISO date/datetime (via _entitlement_as_of) AND falls on-or-before the
+        # dividend's date. Applying the same full-string validation per fill closes the mirror of
+        # the DIV-ts hole: a fill with an empty/malformed fill_ts (e.g. '') would, under a raw
+        # `substr(fill_ts,1,10) <= as_of` comparison, sort BELOW every real date and be wrongly
+        # counted as entitled — inflating the share base. A non-boundable fill_ts is un-datable, so
+        # it is excluded from the entitled base rather than silently satisfying '<='.
+        positions: dict[str, float] = {}
+        for r in conn.execute(
+            f"SELECT strategy, qty, fill_ts FROM {t.fills} "
+            "WHERE strategy IS NOT NULL AND symbol = ?",
+            (sym,),
+        ):
+            fill_as_of = _entitlement_as_of(r["fill_ts"])
+            if fill_as_of is None or fill_as_of > as_of:
+                continue
+            q = float(r["qty"])
+            # A non-finite fill qty can't be a real position — fail it closed out of the base so it
+            # can't drive an inf/nan into the credit.
+            if not math.isfinite(q):
+                continue
+            positions[r["strategy"]] = positions.get(r["strategy"], 0.0) + q
         my_q = positions.get(strategy, 0.0)
         if amt >= 0.0:  # long-side credit
             base = sum(q for q in positions.values() if q > 0.0)
@@ -189,8 +220,10 @@ def strategy_cash_credit(
         else:  # short-side dividend debit
             base = sum(-q for q in positions.values() if q < 0.0)
             my_share = -my_q if my_q < 0.0 else 0.0
-        if base > 0.0 and my_share > 0.0:
-            credit += amt * (my_share / base)
+        if base > 0.0 and math.isfinite(base) and my_share > 0.0:
+            contribution = amt * (my_share / base)
+            if math.isfinite(contribution):
+                credit += contribution
     return credit
 
 
