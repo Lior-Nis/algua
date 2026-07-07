@@ -79,10 +79,14 @@ def _seed_live_ticks(conn, strategy_id, ident, *, sharpe_target, n, start_after=
         sessions.append(sess)
     sessions.reverse()
     _ = start_after  # ticks are all recent; the certificate is pinned just before sessions[0].
+    now = datetime.now(UTC)
     equity = 100_000.0
     for i, day in enumerate(sessions):
         equity *= (1.0 + float(rets[i]))
-        ts = datetime.combine(day, datetime.min.time(), UTC).replace(hour=20).isoformat()
+        ts_dt = datetime.combine(day, datetime.min.time(), UTC).replace(hour=20)
+        if ts_dt > now:
+            ts_dt = now
+        ts = ts_dt.isoformat()
         conn.execute(
             "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, positions,"
             " n_submitted, reconcile_ok, lane, strategy_id, clock_source, code_hash,"
