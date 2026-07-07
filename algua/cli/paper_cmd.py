@@ -91,6 +91,7 @@ from algua.registry.human_actor import canonical_run_context
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
+    FORWARD_SHARPE_CONFIDENCE,
     MAX_FORWARD_DRAWDOWN,
     MAX_STALENESS_SESSIONS,
     MIN_FORWARD_OBSERVATIONS,
@@ -785,6 +786,10 @@ def promote(
         MAX_STALENESS_SESSIONS, "--max-staleness",
         help="newest admissible tick may be at most this many sessions old "
              "(lowering is stricter; raising is human-only)"),
+    forward_sharpe_confidence: float = typer.Option(
+        FORWARD_SHARPE_CONFIDENCE, "--forward-sharpe-confidence",
+        help="one-sided confidence that the true forward Sharpe > 0 that the realized-Sharpe "
+             "lower bound must clear (raising is stricter; lowering is human-only)"),
 ) -> None:
     """Forward-test evidence gate (#124): evaluate this strategy's wall-clock paper evidence
     and promote paper -> forward_tested on pass. At forward_tested: re-evaluate, refreshing
@@ -799,6 +804,7 @@ def promote(
         min_forward_vol=min_vol,
         max_forward_drawdown=max_drawdown,
         max_staleness_sessions=max_staleness,
+        forward_sharpe_confidence=forward_sharpe_confidence,
     )
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
@@ -806,7 +812,7 @@ def promote(
         # AUTHENTICATE the human actor (#329) BEFORE the relaxation guard is even consulted. A bare
         # `--actor human` is forgeable, so asserting a human actor here requires an SSH signature
         # (namespace algua-human-actor) over a fresh single-use challenge binding this command +
-        # strategy + RECOMPUTED artifact identity + the FULL ForwardGateCriteria (all 7 thresholds).
+        # strategy + RECOMPUTED artifact identity + the FULL ForwardGateCriteria (all 8 thresholds).
         # No signature => a challenge is issued+printed and NOTHING runs. A declared agent is
         # returned unchanged (the relaxation guard refuses its relaxations exactly as before).
         actor_enum = authenticate_actor(
@@ -817,6 +823,7 @@ def promote(
                 "min_observations": min_observations, "min_coverage": min_coverage,
                 "degradation_factor": degradation_factor, "sharpe_floor": sharpe_floor,
                 "min_vol": min_vol, "max_drawdown": max_drawdown, "max_staleness": max_staleness,
+                "forward_sharpe_confidence": forward_sharpe_confidence,
             }),
         )
         # PREFLIGHT: actor legality + relaxations-need-human + stage legality. Refuses here,

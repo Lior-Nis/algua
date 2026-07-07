@@ -697,6 +697,7 @@ def test_preflight_accepts_paper_and_forward_tested(conn, repo, stage):
     ({"max_forward_drawdown": 0.30}, "max_forward_drawdown"),
     ({"max_staleness_sessions": 6}, "max_staleness_sessions"),
     ({"min_session_coverage": 0.8}, "min_session_coverage"),
+    ({"forward_sharpe_confidence": 0.90}, "forward_sharpe_confidence"),
 ])
 def test_guard_refuses_agent_relaxation_naming_field(kwargs, fieldname):
     with pytest.raises(ValueError, match=fieldname):
@@ -708,13 +709,14 @@ def test_guard_allows_agent_tightening_and_defaults():
     guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(sharpe_floor=0.5))
     guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(max_forward_drawdown=0.20))
     guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(max_staleness_sessions=3))
+    guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(forward_sharpe_confidence=0.99))
 
 
 def test_guard_human_may_relax_anything():
     guard_forward_relaxations(Actor.HUMAN, ForwardGateCriteria(
         min_forward_observations=1, min_session_coverage=0.1, degradation_factor=0.0,
         sharpe_floor=0.0, min_forward_vol=0.0, max_forward_drawdown=0.9,
-        max_staleness_sessions=99))
+        max_staleness_sessions=99, forward_sharpe_confidence=0.5))
 
 
 def _pin_identity(monkeypatch):

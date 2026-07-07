@@ -5,6 +5,7 @@ import pytest
 
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
+    FORWARD_SHARPE_CONFIDENCE,
     MAX_FORWARD_DRAWDOWN,
     MAX_STALENESS_SESSIONS,
     MIN_FORWARD_OBSERVATIONS,
@@ -19,7 +20,10 @@ from algua.research.forward_gates import (
 
 
 def passing_evidence(**over):
-    base = dict(n_return_observations=63, session_coverage=0.95, realized_sharpe=0.8,
+    # realized_sharpe=4.0 clears the 95% PSR wall at n=63 (needs an observed annual Sharpe ~3.32);
+    # skew=0.0, kurtosis=3.0 are the Gaussian (neutral) moments for the Sharpe-SE adjustment.
+    base = dict(n_return_observations=63, session_coverage=0.95, realized_sharpe=4.0,
+                realized_skew=0.0, realized_kurtosis=3.0,
                 realized_vol=0.10, realized_max_drawdown=0.10, holdout_sharpe=1.0,
                 n_reconcile_failures=0, n_defective_ticks=0, kill_switch_tripped=False,
                 global_halt_engaged=False, n_kill_trips_in_window=0, single_account_ok=True,
@@ -33,10 +37,10 @@ def _check(decision: ForwardGateDecision, name: str) -> dict:
 
 
 ALL_CHECK_NAMES = {
-    "min_forward_observations", "session_coverage", "realized_sharpe", "min_forward_vol",
-    "max_forward_drawdown", "reconcile_ok", "no_defective_ticks", "kill_switch_clear",
-    "global_halt_clear", "no_kill_trips_in_window", "single_account", "activities_ok",
-    "no_external_cash_flows", "no_unattributable_fills", "max_staleness_sessions",
+    "min_forward_observations", "session_coverage", "realized_sharpe", "realized_sharpe_lcb",
+    "min_forward_vol", "max_forward_drawdown", "reconcile_ok", "no_defective_ticks",
+    "kill_switch_clear", "global_halt_clear", "no_kill_trips_in_window", "single_account",
+    "activities_ok", "no_external_cash_flows", "no_unattributable_fills", "max_staleness_sessions",
 }
 
 
@@ -49,6 +53,7 @@ def test_protected_constants():
     assert MIN_FORWARD_VOL == 0.02
     assert MAX_FORWARD_DRAWDOWN == 0.25
     assert MAX_STALENESS_SESSIONS == 5
+    assert FORWARD_SHARPE_CONFIDENCE == 0.95
 
 
 def test_all_pass_baseline():
@@ -61,13 +66,12 @@ def test_all_pass_baseline():
 
 # --- one field flipped across its boundary fails exactly that check --------------------------
 
+# NOTE: the point-performance bar ('realized_sharpe') is NOT probed here — a low realized Sharpe
+# co-fails the new 'realized_sharpe_lcb' significance wall, breaking this loop's "exactly one check
+# fails" invariant. The point bar is exercised in isolation by the test_point_bar_* tests below.
 FLIP_CASES = [
     ({"n_return_observations": 62}, "min_forward_observations"),
     ({"session_coverage": 0.89}, "session_coverage"),
-    # bar = max(0.5 * holdout, 0.3); holdout=1.0 -> bar 0.5
-    ({"realized_sharpe": 0.49}, "realized_sharpe"),
-    # holdout=0.4 -> 0.5*0.4=0.2 < floor -> bar is the 0.3 floor
-    ({"holdout_sharpe": 0.4, "realized_sharpe": 0.29}, "realized_sharpe"),
     ({"realized_vol": 0.01}, "min_forward_vol"),
     ({"realized_max_drawdown": 0.26}, "max_forward_drawdown"),
     # integrity: each field flipped fails
@@ -88,7 +92,7 @@ FLIP_CASES = [
 
 
 @pytest.mark.parametrize("over,failing", FLIP_CASES, ids=[
-    "obs_62", "coverage_0.89", "sharpe_below_degradation_bar", "sharpe_below_floor_bar",
+    "obs_62", "coverage_0.89",
     "vol_0.01", "drawdown_0.26", "reconcile_failure", "defective_tick", "kill_switch_tripped",
     "global_halt_engaged", "kill_trip_in_window", "single_account_failed", "activities_not_ok",
     "external_cash_flow", "unattributable_fill", "staleness_6", "staleness_none",
@@ -104,11 +108,10 @@ def test_single_field_flip_fails_exactly_that_check(over, failing):
 
 # --- boundary values pass (>= / <= semantics) -------------------------------------------------
 
+# The realized_sharpe point-bar boundaries are exercised in isolation by test_point_bar_* below
+# (low Sharpes at the bar legitimately fail the significance wall, so they can't be overall-pass
+# boundary cases here).
 BOUNDARY_PASS_CASES = [
-    # exactly at the degradation bar: holdout=1.0 -> bar 0.5, realized 0.5 passes (>=)
-    {"realized_sharpe": 0.5},
-    # floor regime: holdout=0.4 -> bar 0.3, realized 0.31 passes
-    {"holdout_sharpe": 0.4, "realized_sharpe": 0.31},
     {"session_coverage": 0.9},
     {"realized_vol": 0.02},
     {"realized_max_drawdown": 0.25},
@@ -117,12 +120,104 @@ BOUNDARY_PASS_CASES = [
 
 
 @pytest.mark.parametrize("over", BOUNDARY_PASS_CASES, ids=[
-    "sharpe_at_degradation_bar", "sharpe_just_above_floor", "coverage_at_0.9",
-    "vol_at_0.02", "drawdown_at_0.25", "staleness_at_5",
+    "coverage_at_0.9", "vol_at_0.02", "drawdown_at_0.25", "staleness_at_5",
 ])
 def test_boundary_values_pass(over):
     d = evaluate_forward_gate(passing_evidence(**over), ForwardGateCriteria())
     assert d.passed is True
+
+
+# --- point performance bar ('realized_sharpe') probed in isolation via _check --------------------
+# These deliberately sit at low Sharpes where the significance wall (realized_sharpe_lcb) fails, so
+# we assert ONLY the point-bar check, never overall d.passed.
+
+
+def test_point_bar_below_degradation():
+    # bar = max(0.5 * holdout, 0.3); holdout=1.0 -> bar 0.5; realized 0.49 misses it.
+    d = evaluate_forward_gate(
+        passing_evidence(holdout_sharpe=1.0, realized_sharpe=0.49), ForwardGateCriteria())
+    c = _check(d, "realized_sharpe")
+    assert c["passed"] is False
+    assert c["threshold"] == 0.5
+
+
+def test_point_bar_below_floor():
+    # holdout=0.4 -> 0.5*0.4=0.2 < floor -> bar is the 0.3 floor; realized 0.29 misses it.
+    d = evaluate_forward_gate(
+        passing_evidence(holdout_sharpe=0.4, realized_sharpe=0.29), ForwardGateCriteria())
+    c = _check(d, "realized_sharpe")
+    assert c["passed"] is False
+    assert c["threshold"] == 0.3
+
+
+def test_point_bar_at_degradation():
+    # exactly at the degradation bar: holdout=1.0 -> bar 0.5, realized 0.5 passes (>=).
+    d = evaluate_forward_gate(
+        passing_evidence(holdout_sharpe=1.0, realized_sharpe=0.5), ForwardGateCriteria())
+    assert _check(d, "realized_sharpe")["passed"] is True
+
+
+def test_point_bar_just_above_floor():
+    # floor regime: holdout=0.4 -> bar 0.3, realized 0.31 passes.
+    d = evaluate_forward_gate(
+        passing_evidence(holdout_sharpe=0.4, realized_sharpe=0.31), ForwardGateCriteria())
+    assert _check(d, "realized_sharpe")["passed"] is True
+
+
+# --- statistical-significance wall (realized_sharpe_lcb / PSR) ----------------------------------
+
+
+def test_significant_point_but_insignificant_fails():
+    # The #432 scenario: a 63-obs draw clears the point bar (0.5) at realized Sharpe 1.0 but is
+    # NOT statistically distinguishable from zero -> the significance wall fails the gate.
+    d = evaluate_forward_gate(
+        passing_evidence(holdout_sharpe=1.0, realized_sharpe=1.0, n_return_observations=63),
+        ForwardGateCriteria())
+    assert _check(d, "realized_sharpe")["passed"] is True
+    lcb = _check(d, "realized_sharpe_lcb")
+    assert lcb["passed"] is False
+    assert lcb["op"] == ">="
+    assert lcb["threshold"] == FORWARD_SHARPE_CONFIDENCE
+    assert d.passed is False
+    json.dumps(d.to_dict(), allow_nan=False)
+
+
+def test_lcb_pass_baseline():
+    # The realized_sharpe=4.0 baseline clears the 95% PSR wall at n=63.
+    d = evaluate_forward_gate(passing_evidence(), ForwardGateCriteria())
+    lcb = _check(d, "realized_sharpe_lcb")
+    assert lcb["passed"] is True
+    assert lcb["value"] >= FORWARD_SHARPE_CONFIDENCE
+
+
+def test_lcb_fail_closed_on_underpowered():
+    # n<=1 has no standard error (sqrt(T-1)==0) -> the PSR is undefined and fails closed. (The
+    # obs-floor check also fails here, which is fine; we assert only the lcb check's fields.)
+    d = evaluate_forward_gate(
+        passing_evidence(n_return_observations=1), ForwardGateCriteria())
+    lcb = _check(d, "realized_sharpe_lcb")
+    assert lcb["passed"] is False
+    assert lcb["value"] is None
+    assert lcb["detail"]
+    json.dumps(d.to_dict(), allow_nan=False)
+
+
+def test_lcb_more_observations_rescue_significance():
+    # A marginal realized Sharpe (1.2) that fails at n=63 clears the wall with a much longer
+    # window (700 obs) — the SE shrinks with T, which is the sanctioned remedy, not a weaker bar.
+    short = evaluate_forward_gate(
+        passing_evidence(realized_sharpe=1.2, n_return_observations=63), ForwardGateCriteria())
+    assert _check(short, "realized_sharpe_lcb")["passed"] is False
+    long = evaluate_forward_gate(
+        passing_evidence(realized_sharpe=1.2, n_return_observations=700), ForwardGateCriteria())
+    assert _check(long, "realized_sharpe_lcb")["passed"] is True
+
+
+def test_lcb_tightened_confidence_is_agent_allowed():
+    # Agents may TIGHTEN (raise) the confidence; a baseline that clears 0.95 can fail at 0.999.
+    d = evaluate_forward_gate(
+        passing_evidence(), ForwardGateCriteria(forward_sharpe_confidence=0.999))
+    assert _check(d, "realized_sharpe_lcb")["passed"] is False
 
 
 # --- fail-closed paths -------------------------------------------------------------------------

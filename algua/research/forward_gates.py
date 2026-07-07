@@ -17,7 +17,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from statistics import NormalDist
 from typing import Any
+
+from algua.backtest._constants import ANN
+
+# Standard normal for the one-sided Sharpe lower-confidence-bound (PSR) wall. stdlib only — this
+# pure wall must NOT pull scipy in (research.gates owns the scipy-backed DSR path).
+_NORM = NormalDist()
 
 # Window floor: minimum daily RETURN observations in the forward window. Symmetric with
 # gates.MIN_HOLDOUT_OBSERVATIONS (~one trading quarter); underpowered windows fail closed.
@@ -35,6 +42,15 @@ MIN_SESSION_COVERAGE = 0.9
 # Both protected — NOT agent-tunable knobs.
 DEGRADATION_FACTOR = 0.5
 SHARPE_FLOOR = 0.3
+
+# Statistical-significance wall on the realized forward Sharpe: the one-sided lower confidence
+# bound on the realized Sharpe (at this confidence) must clear ZERO — equivalently the
+# Probabilistic Sharpe Ratio P(true forward Sharpe > 0) must be >= this level. Mirrors the
+# strategy-holdout DSR posture (gates.DSR_ALPHA=0.05 => 0.95 confidence). Power tradeoff: at
+# MIN_FORWARD_OBSERVATIONS=63 this demands an observed ANNUAL Sharpe of ~3.3; the remedy for a
+# marginal strategy is a LONGER forward window (the standard error shrinks with T), NOT a weaker
+# bar. Protected — an agent may only RAISE it (stricter); lowering is human-only.
+FORWARD_SHARPE_CONFIDENCE = 0.95  # one-sided confidence that true forward Sharpe > 0
 
 # Volatility floor: near-zero vol makes Sharpe undefined/explosive; a do-nothing strategy must
 # not pass. Protected — NOT an agent-tunable knob.
@@ -71,6 +87,7 @@ class ForwardGateCriteria:
     min_forward_vol: float = MIN_FORWARD_VOL
     max_forward_drawdown: float = MAX_FORWARD_DRAWDOWN
     max_staleness_sessions: int = MAX_STALENESS_SESSIONS
+    forward_sharpe_confidence: float = FORWARD_SHARPE_CONFIDENCE
 
 
 @dataclass(frozen=True)
@@ -87,6 +104,11 @@ class ForwardEvidence:
     n_return_observations: int
     session_coverage: float
     realized_sharpe: float
+    # Return-series moments feeding the non-normality-adjusted Sharpe standard error (the
+    # realized_sharpe_lcb / PSR wall). ``realized_kurtosis`` is RAW Pearson kurtosis (~3 for a
+    # normal series — matches metrics_from_returns 'kurtosis').
+    realized_skew: float
+    realized_kurtosis: float
     realized_vol: float
     realized_max_drawdown: float
     holdout_sharpe: float | None
@@ -136,6 +158,37 @@ def _metric_check(name: str, value: float, op: str, threshold: float,
 def _bool_check(name: str, ok: bool, fail_detail: str) -> dict[str, Any]:
     """One boolean precondition; ``detail`` explains the failure (None on pass)."""
     return {"name": name, "passed": bool(ok), "detail": None if ok else fail_detail}
+
+
+def _forward_sharpe_psr(
+    sharpe_ann: float, n_obs: int, skew: float, raw_kurtosis: float,
+) -> float | None:
+    """Probabilistic Sharpe Ratio for the realized forward Sharpe: P(true per-period Sharpe > 0).
+
+    Uses the SAME Lo(2002)/Mertens non-normality variance term as
+    ``algua.research.gates`` / ``algua.research.dsr.dsr_confidence`` (kept self-contained on
+    purpose so this pure wall does not import the scipy-backed DSR path):
+
+        SR   = sharpe_ann / sqrt(ANN)                       # de-annualize to per-period
+        var  = 1 - skew*SR + ((rawKurt - 1)/4) * SR^2       # against a zero benchmark (SR* = 0)
+        z    = SR * sqrt(T - 1) / sqrt(var)
+        PSR  = Phi(z)
+
+    ``PSR >= c`` is exactly equivalent to the one-sided c-confidence lower bound on the realized
+    Sharpe clearing zero. Fails closed (returns ``None``) on any degenerate input: ``n_obs <= 1``
+    (needs sqrt(T-1) > 0), any non-finite moment, or a non-finite/<= 0 variance term.
+    """
+    if n_obs <= 1:
+        return None
+    if not (math.isfinite(sharpe_ann) and math.isfinite(skew) and math.isfinite(raw_kurtosis)):
+        return None
+    sr = sharpe_ann / math.sqrt(ANN)
+    var_term = 1.0 - skew * sr + ((raw_kurtosis - 1.0) / 4.0) * sr * sr
+    if not math.isfinite(var_term) or var_term <= 0.0:
+        return None
+    z = sr * math.sqrt(n_obs - 1) / math.sqrt(var_term)
+    conf = float(_NORM.cdf(z))
+    return conf if math.isfinite(conf) else None
 
 
 def evaluate_forward_gate(
@@ -191,6 +244,24 @@ def evaluate_forward_gate(
         bar = max(factor * float(holdout), floor)
         checks.append(_metric_check(
             "realized_sharpe", float(evidence.realized_sharpe), ">=", bar))
+
+    # 3b. Statistical-significance wall on the realized Sharpe (PSR / one-sided lower bound).
+    # INDEPENDENT of holdout availability: a lucky short window can clear the point performance
+    # bar without the realized Sharpe being distinguishable from zero. A degenerate PSR (n<=1 or
+    # non-finite moments) fails closed.
+    psr = _forward_sharpe_psr(
+        evidence.realized_sharpe, evidence.n_return_observations,
+        evidence.realized_skew, evidence.realized_kurtosis)
+    if psr is None:
+        checks.append({
+            "name": "realized_sharpe_lcb", "value": None, "op": ">=",
+            "threshold": float(criteria.forward_sharpe_confidence), "passed": False,
+            "detail": "forward Sharpe confidence undegenerate (n<=1 or non-finite moments)",
+        })
+    else:
+        checks.append(_metric_check(
+            "realized_sharpe_lcb", psr, ">=", float(criteria.forward_sharpe_confidence),
+            detail="one-sided lower Sharpe bound must clear zero at this confidence (PSR)"))
 
     # 4. Volatility floor — a do-nothing strategy must not pass on an undefined/explosive Sharpe.
     checks.append(_metric_check(

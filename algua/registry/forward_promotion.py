@@ -321,6 +321,8 @@ def assemble_forward_evidence(
         n_return_observations=len(returns),
         session_coverage=float(session_coverage),
         realized_sharpe=float(m["sharpe"]),
+        realized_skew=float(m["skewness"]),
+        realized_kurtosis=float(m["kurtosis"]),
         realized_vol=float(m["ann_volatility"]),
         realized_max_drawdown=abs(float(m["max_drawdown"])),
         holdout_sharpe=qualified_holdout_sharpe(conn, strategy_id, identity),
@@ -474,7 +476,8 @@ def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> No
         return
     defaults = ForwardGateCriteria()
     higher_is_stricter = ("min_forward_observations", "min_session_coverage",
-                          "degradation_factor", "sharpe_floor", "min_forward_vol")
+                          "degradation_factor", "sharpe_floor", "min_forward_vol",
+                          "forward_sharpe_confidence")
     lower_is_stricter = ("max_forward_drawdown", "max_staleness_sessions")
     relaxed = [f for f in higher_is_stricter if getattr(criteria, f) < getattr(defaults, f)]
     relaxed += [f for f in lower_is_stricter if getattr(criteria, f) > getattr(defaults, f)]
