@@ -58,6 +58,16 @@ MAX_STALENESS_SESSIONS = 5
 # gets it added ON TOP. Do NOT add it to ForwardGateCriteria.
 MT_SHARPE_PENALTY = 0.05
 
+# Trailing horizon (in trading sessions) over which prior forward-gate evaluations of THIS
+# strategy+identity count as optional-stopping "looks" (#431). Bounding the look count is what
+# keeps the tax immune to the #324 anti-scaling pathology: without it, the live wall's MANDATORY
+# periodic re-certification (a passing run must be <= CERTIFICATE_FRESH_SESSIONS old) would make
+# routine, required refreshes accumulate looks forever and eventually push the bar out of reach —
+# punishing a strategy for COMPLYING with the freshness wall. Aligned with
+# CERTIFICATE_FRESH_SESSIONS so routine re-certification is at most ~1 look while burst re-runs
+# age out. Protected — NOT an agent-tunable knob.
+FORWARD_RELOOK_HORIZON_SESSIONS = 10
+
 # Consumable-token freshness for the paper -> forward_tested edge (consumed by transitions.py).
 # Protected — NOT an agent-tunable knob.
 FORWARD_TOKEN_TTL_DAYS = 7
@@ -92,9 +102,12 @@ class ForwardEvidence:
     such row exists and the performance check fails closed. ``staleness_sessions`` is ``None``
     when there are no admissible evidence ticks at all — also fail closed.
 
-    ``n_prior_forward_looks`` (prior forward-gate evaluations of this strategy+identity) and
-    ``n_concurrent_forward`` (distinct strategies forward-testing concurrently in the window)
-    drive the multiple-testing Sharpe penalty raising the performance bar (#431).
+    ``n_prior_forward_looks`` (prior forward-gate evaluations of this strategy+identity WITHIN a
+    trailing ``FORWARD_RELOOK_HORIZON_SESSIONS`` window) and ``n_concurrent_forward`` (distinct
+    strategies forward-testing concurrently in the window) drive the multiple-testing Sharpe
+    penalty raising the performance bar (#431). The look count is deliberately scoped to an EXACT
+    identity match (code+config+dependency hash) — a v1 narrower than a family/lineage scope; see
+    the assembly note in ``forward_promotion.py`` for the scope and its known residual gaps.
     """
 
     n_return_observations: int

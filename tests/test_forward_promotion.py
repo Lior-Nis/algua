@@ -65,6 +65,12 @@ class FakeCalendar:
         n = len(self.sessions_in_range(lo, hi)) - 1
         return n if sb >= sa else -n
 
+    def previous_session(self, day: date) -> date:
+        day -= timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+        return day
+
 
 CAL = FakeCalendar()
 
@@ -591,7 +597,7 @@ def test_no_admissible_ticks_skips_broker_and_zeroes_evidence(conn):
 # ---------------------------------------------------------------------------
 
 def seed_forward_eval_row(conn, *, strategy_id=1, passed=1, code_hash="c", config_hash="g",
-                          dependency_hash="d"):
+                          dependency_hash="d", created_at="2026-06-10T00:00:00+00:00"):
     """Minimal forward_gate_evaluations row (NOT NULL columns only) for the prior-looks count."""
     conn.execute(
         "INSERT INTO forward_gate_evaluations (strategy_id, passed, n_forward_observations,"
@@ -600,7 +606,7 @@ def seed_forward_eval_row(conn, *, strategy_id=1, passed=1, code_hash="c", confi
         " n_concurrent_forward, code_hash, config_hash, dependency_hash, actor, decision_json,"
         " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (strategy_id, passed, 63, 63, 0.5, 0.3, 0.02, 0.25, 5, 0, 1, code_hash, config_hash,
-         dependency_hash, "agent", "{}", "2026-06-10T00:00:00+00:00"),
+         dependency_hash, "agent", "{}", created_at),
     )
     conn.commit()
 
@@ -626,6 +632,30 @@ def test_prior_forward_evals_ignore_other_identity(conn):
     seed_forward_eval_row(conn)  # counted
     seed_forward_eval_row(conn, code_hash="OTHER")  # different code_hash -> not counted
     seed_forward_eval_row(conn, dependency_hash="OTHER")  # different dep_hash -> not counted
+    res = assemble(conn)
+    assert res.evidence.n_prior_forward_looks == 1
+    assert res.n_prior_forward_looks == 1
+
+
+def test_prior_forward_evals_outside_horizon_age_out(conn):
+    # #431 anti-scaling fix: looks older than FORWARD_RELOOK_HORIZON_SESSIONS (10 sessions before
+    # NOW=Fri 2026-06-12 => cutoff session Fri 2026-05-29) do NOT count. Without the horizon bound
+    # the live wall's mandatory re-certification would accumulate looks forever and make the bar
+    # unpassable. A row on 2026-05-01 (well before the cutoff) is aged out; a recent one counts.
+    _two_admissible(conn)
+    seed_forward_eval_row(conn, created_at="2026-05-01T00:00:00+00:00")  # aged out
+    seed_forward_eval_row(conn, created_at="2026-06-11T12:00:00+00:00")  # within horizon
+    res = assemble(conn)
+    assert res.evidence.n_prior_forward_looks == 1
+    assert res.n_prior_forward_looks == 1
+
+
+def test_prior_forward_evals_horizon_boundary_inclusive(conn):
+    # A look stamped exactly at the horizon cutoff session (2026-05-29, 10 sessions before NOW) is
+    # ON the boundary and counts (created_at >= cutoff); one the session before it does not.
+    _two_admissible(conn)
+    seed_forward_eval_row(conn, created_at="2026-05-29T00:00:00+00:00")  # boundary -> counted
+    seed_forward_eval_row(conn, created_at="2026-05-28T23:59:59+00:00")  # just before -> not
     res = assemble(conn)
     assert res.evidence.n_prior_forward_looks == 1
     assert res.n_prior_forward_looks == 1

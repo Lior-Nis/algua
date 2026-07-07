@@ -31,6 +31,7 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
 from algua.research.forward_gates import (
     CERTIFICATE_FRESH_SESSIONS,
+    FORWARD_RELOOK_HORIZON_SESSIONS,
     ForwardEvidence,
     ForwardGateCriteria,
     ForwardGateDecision,
@@ -60,6 +61,7 @@ class SessionCalendar(Protocol):
     def session_on_or_before(self, day: date) -> date: ...
     def sessions_between(self, a: date, b: date) -> int: ...
     def sessions_in_range(self, start: date, end: date) -> list[date]: ...
+    def previous_session(self, day: date) -> date: ...
 
 
 # (after_iso, until_iso) -> raw activity dicts; exhaustively paginated by the broker layer,
@@ -289,18 +291,55 @@ def assemble_forward_evidence(
         ).fetchone()[0]
 
     # 8b. Optional-stopping count (#431): PRIOR forward-gate evaluations of THIS strategy+identity
-    # in the ledger — the re-runnable forward gate lets an agent take repeated looks at the same
-    # strategy, inflating the family-wise error rate. Identity-scoped: a code change (new identity)
-    # legitimately resets it, because it forces a fresh research-gate pass. Counts PRIOR rows only;
-    # assemble runs BEFORE the new row is recorded (run_forward_gate ordering), so this never
-    # counts the in-flight evaluation. A None dependency_hash matches nothing (SQL `= NULL` never
-    # matches, and the holdout check already fails closed there) — leave 0.
+    # in the ledger, WITHIN a trailing FORWARD_RELOOK_HORIZON_SESSIONS window — the re-runnable
+    # forward gate lets an agent take repeated looks at the same strategy, inflating the family-wise
+    # error rate.
+    #
+    # HORIZON BOUND (the #324 anti-scaling fix): only looks whose `created_at` is on or after the
+    # session FORWARD_RELOOK_HORIZON_SESSIONS trading sessions before `now` count. Without this the
+    # live wall's MANDATORY periodic re-certification (a passing run must stay <= 10 sessions old)
+    # would accumulate looks forever and eventually make the bar unpassable — taxing a strategy for
+    # COMPLYING with the freshness wall. Bounded, burst-rate-limiting counting taxes clustered
+    # re-runs and lets looks age out; it does NOT claim to control sequential false-pass over
+    # unbounded time (that would require the very lifetime-cumulative penalty #324 removed).
+    #
+    # SCOPE — narrower v1 (identity-exact-match), stated honestly. The count keys on an EXACT
+    # code+config+dependency hash match, NOT on a #222 family/lineage component. This is a
+    # deliberate, documented v1 limitation, not the escape-hatch-proof lineage scope: an agent that
+    # RE-REGISTERS a peeked strategy under a new name (new strategy_id) or edits any byte of code
+    # (new code_hash) resets this count to 0. Widening to lineage-component scoping (walking the
+    # #222 family DAG) is deferred follow-up work; it is NOT implemented here and this code makes no
+    # claim to close that hatch. What v1 DOES tax honestly: repeated looks at the SAME fixed
+    # artifact within the horizon (the dominant optional-stopping pattern — an agent re-running
+    # `paper promote` each session hoping the growing window clears the bar). A code change
+    # legitimately resets the count anyway — it forces a fresh `research promote` pass first. A None
+    # dependency_hash matches nothing (SQL `= NULL` never matches, and the holdout check already
+    # fails closed there) — leave 0.
+    #
+    # RESIDUAL RACE (documented, not closed in v1). This is a plain read; the row for the current
+    # run is inserted later, in a SEPARATE write transaction (run_forward_gate ordering). Two
+    # `paper promote` runs on the same identity that interleave read-read-insert-insert can both
+    # observe the same look count L and both pass on a stale tax. This is a bounded, tighten-only
+    # residual: the worst case UNDER-counts by the number of truly-concurrent racing promotes of one
+    # identity (a rare operator pattern — a single agent drives one strategy's gate serially), it
+    # can only make the tax too SMALL for that one race (never spuriously fail an honest run), and
+    # the NEXT run counts both committed rows and re-taxes. Fully closing it (recompute-and-insert
+    # in one BEGIN IMMEDIATE critical section, as `record_gate_with_fdr_and_maybe_promote` does for
+    # the research gate) is deferred follow-up; v1 accepts this residual rather than shipping
+    # an unbuilt in-lock accounting method.
     n_prior_forward_looks = 0
     if identity.dependency_hash is not None:
+        horizon_session = calendar.session_on_or_before(now_utc.date())
+        for _ in range(FORWARD_RELOOK_HORIZON_SESSIONS):
+            horizon_session = calendar.previous_session(horizon_session)
+        horizon_cutoff_iso = datetime(
+            horizon_session.year, horizon_session.month, horizon_session.day, tzinfo=UTC
+        ).isoformat()
         n_prior_forward_looks = conn.execute(
             "SELECT COUNT(*) FROM forward_gate_evaluations WHERE strategy_id=? AND code_hash=?"
-            " AND config_hash=? AND dependency_hash=?",
-            (strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash),
+            " AND config_hash=? AND dependency_hash=? AND created_at>=?",
+            (strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash,
+             horizon_cutoff_iso),
         ).fetchone()[0]
 
     # 9-10. Broker activities + staleness. With no admissible ticks there is no window: skip
