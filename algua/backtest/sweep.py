@@ -204,6 +204,11 @@ class SweepResult:
     fundamentals_snapshot: str | None = None
     news_snapshot: str | None = None
 
+    # NOTE: the per-combo x per-window OOS Sharpe MATRIX is DELIBERATELY NOT a field here (#467
+    # R2-2). It rides ONLY as the second element of `sweep_with_matrix()`'s return tuple, never on a
+    # `SweepResult` instance — so nothing that merely holds a result object (tracking, `to_dict()`,
+    # `--summary`, `record_search_breadth`, or a caller of the public `sweep()`) can reach it, where
+    # it would silently become an unmetered per-combo selection oracle.
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
@@ -222,6 +227,7 @@ def _evaluate_combo(
     rank_by: str,
     delisting_records: Mapping[str, list[DelistingRecord]] | None,
     assume_terminal_last_close: bool,
+    compute_holdout: bool = True,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
 ) -> dict[str, Any]:
@@ -230,7 +236,9 @@ def _evaluate_combo(
 
     Deliberately does NOT return wf.holdout_metrics: the holdout never leaves the worker process,
     preserving sweep's single-use-holdout discipline (the holdout is revealed only in
-    `research promote`).
+    `research promote`). ``compute_holdout=False`` (the #467 PBO path) additionally makes
+    walk_forward skip the holdout STATISTIC entirely; ``window_sharpes`` (the PBO matrix row,
+    carved from the identical windows) is bit-identical either way.
     """
     wf = walk_forward(
         overridden, provider, start, end,
@@ -241,12 +249,14 @@ def _evaluate_combo(
         news_provider=news_provider,
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
+        compute_holdout=compute_holdout,
     )
     return {
         "config_hash": wf.config_hash,
         "n_windows": wf.windows,
         "stability": wf.stability,
         "score": wf.stability[rank_by],
+        "window_sharpes": [w["sharpe"] for w in wf.window_metrics],
         "meta": {
             "data_source": wf.data_source,
             "snapshot_id": wf.snapshot_id,
@@ -337,7 +347,7 @@ def _run_combos(
         raise BacktestError(f"parallel sweep failed: {exc}") from exc
 
 
-def sweep(
+def sweep_with_matrix(
     strategy: LoadedStrategy,
     provider: DataProvider,
     start: datetime,
@@ -354,14 +364,30 @@ def sweep(
     news_provider: NewsProvider | None = None,
     delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
     assume_terminal_last_close: bool = False,
-) -> SweepResult:
-    """Evaluate every grid combo with walk_forward and rank by an out-of-sample window metric.
+    compute_holdout: bool = True,
+) -> tuple[SweepResult, list[list[float]]]:
+    """Internal entry point: evaluate every grid combo with walk_forward and return BOTH the
+    ``SweepResult`` AND the trials x windows OOS-Sharpe MATRIX as two SEPARATE values (#467 R2-2).
 
-    The holdout is COMPUTED by each combo's walk_forward but is DELIBERATELY NOT recorded here:
-    it is never used for ranking (ranking is on window/stability), and exposing a per-combo holdout
-    would let a caller SELECT the best combo on the untouched holdout across the whole grid — the
-    exact multiple-testing leak the promotion breadth gate fights. The holdout is revealed (and
-    burned) in exactly one place: `research promote`.
+    The matrix is a ``list[list[float]]`` in GENERATED-COMBO ORDER — row ``i`` is combo ``i``'s
+    per-OOS-window Sharpes (``_combos(grid)`` / ``results`` order, aligned with ``n_combos``), NEVER
+    reordered by rank. The holdout is excluded from the matrix BY CONSTRUCTION (each row is
+    ``wf.window_metrics`` Sharpes; ``window_metrics`` never contains the holdout segment). The
+    matrix is returned ALONGSIDE the result, never stored ON it, so no ``SweepResult`` instance can
+    leak the per-combo per-window Sharpes to tracking / JSON / ``--summary`` /
+    ``record_search_breadth``. Only ``research pbo`` calls this directly (holding the matrix as a
+    local that flows straight into ``cscv.pbo``); every other caller uses ``sweep()``.
+
+    ``compute_holdout`` is threaded to each combo's ``walk_forward``. The public ``sweep()`` keeps
+    the default (``True``); ``research pbo`` passes ``False`` (holdout STATISTIC never computed —
+    #467). Because window bounds are carved identically regardless of the flag, the matrix is
+    BIT-IDENTICAL either way.
+
+    The holdout is COMPUTED by each combo's walk_forward (when ``compute_holdout=True``) but is
+    DELIBERATELY NOT recorded here: it is never used for ranking (ranking is on window/stability),
+    and exposing a per-combo holdout would let a caller SELECT the best combo on the untouched
+    holdout across the whole grid — the exact multiple-testing leak the promotion breadth gate
+    fights. The holdout is revealed (and burned) in exactly one place: `research promote`.
     """
     if rank_by not in _RANK_KEYS:
         raise ValueError(f"rank_by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
@@ -388,8 +414,15 @@ def sweep(
         fundamentals_provider=fundamentals_provider, news_provider=news_provider,
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
+        compute_holdout=compute_holdout,
     )
     results = _run_combos(overridden, eval_kwargs)
+
+    # Per-combo x per-window OOS Sharpe matrix in GENERATED-COMBO order (row i == combo i). The
+    # holdout is excluded BY CONSTRUCTION: each row is wf.window_metrics' sharpes, and
+    # window_metrics never contains the holdout segment. Returned as a SEPARATE value alongside the
+    # SweepResult (never a field on it — #467 R2-2); consumed only by the in-process PBO/CSCV layer.
+    matrix = [res["window_sharpes"] for res in results]
 
     # Build records in COMBO ORDER (zip with the original combos) so _rank_records' stable
     # tie-break on equal score+std_sharpe stays reproducible regardless of worker completion order.
@@ -412,7 +445,7 @@ def sweep(
 
     t_count, t_mean, t_var = _trial_sharpe_stats(records)
 
-    return SweepResult(
+    result = SweepResult(
         strategy=strategy.name,
         data_source=meta["data_source"],
         snapshot_id=meta["snapshot_id"],
@@ -436,3 +469,42 @@ def sweep(
         fundamentals_snapshot=meta["fundamentals_snapshot"],
         news_snapshot=meta["news_snapshot"],
     )
+    return result, matrix
+
+
+def sweep(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    grid: dict[str, list[Any]],
+    windows: int = 4,
+    holdout_frac: float = 0.2,
+    rank_by: str = "mean_sharpe",
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+    universe_name: str | None = None,
+    universe_snapshots: list[dict[str, str]] | None = None,
+    fundamentals_provider: FundamentalsProvider | None = None,
+    news_provider: NewsProvider | None = None,
+    delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
+    assume_terminal_last_close: bool = False,
+) -> SweepResult:
+    """Public sweep: evaluate every grid combo with walk_forward, rank by an OOS window metric, and
+    return ONLY the ``SweepResult``.
+
+    Thin wrapper over ``sweep_with_matrix`` that DROPS the trials x windows matrix (#467 R2-2): the
+    matrix never rides on the returned ``SweepResult``, so no in-process caller of ``sweep()`` — nor
+    tracking, JSON, ``--summary``, or ``record_search_breadth`` — can reach the per-combo per-window
+    Sharpes off the result object. Only ``research pbo`` (via ``sweep_with_matrix``) obtains the
+    matrix, and it holds it as a local that flows straight into ``cscv.pbo``.
+    """
+    return sweep_with_matrix(
+        strategy, provider, start, end,
+        grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by,
+        universe_by_date=universe_by_date,
+        universe_name=universe_name, universe_snapshots=universe_snapshots,
+        fundamentals_provider=fundamentals_provider, news_provider=news_provider,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
+    )[0]

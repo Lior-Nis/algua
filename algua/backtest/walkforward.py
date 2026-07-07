@@ -210,6 +210,7 @@ def walk_forward(
     news_provider: NewsProvider | None = None,
     delisting_records: Mapping[str, list[DelistingRecord]] | None = None,
     assume_terminal_last_close: bool = False,
+    compute_holdout: bool = True,
 ) -> WalkForwardResult:
     """Run the strategy once, then segment its return series into K windows + a final holdout,
     separated by an ``embargo``-bar purge gap (issue #345).
@@ -227,6 +228,17 @@ def walk_forward(
     ``on_peek`` (if given) is called exactly once, with the strategy ``config_hash``, immediately
     BEFORE the holdout window is evaluated. It is the burn point for a single-use holdout: a caller
     that commits a durable "burn" here can rely on nothing fallible-and-releasing running after it.
+
+    ``compute_holdout`` (default ``True`` preserves today's behavior). When ``False`` — the PBO/CSCV
+    window-only path (#467) — the holdout STATISTIC is never computed: the IDENTICAL
+    ``_segment_bounds`` are carved (same K in-sample windows, same purge/embargo gap, same holdout
+    interval reserved-but-unscored, so ``window_metrics`` is BIT-IDENTICAL to a normal run), but the
+    holdout slice is never scored (``holdout_metrics = {}``, ``holdout_returns = None``),
+    ``on_peek`` is NEVER called (no single-use burn), and ``_market_return_series`` is SKIPPED
+    (``market_returns = None`` — the benchmark series is a regime-gate input the PBO path never
+    consumes). ``build_portfolio(start, end)`` STILL runs over the full period, so the underlying
+    holdout bar RANGE is read and strategy code executes over it (the accepted residual, #467 R2-1);
+    only the holdout STATISTIC and burn are elided.
     """
     # Model lane (#376) is NOT supported in walk-forward/sweep this slice: a single fixed-per-run
     # model is not point-in-time safe across rolling OOS windows (each window would need the model
@@ -252,7 +264,12 @@ def walk_forward(
     )
     # Compute the full-period benchmark series immediately after build_portfolio (same provider +
     # universe_by_date — PIT-identical, a second read of the same immutable snapshot). Never raises.
-    market_returns = _market_return_series(strategy, provider, start, end, universe_by_date)
+    # SKIPPED on the window-only path (#467): the benchmark is a regime-gate input the PBO path
+    # never consumes, so skipping it avoids a redundant holdout-spanning read.
+    market_returns = (
+        _market_return_series(strategy, provider, start, end, universe_by_date)
+        if compute_holdout else None
+    )
     returns = pf.returns()
     bounds, holdout = _segment_bounds(len(returns), windows, holdout_frac, embargo)
 
@@ -272,17 +289,27 @@ def walk_forward(
     prov = provenance(provider, seed)
     cfg_hash = config_hash(strategy)
 
-    # Burn-on-peek boundary: the holdout metric is evaluated on the NEXT line, so any single-use
-    # burn the caller commits in on_peek is durable before the peek. Nothing fallible-and-releasing
-    # may be added between on_peek and the holdout evaluation.
-    if on_peek is not None:
-        on_peek(cfg_hash)
-    holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
-    holdout_seg = returns.iloc[holdout[0]:holdout[1]]
-    holdout_returns = (
-        [float(x) for x in holdout_seg.to_numpy()],
-        [str(idx.date()) for idx in holdout_seg.index],
-    )
+    # Holdout STATISTIC + single-use burn (#467 window-only path skips BOTH): on the
+    # compute_holdout=False path the holdout is carved (bounds above) but never scored, on_peek is
+    # never called, and no holdout return vector is materialized. window_metrics — carved from the
+    # IDENTICAL _segment_bounds — is unaffected, so it stays BIT-IDENTICAL to a normal run.
+    holdout_metrics: dict[str, Any]
+    holdout_returns: tuple[list[float], list[str]] | None
+    if compute_holdout:
+        # Burn-on-peek boundary: the holdout metric is evaluated on the NEXT line, so any single-use
+        # burn the caller commits in on_peek is durable before the peek. Nothing
+        # fallible-and-releasing may be added between on_peek and the holdout evaluation.
+        if on_peek is not None:
+            on_peek(cfg_hash)
+        holdout_metrics = _segment_record(returns, holdout[0], holdout[1])
+        holdout_seg = returns.iloc[holdout[0]:holdout[1]]
+        holdout_returns = (
+            [float(x) for x in holdout_seg.to_numpy()],
+            [str(idx.date()) for idx in holdout_seg.index],
+        )
+    else:
+        holdout_metrics = {}
+        holdout_returns = None
 
     return WalkForwardResult(
         strategy=strategy.name,

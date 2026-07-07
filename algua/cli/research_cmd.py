@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from itertools import combinations
 from typing import Any
@@ -7,6 +9,7 @@ from typing import Any
 import typer
 
 from algua.backtest.engine import holdout_window
+from algua.backtest.sweep import parse_grid, sweep_with_matrix
 from algua.backtest.walkforward import walk_forward
 from algua.cli._common import (
     authenticate_actor,
@@ -36,9 +39,13 @@ from algua.registry.negative_results import (
     sanitize_record,
 )
 from algua.registry.promotion import promotion_preflight, run_gate
+from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.research import family_audit
+from algua.research.cscv import CSCV_MIN_WINDOWS
+from algua.research.cscv import pbo as compute_pbo
 from algua.research.gates import GateCriteria
+from algua.strategies.base import config_hash
 from algua.strategies.loader import load_strategy
 
 
@@ -510,6 +517,186 @@ def dormant_sweep(
                        "min_pct_positive": min_pct_positive},
         "total_dormant": len(dormant), "evaluated": evaluated,
         "passed": passed, "failed": failed, "skipped": skipped, "errors": errors,
+    }))
+
+
+_PBO_NOTE = (
+    "ADVISORY overfitting diagnostic (PBO/CSCV). PBO = the probability that the "
+    "in-sample-best combo lands below the OOS median across combinatorially-"
+    "symmetric splits; a high PBO (>~0.5) means the SELECTION RULE does not "
+    "generalize OOS. RECORDS search breadth (metered — repeated runs self-penalize "
+    "at promotion); burns NO holdout statistic, writes NO gate ledger row, "
+    "transitions nothing. Aggregate-only (no matrix/ranked). Orthogonal to DSR/FDR."
+)
+
+
+@research_app.command("pbo")
+@json_errors
+def pbo_cmd(  # noqa: PLR0913
+    name: str,
+    start: str = typer.Option("2023-01-01", "--start"),
+    end: str = typer.Option("2023-12-31", "--end"),
+    demo: bool = typer.Option(False, "--demo", help="use the synthetic data provider"),
+    snapshot: str = typer.Option(None, "--snapshot", help="screen an ingested bars snapshot id"),
+    universe: str = typer.Option(
+        None, "--universe",
+        help="point-in-time universe name (opt into survivorship-bias-free membership)"),
+    windows: int = typer.Option(
+        4, "--windows",
+        help="walk-forward windows per combo; must be >= 4 (CSCV_MIN_WINDOWS) or PBO fails closed. "
+             "Odd counts are fine — CSCV bounds the sub-period count to an even S internally"),
+    holdout_frac: float = typer.Option(0.2, "--holdout-frac", help="fraction reserved as holdout"),
+    param: list[str] = typer.Option(None, "--param", help="KEY=v1,v2,... (repeatable)"),
+    rank_by: str = typer.Option("mean_sharpe", "--rank-by", help="mean_sharpe | min_sharpe"),
+    fundamentals_snapshot: str = typer.Option(
+        None, "--fundamentals-snapshot",
+        help="ingested fundamentals snapshot id (required for a needs_fundamentals strategy)"),
+    news_snapshot: str = typer.Option(
+        None, "--news-snapshot",
+        help="ingested news snapshot id (required for a needs_news strategy)"),
+    delistings: str = typer.Option(
+        None, "--delistings",
+        help="delistings snapshot handle (survivorship-free: realize held delisted names)"),
+    assume_terminal_last_close: bool = typer.Option(
+        False, "--assume-terminal-last-close",
+        help="realize a held-into-gap name at its last close when no delisting record exists"),
+) -> None:
+    """ADVISORY overfitting diagnostic — Probability of Backtest Overfitting via CSCV (#467).
+
+    Runs the SAME sweep as `backtest sweep`, then measures, across combinatorially-symmetric
+    in-sample/out-of-sample window splits, how often the IS-best combo lands below the OOS median.
+    That fraction is the PBO. High PBO => the sweep is fitting noise, not signal. This is a REAL
+    grid search, so — exactly like `backtest sweep` — it RECORDS its measured breadth (repeated
+    `pbo` runs self-penalize at promotion via funnel-wide breadth). It burns NO holdout STATISTIC,
+    writes NO gate/FDR ledger row, and transitions nothing. Output is AGGREGATE-ONLY (no matrix, no
+    ranked combos, no per-split detail). It is orthogonal to the DSR/FDR promotion machinery — a
+    winner can look great on DSR yet have a high PBO (the SELECTION RULE doesn't generalize)."""
+    strategy, provider, start_dt, end_dt = resolve_eval_inputs(name, demo, snapshot, start, end)
+    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
+    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
+        raise ValueError(
+            "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
+        )
+    if news_snapshot and not strategy.config.needs_news:
+        raise ValueError(
+            "--news-snapshot was given but the strategy does not declare needs_news"
+        )
+    fundamentals_provider = (
+        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
+        if fundamentals_snapshot
+        else None
+    )
+    news_provider = (
+        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
+        if news_snapshot
+        else None
+    )
+    # Capture the RESOLVED delisting snapshot id at the CLI layer for provenance — SweepResult
+    # carries neither the resolved id, the raw handle, nor the assume-last-close flag (#467 R2-4).
+    delisting_records, delisting_snapshot = resolve_delisting_inputs(delistings, end_dt)
+    grid = parse_grid(param or [])
+    # FULL untruncated grid hash (64 hex chars) so a recorded PBO is reconstructable to the exact
+    # grid without emitting the raw grid dict (aggregate-only surface) — #467 R2-4.
+    grid_hash = hashlib.sha256(json.dumps(grid, sort_keys=True).encode()).hexdigest()
+    # Fail closed BEFORE the sweep on a sub-2 --windows. cscv.pbo is the fail-closed authority for
+    # 2 <= windows < CSCV_MIN_WINDOWS (the sweep runs, its matrix has < 4 columns, cscv returns
+    # pbo=None), but walk_forward's _segment_bounds REQUIRES windows >= 2 and would raise a
+    # ValueError first, turning the advisory "pbo: null + warning, exit 0" contract into an exit-1
+    # error envelope. A < 2 windows sweep is definitionally uncarveable, so short-circuit to the
+    # SAME aggregate fail-closed payload here — no sweep runs (no real search, so no breadth
+    # recorded), and the sweep-runtime provenance fields (code/dependency hash, data_source,
+    # snapshot, seed, timeframe) are null because nothing ran to stamp them.
+    if windows < 2:
+        emit(ok({
+            "note": _PBO_NOTE,
+            "pbo": None,
+            "split_count": 0,
+            "trial_count": 0,
+            "window_count": windows,
+            "subperiod_count": 0,
+            "rank_by": rank_by,
+            "warnings": [
+                f"PBO needs >= {CSCV_MIN_WINDOWS} windows; got {windows} (fail closed)"
+            ],
+            "provenance": {
+                "config_hash": config_hash(strategy),
+                "code_hash": None,
+                "dependency_hash": None,
+                "data_source": None,
+                "snapshot_id": None,
+                "timeframe": None,
+                "seed": None,
+                "period": {
+                    "start": start_dt.date().isoformat(),
+                    "end": end_dt.date().isoformat(),
+                },
+                "universe_name": universe,
+                "universe_snapshots": universe_prov,
+                "fundamentals_snapshot": fundamentals_snapshot or None,
+                "news_snapshot": news_snapshot or None,
+                "windows": windows,
+                "holdout_frac": holdout_frac,
+                "rank_by": rank_by,
+                "grid_hash": grid_hash,
+                "delisting_snapshot": delisting_snapshot,
+                "delistings_name": delistings,
+                "assume_terminal_last_close": assume_terminal_last_close,
+            },
+        }))
+        return
+    # sweep_with_matrix returns BOTH the SweepResult (for breadth recording) and the trials x
+    # windows OOS-Sharpe matrix (for CSCV) as SEPARATE values — the matrix never rides on the
+    # result (#467 R2-2). compute_holdout=False makes each combo's walk_forward skip the holdout
+    # STATISTIC/burn entirely; the matrix is bit-identical to a normal sweep.
+    result, matrix = sweep_with_matrix(
+        strategy, provider, start_dt, end_dt,
+        grid=grid, windows=windows, holdout_frac=holdout_frac, rank_by=rank_by,
+        universe_by_date=universe_by_date,
+        universe_name=universe, universe_snapshots=universe_prov,
+        fundamentals_provider=fundamentals_provider,
+        news_provider=news_provider,
+        delisting_records=delisting_records,
+        assume_terminal_last_close=assume_terminal_last_close,
+        compute_holdout=False)
+    # METER this search (#467 R2-3 / HIGH-1): record the sweep's measured breadth via the SAME path
+    # `backtest sweep`/`sweep_task` use, keyed by strategy NAME, so repeated `pbo` runs inflate
+    # funnel-wide breadth (over-counting only ever TIGHTENS downstream gates — fail-safe). This
+    # records breadth ONLY; burns no holdout, writes no gate/FDR/holdout-burn row, mints no token.
+    with registry_conn() as conn:
+        record_search_breadth(SqliteStrategyRepository(conn), name, result)
+    # A 1-combo grid (< 2 rows) or a `< 4` --windows makes cscv.pbo FAIL CLOSED — pbo=None + a
+    # warning, exit 0 (advisory), never a raise.
+    diag = compute_pbo(matrix, rank_by=rank_by)
+    emit(ok({
+        "note": _PBO_NOTE,
+        "pbo": diag.pbo,
+        "split_count": diag.split_count,
+        "trial_count": diag.trial_count,
+        "window_count": diag.window_count,
+        "subperiod_count": diag.subperiod_count,
+        "rank_by": diag.rank_by,
+        "warnings": diag.warnings,
+        "provenance": {
+            "config_hash": config_hash(strategy),
+            "code_hash": result.code_hash,
+            "dependency_hash": result.dependency_hash,
+            "data_source": result.data_source,
+            "snapshot_id": result.snapshot_id,
+            "timeframe": result.timeframe,
+            "seed": result.seed,
+            "period": result.period,
+            "universe_name": result.universe_name,
+            "universe_snapshots": result.universe_snapshots,
+            "fundamentals_snapshot": result.fundamentals_snapshot,
+            "news_snapshot": result.news_snapshot,
+            "windows": result.windows,
+            "holdout_frac": result.holdout_frac,
+            "rank_by": result.rank_by,
+            "grid_hash": grid_hash,
+            "delisting_snapshot": delisting_snapshot,
+            "delistings_name": delistings,
+            "assume_terminal_last_close": assume_terminal_last_close,
+        },
     }))
 
 
