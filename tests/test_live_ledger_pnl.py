@@ -140,6 +140,36 @@ def test_dividend_with_valid_date_prefix_malformed_suffix_is_residual(tmp_path):
     assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 30.0
 
 
+def test_fill_with_malformed_ts_is_excluded_from_entitled_base(tmp_path):
+    # #437 (GATE-2): the entitlement guard must be applied to each FILL's fill_ts too, not just the
+    # DIV row's ts. A fill with an empty/malformed fill_ts sorts BELOW every real date under a raw
+    # `substr(fill_ts,1,10) <= as_of` comparison, so it would ALWAYS satisfy '<=' and be counted as
+    # entitled — inflating (or fabricating) the base. It must instead be EXCLUDED, exactly like
+    # a malformed DIV ts fails closed. Here the only fill for AAA has an empty fill_ts, so the
+    # entitled base is empty and the DIV stays an unattributed account-level residual (credit 0.0).
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0, ts="")           # un-datable fill_ts
+    _activity(conn, "d1", "DIV", "AAA", 30.0, ts="2026-06-06")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+    # a wholly non-ISO fill_ts is likewise excluded (not silently on-or-before the dividend)
+    _fill(conn, "f2", "s1", "AAA", 10.0, 100.0, ts="not-a-date")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+    # control: a well-formed same-symbol fill on-or-before the dividend IS entitled and gets it all
+    _fill(conn, "f3", "s1", "AAA", 10.0, 100.0, ts="2026-06-05T00:00:00+00:00")
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 30.0
+
+
+def test_non_finite_dividend_amount_fails_closed(tmp_path):
+    # #437 (GATE-2, codex #3): a corrupt (non-finite) DIV amount must not propagate inf/nan into NAV
+    # and the persisted drawdown peak — it fails closed to no credit.
+    conn = _conn(tmp_path)
+    _fill(conn, "f1", "s1", "AAA", 10.0, 100.0)
+    _activity(conn, "d1", "DIV", "AAA", float("inf"))
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+    _activity(conn, "d2", "DIV", "AAA", float("nan"))
+    assert strategy_cash_credit(conn, "s1", LedgerKind.LIVE) == 0.0
+
+
 def test_long_then_partial_close_realizes():
     # buy 10@100, buy 10@110 -> avg 105, qty 20; sell 5@120 -> realized 5*(120-105)=75
     fills = [(10.0, 100.0), (10.0, 110.0), (-5.0, 120.0)]

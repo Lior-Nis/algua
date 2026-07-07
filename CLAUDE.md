@@ -95,6 +95,21 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   flagged clusters by family-term breadth dodged and recommends a human-governed consolidation
   (member reassignment). READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation —
   a prioritization signal, not a gate.
+- `uv run algua research pbo <name> --param KEY=v1,v2,... [--windows N --rank-by mean_sharpe|min_sharpe]`
+  — ADVISORY Probability-of-Backtest-Overfitting (PBO) via CSCV (#467) over the SAME grid a
+  `backtest sweep` runs. Answers a question the DSR/FDR/breadth stack never asks: does the selection
+  rule "pick the in-sample-best combo" GENERALIZE out-of-sample? Builds the trials×windows OOS-Sharpe
+  matrix (holdout excluded by construction), then reports `pbo` = the fraction of combinatorially-
+  symmetric IS/OOS splits where the IS-best combo lands below the OOS median. A HIGH pbo (≳0.5) flags
+  a sweep fitting noise. This is a REAL grid search, so — like `backtest sweep` — it RECORDS its
+  measured breadth (metered: repeated `pbo` runs self-penalize the eventual promotion Sharpe bar);
+  it burns NO holdout STATISTIC (the holdout bars are read as part of the full-period sweep fetch but
+  never scored/burned — `compute_holdout=False`), transitions nothing, and writes no gate/FDR ledger
+  row. Output is AGGREGATE-ONLY (pbo, split/trial/window/subperiod counts, rank_by, warnings, and a
+  fully-reconstructable `provenance` block: base `config_hash`, full `grid_hash`, delisting inputs) —
+  never the raw matrix, ranked combos, or per-split logits. Fails closed (`pbo: null` + warning,
+  exit 0) on <2 combos, <4 windows, or a non-finite matrix. See the `interpret-results` skill for how
+  to read it. Orthogonal to promotion: a winner can pass DSR yet have a high PBO.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
