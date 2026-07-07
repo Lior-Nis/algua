@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 
 from algua.contracts.types import OpenOrderReader, OrderLookupBroker
@@ -81,6 +81,117 @@ def position_pnl(fills: list[tuple[float, float]], mark: float) -> PositionPnl:
                 avg = 0.0
     unrealized = (mark - avg) * qty
     return PositionPnl(qty=qty, avg_cost=avg, realized=realized, unrealized=unrealized)
+
+
+def _entitlement_as_of(ts: object) -> str | None:
+    """The date (``YYYY-MM-DD``) that bounds a ``DIV`` row's entitlement window, or ``None`` if
+    ``ts`` is not a FULLY-valid ISO value we can trust.
+
+    A broker ``DIV`` row carries either a date-only ``date`` field (``2026-06-06``) or a full ISO
+    ``transaction_time`` (``2026-06-06T15:30:00+00:00``); both are accepted and reduced to their
+    date. Validation is on the WHOLE string, never a prefix slice: an earlier ``str(ts)[:10]`` cut
+    would have accepted a value like ``2026-06-06 garbage`` on its clean 10-char date prefix while
+    the rest was malformed. Anything that is not entirely a valid ISO date OR ISO datetime is
+    un-boundable and returns ``None`` (the caller drops the row to an account-level residual) — this
+    is the fail-closed guard against a malformed ``ts`` that, sorting below every fill date, would
+    otherwise credit an unbounded all-fills window."""
+    s = str(ts)
+    try:
+        return date.fromisoformat(s).isoformat()      # date-only broker field, fully validated
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(s).date().isoformat()   # full ISO timestamp, fully validated
+    except ValueError:
+        return None
+
+
+def strategy_cash_credit(
+    conn: sqlite3.Connection, strategy: str, kind: LedgerKind
+) -> float:
+    """The dividend cash-flow this strategy's virtual NAV should include (#437, minimal slice).
+
+    Broker dividend (``DIV``) activities are booked at the ACCOUNT level per symbol (the
+    ``{kind}_activities`` table has no strategy column), while the backtest simulates on the
+    total-return ``adj_close`` which reinvests dividends. So live/paper NAV must credit that cash or
+    it understates the sizing denominator and trips the drawdown breaker on a phantom drawdown.
+
+    Attribution is SIGNED and per-SIDE — each ``DIV`` activity row is attributed to the entitled
+    side from each strategy's OWN signed position, never from a netted account total:
+
+    - Only ``type = 'DIV'`` rows are attributed. Non-dividend cash (interest, fees, journals,
+      deposits) and NULL/symbol-less rows are NOT per-security total-return and are excluded.
+    - Each row is handled INDIVIDUALLY (never summed across rows first). A positive amount is a
+      long-side credit, split across the strategies LONG the symbol pro-rata by their long shares; a
+      negative amount is a short-dividend debit, split across the strategies SHORT the symbol
+      pro-rata by their short shares. A long is thus credited and a short debited independently —
+      there is NO shared long+short divisor, so an offsetting book (A long, B short, booked as a
+      credit row and a debit row) attributes both sides correctly and oppositely-signed instead of
+      cancelling to ~0.
+    - Entitlement is bounded to the dividend's own date: a strategy's share base is its signed
+      position reconstructed from fills on or before the activity date (``date(fill_ts) <=
+      date(ts)``), so a past dividend's attributed credit is DETERMINISTIC and never drifts as
+      later, unrelated fills accumulate. The bound is DELIBERATELY date-level, not full-timestamp:
+      broker ``DIV`` rows carry a date-only ``date`` field (no intraday time), so a finer bound
+      would be false precision. A consequence — DISCLOSED, not a bug — is that a fill placed the
+      SAME DAY the dividend posts, even one timestamped strictly AFTER the ``DIV`` row's own
+      instant, is counted as entitled (it shares the activity's date). On the regular-hours daily
+      rail this is a close approximation of the exchange record-date convention (see design-doc
+      limitation #3); the exact ex-date/record-date rule is deferred to the declaration-sourced one.
+
+    Divides only when the same-side share base is positive, so it never divides by zero; a row whose
+    entitled side is empty in the ledger (e.g. a short-debit row with no ledger short) contributes
+    nothing to any strategy and stays an account-level residual.
+
+    Fail-closed on an un-boundable timestamp: a ``DIV`` row whose ``ts`` is NULL, or is not
+    ENTIRELY a valid ISO date/datetime, carries no entitlement window we can trust, so it is
+    EXCLUDED from attribution (SQL ``AND ts IS NOT NULL`` plus the ``_entitlement_as_of`` full-
+    string parse guard) and left as an unattributed account-level residual — it is never credited
+    against an unbounded (all-fills) window, which a malformed ``ts`` sorting below every fill date
+    would otherwise produce. The parse validates the WHOLE ``ts`` (not a 10-char prefix slice), so a
+    value like ``2026-06-06 garbage`` with a well-formed date prefix but malformed suffix also fails
+    closed rather than being accepted on its prefix.
+
+    Minimal-slice limitation: the per-share figure is IMPLIED from the account cash, not sourced
+    from a corporate-action declaration, and a single broker-netted row (one row for an internally
+    long+short book) cannot recover the per-side split — the full declaration-sourced design in
+    ``docs/superpowers/specs/2026-07-05-dividend-nav-accrual-437-design.md`` is deferred."""
+    t = _TABLES[kind]
+    divs = conn.execute(
+        f"SELECT symbol, amount, ts FROM {t.activities} "
+        "WHERE type = 'DIV' AND symbol IS NOT NULL AND amount IS NOT NULL AND ts IS NOT NULL"
+    ).fetchall()
+    if not divs:
+        return 0.0
+    credit = 0.0
+    for row in divs:
+        sym = row["symbol"]
+        amt = float(row["amount"])
+        # date-vs-date entitlement bound (clean, tz-free), validating the WHOLE ts; a not-fully-ISO
+        # ts is un-boundable, so the row fails closed to a residual rather than crediting an
+        # all-fills window (see _entitlement_as_of).
+        as_of = _entitlement_as_of(row["ts"])
+        if as_of is None:
+            continue
+        positions = {
+            r["strategy"]: float(r["q"])
+            for r in conn.execute(
+                f"SELECT strategy, SUM(qty) AS q FROM {t.fills} "
+                "WHERE strategy IS NOT NULL AND symbol = ? AND substr(fill_ts, 1, 10) <= ? "
+                "GROUP BY strategy",
+                (sym, as_of),
+            )
+        }
+        my_q = positions.get(strategy, 0.0)
+        if amt >= 0.0:  # long-side credit
+            base = sum(q for q in positions.values() if q > 0.0)
+            my_share = my_q if my_q > 0.0 else 0.0
+        else:  # short-side dividend debit
+            base = sum(-q for q in positions.values() if q < 0.0)
+            my_share = -my_q if my_q < 0.0 else 0.0
+        if base > 0.0 and my_share > 0.0:
+            credit += amt * (my_share / base)
+    return credit
 
 
 def record_live_order(
@@ -311,8 +422,9 @@ def _fills_for(
 def strategy_nav(
     conn: sqlite3.Connection, strategy: str, allocation: float, marks: dict[str, float]
 ) -> float:
-    """NAV = allocation + Σ realized + Σ unrealized across the strategy's symbols. `marks` supplies
-    the current price per symbol (a missing mark falls back to the average cost → 0 unrealized)."""
+    """NAV = allocation + Σ realized + Σ unrealized across the strategy's symbols, plus credited
+    dividend/cash activities (#437). `marks` supplies the current price per symbol (a missing mark
+    falls back to the average cost → 0 unrealized)."""
     symbols = {
         r["symbol"]
         for r in conn.execute(
@@ -324,6 +436,7 @@ def strategy_nav(
         fills = _fills_for(conn, strategy, sym)
         pnl = position_pnl(fills, mark=marks.get(sym, fills[-1][1] if fills else 0.0))
         total += pnl.realized + pnl.unrealized
+    total += strategy_cash_credit(conn, strategy, LedgerKind.LIVE)
     return total
 
 
