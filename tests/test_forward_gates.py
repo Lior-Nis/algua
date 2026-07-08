@@ -11,6 +11,7 @@ from algua.research.forward_gates import (
     MIN_FORWARD_OBSERVATIONS,
     MIN_FORWARD_VOL,
     MIN_SESSION_COVERAGE,
+    MT_SHARPE_PENALTY,
     SHARPE_FLOOR,
     ForwardEvidence,
     ForwardGateCriteria,
@@ -29,7 +30,7 @@ def passing_evidence(**over):
                 n_reconcile_failures=0, n_defective_ticks=0, kill_switch_tripped=False,
                 global_halt_engaged=False, n_kill_trips_in_window=0, single_account_ok=True,
                 activities_ok=True, n_external_cash_flows=0, n_unattributable_fills=0,
-                staleness_sessions=2)
+                staleness_sessions=2, n_prior_forward_looks=0, n_concurrent_forward=1)
     return ForwardEvidence(**(base | over))
 
 
@@ -345,3 +346,79 @@ def test_evaluation_is_pure():
     d2 = evaluate_forward_gate(ev, crit)
     assert d1.to_dict() == d2.to_dict()
     assert math.isfinite(_check(d1, "realized_sharpe")["threshold"])
+
+
+# --- multiple-testing Sharpe penalty (#431) ---------------------------------------------------
+
+
+def test_mt_sharpe_penalty_constant_pinned():
+    # Protected tighten-only wall — NOT an agent-tunable knob.
+    assert MT_SHARPE_PENALTY == 0.05
+
+
+def test_clean_first_solo_look_has_zero_penalty():
+    # n_prior_forward_looks=0, n_concurrent_forward=1 => effective_trials=1, ln(1)=0 => no tax.
+    # The bar equals the plain max(0.5*holdout, 0.3) with no penalty; behavior is unchanged.
+    ev = passing_evidence(holdout_sharpe=1.0, n_prior_forward_looks=0, n_concurrent_forward=1)
+    c = _check(evaluate_forward_gate(ev, ForwardGateCriteria()), "realized_sharpe")
+    assert c["threshold"] == max(0.5 * 1.0, 0.3)
+    assert c["multiple_testing_penalty"] == 0.0
+    assert c["effective_trials"] == 1
+    assert c["n_prior_forward_looks"] == 0
+    assert c["n_concurrent_forward"] == 1
+
+
+def test_prior_looks_raise_the_bar():
+    # holdout=0.4 -> plain bar is the 0.3 floor; 9 prior looks + 1 concurrent => 10 trials.
+    expected = 0.3 + MT_SHARPE_PENALTY * math.log(10)
+    base = dict(holdout_sharpe=0.4, n_prior_forward_looks=9, n_concurrent_forward=1)
+    c = _check(
+        evaluate_forward_gate(passing_evidence(**base), ForwardGateCriteria()), "realized_sharpe")
+    assert c["threshold"] == pytest.approx(expected)
+    assert c["effective_trials"] == 10
+    assert c["n_prior_forward_looks"] == 9
+    assert c["n_concurrent_forward"] == 1
+    assert c["multiple_testing_penalty"] == pytest.approx(MT_SHARPE_PENALTY * math.log(10))
+    # A realized Sharpe just below the raised bar fails; just above passes.
+    below = evaluate_forward_gate(
+        passing_evidence(**base, realized_sharpe=expected - 1e-6), ForwardGateCriteria())
+    assert _check(below, "realized_sharpe")["passed"] is False
+    above = evaluate_forward_gate(
+        passing_evidence(**base, realized_sharpe=expected + 1e-6), ForwardGateCriteria())
+    assert _check(above, "realized_sharpe")["passed"] is True
+
+
+def test_concurrency_contributes_monotonically():
+    # Same evidence, more concurrent forward strategies => strictly higher bar.
+    lo = _check(evaluate_forward_gate(
+        passing_evidence(n_prior_forward_looks=0, n_concurrent_forward=1),
+        ForwardGateCriteria()), "realized_sharpe")
+    hi = _check(evaluate_forward_gate(
+        passing_evidence(n_prior_forward_looks=0, n_concurrent_forward=5),
+        ForwardGateCriteria()), "realized_sharpe")
+    assert hi["threshold"] > lo["threshold"]
+    assert hi["effective_trials"] == 5
+    assert hi["multiple_testing_penalty"] == pytest.approx(MT_SHARPE_PENALTY * math.log(5))
+
+
+def test_penalty_not_relaxable_by_tighter_criteria():
+    # Even an agent's TIGHTER criteria (higher factor/floor) still gets the penalty added on top:
+    # the emitted bar is >= max(factor*holdout, floor) + penalty.
+    ev = passing_evidence(holdout_sharpe=1.0, n_prior_forward_looks=4, n_concurrent_forward=1)
+    crit = ForwardGateCriteria(degradation_factor=0.9, sharpe_floor=0.6)
+    c = _check(evaluate_forward_gate(ev, crit), "realized_sharpe")
+    penalty = MT_SHARPE_PENALTY * math.log(5)
+    assert c["threshold"] == pytest.approx(max(0.9 * 1.0, 0.6) + penalty)
+    assert c["threshold"] >= max(0.9 * 1.0, 0.6) + penalty
+    assert c["multiple_testing_penalty"] == pytest.approx(penalty)
+
+
+def test_fail_closed_branch_unaffected_by_prior_looks():
+    # holdout_sharpe=None fails closed regardless of prior looks — no penalty key is emitted on
+    # the fail-closed branch (the bar was never computed).
+    ev = passing_evidence(holdout_sharpe=None, n_prior_forward_looks=9, n_concurrent_forward=3)
+    c = _check(evaluate_forward_gate(ev, ForwardGateCriteria()), "realized_sharpe")
+    assert c["passed"] is False
+    assert c["threshold"] is None
+    assert c["detail"] == "no qualified backtest gate row for current identity"
+    assert "multiple_testing_penalty" not in c

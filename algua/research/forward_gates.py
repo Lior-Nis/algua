@@ -68,6 +68,25 @@ MAX_FORWARD_DRAWDOWN = 0.25
 # agent-tunable knob.
 MAX_STALENESS_SESSIONS = 5
 
+# Multiple-testing Sharpe tax for the RE-RUNNABLE forward gate (#431). The forward gate can be
+# re-run against the same strategy+identity (optional stopping) and many strategies forward-test
+# concurrently — both inflate the family-wise error rate the single-look bar was calibrated for.
+# The bar is RAISED by MT_SHARPE_PENALTY per natural-log trial (ln(1)=0 => zero tax on a clean
+# first solo look, so today's behavior is preserved). It is a TIGHTEN-ONLY wall, NOT a
+# ForwardGateCriteria knob — an agent can never relax it, and even a human's tighter criteria
+# gets it added ON TOP. Do NOT add it to ForwardGateCriteria.
+MT_SHARPE_PENALTY = 0.05
+
+# Trailing horizon (in trading sessions) over which prior forward-gate evaluations of THIS
+# strategy+identity count as optional-stopping "looks" (#431). Bounding the look count is what
+# keeps the tax immune to the #324 anti-scaling pathology: without it, the live wall's MANDATORY
+# periodic re-certification (a passing run must be <= CERTIFICATE_FRESH_SESSIONS old) would make
+# routine, required refreshes accumulate looks forever and eventually push the bar out of reach —
+# punishing a strategy for COMPLYING with the freshness wall. Aligned with
+# CERTIFICATE_FRESH_SESSIONS so routine re-certification is at most ~1 look while burst re-runs
+# age out. Protected — NOT an agent-tunable knob.
+FORWARD_RELOOK_HORIZON_SESSIONS = 10
+
 # Consumable-token freshness for the paper -> forward_tested edge (consumed by transitions.py).
 # Protected — NOT an agent-tunable knob.
 FORWARD_TOKEN_TTL_DAYS = 7
@@ -102,6 +121,13 @@ class ForwardEvidence:
     ``gate_evaluations`` row (passed, PIT, no override, identity-matched) — ``None`` means no
     such row exists and the performance check fails closed. ``staleness_sessions`` is ``None``
     when there are no admissible evidence ticks at all — also fail closed.
+
+    ``n_prior_forward_looks`` (prior forward-gate evaluations of this strategy+identity WITHIN a
+    trailing ``FORWARD_RELOOK_HORIZON_SESSIONS`` window) and ``n_concurrent_forward`` (distinct
+    strategies forward-testing concurrently in the window) drive the multiple-testing Sharpe
+    penalty raising the performance bar (#431). The look count is deliberately scoped to an EXACT
+    identity match (code+config+dependency hash) — a v1 narrower than a family/lineage scope; see
+    the assembly note in ``forward_promotion.py`` for the scope and its known residual gaps.
     """
 
     n_return_observations: int
@@ -125,6 +151,8 @@ class ForwardEvidence:
     n_external_cash_flows: int
     n_unattributable_fills: int
     staleness_sessions: int | None
+    n_prior_forward_looks: int
+    n_concurrent_forward: int
 
 
 @dataclass
@@ -236,6 +264,16 @@ def evaluate_forward_gate(
     holdout = evidence.holdout_sharpe
     factor = float(criteria.degradation_factor)
     floor = float(criteria.sharpe_floor)
+    # Multiple-testing tax (#431): RAISE the bar by MT_SHARPE_PENALTY per natural-log trial, where
+    # trials = prior identity-scoped forward looks (optional stopping) + concurrent forward
+    # strategies (breadth). effective_trials is clamped to >=1 so ln(1)=0 gives zero penalty on a
+    # clean first solo look (preserving pre-#431 behavior); it is an int >= 1 so the penalty is
+    # always finite. Tighten-only wall — added ON TOP of the criteria-derived bar so a human's
+    # tighter criteria cannot subtract it, and folded into ``bar`` so BOTH the point-estimate
+    # check AND the #432 LCB significance wall (3b) are held to the SAME MT-taxed bar. Computed
+    # unconditionally (depends only on evidence) so it is always in scope for both checks.
+    effective_trials = max(1, evidence.n_prior_forward_looks + evidence.n_concurrent_forward)
+    penalty = MT_SHARPE_PENALTY * math.log(effective_trials)
     bar: float | None
     if holdout is None or not math.isfinite(holdout):
         bar = None
@@ -244,7 +282,7 @@ def evaluate_forward_gate(
         bar = None
         bar_detail = "non-finite performance criteria (degradation_factor/sharpe_floor)"
     else:
-        bar = max(factor * float(holdout), floor)
+        bar = max(factor * float(holdout), floor) + penalty
         bar_detail = None
     if bar is None:
         realized = evidence.realized_sharpe
@@ -254,8 +292,12 @@ def evaluate_forward_gate(
             "op": ">=", "threshold": None, "passed": False, "detail": bar_detail,
         })
     else:
-        checks.append(_metric_check(
-            "realized_sharpe", float(evidence.realized_sharpe), ">=", bar))
+        chk = _metric_check("realized_sharpe", float(evidence.realized_sharpe), ">=", bar)
+        chk["effective_trials"] = int(effective_trials)
+        chk["n_prior_forward_looks"] = int(evidence.n_prior_forward_looks)
+        chk["n_concurrent_forward"] = int(evidence.n_concurrent_forward)
+        chk["multiple_testing_penalty"] = float(penalty)
+        checks.append(chk)
 
     # 3b. Statistical-significance wall: the one-sided lower confidence bound (LCB) on the realized
     # ANNUALIZED Sharpe must clear the SAME performance bar the point estimate is held to — not

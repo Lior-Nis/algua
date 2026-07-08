@@ -1,18 +1,21 @@
 # Forward-gate realized-Sharpe lower confidence bound (#432) — design
 
 Status: design — describes the change **as actually shipped** in this PR (an analytic,
-non-normality-adjusted Sharpe lower-confidence-bound wall). See "Scope & explicitly deferred work"
-for the multiple-testing / optional-stopping correction (#431), which this PR does **not**
-implement.
+non-normality-adjusted Sharpe lower-confidence-bound wall). Since #431 (multiple-testing Sharpe
+tax) landed on `main`, this branch was merged with it: the shipped code **composes** #431's
+`MT_SHARPE_PENALTY` into the shared performance bar, so BOTH the point-estimate check and the LCB
+wall are held to the MT-taxed bar (see "Scope & explicitly deferred work" for what remains
+deferred — the broader bootstrap LCB and the family alpha-spending ledger).
 
 Issue: **#432** (`[ds]` — "Forward-gate `realized_sharpe` is a point-estimate bar on as few as 63
 observations with no confidence lower bound").
 
 > **Honesty note.** Earlier drafts of this doc described a stationary-bootstrap LCB plus a
 > family-scoped alpha-spending ledger (a new serialized `store.py` committer, a HISTORICAL-lineage
-> CTE, concurrency CAS, etc.) and folded in #431. **None of that is built.** This document has been
-> rewritten to describe only the code in this diff. The bootstrap/ledger/#431 material is deferred
-> to a genuinely future design doc and must not be read as approved or implemented.
+> CTE, concurrency CAS, etc.). **That richer bootstrap/ledger machinery is still NOT built** and
+> remains deferred. What IS built and shipped here is the analytic LCB in this diff, composed with
+> #431's already-merged additive-log multiple-testing Sharpe tax (folded into the shared bar); the
+> stationary-bootstrap LCB and the full alpha-spending ledger remain a genuinely future design doc.
 
 ## Problem
 
@@ -119,12 +122,13 @@ check all ride inside the existing `gate_evaluations.decision_json` blob / in-me
 This PR fixes the **single-look** defect only. The following are **not implemented here** and are
 deferred to a future design doc:
 
-- **#431 — optional stopping & concurrency.** The gate is re-runnable and strategies forward-test
-  concurrently; `n_concurrent_forward` is recorded but still **not evaluated**, and there is no
-  cross-look alpha-spending budget. A below-bar strategy can still take repeated re-rolls of a noisy
-  tail. Correcting this needs a multiplicity/optional-stopping mechanism (an alpha-spending ledger
-  and/or a family-scoped look count) that must be committed under the write lock alongside the row
-  insert — genuinely new design and store work, out of scope for #432.
+- **#431 — optional stopping & concurrency (NOW COMPOSED, not deferred).** Since #431 landed on
+  `main`, this branch merged it: the horizon-bounded look count (`n_prior_forward_looks`) plus
+  `n_concurrent_forward` drive `MT_SHARPE_PENALTY * ln(effective_trials)`, which is folded into the
+  shared performance bar — so the point-estimate check AND this PR's LCB wall are BOTH taxed for
+  optional stopping and breadth. What remains genuinely deferred is the richer version: a
+  cross-look **alpha-spending ledger** and **family/lineage-scoped** look counting committed under
+  the write lock (#431 ships an identity-exact, additive-log tax with a documented residual race).
 - **Serial-correlation robustness.** The analytic Lo/Mertens SE assumes weak dependence; daily
   strategy returns are autocorrelated, so the LCB's coverage is approximate. A
   stationary-bootstrap LCB (reusing `algua/backtest/bootstrap.py`, the DSR gate's instrument) is a
@@ -133,9 +137,11 @@ deferred to a future design doc:
 ## Honest guarantee
 
 The wall adds a non-normality-adjusted, **single-look** lower confidence bound on the realized
-forward Sharpe, tested against the holdout-derived performance bar. It defends against a lucky short
-window clearing the point bar. It does **NOT** provide any multiple-testing / optional-stopping /
-family-wise control, and its coverage is approximate under autocorrelation. Live-wall safety
+forward Sharpe, tested against the holdout-derived performance bar (which, post-merge, already
+carries #431's optional-stopping/concurrency Sharpe tax). It defends against a lucky short window
+clearing the point bar. Beyond #431's additive-log tax it does **NOT** provide a full
+alpha-spending / family-wise ledger, and its coverage is approximate under autocorrelation.
+Live-wall safety
 continues to rest on **defense-in-depth**: the LCB is one AND-check among the vol floor, drawdown
 cap, integrity, account-hygiene and staleness checks; the bar is holdout-derived; and
 `forward_tested -> live` additionally requires a verified human signature over a fresh,
