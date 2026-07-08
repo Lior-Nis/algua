@@ -937,6 +937,7 @@ def promote(
         "decision": outcome.decision.to_dict(),
         "excluded_ticks": outcome.assembled.excluded,
         "n_concurrent_forward": outcome.assembled.n_concurrent_forward,
+        "n_prior_forward_looks": outcome.assembled.n_prior_forward_looks,
     }
     # Re-sync the kb doc to the (possibly) new stage (#331): best-effort, out-of-transaction —
     # the `with registry_conn()` block above has already committed and closed.
