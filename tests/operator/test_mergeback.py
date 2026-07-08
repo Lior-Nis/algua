@@ -47,7 +47,8 @@ class FakeGit:
     ancestor: bool = True
     origin_blobs: dict[str, str] | None = None
     cas_fails: bool = False
-    push_current_fail_once: bool = False
+    crash_after_push: bool = False
+    revert_push_fail_once: bool = False
     calls: list[object] = field(default_factory=list)
 
     def merge_in_progress(self) -> bool:
@@ -90,6 +91,10 @@ class FakeGit:
     def commit_merge(self) -> None:
         self.calls.append("commit")
         self.merge_flag = False
+        # Mirror real git: committing the merge advances HEAD (local `main`) to the merge commit.
+        # A test that reconstructs a fresh FakeGit for a resume passes `local_main` explicitly to
+        # model this — without this advance the finding #1 drift precondition was never exercised.
+        self.local_main = self.merge_sha
 
     def merge_commit_of(self, tip: str) -> str:
         return self.merge_sha
@@ -101,6 +106,9 @@ class FakeGit:
         return self.ancestor
 
     def push_cas(self, merge_sha: str, expected_base: str) -> None:
+        # Model a crash after commit_merge (local main already advanced) but before the push lands.
+        if self.crash_after_push:
+            raise RuntimeError("crash after commit before push confirmed")
         if self.cas_fails or expected_base != self.origin_main:
             raise RemoteMovedError("origin/main moved")
         self.calls.append(("push", merge_sha))
@@ -116,13 +124,20 @@ class FakeGit:
 
     def revert_merge(self, sha: str) -> str:
         self.calls.append(("revert", sha))
+        # Mirror real git: the revert commit advances HEAD (local `main`) to the revert commit.
+        self.local_main = "REVERT0"
         return "REVERT0"
 
-    def push_current(self, ref: str) -> None:
-        if self.push_current_fail_once:
-            self.push_current_fail_once = False
-            raise RuntimeError("crash after revert before push confirmed")
-        self.calls.append(("push_current", ref))
+    def push_revert(self, revert_sha: str, expected_merge_sha: str) -> None:
+        # Model a crash after revert_merge (local main advanced) but before the revert push lands.
+        if self.revert_push_fail_once:
+            self.revert_push_fail_once = False
+            raise RuntimeError("crash after revert before revert push confirmed")
+        # Compare-and-swap: the reverted merge must still be the live origin/main tip (finding #3).
+        if expected_merge_sha != self.origin_main:
+            raise RemoteMovedError("origin/main moved before revert push")
+        self.calls.append(("revert_push", revert_sha))
+        self.origin_main = revert_sha
 
 
 class FakeJournal:
@@ -245,7 +260,7 @@ def test_backtested_green_promote_not_committed_reverts() -> None:
     assert result.status == "promote_failed"
     assert result.reverted and not result.promoted
     assert ("revert", _MERGE) in git.calls
-    assert ("push_current", "main") in git.calls
+    assert ("revert_push", "REVERT0") in git.calls
 
 
 # (f) promote RAISES and did not commit -> revert then the exception propagates.
@@ -397,7 +412,10 @@ def test_local_main_drift_fails_closed_before_merge() -> None:
 
 # (s) finding #2: crash committed-locally-but-not-pushed -> resume retries push_cas, no re-merge.
 def test_resume_merge_committed_not_pushed_retries_push() -> None:
-    git = FakeGit()
+    # Faithful resume state: real git left local `main` AT the merge commit (HEAD advanced on
+    # commit) while origin/main is still at base (the push never landed). The finding #1 drift
+    # precondition must recognize this as OUR own journaled step, not external drift.
+    git = FakeGit(local_main=_MERGE)
     journal = FakeJournal()
     # A crash landed after commit_merge but before push_status flipped to 'pushed'.
     journal.append(MergeBackRecord(
@@ -415,9 +433,10 @@ def test_resume_merge_committed_not_pushed_retries_push() -> None:
 
 # (s2) finding #2: committed-not-pushed but origin/main moved under us -> fail closed, no promote.
 def test_resume_merge_committed_not_pushed_origin_moved_fails_closed() -> None:
-    # origin (and the local main that tracks it) drifted off the recorded base since the crash, so
-    # the finding #1 precondition passes but the recorded-base CAS check must fail closed.
-    git = FakeGit(origin_main="MOVED", local_main="MOVED")
+    # Faithful: local `main` is AT the local merge commit (our journaled step, so the finding #1
+    # precondition adopts it) while origin/main advanced elsewhere since the crash — the recorded-
+    # base CAS check inside the push retry must then fail closed.
+    git = FakeGit(origin_main="MOVED", local_main=_MERGE)
     journal = FakeJournal()
     journal.append(MergeBackRecord(
         strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
@@ -429,32 +448,63 @@ def test_resume_merge_committed_not_pushed_origin_moved_fails_closed() -> None:
     assert not any(isinstance(c, tuple) and c[0] == "push" for c in git.calls)
 
 
-# (t) finding #3: crash BETWEEN revert_merge and push_current -> resume completes the revert-push,
-# does NOT re-promote, and leaves no stray commit to contaminate a later cycle.
+# (t) finding #3: crash BETWEEN revert_merge and the revert push -> resume completes the revert-
+# push, does NOT re-promote, and leaves no stray commit to contaminate a later cycle.
 def test_crash_between_revert_and_push_resumes_revert_push() -> None:
     journal = FakeJournal()
-    # First cycle: promote does not commit, stage stays backtested -> revert path; push crashes.
-    git = FakeGit(push_current_fail_once=True)
+    # First cycle: promote does not commit, stage stays backtested -> revert path; revert push
+    # crashes. commit_merge/revert_merge advance local main (mirroring real git HEAD), so after the
+    # crash local main sits at the revert commit while origin/main still carries the merge.
+    git = FakeGit(revert_push_fail_once=True)
     p = Promoter(commit=False)
     with pytest.raises(RuntimeError, match="crash after revert"):
         _run(git, journal, stage={"s": "backtested"}, promoter=p)
+    assert git.local_main == "REVERT0" and git.origin_main == _MERGE
     # Durable marker: revert_sha journaled, terminal NOT yet set (push unconfirmed).
     rec = journal.latest("s", _TIP)
     assert rec.revert_sha == "REVERT0"
     assert rec.terminal is None
     assert ("revert", _MERGE) in git.calls
 
-    # Resume with a fresh git whose push_current now succeeds.
-    git2 = FakeGit()
+    # Resume with a fresh git reconstructed at the FAITHFUL post-crash git state: local main AT the
+    # revert commit, origin/main still at the merge. The drift precondition must adopt this (our own
+    # journaled revert), not raise LocalMainDriftError.
+    git2 = FakeGit(local_main="REVERT0", origin_main=_MERGE)
     p2 = Promoter(commit=False)
     result = _run(git2, journal, stage={"s": "backtested"}, promoter=p2)
     assert result.status == "promote_failed" and result.reverted
-    # The revert-push completed; there was NO second promote and NO re-merge / second revert.
+    # Revert-push completed under CAS; NO second promote and NO re-merge / second revert.
     assert p2.tokens == []
-    assert ("push_current", "main") in git2.calls
+    assert ("revert_push", "REVERT0") in git2.calls
     assert not any(isinstance(c, tuple) and c[0] in ("begin", "revert", "push")
                    for c in git2.calls)
     assert journal.latest("s", _TIP).terminal == "promote_failed"
+
+
+# (u) finding #1/#2 (the CRITICAL bug GATE-1 missed): crash right after commit_merge leaves local
+# main AT the merge commit; a faithful resume must reach push-retry, NOT LocalMainDriftError.
+def test_crash_after_commit_resumes_push_retry_not_drift() -> None:
+    journal = FakeJournal()
+    # First cycle crashes inside the push, after commit_merge advanced local main + the merge was
+    # journaled (push still pending).
+    git1 = FakeGit(crash_after_push=True)
+    p1 = Promoter(commit=True)
+    with pytest.raises(RuntimeError, match="crash after commit"):
+        _run(git1, journal, stage={"s": "backtested"}, promoter=p1)
+    assert git1.local_main == _MERGE and git1.origin_main == _BASE
+    rec = journal.latest("s", _TIP)
+    assert rec.merge_sha == _MERGE and rec.push_status != "pushed" and rec.terminal is None
+
+    # Resume at the faithful post-crash state: local main AT the merge commit, origin/main still at
+    # base. Before the fix this raised LocalMainDriftError (local != origin); now it is adopted as
+    # our own journaled step and the CAS push is retried.
+    git2 = FakeGit(local_main=_MERGE, origin_main=_BASE)
+    p2 = Promoter(commit=True)
+    result = _run(git2, journal, stage={"s": "backtested"}, promoter=p2)
+    assert result.status == "promoted_allocated"
+    assert ("push", _MERGE) in git2.calls
+    assert not any(isinstance(c, tuple) and c[0] == "begin" for c in git2.calls)
+    assert p2.tokens == [derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())]
 
 
 def test_replace_helper_sanity() -> None:

@@ -23,6 +23,7 @@ from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState
 from algua.operator.diff_policy import DiffEntry
+from algua.operator.gitops import RemoteMovedError
 from algua.operator.mergeback import merge_back_lock
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
@@ -88,7 +89,12 @@ class _FakeGit:
     def revert_merge(self, sha):
         self.calls.append(("revert", sha))
         return "REVERT"
-    def push_current(self, ref): self.calls.append(("push_current", ref))
+
+    def push_revert(self, revert_sha, expected_merge_sha):
+        if expected_merge_sha != self.origin_main:
+            raise RemoteMovedError("origin/main moved before revert push")
+        self.calls.append(("revert_push", revert_sha))
+        self.origin_main = revert_sha
 
 
 def _register_backtested(name: str) -> None:

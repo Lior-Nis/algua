@@ -84,6 +84,27 @@ def test_changed_entries_parses_rename(repo: Path) -> None:
     assert rename[0].new_path == "renamed.md"
 
 
+def test_changed_entries_detects_unmodified_copy(repo: Path) -> None:
+    """Finding #4: ``--find-copies-harder`` must catch an UNMODIFIED file copied to a new path — the
+    dangerous case (copy a denylisted file byte-for-byte to an allowlisted dest, source untouched).
+    This exercises the REAL git plumbing, not the pure ``evaluate_diff`` unit, proving the copy is
+    reported as a ``C`` entry with ``old_path`` set so the dual-path guard can reject it.
+    """
+    git = RealGitOps(repo)
+    _git(repo, "checkout", "-q", "-b", "copy-branch")
+    # Copy README.md byte-for-byte to a new path WITHOUT modifying the original.
+    (repo / "copy.md").write_text((repo / "README.md").read_text())
+    _git(repo, "add", "copy.md")
+    _git(repo, "commit", "-q", "-m", "copy readme unmodified")
+    base = git.merge_base("main", "copy-branch")
+    tip = git.resolve("copy-branch")
+    entries = git.changed_entries(base, tip)
+    copies = [e for e in entries if e.change_type.startswith("C")]
+    assert copies, entries
+    assert copies[0].old_path == "README.md"
+    assert copies[0].new_path == "copy.md"
+
+
 def test_changed_entries_parses_symlink_mode(repo: Path) -> None:
     git = RealGitOps(repo)
     _git(repo, "checkout", "-q", "-b", "link-branch")

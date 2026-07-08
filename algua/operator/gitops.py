@@ -39,7 +39,10 @@ class GitOps(Protocol):
 
     def merge_base(self, a: str, b: str) -> str: ...
     def changed_entries(self, base: str, tip: str) -> list[DiffEntry]:
-        """``git diff --raw -M -C base tip`` parsed into :class:`DiffEntry` tuples (R5)."""
+        """``git diff --raw -M -C --find-copies-harder base tip`` parsed into :class:`DiffEntry`
+        tuples (R5). ``--find-copies-harder`` makes git treat UNMODIFIED files as copy sources, so
+        a branch that copies a denylisted file byte-for-byte to an allowlisted path is reported as a
+        ``C`` entry (with ``old_path`` set) and caught by the dual-path guard."""
         ...
 
     def begin_merge(self, tip: str) -> None:
@@ -69,8 +72,14 @@ class GitOps(Protocol):
         """``git revert -m 1 <merge_sha> --no-edit`` and return the revert commit SHA."""
         ...
 
-    def push_current(self, ref: str) -> None:
-        """Push the local ``ref`` tip to ``origin/<ref>`` (used after a revert commit)."""
+    def push_revert(self, revert_sha: str, expected_merge_sha: str) -> None:
+        """Remote compare-and-swap push of a revert commit (finding #3), mirroring
+        :meth:`push_cas`: fetch ``origin/main``, assert it still equals ``expected_merge_sha`` (the
+        reverted merge is still the live remote tip), ``git push origin <revert_sha>:refs/heads/
+        main``, re-fetch and assert the revert is now live. Raises :class:`RemoteMovedError` on any
+        CAS failure, so a concurrent remote advance during the revert push is detected (a resume can
+        then distinguish 'stale, needs recompute' from a transient retry) instead of surfacing an
+        opaque non-fast-forward ``CalledProcessError``."""
         ...
 
     def tree_blobs(self, sha: str, paths: list[str]) -> dict[str, str]:
@@ -135,7 +144,8 @@ class RealGitOps:
         # `git diff --raw -M -C` lines look like:
         #   :100644 100644 <src> <dst> M\tpath
         #   :100644 100644 <src> <dst> R100\told\tnew
-        raw = self._run(["diff", "--raw", "-M", "-C", "-z", base, tip]).stdout
+        raw = self._run(
+            ["diff", "--raw", "-M", "-C", "--find-copies-harder", "-z", base, tip]).stdout
         return _parse_raw_z(raw)
 
     def begin_merge(self, tip: str) -> None:
@@ -174,8 +184,19 @@ class RealGitOps:
         self._run(["revert", "-m", "1", merge_sha, "--no-edit"])
         return self._run(["rev-parse", "HEAD"]).stdout.strip()
 
-    def push_current(self, ref: str) -> None:
-        self._run(["push", self.remote, f"HEAD:refs/heads/{ref}"])
+    def push_revert(self, revert_sha: str, expected_merge_sha: str) -> None:
+        self.fetch_remote("main")
+        if self.remote_tip("main") != expected_merge_sha:
+            raise RemoteMovedError(
+                f"origin/main moved before revert push (expected the reverted merge "
+                f"{expected_merge_sha}, found {self.remote_tip('main')}); the revert is stale, "
+                f"recompute rather than force it")
+        self._run(["push", self.remote, f"{revert_sha}:refs/heads/main"])
+        self.fetch_remote("main")
+        if self.remote_tip("main") != revert_sha:
+            raise RemoteMovedError(
+                f"origin/main is {self.remote_tip('main')} after revert push, not the pushed "
+                f"{revert_sha}; remote moved between push and re-verify")
 
     def tree_blobs(self, sha: str, paths: list[str]) -> dict[str, str]:
         out: dict[str, str] = {}
