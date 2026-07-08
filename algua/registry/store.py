@@ -1526,6 +1526,22 @@ class SqliteStrategyRepository:
         ).fetchone()
         return int(row["id"]) if row is not None else None
 
+    def gate_exists_by_token(self, strategy: str, attempt_token: str) -> bool:
+        """True iff ANY ``gate_evaluations`` row — PASSING **or** FAILING — is already stamped with
+        this exact ``attempt_token`` for ``strategy``. The crash-idempotency read the merge-back
+        driver (#485) uses to avoid re-invoking a metered promote whose prior (crashed) attempt
+        already inserted a row and burned the holdout: because ``(strategy_id, attempt_token)`` is
+        partial-unique, a second promote under the same token would late-fail on the index AFTER its
+        side effects, so the driver must detect the existing row and branch on it instead of
+        re-invoking. Unlike :meth:`passing_gate_by_token` this ignores ``passed`` (a failing row
+        still consumed the token and burned the holdout)."""
+        row = self._conn.execute(
+            "SELECT 1 FROM gate_evaluations g JOIN strategies s ON s.id = g.strategy_id"
+            " WHERE s.name = ? AND g.attempt_token = ? LIMIT 1",
+            (strategy, attempt_token),
+        ).fetchone()
+        return row is not None
+
     # -------------------------------------------------------------------------
     # Factor-evaluation ledger (#219, slice E of #140)
     # -------------------------------------------------------------------------

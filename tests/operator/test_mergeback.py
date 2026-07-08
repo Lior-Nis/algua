@@ -102,6 +102,13 @@ class FakeGit:
     def commit_second_parent(self, sha: str) -> str:
         return self.second_parent if self.second_parent is not None else self.branch_tip
 
+    def is_merge_of(self, sha: str, expected_second_parent: str) -> bool:
+        # In this fake the only merge commit is ``merge_sha``; its 2nd parent is the branch tip
+        # (overridable via ``second_parent``). A non-merge sha returns False rather than raising,
+        # mirroring RealGitOps' safe ``rev-parse -q --verify <sha>^2``.
+        second = self.second_parent if self.second_parent is not None else self.branch_tip
+        return sha == self.merge_sha and second == expected_second_parent
+
     def is_ancestor(self, sha: str, ref: str) -> bool:
         return self.ancestor
 
@@ -162,9 +169,13 @@ class Promoter:
         self.gate_id = gate_id
         self.tokens: list[str] = []
         self._committed: dict[str, int] = {}
+        self._rows: set[str] = set()
 
     def __call__(self, token: str) -> object:
         self.tokens.append(token)
+        # A gate row (passing OR failing) is written for this token whenever promote runs — even a
+        # failing/raising run inserts a row (promotion.run_gate records pass AND fail).
+        self._rows.add(token)
         if self.commit:
             self._committed[token] = self.gate_id
         if self.raises is not None:
@@ -174,13 +185,16 @@ class Promoter:
     def by_token(self, token: str) -> int | None:
         return self._committed.get(token)
 
+    def exists(self, token: str) -> bool:
+        return token in self._rows
+
 
 def _stage(mapping):
     return lambda name: mapping[name]
 
 
 def _run(git, journal, *, stage, promoter=None, run_gate=True, intake=None,
-         allocated=True, audit=None):
+         allocated=True, audit=None, gate_exists_by_token=None):
     promoter = promoter if promoter is not None else Promoter()
     return run_merge_back(
         git=git, journal=journal, strategy="s", branch="feat/s",
@@ -189,6 +203,8 @@ def _run(git, journal, *, stage, promoter=None, run_gate=True, intake=None,
         run_gate=(lambda: run_gate) if isinstance(run_gate, bool) else run_gate,
         promote=promoter,
         passing_gate_by_token=promoter.by_token,
+        gate_exists_by_token=(gate_exists_by_token if gate_exists_by_token is not None
+                              else promoter.exists),
         intake=(intake if intake is not None else (lambda: {"admitted": ["s"]})),
         target_allocated=lambda name: allocated,
         audit_log=audit,
@@ -328,6 +344,7 @@ def test_promote_stage_drift_without_token_fails_closed_no_revert() -> None:
             codeowners_text=_CODEOWNERS,
             stage_of=lambda name: next(seq),
             run_gate=lambda: True, promote=p, passing_gate_by_token=p.by_token,
+            gate_exists_by_token=p.exists,
             intake=lambda: {}, target_allocated=lambda n: True)
     assert not any(isinstance(c, tuple) and c[0] == "revert" for c in git.calls)
 
@@ -505,6 +522,151 @@ def test_crash_after_commit_resumes_push_retry_not_drift() -> None:
     assert ("push", _MERGE) in git2.calls
     assert not any(isinstance(c, tuple) and c[0] == "begin" for c in git2.calls)
     assert p2.tokens == [derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())]
+
+
+# (HIGH-1) pending-push resume where the push ACTUALLY LANDED before the crash: origin/main already
+# equals merge_sha but the journal still says push_status="pending". Resume must accept it as
+# "push already landed" and converge forward (no re-push, no wrong RemoteMovedError), then promote.
+def test_resume_pending_push_but_push_already_landed_converges() -> None:
+    # Faithful post-crash state: commit landed (local main at merge), the push ALSO landed
+    # (origin/main at merge) but the journal flip to "pushed" never happened.
+    git = FakeGit(local_main=_MERGE, origin_main=_MERGE)
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pending"))
+    p = Promoter(commit=True)
+    result = _run(git, journal, stage={"s": "backtested"}, promoter=p)
+    assert result.status == "promoted_allocated"
+    # The already-landed push is NOT re-driven (push_cas would RemoteMovedError against the stale
+    # base); it is adopted and the journal converges to pushed.
+    assert not any(isinstance(c, tuple) and c[0] == "push" for c in git.calls)
+    assert not any(isinstance(c, tuple) and c[0] == "begin" for c in git.calls)
+    assert journal.latest("s", _TIP).push_status == "pushed"
+    assert p.tokens == [derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())]
+
+
+# (HIGH-2a) a prior promote inserted a FAILING gate row under this token then crashed before
+# journaling promote_status. Resume must NOT re-invoke promote (double holdout burn / unique-index
+# fail) — it reads the existing row and takes the revert path.
+def test_resume_failing_token_row_does_not_reinvoke_promote() -> None:
+    # The merge was already pushed (origin/main at merge); local main sits at the merge commit.
+    git = FakeGit(local_main=_MERGE, origin_main=_MERGE)
+    journal = FakeJournal()
+    token = derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", attempt_token=token))
+    p = Promoter(commit=False)  # if (wrongly) re-invoked, would append to p.tokens
+    result = _run(git, journal, stage={"s": "backtested"}, promoter=p,
+                  gate_exists_by_token=lambda tok: tok == token)  # a failing row already exists
+    assert result.status == "promote_failed" and result.reverted
+    assert p.tokens == []                          # promote NEVER re-invoked
+    assert ("revert", _MERGE) in git.calls
+    assert journal.latest("s", _TIP).terminal == "promote_failed"
+
+
+# (HIGH-2b) a prior promote committed a PASSING gate row under this token then crashed before
+# journaling. Resume must converge straight to INTAKE without re-invoking promote.
+def test_resume_passing_token_row_converges_to_intake_no_reinvoke() -> None:
+    journal = FakeJournal()
+    token = derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", attempt_token=token))
+    p = Promoter(commit=False)  # must NOT be re-invoked
+    result = run_merge_back(
+        git=FakeGit(), journal=journal, strategy="s", branch="feat/s",
+        codeowners_text=_CODEOWNERS, stage_of=_stage({"s": "backtested"}), run_gate=lambda: True,
+        promote=p, passing_gate_by_token=lambda tok: 77 if tok == token else None,
+        gate_exists_by_token=lambda tok: True,
+        intake=lambda: {"admitted": ["s"]}, target_allocated=lambda n: True)
+    assert result.status == "promoted_allocated"
+    assert result.gate_id == 77
+    assert p.tokens == []  # promote NEVER re-invoked when a passing row already exists
+
+
+# (HIGH-3) revert-push accepted-but-not-journaled: the revert push landed remotely (origin/main ==
+# revert_sha) but the crash beat terminal="promote_failed". Resume must accept it as "revert already
+# landed" and converge to the terminal, not RemoteMovedError against the moved origin.
+def test_resume_revert_push_already_landed_converges_terminal() -> None:
+    journal = FakeJournal()
+    # Faithful: local main at the revert commit, origin/main ALSO at the revert commit (push
+    # landed), journal has revert_sha but no terminal.
+    git = FakeGit(local_main="REVERT0", origin_main="REVERT0")
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", promote_status="failed",
+        revert_sha="REVERT0"))
+    p = Promoter(commit=False)
+    result = _run(git, journal, stage={"s": "backtested"}, promoter=p)
+    assert result.status == "promote_failed" and result.reverted
+    # The already-landed revert push is NOT re-driven (push_revert would RemoteMovedError since
+    # origin is at revert, not the reverted merge); it converges to the terminal.
+    assert not any(isinstance(c, tuple) and c[0] == "revert_push" for c in git.calls)
+    assert p.tokens == []
+    assert journal.latest("s", _TIP).terminal == "promote_failed"
+
+
+# (MEDIUM-1) crash BETWEEN commit_merge() and journaling merge_sha: local main is at an unjournaled
+# merge commit; the journal only has diff_policy=passed. Resume must ADOPT the merge via second-
+# parent verification (not fail closed forever on LocalMainDriftError).
+def test_resume_unjournaled_merge_commit_is_adopted() -> None:
+    journal = FakeJournal()
+    # crash left diff_policy=passed journaled but merge_sha NOT yet (line order: _write(passed)
+    # precedes begin_merge/commit_merge/_write(merge_sha)).
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed"))
+    # local main advanced to the merge commit; origin still at base; the merge's 2nd parent is TIP.
+    git = FakeGit(local_main=_MERGE, origin_main=_BASE)
+    p = Promoter(commit=True)
+    result = _run(git, journal, stage={"s": "backtested"}, promoter=p)
+    assert result.status == "promoted_allocated"
+    # The unjournaled merge was adopted (no re-merge), its merge_sha journaled, then pushed.
+    assert not any(isinstance(c, tuple) and c[0] == "begin" for c in git.calls)
+    assert ("push", _MERGE) in git.calls
+    assert journal.latest("s", _TIP).merge_sha == _MERGE
+
+
+# (MEDIUM-1 negative) genuine external drift (local main is NOT our merge) still fails closed.
+def test_unadoptable_local_drift_still_fails_closed() -> None:
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed"))
+    # local main is some unrelated commit that is NOT a merge of our branch tip.
+    git = FakeGit(local_main="ALIEN", origin_main=_BASE)
+    with pytest.raises(LocalMainDriftError):
+        _run(git, journal, stage={"s": "backtested"})
+
+
+# (MEDIUM-2) run_gate() RAISES after begin_merge(): must be treated as a RED gate — abort the staged
+# preview merge and take the gate_failed path, never leak the exception with the merge left staged.
+def test_gate_seam_exception_is_red_gate() -> None:
+    git = FakeGit()
+
+    def _boom() -> bool:
+        raise RuntimeError("gate subprocess crashed")
+
+    result = _run(git, FakeJournal(), stage={"s": "backtested"}, run_gate=_boom)
+    assert result.status == "gate_failed"
+    assert result.merged is False
+    assert ("begin", _TIP) in git.calls and "abort" in git.calls
+    assert "commit" not in git.calls
+
+
+# (LOW-1) a promote_failed terminal replays with the SAME flags the fresh promote-failed path
+# returned (merged=True, reverted=True) — idempotent re-invocation output matches the original.
+def test_promote_failed_terminal_replays_merged_true() -> None:
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, merge_sha=_MERGE,
+        push_status="pushed", promote_status="failed", revert_sha="REVERT0",
+        terminal="promote_failed"))
+    result = _run(FakeGit(local_main="REVERT0", origin_main="REVERT0"), journal,
+                  stage={"s": "backtested"})
+    assert result.status == "promote_failed"
+    assert result.merged is True      # a merge DID happen; the later revert must not unset it
+    assert result.reverted is True
 
 
 def test_replace_helper_sanity() -> None:

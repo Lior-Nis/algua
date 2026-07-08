@@ -72,6 +72,20 @@ def test_failed_row_not_returned(tmp_path):
     assert SqliteStrategyRepository(conn).passing_gate_by_token("s", "TOKEN_A") is None
 
 
+def test_gate_exists_by_token_sees_failing_row(tmp_path):
+    # HIGH-2 crash-idempotency read: unlike passing_gate_by_token, gate_exists_by_token returns True
+    # for a FAILING row too (a failing promote still consumed the token + burned the holdout), so a
+    # resume knows not to re-invoke.
+    conn = _conn(tmp_path)
+    rec = SqliteStrategyRepository(conn).add("s")
+    repo = SqliteStrategyRepository(conn)
+    assert repo.gate_exists_by_token("s", "TOKEN_A") is False
+    _insert_gate(conn, rec.id, passed=False, actor="agent", token="TOKEN_A")
+    assert repo.gate_exists_by_token("s", "TOKEN_A") is True     # failing row detected
+    assert repo.passing_gate_by_token("s", "TOKEN_A") is None    # but not a PASS
+    assert repo.gate_exists_by_token("s", "TOKEN_B") is False    # unrelated token absent
+
+
 def test_duplicate_token_violates_unique_index(tmp_path):
     conn = _conn(tmp_path)
     rec = SqliteStrategyRepository(conn).add("s")

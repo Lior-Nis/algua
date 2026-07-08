@@ -58,6 +58,15 @@ class GitOps(Protocol):
         """SHA of ``<sha>^2`` (the merged branch tip)."""
         ...
 
+    def is_merge_of(self, sha: str, expected_second_parent: str) -> bool:
+        """True iff ``sha`` is a merge commit whose 2nd parent equals ``expected_second_parent``.
+
+        SAFE where :meth:`commit_second_parent` is not: a non-merge commit (no ``^2``) returns
+        False instead of raising. Used to ADOPT an unjournaled local merge on resume (a crash
+        between ``commit_merge`` and journaling ``merge_sha`` — MEDIUM-1) by verifying the drifted
+        local ``main`` HEAD really is THIS attempt's merge of the branch tip, not external drift."""
+        ...
+
     def is_ancestor(self, sha: str, ref: str) -> bool:
         """True iff ``sha`` is an ancestor of ``ref`` (``git merge-base --is-ancestor``)."""
         ...
@@ -163,6 +172,12 @@ class RealGitOps:
 
     def commit_second_parent(self, sha: str) -> str:
         return self._run(["rev-parse", f"{sha}^2"]).stdout.strip()
+
+    def is_merge_of(self, sha: str, expected_second_parent: str) -> bool:
+        # `rev-parse -q --verify <sha>^2` exits non-zero (no output) for a non-merge commit, so a
+        # commit with no second parent is False rather than a raised CalledProcessError.
+        r = self._run(["rev-parse", "-q", "--verify", f"{sha}^2"], check=False)
+        return r.returncode == 0 and r.stdout.strip() == expected_second_parent
 
     def is_ancestor(self, sha: str, ref: str) -> bool:
         return self._run(["merge-base", "--is-ancestor", sha, ref], check=False).returncode == 0

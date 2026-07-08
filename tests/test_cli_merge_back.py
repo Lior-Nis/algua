@@ -225,7 +225,14 @@ def test_held_lock_fails_second_invocation(monkeypatch):
     _register_backtested(_STRAT)
     git = _FakeGit()
     _wire(monkeypatch, gate=True, git=git, promote_calls=[])
-    lock_path = Path(get_settings().db_path).parent / "merge_back.lock"
+    # HIGH-4: the lock is anchored at the repo's own git dir (per-checkout), NOT db_path.parent, so
+    # two invocations on the SAME checkout serialize regardless of ALGUA_DB_PATH. Acquire the same
+    # git-dir-rooted lock the command computes to prove the second invocation fails closed.
+    import subprocess as _sp
+    git_dir = _sp.run(["git", "rev-parse", "--absolute-git-dir"],
+                      cwd=Path(paper_cmd.__file__).resolve().parent,
+                      capture_output=True, text=True, check=True).stdout.strip()
+    lock_path = Path(git_dir) / "merge_back.lock"
     with merge_back_lock(lock_path):
         result = _invoke()
     assert result.exit_code != 0

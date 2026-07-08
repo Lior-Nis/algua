@@ -149,6 +149,20 @@ def test_push_cas_stale_base_rejects(repo: Path) -> None:
         git.push_cas(merge_sha, "0" * 40)
 
 
+def test_is_merge_of_true_for_merge_false_otherwise(repo: Path) -> None:
+    # MEDIUM-1 adoption seam: is_merge_of is True only for a merge commit whose 2nd parent matches,
+    # and SAFE (False, not a raise) for a non-merge commit with no ^2.
+    git = RealGitOps(repo)
+    tip = git.resolve("feature")
+    git.begin_merge(tip)
+    git.commit_merge()
+    merge_sha = git.merge_commit_of(tip)
+    assert git.is_merge_of(merge_sha, tip) is True
+    assert git.is_merge_of(merge_sha, "0" * 40) is False   # wrong second parent
+    # A plain (non-merge) commit has no ^2: safe False, never a CalledProcessError.
+    assert git.is_merge_of(git.resolve("HEAD~1"), tip) is False
+
+
 def test_revert_merge_returns_sha_and_undoes_code(repo: Path) -> None:
     git = RealGitOps(repo)
     tip = git.resolve("feature")

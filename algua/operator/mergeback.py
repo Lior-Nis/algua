@@ -122,6 +122,7 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     run_gate: Callable[[], bool],
     promote: Callable[[str], object],
     passing_gate_by_token: Callable[[str], int | None],
+    gate_exists_by_token: Callable[[str], bool],
     intake: Callable[[], dict],
     target_allocated: Callable[[str], bool],
     audit_log: Callable[[dict], None] | None = None,
@@ -134,7 +135,10 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     ``stage_of`` (read the lifecycle stage), ``run_gate`` (full quality gate on the staged tree),
     ``promote`` (the strict-agent promote seam — it takes the ``attempt_token`` and stamps it on the
     gate row), ``passing_gate_by_token`` (authoritative read of THIS attempt's passing gate row id,
-    or None), ``intake`` (FIFO candidate->paper intake), ``target_allocated`` (did intake allocate
+    or None), ``gate_exists_by_token`` (does ANY gate row — passing OR failing — already bear this
+    attempt's token; the crash-idempotency read that stops a resume from re-invoking a metered
+    promote whose prior attempt already burned the holdout), ``intake`` (FIFO candidate->paper
+    intake), ``target_allocated`` (did intake allocate
     THIS strategy?), and an optional ``audit_log`` sink for push/revert records.
 
     Returns a :class:`CycleResult` on a completed cycle (including the non-error ``gate_failed`` /
@@ -162,6 +166,15 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     # commit is durably recorded here as merge_sha/revert_sha. So drift is evaluated against the
     # journal, not against ``origin/main`` unconditionally.
     rec = journal.latest(strategy, branch_tip)
+
+    def _write(**changes: object) -> MergeBackRecord:
+        nonlocal rec
+        base = rec if rec is not None else MergeBackRecord(
+            strategy=strategy, branch=branch, branch_tip=branch_tip)
+        rec = replace(base, **changes)  # type: ignore[arg-type]
+        journal.append(rec)
+        return rec
+
     # Hard precondition (finding #1): local `main` must be reconciled with the freshly-fetched
     # `origin/main`. Equal is the common case. If it differs, the ONLY benign explanation is a prior
     # crash of THIS driver that left its own committed merge/revert on local `main` (recorded in the
@@ -173,20 +186,27 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         if rec is not None:
             explained_by = {sha for sha in (rec.merge_sha, rec.revert_sha) if sha is not None}
         if local_main not in explained_by:
-            raise LocalMainDriftError(
-                f"local {base_ref!r} is {local_main} but freshly-fetched origin/{base_ref} is "
-                f"{base_sha} and no journal record for branch_tip {branch_tip} accounts for it; "
-                f"refusing to merge onto a drifted local main (would bypass the "
-                f"diff-policy/CODEOWNERS gate)")
+            # MEDIUM-1: a crash BETWEEN ``commit_merge()`` and journaling ``merge_sha`` leaves local
+            # `main` at an unjournaled merge commit (the journal only has diff_policy=passed). That
+            # is NOT external drift — adopt it by SECOND-PARENT verification: if we were mid-merge
+            # (diff policy passed, no merge_sha/revert_sha yet) AND local `main` is a merge commit
+            # whose 2nd parent is our branch tip, it is THIS attempt's own merge. Journal it and
+            # resume forward (the push retry below) rather than failing closed forever.
+            adoptable = (
+                rec is not None and rec.diff_policy == "passed"
+                and rec.merge_sha is None and rec.revert_sha is None
+                and git.is_merge_of(local_main, branch_tip))
+            if adoptable:
+                assert rec is not None
+                _write(base_sha=rec.base_sha if rec.base_sha is not None else base_sha,
+                       diff_policy="passed", gate_status="green", merge_sha=local_main)
+            else:
+                raise LocalMainDriftError(
+                    f"local {base_ref!r} is {local_main} but freshly-fetched origin/{base_ref} is "
+                    f"{base_sha} and no journal record for branch_tip {branch_tip} accounts for "
+                    f"it; refusing to merge onto a drifted local main (would bypass the "
+                    f"diff-policy/CODEOWNERS gate)")
     stage = stage_of(strategy)
-
-    def _write(**changes: object) -> MergeBackRecord:
-        nonlocal rec
-        base = rec if rec is not None else MergeBackRecord(
-            strategy=strategy, branch=branch, branch_tip=branch_tip)
-        rec = replace(base, **changes)  # type: ignore[arg-type]
-        journal.append(rec)
-        return rec
 
     def _allow_paths() -> list[str]:
         """The allowlisted paths the branch introduces vs merge-base(base, tip) — re-derivable on
@@ -220,7 +240,10 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         return CycleResult(
             ok=status in {"already_done", "promoted_allocated", "promoted_queued"},
             status=status,
-            merged=record.merge_sha is not None and record.revert_sha is None,
+            # A merge DID happen iff a merge commit was recorded; a subsequent revert does NOT unset
+            # it (LOW-1: match the fresh promote_failed path — merged=True/reverted=True — so
+            # idempotent replay output equals the original result).
+            merged=record.merge_sha is not None,
             reverted=record.revert_sha is not None,
             promoted=record.promote_status == "passed",
             intake=None,
@@ -257,16 +280,28 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         """Resume a crash BETWEEN ``revert_merge`` and the revert push (finding #3).
 
         ``revert_sha`` is durably journaled but ``terminal`` is not, so the revert commit exists
-        locally yet may not be on ``origin``. Re-run the revert push under its compare-and-swap
-        (idempotent — a concurrent remote advance fails closed as ``RemoteMovedError``) and reach
-        the ``promote_failed`` terminal — never fall through to re-``promote()`` or leave a stray
-        revert unpushed."""
+        locally yet may not be on ``origin``. If the revert push ALREADY LANDED before the crash
+        (``origin/main == revert_sha``, finding #3) it is accepted as done and converged forward —
+        NOT re-pushed (a re-push would ``RemoteMovedError`` against the moved origin). Otherwise
+        re-run the revert push under its compare-and-swap (idempotent — a concurrent remote advance
+        fails closed as ``RemoteMovedError``). Either way reach the ``promote_failed`` terminal —
+        never fall through to re-``promote()`` or leave a stray revert unpushed."""
         assert record.merge_sha is not None and record.revert_sha is not None
-        audit({"event": "autonomous_revert", "strategy": strategy, "merge_sha": record.merge_sha,
-               "revert_sha": record.revert_sha, "phase": "resume_before"})
-        git.push_revert(record.revert_sha, record.merge_sha)
-        audit({"event": "autonomous_revert", "strategy": strategy, "merge_sha": record.merge_sha,
-               "revert_sha": record.revert_sha, "phase": "after", "result": "ok"})
+        git.fetch_remote(base_ref)
+        if git.remote_tip(base_ref) == record.revert_sha:
+            # The revert push landed remotely before the crash; only the terminal journal write was
+            # lost. Converge without re-pushing.
+            audit({"event": "autonomous_revert", "strategy": strategy,
+                   "merge_sha": record.merge_sha, "revert_sha": record.revert_sha,
+                   "phase": "after", "result": "already_landed"})
+        else:
+            audit({"event": "autonomous_revert", "strategy": strategy,
+                   "merge_sha": record.merge_sha, "revert_sha": record.revert_sha,
+                   "phase": "resume_before"})
+            git.push_revert(record.revert_sha, record.merge_sha)
+            audit({"event": "autonomous_revert", "strategy": strategy,
+                   "merge_sha": record.merge_sha, "revert_sha": record.revert_sha,
+                   "phase": "after", "result": "ok"})
         _write(promote_status="failed", revert_sha=record.revert_sha, terminal="promote_failed")
         return CycleResult(ok=False, status="promote_failed", merged=True, reverted=True,
                            promoted=False, intake=None, branch_tip=branch_tip,
@@ -330,20 +365,35 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                     f"recorded local merge {merge_sha} for {strategy!r} is not a merge of branch "
                     f"tip {branch_tip}; cannot resume push")
             git.fetch_remote(base_ref)
-            if git.remote_tip(base_ref) != anchor_base:
+            remote_now = git.remote_tip(base_ref)
+            if remote_now == merge_sha:
+                # HIGH-1: the push ACTUALLY LANDED before the crash — only the journal flip to
+                # "pushed" was lost. origin/main already carries our merge, so accepting
+                # ``origin/main == merge_sha`` as done and converging forward is correct; re-driving
+                # push_cas (which expects origin still at ``anchor_base``) would wrongly
+                # RemoteMovedError. Verify branch-tip identity is still live before converging.
+                if not _merge_verified(merge_sha):
+                    raise MergeContentAbsentError(
+                        f"resume: origin/{base_ref} is at recorded merge {merge_sha} for "
+                        f"{strategy!r} but its branch-tip identity/content no longer verifies")
+                audit({"event": "autonomous_push", "strategy": strategy, "merge_sha": merge_sha,
+                       "phase": "after", "result": "already_landed", "resume": True})
+                _write(base_sha=anchor_base, diff_policy="passed", gate_status="green",
+                       merge_sha=merge_sha, push_status="pushed")
+            elif remote_now != anchor_base:
                 raise RemoteMovedError(
-                    f"origin/{base_ref} moved to {git.remote_tip(base_ref)} (expected recorded "
-                    f"base {anchor_base}); local merge {merge_sha} is stale, refusing to resume "
-                    f"push")
-            audit({"event": "autonomous_push", "strategy": strategy, "branch": branch,
-                   "branch_tip": branch_tip, "base_sha": anchor_base, "merge_sha": merge_sha,
-                   "refspec": f"{merge_sha}:refs/heads/{base_ref}", "phase": "before",
-                   "resume": True})
-            git.push_cas(merge_sha, anchor_base)  # raises RemoteMovedError -> fail closed
-            audit({"event": "autonomous_push", "strategy": strategy, "merge_sha": merge_sha,
-                   "phase": "after", "result": "ok", "resume": True})
-            _write(base_sha=anchor_base, diff_policy="passed", gate_status="green",
-                   merge_sha=merge_sha, push_status="pushed")
+                    f"origin/{base_ref} moved to {remote_now} (expected recorded base "
+                    f"{anchor_base}); local merge {merge_sha} is stale, refusing to resume push")
+            else:
+                audit({"event": "autonomous_push", "strategy": strategy, "branch": branch,
+                       "branch_tip": branch_tip, "base_sha": anchor_base, "merge_sha": merge_sha,
+                       "refspec": f"{merge_sha}:refs/heads/{base_ref}", "phase": "before",
+                       "resume": True})
+                git.push_cas(merge_sha, anchor_base)  # raises RemoteMovedError -> fail closed
+                audit({"event": "autonomous_push", "strategy": strategy, "merge_sha": merge_sha,
+                       "phase": "after", "result": "ok", "resume": True})
+                _write(base_sha=anchor_base, diff_policy="passed", gate_status="green",
+                       merge_sha=merge_sha, push_status="pushed")
     else:
         # -------------------------------------------------------------- DIFF POLICY (pre-merge)
         if rec is None or rec.diff_policy != "passed":
@@ -358,7 +408,16 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
 
         # -------------------------------------------------------------- MERGE (gate before commit)
         git.begin_merge(branch_tip)
-        if not run_gate():
+        # MEDIUM-2: an EXCEPTION out of the gate seam (a crashed subprocess, an OSError launching
+        # it) is a RED gate, exactly as the CLI doc promises ("each check is a separate subprocess
+        # so a crash in one is a red gate"). A raised gate must NOT propagate with the ``--no-ff
+        # --no-commit`` preview merge left staged in the working tree — abort it and take the
+        # gate_failed path, same as a clean ``False`` return.
+        try:
+            gate_green = run_gate()
+        except Exception:  # noqa: BLE001 — any gate-seam failure is a red gate, never a raised saga
+            gate_green = False
+        if not gate_green:
             git.abort_merge()
             _write(base_sha=base_sha, diff_policy="passed", gate_status="failed",
                    terminal="gate_failed")
@@ -379,6 +438,11 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                push_status="pushed")
 
     # ------------------------------------------------------------------ 4. PROMOTE (token-bound)
+    # The record's base_sha is authoritative from here: a resume may have re-read a top-level
+    # ``base_sha`` that already advanced to ``merge_sha`` (origin fast-forwarded to our merge), so
+    # keep the ORIGINAL base for the journal + the ``_allow_paths`` content-check anchor.
+    if rec is not None and rec.base_sha is not None:
+        base_sha = rec.base_sha
     if not _content_present(merge_sha):
         raise MergeContentAbsentError(
             f"merged code for {strategy!r} absent from origin/{base_ref} before promote")
@@ -386,14 +450,24 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     _write(base_sha=base_sha, diff_policy="passed", gate_status="green", merge_sha=merge_sha,
            push_status="pushed", attempt_token=token)
 
+    # HIGH-2 crash-idempotency: a prior attempt under THIS (deterministic) token may already have
+    # run the metered promote and crashed BEFORE journaling the outcome. The token is unique-indexed
+    # on the gate row, so blindly re-invoking promote() would double-burn the holdout and late-fail
+    # on the unique index AFTER side effects. Read the AUTHORITATIVE registry state by token FIRST
+    # and branch on it; invoke promote() only when NO row under this token exists yet.
     raised: BaseException | None = None
-    try:
-        promote(token)
-    except BaseException as exc:  # noqa: BLE001 — outcome is read authoritatively below, not from raise
-        raised = exc
+    gate_id = passing_gate_by_token(token)
+    if gate_id is None and not gate_exists_by_token(token):
+        try:
+            promote(token)
+        except BaseException as exc:  # noqa: BLE001 — outcome read authoritatively below, not raise
+            raised = exc
+        gate_id = passing_gate_by_token(token)
+    # else: a gate row already bears this token (a crashed prior attempt). Never re-invoke — a
+    # passing row converges to intake just below; a failing-only row (gate_id stays None) falls
+    # through to the revert path.
 
     # Success is read from AUTHORITATIVE registry state by attempt_token, never from "did it raise".
-    gate_id = passing_gate_by_token(token)
     if gate_id is not None:
         rec = _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
                      merge_sha=merge_sha, push_status="pushed", attempt_token=token,

@@ -531,13 +531,22 @@ def merge_back(
         raise ValueError('--max-concurrent must be positive')
     actor_enum = Actor(actor)  # fail fast on a bad actor before any git mutation
     settings = get_settings()
+    # The lock must be scoped to the CHECKOUT it protects, NOT to ``db_path.parent`` (HIGH-4): two
+    # invocations on the SAME working tree with different ALGUA_DB_PATH would otherwise take
+    # DIFFERENT db-rooted locks and mutate the one shared tree concurrently. Anchor it at the repo's
+    # own git dir (``git rev-parse --absolute-git-dir`` — the per-worktree ``.git``), resolved
+    # BEFORE the lock. The git dir is outside the working tree, so the lock file never dirties
+    # ``git status`` (which would fail the clean-checkout precondition).
+    _here = Path(__file__).resolve().parent
+    repo_root = Path(subprocess.run(  # noqa: S603,S607 — fixed argv, no shell
+        ['git', 'rev-parse', '--show-toplevel'],
+        cwd=_here, capture_output=True, text=True, check=True).stdout.strip())
+    git_dir = Path(subprocess.run(  # noqa: S603,S607 — fixed argv, no shell
+        ['git', 'rev-parse', '--absolute-git-dir'],
+        cwd=_here, capture_output=True, text=True, check=True).stdout.strip())
     # Repo-global exclusive flock for the whole saga: a live concurrent cycle fails closed rather
     # than mutating the shared checkout under a second driver (kernel-released on death).
-    with merge_back_lock(settings.db_path.parent / 'merge_back.lock'):
-        repo_root = Path(subprocess.run(  # noqa: S603,S607 — fixed argv, no shell
-            ['git', 'rev-parse', '--show-toplevel'],
-            cwd=Path(__file__).resolve().parent,
-            capture_output=True, text=True, check=True).stdout.strip())
+    with merge_back_lock(git_dir / 'merge_back.lock'):
         git = RealGitOps(repo_root)
         # The driver's OWN durable recovery journal (per-strategy JSONL beside the registry db); NOT
         # registry-domain state, so no schema bump. The CODEOWNERS text feeds the diff-policy
@@ -570,6 +579,13 @@ def merge_back(
             with registry_conn() as conn:
                 return SqliteStrategyRepository(conn).passing_gate_by_token(strategy, attempt_token)
 
+        def gate_exists_by_token(attempt_token: str) -> bool:
+            # Crash-idempotency read (#485 HIGH-2): does ANY gate row (pass OR fail) already bear
+            # this attempt's token? If so, a prior crashed attempt already ran the metered promote —
+            # the driver must NOT re-invoke it (double holdout burn / unique-index late-fail).
+            with registry_conn() as conn:
+                return SqliteStrategyRepository(conn).gate_exists_by_token(strategy, attempt_token)
+
         def intake() -> dict:
             # Read paper equity READ-ONLY BEFORE opening the intake txn (no trading), then run the
             # shared FIFO admit over its OWN short-lived registry_conn.
@@ -601,6 +617,7 @@ def merge_back(
             codeowners_text=codeowners_text,
             stage_of=stage_of, run_gate=lambda: _run_quality_gate(repo_root),
             promote=promote, passing_gate_by_token=passing_gate_by_token,
+            gate_exists_by_token=gate_exists_by_token,
             intake=intake, target_allocated=target_allocated, audit_log=audit_log)
     # A completed cycle is a successful invocation regardless of the promote outcome: emit ok() with
     # the terminal status (gate_failed/promote_failed/diff_policy_rejected carry honest statuses).
