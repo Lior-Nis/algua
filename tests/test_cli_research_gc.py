@@ -217,8 +217,9 @@ def test_gc_archive_refuses_symlinked_intermediate_dir(tmp_path):
 
 
 def test_gc_archive_uses_atomic_replace_no_both_paths_window(tmp_path, monkeypatch):
-    """The move is a single atomic os.replace — asserted by a spy that, at call time, sees the
-    source present and the dest absent (never a copy+unlink window where BOTH exist)."""
+    """The move is a single atomic renameat — asserted by a spy that, at call time, sees the source
+    present and the dest absent (never a copy+unlink window where BOTH exist). The move now targets
+    a dst_dir_fd + bare name, so dest existence is probed relative to that fd."""
     f = tmp_path / "r.md"
     f.write_text("bytes\n")
     arch = tmp_path / "arch"
@@ -228,12 +229,13 @@ def test_gc_archive_uses_atomic_replace_no_both_paths_window(tmp_path, monkeypat
     seen = {}
 
     def _spy(src, dst, *a, **k):
+        dfd = k["dst_dir_fd"]  # renameat form: dst is a bare name under this dir fd
         # At the atomic instant: source still there, destination not yet created.
         seen["src_before"] = os.path.exists(src)
-        seen["dst_before"] = os.path.exists(dst)
+        seen["dst_before"] = dst in os.listdir(dfd)
         real_replace(src, dst, *a, **k)
         seen["src_after"] = os.path.exists(src)
-        seen["dst_after"] = os.path.exists(dst)
+        seen["dst_after"] = dst in os.listdir(dfd)
 
     monkeypatch.setattr(os, "replace", _spy)
     run_dir, moved, skipped = _gc_archive([_classified(str(f))], arch, hashes, [tmp_path])
@@ -303,7 +305,7 @@ def test_archive_run_id_is_collision_resistant():
     assert len(ids) == 200  # all unique despite same-second stamps
     for rid in ids:
         stamp, _, suffix = rid.partition("-")
-        assert stamp.endswith("Z") and len(suffix) == 8 and suffix.isalnum()
+        assert stamp.endswith("Z") and len(suffix) == 32 and suffix.isalnum()
 
 
 def test_gc_archive_rechecks_registry_stage_before_move(tmp_path):

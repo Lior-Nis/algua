@@ -139,10 +139,14 @@ Only two reasons make a file reapable; everything else is `protected`:
     are hashed off the fd and must equal the sha256 the human SIGNED (`content_changed_since_authorization`
     else — point-of-use enforcement, not merely challenge-time); an `lstat` (st_dev,st_ino) recheck
     just before the move rejects a raced-in replacement (`replaced_before_move`).
-  - **Destination hardening (symmetric).** Before AND after the `mkdir`, the destination is verified
-    to contain no symlinked run-dir/mirrored component and to resolve under the archive root
-    (`archive_dest_unsafe` else) — a planted symlink component cannot redirect a reaped file out of
-    the archive tree via `mkdir(exist_ok=True)` + `os.replace`.
+  - **Destination hardening (symmetric, fd-based).** The dest parent is built by fd-relative,
+    symlink-refusing traversal (`_open_archive_parent_dir`): the operator-declared archive root is
+    opened, then each component below it is `mkdir`-then-`open`ed under the parent's fd with
+    `O_DIRECTORY | O_NOFOLLOW`, and the move is a `renameat` (`os.replace(..., dst_dir_fd=parent_fd)`)
+    targeting the real directory inode we hold. A symlink planted at any dest component — even one
+    swapped in after a path-level check — cannot redirect the reaped file out of the archive tree
+    (`archive_dest_unsafe` if traversal hits a symlinked/failed component). This closes the TOCTOU a
+    path-based `resolve()`+containment check would still leave open.
   - **Registry re-check at point of use.** Immediately before `os.replace` the strategy's CURRENT
     registry stage is re-read; a retired-expired item whose strategy was un-retired, or an orphan
     whose name was `registry add`ed, since the classify snapshot is skipped `registry_stage_changed`
@@ -283,8 +287,8 @@ nothing.
    reap-set-mismatched signatures; no signature → print the manifest-bound challenge and move
    nothing) — no file moves before this gate — THEN per file: source hardening (`O_NOFOLLOW` fd,
    parent-chain containment to scan roots, signed-content-hash match, inode recheck), **destination
-   hardening** (`_archive_dest_safe`: reject a symlinked run-dir/mirrored component or a dest
-   resolving outside the archive root, checked before+after `mkdir`), **registry stage re-check**
+   hardening** (`_open_archive_parent_dir`: fd-relative `O_NOFOLLOW` traversal + `renameat` via
+   `dst_dir_fd` so no symlinked dest component is ever followed), **registry stage re-check**
    (skip `registry_stage_changed` if the strategy un-retired / the orphan was added since classify),
    then a single atomic `os.replace` into `<archive-dir>/<run-id>/<mirrored-path>` (`run-id` =
    UTC stamp + uuid suffix, collision-resistant; NO copy fallback — cross-fs skipped
@@ -361,7 +365,8 @@ finding), the body of this spec was rewritten to describe what actually ships: (
 are NEVER reaped (kb-sync-owned); (2) a SINGLE `--archive-dir` (not co-located dual roots), with a
 cross-filesystem source skipped `cross_filesystem`; (3) archive = a single atomic `os.replace` into
 a UTC+uuid run dir, with source hardening (`O_NOFOLLOW`/containment/signed-hash/inode), destination
-hardening (`_archive_dest_safe` symlink+containment), and a point-of-use registry-stage re-check;
+hardening (`_open_archive_parent_dir` fd-relative `O_NOFOLLOW` traversal + `renameat`), and a
+point-of-use registry-stage re-check;
 (4) **no sidecar, no `manifest.jsonl`, no reconcile pass** — crash-safety is limited to the
 atomic-rename "at most one of {source,target} exists" invariant, and the audit record lives only in
 the command's stdout JSON. The durable-record protocol is captured above as a DEFERRED follow-up,

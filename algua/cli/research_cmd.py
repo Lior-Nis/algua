@@ -852,42 +852,51 @@ def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
 
 
 def _archive_run_id() -> str:
-    """Collision-resistant archive run-dir id: a UTC second stamp PLUS a short random suffix.
+    """Collision-resistant archive run-dir id: a UTC second stamp PLUS a full ``uuid4`` suffix.
 
     Two ``--archive`` runs landing in the same UTC second would otherwise share a run dir and could
-    silently ``os.replace`` a prior archived file onto itself; the uuid suffix makes the run dir
-    unique per invocation (#510 GATE-2). Factored out so a test can pin it."""
-    return f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    silently overwrite a prior archived file; the 128-bit uuid suffix makes the run dir unique per
+    invocation with negligible collision probability (#510 GATE-2). Factored out so a test can pin
+    it."""
+    return f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex}"
 
 
-def _archive_dest_safe(archive_dir: Path, dest: Path) -> bool:
-    """True iff ``dest`` lands under ``archive_dir`` with NO symlinked component (#510 GATE-2).
+def _open_archive_parent_dir(archive_dir: Path, dest_parent: Path) -> int | None:
+    """Materialize+open ``dest_parent`` under ``archive_dir`` via fd-relative, symlink-refusing
+    traversal, returning an fd to the FINAL directory (or None if any component is unsafe).
 
-    Hardens the archive DESTINATION the same way the source is hardened: the user-declared archive
-    root (``archive_dir``, resolved — a symlinked root the operator chose is honored) is the trust
-    anchor, but every component BELOW it down to ``dest.parent`` must be a real (non-symlink)
-    directory, and the resolved ``dest.parent`` must land under the resolved root. This defeats a
-    planted symlink (e.g. a pre-created ``<run-dir>`` or mirrored subdir pointing at ``/etc``) that
-    ``mkdir(exist_ok=True)`` + ``os.replace`` would otherwise silently follow OUT of the tree."""
-    root = archive_dir.resolve(strict=False)
+    Hardens the archive DESTINATION as strongly as the source (#510 GATE-2). A prior path-based
+    containment check was still TOCTOU-vulnerable: a component swapped to a symlink between the
+    check and ``os.replace`` could redirect the write out of the tree. Instead we open the
+    operator-declared archive root (``archive_dir`` — a symlinked root the operator chose is
+    honored, so it is opened WITHOUT ``O_NOFOLLOW``) then descend one component at a time,
+    ``mkdir``-then-``open`` each
+    under the parent's fd with ``O_DIRECTORY | O_NOFOLLOW`` so NO intermediate symlink is ever
+    followed. The caller renames with ``dst_dir_fd`` = this fd + the bare final name, so the move
+    targets the real directory inode we hold — a symlink planted at the path level afterward cannot
+    redirect it."""
     try:
-        rel = dest.parent.relative_to(archive_dir)
+        rel = dest_parent.relative_to(archive_dir)
     except ValueError:
-        return False
-    cur = archive_dir
+        return None
+    try:
+        cur = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)  # operator root: follow is OK
+    except OSError:
+        return None
     for part in rel.parts:
-        cur = cur / part
-        if cur.is_symlink():  # a planted symlink component redirects the write outside the tree
-            return False
-    if dest.parent.exists():
         try:
-            real = dest.parent.resolve(strict=True)
-        except (OSError, RuntimeError):
-            return False
-        if not (real == root or root in real.parents):
-            return False
-    # dest itself must not be a symlink (os.replace would clobber the symlink's target).
-    return not dest.is_symlink()
+            try:
+                os.mkdir(part, dir_fd=cur)
+            except FileExistsError:
+                pass  # reuse an already-created run/mirror dir (same-run multi-file)
+            # O_NOFOLLOW: a component that is (or was swapped to) a symlink fails here (ELOOP).
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+        except OSError:
+            os.close(cur)
+            return None
+        os.close(cur)
+        cur = nxt
+    return cur
 
 
 def _gc_archive(
@@ -924,10 +933,10 @@ def _gc_archive(
       copy exist simultaneously (which would double-archive on retry). A genuinely cross-filesystem
       destination raises ``EXDEV``; per the design doc we SKIP+surface it (``cross_filesystem``)
       rather than silently falling back to a non-atomic copy.
-    * DESTINATION containment (symmetric with the source guard): ``_archive_dest_safe`` rejects a
-      dest whose run-dir/mirrored components include a planted symlink or that resolves outside the
-      archive root (``archive_dest_unsafe``), checked BOTH before and after the ``mkdir`` (mkdir
-      with ``exist_ok=True`` would otherwise follow a pre-existing symlinked component out of tree).
+    * DESTINATION containment (symmetric with the source guard): the dest parent is built by
+      fd-relative, ``O_NOFOLLOW`` traversal (``_open_archive_parent_dir``) and the move is a
+      ``renameat`` (``os.replace(..., dst_dir_fd=parent_fd)``) so a planted symlink component can
+      never redirect the write out of the archive tree (``archive_dest_unsafe`` if traversal fails).
     * REGISTRY RE-CHECK (closes the in-process TOCTOU between computing ``reap`` and moving): when
       ``current_stage`` is supplied, the strategy's CURRENT registry stage is re-read immediately
       before ``os.replace``; a retired-expired item whose strategy is no longer ``retired`` (an
@@ -939,6 +948,9 @@ def _gc_archive(
     suffix (``_archive_run_id``) so two runs in the same UTC second never collide.
     """
     resolved_roots = [r.resolve() for r in scan_roots]
+    # Materialize the operator-declared archive ROOT once so the fd-relative traversal can open it;
+    # every component BELOW it is created/opened O_NOFOLLOW per file by _open_archive_parent_dir.
+    archive_dir.mkdir(parents=True, exist_ok=True)
     run_dir = archive_dir / _archive_run_id()
     moved: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -1008,27 +1020,24 @@ def _gc_archive(
             # writing the file onto itself. Stripping the root ("/") yields a unique, nested dest.
             rel = src.relative_to(src.anchor) if src.is_absolute() else src
             dest = run_dir / rel
-            # DESTINATION containment BEFORE mkdir: refuse a planted symlink component up front so
-            # mkdir(exist_ok=True) can never follow it out of the archive tree.
-            if not _archive_dest_safe(archive_dir, dest):
-                _skip("archive_dest_unsafe")
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            # Re-verify AFTER mkdir (a component could have been swapped to a symlink concurrently);
-            # only now, with dest.parent materialized, can we resolve+contain it.
-            if not _archive_dest_safe(archive_dir, dest):
+            # Build+open the dest parent via fd-relative, symlink-refusing traversal, then rename
+            # INTO that fd — a planted symlink component cannot redirect the move out of the tree.
+            parent_fd = _open_archive_parent_dir(archive_dir, dest.parent)
+            if parent_fd is None:
                 _skip("archive_dest_unsafe")
                 continue
             try:
-                # Atomic same-fs rename: no window where both src and dest exist (crash-safe, and no
-                # duplicate-archive-on-retry). Cross-fs raises EXDEV — skip rather than copy.
-                os.replace(src, dest)
+                # Atomic same-fs renameat: no window where both src and dest exist (crash-safe, and
+                # no duplicate-archive-on-retry). Cross-fs raises EXDEV — skip rather than copy.
+                os.replace(src, dest.name, dst_dir_fd=parent_fd)
             except OSError as exc:
                 if exc.errno == errno.EXDEV:
                     _skip("cross_filesystem")
                 else:
                     _skip("archive_move_failed")
                 continue
+            finally:
+                os.close(parent_fd)
         finally:
             os.close(fd)
         moved.append({
