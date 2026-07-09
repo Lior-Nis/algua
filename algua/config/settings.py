@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     alpaca_live_api_secret: str | None = None
     alpaca_live_url: str = "https://api.alpaca.markets"
     mlflow_tracking_uri: str = "mlruns"
+    # Optional operator alert command (#486). Fed the alert JSON on stdin when an always-on operator
+    # run fails / halts / hits a corrupt marker / a wedged lock / a calendar-out-of-bounds anomaly.
+    # Declared as a first-class field (not an ad-hoc os.environ read) so it surfaces through
+    # get_settings() despite model_config extra="ignore". env: ALGUA_ALERT_CMD.
+    alert_cmd: str | None = None
     # Book-level aggregate risk caps (#389), enforced across ALL strategies sharing the live
     # account in `live run-all`. Conservative defaults; env-overridable via ALGUA_BOOK_*.
     # gross/net/single-name-notional are multiples of account equity; concentration is a fraction
