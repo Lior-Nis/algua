@@ -20,3 +20,11 @@ __pycache__/
 
 # Claude Code personal-local settings (per-user, not shared)
 .claude/settings.local.json
+
+# runtime research-output churn (issue #509)
+scratchpad-*
+kb/experience/
+kb/**/.sync.lock
+*.sync.lock
+.DS_Store
+*.swp

@@ -88,6 +88,11 @@ _PROVENANCE_DIGEST = compute_provenance_digest(
     eval_report=EVAL_REPORT,
 )
 
+# Provenance marker (additions-only discipline): these bundled seed examples are hand-authored.
+# Informational only — read by `algua doctor`'s advisory generated_provenance probe, NOT a trust
+# or authorization control.
+GENERATED_BY = "human"
+
 CONFIG = StrategyConfig(
     name="model_scaled_linear",
     universe=["AAPL", "MSFT", "NVDA"],

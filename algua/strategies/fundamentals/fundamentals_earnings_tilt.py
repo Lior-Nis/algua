@@ -9,6 +9,11 @@ import pandas as pd
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import StrategyConfig
 
+# Provenance marker (additions-only discipline): these bundled seed examples are hand-authored.
+# Informational only — read by `algua doctor`'s advisory generated_provenance probe, NOT a trust
+# or authorization control.
+GENERATED_BY = "human"
+
 CONFIG = StrategyConfig(
     name="fundamentals_earnings_tilt",
     universe=["AAPL", "MSFT", "NVDA"],
