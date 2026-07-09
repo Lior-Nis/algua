@@ -140,6 +140,27 @@ def test_no_tracked_junk() -> None:
     )
 
 
+def _strategy_top_level_offender(name: str) -> bool:
+    """True iff a top-level (no subdir) tracked module under strategies/ is NOT an allowed infra
+    module. Deliberately ignores any underscore-prefix naming convention: a `_private`-named
+    module must NOT be able to dodge the top-level placement check by naming alone — only
+    modules declared in INFRA_TOP_LEVEL are exempt."""
+    return name not in INFRA_TOP_LEVEL
+
+
+def test_top_level_underscore_module_is_not_exempt_from_placement() -> None:
+    """Regression (issue #509 GATE-2 finding): a top-level `_private`-named module (e.g.
+    `_scratch_alpha.py`) must still be flagged as an unplaced strategy. Before the fix, the
+    per-file loop's underscore skip ran BEFORE the top-level placement check, so any
+    underscore-prefixed module dropped directly under `algua/strategies/` silently bypassed
+    placement enforcement."""
+    assert _strategy_top_level_offender("_scratch_alpha.py")
+    assert _strategy_top_level_offender("_experimental.py")
+    assert not _strategy_top_level_offender("base.py")
+    assert not _strategy_top_level_offender("loader.py")
+    assert not _strategy_top_level_offender("__init__.py")
+
+
 def test_strategies_placement_and_provenance() -> None:
     """Fail-closed: strategy modules must be PLACED in a family subdir and carry GENERATED_BY.
 
@@ -158,15 +179,18 @@ def test_strategies_placement_and_provenance() -> None:
         rel = path[len(STRAT_PREFIX) :]
         segments = rel.split("/")
         name = segments[-1]
-        if name.startswith("_"):
-            continue
 
-        # No stray non-infra module directly at the strategies top level.
+        # No stray module directly at the strategies top level — checked BEFORE the underscore
+        # skip below, so a "_private"-named module (e.g. `_scratch.py`) can't dodge placement by
+        # naming convention. Only the declared infra modules are allowed here.
         if len(segments) == 1:
-            assert name in INFRA_TOP_LEVEL, (
+            assert not _strategy_top_level_offender(name), (
                 f"unplaced strategy: {path} sits at the strategies top level. Strategy modules "
                 f"must live in a family subdirectory (e.g. algua/strategies/<family>/)."
             )
+            continue
+
+        if name.startswith("_"):
             continue
 
         # Every strategy module inside a family subdir carries a GENERATED_BY provenance stamp.
