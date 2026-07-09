@@ -107,6 +107,15 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   flagged clusters by family-term breadth dodged and recommends a human-governed consolidation
   (member reassignment). READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation —
   a prioritization signal, not a gate.
+- `uv run algua research gc [--retention-days N --archive --actor human --archive-dir DIR --top N]` —
+  ADVISORY reaper of dead strategy artifacts: it classifies the on-disk strategy modules
+  (`algua/strategies/<family>/*.py`) and top-level reports (`<knowledge_dir>/strategies/*.md`) against
+  the registry and lists what is safely reapable — a strategy RETIRED for more than `--retention-days`
+  (default 90), or a report with no registry row (orphaned). READ-ONLY by default (a listing is a
+  prioritization signal, NOT a transition). Fail-safe: an untracked module, a non-terminal strategy,
+  and a retired-without-timestamp are ALWAYS kept. `--archive --actor human` (human-only) MOVES the
+  reapable files into a timestamped `archive/` tree; it NEVER deletes and NEVER touches the immutable
+  registry DB row.
 - `uv run algua research pbo <name> --param KEY=v1,v2,... [--windows N --rank-by mean_sharpe|min_sharpe]`
   — ADVISORY Probability-of-Backtest-Overfitting (PBO) via CSCV (#467) over the SAME grid a
   `backtest sweep` runs. Answers a question the DSR/FDR/breadth stack never asks: does the selection

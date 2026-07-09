@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import time
+from collections import Counter
+from datetime import UTC, datetime
 from itertools import combinations
+from pathlib import Path
 from typing import Any
 
 import typer
 
+import algua.strategies
 from algua.backtest.engine import holdout_window
 from algua.backtest.sweep import parse_grid, sweep_with_matrix
 from algua.backtest.walkforward import walk_forward
@@ -41,7 +46,7 @@ from algua.registry.negative_results import (
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
-from algua.research import family_audit
+from algua.research import family_audit, lifecycle_gc
 from algua.research.cscv import CSCV_MIN_WINDOWS
 from algua.research.cscv import pbo as compute_pbo
 from algua.research.gates import GateCriteria
@@ -766,4 +771,150 @@ def family_audit_cmd() -> None:
             "return_independent_threshold": family_audit.RETURN_INDEPENDENT_THRESHOLD,
             "return_correlation_min_overlap": family_audit.RETURN_CORRELATION_MIN_OVERLAP,
         },
+    }))
+
+
+_GC_NOTE = (
+    "advisory lifecycle GC: read-only by default; a listing is a prioritization signal, not a "
+    "transition. Only --archive --actor human MOVES files; the immutable registry DB row is NEVER "
+    "touched."
+)
+
+
+def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
+    """Scan the two on-disk strategy surfaces into FileItems (the I/O the pure module refuses).
+
+    Surface 1 — strategy modules: every ``*.py`` under a public family dir
+    (``algua/strategies/<family>/`` with an ``__init__.py`` and a non-underscore name), skipping
+    ``__init__.py`` and any private ``_*.py`` helper. Example families are scanned too; with no
+    registry row they classify as ``untracked_module`` and are never reaped, so no special-casing.
+    Surface 2 — reports: the TOP-LEVEL ``*.md`` files under ``<knowledge_dir>/strategies/`` (never
+    recursing into ``families/`` subdirs), skipping ``README.md``.
+    """
+    items: list[lifecycle_gc.FileItem] = []
+    root = Path(algua.strategies.__file__).parent
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or d.name.startswith("_") or not (d / "__init__.py").exists():
+            continue
+        for p in sorted(d.glob("*.py")):
+            if p.name == "__init__.py" or p.stem.startswith("_"):
+                continue
+            items.append(lifecycle_gc.FileItem(
+                path=str(p), strategy=p.stem, surface=lifecycle_gc.SURFACE_MODULE,
+                size_bytes=p.stat().st_size))
+    reports_dir = settings.knowledge_dir / "strategies"
+    if reports_dir.exists():
+        for p in sorted(reports_dir.glob("*.md")):
+            if p.name == "README.md":
+                continue
+            items.append(lifecycle_gc.FileItem(
+                path=str(p), strategy=p.stem, surface=lifecycle_gc.SURFACE_REPORT,
+                size_bytes=p.stat().st_size))
+    return items
+
+
+def _gc_archive(
+    reap: list[lifecycle_gc.Classified], archive_dir: Path,
+) -> tuple[str, list[dict[str, Any]]]:
+    """MOVE each reapable file into a timestamped run dir under ``archive_dir``, mirroring its path.
+
+    Idempotent/race-safe: a source that has already vanished (a concurrent GC, a manual delete) is
+    skipped rather than raising, so a re-run of the same command moves nothing left to move.
+    """
+    run_dir = archive_dir / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    moved: list[dict[str, Any]] = []
+    for c in reap:
+        src = Path(c.path)
+        if not src.exists():
+            continue
+        # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
+        # paths are ABSOLUTE (both algua.strategies.__file__ and an absolute knowledge_dir), and
+        # `run_dir / <absolute>` would collapse to the absolute path itself (pathlib join rule),
+        # moving the file onto itself. Stripping the root ("/") yields a unique, nested dest.
+        rel = src.relative_to(src.anchor) if src.is_absolute() else src
+        dest = run_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        moved.append({
+            "src": c.path, "dest": str(dest), "strategy": c.strategy, "surface": c.surface,
+            "reason": c.reason, "size_bytes": c.size_bytes,
+        })
+    return (str(run_dir), moved)
+
+
+@research_app.command("gc")
+@json_errors
+def gc(
+    retention_days: float = typer.Option(
+        90.0, "--retention-days",
+        help="reap retired strategies only after this many days retired (conservative default)"),
+    archive: bool = typer.Option(
+        False, "--archive",
+        help="GOVERNED cleanup: MOVE reapable files to the archive tree (human-only). Default is "
+             "read-only advisory."),
+    actor: str = typer.Option("agent", "--actor"),
+    archive_dir: Path = typer.Option(
+        Path("archive"), "--archive-dir", help="root of the archive tree for --archive"),
+    top: int = typer.Option(
+        None, "--top", help="cap the reapable list to the top N by reclaimable size"),
+) -> None:
+    """ADVISORY reaper of dead strategy artifacts — retired-strategy modules/reports & orphaned
+    reports. READ-ONLY by default: it classifies the on-disk strategy modules and top-level reports
+    against the registry and lists what is safely reapable (a retired strategy older than
+    --retention-days, or a report with no registry row). A listing is a prioritization signal, NOT
+    a transition. Fail-safe throughout: a module with no row (untracked), a non-terminal strategy,
+    or a retired-without-timestamp is ALWAYS kept. Only `--archive --actor human` MOVES the reapable
+    files into a timestamped archive tree; it NEVER deletes and NEVER touches the registry row."""
+    if retention_days < 0:
+        raise ValueError("--retention-days must be >= 0")
+    if top is not None and top < 1:
+        raise ValueError("--top must be >= 1 when provided")
+    if archive and actor != "human":
+        raise ValueError("research gc --archive is a governed cleanup: pass --actor human")
+
+    settings = get_settings()
+    items = _gc_inventory(settings)
+
+    registry: dict[str, lifecycle_gc.RegistryEntry] = {}
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        for rec in repo.list_strategies():
+            retired_at: str | None = None
+            if rec.stage == Stage.RETIRED:
+                trans = repo.list_transitions(rec.name)
+                rets = [t["created_at"] for t in trans if t["to_stage"] == Stage.RETIRED.value]
+                retired_at = max(rets) if rets else None
+            registry[rec.name] = lifecycle_gc.RegistryEntry(
+                stage=rec.stage.value, retired_at=retired_at)
+
+    now = datetime.now(UTC)
+    classified = lifecycle_gc.classify(
+        items, registry, now=now, retention_days=retention_days)
+    reap = lifecycle_gc.reapable(classified)
+    by_reason: Counter[str] = Counter(c.reason for c in classified)
+
+    archive_run_dir: str | None = None
+    archived: list[dict[str, Any]] = []
+    if archive and reap:
+        archive_run_dir, archived = _gc_archive(reap, archive_dir)
+
+    shown = reap[:top] if top else reap
+    reapable_dicts = [{
+        "path": c.path, "strategy": c.strategy, "surface": c.surface, "reason": c.reason,
+        "size_bytes": c.size_bytes,
+        "age_days": round(c.age_days, 3) if c.age_days is not None else None,
+        "stage": c.stage,
+    } for c in shown]
+
+    emit(ok({
+        "note": _GC_NOTE,
+        "dry_run": not archive,
+        "retention_days": retention_days,
+        "total_files_scanned": len(classified),
+        "reapable_count": len(reap),
+        "reclaimable_bytes": sum(c.size_bytes for c in reap),
+        "by_reason": dict(by_reason),
+        "reapable": reapable_dicts,
+        "archived": archived,
+        "archive_run_dir": archive_run_dir,
     }))
