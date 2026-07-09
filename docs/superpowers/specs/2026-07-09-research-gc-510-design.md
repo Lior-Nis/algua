@@ -147,10 +147,22 @@ Only two reasons make a file reapable; everything else is `protected`:
     swapped in after a path-level check — cannot redirect the reaped file out of the archive tree
     (`archive_dest_unsafe` if traversal hits a symlinked/failed component). This closes the TOCTOU a
     path-based `resolve()`+containment check would still leave open.
-  - **Registry re-check at point of use.** Immediately before `os.replace` the strategy's CURRENT
-    registry stage is re-read; a retired-expired item whose strategy was un-retired, or an orphan
-    whose name was `registry add`ed, since the classify snapshot is skipped `registry_stage_changed`
-    — closing the in-process TOCTOU between computing `reap` and moving.
+  - **Registry re-check at point of use (live per-file query).** A `current_stage` callable queries
+    the registry LIVE (`repo.get(name)`) for each strategy immediately before its file is moved —
+    NOT a one-shot pre-loop snapshot — so a retired-expired item whose strategy was un-retired, or
+    an orphan whose name was `registry add`ed, since the classify pass is caught per-file and
+    skipped `registry_stage_changed`.
+  - **Accepted residual races (documented, not closed).** Two sub-instruction windows are inherent
+    to a lock-free file mover and are NOT closed: (1) the source `os.replace` re-resolves `src` by
+    path, so a swap between the `lstat(dev,ino)` recheck and the rename could archive a raced-in
+    file; (2) the registry stage can change between the live query and the rename. Both are accepted
+    because GC is advisory, human-authenticated, reversible (nothing deleted, no DB row moved), and
+    the worst case is a file that was being removed from the active tree anyway landing in
+    `archive/`. Fully closing them would require serializing registry/filesystem writers across the
+    archive phase (a lock), which is out of scope for this housekeeping slice. Likewise
+    `archive_dir.mkdir(parents=True)` may follow a symlink in an ANCESTOR of the archive dir — the
+    archive dir and its ancestors are the operator's own declared, trusted path (only the untrusted
+    run-dir/mirror components BELOW it get the fd-relative `O_NOFOLLOW` treatment).
 - **Crash-safety: what actually ships (NO durable archive record / rebuildable index).** The atomic
   rename is the only crash-safety mechanism: after any crash, **at most one of {source, target}
   exists** for each artifact (never both, because there is no copy path; never a torn write). There

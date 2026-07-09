@@ -50,7 +50,7 @@ from algua.registry.negative_results import (
 )
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.search_breadth import record_search_breadth
-from algua.registry.store import SqliteStrategyRepository
+from algua.registry.store import SqliteStrategyRepository, StrategyNotFound
 from algua.research import family_audit, lifecycle_gc
 from algua.research.cscv import CSCV_MIN_WINDOWS
 from algua.research.cscv import pbo as compute_pbo
@@ -950,6 +950,9 @@ def _gc_archive(
     resolved_roots = [r.resolve() for r in scan_roots]
     # Materialize the operator-declared archive ROOT once so the fd-relative traversal can open it;
     # every component BELOW it is created/opened O_NOFOLLOW per file by _open_archive_parent_dir.
+    # NOTE: this mkdir may follow a symlink in an ANCESTOR of archive_dir — the archive dir and its
+    # ancestors are the operator's own declared location (a trusted path), unlike the untrusted
+    # run-dir/mirror components below it, which are the ones a symlink attack would target.
     archive_dir.mkdir(parents=True, exist_ok=True)
     run_dir = archive_dir / _archive_run_id()
     moved: list[dict[str, Any]] = []
@@ -992,7 +995,11 @@ def _gc_archive(
                 _skip("content_changed_since_authorization")
                 continue
             # Identity re-check before the atomic move: the path must STILL name the exact inode we
-            # hashed, else a replacement was raced in — leave both alone.
+            # hashed, else a replacement was raced in — leave both alone. (This narrows but cannot
+            # fully close the source race: os.replace re-resolves `src` by path, so a swap in the
+            # sub-instruction window between this lstat and the rename is inherent to a lock-free
+            # mover. Accepted residual — GC is advisory, reversible, and the worst case is archiving
+            # a raced-in file that was being REMOVED from the active tree anyway.)
             try:
                 lst = os.lstat(src)
             except FileNotFoundError:
@@ -1194,16 +1201,25 @@ def gc(
                 "retention window, and archive dir. Re-run without --actor-signature to print a "
                 "fresh challenge, sign it (ssh-keygen -Y sign -n algua-human-actor), and retry. A "
                 "bare --actor human does not unlock the cleanup.")
-        # Fresh registry snapshot re-read AFTER signature verification: the point-of-use stage
-        # re-check in _gc_archive keys off this, closing the in-process TOCTOU between the classify
-        # snapshot above and the actual move (a strategy un-retired, or an orphan `registry add`ed,
-        # in between must not be archived against stale eligibility).
+        # Point-of-use stage re-check: pass a callable that queries the registry LIVE for each
+        # strategy immediately before its file is moved (NOT a one-shot snapshot), so the window
+        # between the classify pass and each individual move is closed — a strategy un-retired, or
+        # an orphan `registry add`ed, in between is caught per-file and skipped
+        # (`registry_stage_changed`) rather than archived against stale eligibility. (The residual
+        # sub-instruction race between the query and the rename is inherent to a lock-free file
+        # mover; GC is advisory + reversible + human-authenticated, so it is an accepted residual.)
         with registry_conn() as conn:
             fresh_repo = SqliteStrategyRepository(conn)
-            fresh_stage = {r.name: r.stage.value for r in fresh_repo.list_strategies()}
-        archive_run_dir, archived, archive_skipped = _gc_archive(
-            reap, archive_dir, content_hashes, _gc_scan_roots(settings),
-            current_stage=fresh_stage.get)
+
+            def _live_stage(name: str) -> str | None:
+                try:
+                    return fresh_repo.get(name).stage.value
+                except StrategyNotFound:
+                    return None
+
+            archive_run_dir, archived, archive_skipped = _gc_archive(
+                reap, archive_dir, content_hashes, _gc_scan_roots(settings),
+                current_stage=_live_stage)
 
     emit(ok({
         "note": _GC_NOTE,
