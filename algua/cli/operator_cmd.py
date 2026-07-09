@@ -53,11 +53,20 @@ operator_app = typer.Typer(
 app.add_typer(operator_app, name="operator")
 
 _STDOUT_HEAD_CAP = 500
+# Hard wall-clock cap on a single driver subprocess, as a multiple of the job's stuck-lock grace
+# (`expected_duration_seconds`). A driver hung on a broker/network stall is KILLED at this cap so it
+# can never hold `operator.lock` indefinitely and silently stop the fleet from ever trading again.
+# The kill leaves the session marker unwritten, so the next timer fire re-attempts (run-all
+# reconciles-before-trading, so a retry never blind-double-trades). systemd `TimeoutStartSec` is a
+# further backstop set ABOVE this app-level cap.
+_DRIVER_TIMEOUT_FACTOR = 2.0
 
 
-def _run_driver(command: list[str]) -> subprocess.CompletedProcess:
-    """Subprocess seam (monkeypatched in tests): run the driver, capturing stdout/stderr."""
-    return subprocess.run(command, capture_output=True, text=True)  # noqa: S603
+def _run_driver(command: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Subprocess seam (monkeypatched in tests): run the driver, capturing stdout/stderr, under a
+    hard ``timeout`` (seconds). A driver that overruns is killed and ``subprocess.TimeoutExpired``
+    propagates to the caller."""
+    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)  # noqa: S603
 
 
 def _resolve_git_dir() -> Path:
@@ -332,7 +341,32 @@ def _run_session(
             alert_cmd=alert_cmd,
         )
 
-    proc = _run_driver(command)
+    driver_timeout = op_job.expected_duration_seconds * _DRIVER_TIMEOUT_FACTOR
+    try:
+        proc = _run_driver(command, driver_timeout)
+    except subprocess.TimeoutExpired:
+        # A hung driver (broker/network stall) would otherwise hold operator.lock until a human
+        # intervenes and silently stop the fleet from trading. It is KILLED at the wall-clock cap;
+        # the marker is left unwritten so the next fire re-attempts (run-all reconciles-before-
+        # trading, so a retry never blind-double-trades), and the timeout is alerted.
+        emit_alert(
+            "driver_timeout",
+            {"job": job, "session": sess_iso, "timeout_seconds": driver_timeout},
+            alert_cmd=alert_cmd,
+        )
+        emit(
+            {
+                "ok": False,
+                "job": job,
+                "ran": True,
+                "recorded": False,
+                "reason": "driver_timeout",
+                "session": sess_iso,
+                "timeout_seconds": driver_timeout,
+                "alerted": True,
+            }
+        )
+        raise typer.Exit(1) from None
     payload = _parse_driver_payload(proc.stdout)
     rc = proc.returncode
     stdout_head = (proc.stdout or "")[:_STDOUT_HEAD_CAP]

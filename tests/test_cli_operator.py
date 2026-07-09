@@ -42,7 +42,7 @@ def _record(m: SessionMarker, session: date) -> None:
 
 
 def _fake_driver(returncode: int, stdout: str):
-    def _run(command: list[str]) -> subprocess.CompletedProcess:
+    def _run(command: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(command, returncode=returncode, stdout=stdout, stderr="")
 
     return _run
@@ -69,7 +69,7 @@ def test_already_ran_suppresses_and_skips_driver(db_dir, monkeypatch):
     _record(SessionMarker(db_dir), _SESSION)
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        operator_cmd, "_run_driver", lambda c: calls.append(c) or _fake_driver(0, "{}")(c)
+        operator_cmd, "_run_driver", lambda c, *_: calls.append(c) or _fake_driver(0, "{}")(c)
     )
 
     result = _invoke()
@@ -91,7 +91,7 @@ def test_weekend_after_friday_ran_is_no_op(db_dir, monkeypatch):
     _record(SessionMarker(db_dir), date(2023, 6, 2))
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        operator_cmd, "_run_driver", lambda c: calls.append(c) or _fake_driver(0, "{}")(c)
+        operator_cmd, "_run_driver", lambda c, *_: calls.append(c) or _fake_driver(0, "{}")(c)
     )
 
     result = _invoke(now="2023-06-04T07:00:00+00:00")  # Sunday
@@ -109,7 +109,7 @@ def test_weekend_after_friday_ran_is_no_op(db_dir, monkeypatch):
 def test_due_clean_run_records_full_argv(db_dir, monkeypatch):
     calls: list[list[str]] = []
 
-    def _spy(command):
+    def _spy(command, timeout=None):
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, stdout='{"ok":true}', stderr="")
 
@@ -172,6 +172,35 @@ def test_due_failed_ok_false_is_breach(db_dir, monkeypatch):
     assert alerts[0][0] == "breach"
 
 
+# --- (d') due, driver HANGS: killed at the timeout cap, alert + NO marker + exit 1 --------------
+
+
+def test_due_driver_timeout_kills_and_leaves_marker_for_retry(db_dir, monkeypatch):
+    seen: dict[str, float] = {}
+
+    def _hang(command, timeout=None):
+        seen["timeout"] = timeout
+        raise subprocess.TimeoutExpired(cmd=command, timeout=timeout)
+
+    monkeypatch.setattr(operator_cmd, "_run_driver", _hang)
+    alerts = _spy_alerts(monkeypatch)
+
+    result = _invoke()
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["ran"] is True
+    assert payload["recorded"] is False
+    assert payload["reason"] == "driver_timeout"
+    # the wrapper hard-caps the driver at 2x the paper job's 900s grace
+    assert payload["timeout_seconds"] == 1800.0
+    assert seen["timeout"] == 1800.0
+    assert alerts[0][0] == "driver_timeout"
+    # marker left unwritten so the NEXT fire re-attempts the session
+    assert SessionMarker(db_dir).last_session("paper") is None
+
+
 # --- (j) due, rc==0 deferred: NO marker, NO alert, exit 0 ---------------------------------------
 
 
@@ -214,7 +243,7 @@ def test_due_rc0_non_json_completion_unconfirmed(db_dir, monkeypatch):
 def test_corrupt_marker_fails_closed(db_dir, monkeypatch):
     (db_dir / "operator_sessions.json").write_text("{corrupt json")
     calls: list = []
-    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c: calls.append(c))
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)
 
     result = _invoke()
@@ -232,7 +261,7 @@ def test_corrupt_marker_fails_closed(db_dir, monkeypatch):
 
 def test_calendar_out_of_bounds_fails_closed(db_dir, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c: calls.append(c))
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)
 
     result = _invoke(now="2099-01-01T21:30:00+00:00")
@@ -257,7 +286,7 @@ def test_calendar_out_of_bounds_fails_closed(db_dir, monkeypatch):
 )
 def test_command_mismatch_fails_closed(db_dir, monkeypatch, cmd):
     calls: list = []
-    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c: calls.append(c))
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)
 
     result = _invoke(cmd=cmd)
@@ -275,7 +304,7 @@ def test_command_mismatch_fails_closed(db_dir, monkeypatch, cmd):
 
 def test_unknown_job_fails_closed(db_dir, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c: calls.append(c))
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)
 
     result = _invoke(job="frobnicate")
@@ -307,7 +336,7 @@ def _hold_lock(db_dir: Path, started_at: str):
 
 def test_run_lock_within_grace_is_benign_no_op(db_dir, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c: calls.append(c))
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)
     handle = _hold_lock(db_dir, "2023-06-01T21:29:30+00:00")  # 30s before _DUE -> within grace
     try:
@@ -326,7 +355,7 @@ def test_run_lock_within_grace_is_benign_no_op(db_dir, monkeypatch):
 
 def test_run_lock_past_grace_alerts_stuck(db_dir, monkeypatch):
     calls: list = []
-    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c: calls.append(c))
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)
     handle = _hold_lock(db_dir, "2023-06-01T18:00:00+00:00")  # 3.5h before _DUE -> past 900s grace
     try:
@@ -349,7 +378,9 @@ def test_session_gap_alerts_before_running(db_dir, monkeypatch):
     _record(SessionMarker(db_dir), date(2023, 5, 30))  # two sessions back -> one skipped (5/31)
     calls: list = []
     monkeypatch.setattr(
-        operator_cmd, "_run_driver", lambda c: calls.append(c) or _fake_driver(0, '{"ok":true}')(c)
+        operator_cmd,
+        "_run_driver",
+        lambda c, *_: calls.append(c) or _fake_driver(0, '{"ok":true}')(c),
     )
     alerts = _spy_alerts(monkeypatch)
 
@@ -381,6 +412,8 @@ def test_paper_systemd_units_present_and_shaped():
     svc = (_SYSTEMD / "algua-paper.service").read_text()
     assert "Type=oneshot" in svc
     assert "operator run --job paper" in svc
+    # a hung firing must not wedge forever — systemd caps it as the last-resort backstop
+    assert "TimeoutStartSec=" in svc
 
     tmr = (_SYSTEMD / "algua-paper.timer").read_text()
     assert "OnCalendar" in tmr
