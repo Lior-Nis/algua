@@ -901,7 +901,9 @@ def _open_archive_parent_dir(archive_dir: Path, dest_parent: Path) -> int | None
 
 def _gc_archive(
     reap: list[lifecycle_gc.Classified], archive_dir: Path, expected_hashes: dict[str, str],
-    scan_roots: list[Path], current_stage: Callable[[str], str | None] | None = None,
+    scan_roots: list[Path],
+    current_entry: Callable[[str], lifecycle_gc.RegistryEntry | None] | None = None,
+    retention_days: float = 0.0,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """MOVE each reapable file into a timestamped run dir under ``archive_dir``, mirroring its path.
 
@@ -937,10 +939,15 @@ def _gc_archive(
       fd-relative, ``O_NOFOLLOW`` traversal (``_open_archive_parent_dir``) and the move is a
       ``renameat`` (``os.replace(..., dst_dir_fd=parent_fd)``) so a planted symlink component can
       never redirect the write out of the archive tree (``archive_dest_unsafe`` if traversal fails).
-    * REGISTRY RE-CHECK (closes the in-process TOCTOU between computing ``reap`` and moving): when
-      ``current_stage`` is supplied, the strategy's CURRENT registry stage is re-read immediately
-      before ``os.replace``; a retired-expired item whose strategy is no longer ``retired`` (an
-      un-retire back-step) or an orphaned report whose name now has a registry row is skipped
+    * REGISTRY RE-CHECK (closes the window between computing ``reap`` and moving — which spans an
+      out-of-band human signing delay, not just a few in-process instructions): when
+      ``current_entry`` is supplied, the strategy's LIVE registry snapshot (stage + retired_at) is
+      re-read immediately before ``os.replace`` and run back through
+      ``lifecycle_gc.still_reapable`` — a full re-DERIVE of eligibility against ``retention_days``,
+      not a bare stage-equality check. This catches not only an un-retire back-step or an orphan
+      that gained a registry row, but also a strategy that un-retired and RE-retired in the window:
+      its live stage reads ``retired`` again, but the re-retirement reset its clock, so a
+      stage-only check would wrongly re-authorize it. Any of these is skipped
       (``registry_stage_changed``) rather than moved against stale eligibility.
 
     Refused/vanished paths are reported in ``skipped`` and left in place; ``expected_hashes`` is the
@@ -1008,17 +1015,17 @@ def _gc_archive(
             if (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
                 _skip("replaced_before_move")
                 continue
-            # Registry re-check at the point of use: re-read the strategy's CURRENT stage and refuse
-            # to move against a now-stale eligibility (a retired strategy un-retired, or an orphan
-            # that got `registry add`ed, between computing `reap` and here). Closes the in-process
-            # TOCTOU window; hash/inode identity alone would not catch a pure registry transition.
-            if current_stage is not None:
-                cur_stage = current_stage(c.strategy)
-                if c.reason == lifecycle_gc.REAP_RETIRED_EXPIRED \
-                        and cur_stage != lifecycle_gc.RETIRED:
-                    _skip("registry_stage_changed")
-                    continue
-                if c.reason == lifecycle_gc.REAP_ORPHANED_REPORT and cur_stage is not None:
+            # Registry re-check at the point of use: re-read the strategy's LIVE registry snapshot
+            # and re-DERIVE eligibility (not just compare stage equality) so a retired strategy that
+            # un-retired, OR un-retired and RE-retired (resetting its clock), OR an orphan that got
+            # `registry add`ed, between computing `reap` and here is refused. Closes the window
+            # between the classify() scan and the move, which spans an out-of-band human signing
+            # delay; hash/inode identity alone would not catch a pure registry transition.
+            if current_entry is not None:
+                entry = current_entry(c.strategy)
+                if not lifecycle_gc.still_reapable(
+                    c.reason, entry, now=datetime.now(UTC), retention_days=retention_days,
+                ):
                     _skip("registry_stage_changed")
                     continue
             # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
@@ -1109,6 +1116,12 @@ def gc(
         raise ValueError("--top must be >= 1 when provided")
     if archive and actor != "human":
         raise ValueError("research gc --archive is a governed cleanup: pass --actor human")
+    # Resolve BEFORE building the challenge: the signed challenge binds this exact string (see
+    # build_gc_archive_challenge's "resolved archive root" contract), so a relative --archive-dir
+    # must be pinned to an absolute path here — otherwise the same relative string could resolve to
+    # a different directory depending on the cwd the command happens to be re-run from, silently
+    # widening what a signature authorizes beyond what the human actually saw (#510 GATE-2).
+    archive_dir = archive_dir.expanduser().resolve()
 
     settings = get_settings()
     items = _gc_inventory(settings)
@@ -1203,23 +1216,31 @@ def gc(
                 "bare --actor human does not unlock the cleanup.")
         # Point-of-use stage re-check: pass a callable that queries the registry LIVE for each
         # strategy immediately before its file is moved (NOT a one-shot snapshot), so the window
-        # between the classify pass and each individual move is closed — a strategy un-retired, or
-        # an orphan `registry add`ed, in between is caught per-file and skipped
-        # (`registry_stage_changed`) rather than archived against stale eligibility. (The residual
+        # between the classify pass and each individual move is closed — a strategy un-retired, an
+        # orphan `registry add`ed, or a strategy that un-retired and RE-retired (resetting its
+        # retention clock) in between is caught per-file and skipped (`registry_stage_changed`)
+        # rather than archived against stale eligibility. `_gc_archive` re-derives full eligibility
+        # via `lifecycle_gc.still_reapable`, not a bare stage-equality check. (The residual
         # sub-instruction race between the query and the rename is inherent to a lock-free file
         # mover; GC is advisory + reversible + human-authenticated, so it is an accepted residual.)
         with registry_conn() as conn:
             fresh_repo = SqliteStrategyRepository(conn)
 
-            def _live_stage(name: str) -> str | None:
+            def _live_entry(name: str) -> lifecycle_gc.RegistryEntry | None:
                 try:
-                    return fresh_repo.get(name).stage.value
+                    rec = fresh_repo.get(name)
                 except StrategyNotFound:
                     return None
+                retired_at: str | None = None
+                if rec.stage == Stage.RETIRED:
+                    trans = fresh_repo.list_transitions(name)
+                    rets = [t["created_at"] for t in trans if t["to_stage"] == Stage.RETIRED.value]
+                    retired_at = max(rets) if rets else None
+                return lifecycle_gc.RegistryEntry(stage=rec.stage.value, retired_at=retired_at)
 
             archive_run_dir, archived, archive_skipped = _gc_archive(
                 reap, archive_dir, content_hashes, _gc_scan_roots(settings),
-                current_stage=_live_stage)
+                current_entry=_live_entry, retention_days=retention_days)
 
     emit(ok({
         "note": _GC_NOTE,

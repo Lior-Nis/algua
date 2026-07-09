@@ -309,14 +309,16 @@ def test_archive_run_id_is_collision_resistant():
 
 
 def test_gc_archive_rechecks_registry_stage_before_move(tmp_path):
-    """The point-of-use registry re-check closes the in-process TOCTOU: a retired-expired item whose
-    strategy is no longer `retired`, and an orphan whose name now has a row, are BOTH skipped."""
+    """The point-of-use registry re-check closes the window between classify() and the move (which
+    spans an out-of-band human signing delay): a retired-expired item whose strategy is no longer
+    `retired`, an orphan whose name now has a row, and a strategy that un-retired and RE-retired
+    (resetting its retention clock) are ALL skipped."""
     # (a) un-retired between classify and move -> skipped, source left in place.
     f1 = tmp_path / "unretired.py"
     f1.write_text("x=1\n")
     run_dir, moved, skipped = _gc_archive(
         [_classified_retired(str(f1))], tmp_path / "a1", {str(f1): _sha(f1)}, [tmp_path],
-        current_stage=lambda name: "live")
+        current_entry=lambda name: lifecycle_gc.RegistryEntry(stage="live", retired_at=None))
     assert moved == []
     assert [s["reason"] for s in skipped] == ["registry_stage_changed"]
     assert f1.exists()
@@ -326,19 +328,37 @@ def test_gc_archive_rechecks_registry_stage_before_move(tmp_path):
     f2.write_text("y\n")
     run_dir, moved, skipped = _gc_archive(
         [_classified(str(f2))], tmp_path / "a2", {str(f2): _sha(f2)}, [tmp_path],
-        current_stage=lambda name: "idea")
+        current_entry=lambda name: lifecycle_gc.RegistryEntry(stage="idea", retired_at=None))
     assert moved == []
     assert [s["reason"] for s in skipped] == ["registry_stage_changed"]
     assert f2.exists()
 
-    # (c) control: stage still retired -> the move proceeds.
+    # (c) control: stage still retired at the SAME old timestamp -> the move proceeds.
     f3 = tmp_path / "still_retired.py"
     f3.write_text("z=1\n")
     run_dir, moved, skipped = _gc_archive(
         [_classified_retired(str(f3))], tmp_path / "a3", {str(f3): _sha(f3)}, [tmp_path],
-        current_stage=lambda name: lifecycle_gc.RETIRED)
+        current_entry=lambda name: lifecycle_gc.RegistryEntry(
+            stage=lifecycle_gc.RETIRED, retired_at="2020-01-01T00:00:00+00:00"),
+        retention_days=90.0)
     assert [m["src"] for m in moved] == [str(f3)]
     assert not f3.exists()
+
+    # (d) RE-retired between classify and move: live stage reads "retired" again, but a fresh
+    # retired_at means the retention clock reset -> skipped, NOT re-authorized by the stage match
+    # alone (#510 GATE-2: still_reapable re-derives eligibility, not a bare stage-equality check).
+    f4 = tmp_path / "re_retired.py"
+    f4.write_text("w=1\n")
+    from datetime import UTC, datetime
+    fresh_retired_at = datetime.now(UTC).isoformat()
+    run_dir, moved, skipped = _gc_archive(
+        [_classified_retired(str(f4))], tmp_path / "a4", {str(f4): _sha(f4)}, [tmp_path],
+        current_entry=lambda name: lifecycle_gc.RegistryEntry(
+            stage=lifecycle_gc.RETIRED, retired_at=fresh_retired_at),
+        retention_days=90.0)
+    assert moved == []
+    assert [s["reason"] for s in skipped] == ["registry_stage_changed"]
+    assert f4.exists()
 
 
 def test_gc_top_bounds_archived_set_to_shown_challenge(tmp_path, monkeypatch):

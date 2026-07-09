@@ -169,6 +169,30 @@ def reapable(classified: list[Classified]) -> list[Classified]:
     )
 
 
+def still_reapable(
+    reason: str, current: RegistryEntry | None, *, now: datetime, retention_days: float,
+) -> bool:
+    """Point-of-use eligibility recheck (#510 GATE-2): re-DERIVE reapability from a LIVE registry
+    snapshot at move time, rather than merely comparing the current stage against the classify-time
+    stage.
+
+    A bare ``stage == retired`` equality check is insufficient: between the initial ``classify()``
+    scan and the archive move — a window that spans an out-of-band human signing delay, not just a
+    few in-process instructions — a strategy can un-retire and then RE-retire. Its live stage reads
+    "retired" again, so a stage-only check would wrongly treat it as still eligible, even though the
+    re-retirement reset its retirement clock to near-zero and it no longer satisfies
+    ``retention_days``. This mirrors ``classify()``'s own fail-safe branches exactly so the
+    point-of-use verdict can never be more permissive than a fresh scan would be.
+    """
+    if reason == REAP_RETIRED_EXPIRED:
+        if current is None or current.stage != RETIRED or current.retired_at is None:
+            return False
+        return _age_days(current.retired_at, now) >= retention_days
+    if reason == REAP_ORPHANED_REPORT:
+        return current is None
+    return False
+
+
 def archive_manifest(reap: list[Classified], content_hashes: dict[str, str]) -> str:
     """Canonical, injective, CONTENT-ADDRESSED description of the EXACT file set an ``--archive``
     run would move. Sorted by path; compact JSON. Each row binds ``path``, ``size_bytes``,

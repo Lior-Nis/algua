@@ -21,6 +21,7 @@ from algua.research.lifecycle_gc import (
     RegistryEntry,
     classify,
     reapable,
+    still_reapable,
 )
 
 NOW = datetime(2026, 7, 9, tzinfo=UTC)
@@ -232,3 +233,43 @@ def test_reapable_size_tie_older_age_first() -> None:
 def test_reapable_empty_when_nothing_reapable() -> None:
     items = [FileItem("wip.py", "wip", SURFACE_MODULE, 10)]
     assert reapable(classify(items, {}, now=NOW, retention_days=RETENTION)) == []
+
+
+def test_still_reapable_retired_expired_true_when_still_past_retention() -> None:
+    entry = RegistryEntry(RETIRED, _iso(90))
+    assert still_reapable(
+        REAP_RETIRED_EXPIRED, entry, now=NOW, retention_days=RETENTION) is True
+
+
+def test_still_reapable_retired_expired_false_when_un_retired() -> None:
+    """A stage-only recheck would miss this: the entry is simply not RETIRED any more."""
+    entry = RegistryEntry("live", None)
+    assert still_reapable(
+        REAP_RETIRED_EXPIRED, entry, now=NOW, retention_days=RETENTION) is False
+
+
+def test_still_reapable_retired_expired_false_when_re_retired_resets_clock() -> None:
+    """The strategy reads RETIRED again (a stage-equality check alone would pass it), but its
+    retired_at is FRESH — the retirement clock reset via an un-retire/re-retire round trip — so it
+    must NOT be re-authorized (#510 GATE-2)."""
+    entry = RegistryEntry(RETIRED, _iso(1))
+    assert still_reapable(
+        REAP_RETIRED_EXPIRED, entry, now=NOW, retention_days=RETENTION) is False
+
+
+def test_still_reapable_retired_expired_false_when_no_entry_or_no_timestamp() -> None:
+    assert still_reapable(REAP_RETIRED_EXPIRED, None, now=NOW, retention_days=RETENTION) is False
+    assert still_reapable(
+        REAP_RETIRED_EXPIRED, RegistryEntry(RETIRED, None), now=NOW,
+        retention_days=RETENTION) is False
+
+
+def test_still_reapable_orphaned_report_true_only_while_still_no_row() -> None:
+    assert still_reapable(REAP_ORPHANED_REPORT, None, now=NOW, retention_days=RETENTION) is True
+
+
+def test_still_reapable_orphaned_report_false_once_registered() -> None:
+    """An orphan that got `registry add`ed between classify and move must not be archived."""
+    entry = RegistryEntry("idea", None)
+    assert still_reapable(
+        REAP_ORPHANED_REPORT, entry, now=NOW, retention_days=RETENTION) is False
