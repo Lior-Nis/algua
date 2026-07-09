@@ -110,27 +110,48 @@ Only two reasons make a file reapable; everything else is `protected`:
     no money, so a bespoke weaker gate was tempting. We deliberately reuse the *same* verified
     human-actor chokepoint as every other governed mutation rather than reintroduce the exact
     forgeable-`--actor` defect #329 fixed. Consistency + non-forgeability beats a one-off gate.
-- **Archive, never delete.** Each reaped file is moved under a run-scoped archive root
-  `archive/<UTC-run-id>/<original-relative-path>` (e.g.
-  `archive/20260709T2014Z-ab12/strategies/momentum/dead_mom.py`). Preserving the original
-  relative structure + a per-run subdir means a later re-created/re-retired same-named file
-  never collides with an earlier archived copy.
+- **Archive, never delete — atomic same-filesystem rename ONLY.** Each reaped artifact is moved
+  under a run-scoped archive root `<archive-root>/<UTC-run-id>/<original-relative-path>` (e.g.
+  `archive/20260709T2014Z-ab12/strategies/momentum/dead_mom.py`). The move is a single
+  `os.replace` (POSIX `rename(2)` — atomic for both files and whole directories on one
+  filesystem). **There is no cross-filesystem copy fallback** (a copy→fsync→unlink, or a
+  non-atomic recursive directory copy, could crash with *both* source and target present — an
+  ambiguous partial-archive state; forbidding it keeps the invariant "at most one of {source,
+  target} exists" true by construction). To guarantee the source and its archive target are always
+  on the same filesystem, the **archive root is co-located per source root**, not a single
+  repo-root dir:
+  - source-tree modules (`algua/strategies/…`) → `<repo>/archive/…`
+  - vault docs + report trees (`<kb>/strategies/…`) → `<kb>/archive/…`
+  Both archive roots are excluded from the scan surfaces and added to `.gitignore`. If a source
+  and its co-located archive root are still somehow on different filesystems (unexpected mount),
+  that artifact is **skipped and surfaced** (reason `skipped_cross_fs`) — never copied — so the
+  atomicity invariant is never violated. Preserving the original relative structure + a per-run
+  subdir means a later re-created/re-retired same-named artifact never collides with an earlier
+  archived copy.
 - **Crash-safe move + manifest protocol (durable record = per-move sidecar).** The rollup
-  `archive/manifest.jsonl` is a *rebuildable index*, NOT the source of truth, so a crash between
-  the move and the manifest append can never orphan an archived artifact. Per artifact:
-  1. Atomically write a sidecar `archive/<run-id>/<rel-path>.reap.json` (write-temp → fsync →
-     `os.replace`) recording the full intent `{run_id, ts, from, to, strategy, reason,
-     stage_at_reap, retired_at, bytes}` — **before** the move. The sidecar sits at the *target*
-     location, whose path is fully known up front.
-  2. Move the artifact: `os.replace(from, to)` (the commit point).
-  3. Append the row to `archive/manifest.jsonl`.
-  **Reconcile-first recovery.** Every `--archive` run begins by reconciling the archive tree
-  against the rollup BEFORE reaping anything new: for each sidecar, (a) target present + row
-  missing → append the row (repairs a crash between step 2 and step 3 — the exact gap a naive
-  move-then-append leaves); (b) target absent but source still present → the crash landed between
-  step 1 and step 2, so complete or discard the pending move idempotently; (c) target absent and
-  source absent → stale sidecar, drop it. Only after reconcile does the run classify + reap. This
-  makes the archive self-describing and the manifest always eventually complete.
+  `<archive-root>/manifest.jsonl` is a *rebuildable index*, NOT the source of truth, so a crash
+  between the move and the manifest append can never orphan an archived artifact. Per artifact:
+  1. Atomically write a sidecar `<archive-root>/<run-id>/<rel-path>.reap.json` (write-temp →
+     fsync → `os.replace`) recording the full intent `{run_id, ts, from, to, strategy, reason,
+     stage_at_reap, retired_at, bytes}` — **before** the move. The sidecar sits *beside* the
+     target location, whose path is fully known up front.
+  2. Move the artifact: `os.replace(from, to)` (the atomic commit point; file or directory).
+  3. Append the row to `<archive-root>/manifest.jsonl`.
+  **Reconcile-first recovery.** Every `--archive` run begins by reconciling each archive tree
+  against its rollup BEFORE reaping anything new. Because step 2 is an atomic rename, exactly one
+  of {source, target} exists per sidecar, giving a total recovery matrix:
+  - **target present, source absent, row missing** → append the row (repairs a crash between
+    step 2 and step 3 — the exact gap a naive move-then-append leaves).
+  - **target present, source absent, row present** → already complete; no-op.
+  - **target absent, source present** → the crash landed between step 1 and step 2; redo the move
+    (idempotent: re-`os.replace`), then append the row.
+  - **target absent, source absent** → stale/aborted sidecar, drop it.
+  - **target present AND source present** → *impossible under atomic rename*; treated as
+    corruption → the item is **skipped, flagged, and surfaced for a human** (never
+    double-reaped, never auto-resolved). This defends the case Codex flagged even though the
+    no-copy rule makes it unreachable.
+  Only after reconcile does the run classify + reap. This makes each archive self-describing and
+  the manifest always eventually complete.
 - **DB immutability.** Cleanup calls **no** registry writer — no `remove_strategy`, no
   `apply_transition`, no ledger write. It only relocates files. Asserted by a test that runs
   `--archive` against a temp registry and checks the `strategies` + `stage_transitions` row
@@ -144,14 +165,15 @@ Only two reasons make a file reapable; everything else is `protected`:
   present at its live path. After a run, a reaped module/doc/report-tree no longer exists at the
   live path (it lives under `archive/`, which is **excluded from the scan roots**), so a second
   run finds nothing more to reap for it and moves nothing. The run-scoped archive subdir
-  guarantees no target collision. Moves use `os.replace` (atomic within a filesystem; cross-fs
-  falls back to copy → fsync → unlink; a report *directory* moves as a unit the same way).
+  guarantees no target collision. Moves are a single atomic `os.replace` on one filesystem (a
+  report *directory* renames as a unit the same way); there is **no** non-atomic copy fallback, so
+  after any crash exactly one of {source, target} exists.
 - The **reconcile-first recovery** above makes crash-idempotency total: a crash mid-run leaves
-  either the source or the archived copy intact (never neither, thanks to the pre-move sidecar +
-  atomic replace), and the next run's reconcile pass repairs any missing manifest row from the
-  sidecar and completes/discards any half-done move — no duplicate manifest row is ever written
-  for an artifact already moved (the append is guarded by the reconcile check), and no archived
-  artifact is ever left without its audit row.
+  either the source or the archived copy intact (never neither and — because the move is an atomic
+  rename with no copy path — never both), and the next run's reconcile pass repairs any missing
+  manifest row from the sidecar and completes/discards any half-done move — no duplicate manifest
+  row is ever written for an artifact already moved (the append is guarded by the reconcile
+  check), and no archived artifact is ever left without its audit row.
 
 ## Module structure & boundaries
 - **`algua/research/gc.py` — pure classifier (no I/O, no DB, no filesystem).** Precedent:
@@ -240,17 +262,20 @@ Ranking = worst-first: `orphaned` before `retired_expired`, then by `total_bytes
 4. **Governed cleanup path** — behind `--archive`: run the **reconcile-first recovery** pass over
    `archive/`, then verify effective human actor via the #329 chokepoint (fail-closed for
    agent/system, forged, replayed, or reap-set-mismatched signatures), then per artifact write the
-   pre-move sidecar (atomic) → `os.replace` to `archive/<run-id>/<rel-path>` (cross-fs
-   copy+fsync+unlink fallback; report dirs move as a unit) through the `_safe_path` containment
-   guard → append the `archive/manifest.jsonl` row. Tests: agent `--archive` fails closed & moves
-   nothing; verified human archives module+doc+report-tree + writes manifest; **DB-immutability**
-   test (`strategies` + `stage_transitions` row counts unchanged); **idempotency** test (second run
-   moves nothing, no dup manifest row); **crash-recovery** test (simulate a move with no manifest
-   append, i.e. an archived file + sidecar but missing rollup row → next run's reconcile appends
-   exactly one row, reaps nothing new); path-containment test (crafted name cannot escape archive
-   root).
-5. **`.gitignore`** — add `/archive/` so archived files + the manifest never re-enter
-   `git status`/an accidental `git add` (coordinates with #509's junk rules).
+   pre-move sidecar (atomic) → single atomic `os.replace` to `<archive-root>/<run-id>/<rel-path>`
+   (co-located per source root; report dirs rename as a unit; NO copy fallback — a genuinely
+   cross-fs artifact is skipped as `skipped_cross_fs`, never copied) through the `_safe_path`
+   containment guard → append the `<archive-root>/manifest.jsonl` row. Tests: agent `--archive`
+   fails closed & moves nothing; verified human archives module+doc+report-tree + writes manifest;
+   **DB-immutability** test (`strategies` + `stage_transitions` row counts unchanged);
+   **idempotency** test (second run moves nothing, no dup manifest row); **crash-recovery** test
+   (simulate a move with no manifest append, i.e. an archived artifact + sidecar but missing
+   rollup row → next run's reconcile appends exactly one row, reaps nothing new); **both-present
+   corruption** test (source + target both present → item skipped+flagged, never double-reaped);
+   path-containment test (crafted name cannot escape either archive root).
+5. **`.gitignore`** — add `/archive/` and `kb/archive/` (the two co-located archive roots) so
+   archived artifacts + manifests never re-enter `git status`/an accidental `git add`
+   (coordinates with #509's junk rules). Both roots are also excluded from the GC scan surfaces.
 6. **CLAUDE.md command-surface entry** — add a `uv run algua research gc [--retention-days N]
    [--archive --actor human --actor-signature …] [--summary]` bullet: advisory-first
    lifecycle-tied file GC; read-only default (registry cross-ref, retention window, orphan +
@@ -284,3 +309,14 @@ the archive self-describing and the manifest a rebuildable rollup. Everything el
 covered (read-only default, registry cross-ref, 90-day retention, orphan mtime floor,
 archive-not-delete, verified human actor per #329, DB immutability, protection-by-construction for
 every non-`RETIRED` stage including `dormant`).
+
+Third GATE-1 pass CHANGES-REQUESTED, one new material defect: the crash-idempotency claim was
+undermined by the allowed cross-filesystem `copy → fsync → unlink` (and non-atomic directory
+copy) fallback — a crash after copy but before unlink can leave *both* source and target present,
+a state the reconcile matrix did not cover. Resolved by (a) dropping the copy fallback entirely
+and mandating a single atomic same-filesystem `os.replace` (files and whole directories), (b)
+co-locating the archive root per source root (`<repo>/archive/` for modules, `<kb>/archive/` for
+vault artifacts) so rename is always same-fs, (c) skipping+surfacing any genuinely cross-fs
+artifact (`skipped_cross_fs`) rather than copying it, and (d) completing the reconcile matrix with
+the both-present case (impossible under atomic rename → skip + flag for human, never
+double-reaped). Re-run GATE-1 against this file inline.
