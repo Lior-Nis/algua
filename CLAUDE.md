@@ -46,6 +46,18 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   `--min-vol`, `--max-drawdown`, `--max-staleness`) are human-only. A passing run is the ONLY
   agent path to `forward_tested`; re-running at `forward_tested` refreshes the live-wall
   certificate without changing the stage.
+- `uv run algua paper merge-back --branch B --strategy S --universe U --start D --end D` — autonomous
+  research-cycle merge-back (#485): one repo-global-locked cycle that gated-merges a candidate branch
+  onto `main` (preview-merge → FULL quality gate on the staged tree → commit only on green), runs the
+  metered strict-agent `research promote`, and on a PASS runs the FIFO paper intake to allocate a book
+  slice; a proven promote FAILURE reverts the merge (`main` untouched). The branch's change set is
+  gated by an allowlist/CODEOWNERS-denylist DIFF POLICY BEFORE any merge; recovery is driven by a
+  durable per-strategy journal keyed on the branch-tip SHA, and promote attribution binds to a
+  per-attempt `attempt_token` stamped on the gate row (not the ambient stage). Terminal `status` is
+  `already_done` | `diff_policy_rejected` | `gate_failed` | `promote_failed` | `promoted_allocated` |
+  `promoted_queued` (a not-promoted cycle is `ok`, not an error). Mutually exclusive with `paper
+  trade-tick`/`run-all` BY OPERATOR DISCIPLINE (like #316); concurrent merge-backs are hard-serialized
+  by a `merge_back.lock` flock. The push is a real remote compare-and-swap to `refs/heads/main`.
 - **Authenticated `--actor human` (#329).** `--actor human` on `research promote` / `paper promote`
   is NOT a bare string anymore: run once with `--actor human` to print a single-use challenge, sign
   it (`ssh-keygen -Y sign -n algua-human-actor -f <key> <file>`), then re-run with `--actor-signature

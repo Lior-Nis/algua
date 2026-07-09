@@ -405,6 +405,7 @@ def run_gate(
     allow_non_pit: bool,
     reason_suffix: str,
     holdout_evaluation_id: int | None = None,
+    attempt_token: str | None = None,
 ) -> PromotionOutcome:
     """Post-walk phase: resolve PIT, evaluate, record the gate_evaluations row (pass AND fail), and
     on pass transition BACKTESTED->CANDIDATE (which consumes the just-minted agent token).
@@ -555,6 +556,10 @@ def run_gate(
         # gate audit row records exactly which fundamentals/news snapshot fed a needs_* promotion.
         "fundamentals_snapshot": wf.fundamentals_snapshot,
         "news_snapshot": wf.news_snapshot,
+        # #485: opaque per-attempt idempotency key from the autonomous merge-back driver (NULL for
+        # every ordinary caller), stamped on the gate row so promote-outcome attribution binds to
+        # the branch identity, not the ambient stage.
+        "attempt_token": attempt_token,
     }
 
     # Atomic FDR-test-and-maybe-promote. For non-binding rows (p_value=None), the method
