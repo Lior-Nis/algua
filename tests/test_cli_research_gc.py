@@ -265,6 +265,80 @@ def test_gc_archive_skips_cross_filesystem_rather_than_copy(tmp_path, monkeypatc
     assert f.exists() and f.read_text() == "bytes\n"  # left in place, never copied
 
 
+def _classified_retired(path: str, strategy: str = "s") -> lifecycle_gc.Classified:
+    return lifecycle_gc.Classified(
+        path=path, strategy=strategy, surface=lifecycle_gc.SURFACE_MODULE,
+        size_bytes=1, reason=lifecycle_gc.REAP_RETIRED_EXPIRED, reapable=True,
+        stage=lifecycle_gc.RETIRED, retired_at="2020-01-01T00:00:00+00:00", age_days=999.0)
+
+
+def test_gc_archive_refuses_symlinked_dest_component(tmp_path, monkeypatch):
+    """The DESTINATION is hardened symmetrically with the source: a planted symlinked run-dir
+    component under --archive-dir is refused (archive_dest_unsafe), so os.replace can never follow
+    it OUT of the archive tree. Mirrors the source-side intermediate-symlink test."""
+    f = tmp_path / "r.md"
+    f.write_text("bytes\n")
+    arch = tmp_path / "arch"
+    arch.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    # Pin the run id so we can pre-plant the exact run dir as a symlink pointing outside the tree.
+    monkeypatch.setattr("algua.cli.research_cmd._archive_run_id", lambda: "FIXEDRUN")
+    (arch / "FIXEDRUN").symlink_to(outside)
+
+    run_dir, moved, skipped = _gc_archive(
+        [_classified(str(f))], arch, {str(f): _sha(f)}, [tmp_path])
+
+    assert moved == []
+    assert [s["reason"] for s in skipped] == ["archive_dest_unsafe"]
+    assert f.exists() and f.read_text() == "bytes\n"  # source untouched
+    assert not any(outside.rglob("r.md"))  # never written through the symlink
+
+
+def test_archive_run_id_is_collision_resistant():
+    """Two runs in the same UTC second must get distinct run dirs: the id carries a random suffix so
+    os.replace can never silently overwrite a prior archived file (#510 GATE-2)."""
+    from algua.cli.research_cmd import _archive_run_id
+    ids = {_archive_run_id() for _ in range(200)}
+    assert len(ids) == 200  # all unique despite same-second stamps
+    for rid in ids:
+        stamp, _, suffix = rid.partition("-")
+        assert stamp.endswith("Z") and len(suffix) == 8 and suffix.isalnum()
+
+
+def test_gc_archive_rechecks_registry_stage_before_move(tmp_path):
+    """The point-of-use registry re-check closes the in-process TOCTOU: a retired-expired item whose
+    strategy is no longer `retired`, and an orphan whose name now has a row, are BOTH skipped."""
+    # (a) un-retired between classify and move -> skipped, source left in place.
+    f1 = tmp_path / "unretired.py"
+    f1.write_text("x=1\n")
+    run_dir, moved, skipped = _gc_archive(
+        [_classified_retired(str(f1))], tmp_path / "a1", {str(f1): _sha(f1)}, [tmp_path],
+        current_stage=lambda name: "live")
+    assert moved == []
+    assert [s["reason"] for s in skipped] == ["registry_stage_changed"]
+    assert f1.exists()
+
+    # (b) orphan report that got `registry add`ed (now has a row) -> skipped.
+    f2 = tmp_path / "nowtracked.md"
+    f2.write_text("y\n")
+    run_dir, moved, skipped = _gc_archive(
+        [_classified(str(f2))], tmp_path / "a2", {str(f2): _sha(f2)}, [tmp_path],
+        current_stage=lambda name: "idea")
+    assert moved == []
+    assert [s["reason"] for s in skipped] == ["registry_stage_changed"]
+    assert f2.exists()
+
+    # (c) control: stage still retired -> the move proceeds.
+    f3 = tmp_path / "still_retired.py"
+    f3.write_text("z=1\n")
+    run_dir, moved, skipped = _gc_archive(
+        [_classified_retired(str(f3))], tmp_path / "a3", {str(f3): _sha(f3)}, [tmp_path],
+        current_stage=lambda name: lifecycle_gc.RETIRED)
+    assert [m["src"] for m in moved] == [str(f3)]
+    assert not f3.exists()
+
+
 def test_gc_top_bounds_archived_set_to_shown_challenge(tmp_path, monkeypatch):
     """--top must bound what is AUTHORIZED, not just what is displayed: the challenge's reapable
     list and reclaimable_bytes reflect exactly the top-N, so the archived set never exceeds it."""

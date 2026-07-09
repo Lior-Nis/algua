@@ -6,7 +6,9 @@ import json
 import os
 import stat
 import time
+import uuid
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 from itertools import combinations
 from pathlib import Path
@@ -849,9 +851,48 @@ def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
     return items
 
 
+def _archive_run_id() -> str:
+    """Collision-resistant archive run-dir id: a UTC second stamp PLUS a short random suffix.
+
+    Two ``--archive`` runs landing in the same UTC second would otherwise share a run dir and could
+    silently ``os.replace`` a prior archived file onto itself; the uuid suffix makes the run dir
+    unique per invocation (#510 GATE-2). Factored out so a test can pin it."""
+    return f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+
+
+def _archive_dest_safe(archive_dir: Path, dest: Path) -> bool:
+    """True iff ``dest`` lands under ``archive_dir`` with NO symlinked component (#510 GATE-2).
+
+    Hardens the archive DESTINATION the same way the source is hardened: the user-declared archive
+    root (``archive_dir``, resolved — a symlinked root the operator chose is honored) is the trust
+    anchor, but every component BELOW it down to ``dest.parent`` must be a real (non-symlink)
+    directory, and the resolved ``dest.parent`` must land under the resolved root. This defeats a
+    planted symlink (e.g. a pre-created ``<run-dir>`` or mirrored subdir pointing at ``/etc``) that
+    ``mkdir(exist_ok=True)`` + ``os.replace`` would otherwise silently follow OUT of the tree."""
+    root = archive_dir.resolve(strict=False)
+    try:
+        rel = dest.parent.relative_to(archive_dir)
+    except ValueError:
+        return False
+    cur = archive_dir
+    for part in rel.parts:
+        cur = cur / part
+        if cur.is_symlink():  # a planted symlink component redirects the write outside the tree
+            return False
+    if dest.parent.exists():
+        try:
+            real = dest.parent.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return False
+        if not (real == root or root in real.parents):
+            return False
+    # dest itself must not be a symlink (os.replace would clobber the symlink's target).
+    return not dest.is_symlink()
+
+
 def _gc_archive(
     reap: list[lifecycle_gc.Classified], archive_dir: Path, expected_hashes: dict[str, str],
-    scan_roots: list[Path],
+    scan_roots: list[Path], current_stage: Callable[[str], str | None] | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """MOVE each reapable file into a timestamped run dir under ``archive_dir``, mirroring its path.
 
@@ -883,12 +924,22 @@ def _gc_archive(
       copy exist simultaneously (which would double-archive on retry). A genuinely cross-filesystem
       destination raises ``EXDEV``; per the design doc we SKIP+surface it (``cross_filesystem``)
       rather than silently falling back to a non-atomic copy.
+    * DESTINATION containment (symmetric with the source guard): ``_archive_dest_safe`` rejects a
+      dest whose run-dir/mirrored components include a planted symlink or that resolves outside the
+      archive root (``archive_dest_unsafe``), checked BOTH before and after the ``mkdir`` (mkdir
+      with ``exist_ok=True`` would otherwise follow a pre-existing symlinked component out of tree).
+    * REGISTRY RE-CHECK (closes the in-process TOCTOU between computing ``reap`` and moving): when
+      ``current_stage`` is supplied, the strategy's CURRENT registry stage is re-read immediately
+      before ``os.replace``; a retired-expired item whose strategy is no longer ``retired`` (an
+      un-retire back-step) or an orphaned report whose name now has a registry row is skipped
+      (``registry_stage_changed``) rather than moved against stale eligibility.
 
     Refused/vanished paths are reported in ``skipped`` and left in place; ``expected_hashes`` is the
-    same per-file sha256 map that was folded into the signed manifest.
+    same per-file sha256 map that was folded into the signed manifest. The run dir carries a random
+    suffix (``_archive_run_id``) so two runs in the same UTC second never collide.
     """
     resolved_roots = [r.resolve() for r in scan_roots]
-    run_dir = archive_dir / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = archive_dir / _archive_run_id()
     moved: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for c in reap:
@@ -938,13 +989,36 @@ def _gc_archive(
             if (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
                 _skip("replaced_before_move")
                 continue
+            # Registry re-check at the point of use: re-read the strategy's CURRENT stage and refuse
+            # to move against a now-stale eligibility (a retired strategy un-retired, or an orphan
+            # that got `registry add`ed, between computing `reap` and here). Closes the in-process
+            # TOCTOU window; hash/inode identity alone would not catch a pure registry transition.
+            if current_stage is not None:
+                cur_stage = current_stage(c.strategy)
+                if c.reason == lifecycle_gc.REAP_RETIRED_EXPIRED \
+                        and cur_stage != lifecycle_gc.RETIRED:
+                    _skip("registry_stage_changed")
+                    continue
+                if c.reason == lifecycle_gc.REAP_ORPHANED_REPORT and cur_stage is not None:
+                    _skip("registry_stage_changed")
+                    continue
             # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
             # paths are ABSOLUTE (both algua.strategies.__file__ and an absolute knowledge_dir), and
             # `run_dir / <absolute>` would collapse to the absolute path itself (pathlib join rule),
             # writing the file onto itself. Stripping the root ("/") yields a unique, nested dest.
             rel = src.relative_to(src.anchor) if src.is_absolute() else src
             dest = run_dir / rel
+            # DESTINATION containment BEFORE mkdir: refuse a planted symlink component up front so
+            # mkdir(exist_ok=True) can never follow it out of the archive tree.
+            if not _archive_dest_safe(archive_dir, dest):
+                _skip("archive_dest_unsafe")
+                continue
             dest.parent.mkdir(parents=True, exist_ok=True)
+            # Re-verify AFTER mkdir (a component could have been swapped to a symlink concurrently);
+            # only now, with dest.parent materialized, can we resolve+contain it.
+            if not _archive_dest_safe(archive_dir, dest):
+                _skip("archive_dest_unsafe")
+                continue
             try:
                 # Atomic same-fs rename: no window where both src and dest exist (crash-safe, and no
                 # duplicate-archive-on-retry). Cross-fs raises EXDEV — skip rather than copy.
@@ -1111,8 +1185,16 @@ def gc(
                 "retention window, and archive dir. Re-run without --actor-signature to print a "
                 "fresh challenge, sign it (ssh-keygen -Y sign -n algua-human-actor), and retry. A "
                 "bare --actor human does not unlock the cleanup.")
+        # Fresh registry snapshot re-read AFTER signature verification: the point-of-use stage
+        # re-check in _gc_archive keys off this, closing the in-process TOCTOU between the classify
+        # snapshot above and the actual move (a strategy un-retired, or an orphan `registry add`ed,
+        # in between must not be archived against stale eligibility).
+        with registry_conn() as conn:
+            fresh_repo = SqliteStrategyRepository(conn)
+            fresh_stage = {r.name: r.stage.value for r in fresh_repo.list_strategies()}
         archive_run_dir, archived, archive_skipped = _gc_archive(
-            reap, archive_dir, content_hashes, _gc_scan_roots(settings))
+            reap, archive_dir, content_hashes, _gc_scan_roots(settings),
+            current_stage=fresh_stage.get)
 
     emit(ok({
         "note": _GC_NOTE,

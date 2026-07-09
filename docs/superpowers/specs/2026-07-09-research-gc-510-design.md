@@ -23,38 +23,44 @@ group that emits JSON on stdout, ranked worst-offender-first.
   transitions nothing, reads/burns no holdout, writes no gate/FDR ledger. Safe to run
   unattended on the systemd clock as a fleet-health-style signal.
 - **`--archive` = governed cleanup (human-only).** Move the reaped files into an `archive/`
-  tree (never delete), recording a manifest of what moved. Fail-closed for an agent/system
-  actor. Never deletes a DB row — the registry stays the immutable system of record; only the
-  *derived FILES* are reaped.
+  tree (never delete), reporting the moved set in the command's stdout JSON. Fail-closed for an
+  agent/system actor. Never deletes a DB row — the registry stays the immutable system of record;
+  only the *derived FILES* are reaped.
 
 ### Why archive-not-delete, and why only files
 The registry (`strategies`, `stage_transitions`, gate/allocation/FDR ledgers) is the governed,
 immutable record of what was tried and decided. GC must never mutate it — a retired strategy's
 row and its transition history stay forever. GC only relocates the *derived files* those rows
 generated, and even then it archives rather than deletes, so a mistaken reap is fully
-reversible (the archive tree + manifest are a redo log).
+reversible (the archive tree is a browsable redo log; the moved set is echoed in the run's JSON).
 
 ## Reap-eligible surfaces (in scope for this slice)
-A reap candidate is a file **or a strategy-keyed report directory** that resolves unambiguously to
-a single strategy *name*:
+A reap candidate is a file that resolves unambiguously to a single strategy *name*. **As shipped,
+two surfaces are scanned** (each candidate is an individual FileItem — reports are NOT grouped into
+a whole-tree unit):
 
 1. **Strategy modules** — `algua/strategies/<family>/<name>.py`. The module stem *is* the bare
    strategy name (the loader's `_index()` maps `mod.name -> dotted module`). Archiving the file
    removes it from the loader index, which is correct: a retired strategy must not be loadable.
-2. **Per-strategy vault docs** — `<knowledge_dir>/strategies/<name>.md` (the always-on synced
-   strategy doc; `strategy_doc_path`). The stem is the strategy name.
-3. **Per-strategy generated reports** — the report tree `<knowledge_dir>/strategies/<name>/`
-   (report-experiments writes `<kb>/strategies/<name>/reports/<stamp>/report.md` + SVGs; the
-   directory name is the strategy name). This is the "stale reports whose strategy is long dead"
-   surface the issue names. Reaped as a whole subtree (the entire `<name>/` report directory
-   moves as one unit, keeping its internal `reports/<stamp>/…` structure). NOTE the two vault
-   shapes coexist without collision: the doc is the FILE `<kb>/strategies/<name>.md`; the reports
-   are the DIRECTORY `<kb>/strategies/<name>/` — different filesystem entries, same strategy key.
+   Private `_*.py` helpers and `__init__.py` are skipped exactly as the loader does.
+2. **Per-strategy generated report FILES** — every regular file under
+   `<knowledge_dir>/strategies/<name>/reports/<stamp>/…` (report-experiments writes
+   `report.md` + SVGs there; the `<name>` DIRECTORY component is the strategy key). This is the
+   "stale reports whose strategy is long dead" surface the issue names. Each report file is scanned,
+   classified, and archived individually (mirroring its `reports/<stamp>/…` sub-path under the run
+   dir), NOT as an atomic whole-directory move.
 
-All three map candidate → strategy by **exact stem/dirname == registry `name`**. The map is total
-and unambiguous; anything that does not resolve to exactly one name is left alone. A single reap
-item groups all resolved artifacts (module + doc + report tree) for one strategy so they are
-scanned, ranked, and archived together.
+**Explicitly NOT a reap surface (shipped behavior):** the top-level `<knowledge_dir>/strategies/*.md`
+files are kb-sync-OWNED and are never scanned — this includes both the `_*` router pages
+(`_index`/`_by-stage`/`_by-date`/`_families`) AND every per-strategy live synced note at
+`strategy_doc_path()` (`<kb>/strategies/<name>.md`). The walk iterates only per-strategy
+DIRECTORIES (and skips `families/`), which structurally excludes every top-level file without
+name-by-name special-casing. (An earlier draft of this spec proposed reaping the per-strategy vault
+doc as a third surface; the implementation deliberately does NOT, because a live synced note must
+never be mistaken for a disposable artifact — the doc description here matches the code.)
+
+Both scanned surfaces map candidate → strategy by **exact stem/dirname == registry `name`**. The map
+is total and unambiguous; anything that does not resolve to exactly one name is left alone.
 
 ## Explicitly-protected surfaces (NEVER reaped in this slice)
 - `<kb>/experience/` — negative-result / refuted-hypothesis notes. These are a permanent
@@ -110,61 +116,49 @@ Only two reasons make a file reapable; everything else is `protected`:
     no money, so a bespoke weaker gate was tempting. We deliberately reuse the *same* verified
     human-actor chokepoint as every other governed mutation rather than reintroduce the exact
     forgeable-`--actor` defect #329 fixed. Consistency + non-forgeability beats a one-off gate.
-- **Archive, never delete — atomic same-filesystem rename ONLY.** Each reaped artifact is moved
-  under a run-scoped archive root `<archive-root>/<UTC-run-id>/<original-relative-path>` (e.g.
-  `archive/20260709T2014Z-ab12/strategies/momentum/dead_mom.py`). The move is a single
-  `os.replace` (POSIX `rename(2)` — atomic for both files and whole directories on one
-  filesystem). **There is no cross-filesystem copy fallback** (a copy→fsync→unlink, or a
-  non-atomic recursive directory copy, could crash with *both* source and target present — an
-  ambiguous partial-archive state; forbidding it keeps the invariant "at most one of {source,
-  target} exists" true by construction). To guarantee the source and its archive target are always
-  on the same filesystem, the **archive root is co-located per source root**, not a single
-  repo-root dir:
-  - source-tree modules (`algua/strategies/…`) → `<repo>/archive/…`
-  - vault docs + report trees (`<kb>/strategies/…`) → `<kb>/archive/…`
-  Both archive roots are excluded from the scan surfaces and added to `.gitignore`. If a source
-  and its co-located archive root are still somehow on different filesystems (unexpected mount),
-  that artifact is **skipped and surfaced** (reason `skipped_cross_fs`) — never copied — so the
-  atomicity invariant is never violated. Preserving the original relative structure + a per-run
-  subdir means a later re-created/re-retired same-named artifact never collides with an earlier
-  archived copy.
-- **Crash-safe move + manifest protocol (durable record = per-move sidecar).** The rollup
-  `<archive-root>/manifest.jsonl` is a *rebuildable index*, NOT the source of truth, so a crash
-  between the move and the manifest append can never orphan an archived artifact. Per artifact:
-  1. Atomically write a sidecar `<archive-root>/<run-id>/<rel-path>.reap.json` (write-temp →
-     fsync → `os.replace`) recording the full intent `{run_id, ts, from, to, strategy, reason,
-     stage_at_reap, retired_at, bytes, src_content_hash}` — **before** the move. The sidecar sits
-     *beside* the target location, whose path is fully known up front. (`src_content_hash` is a
-     size+digest fingerprint of the source at intent time — used only to detect tampering; a
-     pre-commit intent is never redone, so it can only downgrade to skip+surface, never re-archive.)
-  2. Move the artifact: `os.replace(from, to)` (the atomic commit point; file or directory).
-  3. Append the row to `<archive-root>/manifest.jsonl`.
-  **Reconcile-first recovery.** Ordering matters: the verified-human gate runs FIRST; only then —
-  still before reaping anything new — does the run reconcile each archive tree against its rollup.
-  Reconcile mutates the archive tree (appends rows, discards stale sidecars), so it must sit behind
-  the human gate exactly like the reap itself (an unauthenticated `--archive` performs no archive
-  mutation at all — it fails closed at the gate before reconcile). Because step 2 is an atomic
-  rename, exactly one of {source, target} exists per sidecar, giving a total recovery matrix:
-  - **target present, source absent, row missing** → append the row (repairs a crash between
-    step 2 and step 3 — the exact gap a naive move-then-append leaves).
-  - **target present, source absent, row present** → already complete; no-op.
-  - **target absent, source present** → the crash landed between step 1 and step 2, so the move
-    **never committed** (the atomic rename is the sole commit point). A pre-commit sidecar carries
-    **no authority**: the reconcile pass **discards the stale sidecar and does NOT redo the move**.
-    The source is simply left in place and **re-evaluated from scratch by this run's normal
-    classify pass under CURRENT registry + file state**. This is the fix for the stale-eligibility
-    hazard: if, between the crash and now, the operator `registry add`ed the orphan (now a live,
-    protected strategy), edited the source, or the retention math changed, the fresh classification
-    respects it — GC can never archive a source whose eligibility was decided in a prior, now-stale
-    intent. (As defense-in-depth the sidecar also records the source's size+content hash at intent
-    time; a redo is never performed, so a mismatch can only ever downgrade to skip+surface.)
-  - **target absent, source absent** → stale/aborted sidecar, drop it.
-  - **target present AND source present** → *impossible under atomic rename*; treated as
-    corruption → the item is **skipped, flagged, and surfaced for a human** (never
-    double-reaped, never auto-resolved). This defends the case Codex flagged even though the
-    no-copy rule makes it unreachable.
-  Only after reconcile does the run classify + reap. This makes each archive self-describing and
-  the manifest always eventually complete.
+- **Archive, never delete — atomic same-filesystem rename ONLY.** Each reaped file is moved under a
+  run-scoped archive dir `<archive-dir>/<run-id>/<mirrored-source-path>` (e.g.
+  `archive/20260709T2014Z-ab12f0c9/home/u/algua/strategies/momentum/dead_mom.py` — the source's
+  absolute path with its anchor `/` stripped so the join nests instead of collapsing). The move is a
+  single `os.replace` (POSIX `rename(2)` — atomic for a file on one filesystem). **There is no
+  cross-filesystem copy fallback:** a copy→fsync→unlink could crash with *both* source and target
+  present (an ambiguous partial-archive state), so a genuinely cross-filesystem destination (EXDEV)
+  is **skipped and surfaced** (`cross_filesystem`), never copied — keeping the invariant "at most
+  one of {source, target} exists" true by construction.
+  - **Single archive dir, not co-located dual roots (shipped).** `--archive-dir` (default
+    `archive/`, repo-relative) is one root for all surfaces. A source on a *different* filesystem
+    than the archive dir (e.g. a `<kb>` report when `--archive-dir` sits on another mount) is not
+    copied — it is skipped `cross_filesystem`, so the operator points `--archive-dir` at the same
+    filesystem as the surface they intend to reap. The run-id carries a `uuid4` suffix so two runs
+    in the same UTC second get distinct run dirs and can never `os.replace` onto each other. The
+    archive dir is excluded from the scan surfaces and belongs in `.gitignore`.
+  - **Source hardening (TOCTOU/symlink/content).** Each source is opened once
+    `O_RDONLY|O_NOFOLLOW` and never re-resolved by path: the whole parent chain is resolved and
+    required to land under a scan root (`escaped_scan_root` else — catches an intermediate symlinked
+    dir `O_NOFOLLOW`'s final-component check misses); `fstat` rejects a non-regular file; the bytes
+    are hashed off the fd and must equal the sha256 the human SIGNED (`content_changed_since_authorization`
+    else — point-of-use enforcement, not merely challenge-time); an `lstat` (st_dev,st_ino) recheck
+    just before the move rejects a raced-in replacement (`replaced_before_move`).
+  - **Destination hardening (symmetric).** Before AND after the `mkdir`, the destination is verified
+    to contain no symlinked run-dir/mirrored component and to resolve under the archive root
+    (`archive_dest_unsafe` else) — a planted symlink component cannot redirect a reaped file out of
+    the archive tree via `mkdir(exist_ok=True)` + `os.replace`.
+  - **Registry re-check at point of use.** Immediately before `os.replace` the strategy's CURRENT
+    registry stage is re-read; a retired-expired item whose strategy was un-retired, or an orphan
+    whose name was `registry add`ed, since the classify snapshot is skipped `registry_stage_changed`
+    — closing the in-process TOCTOU between computing `reap` and moving.
+- **Crash-safety: what actually ships (NO durable archive record / rebuildable index).** The atomic
+  rename is the only crash-safety mechanism: after any crash, **at most one of {source, target}
+  exists** for each artifact (never both, because there is no copy path; never a torn write). There
+  is **no per-move sidecar, no `manifest.jsonl` rollup, and no reconcile-first recovery pass** — the
+  record of what moved is emitted only in the command's stdout JSON (`archived`/`archive_skipped`/
+  `archive_run_dir`), which is NOT a durable, rebuildable on-disk index. A crash mid-run therefore
+  loses the audit line for any already-moved file (the file is safely under `archive/<run-id>/…` but
+  no on-disk manifest records it); recovery is manual (the archive tree itself is browsable). This
+  is an accepted limitation for an advisory, reversible, file-only housekeeping pass: nothing is
+  deleted, no DB row moves, and the immutable registry remains the system of record. A durable
+  sidecar+`manifest.jsonl`+reconcile protocol was designed (see the review history below) but
+  deliberately **deferred** — it is not implemented, and this slice does not claim it.
 - **DB immutability.** Cleanup calls **no** registry writer — no `remove_strategy`, no
   `apply_transition`, no ledger write. It only relocates files. Asserted by a test that runs
   `--archive` against a temp registry and checks the `strategies` + `stage_transitions` row
@@ -177,69 +171,79 @@ Only two reasons make a file reapable; everything else is `protected`:
 - Cleanup is idempotent by the **source-absence** rule: an artifact is reaped only if it is still
   present at its live path. After a run, a reaped module/doc/report-tree no longer exists at the
   live path (it lives under `archive/`, which is **excluded from the scan roots**), so a second
-  run finds nothing more to reap for it and moves nothing. The run-scoped archive subdir
-  guarantees no target collision. Moves are a single atomic `os.replace` on one filesystem (a
-  report *directory* renames as a unit the same way); there is **no** non-atomic copy fallback, so
-  after any crash exactly one of {source, target} exists.
-- The **reconcile-first recovery** above makes crash-idempotency total: a crash mid-run leaves
-  either the source or the archived copy intact (never neither and — because the move is an atomic
-  rename with no copy path — never both), and the next run's reconcile pass repairs any missing
-  manifest row from the sidecar and completes/discards any half-done move — no duplicate manifest
-  row is ever written for an artifact already moved (the append is guarded by the reconcile
-  check), and no archived artifact is ever left without its audit row.
+  run finds nothing more to reap for it and moves nothing. The run-scoped archive subdir (UTC stamp
+  + uuid suffix) guarantees no target collision. Moves are a single atomic `os.replace` on one
+  filesystem; there is **no** non-atomic copy fallback, so after any crash exactly one of {source,
+  target} exists per artifact.
+- **Crash behavior (shipped, no reconcile pass):** because the move is atomic and there is no copy
+  path, a crash mid-run leaves either the source (move never committed) or the archived copy (move
+  committed) intact — never both, never neither. There is **no** manifest/sidecar to repair on the
+  next run, so the next run simply re-classifies from live file + registry state: an already-moved
+  file is gone from the scan surface (no-op), a not-yet-moved source is re-evaluated fresh. The only
+  loss is the *audit line* for a file moved just before a crash (the file is safe under
+  `archive/<run-id>/…`, but the stdout JSON that would have recorded it never printed) — an accepted
+  limitation, not a data-loss or double-reap bug.
 
 ## Module structure & boundaries
-- **`algua/research/gc.py` — pure classifier (no I/O, no DB, no filesystem).** Precedent:
-  `research/family_audit.py` is a pure advisory core. Signature roughly:
-  `classify(candidates, registry_state, *, now, retention_days) -> GcReport`, where
-  `candidates` is a list of `FileCandidate(path, kind, strategy_name, mtime, size)` — `kind ∈
-  {module, vault_doc, report_tree}`, `size` is the recursive byte total for a `report_tree` and
-  `mtime` its newest descendant mtime — and
-  `registry_state` is `{name: (stage, retired_at | None)}`. Returns the ranked reapable list +
-  protected summary. 100% unit-testable with no fixtures.
-- **`algua/cli/research_cmd.py` — orchestration (the only I/O).** The new `gc` command does the
-  filesystem walk (discover candidates, follow no symlinks, contain to the two scan roots),
-  reads the registry via `SqliteStrategyRepository.list_strategies()` + `list_transitions()`,
-  calls the pure classifier, emits JSON, and — only under `--archive` + verified human — moves
-  files + writes the manifest.
-- **Path-containment safety.** Archive targets are built through the same
-  containment guard `knowledge/sync.py::_safe_path` uses (target must resolve under the
-  archive root), so a crafted strategy name cannot escape the archive tree. The walk resolves
-  symlinks and refuses to descend or reap through them.
-- **Import boundaries.** `gc.py` imports nothing from `algua.data`/`algua.cli`; the command
+- **`algua/research/lifecycle_gc.py` — pure classifier (no I/O, no DB, no filesystem).** Precedent:
+  `research/family_audit.py` is a pure advisory core. Shipped signature:
+  `classify(items, registry, *, now, retention_days) -> list[Classified]`, where `items` is a list
+  of `FileItem(path, strategy, surface, size_bytes, mtime)` — `surface ∈ {strategy_module, report}`,
+  each report FILE its own item (not a grouped tree) — and `registry` is `{name:
+  RegistryEntry(stage, retired_at | None)}`. It also exposes `reapable()` (rank worst-first),
+  `archive_manifest()` (canonical content-addressed description of the exact reap set), and
+  `build_gc_archive_challenge()` (the #329 signed-challenge bytes). 100% unit-testable, no fixtures.
+- **`algua/cli/research_cmd.py` — orchestration (the only I/O).** The `gc` command walks the two
+  scan surfaces (`_gc_inventory`, symlink-refusing, contained to the two scan roots via
+  `_gc_scan_roots`), reads the registry via `SqliteStrategyRepository.list_strategies()` +
+  `list_transitions()`, calls the pure classifier, emits JSON, and — only under `--archive` +
+  verified human — moves files (`_gc_archive`). There is **no manifest file written to disk**; the
+  archived/skipped lists are reported in the command's stdout JSON only.
+- **Path-containment safety.** Both the source parent chain and the archive destination are resolved
+  and required to stay under their respective roots (mirroring `knowledge/sync.py::_safe_path`), so
+  a crafted strategy name or a planted symlink component cannot escape either the scan roots or the
+  archive tree. The walk resolves symlinks and refuses to descend or reap through them.
+- **Import boundaries.** `lifecycle_gc.py` imports nothing from `algua.data`/`algua.cli`; the command
   lives in the already-registered `research` group, so no new `independence`-contract module
   registration is needed. `uv run lint-imports` must stay green.
-- **CODEOWNERS.** None of the touched paths (`algua/research/gc.py` [new],
+- **CODEOWNERS.** None of the touched paths (`algua/research/lifecycle_gc.py` [new],
   `algua/cli/research_cmd.py`, tests, `CLAUDE.md`) are CODEOWNERS-protected → the PR is
   auto-merge eligible iff CI is green.
 
-## JSON shape
-Advisory (`research gc`):
+## JSON shape (as shipped)
+Advisory (`research gc`) — `reapable` is a FLAT list of per-file entries (one per module / report
+file), not grouped per strategy:
 ```json
 {
-  "now": "2026-07-09T20:14:00+00:00",
+  "note": "advisory lifecycle GC: read-only by default; …",
+  "dry_run": true,
   "retention_days": 90,
+  "total_files_scanned": 74,
+  "reapable_count": 2,
+  "reclaimable_bytes": 23408,
+  "by_reason": {"untracked_module": 40, "protected_non_terminal": 30,
+                "retired_expired": 1, "orphaned_report": 1},
   "reapable": [
-    {"strategy": "dead_mom_v3", "reason": "orphaned", "stage": null,
-     "retired_at": null, "age_days": 412,
-     "files": [{"path": "algua/strategies/momentum/dead_mom_v3.py", "kind": "module", "bytes": 2841}],
-     "total_bytes": 2841},
-    {"strategy": "old_meanrev", "reason": "retired_expired", "stage": "retired",
-     "retired_at": "2026-01-02T…", "age_days": 188,
-     "files": [{"path": "…/old_meanrev.py", "kind": "module", "bytes": 3120},
-               {"path": "kb/strategies/old_meanrev.md", "kind": "vault_doc", "bytes": 1044},
-               {"path": "kb/strategies/old_meanrev/", "kind": "report_tree", "bytes": 20488}],
-     "total_bytes": 24652}
+    {"path": "…/kb/strategies/old_meanrev/reports/20260102-000000/report.md",
+     "strategy": "old_meanrev", "surface": "report", "reason": "orphaned_report",
+     "size_bytes": 20488, "age_days": 188.0, "stage": null},
+    {"path": "…/algua/strategies/momentum/dead_mom_v3.py",
+     "strategy": "dead_mom_v3", "surface": "strategy_module", "reason": "retired_expired",
+     "size_bytes": 2920, "age_days": 412.0, "stage": "retired"}
   ],
-  "protected_summary": {"n_strategies": 37, "n_files": 74, "by_stage": {"live": 3, "paper": 5, "dormant": 2, "retired_within_window": 4, "…": 0}},
-  "summary": {"n_reapable": 2, "n_files": 3, "total_bytes": 7005}
+  "archived": [], "archive_skipped": [], "archive_run_dir": null
 }
 ```
-Ranking = worst-first: `orphaned` before `retired_expired`, then by `total_bytes` desc, then
-`age_days` desc, then name (stable). Cleanup (`--archive`) adds
-`"archived": [{"from","to","strategy","reason","bytes"}], "manifest_path": "archive/manifest.jsonl"`.
-`--summary` (the #349 projection) drops the per-file lists and `protected_summary`, keeping only
-`summary` + the reapable strategy/reason/total_bytes scalars.
+Ranking = reclaimable `size_bytes` DESC, then `age_days` DESC, then `path` (stable). Cleanup
+(`--archive --actor human` with a valid `--actor-signature`) populates `archived`
+(`[{src,dest,strategy,surface,reason,size_bytes}]`), `archive_skipped`
+(`[{src,strategy,surface,reason}]` — e.g. `cross_filesystem`, `archive_dest_unsafe`,
+`registry_stage_changed`, `content_changed_since_authorization`, `replaced_before_move`,
+`escaped_scan_root`, `refused_non_regular_file`), and `archive_run_dir` (the timestamp+uuid run
+dir). **There is no `manifest_path`** — no manifest file is written; the archived/skipped lists live
+only in this JSON. Running `--archive --actor human` WITHOUT a signature instead emits an
+`action: "human_actor_challenge"` payload (the challenge to sign + the reapable preview) and moves
+nothing.
 
 ## Non-goals / deferred
 - **Family docs, experience notes, MLflow/artifacts** — out of scope (protected). Family-doc
@@ -248,53 +252,53 @@ Ranking = worst-first: `orphaned` before `retired_expired`, then by `total_bytes
   items past a longer horizon is a follow-up.
 - **No gate/ledger/holdout interaction, no schema bump** — GC is pure housekeeping over files.
 - **MLflow runs / emit-series parquet under `mlruns/` + `artifacts/`** — governed by the tracking
-  store's own retention; out of scope. The `kind` enum is designed to extend to a strategy-keyed
-  MLflow retention pass later, but this slice ships strategy modules, vault docs, and the
-  `<kb>/strategies/<name>/` report tree only.
+  store's own retention; out of scope. The `surface` enum can extend to a strategy-keyed MLflow
+  retention pass later, but this slice ships strategy modules and the per-strategy report FILES
+  under `<kb>/strategies/<name>/reports/…` only (top-level vault docs are NOT reaped).
+- **Durable archive record / rebuildable index** — the per-move sidecar + `manifest.jsonl` rollup +
+  reconcile-first recovery protocol described in the review history is DEFERRED; this slice ships
+  atomic `os.replace` only, with the archived/skipped record living in the command's stdout JSON.
 - **No auto-archive on retire** — GC stays a separate, explicitly-invoked pass; wiring a reap
   into the `-> retired` transition would couple file I/O into a registry mutation (rejected).
 
 ## Implementation task list
-1. **Pure classifier `algua/research/gc.py`** — `FileCandidate`, `ReapItem`, `GcReport`
-   dataclasses + `classify(candidates, registry_state, *, now, retention_days)`; the
-   reason/protected rules and the worst-first ranking above. No I/O. Unit tests
+1. **Pure classifier `algua/research/lifecycle_gc.py`** — `FileItem`, `RegistryEntry`, `Classified`
+   dataclasses + `classify(items, registry, *, now, retention_days)` + `reapable()` ranking +
+   `archive_manifest()`/`build_gc_archive_challenge()` (#329 challenge bytes). No I/O. Unit tests
    `tests/test_research_gc.py`: retired-expired vs retired-within-window; orphan past vs under
    mtime floor; every non-terminal stage (esp. `dormant`) is protected; a new hypothetical
-   stage is protected-by-default; ambiguous/unresolvable path left alone; ranking order.
-2. **Filesystem discovery** (in `research_cmd.py` or a small `gc.py`-adjacent I/O helper) —
-   walk the three scan surfaces (`algua/strategies/<family>/*.py`, `<kb>/strategies/*.md`,
-   `<kb>/strategies/<name>/` report dirs), resolve symlinks, build `FileCandidate`s (skip
-   `_`-prefixed/private modules exactly as the loader does; hard-exclude the `families/` reserved
-   dirname; skip the archive root). A `report_tree` candidate carries its recursive byte total +
-   newest-descendant mtime. Tests for the walk on a temp tree (module + doc + report dir for one
-   name; `families/` never treated as a strategy).
+   stage is protected-by-default; untracked module kept; ranking order.
+2. **Filesystem discovery** (`_gc_inventory` in `research_cmd.py`) — walk the two scan surfaces
+   (`algua/strategies/<family>/*.py`; per-strategy report FILES under
+   `<kb>/strategies/<name>/reports/…`), refuse symlinks, build `FileItem`s (skip `_`-prefixed/private
+   modules + `__init__.py` exactly as the loader does; iterate only per-strategy DIRECTORIES so
+   `families/` and all top-level `*.md` are structurally excluded). Tests for the walk on a temp
+   tree (module + report file for one name; top-level `.md` never scanned).
 3. **`research gc` CLI command** — wire onto the `research` typer group: `--retention-days`
-   (default 90), `--archive`, `--actor`/`--actor-signature`, `--summary`. Advisory path reads
-   registry (`list_strategies` + per-name `list_transitions` for `retired_at`), calls the
+   (default 90), `--archive`, `--actor`/`--actor-signature`, `--archive-dir`, `--top`. Advisory path
+   reads registry (`list_strategies` + per-name `list_transitions` for `retired_at`), calls the
    classifier, `emit`s JSON. Tests `tests/test_cli_research_gc.py` for the advisory JSON.
-4. **Governed cleanup path** — behind `--archive`: FIRST verify effective human actor via the #329
-   chokepoint (fail-closed for agent/system, forged, replayed, or reap-set-mismatched signatures)
-   — no archive mutation happens before this gate — THEN run the **reconcile-first recovery** pass
-   over the archive roots, then per artifact write the
-   pre-move sidecar (atomic) → single atomic `os.replace` to `<archive-root>/<run-id>/<rel-path>`
-   (co-located per source root; report dirs rename as a unit; NO copy fallback — a genuinely
-   cross-fs artifact is skipped as `skipped_cross_fs`, never copied) through the `_safe_path`
-   containment guard → append the `<archive-root>/manifest.jsonl` row. Tests: agent `--archive`
-   fails closed & moves nothing; verified human archives module+doc+report-tree + writes manifest;
-   **DB-immutability** test (`strategies` + `stage_transitions` row counts unchanged);
-   **idempotency** test (second run moves nothing, no dup manifest row); **crash-recovery** tests:
-   (i) committed-but-unlogged (archived artifact + sidecar, missing rollup row → reconcile appends
-   exactly one row, reaps nothing new); (ii) **pre-commit intent is non-authoritative** — a
-   sidecar whose source is still present (move never committed) whose strategy was `registry
-   add`ed (now non-terminal) between runs → reconcile discards the intent and the fresh classify
-   pass leaves the now-protected source untouched (the stale-eligibility hazard); **both-present
-   corruption** test (source + target both present → item skipped+flagged, never double-reaped);
-   path-containment test (crafted name cannot escape either archive root).
-5. **`.gitignore`** — add `/archive/` and `kb/archive/` (the two co-located archive roots) so
-   archived artifacts + manifests never re-enter `git status`/an accidental `git add`
-   (coordinates with #509's junk rules). Both roots are also excluded from the GC scan surfaces.
+4. **Governed cleanup path (`_gc_archive`)** — behind `--archive`: FIRST verify effective human
+   actor via the #329 chokepoint (fail-closed for agent/system, forged, replayed, or
+   reap-set-mismatched signatures; no signature → print the manifest-bound challenge and move
+   nothing) — no file moves before this gate — THEN per file: source hardening (`O_NOFOLLOW` fd,
+   parent-chain containment to scan roots, signed-content-hash match, inode recheck), **destination
+   hardening** (`_archive_dest_safe`: reject a symlinked run-dir/mirrored component or a dest
+   resolving outside the archive root, checked before+after `mkdir`), **registry stage re-check**
+   (skip `registry_stage_changed` if the strategy un-retired / the orphan was added since classify),
+   then a single atomic `os.replace` into `<archive-dir>/<run-id>/<mirrored-path>` (`run-id` =
+   UTC stamp + uuid suffix, collision-resistant; NO copy fallback — cross-fs skipped
+   `cross_filesystem`). Tests: agent `--archive` fails closed & moves nothing; verified human
+   archives module+report + reports the moved set; **DB-immutability** (`strategies` +
+   `stage_transitions` counts unchanged); **idempotency** (second run moves nothing); source symlink
+   refusal; intermediate-symlinked-dir escape refusal; **destination symlinked-component refusal**;
+   content-changed refusal; atomic-replace (no both-paths window); cross-fs skip;
+   **registry-stage-recheck** skip; run-id collision-resistance.
+5. **`.gitignore`** — add `/archive/` (the default archive root) so archived artifacts never
+   re-enter `git status`/an accidental `git add` (coordinates with #509's junk rules). The archive
+   root is also excluded from the GC scan surfaces.
 6. **CLAUDE.md command-surface entry** — add a `uv run algua research gc [--retention-days N]
-   [--archive --actor human --actor-signature …] [--summary]` bullet: advisory-first
+   [--archive --actor human --actor-signature … --archive-dir DIR --top N]` bullet: advisory-first
    lifecycle-tied file GC; read-only default (registry cross-ref, retention window, orphan +
    retired-expired detection); reaps NOTHING referenced by a non-terminal state; `--archive` is
    human-only (verified actor), archives-not-deletes, writes no DB row, idempotent. Note it is
@@ -346,3 +350,20 @@ the atomic rename is the sole commit point, so a never-committed move is discard
 the source is re-evaluated from scratch under CURRENT registry + file state (plus a
 `src_content_hash` tamper fingerprint that can only downgrade to skip+surface, never re-archive).
 Re-run GATE-1 against this file inline.
+
+GATE-2 (Codex, code) reconciliation — spec-vs-reality. The GATE-1 review history above records a
+progressively richer *design* for a durable, crash-recoverable archive (per-move sidecar +
+`manifest.jsonl` rollup + reconcile-first recovery + co-located dual archive roots + a whole-tree
+`report_tree`/`vault_doc` surface). **The shipped implementation deliberately does NOT build that
+machinery.** To avoid the spec asserting guarantees the code does not provide (a GATE-2 blocking
+finding), the body of this spec was rewritten to describe what actually ships: (1) two scan surfaces
+— strategy modules and per-strategy report FILES; the top-level `<kb>/strategies/*.md` vault docs
+are NEVER reaped (kb-sync-owned); (2) a SINGLE `--archive-dir` (not co-located dual roots), with a
+cross-filesystem source skipped `cross_filesystem`; (3) archive = a single atomic `os.replace` into
+a UTC+uuid run dir, with source hardening (`O_NOFOLLOW`/containment/signed-hash/inode), destination
+hardening (`_archive_dest_safe` symlink+containment), and a point-of-use registry-stage re-check;
+(4) **no sidecar, no `manifest.jsonl`, no reconcile pass** — crash-safety is limited to the
+atomic-rename "at most one of {source,target} exists" invariant, and the audit record lives only in
+the command's stdout JSON. The durable-record protocol is captured above as a DEFERRED follow-up,
+not a shipped guarantee. The additional GATE-2 hardening (collision-resistant run id, destination
+containment, registry re-check) is folded into the governed-cleanup section and task list.
