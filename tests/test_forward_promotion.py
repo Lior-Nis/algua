@@ -772,6 +772,7 @@ def test_preflight_accepts_paper_and_forward_tested(conn, repo, stage):
     ({"max_forward_drawdown": 0.30}, "max_forward_drawdown"),
     ({"max_staleness_sessions": 6}, "max_staleness_sessions"),
     ({"min_session_coverage": 0.8}, "min_session_coverage"),
+    ({"forward_sharpe_confidence": 0.90}, "forward_sharpe_confidence"),
 ])
 def test_guard_refuses_agent_relaxation_naming_field(kwargs, fieldname):
     with pytest.raises(ValueError, match=fieldname):
@@ -783,13 +784,25 @@ def test_guard_allows_agent_tightening_and_defaults():
     guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(sharpe_floor=0.5))
     guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(max_forward_drawdown=0.20))
     guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(max_staleness_sessions=3))
+    guard_forward_relaxations(Actor.AGENT, ForwardGateCriteria(forward_sharpe_confidence=0.99))
 
 
 def test_guard_human_may_relax_anything():
     guard_forward_relaxations(Actor.HUMAN, ForwardGateCriteria(
         min_forward_observations=1, min_session_coverage=0.1, degradation_factor=0.0,
         sharpe_floor=0.0, min_forward_vol=0.0, max_forward_drawdown=0.9,
-        max_staleness_sessions=99))
+        max_staleness_sessions=99, forward_sharpe_confidence=0.5))
+
+
+@pytest.mark.parametrize("actor", [Actor.AGENT, Actor.HUMAN])
+@pytest.mark.parametrize("bad", [
+    float("nan"), float("inf"), float("-inf"), 0.0, 1.0, 1.5, -0.1])
+def test_guard_rejects_nonfinite_or_out_of_range_confidence(actor, bad):
+    # A nan/inf or out-of-(0,1) forward_sharpe_confidence would slip past the tighten-only
+    # comparison (nan < 0.95 is False) and blow up NormalDist.inv_cdf at the 0/1 edges — the guard
+    # fails closed for BOTH actors rather than passing it silently downstream.
+    with pytest.raises(ValueError, match="finite probability"):
+        guard_forward_relaxations(actor, ForwardGateCriteria(forward_sharpe_confidence=bad))
 
 
 def _pin_identity(monkeypatch):

@@ -17,7 +17,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from statistics import NormalDist
 from typing import Any
+
+from algua.backtest._constants import ANN
+
+# Standard normal for the one-sided Sharpe lower-confidence-bound (PSR) wall. stdlib only — this
+# pure wall must NOT pull scipy in (research.gates owns the scipy-backed DSR path).
+_NORM = NormalDist()
 
 # Window floor: minimum daily RETURN observations in the forward window. Symmetric with
 # gates.MIN_HOLDOUT_OBSERVATIONS (~one trading quarter); underpowered windows fail closed.
@@ -35,6 +42,18 @@ MIN_SESSION_COVERAGE = 0.9
 # Both protected — NOT agent-tunable knobs.
 DEGRADATION_FACTOR = 0.5
 SHARPE_FLOOR = 0.3
+
+# Statistical-significance wall on the realized forward Sharpe: the one-sided lower confidence
+# bound (LCB) on the realized ANNUALIZED Sharpe (at this confidence) must clear the SAME
+# performance bar the point estimate is held to (``max(factor*holdout, floor)``) — NOT merely
+# zero. Testing the LCB against the bar (not against 0) is the point: a lucky short window can put
+# the point estimate above the bar while the true Sharpe is not confidently distinguishable from
+# the bar. Mirrors the strategy-holdout DSR posture (gates.DSR_ALPHA=0.05 => 0.95 confidence).
+# Power tradeoff: at MIN_FORWARD_OBSERVATIONS=63 clearing even the 0.3 floor bar at the LCB
+# demands an observed ANNUAL Sharpe of ~3.8; the remedy for a marginal strategy is a LONGER
+# forward window (the standard error shrinks with T), NOT a weaker bar. Protected — an agent may
+# only RAISE it (stricter); lowering is human-only.
+FORWARD_SHARPE_CONFIDENCE = 0.95  # one-sided confidence the LCB must clear the performance bar
 
 # Volatility floor: near-zero vol makes Sharpe undefined/explosive; a do-nothing strategy must
 # not pass. Protected — NOT an agent-tunable knob.
@@ -90,6 +109,7 @@ class ForwardGateCriteria:
     min_forward_vol: float = MIN_FORWARD_VOL
     max_forward_drawdown: float = MAX_FORWARD_DRAWDOWN
     max_staleness_sessions: int = MAX_STALENESS_SESSIONS
+    forward_sharpe_confidence: float = FORWARD_SHARPE_CONFIDENCE
 
 
 @dataclass(frozen=True)
@@ -113,6 +133,11 @@ class ForwardEvidence:
     n_return_observations: int
     session_coverage: float
     realized_sharpe: float
+    # Return-series moments feeding the non-normality-adjusted Sharpe standard error (the
+    # realized_sharpe_lcb / PSR wall). ``realized_kurtosis`` is RAW Pearson kurtosis (~3 for a
+    # normal series — matches metrics_from_returns 'kurtosis').
+    realized_skew: float
+    realized_kurtosis: float
     realized_vol: float
     realized_max_drawdown: float
     holdout_sharpe: float | None
@@ -166,6 +191,46 @@ def _bool_check(name: str, ok: bool, fail_detail: str) -> dict[str, Any]:
     return {"name": name, "passed": bool(ok), "detail": None if ok else fail_detail}
 
 
+def _forward_sharpe_lcb(
+    sharpe_ann: float, n_obs: int, skew: float, raw_kurtosis: float, confidence: float,
+) -> float | None:
+    """One-sided lower confidence bound (at ``confidence``) on the realized ANNUALIZED forward
+    Sharpe.
+
+    Uses the SAME Lo(2002)/Mertens non-normality Sharpe standard error as
+    ``algua.research.gates`` / ``algua.research.dsr.dsr_confidence`` (kept self-contained on
+    purpose so this pure wall does not import the scipy-backed DSR path):
+
+        SR   = sharpe_ann / sqrt(ANN)                       # de-annualize to per-period
+        var  = 1 - skew*SR + ((rawKurt - 1)/4) * SR^2       # Lo/Mertens SE^2 numerator
+        SE   = sqrt(var / (T - 1))                          # per-period Sharpe standard error
+        lcb  = (SR - z_confidence * SE) * sqrt(ANN)         # re-annualize the LCB
+
+    Comparing ``lcb >= bar`` tests that the TRUE forward Sharpe clears the required performance
+    bar at ``confidence`` — not merely that it clears zero (an earlier revision compared the
+    equivalent PSR against a SR*=0 benchmark, which is the bug this fixes: the point-estimate
+    check already establishes the level, so the significance wall must be against the SAME bar).
+
+    Fails closed (returns ``None``) on any degenerate input: ``n_obs <= 1`` (needs sqrt(T-1) > 0),
+    any non-finite moment, a non-finite/<= 0 variance term, a non-finite/out-of-(0,1) confidence
+    (``inv_cdf`` would blow up at the 0/1 edges), or a non-finite result.
+    """
+    if n_obs <= 1:
+        return None
+    if not (math.isfinite(sharpe_ann) and math.isfinite(skew) and math.isfinite(raw_kurtosis)):
+        return None
+    if not (math.isfinite(confidence) and 0.0 < confidence < 1.0):
+        return None
+    sr = sharpe_ann / math.sqrt(ANN)
+    var_term = 1.0 - skew * sr + ((raw_kurtosis - 1.0) / 4.0) * sr * sr
+    if not math.isfinite(var_term) or var_term <= 0.0:
+        return None
+    se = math.sqrt(var_term / (n_obs - 1))
+    z = _NORM.inv_cdf(confidence)
+    lcb = (sr - z * se) * math.sqrt(ANN)
+    return lcb if math.isfinite(lcb) else None
+
+
 def evaluate_forward_gate(
     evidence: ForwardEvidence,
     criteria: ForwardGateCriteria,
@@ -199,39 +264,69 @@ def evaluate_forward_gate(
     holdout = evidence.holdout_sharpe
     factor = float(criteria.degradation_factor)
     floor = float(criteria.sharpe_floor)
+    # Multiple-testing tax (#431): RAISE the bar by MT_SHARPE_PENALTY per natural-log trial, where
+    # trials = prior identity-scoped forward looks (optional stopping) + concurrent forward
+    # strategies (breadth). effective_trials is clamped to >=1 so ln(1)=0 gives zero penalty on a
+    # clean first solo look (preserving pre-#431 behavior); it is an int >= 1 so the penalty is
+    # always finite. Tighten-only wall — added ON TOP of the criteria-derived bar so a human's
+    # tighter criteria cannot subtract it, and folded into ``bar`` so BOTH the point-estimate
+    # check AND the #432 LCB significance wall (3b) are held to the SAME MT-taxed bar. Computed
+    # unconditionally (depends only on evidence) so it is always in scope for both checks.
+    effective_trials = max(1, evidence.n_prior_forward_looks + evidence.n_concurrent_forward)
+    penalty = MT_SHARPE_PENALTY * math.log(effective_trials)
+    bar: float | None
     if holdout is None or not math.isfinite(holdout):
-        realized = evidence.realized_sharpe
-        checks.append({
-            "name": "realized_sharpe",
-            "value": float(realized) if math.isfinite(realized) else None,
-            "op": ">=", "threshold": None, "passed": False,
-            "detail": "no qualified backtest gate row for current identity",
-        })
+        bar = None
+        bar_detail = "no qualified backtest gate row for current identity"
     elif not (math.isfinite(factor) and math.isfinite(floor)):
+        bar = None
+        bar_detail = "non-finite performance criteria (degradation_factor/sharpe_floor)"
+    else:
+        bar = max(factor * float(holdout), floor) + penalty
+        bar_detail = None
+    if bar is None:
         realized = evidence.realized_sharpe
         checks.append({
             "name": "realized_sharpe",
             "value": float(realized) if math.isfinite(realized) else None,
-            "op": ">=", "threshold": None, "passed": False,
-            "detail": "non-finite performance criteria (degradation_factor/sharpe_floor)",
+            "op": ">=", "threshold": None, "passed": False, "detail": bar_detail,
         })
     else:
-        # Multiple-testing tax (#431): RAISE the bar by MT_SHARPE_PENALTY per natural-log trial,
-        # where trials = prior identity-scoped forward looks (optional stopping) + concurrent
-        # forward strategies (breadth). effective_trials is clamped to >=1 so ln(1)=0 gives zero
-        # penalty on a clean first solo look (preserving pre-#431 behavior); it is an int >= 1 so
-        # the penalty is always finite. This is a tighten-only wall — folded into the SAME
-        # realized_sharpe check (no new check name), added ON TOP of the criteria-derived bar so
-        # a human's tighter criteria cannot subtract it.
-        effective_trials = max(1, evidence.n_prior_forward_looks + evidence.n_concurrent_forward)
-        penalty = MT_SHARPE_PENALTY * math.log(effective_trials)
-        bar = max(factor * float(holdout), floor) + penalty
         chk = _metric_check("realized_sharpe", float(evidence.realized_sharpe), ">=", bar)
         chk["effective_trials"] = int(effective_trials)
         chk["n_prior_forward_looks"] = int(evidence.n_prior_forward_looks)
         chk["n_concurrent_forward"] = int(evidence.n_concurrent_forward)
         chk["multiple_testing_penalty"] = float(penalty)
         checks.append(chk)
+
+    # 3b. Statistical-significance wall: the one-sided lower confidence bound (LCB) on the realized
+    # ANNUALIZED Sharpe must clear the SAME performance bar the point estimate is held to — not
+    # merely zero. A lucky short window can clear the point bar while the true Sharpe is not
+    # confidently above the bar. When the bar itself is unavailable (no qualified holdout /
+    # non-finite criteria) the performance question is undefinable, so this fails closed too; a
+    # degenerate LCB (n<=1, non-finite moments, non-finite/out-of-range confidence) also fails
+    # closed. The threshold is the finite bar (or None, scrubbed exactly as _metric_check would).
+    if bar is None:
+        checks.append({
+            "name": "realized_sharpe_lcb", "value": None, "op": ">=",
+            "threshold": None, "passed": False, "detail": bar_detail,
+        })
+    else:
+        lcb = _forward_sharpe_lcb(
+            evidence.realized_sharpe, evidence.n_return_observations,
+            evidence.realized_skew, evidence.realized_kurtosis,
+            float(criteria.forward_sharpe_confidence))
+        if lcb is None:
+            checks.append({
+                "name": "realized_sharpe_lcb", "value": None, "op": ">=",
+                "threshold": float(bar) if math.isfinite(bar) else None, "passed": False,
+                "detail": "forward Sharpe LCB degenerate (n<=1, non-finite moments/confidence)",
+            })
+        else:
+            checks.append(_metric_check(
+                "realized_sharpe_lcb", lcb, ">=", float(bar),
+                detail="one-sided lower Sharpe bound must clear the performance bar at "
+                       f"{float(criteria.forward_sharpe_confidence):g} confidence"))
 
     # 4. Volatility floor — a do-nothing strategy must not pass on an undefined/explosive Sharpe.
     checks.append(_metric_check(
