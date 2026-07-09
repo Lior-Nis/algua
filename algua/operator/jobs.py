@@ -74,9 +74,16 @@ OPERATOR_JOBS: dict[str, OperatorJob] = {
         key="paper",
         argv_template=("algua", "paper", "run-all", "--snapshot", "{snapshot}"),
         expected_duration_seconds=900.0,
-        # A `deferred:true` cycle exits 0 but did NOT trade the session (a transient reconcile
-        # condition) — NOT completed, so the marker is left unwritten and the next fire retries.
-        is_completed=lambda rc, payload: rc == 0 and not (payload or {}).get("deferred"),
+        # Require the driver's OWN positive verdict (`ok: true`), not just rc==0: `paper run-all`
+        # today always exits non-zero on an `ok:false` outcome, but this predicate is the ONLY
+        # thing standing between a future/altered driver behavior and silently marking a broken
+        # session complete (GATE-2 finding, #486) — `rc==0` alone is not proof of success. A
+        # `deferred:true` cycle exits 0 with `ok:true` but did NOT trade the session (a transient
+        # reconcile condition) — also NOT completed, so the marker is left unwritten and the next
+        # fire retries.
+        is_completed=lambda rc, payload: (
+            rc == 0 and (payload or {}).get("ok") is True and not (payload or {}).get("deferred")
+        ),
     ),
 }
 # The "research" job (`algua paper merge-back …`, completed ⇔ rc0, grace 3600) is DEFERRED to a

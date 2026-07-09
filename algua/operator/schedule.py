@@ -282,6 +282,16 @@ def session_gate(
     both fail closed (``due=False``) with a distinct reason so the CLI can alert + exit non-zero. On
     a ``due`` decision, ``skipped_sessions`` counts the completed sessions strictly between the last
     recorded session and the target (0 in the ordinary daily cadence).
+
+    A recorded session STRICTLY AFTER the current target (``last > sess``) is a SEMANTIC anomaly,
+    not an ordinary re-fire: a legitimately-written marker only ever records the exact session it
+    was gated `due` for, which can never outrun `target_session(now, ...)` as of the SAME `now` — so
+    a future-dated entry means the file was corrupted by an external actor (manual edit, bad
+    restore, clock-skewed writer). Silently treating it as `already_ran` (GATE-2 finding, #486)
+    would suppress trading on every real subsequent session with zero signal — the exact "fleet
+    quietly stops trading" hazard the corrupt-marker/stuck-lock alerts exist to prevent elsewhere in
+    this module. It fails closed as `marker_corrupt` (alerted by the caller), same as unparseable
+    JSON; only an exact match (``last == sess``) is the benign, expected re-fire case.
     """
     try:
         sess = target_session(now, calendar)
@@ -293,7 +303,9 @@ def session_gate(
         last = marker.last_session(job)
     except MarkerCorrupt:
         return SessionGateDecision(due=False, session=sess, reason="marker_corrupt")
-    if last is not None and last >= sess:
+    if last is not None and last > sess:
+        return SessionGateDecision(due=False, session=sess, reason="marker_corrupt")
+    if last is not None and last == sess:
         return SessionGateDecision(due=False, session=sess, reason="already_ran")
     skipped = 0
     if last is not None:

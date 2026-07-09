@@ -31,7 +31,6 @@ def test_unknown_key_lookup_returns_none() -> None:
 
 def test_is_completed_rc0_no_deferred_is_true() -> None:
     assert _paper().is_completed(0, {"ok": True}) is True
-    assert _paper().is_completed(0, None) is True
 
 
 def test_is_completed_rc0_deferred_is_false() -> None:
@@ -41,6 +40,16 @@ def test_is_completed_rc0_deferred_is_false() -> None:
 def test_is_completed_nonzero_is_false() -> None:
     assert _paper().is_completed(1, {"ok": False}) is False
     assert _paper().is_completed(2, None) is False
+
+
+def test_is_completed_rc0_without_explicit_ok_true_is_false() -> None:
+    # GATE-2 (#486): rc==0 alone is not proof of success — the driver must say `ok: true` itself.
+    # A missing/absent-payload/`ok:false`-at-rc0 outcome must never be trusted as a completion (the
+    # in-repo `paper run-all` always exits non-zero on `ok:false` today, but the predicate is the
+    # only backstop against a future/altered driver silently marking a broken session complete).
+    assert _paper().is_completed(0, None) is False
+    assert _paper().is_completed(0, {"ok": False}) is False
+    assert _paper().is_completed(0, {}) is False
 
 
 # --- bind: exact-arity full-argv match --------------------------------------------------------

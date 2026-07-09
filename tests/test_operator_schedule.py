@@ -278,6 +278,21 @@ def test_session_gate_marker_corrupt(tmp_path) -> None:
     assert d.session == date(2023, 6, 1)
 
 
+def test_session_gate_future_dated_marker_fails_closed_as_corrupt(tmp_path) -> None:
+    # GATE-2 (#486): a marker recorded STRICTLY AFTER the current target can never arise from
+    # legitimate operation (a marker only ever records the exact session it was gated `due` for,
+    # which cannot outrun `target_session` as of the SAME `now`) -- so it is semantic corruption
+    # (manual edit / bad restore / clock-skewed writer), not an ordinary re-fire. Must fail closed
+    # the same way unparseable-JSON corruption does, not silently suppress every future session.
+    m = SessionMarker(tmp_path)
+    _record(m, "paper", date(2099, 1, 1))
+    now = datetime(2023, 6, 1, 21, 30, tzinfo=UTC)
+    d = session_gate("paper", now, _cal(), m)
+    assert d.due is False
+    assert d.reason == "marker_corrupt"
+    assert d.session == date(2023, 6, 1)
+
+
 def test_session_gate_skipped_sessions_on_one_session_gap(tmp_path) -> None:
     m = SessionMarker(tmp_path)
     # Target is 2023-06-01; last recorded is 2023-05-30 -> one skipped session (5/31).

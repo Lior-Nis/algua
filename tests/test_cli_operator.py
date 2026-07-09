@@ -201,6 +201,32 @@ def test_due_driver_timeout_kills_and_leaves_marker_for_retry(db_dir, monkeypatc
     assert SessionMarker(db_dir).last_session("paper") is None
 
 
+# --- (i') due, driver CANNOT BE SPAWNED (OSError): alert + NO marker + exit 1 -------------------
+
+
+def test_due_driver_spawn_failure_alerts_and_leaves_marker_for_retry(db_dir, monkeypatch):
+    # GATE-2 (#486): before this fix, a spawn failure (binary not on PATH, permission denied, …)
+    # propagated past the run lock straight to the generic `@json_errors` catch-all, which renders
+    # an error envelope but never alerts — every fire would fail forever with zero paging.
+    def _unspawnable(command, timeout=None):
+        raise FileNotFoundError(2, "No such file or directory", command[0])
+
+    monkeypatch.setattr(operator_cmd, "_run_driver", _unspawnable)
+    alerts = _spy_alerts(monkeypatch)
+
+    result = _invoke()
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["ran"] is False
+    assert payload["recorded"] is False
+    assert payload["reason"] == "driver_spawn_failed"
+    assert alerts[0][0] == "driver_spawn_failed"
+    # marker left unwritten so the NEXT fire re-attempts the session
+    assert SessionMarker(db_dir).last_session("paper") is None
+
+
 # --- (j) due, rc==0 deferred: NO marker, NO alert, exit 0 ---------------------------------------
 
 
@@ -225,6 +251,35 @@ def test_due_rc0_deferred_no_marker_no_alert(db_dir, monkeypatch):
 
 def test_due_rc0_non_json_completion_unconfirmed(db_dir, monkeypatch):
     monkeypatch.setattr(operator_cmd, "_run_driver", _fake_driver(0, "not json at all"))
+    alerts = _spy_alerts(monkeypatch)
+
+    result = _invoke()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["recorded"] is False
+    assert payload["reason"] == "completion_unconfirmed"
+    assert alerts[0][0] == "completion_unconfirmed"
+    assert SessionMarker(db_dir).last_session("paper") is None
+
+
+# --- (k') due, rc==0 non-success payload (NOT deferred): completion_unconfirmed alert, NO marker --
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"ok": False, "reason": "boom"},  # explicit failure at rc0
+        {"reason": "no ok field"},  # ok-less envelope
+        {},  # empty object
+    ],
+)
+def test_due_rc0_non_success_payload_alerts_completion_unconfirmed(db_dir, monkeypatch, body):
+    # GATE-2 (#486): rc==0 with a parsed payload that is NOT `ok:true` and NOT `deferred:true` must
+    # NOT be silently misfiled as a benign `deferred` — that would retry a broken driver forever
+    # with zero paging. It fails closed like the unparseable case: alert + no marker + exit 0.
+    stdout = json.dumps(body, indent=2)
+    monkeypatch.setattr(operator_cmd, "_run_driver", _fake_driver(0, stdout))
     alerts = _spy_alerts(monkeypatch)
 
     result = _invoke()
@@ -315,6 +370,58 @@ def test_unknown_job_fails_closed(db_dir, monkeypatch):
     assert payload["reason"] == "unknown_job"
     assert alerts[0][0] == "unknown_job"
     assert calls == []
+
+
+# --- (o) git-dir unresolvable: alert + fail closed + exit 1, driver NOT called ------------------
+
+
+def test_git_dir_unresolvable_fails_closed(db_dir, monkeypatch):
+    # GATE-2 (#486): the run lock is anchored at the per-worktree git dir; if it cannot be resolved
+    # (not a git worktree, `git` missing, permission denied) the fire must alert + fail closed, not
+    # escape to the generic `@json_errors` catch-all that pages no one and fails every fire forever.
+    def _boom() -> Path:
+        raise subprocess.CalledProcessError(128, ["git", "rev-parse", "--absolute-git-dir"])
+
+    monkeypatch.setattr(operator_cmd, "_resolve_git_dir", _boom)
+    calls: list = []
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
+    alerts = _spy_alerts(monkeypatch)
+
+    result = _invoke()
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["ran"] is False
+    assert payload["reason"] == "git_dir_unresolved"
+    assert alerts[0][0] == "git_dir_unresolved"
+    assert calls == []
+    assert SessionMarker(db_dir).last_session("paper") is None
+
+
+# --- (p) lock file unopenable: alert + fail closed + exit 1, driver NOT called ------------------
+
+
+def test_lock_file_unopenable_fails_closed(db_dir, monkeypatch):
+    # GATE-2 (#486): `operator_run_lock` raises a RAW OSError (not OperatorLockHeld) when it cannot
+    # open/create the lock file — permission denied, read-only fs, disk full. Point the git dir at a
+    # non-existent parent so `open(lock_path, "a+")` raises FileNotFoundError; it must alert + fail
+    # closed the same way, never silently at the un-paging catch-all.
+    monkeypatch.setattr(operator_cmd, "_resolve_git_dir", lambda: db_dir / "no_such_dir")
+    calls: list = []
+    monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
+    alerts = _spy_alerts(monkeypatch)
+
+    result = _invoke()
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["ran"] is False
+    assert payload["reason"] == "lock_unavailable"
+    assert alerts[0][0] == "lock_unavailable"
+    assert calls == []
+    assert SessionMarker(db_dir).last_session("paper") is None
 
 
 # --- (h)/(i) run-lock contention: benign within grace, stuck past grace -------------------------

@@ -216,7 +216,14 @@ def run(
         now_dt = now_dt.replace(tzinfo=UTC)
 
     host, pid = socket.gethostname(), os.getpid()
-    lock_path = _resolve_git_dir() / "operator.lock"
+    try:
+        lock_path = _resolve_git_dir() / "operator.lock"
+    except (OSError, subprocess.CalledProcessError) as exc:
+        # The run lock is anchored at the per-worktree git dir; if we cannot even resolve it (not a
+        # git worktree, `git` binary missing, permission denied) there is nowhere safe to take the
+        # lock, and this escapes BEFORE any driver runs. Alert + fail closed (_emit_setup_failed).
+        _emit_setup_failed(job, "git_dir_unresolved", exc, alert_cmd)
+        raise typer.Exit(1) from None
 
     with correlation_context():
         try:
@@ -224,6 +231,13 @@ def run(
                 _run_session(job, op_job, command, now_dt, alert_cmd, host, pid)
         except OperatorLockHeld as held:
             _emit_lock_held(job, op_job, held.holder, now_dt, alert_cmd)
+        except OSError as exc:
+            # `operator_run_lock` raises a RAW OSError if it cannot open/create the lock file
+            # (permission denied, read-only fs, disk full) — this happens BEFORE it converts flock
+            # contention into OperatorLockHeld, so it is a setup failure, not an overlap. Same
+            # fail-closed-with-a-page invariant: never let it die at the un-paging catch-all (#486).
+            _emit_setup_failed(job, "lock_unavailable", exc, alert_cmd)
+            raise typer.Exit(1) from None
 
 
 def _held_seconds(holder: dict | None, now_dt: datetime) -> float | None:
@@ -276,6 +290,27 @@ def _emit_lock_held(
                 "holder": holder,
             }
         )
+    )
+
+
+def _emit_setup_failed(job: str, reason: str, exc: BaseException, alert_cmd: str | None) -> None:
+    """A pre-driver SETUP failure — the git dir that anchors the run lock is unresolvable, or the
+    lock file itself cannot be opened/created (permission denied, read-only fs, disk full). The fire
+    never even reached the session gate. Fail closed WITH an explicit page: without this the failure
+    would propagate to the generic ``@json_errors`` catch-all, which renders an error envelope but
+    NEVER calls ``emit_alert`` — so a mis-provisioned deployment would fail every timer fire forever
+    in silence (GATE-2 finding, #486). No marker is written, so the next fire re-attempts."""
+    emit_alert(reason, {"job": job, "error": str(exc)}, alert_cmd=alert_cmd)
+    emit(
+        {
+            "ok": False,
+            "job": job,
+            "ran": False,
+            "recorded": False,
+            "reason": reason,
+            "error": str(exc),
+            "alerted": True,
+        }
     )
 
 
@@ -367,6 +402,31 @@ def _run_session(
             }
         )
         raise typer.Exit(1) from None
+    except OSError as exc:
+        # The driver could not even be SPAWNED (binary not on PATH, permission denied, …) — this is
+        # not a driver failure, it is an operator-config failure. Without this catch it would
+        # propagate past the run lock's `finally` (releasing the lock correctly) straight to the
+        # generic `@json_errors` catch-all, which renders a JSON error envelope but — critically —
+        # never calls `emit_alert`: the operator would then fail EVERY fire, forever, with zero
+        # paging (GATE-2 finding, #486). Alert explicitly and leave the marker unwritten.
+        emit_alert(
+            "driver_spawn_failed",
+            {"job": job, "session": sess_iso, "error": str(exc)},
+            alert_cmd=alert_cmd,
+        )
+        emit(
+            {
+                "ok": False,
+                "job": job,
+                "ran": False,
+                "recorded": False,
+                "reason": "driver_spawn_failed",
+                "session": sess_iso,
+                "error": str(exc),
+                "alerted": True,
+            }
+        )
+        raise typer.Exit(1) from None
     payload = _parse_driver_payload(proc.stdout)
     rc = proc.returncode
     stdout_head = (proc.stdout or "")[:_STDOUT_HEAD_CAP]
@@ -398,15 +458,40 @@ def _run_session(
             )
             return
         if not op_job.is_completed(rc, payload):
-            # A benign deferral (driver chose not to trade): NOT completed, so the marker is left
-            # unwritten and the next fire retries. Not a failure — no alert.
+            if payload.get("deferred") is True:
+                # A benign deferral (the driver deliberately chose NOT to trade this cycle — a
+                # transient reconcile condition): NOT completed, so the marker is left unwritten and
+                # the next fire retries. Expected operation, not a failure — no alert.
+                emit(
+                    ok(
+                        {
+                            "job": job,
+                            "ran": True,
+                            "recorded": False,
+                            "reason": "deferred",
+                            "session": sess_iso,
+                            "rc": 0,
+                        }
+                    )
+                )
+                return
+            # rc==0 but the driver neither asserted success (`ok:true`) NOR deferred — e.g.
+            # `ok:false`, or an `ok`-less envelope at rc0. We cannot confirm the session completed,
+            # so — exactly like the unparseable case above — refuse to record, ALERT, and let the
+            # next fire retry. Without this, a broken-but-rc0 driver would be silently misfiled as a
+            # benign deferral and retried FOREVER with zero paging (GATE-2 finding, #486).
+            emit_alert(
+                "completion_unconfirmed",
+                {"job": job, "rc": rc, "stdout_head": stdout_head},
+                alert_cmd=alert_cmd,
+            )
             emit(
                 ok(
                     {
                         "job": job,
                         "ran": True,
                         "recorded": False,
-                        "reason": "deferred",
+                        "reason": "completion_unconfirmed",
                         "session": sess_iso,
                         "rc": 0,
                     }
