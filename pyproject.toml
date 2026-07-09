@@ -301,6 +301,7 @@ modules = [
     "algua.cli.live_cmd",
     "algua.cli.monitoring_cmd",
     "algua.cli.negative_cmd",
+    "algua.cli.operator_cmd",
     "algua.cli.paper_cmd",
     "algua.cli.registry_cmd",
     "algua.cli.research_cmd",

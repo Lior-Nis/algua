@@ -53,6 +53,21 @@ class MarketCalendar:
         n = len(self._cal.sessions_in_range(pd.Timestamp(lo), pd.Timestamp(hi))) - 1
         return n if sb >= sa else -n
 
+    def session_close(self, session: date) -> datetime:
+        """The UTC close instant of a trading `session`. xcals returns a UTC tz-aware Timestamp;
+        e.g. session_close(2023-06-01) == 2023-06-01 20:00:00+00:00."""
+        return self._cal.session_close(pd.Timestamp(session)).to_pydatetime()
+
+    def bounds(self) -> tuple[datetime, datetime]:
+        """The calendar's precomputed (first_minute, last_minute) horizon, UTC tz-aware. Used to
+        tell a before-first-session instant (benign bring-up) apart from a past-the-horizon
+        instant (a calendar that has RUN OUT and needs a refresh) — both raise ``MinuteOutOfBounds``
+        from the underlying calendar, but only the latter is an operational anomaly."""
+        return (
+            self._cal.first_minute.to_pydatetime(),
+            self._cal.last_minute.to_pydatetime(),
+        )
+
     def session_of_instant(self, instant: datetime) -> date:
         """The exchange session an INSTANT belongs to (the session on-or-before it), mapped in
         EXCHANGE time — NOT the instant's UTC calendar date. An after-close tick such as
