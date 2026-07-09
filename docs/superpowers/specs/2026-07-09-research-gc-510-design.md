@@ -133,8 +133,10 @@ Only two reasons make a file reapable; everything else is `protected`:
   between the move and the manifest append can never orphan an archived artifact. Per artifact:
   1. Atomically write a sidecar `<archive-root>/<run-id>/<rel-path>.reap.json` (write-temp →
      fsync → `os.replace`) recording the full intent `{run_id, ts, from, to, strategy, reason,
-     stage_at_reap, retired_at, bytes}` — **before** the move. The sidecar sits *beside* the
-     target location, whose path is fully known up front.
+     stage_at_reap, retired_at, bytes, src_content_hash}` — **before** the move. The sidecar sits
+     *beside* the target location, whose path is fully known up front. (`src_content_hash` is a
+     size+digest fingerprint of the source at intent time — used only to detect tampering; a
+     pre-commit intent is never redone, so it can only downgrade to skip+surface, never re-archive.)
   2. Move the artifact: `os.replace(from, to)` (the atomic commit point; file or directory).
   3. Append the row to `<archive-root>/manifest.jsonl`.
   **Reconcile-first recovery.** Every `--archive` run begins by reconciling each archive tree
@@ -143,8 +145,16 @@ Only two reasons make a file reapable; everything else is `protected`:
   - **target present, source absent, row missing** → append the row (repairs a crash between
     step 2 and step 3 — the exact gap a naive move-then-append leaves).
   - **target present, source absent, row present** → already complete; no-op.
-  - **target absent, source present** → the crash landed between step 1 and step 2; redo the move
-    (idempotent: re-`os.replace`), then append the row.
+  - **target absent, source present** → the crash landed between step 1 and step 2, so the move
+    **never committed** (the atomic rename is the sole commit point). A pre-commit sidecar carries
+    **no authority**: the reconcile pass **discards the stale sidecar and does NOT redo the move**.
+    The source is simply left in place and **re-evaluated from scratch by this run's normal
+    classify pass under CURRENT registry + file state**. This is the fix for the stale-eligibility
+    hazard: if, between the crash and now, the operator `registry add`ed the orphan (now a live,
+    protected strategy), edited the source, or the retention math changed, the fresh classification
+    respects it — GC can never archive a source whose eligibility was decided in a prior, now-stale
+    intent. (As defense-in-depth the sidecar also records the source's size+content hash at intent
+    time; a redo is never performed, so a mismatch can only ever downgrade to skip+surface.)
   - **target absent, source absent** → stale/aborted sidecar, drop it.
   - **target present AND source present** → *impossible under atomic rename*; treated as
     corruption → the item is **skipped, flagged, and surfaced for a human** (never
@@ -268,9 +278,12 @@ Ranking = worst-first: `orphaned` before `retired_expired`, then by `total_bytes
    containment guard → append the `<archive-root>/manifest.jsonl` row. Tests: agent `--archive`
    fails closed & moves nothing; verified human archives module+doc+report-tree + writes manifest;
    **DB-immutability** test (`strategies` + `stage_transitions` row counts unchanged);
-   **idempotency** test (second run moves nothing, no dup manifest row); **crash-recovery** test
-   (simulate a move with no manifest append, i.e. an archived artifact + sidecar but missing
-   rollup row → next run's reconcile appends exactly one row, reaps nothing new); **both-present
+   **idempotency** test (second run moves nothing, no dup manifest row); **crash-recovery** tests:
+   (i) committed-but-unlogged (archived artifact + sidecar, missing rollup row → reconcile appends
+   exactly one row, reaps nothing new); (ii) **pre-commit intent is non-authoritative** — a
+   sidecar whose source is still present (move never committed) whose strategy was `registry
+   add`ed (now non-terminal) between runs → reconcile discards the intent and the fresh classify
+   pass leaves the now-protected source untouched (the stale-eligibility hazard); **both-present
    corruption** test (source + target both present → item skipped+flagged, never double-reaped);
    path-containment test (crafted name cannot escape either archive root).
 5. **`.gitignore`** — add `/archive/` and `kb/archive/` (the two co-located archive roots) so
@@ -320,3 +333,12 @@ vault artifacts) so rename is always same-fs, (c) skipping+surfacing any genuine
 artifact (`skipped_cross_fs`) rather than copying it, and (d) completing the reconcile matrix with
 the both-present case (impossible under atomic rename → skip + flag for human, never
 double-reaped). Re-run GATE-1 against this file inline.
+
+Fourth GATE-1 pass CHANGES-REQUESTED, one new material defect: the reconcile case `target absent,
+source present → redo the move` could archive a source whose eligibility was decided in a prior,
+now-stale intent (an intervening `registry add` making the orphan a live/protected strategy, a
+source edit, or a retention change). Resolved by making a **pre-commit intent non-authoritative**:
+the atomic rename is the sole commit point, so a never-committed move is discarded on reconcile and
+the source is re-evaluated from scratch under CURRENT registry + file state (plus a
+`src_content_hash` tamper fingerprint that can only downgrade to skip+surface, never re-archive).
+Re-run GATE-1 against this file inline.
