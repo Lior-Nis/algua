@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -783,6 +784,15 @@ _GC_NOTE = (
 )
 
 
+def _gc_scan_roots(settings: Any) -> list[Path]:
+    """The two containment roots the GC walk is confined to: the strategy-module package dir and the
+    knowledge-base strategies subtree. `_gc_archive` requires every reaped source to resolve UNDER
+    one of these (symlink-free), mirroring `knowledge/sync.py::_safe_path`'s escape guard."""
+    # Lazy import (mlflow-importing metrics layer) — see _gc_inventory.
+    from algua.knowledge.sync import strategies_dir
+    return [Path(algua.strategies.__file__).parent, strategies_dir(settings)]
+
+
 def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
     """Scan the two on-disk strategy surfaces into FileItems (the I/O the pure module refuses).
 
@@ -802,34 +812,35 @@ def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
     iterating only DIRECTORIES (skipping ``families/``) we structurally exclude those top-level
     files without special-casing each name.
     """
-    # Lazy import: algua.knowledge.sync pulls the mlflow-importing metrics layer, kept off the
-    # import path of unrelated CLI commands (mirrors _common.sync_kb_doc).
-    from algua.knowledge.sync import strategies_dir
-
+    root, sdir = _gc_scan_roots(settings)
     items: list[lifecycle_gc.FileItem] = []
-    root = Path(algua.strategies.__file__).parent
     for d in sorted(root.iterdir()):
-        if not d.is_dir() or d.name.startswith("_") or not (d / "__init__.py").exists():
+        # Containment: never descend a symlinked family dir — it could point outside the package
+        # root and smuggle an arbitrary tree into the reapable set (mirrors _safe_path).
+        if d.is_symlink() or not d.is_dir() or d.name.startswith("_") \
+                or not (d / "__init__.py").exists():
             continue
         for p in sorted(d.glob("*.py")):
-            if p.name == "__init__.py" or p.stem.startswith("_"):
+            if p.is_symlink() or p.name == "__init__.py" or p.stem.startswith("_"):
                 continue
             st = p.stat()
             items.append(lifecycle_gc.FileItem(
                 path=str(p), strategy=p.stem, surface=lifecycle_gc.SURFACE_MODULE,
                 size_bytes=st.st_size, mtime=st.st_mtime))
-    sdir = strategies_dir(settings)
     if sdir.exists():
         for name_dir in sorted(sdir.iterdir()):
             # Only per-strategy DIRECTORIES; skip the families/ hub subtree and every top-level file
-            # (the kb-sync-owned router pages + strategy_doc_path notes are files, not dirs).
-            if not name_dir.is_dir() or name_dir.name == "families":
+            # (the kb-sync-owned router pages + strategy_doc_path notes are files, not dirs). A
+            # symlinked per-strategy dir OR reports/ dir is refused — it could escape the vault.
+            if name_dir.is_symlink() or not name_dir.is_dir() or name_dir.name == "families":
                 continue
             reports = name_dir / "reports"
-            if not reports.is_dir():
+            if reports.is_symlink() or not reports.is_dir():
                 continue
             for p in sorted(reports.rglob("*")):
-                if not p.is_file():
+                # rglob does not descend symlinked subdirs, but a symlinked leaf can still surface;
+                # skip any symlink so only genuine regular files under the vault are ever scanned.
+                if p.is_symlink() or not p.is_file():
                     continue
                 st = p.stat()
                 items.append(lifecycle_gc.FileItem(
@@ -840,6 +851,7 @@ def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
 
 def _gc_archive(
     reap: list[lifecycle_gc.Classified], archive_dir: Path, expected_hashes: dict[str, str],
+    scan_roots: list[Path],
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """MOVE each reapable file into a timestamped run dir under ``archive_dir``, mirroring its path.
 
@@ -849,6 +861,12 @@ def _gc_archive(
     TOCTOU/symlink/content hardening (#510 GATE-2). Every file is handled through a SINGLE file
     descriptor opened ``O_RDONLY | O_NOFOLLOW`` and never re-resolved by path:
 
+    * PATH CONTAINMENT (before any open): the source's parent is resolved with ``strict=True`` and
+      REQUIRED to land under one of ``scan_roots`` (the strategy package dir / kb strategies
+      subtree). ``O_NOFOLLOW`` only rejects a symlink at the FINAL component; an INTERMEDIATE
+      symlinked dir (``.../reports -> /etc``) would slip past it, so we resolve the whole parent
+      chain and refuse (``escaped_scan_root``) anything that resolves outside the known roots —
+      mirroring ``knowledge/sync.py::_safe_path``.
     * ``O_NOFOLLOW`` makes the open FAIL if the final path component is a symlink, and ``fstat`` on
       the fd rejects any non-regular file — so a symlink/dir/FIFO swapped in after classification
       can never be followed into archiving an unrelated target.
@@ -857,14 +875,19 @@ def _gc_archive(
       challenge). A racing writer that swaps in different-but-regular content after signature
       verification fails this check (``content_changed_since_authorization``) — the archived bytes
       are ALWAYS the signed bytes, enforced at the point of use, not merely at challenge time.
-    * Before the destructive ``os.unlink`` we re-``lstat`` the path and compare (st_dev, st_ino) to
-      the open fd's ``fstat``; a mismatch means the path now names a DIFFERENT inode than the one we
-      hashed/archived, so we skip the unlink (``replaced_before_unlink``) rather than delete a
-      replacement file.
+    * Before the move we re-``lstat`` the path and compare (st_dev, st_ino) to the open fd's
+      ``fstat``; a mismatch means the path now names a DIFFERENT inode than the one we hashed, so we
+      skip (``replaced_before_move``) rather than relocate a replacement file.
+    * The move itself is a SINGLE atomic same-filesystem ``os.replace(src, dest)`` — never
+      copy-then-unlink. There is therefore NO crash window in which both the source and an archived
+      copy exist simultaneously (which would double-archive on retry). A genuinely cross-filesystem
+      destination raises ``EXDEV``; per the design doc we SKIP+surface it (``cross_filesystem``)
+      rather than silently falling back to a non-atomic copy.
 
     Refused/vanished paths are reported in ``skipped`` and left in place; ``expected_hashes`` is the
     same per-file sha256 map that was folded into the signed manifest.
     """
+    resolved_roots = [r.resolve() for r in scan_roots]
     run_dir = archive_dir / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     moved: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -875,6 +898,18 @@ def _gc_archive(
                   path: str = c.path) -> None:
             skipped.append({"src": path, "strategy": strategy, "surface": surface,
                             "reason": reason})
+
+        # Containment guard: resolve the ENTIRE parent chain (catches an intermediate symlinked dir
+        # that O_NOFOLLOW's final-component check would miss) and require it under a scan root.
+        try:
+            real_parent = src.parent.resolve(strict=True)
+        except (OSError, RuntimeError):
+            _skip("parent_unresolvable")
+            continue
+        if not any(real_parent == root or root in real_parent.parents
+                   for root in resolved_roots):
+            _skip("escaped_scan_root")
+            continue
 
         try:
             fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)  # O_NOFOLLOW: refuse a swapped symlink
@@ -893,15 +928,15 @@ def _gc_archive(
                 # Content differs from what the human SIGNED — refuse (point-of-use enforcement).
                 _skip("content_changed_since_authorization")
                 continue
-            # Identity re-check before the destructive unlink: the path must STILL name the exact
-            # inode we hashed, else a replacement was raced in — leave both alone.
+            # Identity re-check before the atomic move: the path must STILL name the exact inode we
+            # hashed, else a replacement was raced in — leave both alone.
             try:
                 lst = os.lstat(src)
             except FileNotFoundError:
-                _skip("vanished_before_unlink")
+                _skip("vanished_before_move")
                 continue
             if (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
-                _skip("replaced_before_unlink")
+                _skip("replaced_before_move")
                 continue
             # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
             # paths are ABSOLUTE (both algua.strategies.__file__ and an absolute knowledge_dir), and
@@ -910,10 +945,18 @@ def _gc_archive(
             rel = src.relative_to(src.anchor) if src.is_absolute() else src
             dest = run_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(data)  # the exact signed bytes we hashed above
+            try:
+                # Atomic same-fs rename: no window where both src and dest exist (crash-safe, and no
+                # duplicate-archive-on-retry). Cross-fs raises EXDEV — skip rather than copy.
+                os.replace(src, dest)
+            except OSError as exc:
+                if exc.errno == errno.EXDEV:
+                    _skip("cross_filesystem")
+                else:
+                    _skip("archive_move_failed")
+                continue
         finally:
             os.close(fd)
-        os.unlink(src)  # inode confirmed identical just above; removes the original we archived
         moved.append({
             "src": c.path, "dest": str(dest), "strategy": c.strategy, "surface": c.surface,
             "reason": c.reason, "size_bytes": c.size_bytes,
@@ -995,16 +1038,22 @@ def gc(
     now = datetime.now(UTC)
     classified = lifecycle_gc.classify(
         items, registry, now=now, retention_days=retention_days)
-    reap = lifecycle_gc.reapable(classified)
     by_reason: Counter[str] = Counter(c.reason for c in classified)
 
-    shown = reap[:top] if top else reap
+    # --top is applied to `reap` ITSELF (not just the printed list) so the signed manifest, the
+    # challenge, and the actual archived set are EXACTLY the top-N shown — authorization can never
+    # diverge from display (#510 GATE-2). Everything downstream (hashes/manifest/archive/report)
+    # keys off this single truncated list.
+    reap = lifecycle_gc.reapable(classified)
+    if top:
+        reap = reap[:top]
+
     reapable_dicts = [{
         "path": c.path, "strategy": c.strategy, "surface": c.surface, "reason": c.reason,
         "size_bytes": c.size_bytes,
         "age_days": round(c.age_days, 3) if c.age_days is not None else None,
         "stage": c.stage,
-    } for c in shown]
+    } for c in reap]
 
     archive_run_dir: str | None = None
     archived: list[dict[str, Any]] = []
@@ -1063,7 +1112,7 @@ def gc(
                 "fresh challenge, sign it (ssh-keygen -Y sign -n algua-human-actor), and retry. A "
                 "bare --actor human does not unlock the cleanup.")
         archive_run_dir, archived, archive_skipped = _gc_archive(
-            reap, archive_dir, content_hashes)
+            reap, archive_dir, content_hashes, _gc_scan_roots(settings))
 
     emit(ok({
         "note": _GC_NOTE,

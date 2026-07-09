@@ -168,7 +168,7 @@ def test_gc_archive_refuses_symlink_source_and_never_follows_it(tmp_path):
     hashes = {str(link): _sha(secret), str(real): _sha(real)}
 
     run_dir, moved, skipped = _gc_archive(
-        [_classified(str(link)), _classified(str(real))], arch, hashes)
+        [_classified(str(link)), _classified(str(real))], arch, hashes, [tmp_path])
 
     assert [m["src"] for m in moved] == [str(real)]
     assert [s["src"] for s in skipped] == [str(link)]
@@ -188,8 +188,101 @@ def test_gc_archive_refuses_content_changed_since_authorization(tmp_path):
     # expected_hashes carries the hash of DIFFERENT (signed) content than what is on disk now.
     stale = {str(f): "0" * 64}
 
-    run_dir, moved, skipped = _gc_archive([_classified(str(f))], arch, stale)
+    run_dir, moved, skipped = _gc_archive([_classified(str(f))], arch, stale, [tmp_path])
 
     assert moved == []
     assert [s["reason"] for s in skipped] == ["content_changed_since_authorization"]
     assert f.exists()  # untouched — never deleted, never archived
+
+
+def test_gc_archive_refuses_symlinked_intermediate_dir(tmp_path):
+    """An INTERMEDIATE symlinked directory (which O_NOFOLLOW's final-component check would miss) is
+    refused via the scan-root containment guard: the escape target is never read or moved."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "loot.md").write_text("loot\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    # root/reports -> ../outside ; a src under it resolves OUTSIDE the scan root.
+    (root / "reports").symlink_to(outside)
+    src = root / "reports" / "loot.md"
+    arch = tmp_path / "arch"
+
+    run_dir, moved, skipped = _gc_archive(
+        [_classified(str(src))], arch, {str(src): _sha(outside / "loot.md")}, [root])
+
+    assert moved == []
+    assert [s["reason"] for s in skipped] == ["escaped_scan_root"]
+    assert (outside / "loot.md").exists()  # escape target untouched
+
+
+def test_gc_archive_uses_atomic_replace_no_both_paths_window(tmp_path, monkeypatch):
+    """The move is a single atomic os.replace — asserted by a spy that, at call time, sees the
+    source present and the dest absent (never a copy+unlink window where BOTH exist)."""
+    f = tmp_path / "r.md"
+    f.write_text("bytes\n")
+    arch = tmp_path / "arch"
+    hashes = {str(f): _sha(f)}
+
+    real_replace = os.replace
+    seen = {}
+
+    def _spy(src, dst, *a, **k):
+        # At the atomic instant: source still there, destination not yet created.
+        seen["src_before"] = os.path.exists(src)
+        seen["dst_before"] = os.path.exists(dst)
+        real_replace(src, dst, *a, **k)
+        seen["src_after"] = os.path.exists(src)
+        seen["dst_after"] = os.path.exists(dst)
+
+    monkeypatch.setattr(os, "replace", _spy)
+    run_dir, moved, skipped = _gc_archive([_classified(str(f))], arch, hashes, [tmp_path])
+
+    assert len(moved) == 1 and skipped == []
+    assert seen == {"src_before": True, "dst_before": False,
+                    "src_after": False, "dst_after": True}
+    assert not f.exists()
+
+
+def test_gc_archive_skips_cross_filesystem_rather_than_copy(tmp_path, monkeypatch):
+    """A cross-filesystem destination (EXDEV) is SKIPPED and surfaced — never falls back to a
+    non-atomic copy, so the source is left in place untouched."""
+    import errno as _errno
+
+    f = tmp_path / "r.md"
+    f.write_text("bytes\n")
+    arch = tmp_path / "arch"
+    hashes = {str(f): _sha(f)}
+
+    def _exdev(src, dst, *a, **k):
+        raise OSError(_errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "replace", _exdev)
+    run_dir, moved, skipped = _gc_archive([_classified(str(f))], arch, hashes, [tmp_path])
+
+    assert moved == []
+    assert [s["reason"] for s in skipped] == ["cross_filesystem"]
+    assert f.exists() and f.read_text() == "bytes\n"  # left in place, never copied
+
+
+def test_gc_top_bounds_archived_set_to_shown_challenge(tmp_path, monkeypatch):
+    """--top must bound what is AUTHORIZED, not just what is displayed: the challenge's reapable
+    list and reclaimable_bytes reflect exactly the top-N, so the archived set never exceeds it."""
+    # Two orphaned reports of different sizes so ranking (size DESC) is deterministic.
+    big = tmp_path / "kb" / "strategies" / "big" / "reports" / "20240101-000000"
+    small = tmp_path / "kb" / "strategies" / "small" / "reports" / "20240101-000000"
+    for d, payload in ((big, "X" * 500), (small, "y")):
+        d.mkdir(parents=True, exist_ok=True)
+        report = d / "report.md"
+        report.write_text(payload)
+        os.utime(report, (_OLD, _OLD))
+
+    result = runner.invoke(
+        app, ["research", "gc", "--archive", "--actor", "human", "--top", "1"])
+    payload = _json(result)
+    assert payload["action"] == "human_actor_challenge"
+    # Only the top-1 (the big report) is in the authorized manifest and counts.
+    assert payload["reapable_count"] == 1
+    shown = {r["strategy"] for r in payload["reapable"]}
+    assert shown == {"big"}
+    assert payload["reclaimable_bytes"] == 500
