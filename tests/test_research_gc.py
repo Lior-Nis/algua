@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from algua.research.lifecycle_gc import (
+    KEEP_ORPHANED_WITHIN_RETENTION,
     KEEP_PROTECTED_NON_TERMINAL,
     KEEP_RETIRED_WITHIN_RETENTION,
     KEEP_UNTRACKED_MODULE,
@@ -28,6 +29,10 @@ RETENTION = 30.0
 
 def _iso(days_ago: float) -> str:
     return (NOW - timedelta(days=days_ago)).isoformat()
+
+
+def _mtime(days_ago: float) -> float:
+    return (NOW - timedelta(days=days_ago)).timestamp()
 
 
 def _classify_one(item: FileItem, registry: dict[str, RegistryEntry]) -> Classified:
@@ -102,14 +107,42 @@ def test_non_terminal_with_stale_retired_at_still_kept() -> None:
     assert c.age_days is None
 
 
-def test_orphaned_report_no_row_is_reapable() -> None:
-    item = FileItem("kb/reports/ghost.md", "ghost", SURFACE_REPORT, 50)
+def test_orphaned_report_old_mtime_is_reapable() -> None:
+    # An orphaned report (no registry row) is reapable ONLY once its own mtime is past the window.
+    item = FileItem("kb/reports/ghost.md", "ghost", SURFACE_REPORT, 50, mtime=_mtime(60))
     c = _classify_one(item, {})
     assert c.reapable is True
     assert c.reason == REAP_ORPHANED_REPORT
+    assert c.age_days is not None and c.age_days >= RETENTION
+    assert c.stage is None
+    assert c.retired_at is None
+
+
+def test_orphaned_report_recent_mtime_is_kept() -> None:
+    # A fresh orphaned report is within the retention window — fail-safe keep (never reap on sight).
+    item = FileItem("kb/reports/fresh.md", "fresh", SURFACE_REPORT, 50, mtime=_mtime(5))
+    c = _classify_one(item, {})
+    assert c.reapable is False
+    assert c.reason == KEEP_ORPHANED_WITHIN_RETENTION
+    assert c.age_days is not None and c.age_days < RETENTION
+
+
+def test_orphaned_report_no_mtime_is_kept_fail_safe() -> None:
+    # No provable timestamp => never reapable.
+    item = FileItem("kb/reports/notime.md", "notime", SURFACE_REPORT, 50)
+    c = _classify_one(item, {})
+    assert c.reapable is False
+    assert c.reason == KEEP_ORPHANED_WITHIN_RETENTION
     assert c.age_days is None
     assert c.stage is None
     assert c.retired_at is None
+
+
+def test_orphaned_report_mtime_boundary_exact_is_reapable() -> None:
+    item = FileItem("kb/reports/edge.md", "edge", SURFACE_REPORT, 50, mtime=_mtime(RETENTION))
+    c = _classify_one(item, {})
+    assert c.reapable is True
+    assert c.reason == REAP_ORPHANED_REPORT
 
 
 def test_untracked_module_no_row_is_kept() -> None:

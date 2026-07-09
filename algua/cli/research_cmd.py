@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import os
+import stat
 import time
 from collections import Counter
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.knowledge.experience import write_experience_note
+from algua.registry import live_gate
 from algua.registry.human_actor import canonical_run_context
 from algua.registry.negative_results import (
     build_gate_fail_record,
@@ -776,8 +778,8 @@ def family_audit_cmd() -> None:
 
 _GC_NOTE = (
     "advisory lifecycle GC: read-only by default; a listing is a prioritization signal, not a "
-    "transition. Only --archive --actor human MOVES files; the immutable registry DB row is NEVER "
-    "touched."
+    "transition. Only --archive with an authenticated human (#329 signature over the printed "
+    "challenge) MOVES files; the immutable registry DB row is NEVER touched."
 )
 
 
@@ -788,9 +790,22 @@ def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
     (``algua/strategies/<family>/`` with an ``__init__.py`` and a non-underscore name), skipping
     ``__init__.py`` and any private ``_*.py`` helper. Example families are scanned too; with no
     registry row they classify as ``untracked_module`` and are never reaped, so no special-casing.
-    Surface 2 — reports: the TOP-LEVEL ``*.md`` files under ``<knowledge_dir>/strategies/`` (never
-    recursing into ``families/`` subdirs), skipping ``README.md``.
+
+    Surface 2 — report-experiments artifacts: the per-strategy ``reports/`` subtree the
+    ``report-experiments`` skill writes at ``<knowledge_dir>/strategies/<name>/reports/<stamp>/``,
+    keyed by the ``<name>`` DIRECTORY component (the registry strategy name), NOT by a top-level
+    ``.md`` stem. The TOP-LEVEL ``*.md`` files directly under ``strategies/`` are kb-sync-OWNED and
+    are NEVER scanned: the ``_*.md`` router pages (``_index``/``_by-stage``/``_by-date``/
+    ``_families``) AND every per-strategy live note at ``strategy_doc_path()`` are regenerable,
+    always-on surfaces — a live synced note must never be mistaken for a disposable report. We reuse
+    ``algua.knowledge.sync.strategies_dir`` for the surface root rather than re-deriving it, and by
+    iterating only DIRECTORIES (skipping ``families/``) we structurally exclude those top-level
+    files without special-casing each name.
     """
+    # Lazy import: algua.knowledge.sync pulls the mlflow-importing metrics layer, kept off the
+    # import path of unrelated CLI commands (mirrors _common.sync_kb_doc).
+    from algua.knowledge.sync import strategies_dir
+
     items: list[lifecycle_gc.FileItem] = []
     root = Path(algua.strategies.__file__).parent
     for d in sorted(root.iterdir()):
@@ -799,47 +814,121 @@ def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
         for p in sorted(d.glob("*.py")):
             if p.name == "__init__.py" or p.stem.startswith("_"):
                 continue
+            st = p.stat()
             items.append(lifecycle_gc.FileItem(
                 path=str(p), strategy=p.stem, surface=lifecycle_gc.SURFACE_MODULE,
-                size_bytes=p.stat().st_size))
-    reports_dir = settings.knowledge_dir / "strategies"
-    if reports_dir.exists():
-        for p in sorted(reports_dir.glob("*.md")):
-            if p.name == "README.md":
+                size_bytes=st.st_size, mtime=st.st_mtime))
+    sdir = strategies_dir(settings)
+    if sdir.exists():
+        for name_dir in sorted(sdir.iterdir()):
+            # Only per-strategy DIRECTORIES; skip the families/ hub subtree and every top-level file
+            # (the kb-sync-owned router pages + strategy_doc_path notes are files, not dirs).
+            if not name_dir.is_dir() or name_dir.name == "families":
                 continue
-            items.append(lifecycle_gc.FileItem(
-                path=str(p), strategy=p.stem, surface=lifecycle_gc.SURFACE_REPORT,
-                size_bytes=p.stat().st_size))
+            reports = name_dir / "reports"
+            if not reports.is_dir():
+                continue
+            for p in sorted(reports.rglob("*")):
+                if not p.is_file():
+                    continue
+                st = p.stat()
+                items.append(lifecycle_gc.FileItem(
+                    path=str(p), strategy=name_dir.name, surface=lifecycle_gc.SURFACE_REPORT,
+                    size_bytes=st.st_size, mtime=st.st_mtime))
     return items
 
 
 def _gc_archive(
-    reap: list[lifecycle_gc.Classified], archive_dir: Path,
-) -> tuple[str, list[dict[str, Any]]]:
+    reap: list[lifecycle_gc.Classified], archive_dir: Path, expected_hashes: dict[str, str],
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """MOVE each reapable file into a timestamped run dir under ``archive_dir``, mirroring its path.
 
     Idempotent/race-safe: a source that has already vanished (a concurrent GC, a manual delete) is
     skipped rather than raising, so a re-run of the same command moves nothing left to move.
+
+    TOCTOU/symlink/content hardening (#510 GATE-2). Every file is handled through a SINGLE file
+    descriptor opened ``O_RDONLY | O_NOFOLLOW`` and never re-resolved by path:
+
+    * ``O_NOFOLLOW`` makes the open FAIL if the final path component is a symlink, and ``fstat`` on
+      the fd rejects any non-regular file — so a symlink/dir/FIFO swapped in after classification
+      can never be followed into archiving an unrelated target.
+    * The bytes are read FROM THE FD and hashed; the file is archived ONLY if that sha256 matches
+      the ``expected_hashes[path]`` the human actually SIGNED (the manifest bound into the
+      challenge). A racing writer that swaps in different-but-regular content after signature
+      verification fails this check (``content_changed_since_authorization``) — the archived bytes
+      are ALWAYS the signed bytes, enforced at the point of use, not merely at challenge time.
+    * Before the destructive ``os.unlink`` we re-``lstat`` the path and compare (st_dev, st_ino) to
+      the open fd's ``fstat``; a mismatch means the path now names a DIFFERENT inode than the one we
+      hashed/archived, so we skip the unlink (``replaced_before_unlink``) rather than delete a
+      replacement file.
+
+    Refused/vanished paths are reported in ``skipped`` and left in place; ``expected_hashes`` is the
+    same per-file sha256 map that was folded into the signed manifest.
     """
     run_dir = archive_dir / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     moved: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     for c in reap:
         src = Path(c.path)
-        if not src.exists():
+
+        def _skip(reason: str, strategy: str = c.strategy, surface: str = c.surface,
+                  path: str = c.path) -> None:
+            skipped.append({"src": path, "strategy": strategy, "surface": surface,
+                            "reason": reason})
+
+        try:
+            fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)  # O_NOFOLLOW: refuse a swapped symlink
+        except FileNotFoundError:
+            continue  # already gone (concurrent GC / manual delete) — idempotent no-op
+        except OSError:
+            _skip("refused_non_regular_file")  # ELOOP (symlink) or any other open failure
             continue
-        # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
-        # paths are ABSOLUTE (both algua.strategies.__file__ and an absolute knowledge_dir), and
-        # `run_dir / <absolute>` would collapse to the absolute path itself (pathlib join rule),
-        # moving the file onto itself. Stripping the root ("/") yields a unique, nested dest.
-        rel = src.relative_to(src.anchor) if src.is_absolute() else src
-        dest = run_dir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest))
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode):
+                _skip("refused_non_regular_file")  # dir / FIFO / device swapped in
+                continue
+            data = _read_fd_all(fd)
+            if hashlib.sha256(data).hexdigest() != expected_hashes.get(c.path):
+                # Content differs from what the human SIGNED — refuse (point-of-use enforcement).
+                _skip("content_changed_since_authorization")
+                continue
+            # Identity re-check before the destructive unlink: the path must STILL name the exact
+            # inode we hashed, else a replacement was raced in — leave both alone.
+            try:
+                lst = os.lstat(src)
+            except FileNotFoundError:
+                _skip("vanished_before_unlink")
+                continue
+            if (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+                _skip("replaced_before_unlink")
+                continue
+            # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
+            # paths are ABSOLUTE (both algua.strategies.__file__ and an absolute knowledge_dir), and
+            # `run_dir / <absolute>` would collapse to the absolute path itself (pathlib join rule),
+            # writing the file onto itself. Stripping the root ("/") yields a unique, nested dest.
+            rel = src.relative_to(src.anchor) if src.is_absolute() else src
+            dest = run_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)  # the exact signed bytes we hashed above
+        finally:
+            os.close(fd)
+        os.unlink(src)  # inode confirmed identical just above; removes the original we archived
         moved.append({
             "src": c.path, "dest": str(dest), "strategy": c.strategy, "surface": c.surface,
             "reason": c.reason, "size_bytes": c.size_bytes,
         })
-    return (str(run_dir), moved)
+    return (str(run_dir), moved, skipped)
+
+
+def _read_fd_all(fd: int) -> bytes:
+    """Read the whole file behind ``fd`` (never re-resolving the path)."""
+    chunks: list[bytes] = []
+    while True:
+        block = os.read(fd, 1 << 20)
+        if not block:
+            return b"".join(chunks)
+        chunks.append(block)
 
 
 @research_app.command("gc")
@@ -853,18 +942,34 @@ def gc(
         help="GOVERNED cleanup: MOVE reapable files to the archive tree (human-only). Default is "
              "read-only advisory."),
     actor: str = typer.Option("agent", "--actor"),
+    actor_signature: str = typer.Option(
+        None, "--actor-signature",
+        help="path to the SSH signature over the printed --archive challenge (#329). Required to "
+             "authenticate --actor human before any file is MOVED: a bare --actor human is "
+             "forgeable and unlocks NO cleanup — run once with --archive --actor human (no "
+             "signature) to print a challenge bound to the exact reap manifest, sign it with your "
+             "enrolled algua-human-actor key (ssh-keygen -Y sign -n algua-human-actor), then "
+             "re-run with --actor-signature."),
     archive_dir: Path = typer.Option(
         Path("archive"), "--archive-dir", help="root of the archive tree for --archive"),
     top: int = typer.Option(
         None, "--top", help="cap the reapable list to the top N by reclaimable size"),
 ) -> None:
     """ADVISORY reaper of dead strategy artifacts — retired-strategy modules/reports & orphaned
-    reports. READ-ONLY by default: it classifies the on-disk strategy modules and top-level reports
-    against the registry and lists what is safely reapable (a retired strategy older than
-    --retention-days, or a report with no registry row). A listing is a prioritization signal, NOT
-    a transition. Fail-safe throughout: a module with no row (untracked), a non-terminal strategy,
-    or a retired-without-timestamp is ALWAYS kept. Only `--archive --actor human` MOVES the reapable
-    files into a timestamped archive tree; it NEVER deletes and NEVER touches the registry row."""
+    reports. READ-ONLY by default: it classifies the on-disk strategy modules and the per-strategy
+    report-experiments subtrees against the registry and lists what is safely reapable (a retired
+    strategy older than --retention-days, or an orphaned report — no registry row — whose own mtime
+    is older than --retention-days). A listing is a prioritization signal, NOT a transition.
+    Fail-safe throughout: a module with no row (untracked), a non-terminal strategy, a
+    retired-without-timestamp, and an orphaned report younger than the window (or with no provable
+    mtime) are ALWAYS kept.
+
+    Only `--archive --actor human` MOVES the reapable files into a timestamped archive tree, and it
+    is gated by the #329 authenticated-human mechanism (the SAME challenge/signature path as
+    `registry transition --to live`): a bare --actor human string authorizes NOTHING — moving
+    files requires an --actor-signature over a challenge bound to the exact reap manifest, verified
+    against the approvers/allowed_signers trust anchor under the algua-human-actor namespace. It
+    NEVER deletes and NEVER touches the registry row."""
     if retention_days < 0:
         raise ValueError("--retention-days must be >= 0")
     if top is not None and top < 1:
@@ -893,11 +998,6 @@ def gc(
     reap = lifecycle_gc.reapable(classified)
     by_reason: Counter[str] = Counter(c.reason for c in classified)
 
-    archive_run_dir: str | None = None
-    archived: list[dict[str, Any]] = []
-    if archive and reap:
-        archive_run_dir, archived = _gc_archive(reap, archive_dir)
-
     shown = reap[:top] if top else reap
     reapable_dicts = [{
         "path": c.path, "strategy": c.strategy, "surface": c.surface, "reason": c.reason,
@@ -905,6 +1005,65 @@ def gc(
         "age_days": round(c.age_days, 3) if c.age_days is not None else None,
         "stage": c.stage,
     } for c in shown]
+
+    archive_run_dir: str | None = None
+    archived: list[dict[str, Any]] = []
+    archive_skipped: list[dict[str, Any]] = []
+    if archive and reap:
+        # #329 AUTHENTICATED-HUMAN gate (GATE-2): the early `actor == "human"` string check above
+        # is forgeable, so before any file is MOVED we require an SSH signature over a challenge
+        # bound to the EXACT reap manifest, verified against the approvers/allowed_signers anchor
+        # under the algua-human-actor namespace (the same trust anchor + namespace as `registry
+        # transition --to live`). No signature => print the challenge and mutate nothing (mirrors
+        # the go-live challenge print). Binding to the manifest content (a per-file sha256) makes a
+        # captured signature non-replayable onto a byte-different file set.
+        content_hashes: dict[str, str] = {}
+        for c in reap:
+            try:
+                content_hashes[c.path] = hashlib.sha256(Path(c.path).read_bytes()).hexdigest()
+            except OSError:
+                # Unreadable / vanished between classify and now — bind its ABSENCE (empty hash); if
+                # it reappears with content before the signed re-run the manifest differs and the
+                # signature is refused (fail safe).
+                content_hashes[c.path] = ""
+        manifest = lifecycle_gc.archive_manifest(reap, content_hashes)
+        challenge = lifecycle_gc.build_gc_archive_challenge(
+            retention_days=retention_days, archive_dir=str(archive_dir), manifest=manifest)
+        if not actor_signature:
+            emit(ok({
+                "note": _GC_NOTE,
+                "action": "human_actor_challenge",
+                "command": "research gc --archive",
+                "challenge": challenge,
+                "manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
+                "retention_days": retention_days,
+                "reapable_count": len(reap),
+                "reclaimable_bytes": sum(c.size_bytes for c in reap),
+                "by_reason": dict(by_reason),
+                "reapable": reapable_dicts,
+                "instructions": (
+                    "sign the 'challenge' value with your enrolled algua-human-actor key: "
+                    "ssh-keygen -Y sign -n algua-human-actor -f <key> <file>; then re-run "
+                    "`research gc --archive --actor human --archive-dir <same dir> "
+                    "--actor-signature <file>.sig` (the signature covers the exact reap manifest, "
+                    "so it is refused if the reapable set changes before you re-run)."),
+            }))
+            return
+        signature = Path(actor_signature).read_bytes()
+        # Read the trust anchor from the module (not a bound copy) so it honors the same
+        # ALLOWED_SIGNERS_PATH the go-live/human-actor paths use — and stays test-patchable.
+        principal = live_gate.verify_signature(
+            live_gate.ALLOWED_SIGNERS_PATH, challenge, signature,
+            namespace=lifecycle_gc.GC_ARCHIVE_NAMESPACE)
+        if principal is None:
+            raise ValueError(
+                "research gc --archive: --actor-signature did not authenticate an enrolled "
+                "algua-human-actor key over a challenge bound to this exact reap manifest, "
+                "retention window, and archive dir. Re-run without --actor-signature to print a "
+                "fresh challenge, sign it (ssh-keygen -Y sign -n algua-human-actor), and retry. A "
+                "bare --actor human does not unlock the cleanup.")
+        archive_run_dir, archived, archive_skipped = _gc_archive(
+            reap, archive_dir, content_hashes)
 
     emit(ok({
         "note": _GC_NOTE,
@@ -916,5 +1075,6 @@ def gc(
         "by_reason": dict(by_reason),
         "reapable": reapable_dicts,
         "archived": archived,
+        "archive_skipped": archive_skipped,
         "archive_run_dir": archive_run_dir,
     }))
