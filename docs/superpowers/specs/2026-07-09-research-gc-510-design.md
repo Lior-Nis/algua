@@ -139,9 +139,12 @@ Only two reasons make a file reapable; everything else is `protected`:
      pre-commit intent is never redone, so it can only downgrade to skip+surface, never re-archive.)
   2. Move the artifact: `os.replace(from, to)` (the atomic commit point; file or directory).
   3. Append the row to `<archive-root>/manifest.jsonl`.
-  **Reconcile-first recovery.** Every `--archive` run begins by reconciling each archive tree
-  against its rollup BEFORE reaping anything new. Because step 2 is an atomic rename, exactly one
-  of {source, target} exists per sidecar, giving a total recovery matrix:
+  **Reconcile-first recovery.** Ordering matters: the verified-human gate runs FIRST; only then —
+  still before reaping anything new — does the run reconcile each archive tree against its rollup.
+  Reconcile mutates the archive tree (appends rows, discards stale sidecars), so it must sit behind
+  the human gate exactly like the reap itself (an unauthenticated `--archive` performs no archive
+  mutation at all — it fails closed at the gate before reconcile). Because step 2 is an atomic
+  rename, exactly one of {source, target} exists per sidecar, giving a total recovery matrix:
   - **target present, source absent, row missing** → append the row (repairs a crash between
     step 2 and step 3 — the exact gap a naive move-then-append leaves).
   - **target present, source absent, row present** → already complete; no-op.
@@ -269,9 +272,10 @@ Ranking = worst-first: `orphaned` before `retired_expired`, then by `total_bytes
    (default 90), `--archive`, `--actor`/`--actor-signature`, `--summary`. Advisory path reads
    registry (`list_strategies` + per-name `list_transitions` for `retired_at`), calls the
    classifier, `emit`s JSON. Tests `tests/test_cli_research_gc.py` for the advisory JSON.
-4. **Governed cleanup path** — behind `--archive`: run the **reconcile-first recovery** pass over
-   `archive/`, then verify effective human actor via the #329 chokepoint (fail-closed for
-   agent/system, forged, replayed, or reap-set-mismatched signatures), then per artifact write the
+4. **Governed cleanup path** — behind `--archive`: FIRST verify effective human actor via the #329
+   chokepoint (fail-closed for agent/system, forged, replayed, or reap-set-mismatched signatures)
+   — no archive mutation happens before this gate — THEN run the **reconcile-first recovery** pass
+   over the archive roots, then per artifact write the
    pre-move sidecar (atomic) → single atomic `os.replace` to `<archive-root>/<run-id>/<rel-path>`
    (co-located per source root; report dirs rename as a unit; NO copy fallback — a genuinely
    cross-fs artifact is skipped as `skipped_cross_fs`, never copied) through the `_safe_path`
