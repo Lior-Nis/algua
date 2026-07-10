@@ -348,6 +348,34 @@ class ScopedCancelBroker(OpenOrderReader, OrderCanceller, Protocol):
 
 
 @runtime_checkable
+class ExitDrainBroker(ScopedCancelBroker, AccountActivityBroker, Protocol):
+    """The broker capability a book-exit drain needs: list + cancel THIS strategy's open orders
+    AND ingest the account activity feed (cancel -> ingest -> recheck). The union of scoped-cancel
+    and account-activity access, satisfied by both the authorized `AlpacaLiveBroker` and the
+    account-credential `AlpacaLiveDrainBroker` (#497)."""
+
+
+@runtime_checkable
+class ExitLaneGuard(Protocol):
+    """The broker-backed source-lane drain a book-exit transition runs so a resting order can't
+    outlive the strategy's departure from its book and later fill into an ORPHANED position (#497
+    F2/H1). Mirrors the `live flatten` ceremony's cancel -> ingest -> recheck:
+
+    - ``cancel_and_ingest`` runs BEFORE the ``BEGIN IMMEDIATE`` write lock (it makes broker network
+      calls + commits ingested fills, which must not happen while the registry write lock is held):
+      cancel THIS strategy's own open orders, then ingest the venue activity feed so any just-filled
+      order is reflected in the ledger the under-lock flatness check reads.
+    - ``owned_open_order_ids`` runs UNDER the lock: it re-lists the strategy's still-open orders so
+      a cancel that failed to remove a resting order (a non-cancelable/partial state) blocks the
+      revoke+CAS instead of orphaning it. The registry layer injects this so it never imports a
+      broker or the execution ledger (store.py stays behind the data wall)."""
+
+    def cancel_and_ingest(self) -> None: ...
+
+    def owned_open_order_ids(self) -> list[str]: ...
+
+
+@runtime_checkable
 class LiveReconcileBroker(PositionsBroker, AccountActivityBroker, OrderLookupBroker, Protocol):
     """The read-only surface the live/paper resume reconcile reaches: net positions + the activity
     feed + per-coid order lookup (the last via the stranded-order recovery it forwards into)."""

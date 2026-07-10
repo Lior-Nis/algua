@@ -25,6 +25,7 @@ from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
 from algua.execution.flatten import flatten_strategy
+from algua.execution.lane_exit import build_live_broker
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_broker_order_id,
@@ -124,24 +125,27 @@ def allocate(
     all live allocations does not exceed account equity."""
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)
-        if rec.stage is Stage.DORMANT:
+        # LIVE-gate: under the inverted capital flow a strategy goes live UNALLOCATED and the human
+        # allocates it here, at stage==live. Refuse any other stage BEFORE the network account read
+        # (skip the equity fetch on a doomed request). The authoritative re-check is under the write
+        # lock inside allocate_in_lane; this is the friendly early error. The message carries the
+        # actual stage, so a dormant strategy still reads 'dormant' in the refusal.
+        if rec.stage is not Stage.LIVE:
             raise ValueError(
-                f"cannot allocate live capital to dormant strategy {name!r}; a recovered "
-                "strategy re-allocates only after re-climbing paper -> ... -> live")
-        allocations.allocate(conn, rec.id, capital=capital, actor="human",
-                             account_equity=_live_account_equity())
+                f"cannot allocate live capital to {name!r} at stage {rec.stage.value}; live "
+                "allocate requires stage 'live' (a dormant/recovered/forward-tested strategy "
+                "re-allocates only after reaching live)")
+        allocations.allocate_in_lane(
+            conn, rec.id, capital=capital, actor="human",
+            account_equity=_live_account_equity(),
+            allowed_stages=frozenset({Stage.LIVE.value}))
     emit(ok({"strategy": name, "capital": capital}))
 
 
 def _alpaca_live_broker(authorization: LiveAuthorization) -> AlpacaLiveBroker:
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        raise ValueError(
-            "Alpaca LIVE credentials not configured; set ALGUA_ALPACA_LIVE_API_KEY "
-            "and ALGUA_ALPACA_LIVE_API_SECRET"
-        )
-    return AlpacaLiveBroker(authorization, s.alpaca_live_api_key, s.alpaca_live_api_secret,
-                            base_url=s.alpaca_live_url)
+    # Single-sourced with the book-exit drain (#497) so the two never drift on how the real-money
+    # broker is built from the settings credentials.
+    return build_live_broker(authorization)
 
 
 def _still_live_allocated(conn, name: str) -> bool:
@@ -469,7 +473,38 @@ def run_all(
                         "note": "no authorized live strategies",
                     }))
                     return
-                broker = _alpaca_live_broker(verified[0][1])
+                # Inverted capital flow (#497): a strategy now enters `live` UNALLOCATED and the
+                # human allocates it afterward (`live allocate`). SKIP — do not crash on — a live
+                # strategy with no active allocation: it has nothing to size against yet, so it is
+                # simply not ticked this cycle (single-strategy `live run` still errors on no
+                # allocation). Partition BEFORE the tick loop so an unallocated strategy never
+                # reaches `_run_strategy_tick`'s `has no live allocation` raise.
+                skipped_unallocated = [
+                    name for name, _ in verified
+                    if active_allocation(conn, repo.get(name).id) is None
+                ]
+                _unallocated = set(skipped_unallocated)
+                verified = [(name, auth) for name, auth in verified
+                            if name not in _unallocated]
+                if not verified:
+                    # Every authorized live strategy is unallocated: there is nothing to trade AND
+                    # nothing this cycle would attribute at the account. Skip cleanly WITHOUT
+                    # building the broker or touching live credentials — mirroring the "no
+                    # authorized live strategies" early return above (a no-op cycle must not require
+                    # the real-money broker). The next cycle, once a strategy is `live allocate`d,
+                    # builds the broker and runs the whole-account reconcile + book breakers.
+                    emit(ok({
+                        "strategies": [],
+                        "skipped": skipped,
+                        "skipped_unallocated": skipped_unallocated,
+                        "note": "no allocated live strategies",
+                    }))
+                    return
+                # At least one strategy remains allocated: build the account-level broker (from a
+                # still-allocated strategy's authorization) so the whole-account reconcile + book
+                # breakers run over orphan/residual holdings before any strategy orders.
+                account_authorization = verified[0][1]
+                broker = _alpaca_live_broker(account_authorization)
                 provider = _select_provider(False, snapshot)
                 # ingest fills, then reconcile the account before trading
                 cursor = fill_cursor(conn, LedgerKind.LIVE)
@@ -496,7 +531,8 @@ def run_all(
                     global_halt.engage(
                         conn, reason=f"reconcile drift {recon.mismatches}", actor="system"
                     )
-                    emit({"ok": False, "reconcile": recon_payload, "skipped": skipped})
+                    emit({"ok": False, "reconcile": recon_payload, "skipped": skipped,
+                          "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1)
                 if not recon.clean:
                     counters.reconcile_deferred += 1
@@ -504,6 +540,7 @@ def run_all(
                     emit(ok({
                         "reconcile": recon_payload,
                         "skipped": skipped,
+                        "skipped_unallocated": skipped_unallocated,
                         "note": "reconcile pending; deferring trades this cycle",
                         "strategies": [],
                     }))
@@ -527,7 +564,8 @@ def run_all(
                     payload = {"ok": False, "book_breach": {"kind": book_breach.kind,
                                                             "detail": book_breach.detail},
                                "global_halt": "set", "reconcile": recon_payload,
-                               "skipped": skipped}
+                               "skipped": skipped,
+                               "skipped_unallocated": skipped_unallocated}
                     try:
                         broker.close_all_positions()
                     except Exception as exc:  # noqa: BLE001 — surface + persist halt, never swallow
@@ -563,7 +601,8 @@ def run_all(
                     emit({"ok": False,
                           "book_breach": {"kind": book_exc.kind, "detail": book_exc.detail},
                           "global_halt": "set", "liquidation_submitted": False,
-                          "reconcile": recon_payload, "skipped": skipped})
+                          "reconcile": recon_payload, "skipped": skipped,
+                          "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1) from book_exc
                 if book is None:
                     log.info("book_risk_deferred",
@@ -571,6 +610,7 @@ def run_all(
                     emit(ok({
                         "reconcile": recon_payload,
                         "skipped": skipped,
+                        "skipped_unallocated": skipped_unallocated,
                         "note": f"book-level risk precondition failed: {book_reason}; "
                                 "deferring trades this cycle",
                         "strategies": [],
@@ -615,7 +655,8 @@ def run_all(
                             counters.flatten_failures += 1
                         breached = True
                         break
-            envelope = {"reconcile": recon_payload, "skipped": skipped, "strategies": results}
+            envelope = {"reconcile": recon_payload, "skipped": skipped,
+                        "skipped_unallocated": skipped_unallocated, "strategies": results}
             if breached:
                 # A strategy breached/halted (already tripped + scoped-flattened): surface the
                 # breaching strategy AND every sibling already ticked this cycle in one envelope,

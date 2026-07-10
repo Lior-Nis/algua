@@ -103,9 +103,8 @@ def test_full_path_to_live_signed_ceremony(tmp_path, monkeypatch):
     signers = _allowed_signers_file(tmp_path, "lior", pub)
     monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
 
-    # Allocate capital so the go-live guard is satisfied (guard: requires allocation)
-    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 100_000.0)
-    assert runner.invoke(app, ["live", "allocate", strategy, "--capital", "10000"]).exit_code == 0
+    # Inverted capital flow (#497): a strategy goes live UNALLOCATED — no pre-allocation is a
+    # go-live precondition; the human allocates AFTER reaching live.
 
     # Step 1: no --signature -> challenge issued, stage stays forward_tested
     result1 = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
@@ -151,9 +150,7 @@ def test_go_live_without_signature_stays_paper(tmp_path, monkeypatch):
     signers = _allowed_signers_file(tmp_path, "lior", pub)
     monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
 
-    # Allocate capital so the go-live guard is satisfied (guard: requires allocation)
-    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 100_000.0)
-    assert runner.invoke(app, ["live", "allocate", strategy, "--capital", "10000"]).exit_code == 0
+    # Inverted capital flow (#497): no pre-allocation is a go-live precondition.
 
     result = runner.invoke(app, ["registry", "transition", strategy, "--to", "live",
                                  "--actor", "human"])
@@ -323,18 +320,28 @@ def _force_live(monkeypatch, tmp_path, name: str) -> None:
         conn.commit()
 
 
-def _allocate(monkeypatch, tmp_path, name: str, capital: float) -> None:
-    """Set a live allocation for the named strategy via the CLI (monkeypatching equity read)."""
-    monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 1_000_000.0)
-    r = runner.invoke(app, ["live", "allocate", name, "--capital", str(capital)])
-    assert r.exit_code == 0, f"_allocate failed: {r.stdout}"
+def test_go_live_without_preallocation_issues_challenge(monkeypatch, tmp_path):
+    # Inverted capital flow (#497): a forward_tested strategy with NO allocation is still issued a
+    # go-live challenge — allocation is no longer a go-live precondition (the human `live allocate`s
+    # it AFTER it reaches live; `live run-all` skips it until then).
+    from algua.registry.repository import ArtifactIdentity
 
-
-def test_go_live_requires_allocation(monkeypatch, tmp_path):
-    # a strategy at forward_tested with NO allocation cannot be issued a go-live challenge
     name = _seed_forward_tested(monkeypatch, tmp_path, "s1")
+    _stub_passing_certificate(monkeypatch)
+    # Fake strategy has no module on disk; stub the challenge-path identity recompute (bound
+    # directly into registry_cmd's namespace, so patch it there — not on approvals).
+    monkeypatch.setattr(
+        "algua.cli.registry_cmd.compute_artifact_hashes",
+        lambda n: ArtifactIdentity(code_hash="aabb", config_hash="ccdd", dependency_hash="eeff"),
+    )
+    key, pub = _make_key(tmp_path)
+    signers = _allowed_signers_file(tmp_path, "lior", pub)
+    monkeypatch.setattr("algua.cli.registry_cmd.ALLOWED_SIGNERS_PATH", signers)
+
     r = runner.invoke(app, ["registry", "transition", name, "--to", "live", "--actor", "human"])
-    assert r.exit_code == 1 and "allocation" in r.stdout.lower()
+    assert r.exit_code == 0, r.stdout
+    out = json.loads(r.stdout)
+    assert out["action"] == "go_live_challenge"
 
 
 def test_list_emits_metadata_fields():
@@ -675,12 +682,12 @@ def test_backfill_derived_from_valid_parent_is_stored(monkeypatch, tmp_path):
     assert rec["derived_from"] == "parent"
 
 
-def test_go_live_allows_second_live_strategy_with_allocation(monkeypatch, tmp_path):
-    # one strategy already live; a SECOND with an allocation now reaches the go-live challenge
+def test_go_live_allows_second_live_strategy(monkeypatch, tmp_path):
+    # one strategy already live; a SECOND (unallocated, under the #497 inverted flow) still reaches
+    # the go-live challenge — there is no ≤1-live refusal and no allocation precondition.
     from algua.registry.repository import ArtifactIdentity
     _force_live(monkeypatch, tmp_path, "already")
     name = _seed_forward_tested(monkeypatch, tmp_path, "s2")
-    _allocate(monkeypatch, tmp_path, name, 1000.0)
     _stub_passing_certificate(monkeypatch)
     # patch compute_artifact_hashes so s2 (no real module) doesn't raise StrategyNotFound
     monkeypatch.setattr(

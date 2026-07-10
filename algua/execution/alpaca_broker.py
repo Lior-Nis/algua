@@ -465,6 +465,28 @@ class AlpacaLiveBroker(_AlpacaBroker):
         self.authorization = authorization
 
 
+class AlpacaLiveDrainBroker(_AlpacaBroker):
+    """CANCEL-ONLY view of the Alpaca LIVE venue used to DRAIN a strategy's resting orders on a
+    book-exit when the per-strategy go-live authorization is revoked/absent (#497 H1). Constructed
+    WITHOUT a LiveAuthorization — mirroring `_live_account_equity` / `AlpacaLiveReadOnlyBroker`,
+    which already reach the live account with raw APCA credentials because the authorization is only
+    a construction tollbooth on the TRADING broker and is never used for REST. This broker permits
+    GET (`list_open_orders`, `account_activities`) and DELETE (`cancel_order`) so a de-authorized
+    live strategy can still have its resting orders cancelled before it leaves the live book, but it
+    hard-REFUSES POST: a drain cancels and reads only — it must NEVER submit a new order. The live
+    API keys remain the real wall (trusted env only)."""
+
+    _ALLOWED_HOSTS = frozenset({"api.alpaca.markets"})
+
+    def __init__(self, api_key: str, api_secret: str, base_url: str = _LIVE_DEFAULT_URL) -> None:
+        super().__init__(api_key, api_secret, base_url)
+
+    def _post(self, path: str, body: dict[str, Any]) -> requests.Response:
+        # A drain never opens a new position; refuse every submit path (submit_sized/submit/
+        # submit_offset all POST) so an account-credential drain broker can never place an order.
+        raise BrokerError("AlpacaLiveDrainBroker is cancel-only: refusing POST")
+
+
 class AlpacaLiveReadOnlyBroker(_AlpacaBroker):
     """READ-ONLY view of the Alpaca LIVE venue for reconcile (get_positions + account_activities),
     constructed WITHOUT a LiveAuthorization because it never places an order — both endpoints are

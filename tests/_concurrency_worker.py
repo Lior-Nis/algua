@@ -120,8 +120,9 @@ def op_allocate(db_path, barrier, wid, name, capital, equity):
     wait_for(barrier, "go")
     touch(barrier, f"attempting-{wid}")
     try:
-        allocations.allocate(conn, sid, capital=float(capital), actor="human",
-                             account_equity=float(equity))
+        allocations.allocate_in_lane(
+            conn, sid, capital=float(capital), actor="human", account_equity=float(equity),
+            allowed_stages=frozenset({"paper", "forward_tested"}))
         _emit({"ok": True, "wid": wid})
     except allocations.AllocationError as exc:
         _emit({"ok": False, "wid": wid, "error": "AllocationError", "msg": str(exc)})

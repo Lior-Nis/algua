@@ -69,12 +69,18 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
 
 
-def _to_live(name="cross_sectional_momentum"):
-    # bring a strategy to 'live' stage in the DB directly (the signed ceremony is tested elsewhere)
+def _to_live(name="cross_sectional_momentum", allocate=True):
+    # bring a strategy to 'live' stage in the DB directly (the signed ceremony is tested elsewhere).
+    # Under the #497 inverted flow a strategy enters `live` UNALLOCATED and the human allocates it
+    # afterward; `live run-all` SKIPS an unallocated live strategy. So by default this helper also
+    # seeds a live allocation (the normal post-`live allocate` state a run-all cycle ticks against).
+    # Pass allocate=False to leave it unallocated (to exercise the skip path).
     from contextlib import closing
+    from datetime import UTC, datetime
 
     from algua.config.settings import get_settings
     from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
     # CANDIDATE via human: scaffolding to live, not exercising the agent shortlist gate.
@@ -84,6 +90,12 @@ def _to_live(name="cross_sectional_momentum"):
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         conn.execute("UPDATE strategies SET stage='live' WHERE name=?", (name,))
+        if allocate:
+            sid = SqliteStrategyRepository(conn).get(name).id
+            conn.execute(
+                "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+                "VALUES (?,?,?,?)",
+                (sid, 10_000.0, datetime.now(UTC).isoformat(), "human"))
         conn.commit()
 
 
@@ -131,6 +143,24 @@ def test_run_all_no_authorized_returns_without_building_broker(monkeypatch):
     assert payload["strategies"] == []
     assert [s["strategy"] for s in payload["skipped"]] == ["cross_sectional_momentum"]
     assert built["broker"] is False  # early return precedes broker construction (no trade)
+
+
+def test_run_all_all_unallocated_skips_without_building_broker(monkeypatch):
+    # #497 Important: a live+AUTHORIZED strategy that is not yet `live allocate`d (inverted capital
+    # flow) leaves the traded set empty. A no-op cycle must skip cleanly WITHOUT constructing the
+    # real-money broker or touching live credentials — the previous code still built the broker.
+    _to_live("cross_sectional_momentum", allocate=False)  # live + authorized, but unallocated
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    built = {"broker": False}
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker",
+                        lambda auth: built.__setitem__("broker", True))
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["note"] == "no allocated live strategies"
+    assert payload["strategies"] == []
+    assert payload["skipped_unallocated"] == ["cross_sectional_momentum"]
+    assert built["broker"] is False  # early return precedes broker construction (no-op cycle)
 
 
 def test_run_all_skips_only_the_unauthorized_strategy(monkeypatch):
@@ -183,8 +213,9 @@ def _allocate(name="cross_sectional_momentum", capital=10_000.0):
     from algua.registry.store import SqliteStrategyRepository
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        allocations.allocate(conn, SqliteStrategyRepository(conn).get(name).id,
-                             capital=capital, actor="human", account_equity=50_000.0)
+        with conn:
+            allocations.allocate_locked(
+                conn, SqliteStrategyRepository(conn).get(name).id, capital, "human", 50_000.0)
 
 
 def _bench_to_dormant(name="cross_sectional_momentum"):
@@ -276,6 +307,7 @@ def test_run_all_halts_on_unexplained_reconcile_drift(monkeypatch):
     assert r.exit_code == 1
     payload = json.loads(r.stdout)
     assert payload["ok"] is False and payload["reconcile"]["halt"] is True
+    assert payload["skipped_unallocated"] == []  # #497 F1: threaded into reconcile-halt
     from contextlib import closing
 
     from algua.config.settings import get_settings
@@ -305,6 +337,20 @@ def test_run_all_ticks_strategy_when_clean(monkeypatch):
     assert payload["strategies"][0]["strategy"] == "cross_sectional_momentum"
 
 
+def _force_live_stage(name: str) -> None:
+    """Force a fake (module-less) strategy to stage='live' directly in the DB. Under #497 the
+    LIVE-gate on `live allocate` requires stage=='live', so a fake strategy must be forced live
+    before it can be allocated."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name=?", (name,))
+        conn.commit()
+
+
 def test_live_allocate_records_and_enforces_sum(monkeypatch):
     from contextlib import closing
 
@@ -312,6 +358,7 @@ def test_live_allocate_records_and_enforces_sum(monkeypatch):
     from algua.registry.db import connect, migrate
     monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", lambda: 50_000.0)
     assert runner.invoke(app, ["registry", "add", "s1"]).exit_code == 0
+    _force_live_stage("s1")
     r = runner.invoke(app, ["live", "allocate", "s1", "--capital", "10000"])
     assert r.exit_code == 0, r.stdout
     with closing(connect(get_settings().db_path)) as conn:
@@ -321,6 +368,7 @@ def test_live_allocate_records_and_enforces_sum(monkeypatch):
         assert n == 1
     # over-commit refused
     runner.invoke(app, ["registry", "add", "s2"])
+    _force_live_stage("s2")
     r2 = runner.invoke(app, ["live", "allocate", "s2", "--capital", "45000"])
     assert r2.exit_code == 1 and json.loads(r2.stdout)["ok"] is False
 
@@ -513,6 +561,7 @@ def test_run_all_book_loss_breaker_halts_and_flattens_whole_account(monkeypatch)
     assert payload["global_halt"] == "set"
     assert payload["liquidation_submitted"] is True
     assert broker.closed_all is True
+    assert payload["skipped_unallocated"] == []  # #497 F1: threaded into book-loss-halt
 
     # the global halt is now persisted: a subsequent cycle refuses at the top-of-cycle check
     from contextlib import closing
@@ -539,8 +588,18 @@ def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
     # _run_strategy_tick are both mocked; we only need two rows for repo.list_strategies(LIVE)).
     assert runner.invoke(app, ["registry", "add", "second_live"]).exit_code == 0
     with closing(connect(get_settings().db_path)) as conn:
+        from datetime import UTC, datetime
+
+        from algua.registry.store import SqliteStrategyRepository
         migrate(conn)
         conn.execute("UPDATE strategies SET stage='live' WHERE name='second_live'")
+        # #497: run-all skips an UNALLOCATED live strategy; seed an allocation so this second live
+        # strategy is actually ticked (and breaches) rather than skipped.
+        sid = SqliteStrategyRepository(conn).get("second_live").id
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (sid, 10_000.0, datetime.now(UTC).isoformat(), "human"))
         conn.commit()
     monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
     monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
@@ -631,6 +690,59 @@ def test_live_allocate_rejects_dormant(monkeypatch):
     r = runner.invoke(app, ["live", "allocate", "s1", "--capital", "10000"])
     assert r.exit_code != 0
     assert "dormant" in r.output.lower()
+
+
+def test_run_all_skips_unallocated_live_strategy(monkeypatch):
+    # #497 inverted flow: a strategy enters `live` UNALLOCATED. `live run-all` must SKIP it (not
+    # crash on the no-allocation raise), report it under skipped_unallocated, NOT tick it, exit 0.
+    name = "cross_sectional_momentum"
+    _permissive_book(monkeypatch)
+    _to_live(name, allocate=False)  # drives to live but does NOT allocate
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
+
+    def _must_not_tick(*a, **k):
+        raise AssertionError("an unallocated live strategy must never be ticked")
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _must_not_tick)
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["skipped_unallocated"] == [name]
+    assert payload["strategies"] == []
+
+
+def test_run_all_reconcile_halt_carries_unallocated_sibling(monkeypatch):
+    # #497 F1: the reconcile-halt envelope must carry the skipped_unallocated list, not just the
+    # loop-completes path — an unallocated live sibling stays visible even when the cycle halts.
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    _to_live("cross_sectional_momentum")  # allocated
+    assert runner.invoke(app, ["registry", "add", "unalloc_sib"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name='unalloc_sib'")
+        conn.commit()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {"ZZZ": 99.0})
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x", "--grace-cycles", "0"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["reconcile"]["halt"] is True
+    assert payload["skipped_unallocated"] == ["unalloc_sib"]
 
 
 def test_run_all_forwards_start_end_to_tick(monkeypatch):
@@ -1529,5 +1641,6 @@ def test_run_all_book_stale_marks_halts_without_close_all(monkeypatch):
     assert payload["book_breach"]["kind"] == "stale_marks"
     assert payload["global_halt"] == "set"
     assert payload["liquidation_submitted"] is False
+    assert payload["skipped_unallocated"] == []  # #497 F1: threaded into stale-marks-halt
     assert broker.closed_all is False  # halt-only: NEVER flatten off a dead feed
     assert _global_halt_engaged() is True

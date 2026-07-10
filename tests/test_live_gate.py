@@ -231,7 +231,7 @@ def test_apply_transition_rejects_live_authorization_on_non_live_edge(tmp_path):
     bogus = PendingLiveAuthorization(nonce="n", expires_at="2099-01-01T00:00:00+00:00",
                                      principal="lior", signature_b64="x")
     rec = repo.get("s")  # stage 'paper'
-    with pytest.raises(ValueError, match="only valid for a human transition to live"):
+    with pytest.raises(ValueError, match="forward_tested->live"):
         repo.apply_transition(rec, Stage.CANDIDATE, Actor.HUMAN, "x", live_authorization=bogus)
 
 

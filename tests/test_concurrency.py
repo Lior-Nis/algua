@@ -234,6 +234,10 @@ def test_concurrent_allocate_respects_cap(tmp_path):
     from algua.registry.store import SqliteStrategyRepository
     conn = connect(db)
     SqliteStrategyRepository(conn).add("b")
+    # allocate_in_lane re-reads the stage UNDER the write lock and only admits paper-lane tenants;
+    # seed both into a paper stage so the in-lock gate passes and the cap-race is what's tested.
+    conn.execute("UPDATE strategies SET stage='paper' WHERE name IN ('a','b')")
+    conn.commit()
     conn.close()
 
     with _worker_group(barrier) as spawn:

@@ -102,6 +102,38 @@ def test_paper_run_rejects_non_paper_stage():
 
 
 
+def test_still_paper_allocated_reflects_stage_and_allocation(monkeypatch):
+    # #497 F3: the submit-time guard is True only for an ALLOCATED paper-lane tenant, and flips to
+    # False the moment the strategy leaves the book (a lane-exit atomically revokes the slice) — so
+    # a mid-cycle transition halts the tick's further submits instead of trading on stale state.
+    from contextlib import closing
+
+    from algua.cli.paper_cmd import _still_paper_allocated
+    from algua.config.settings import get_settings
+    from algua.registry import allocations
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    _to_paper()  # stage=paper, but UNALLOCATED (candidates allocate via `paper intake`)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        sid = SqliteStrategyRepository(conn).get("cross_sectional_momentum").id
+        # Unallocated paper tenant -> not (yet) a book member: the guard is False.
+        assert _still_paper_allocated(conn, "cross_sectional_momentum") is False
+        with conn:
+            allocations.allocate_locked(conn, sid, 10_000.0, "agent", 50_000.0)
+        assert _still_paper_allocated(conn, "cross_sectional_momentum") is True
+
+    # Bench to dormant (a paper book-exit) atomically revokes the slice.
+    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
+                               "--to", "dormant", "--actor", "agent",
+                               "--reason", "bench"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        # No longer a paper-lane tenant AND allocation shed: the guard halts further submits.
+        assert _still_paper_allocated(conn, "cross_sectional_momentum") is False
+
+
 def test_dormant_strategy_not_run_by_paper_lane():
     """A dormant strategy is rejected by `paper run` with a non-zero exit.
 
