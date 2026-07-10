@@ -12,3 +12,4 @@
 #   <principal> namespaces="algua-go-live" ssh-ed25519 AAAA... comment
 #   <principal> namespaces="algua-human-actor" ssh-ed25519 AAAA... comment
 #   <principal> namespaces="algua-go-live,algua-human-actor" ssh-ed25519 AAAA... comment
+lior namespaces="algua-go-live" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG0QGWRtmPGzxsEaN+g6fQykTvxKmM7xqe35TOoquSzG
