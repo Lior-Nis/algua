@@ -8,6 +8,7 @@ __pycache__/
 /artifacts/
 /mlruns/
 /runs/
+/archive/
 *.db
 *.db-wal
 *.db-shm
