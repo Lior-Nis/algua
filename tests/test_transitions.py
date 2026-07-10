@@ -60,8 +60,8 @@ def test_live_to_dormant_rejected_when_not_flat(tmp_path):
 
 def test_live_to_dormant_flat_succeeds_and_revokes_allocation(tmp_path):
     repo, conn = _live_strategy(tmp_path)
-    allocations.allocate(conn, repo.get("s1").id, capital=10_000.0, actor="human",
-                         account_equity=50_000.0)
+    with conn:
+        allocations.allocate_locked(conn, repo.get("s1").id, 10_000.0, "human", 50_000.0)
     rec = transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT, reason="bench")
     assert rec.stage is Stage.DORMANT
     assert allocations.active_allocation(conn, rec.id) is None
@@ -75,7 +75,8 @@ def test_apply_transition_revoke_enforces_flatness_atomically(tmp_path):
     # holding an open position (the TOCTOU's orphan).
     repo, conn = _live_strategy(tmp_path)
     rec = repo.get("s1")
-    allocations.allocate(conn, rec.id, capital=10_000.0, actor="human", account_equity=50_000.0)
+    with conn:
+        allocations.allocate_locked(conn, rec.id, 10_000.0, "human", 50_000.0)
     conn.execute(
         "INSERT INTO live_fills(activity_id, strategy, symbol, qty, price, fill_ts) "
         "VALUES (?,?,?,?,?,?)",

@@ -89,6 +89,7 @@ from algua.observability import (
 )
 from algua.operator.journal import JsonlJournal
 from algua.operator.mergeback import RealGitOps, merge_back_lock, run_merge_back
+from algua.registry import allocations
 from algua.registry.allocations import (
     AllocationError,
     CountCapReached,
@@ -475,6 +476,42 @@ def intake(
     emit(ok(payload))
 
 
+@paper_app.command('allocate')
+@json_errors
+def allocate(
+    name: str,
+    capital: float = typer.Option(..., '--capital', help='paper capital base $'),
+    max_concurrent: int = typer.Option(8, '--max-concurrent',
+        help='max concurrent active paper-lane tenants'),
+) -> None:
+    """Set a paper/forward_tested strategy's capital base (the fixed sizing denominator).
+
+    Lane-scoped to {paper, forward_tested}: the re-admission path for recovery/demotion re-entrants
+    (dormant→paper, live→paper — which land UNALLOCATED by design) and for manual paper-book
+    resizes. Enforces Σ(active paper allocations) ≤ paper-account equity AND the --max-concurrent
+    count cap on a count-INCREASING allocation (a strategy with no active allocation yet). The
+    authoritative stage + Σ + count checks all run UNDER one write lock inside ``allocate_in_lane``;
+    the stage check here is only a friendly early error before the network account read (a strategy
+    that leaves the lane between this check and the write can never be allocated). Re-allocating an
+    existing tenant RESIZES it (exempt from the count cap; emits prior→new capital)."""
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)  # friendly early error only
+        if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
+            raise ValueError(
+                f"cannot paper-allocate {name!r} at stage {rec.stage.value}; requires stage "
+                "'paper' or 'forward_tested' (candidates enter only via `paper intake`; use "
+                "`live allocate` for live)")
+        prior = active_allocation(conn, rec.id)
+        prior_capital = float(prior['capital']) if prior is not None else 0.0
+        # Paper equity source, read BEFORE the write txn (mirrors `paper intake`).
+        equity = float(_alpaca_broker_from_settings().account().equity)
+        allocations.allocate_in_lane(
+            conn, rec.id, capital=capital, actor='agent', account_equity=equity,
+            allowed_stages=frozenset({Stage.PAPER.value, Stage.FORWARD_TESTED.value}),
+            max_concurrent=max_concurrent)
+    emit(ok({'strategy': name, 'capital': capital, 'prior_capital': prior_capital}))
+
+
 def _run_quality_gate(repo_root: Path) -> bool:
     """Run the FULL quality gate against ``repo_root``'s working tree, returning True iff ALL of
     ``pytest -q``, ``ruff check .``, ``mypy algua``, and ``lint-imports`` exit 0 — short-circuiting
@@ -630,6 +667,19 @@ def merge_back(
     }))
 
 
+def _still_paper_allocated(conn, name: str) -> bool:
+    """True iff `name` is still a paper-lane book tenant: Stage.PAPER or Stage.FORWARD_TESTED AND
+    holding an active allocation. Re-read at submit time so a `paper -> ...`/`... -> dormant` (or
+    any lane-crossing) transition committed MID-CYCLE — which atomically revokes the slice (#497) —
+    aborts this tick's further orders instead of sizing/trading on a stale, now-revoked capital base
+    whose position the paper run-all (iterating only the paper-lane stages) would never wind down.
+    The paper mirror of live `_still_live_allocated` (#281); broader than any single edge — ANY exit
+    from the paper book mid-cycle halts further submits this tick."""
+    rec = SqliteStrategyRepository(conn).get(name)
+    return (rec.stage in (Stage.PAPER, Stage.FORWARD_TESTED)
+            and active_allocation(conn, rec.id) is not None)
+
+
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
     tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
@@ -676,7 +726,9 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         before_submit=_before_submit,
         on_submitted=_on_submitted,
         on_noop=_on_noop,
-        should_halt=lambda: kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn),
+        should_halt=lambda: (kill_switch.is_tripped(conn, name)
+                             or global_halt.is_engaged(conn)
+                             or not _still_paper_allocated(conn, name)),
         cancel=cancel,
         reserve_buy=reserve_buy,
         peak_equity=get_peak_equity(conn, name),

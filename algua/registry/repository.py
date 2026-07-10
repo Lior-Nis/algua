@@ -6,7 +6,7 @@ from typing import Any, NamedTuple, Protocol
 
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.registry_metadata import Author, HypothesisStatus
-from algua.contracts.types import PendingLiveAuthorization
+from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
 
 
 class FdrGateOutcome(NamedTuple):
@@ -297,6 +297,7 @@ class StrategyStore(StrategyReader, StrategyLister, Protocol):
         consume_forward_gate_id: int | None = None,
         revoke_allocation: bool = False,
         live_authorization: PendingLiveAuthorization | None = None,
+        exit_guard: ExitLaneGuard | None = None,
     ) -> StrategyRecord:
         """Atomically advance ``rec`` to ``to``, append a transition row, return the new state.
 
@@ -311,7 +312,13 @@ class StrategyStore(StrategyReader, StrategyLister, Protocol):
         in ONE atomic write transaction (write lock taken up front): re-assert the strategy is flat
         (no open live positions), revoke its active live allocation, and apply the stage CAS. Doing
         the flatness check outside that transaction reopens the #247 TOCTOU (a fill landing between
-        the check and the CAS orphans a position on a now-dormant strategy)."""
+        the check and the CAS orphans a position on a now-dormant strategy).
+
+        ``exit_guard`` (only valid when ``revoke_allocation`` is set, #497 F2/H1) is the
+        broker-backed source-lane drain: its ``cancel_and_ingest`` runs BEFORE the write lock
+        (cancel the strategy's resting orders + ingest the venue feed), and its
+        ``owned_open_order_ids`` is re-listed UNDER the lock so a resting order that survived the
+        cancel blocks the revoke+CAS rather than orphaning a position after it leaves its book."""
         ...
 
 

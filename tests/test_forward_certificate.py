@@ -454,7 +454,7 @@ def test_challenge_payload_carries_certificate_summary(cli, monkeypatch):
     runner, app = cli
     name = "cross_sectional_momentum"
     _cli_to_forward_tested(runner, app, name)
-    assert runner.invoke(app, ["live", "allocate", name, "--capital", "1000"]).exit_code == 0
+    # #497: allocation is no longer a go-live precondition (a strategy goes live UNALLOCATED).
     monkeypatch.setattr(
         "algua.registry.transitions._default_forward_certificate_verifier",
         lambda: (lambda repo, n, sid, ident: dict(CERT_SUMMARY)))
@@ -469,7 +469,7 @@ def test_no_certificate_refuses_before_issuing_a_challenge(cli, monkeypatch):
     runner, app = cli
     name = "cross_sectional_momentum"
     _cli_to_forward_tested(runner, app, name)
-    assert runner.invoke(app, ["live", "allocate", name, "--capital", "1000"]).exit_code == 0
+    # #497: allocation is no longer a go-live precondition.
 
     def raising():
         def v(repo, n, sid, ident):

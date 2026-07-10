@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 from pathlib import Path
 
 import typer
 
+from algua.audit.log import append as audit_append
 from algua.cli._common import ok, registry_conn, sync_kb_doc
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
-from algua.contracts.types import PendingLiveAuthorization
+from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
+from algua.execution.lane_exit import LiveExitGuard, build_live_broker
 from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
-from algua.registry.live_gate import ALLOWED_SIGNERS_PATH
+from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, LiveAuthorizationError
 from algua.registry.repository import StrategyRecord, kb_metadata
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -24,6 +27,41 @@ _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 registry_app = typer.Typer(help="Strategy lifecycle registry", no_args_is_help=True)
 app.add_typer(registry_app, name="registry")
+
+
+# The book-exit edges OUT of the LIVE lane whose resting live orders must be drained before the
+# allocation is shed (#497 F2/H1). Only the LIVE source lane is wired for the broker-backed drain:
+# a real-money resting order that fills after the strategy leaves the live book orphans a position
+# `live run-all` (iterating only Stage.LIVE) will never wind down. Paper-source exits keep the
+# positions-only under-lock flatness check — the paper venue is simulated and the paper operator's
+# own reconcile catches residual drift; a paper-lane drain is a deferred follow-up.
+_LIVE_EXIT_TARGETS = frozenset({Stage.PAPER, Stage.DORMANT, Stage.RETIRED})
+
+
+def _live_exit_guard(
+    conn: sqlite3.Connection, repo: SqliteStrategyRepository, name: str, target: Stage
+) -> ExitLaneGuard | None:
+    """Build the LIVE-lane exit drain (cancel resting orders -> ingest -> under-lock recheck) for a
+    ``live -> paper/dormant/retired`` transition, or None when it does not apply.
+
+    Falls back to None (positions-only under-lock flatness check) when the live authorization is
+    revoked/absent: without it we cannot reach the broker to cancel resting orders, but the
+    transition must still be allowed (a de-authorized live strategy has to be benchable/retirable),
+    and the under-lock believed-positions check still blocks an orphaned FILLED position. The human
+    break-glass for a stuck resting order is `live flatten` before benching. The fallback is
+    audited so the skipped drain is attributable."""
+    rec = repo.get(name)
+    if not (rec.stage is Stage.LIVE and target in _LIVE_EXIT_TARGETS):
+        return None
+    try:
+        authorization = live_gate.verify_live_authorization(
+            conn, repo, name, ALLOWED_SIGNERS_PATH)
+    except LiveAuthorizationError as exc:
+        audit_append(conn, actor="system", action="live_exit_drain_skipped",
+                     reason=f"live authorization unavailable ({exc}); positions-only check",
+                     strategy=name)
+        return None
+    return LiveExitGuard(conn, build_live_broker(authorization), name)
 
 
 def _record_json(r: StrategyRecord) -> dict:
@@ -109,13 +147,10 @@ def transition(
     target = Stage(to)
     with registry_conn() as conn:
         repo = SqliteStrategyRepository(conn)
-        if target is Stage.LIVE:
-            from algua.registry import allocations
-            rec = repo.get(name)
-            if allocations.active_allocation(conn, rec.id) is None:
-                raise TransitionError(
-                    f"{name} has no live allocation; run `algua live allocate {name} --capital X` "
-                    "before going live.")
+        # Inverted capital flow (#497): a strategy goes live UNALLOCATED. The human then
+        # `live allocate`s it at stage==live, and `live run-all` SKIPS an unallocated live
+        # strategy until then — so no unallocated live trading can occur and the pre-go-live
+        # allocation precondition is gone.
         if target is Stage.LIVE and signature is None:
             if Actor(actor) is not Actor.HUMAN:
                 raise TransitionError("transition to live requires a human actor")
@@ -160,8 +195,9 @@ def transition(
 
             verifier = _verify
 
+        exit_guard = _live_exit_guard(conn, repo, name, target)
         rec = transition_strategy(repo, name, target, Actor(actor), reason,
-                                  approval_verifier=verifier)
+                                  approval_verifier=verifier, exit_guard=exit_guard)
         if target is Stage.LIVE:
             # On the CLI live path the SSH signature IS the approval: the real wall is the
             # verify_and_consume signature check above + the live_authorizations row it writes,

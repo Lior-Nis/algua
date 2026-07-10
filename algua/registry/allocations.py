@@ -49,8 +49,8 @@ def allocate_locked(conn: sqlite3.Connection, strategy_id: int, capital: float, 
                     account_equity: float) -> None:
     """The Σ read-check-revoke-insert body WITHOUT opening a transaction — the caller owns the
     ``BEGIN IMMEDIATE`` scope. Revokes any prior active allocation (re-allocation) then enforces
-    Σ(active capital across all strategies) ≤ account_equity. Shared by ``allocate`` and the atomic
-    ``intake_candidate_to_paper`` (#317) so the two paths can never drift on the capital check."""
+    Σ(active capital across all strategies) ≤ account_equity. Shared by ``allocate_in_lane`` and
+    the atomic ``intake_candidate_to_paper`` (#317) so the two can't drift on the capital check."""
     if capital <= 0.0:
         raise AllocationError("capital must be positive")
     now = datetime.now(UTC).isoformat()
@@ -71,15 +71,42 @@ def allocate_locked(conn: sqlite3.Connection, strategy_id: int, capital: float, 
     )
 
 
-def allocate(conn: sqlite3.Connection, strategy_id: int, capital: float, actor: str,
-             account_equity: float) -> None:
-    """Set a strategy's live capital base. Revokes any prior active allocation (re-allocation),
-    then enforces Σ(active capital across all strategies) ≤ account_equity. A re-allocation resets
-    the strategy's NAV drawdown peak (the operator's deliberate capital change)."""
-    # BEGIN IMMEDIATE takes the write lock up front so the read-check-write (Σ ≤ equity) is atomic:
-    # two concurrent allocate calls can't both read the same total and both slip past the cap.
+def allocate_in_lane(conn: sqlite3.Connection, strategy_id: int, capital: float, actor: str,
+                     account_equity: float, allowed_stages: frozenset[str],
+                     max_concurrent: int | None = None) -> None:
+    """Lane-scoped transactional allocator: under ONE top-level ``BEGIN IMMEDIATE`` write lock,
+    re-read the strategy's CURRENT stage, refuse the allocation unless that stage is in
+    ``allowed_stages``, optionally enforce the paper-lane count cap for a count-INCREASING
+    allocation, then delegate to the shared ``allocate_locked`` (Σ ≤ equity) and commit.
+
+    Reading the stage UNDER the write lock is what closes the go-live TOCTOU: a strategy that leaves
+    the allowed lane (e.g. ``live -> dormant``) between the caller's friendly early check and this
+    write can never be allocated. ``allowed_stages`` is a frozenset of ``Stage.value`` strings (NOT
+    ``Stage`` members) so this module stays free of a ``Stage()`` parse of an unexpected DB string
+    and of the ``registry -> lifecycle`` import edge.
+
+    A resize of an already-allocated tenant is EXEMPT from the count cap (it admits no new tenant);
+    only a count-increasing allocation (no active row yet) is cap-checked. TOP-LEVEL ONLY (mirrors
+    ``intake_candidate_to_paper``): a manual ``BEGIN`` inside an open transaction raises, and the
+    blanket ``BaseException`` rollback must own the whole txn."""
+    if conn.in_transaction:
+        raise RuntimeError(
+            "allocate_in_lane must run at top level, not inside an open transaction")
     try:
         conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT stage FROM strategies WHERE id = ?", (strategy_id,)).fetchone()
+        if row is None:
+            raise AllocationError(f"strategy {strategy_id} not found")
+        if row["stage"] not in allowed_stages:
+            raise AllocationError(
+                f"cannot allocate to strategy {strategy_id} at stage {row['stage']!r}; "
+                f"allowed {sorted(allowed_stages)}")
+        if max_concurrent is not None and active_allocation(conn, strategy_id) is None:
+            n = active_paper_lane_count(conn)
+            if n >= max_concurrent:
+                raise CountCapReached(
+                    f"paper book at capacity ({n}/{max_concurrent} active tenants)")
         allocate_locked(conn, strategy_id, capital, actor, account_equity)
         conn.commit()
     except BaseException:

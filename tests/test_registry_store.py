@@ -946,7 +946,8 @@ def test_apply_transition_revokes_allocation_atomically(tmp_path):
     for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
                Stage.FORWARD_TESTED, Stage.LIVE):
         rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
-    allocations.allocate(conn, rec.id, capital=10_000.0, actor="human", account_equity=50_000.0)
+    with conn:
+        allocations.allocate_locked(conn, rec.id, 10_000.0, "human", 50_000.0)
     assert allocations.active_allocation(conn, rec.id) is not None
     rec = repo.apply_transition(rec, Stage.DORMANT, Actor.AGENT, reason="bench",
                                 revoke_allocation=True)
@@ -966,7 +967,8 @@ def test_apply_transition_revoke_rolls_back_with_stage_on_cas_failure(tmp_path):
     for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
                Stage.FORWARD_TESTED, Stage.LIVE):
         rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
-    allocations.allocate(conn, rec.id, capital=10_000.0, actor="human", account_equity=50_000.0)
+    with conn:
+        allocations.allocate_locked(conn, rec.id, 10_000.0, "human", 50_000.0)
     # Force the stage CAS to fail by passing a stale from-stage (rec says PAPER, DB says LIVE)
     stale = StrategyRecord(id=rec.id, name=rec.name, stage=Stage.PAPER,
                            created_at=rec.created_at, updated_at=rec.updated_at)

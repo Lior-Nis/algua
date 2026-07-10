@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
-from algua.contracts.types import PendingLiveAuthorization
+from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     FdrGateOutcome,
@@ -308,21 +308,30 @@ class SqliteStrategyRepository:
         consume_forward_gate_id: int | None = None,
         revoke_allocation: bool = False,
         live_authorization: PendingLiveAuthorization | None = None,
+        exit_guard: ExitLaneGuard | None = None,
     ) -> StrategyRecord:
         if consume_gate_id is not None and consume_forward_gate_id is not None:
             raise ValueError(
                 "at most one of consume_gate_id/consume_forward_gate_id may be set — a single"
                 " transition spends a single token")
-        if live_authorization is not None and revoke_allocation:
-            # The go-live authorization (paper/forward->live) and the bench wind-down
-            # (live->dormant) are different edges; they can never co-occur.
+        if live_authorization is not None and revoke_allocation and not (
+                rec.stage is Stage.FORWARD_TESTED and to is Stage.LIVE):
+            # go-live (forward_tested->live, #497) is the ONE edge that legitimately carries BOTH a
+            # live_authorization AND a revoke_allocation (it enters live UNALLOCATED, shedding any
+            # paper-book slice). Every OTHER co-occurrence is a caller bug: the authorization write
+            # belongs only to go-live, and revoke elsewhere is a plain wind-down.
             raise ValueError("live_authorization is incompatible with revoke_allocation")
-        if live_authorization is not None and not (to is Stage.LIVE and actor is Actor.HUMAN):
+        if live_authorization is not None and not (
+                rec.stage is Stage.FORWARD_TESTED and to is Stage.LIVE and actor is Actor.HUMAN):
             # Defense in depth: the go-live authorization write belongs ONLY to a human
-            # paper/forward->live transition, so the security invariant doesn't rest on
+            # forward_tested->live transition, so the security invariant doesn't rest on
             # transition_strategy being the sole caller (codex #254 review).
             raise ValueError(
-                "live_authorization is only valid for a human transition to live")
+                "live_authorization is only valid for the human forward_tested->live transition")
+        if exit_guard is not None and not revoke_allocation:
+            # The source-lane open-order drain (#497 F2/H1) only makes sense on a book-exit edge
+            # that sheds the allocation; wiring it onto a non-revoke transition is a caller bug.
+            raise ValueError("exit_guard is only valid on a revoke_allocation transition")
         if revoke_allocation:
             # Bench wind-down (#125/#247): the live->dormant flatness check, the allocation revoke,
             # and the stage CAS must be ONE atomic critical section. Enforcing flatness in a
@@ -336,12 +345,22 @@ class SqliteStrategyRepository:
                 raise RuntimeError(
                     "apply_transition(revoke_allocation=True) must run at top level, not inside an"
                     " open transaction")
+            if exit_guard is not None:
+                # Cancel the strategy's own resting orders + ingest the venue feed BEFORE taking the
+                # write lock (both are broker network calls + committing ingests — never hold the
+                # registry write lock across them). This mirrors the `live flatten` ceremony's
+                # cancel -> ingest, so a just-filled order lands in the ledger the under-lock
+                # flatness check reads and a still-open order is caught by owned_open_order_ids
+                # below. Runs OUTSIDE the try/BEGIN so its own commits are not swept into the
+                # transaction that a flatness failure rolls back.
+                exit_guard.cancel_and_ingest()
             try:
                 self._conn.execute("BEGIN IMMEDIATE")
-                self._assert_flat_for_bench(rec.name)
+                self._assert_flat_for_bench(rec.name, rec.stage, exit_guard)
                 result = self._apply_transition_locked(
                     rec, to, actor, reason, code_hash, config_hash, dependency_hash,
-                    consume_gate_id, consume_forward_gate_id, _now(), revoke_allocation=True)
+                    consume_gate_id, consume_forward_gate_id, _now(), revoke_allocation=True,
+                    live_authorization=live_authorization)
                 self._conn.commit()
             except BaseException:
                 self._conn.rollback()
@@ -405,15 +424,33 @@ class SqliteStrategyRepository:
             raise
         return result
 
-    def _assert_flat_for_bench(self, name: str) -> None:
-        """Re-check live flatness INSIDE the bench transaction (#247): with the BEGIN IMMEDIATE
-        write lock held, no concurrent fill can commit between this check and the revoke+CAS, so a
-        live strategy cannot go dormant while holding an open (and thus orphaned) position.
-        believed_positions is imported lazily — the registry->execution pattern transitions uses."""
+    def _assert_flat_for_bench(
+        self, name: str, source: Stage, exit_guard: ExitLaneGuard | None = None
+    ) -> None:
+        """Re-check flatness on the SOURCE lane INSIDE the exit transaction (#247/#497): with the
+        BEGIN IMMEDIATE write lock held, no concurrent fill can commit between this check and the
+        revoke+CAS, so a strategy cannot leave its book (dormant/retired/lane-cross) while still
+        holding an open — and thus orphaned — position. A LIVE source checks the live ledger; every
+        other (paper-lane) source checks the paper-venue ledger. believed_positions is imported
+        lazily — the registry->execution pattern transitions.py uses.
+
+        FILLED positions are not the only orphan risk: a resting (submitted-but-unfilled) order left
+        behind at the venue can fill AFTER the exit and orphan a position the source lane's run-all
+        no longer iterates. When the caller injects an ``exit_guard`` (the broker-backed drain,
+        wired for the LIVE lane, #497 F2/H1), its ``cancel_and_ingest`` already ran before the lock;
+        we re-list the strategy's STILL-open orders UNDER the lock so a cancel that failed to remove
+        one (a non-cancelable/partial state) blocks the revoke+CAS rather than orphaning it."""
         from algua.execution.live_ledger import LedgerKind, believed_positions
-        if believed_positions(self._conn, name, LedgerKind.LIVE):
+        kind = LedgerKind.LIVE if source is Stage.LIVE else LedgerKind.PAPER
+        if believed_positions(self._conn, name, kind):
             raise TransitionError(
-                f"{name} is not flat (open live positions); flatten before benching to dormant")
+                f"{name} is not flat (open {kind.value} positions); flatten before this transition")
+        if exit_guard is not None:
+            open_ids = exit_guard.owned_open_order_ids()
+            if open_ids:
+                raise TransitionError(
+                    f"{name} is not flat ({len(open_ids)} open {kind.value} order(s) {open_ids}); "
+                    "flatten before this transition")
 
     def _apply_transition_locked(
         self,

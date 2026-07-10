@@ -281,3 +281,114 @@ def test_primitive_capital_bound_rolls_back():
                 account_equity=100_000.0, max_concurrent=5)
         assert repo.get(_S1).stage is Stage.CANDIDATE
         assert active_allocation(conn, repo.get(_S1).id) is None
+
+
+# ---------------------------------------------------------------------------
+# `paper allocate` (#497): the lane-scoped re-admission path for recovery/demotion
+# re-entrants (dormant→paper, live→paper land UNALLOCATED) and manual paper-book resizes.
+# ---------------------------------------------------------------------------
+
+def _seed_paper_allocation(name: str, capital: float = 10_000.0) -> None:
+    """Force `name` to stage paper and give it an active allocation via the shared
+    ``allocate_locked`` body (caller-owns-txn) wrapped in a `with conn:` commit — so it counts as
+    an active paper-lane tenant against the concurrency cap."""
+    from algua.registry.allocations import allocate_locked
+    _force_stage(name, "paper")
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        with conn:
+            allocate_locked(conn, rec.id, capital, "agent", 100_000.0)
+
+
+def _capital_of(name: str) -> float:
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        row = active_allocation(conn, rec.id)
+        assert row is not None
+        return float(row["capital"])
+
+
+def test_paper_allocate_sets_then_resizes_paper_stage(monkeypatch):
+    """`paper allocate` on a paper-stage, unallocated strategy sets the capital base and emits
+    prior_capital == 0.0; a second allocate RESIZES it and emits the prior capital."""
+    _to_candidate(_S1)
+    _force_stage(_S1, "paper")
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+
+    r1 = runner.invoke(app, ["paper", "allocate", _S1, "--capital", "10000"])
+    assert r1.exit_code == 0, r1.output
+    p1 = json.loads(r1.output)
+    assert p1["ok"] is True
+    assert p1["strategy"] == _S1
+    assert p1["capital"] == 10_000.0
+    assert p1["prior_capital"] == 0.0
+    assert _has_allocation(_S1)
+    assert _capital_of(_S1) == 10_000.0
+
+    r2 = runner.invoke(app, ["paper", "allocate", _S1, "--capital", "20000"])
+    assert r2.exit_code == 0, r2.output
+    p2 = json.loads(r2.output)
+    assert p2["capital"] == 20_000.0
+    assert p2["prior_capital"] == 10_000.0
+    assert _capital_of(_S1) == 20_000.0
+
+
+def test_paper_allocate_rejected_on_candidate_stage(monkeypatch):
+    """A candidate-stage strategy has no paper re-admission path here — it enters only via
+    `paper intake`. `paper allocate` fails closed (exit != 0), message names the stage."""
+    _to_candidate(_S1)  # stays candidate
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    result = runner.invoke(app, ["paper", "allocate", _S1, "--capital", "10000"])
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "candidate" in payload["error"]
+    assert not _has_allocation(_S1)
+
+
+def test_paper_allocate_rejected_on_live_stage(monkeypatch):
+    """A live-stage strategy is out of the paper lane — `live allocate` owns it. `paper allocate`
+    fails closed (exit != 0), message names the live stage."""
+    _to_candidate(_S1)
+    _force_stage(_S1, "live")
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    result = runner.invoke(app, ["paper", "allocate", _S1, "--capital", "10000"])
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert "live" in payload["error"]
+    assert not _has_allocation(_S1)
+
+
+def test_paper_allocate_count_cap_blocks_new_tenant_but_allows_resize(monkeypatch):
+    """At the max-concurrent cap, a count-INCREASING allocation (a currently-unallocated paper
+    strategy) is refused (CountCapReached surfaced, exit != 0), while RESIZING an already-allocated
+    tenant at the cap succeeds (it admits no new tenant)."""
+    # _S2 occupies the sole slot as an allocated paper tenant; _S1 is a paper strategy with no
+    # active allocation yet.
+    _to_candidate(_S2)
+    _seed_paper_allocation(_S2, capital=10_000.0)
+    _to_candidate(_S1)
+    _force_stage(_S1, "paper")
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+
+    blocked = runner.invoke(app, ["paper", "allocate", _S1, "--capital", "10000",
+                                  "--max-concurrent", "1"])
+    assert blocked.exit_code != 0
+    blocked_payload = json.loads(blocked.output)
+    assert blocked_payload["ok"] is False
+    assert "capacity" in blocked_payload["error"]
+    assert not _has_allocation(_S1)
+
+    # Resizing the already-allocated tenant at the same cap succeeds (no new tenant admitted).
+    resized = runner.invoke(app, ["paper", "allocate", _S2, "--capital", "20000",
+                                  "--max-concurrent", "1"])
+    assert resized.exit_code == 0, resized.output
+    assert json.loads(resized.output)["prior_capital"] == 10_000.0
+    assert _capital_of(_S2) == 20_000.0

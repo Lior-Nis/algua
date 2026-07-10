@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
-from algua.contracts.types import PendingLiveAuthorization
+from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
 from algua.registry.repository import ArtifactIdentity, StrategyRecord, StrategyRepository
 
 # (repo, strategy_id, code_hash, config_hash, dependency_hash) -> approval result. Truthy =
@@ -20,6 +20,18 @@ ApprovalVerifier = Callable[
 ForwardCertificateVerifier = Callable[
     [StrategyRepository, str, int, ArtifactIdentity], dict[str, Any]]
 
+# Every book-exit / lane-crossing edge that must SHED the strategy's capital reservation as part of
+# the transition (#497). Leaving a strategy allocated after it leaves its operating book orphans the
+# reservation: run-all only iterates the source lane, so nothing would ever wind the position down
+# or free the capital. The revoke rides ATOMICALLY with the stage CAS (and, on forward_tested->live,
+# the go-live authorization) inside apply_transition, mirroring the original live->dormant wind-down
+# (#125/#247). Edges kept OUT of the set deliberately retain the allocation: paper->forward_tested
+# and forward_tested->paper stay WITHIN the paper book, so the tenant keeps its slice.
+_REVOKE_ON_EXIT: frozenset[tuple[Stage, Stage]] = frozenset({
+    (Stage.PAPER, Stage.DORMANT), (Stage.PAPER, Stage.RETIRED), (Stage.PAPER, Stage.CANDIDATE),
+    (Stage.FORWARD_TESTED, Stage.RETIRED), (Stage.FORWARD_TESTED, Stage.LIVE),
+    (Stage.LIVE, Stage.PAPER), (Stage.LIVE, Stage.DORMANT), (Stage.LIVE, Stage.RETIRED)})
+
 
 def transition_strategy(
     repo: StrategyRepository,
@@ -29,6 +41,7 @@ def transition_strategy(
     reason: str | None = None,
     approval_verifier: ApprovalVerifier | None = None,
     forward_certificate_verifier: ForwardCertificateVerifier | None = None,
+    exit_guard: ExitLaneGuard | None = None,
 ) -> StrategyRecord:
     target = Stage(to)
     transition_actor = Actor(actor)
@@ -41,7 +54,10 @@ def transition_strategy(
     dependency_hash: str | None = None
     consume_gate_id: int | None = None
     consume_forward_gate_id: int | None = None
-    revoke_allocation = False
+    # One membership test drives the wind-down for EVERY book-exit / lane-crossing edge (#497),
+    # replacing the single hand-wired live->dormant branch. forward_tested->live is IN the set, so
+    # go-live carries BOTH live_authorization (target==LIVE branch below) AND revoke_allocation.
+    revoke_allocation = (rec.stage, target) in _REVOKE_ON_EXIT
     live_authorization: PendingLiveAuthorization | None = None
     if target == Stage.LIVE:
         identity, live_authorization = _validate_live_gate(
@@ -63,13 +79,6 @@ def transition_strategy(
         # promote`). Humans are exempt. The PAPER -> CANDIDATE back-step is free for any actor —
         # re-entry to candidate from below always re-runs the research gate.
         consume_gate_id = _validate_shortlist_gate(repo=repo, name=name, strategy_id=rec.id)
-    elif rec.stage is Stage.LIVE and target is Stage.DORMANT:
-        # Bench wind-down wall (#125): a live strategy must be flat before resting, else its open
-        # positions are orphaned (run-all only iterates Stage.LIVE). The flatness check is enforced
-        # ATOMICALLY with the allocation revoke + stage CAS inside apply_transition (#247): doing it
-        # here as a separate autocommit read left a TOCTOU where a live fill committed between the
-        # check and the CAS would orphan a position on a now-dormant strategy.
-        revoke_allocation = True
     elif rec.stage is Stage.PAPER and target == Stage.FORWARD_TESTED:
         # Identity is pinned for BOTH actors: the agent's token consume re-checks it inside
         # apply_transition, and a human raw transition records it for audit (#124).
@@ -90,6 +99,11 @@ def transition_strategy(
         consume_forward_gate_id=consume_forward_gate_id,
         revoke_allocation=revoke_allocation,
         live_authorization=live_authorization,
+        # The source-lane open-order drain only applies to a book-exit edge that sheds the
+        # allocation (#497 F2/H1); forwarding it on any other edge would trip the store-layer
+        # "exit_guard is only valid on a revoke_allocation transition" guard. The CLI only builds a
+        # guard for a live-source revoke edge, so in practice this is a belt-and-suspenders filter.
+        exit_guard=exit_guard if revoke_allocation else None,
     )
 
 
