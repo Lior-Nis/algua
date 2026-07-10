@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
+import stat
 import time
+import uuid
+from collections import Counter
+from collections.abc import Callable
+from datetime import UTC, datetime
 from itertools import combinations
+from pathlib import Path
 from typing import Any
 
 import typer
 
+import algua.strategies
 from algua.backtest.engine import holdout_window
 from algua.backtest.sweep import parse_grid, sweep_with_matrix
 from algua.backtest.walkforward import walk_forward
@@ -32,6 +41,7 @@ from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.knowledge.experience import write_experience_note
+from algua.registry import live_gate
 from algua.registry.human_actor import canonical_run_context
 from algua.registry.negative_results import (
     build_gate_fail_record,
@@ -40,8 +50,8 @@ from algua.registry.negative_results import (
 )
 from algua.registry.promotion import promotion_preflight, run_gate
 from algua.registry.search_breadth import record_search_breadth
-from algua.registry.store import SqliteStrategyRepository
-from algua.research import family_audit
+from algua.registry.store import SqliteStrategyRepository, StrategyNotFound
+from algua.research import family_audit, lifecycle_gc
 from algua.research.cscv import CSCV_MIN_WINDOWS
 from algua.research.cscv import pbo as compute_pbo
 from algua.research.gates import GateCriteria
@@ -766,4 +776,482 @@ def family_audit_cmd() -> None:
             "return_independent_threshold": family_audit.RETURN_INDEPENDENT_THRESHOLD,
             "return_correlation_min_overlap": family_audit.RETURN_CORRELATION_MIN_OVERLAP,
         },
+    }))
+
+
+_GC_NOTE = (
+    "advisory lifecycle GC: read-only by default; a listing is a prioritization signal, not a "
+    "transition. Only --archive with an authenticated human (#329 signature over the printed "
+    "challenge) MOVES files; the immutable registry DB row is NEVER touched."
+)
+
+
+def _gc_scan_roots(settings: Any) -> list[Path]:
+    """The two containment roots the GC walk is confined to: the strategy-module package dir and the
+    knowledge-base strategies subtree. `_gc_archive` requires every reaped source to resolve UNDER
+    one of these (symlink-free), mirroring `knowledge/sync.py::_safe_path`'s escape guard."""
+    # Lazy import (mlflow-importing metrics layer) — see _gc_inventory.
+    from algua.knowledge.sync import strategies_dir
+    return [Path(algua.strategies.__file__).parent, strategies_dir(settings)]
+
+
+def _gc_inventory(settings: Any) -> list[lifecycle_gc.FileItem]:
+    """Scan the two on-disk strategy surfaces into FileItems (the I/O the pure module refuses).
+
+    Surface 1 — strategy modules: every ``*.py`` under a public family dir
+    (``algua/strategies/<family>/`` with an ``__init__.py`` and a non-underscore name), skipping
+    ``__init__.py`` and any private ``_*.py`` helper. Example families are scanned too; with no
+    registry row they classify as ``untracked_module`` and are never reaped, so no special-casing.
+
+    Surface 2 — report-experiments artifacts: the per-strategy ``reports/`` subtree the
+    ``report-experiments`` skill writes at ``<knowledge_dir>/strategies/<name>/reports/<stamp>/``,
+    keyed by the ``<name>`` DIRECTORY component (the registry strategy name), NOT by a top-level
+    ``.md`` stem. The TOP-LEVEL ``*.md`` files directly under ``strategies/`` are kb-sync-OWNED and
+    are NEVER scanned: the ``_*.md`` router pages (``_index``/``_by-stage``/``_by-date``/
+    ``_families``) AND every per-strategy live note at ``strategy_doc_path()`` are regenerable,
+    always-on surfaces — a live synced note must never be mistaken for a disposable report. We reuse
+    ``algua.knowledge.sync.strategies_dir`` for the surface root rather than re-deriving it, and by
+    iterating only DIRECTORIES (skipping ``families/``) we structurally exclude those top-level
+    files without special-casing each name.
+    """
+    root, sdir = _gc_scan_roots(settings)
+    items: list[lifecycle_gc.FileItem] = []
+    for d in sorted(root.iterdir()):
+        # Containment: never descend a symlinked family dir — it could point outside the package
+        # root and smuggle an arbitrary tree into the reapable set (mirrors _safe_path).
+        if d.is_symlink() or not d.is_dir() or d.name.startswith("_") \
+                or not (d / "__init__.py").exists():
+            continue
+        for p in sorted(d.glob("*.py")):
+            if p.is_symlink() or p.name == "__init__.py" or p.stem.startswith("_"):
+                continue
+            st = p.stat()
+            items.append(lifecycle_gc.FileItem(
+                path=str(p), strategy=p.stem, surface=lifecycle_gc.SURFACE_MODULE,
+                size_bytes=st.st_size, mtime=st.st_mtime))
+    if sdir.exists():
+        for name_dir in sorted(sdir.iterdir()):
+            # Only per-strategy DIRECTORIES; skip the families/ hub subtree and every top-level file
+            # (the kb-sync-owned router pages + strategy_doc_path notes are files, not dirs). A
+            # symlinked per-strategy dir OR reports/ dir is refused — it could escape the vault.
+            if name_dir.is_symlink() or not name_dir.is_dir() or name_dir.name == "families":
+                continue
+            reports = name_dir / "reports"
+            if reports.is_symlink() or not reports.is_dir():
+                continue
+            for p in sorted(reports.rglob("*")):
+                # rglob does not descend symlinked subdirs, but a symlinked leaf can still surface;
+                # skip any symlink so only genuine regular files under the vault are ever scanned.
+                if p.is_symlink() or not p.is_file():
+                    continue
+                st = p.stat()
+                items.append(lifecycle_gc.FileItem(
+                    path=str(p), strategy=name_dir.name, surface=lifecycle_gc.SURFACE_REPORT,
+                    size_bytes=st.st_size, mtime=st.st_mtime))
+    return items
+
+
+def _archive_run_id() -> str:
+    """Collision-resistant archive run-dir id: a UTC second stamp PLUS a full ``uuid4`` suffix.
+
+    Two ``--archive`` runs landing in the same UTC second would otherwise share a run dir and could
+    silently overwrite a prior archived file; the 128-bit uuid suffix makes the run dir unique per
+    invocation with negligible collision probability (#510 GATE-2). Factored out so a test can pin
+    it."""
+    return f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex}"
+
+
+def _open_archive_parent_dir(archive_dir: Path, dest_parent: Path) -> int | None:
+    """Materialize+open ``dest_parent`` under ``archive_dir`` via fd-relative, symlink-refusing
+    traversal, returning an fd to the FINAL directory (or None if any component is unsafe).
+
+    Hardens the archive DESTINATION as strongly as the source (#510 GATE-2). A prior path-based
+    containment check was still TOCTOU-vulnerable: a component swapped to a symlink between the
+    check and ``os.replace`` could redirect the write out of the tree. Instead we open the
+    operator-declared archive root (``archive_dir`` — a symlinked root the operator chose is
+    honored, so it is opened WITHOUT ``O_NOFOLLOW``) then descend one component at a time,
+    ``mkdir``-then-``open`` each
+    under the parent's fd with ``O_DIRECTORY | O_NOFOLLOW`` so NO intermediate symlink is ever
+    followed. The caller renames with ``dst_dir_fd`` = this fd + the bare final name, so the move
+    targets the real directory inode we hold — a symlink planted at the path level afterward cannot
+    redirect it."""
+    try:
+        rel = dest_parent.relative_to(archive_dir)
+    except ValueError:
+        return None
+    try:
+        cur = os.open(archive_dir, os.O_RDONLY | os.O_DIRECTORY)  # operator root: follow is OK
+    except OSError:
+        return None
+    for part in rel.parts:
+        try:
+            try:
+                os.mkdir(part, dir_fd=cur)
+            except FileExistsError:
+                pass  # reuse an already-created run/mirror dir (same-run multi-file)
+            # O_NOFOLLOW: a component that is (or was swapped to) a symlink fails here (ELOOP).
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+        except OSError:
+            os.close(cur)
+            return None
+        os.close(cur)
+        cur = nxt
+    return cur
+
+
+def _gc_archive(
+    reap: list[lifecycle_gc.Classified], archive_dir: Path, expected_hashes: dict[str, str],
+    scan_roots: list[Path],
+    current_entry: Callable[[str], lifecycle_gc.RegistryEntry | None] | None = None,
+    retention_days: float = 0.0,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """MOVE each reapable file into a timestamped run dir under ``archive_dir``, mirroring its path.
+
+    Idempotent/race-safe: a source that has already vanished (a concurrent GC, a manual delete) is
+    skipped rather than raising, so a re-run of the same command moves nothing left to move.
+
+    TOCTOU/symlink/content hardening (#510 GATE-2). Every file is handled through a SINGLE file
+    descriptor opened ``O_RDONLY | O_NOFOLLOW`` and never re-resolved by path:
+
+    * PATH CONTAINMENT (before any open): the source's parent is resolved with ``strict=True`` and
+      REQUIRED to land under one of ``scan_roots`` (the strategy package dir / kb strategies
+      subtree). ``O_NOFOLLOW`` only rejects a symlink at the FINAL component; an INTERMEDIATE
+      symlinked dir (``.../reports -> /etc``) would slip past it, so we resolve the whole parent
+      chain and refuse (``escaped_scan_root``) anything that resolves outside the known roots —
+      mirroring ``knowledge/sync.py::_safe_path``.
+    * ``O_NOFOLLOW`` makes the open FAIL if the final path component is a symlink, and ``fstat`` on
+      the fd rejects any non-regular file — so a symlink/dir/FIFO swapped in after classification
+      can never be followed into archiving an unrelated target.
+    * The bytes are read FROM THE FD and hashed; the file is archived ONLY if that sha256 matches
+      the ``expected_hashes[path]`` the human actually SIGNED (the manifest bound into the
+      challenge). A racing writer that swaps in different-but-regular content after signature
+      verification fails this check (``content_changed_since_authorization``) — the archived bytes
+      are ALWAYS the signed bytes, enforced at the point of use, not merely at challenge time.
+    * Before the move we re-``lstat`` the path and compare (st_dev, st_ino) to the open fd's
+      ``fstat``; a mismatch means the path now names a DIFFERENT inode than the one we hashed, so we
+      skip (``replaced_before_move``) rather than relocate a replacement file.
+    * The move itself is a SINGLE atomic same-filesystem ``os.replace(src, dest)`` — never
+      copy-then-unlink. There is therefore NO crash window in which both the source and an archived
+      copy exist simultaneously (which would double-archive on retry). A genuinely cross-filesystem
+      destination raises ``EXDEV``; per the design doc we SKIP+surface it (``cross_filesystem``)
+      rather than silently falling back to a non-atomic copy.
+    * DESTINATION containment (symmetric with the source guard): the dest parent is built by
+      fd-relative, ``O_NOFOLLOW`` traversal (``_open_archive_parent_dir``) and the move is a
+      ``renameat`` (``os.replace(..., dst_dir_fd=parent_fd)``) so a planted symlink component can
+      never redirect the write out of the archive tree (``archive_dest_unsafe`` if traversal fails).
+    * REGISTRY RE-CHECK (closes the window between computing ``reap`` and moving — which spans an
+      out-of-band human signing delay, not just a few in-process instructions): when
+      ``current_entry`` is supplied, the strategy's LIVE registry snapshot (stage + retired_at) is
+      re-read immediately before ``os.replace`` and run back through
+      ``lifecycle_gc.still_reapable`` — a full re-DERIVE of eligibility against ``retention_days``,
+      not a bare stage-equality check. This catches not only an un-retire back-step or an orphan
+      that gained a registry row, but also a strategy that un-retired and RE-retired in the window:
+      its live stage reads ``retired`` again, but the re-retirement reset its clock, so a
+      stage-only check would wrongly re-authorize it. Any of these is skipped
+      (``registry_stage_changed``) rather than moved against stale eligibility.
+
+    Refused/vanished paths are reported in ``skipped`` and left in place; ``expected_hashes`` is the
+    same per-file sha256 map that was folded into the signed manifest. The run dir carries a random
+    suffix (``_archive_run_id``) so two runs in the same UTC second never collide.
+    """
+    resolved_roots = [r.resolve() for r in scan_roots]
+    # Materialize the operator-declared archive ROOT once so the fd-relative traversal can open it;
+    # every component BELOW it is created/opened O_NOFOLLOW per file by _open_archive_parent_dir.
+    # NOTE: this mkdir may follow a symlink in an ANCESTOR of archive_dir — the archive dir and its
+    # ancestors are the operator's own declared location (a trusted path), unlike the untrusted
+    # run-dir/mirror components below it, which are the ones a symlink attack would target.
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = archive_dir / _archive_run_id()
+    moved: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for c in reap:
+        src = Path(c.path)
+
+        def _skip(reason: str, strategy: str = c.strategy, surface: str = c.surface,
+                  path: str = c.path) -> None:
+            skipped.append({"src": path, "strategy": strategy, "surface": surface,
+                            "reason": reason})
+
+        # Containment guard: resolve the ENTIRE parent chain (catches an intermediate symlinked dir
+        # that O_NOFOLLOW's final-component check would miss) and require it under a scan root.
+        try:
+            real_parent = src.parent.resolve(strict=True)
+        except (OSError, RuntimeError):
+            _skip("parent_unresolvable")
+            continue
+        if not any(real_parent == root or root in real_parent.parents
+                   for root in resolved_roots):
+            _skip("escaped_scan_root")
+            continue
+
+        try:
+            fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)  # O_NOFOLLOW: refuse a swapped symlink
+        except FileNotFoundError:
+            continue  # already gone (concurrent GC / manual delete) — idempotent no-op
+        except OSError:
+            _skip("refused_non_regular_file")  # ELOOP (symlink) or any other open failure
+            continue
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode):
+                _skip("refused_non_regular_file")  # dir / FIFO / device swapped in
+                continue
+            data = _read_fd_all(fd)
+            if hashlib.sha256(data).hexdigest() != expected_hashes.get(c.path):
+                # Content differs from what the human SIGNED — refuse (point-of-use enforcement).
+                _skip("content_changed_since_authorization")
+                continue
+            # Identity re-check before the atomic move: the path must STILL name the exact inode we
+            # hashed, else a replacement was raced in — leave both alone. (This narrows but cannot
+            # fully close the source race: os.replace re-resolves `src` by path, so a swap in the
+            # sub-instruction window between this lstat and the rename is inherent to a lock-free
+            # mover. Accepted residual — GC is advisory, reversible, and the worst case is archiving
+            # a raced-in file that was being REMOVED from the active tree anyway.)
+            try:
+                lst = os.lstat(src)
+            except FileNotFoundError:
+                _skip("vanished_before_move")
+                continue
+            if (lst.st_dev, lst.st_ino) != (fst.st_dev, fst.st_ino):
+                _skip("replaced_before_move")
+                continue
+            # Registry re-check at the point of use: re-read the strategy's LIVE registry snapshot
+            # and re-DERIVE eligibility (not just compare stage equality) so a retired strategy that
+            # un-retired, OR un-retired and RE-retired (resetting its clock), OR an orphan that got
+            # `registry add`ed, between computing `reap` and here is refused. Closes the window
+            # between the classify() scan and the move, which spans an out-of-band human signing
+            # delay; hash/inode identity alone would not catch a pure registry transition.
+            if current_entry is not None:
+                entry = current_entry(c.strategy)
+                if not lifecycle_gc.still_reapable(
+                    c.reason, entry, now=datetime.now(UTC), retention_days=retention_days,
+                ):
+                    _skip("registry_stage_changed")
+                    continue
+            # Mirror the source's directory structure under run_dir. Strip the anchor first: scanned
+            # paths are ABSOLUTE (both algua.strategies.__file__ and an absolute knowledge_dir), and
+            # `run_dir / <absolute>` would collapse to the absolute path itself (pathlib join rule),
+            # writing the file onto itself. Stripping the root ("/") yields a unique, nested dest.
+            rel = src.relative_to(src.anchor) if src.is_absolute() else src
+            dest = run_dir / rel
+            # Build+open the dest parent via fd-relative, symlink-refusing traversal, then rename
+            # INTO that fd — a planted symlink component cannot redirect the move out of the tree.
+            parent_fd = _open_archive_parent_dir(archive_dir, dest.parent)
+            if parent_fd is None:
+                _skip("archive_dest_unsafe")
+                continue
+            try:
+                # Atomic same-fs renameat: no window where both src and dest exist (crash-safe, and
+                # no duplicate-archive-on-retry). Cross-fs raises EXDEV — skip rather than copy.
+                os.replace(src, dest.name, dst_dir_fd=parent_fd)
+            except OSError as exc:
+                if exc.errno == errno.EXDEV:
+                    _skip("cross_filesystem")
+                else:
+                    _skip("archive_move_failed")
+                continue
+            finally:
+                os.close(parent_fd)
+        finally:
+            os.close(fd)
+        moved.append({
+            "src": c.path, "dest": str(dest), "strategy": c.strategy, "surface": c.surface,
+            "reason": c.reason, "size_bytes": c.size_bytes,
+        })
+    return (str(run_dir), moved, skipped)
+
+
+def _read_fd_all(fd: int) -> bytes:
+    """Read the whole file behind ``fd`` (never re-resolving the path)."""
+    chunks: list[bytes] = []
+    while True:
+        block = os.read(fd, 1 << 20)
+        if not block:
+            return b"".join(chunks)
+        chunks.append(block)
+
+
+@research_app.command("gc")
+@json_errors
+def gc(
+    retention_days: float = typer.Option(
+        90.0, "--retention-days",
+        help="reap retired strategies only after this many days retired (conservative default)"),
+    archive: bool = typer.Option(
+        False, "--archive",
+        help="GOVERNED cleanup: MOVE reapable files to the archive tree (human-only). Default is "
+             "read-only advisory."),
+    actor: str = typer.Option("agent", "--actor"),
+    actor_signature: str = typer.Option(
+        None, "--actor-signature",
+        help="path to the SSH signature over the printed --archive challenge (#329). Required to "
+             "authenticate --actor human before any file is MOVED: a bare --actor human is "
+             "forgeable and unlocks NO cleanup — run once with --archive --actor human (no "
+             "signature) to print a challenge bound to the exact reap manifest, sign it with your "
+             "enrolled algua-human-actor key (ssh-keygen -Y sign -n algua-human-actor), then "
+             "re-run with --actor-signature."),
+    archive_dir: Path = typer.Option(
+        Path("archive"), "--archive-dir", help="root of the archive tree for --archive"),
+    top: int = typer.Option(
+        None, "--top", help="cap the reapable list to the top N by reclaimable size"),
+) -> None:
+    """ADVISORY reaper of dead strategy artifacts — retired-strategy modules/reports & orphaned
+    reports. READ-ONLY by default: it classifies the on-disk strategy modules and the per-strategy
+    report-experiments subtrees against the registry and lists what is safely reapable (a retired
+    strategy older than --retention-days, or an orphaned report — no registry row — whose own mtime
+    is older than --retention-days). A listing is a prioritization signal, NOT a transition.
+    Fail-safe throughout: a module with no row (untracked), a non-terminal strategy, a
+    retired-without-timestamp, and an orphaned report younger than the window (or with no provable
+    mtime) are ALWAYS kept.
+
+    Only `--archive --actor human` MOVES the reapable files into a timestamped archive tree, and it
+    is gated by the #329 authenticated-human mechanism (the SAME challenge/signature path as
+    `registry transition --to live`): a bare --actor human string authorizes NOTHING — moving
+    files requires an --actor-signature over a challenge bound to the exact reap manifest, verified
+    against the approvers/allowed_signers trust anchor under the algua-human-actor namespace. It
+    NEVER deletes and NEVER touches the registry row."""
+    if retention_days < 0:
+        raise ValueError("--retention-days must be >= 0")
+    if top is not None and top < 1:
+        raise ValueError("--top must be >= 1 when provided")
+    if archive and actor != "human":
+        raise ValueError("research gc --archive is a governed cleanup: pass --actor human")
+    # Resolve BEFORE building the challenge: the signed challenge binds this exact string (see
+    # build_gc_archive_challenge's "resolved archive root" contract), so a relative --archive-dir
+    # must be pinned to an absolute path here — otherwise the same relative string could resolve to
+    # a different directory depending on the cwd the command happens to be re-run from, silently
+    # widening what a signature authorizes beyond what the human actually saw (#510 GATE-2).
+    archive_dir = archive_dir.expanduser().resolve()
+
+    settings = get_settings()
+    items = _gc_inventory(settings)
+
+    registry: dict[str, lifecycle_gc.RegistryEntry] = {}
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        for rec in repo.list_strategies():
+            retired_at: str | None = None
+            if rec.stage == Stage.RETIRED:
+                trans = repo.list_transitions(rec.name)
+                rets = [t["created_at"] for t in trans if t["to_stage"] == Stage.RETIRED.value]
+                retired_at = max(rets) if rets else None
+            registry[rec.name] = lifecycle_gc.RegistryEntry(
+                stage=rec.stage.value, retired_at=retired_at)
+
+    now = datetime.now(UTC)
+    classified = lifecycle_gc.classify(
+        items, registry, now=now, retention_days=retention_days)
+    by_reason: Counter[str] = Counter(c.reason for c in classified)
+
+    # --top is applied to `reap` ITSELF (not just the printed list) so the signed manifest, the
+    # challenge, and the actual archived set are EXACTLY the top-N shown — authorization can never
+    # diverge from display (#510 GATE-2). Everything downstream (hashes/manifest/archive/report)
+    # keys off this single truncated list.
+    reap = lifecycle_gc.reapable(classified)
+    if top:
+        reap = reap[:top]
+
+    reapable_dicts = [{
+        "path": c.path, "strategy": c.strategy, "surface": c.surface, "reason": c.reason,
+        "size_bytes": c.size_bytes,
+        "age_days": round(c.age_days, 3) if c.age_days is not None else None,
+        "stage": c.stage,
+    } for c in reap]
+
+    archive_run_dir: str | None = None
+    archived: list[dict[str, Any]] = []
+    archive_skipped: list[dict[str, Any]] = []
+    if archive and reap:
+        # #329 AUTHENTICATED-HUMAN gate (GATE-2): the early `actor == "human"` string check above
+        # is forgeable, so before any file is MOVED we require an SSH signature over a challenge
+        # bound to the EXACT reap manifest, verified against the approvers/allowed_signers anchor
+        # under the algua-human-actor namespace (the same trust anchor + namespace as `registry
+        # transition --to live`). No signature => print the challenge and mutate nothing (mirrors
+        # the go-live challenge print). Binding to the manifest content (a per-file sha256) makes a
+        # captured signature non-replayable onto a byte-different file set.
+        content_hashes: dict[str, str] = {}
+        for c in reap:
+            try:
+                content_hashes[c.path] = hashlib.sha256(Path(c.path).read_bytes()).hexdigest()
+            except OSError:
+                # Unreadable / vanished between classify and now — bind its ABSENCE (empty hash); if
+                # it reappears with content before the signed re-run the manifest differs and the
+                # signature is refused (fail safe).
+                content_hashes[c.path] = ""
+        manifest = lifecycle_gc.archive_manifest(reap, content_hashes)
+        challenge = lifecycle_gc.build_gc_archive_challenge(
+            retention_days=retention_days, archive_dir=str(archive_dir), manifest=manifest)
+        if not actor_signature:
+            emit(ok({
+                "note": _GC_NOTE,
+                "action": "human_actor_challenge",
+                "command": "research gc --archive",
+                "challenge": challenge,
+                "manifest_sha256": hashlib.sha256(manifest.encode()).hexdigest(),
+                "retention_days": retention_days,
+                "reapable_count": len(reap),
+                "reclaimable_bytes": sum(c.size_bytes for c in reap),
+                "by_reason": dict(by_reason),
+                "reapable": reapable_dicts,
+                "instructions": (
+                    "sign the 'challenge' value with your enrolled algua-human-actor key: "
+                    "ssh-keygen -Y sign -n algua-human-actor -f <key> <file>; then re-run "
+                    "`research gc --archive --actor human --archive-dir <same dir> "
+                    "--actor-signature <file>.sig` (the signature covers the exact reap manifest, "
+                    "so it is refused if the reapable set changes before you re-run)."),
+            }))
+            return
+        signature = Path(actor_signature).read_bytes()
+        # Read the trust anchor from the module (not a bound copy) so it honors the same
+        # ALLOWED_SIGNERS_PATH the go-live/human-actor paths use — and stays test-patchable.
+        principal = live_gate.verify_signature(
+            live_gate.ALLOWED_SIGNERS_PATH, challenge, signature,
+            namespace=lifecycle_gc.GC_ARCHIVE_NAMESPACE)
+        if principal is None:
+            raise ValueError(
+                "research gc --archive: --actor-signature did not authenticate an enrolled "
+                "algua-human-actor key over a challenge bound to this exact reap manifest, "
+                "retention window, and archive dir. Re-run without --actor-signature to print a "
+                "fresh challenge, sign it (ssh-keygen -Y sign -n algua-human-actor), and retry. A "
+                "bare --actor human does not unlock the cleanup.")
+        # Point-of-use stage re-check: pass a callable that queries the registry LIVE for each
+        # strategy immediately before its file is moved (NOT a one-shot snapshot), so the window
+        # between the classify pass and each individual move is closed — a strategy un-retired, an
+        # orphan `registry add`ed, or a strategy that un-retired and RE-retired (resetting its
+        # retention clock) in between is caught per-file and skipped (`registry_stage_changed`)
+        # rather than archived against stale eligibility. `_gc_archive` re-derives full eligibility
+        # via `lifecycle_gc.still_reapable`, not a bare stage-equality check. (The residual
+        # sub-instruction race between the query and the rename is inherent to a lock-free file
+        # mover; GC is advisory + reversible + human-authenticated, so it is an accepted residual.)
+        with registry_conn() as conn:
+            fresh_repo = SqliteStrategyRepository(conn)
+
+            def _live_entry(name: str) -> lifecycle_gc.RegistryEntry | None:
+                try:
+                    rec = fresh_repo.get(name)
+                except StrategyNotFound:
+                    return None
+                retired_at: str | None = None
+                if rec.stage == Stage.RETIRED:
+                    trans = fresh_repo.list_transitions(name)
+                    rets = [t["created_at"] for t in trans if t["to_stage"] == Stage.RETIRED.value]
+                    retired_at = max(rets) if rets else None
+                return lifecycle_gc.RegistryEntry(stage=rec.stage.value, retired_at=retired_at)
+
+            archive_run_dir, archived, archive_skipped = _gc_archive(
+                reap, archive_dir, content_hashes, _gc_scan_roots(settings),
+                current_entry=_live_entry, retention_days=retention_days)
+
+    emit(ok({
+        "note": _GC_NOTE,
+        "dry_run": not archive,
+        "retention_days": retention_days,
+        "total_files_scanned": len(classified),
+        "reapable_count": len(reap),
+        "reclaimable_bytes": sum(c.size_bytes for c in reap),
+        "by_reason": dict(by_reason),
+        "reapable": reapable_dicts,
+        "archived": archived,
+        "archive_skipped": archive_skipped,
+        "archive_run_dir": archive_run_dir,
     }))
