@@ -14,7 +14,11 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
-from algua.execution.lane_exit import LiveExitGuard, build_live_broker
+from algua.execution.lane_exit import (
+    LiveExitGuard,
+    build_live_broker,
+    build_live_drain_broker,
+)
 from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
@@ -44,12 +48,14 @@ def _live_exit_guard(
     """Build the LIVE-lane exit drain (cancel resting orders -> ingest -> under-lock recheck) for a
     ``live -> paper/dormant/retired`` transition, or None when it does not apply.
 
-    Falls back to None (positions-only under-lock flatness check) when the live authorization is
-    revoked/absent: without it we cannot reach the broker to cancel resting orders, but the
-    transition must still be allowed (a de-authorized live strategy has to be benchable/retirable),
-    and the under-lock believed-positions check still blocks an orphaned FILLED position. The human
-    break-glass for a stuck resting order is `live flatten` before benching. The fallback is
-    audited so the skipped drain is attributable."""
+    When the per-strategy go-live authorization is revoked/absent, the drain does NOT fall open to a
+    positions-only check (which ignores resting OPEN orders — the exact orphan class #451 closed):
+    it instead cancels the strategy's resting orders using the ACCOUNT-LEVEL live credentials
+    (``build_live_drain_broker`` — no per-strategy authorization needed; the authorization is only a
+    construction tollbooth on the trading broker, never used for REST). Only if EVEN the account
+    credentials are unavailable (none configured) does the exit FAIL CLOSED — never fall open — with
+    a message pointing at the `live flatten` break-glass. Both branches are audited so the drain
+    path taken is attributable."""
     rec = repo.get(name)
     if not (rec.stage is Stage.LIVE and target in _LIVE_EXIT_TARGETS):
         return None
@@ -57,10 +63,31 @@ def _live_exit_guard(
         authorization = live_gate.verify_live_authorization(
             conn, repo, name, ALLOWED_SIGNERS_PATH)
     except LiveAuthorizationError as exc:
-        audit_append(conn, actor="system", action="live_exit_drain_skipped",
-                     reason=f"live authorization unavailable ({exc}); positions-only check",
-                     strategy=name)
-        return None
+        # Per-strategy authorization is gone, but a resting live order left behind can still FILL
+        # after the strategy leaves the live book -> orphaned position `live run-all` (iterating
+        # only Stage.LIVE) never winds down. Drain it via the account-level credentials instead.
+        drain = build_live_drain_broker()
+        if drain is None:
+            # No live credentials configured at all: we cannot reach the venue to cancel the resting
+            # orders. FAIL CLOSED — never fall through to a positions-only check that ignores an
+            # OPEN resting order. Human break-glass: `live flatten` before benching.
+            audit_append(
+                conn, actor="system", action="live_exit_drain_unavailable",
+                reason=(f"live authorization unavailable ({exc}) AND live credentials not "
+                        "configured; cannot drain resting orders"),
+                strategy=name)
+            raise TransitionError(
+                f"cannot exit live strategy {name!r}: its per-strategy authorization is "
+                f"unavailable ({exc}) and no live credentials are configured to drain resting "
+                "orders at the account level; run `algua live flatten` to clear resting orders, "
+                "then retry"
+            ) from exc
+        audit_append(
+            conn, actor="system", action="live_exit_drain_account_creds",
+            reason=(f"per-strategy authorization unavailable ({exc}); draining resting orders via "
+                    "account-level live credentials"),
+            strategy=name)
+        return LiveExitGuard(conn, drain, name)
     return LiveExitGuard(conn, build_live_broker(authorization), name)
 
 

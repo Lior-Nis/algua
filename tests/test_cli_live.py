@@ -145,6 +145,24 @@ def test_run_all_no_authorized_returns_without_building_broker(monkeypatch):
     assert built["broker"] is False  # early return precedes broker construction (no trade)
 
 
+def test_run_all_all_unallocated_skips_without_building_broker(monkeypatch):
+    # #497 Important: a live+AUTHORIZED strategy that is not yet `live allocate`d (inverted capital
+    # flow) leaves the traded set empty. A no-op cycle must skip cleanly WITHOUT constructing the
+    # real-money broker or touching live credentials — the previous code still built the broker.
+    _to_live("cross_sectional_momentum", allocate=False)  # live + authorized, but unallocated
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    built = {"broker": False}
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker",
+                        lambda auth: built.__setitem__("broker", True))
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["note"] == "no allocated live strategies"
+    assert payload["strategies"] == []
+    assert payload["skipped_unallocated"] == ["cross_sectional_momentum"]
+    assert built["broker"] is False  # early return precedes broker construction (no-op cycle)
+
+
 def test_run_all_skips_only_the_unauthorized_strategy(monkeypatch):
     _permissive_book(monkeypatch)
     # #253 sibling: with a mix, the unauthorized strategy is skipped and the authorized one still

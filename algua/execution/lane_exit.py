@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlite3
 
 from algua.config.settings import get_settings
-from algua.contracts.types import LiveAuthorization
-from algua.execution.alpaca_broker import AlpacaLiveBroker
+from algua.contracts.types import ExitDrainBroker, LiveAuthorization
+from algua.execution.alpaca_broker import AlpacaLiveBroker, AlpacaLiveDrainBroker
 from algua.execution.live_ledger import (
     LedgerKind,
     fill_cursor,
@@ -33,6 +33,23 @@ def build_live_broker(authorization: LiveAuthorization) -> AlpacaLiveBroker:
                             base_url=s.alpaca_live_url)
 
 
+def build_live_drain_broker() -> AlpacaLiveDrainBroker | None:
+    """Construct the CANCEL-ONLY account-credential LIVE drain broker (#497 H1), used to cancel a
+    strategy's resting orders on a book-exit when its per-strategy go-live authorization is
+    revoked/absent. Built from the SAME settings credentials as ``build_live_broker`` but WITHOUT a
+    ``LiveAuthorization`` — the authorization is only a construction tollbooth on the trading broker
+    and is never used for REST, exactly like ``live_cmd._live_account_equity``'s raw-credential
+    account read.
+
+    Returns ``None`` when the live credentials are not configured, so the caller can FAIL CLOSED
+    (block the exit) rather than fall open to a positions-only check that ignores resting orders."""
+    s = get_settings()
+    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
+        return None
+    return AlpacaLiveDrainBroker(s.alpaca_live_api_key, s.alpaca_live_api_secret,
+                                 base_url=s.alpaca_live_url)
+
+
 class LiveExitGuard:
     """The LIVE-lane ``ExitLaneGuard`` a book-exit transition runs so a resting live order cannot
     outlive the strategy's departure from the live book (#497 F2/H1).
@@ -45,7 +62,7 @@ class LiveExitGuard:
     rather than orphaning a position."""
 
     def __init__(
-        self, conn: sqlite3.Connection, broker: AlpacaLiveBroker, strategy: str
+        self, conn: sqlite3.Connection, broker: ExitDrainBroker, strategy: str
     ) -> None:
         self._conn = conn
         self._broker = broker

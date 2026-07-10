@@ -478,17 +478,32 @@ def run_all(
                 # strategy with no active allocation: it has nothing to size against yet, so it is
                 # simply not ticked this cycle (single-strategy `live run` still errors on no
                 # allocation). Partition BEFORE the tick loop so an unallocated strategy never
-                # reaches `_run_strategy_tick`'s `has no live allocation` raise. The account-level
-                # broker is still built (from any authorized strategy's authorization) so the
-                # whole-account reconcile + book breakers still run over orphan/residual holdings.
+                # reaches `_run_strategy_tick`'s `has no live allocation` raise.
                 skipped_unallocated = [
                     name for name, _ in verified
                     if active_allocation(conn, repo.get(name).id) is None
                 ]
                 _unallocated = set(skipped_unallocated)
-                account_authorization = verified[0][1]
                 verified = [(name, auth) for name, auth in verified
                             if name not in _unallocated]
+                if not verified:
+                    # Every authorized live strategy is unallocated: there is nothing to trade AND
+                    # nothing this cycle would attribute at the account. Skip cleanly WITHOUT
+                    # building the broker or touching live credentials — mirroring the "no
+                    # authorized live strategies" early return above (a no-op cycle must not require
+                    # the real-money broker). The next cycle, once a strategy is `live allocate`d,
+                    # builds the broker and runs the whole-account reconcile + book breakers.
+                    emit(ok({
+                        "strategies": [],
+                        "skipped": skipped,
+                        "skipped_unallocated": skipped_unallocated,
+                        "note": "no allocated live strategies",
+                    }))
+                    return
+                # At least one strategy remains allocated: build the account-level broker (from a
+                # still-allocated strategy's authorization) so the whole-account reconcile + book
+                # breakers run over orphan/residual holdings before any strategy orders.
+                account_authorization = verified[0][1]
                 broker = _alpaca_live_broker(account_authorization)
                 provider = _select_provider(False, snapshot)
                 # ingest fills, then reconcile the account before trading

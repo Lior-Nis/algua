@@ -348,6 +348,14 @@ class ScopedCancelBroker(OpenOrderReader, OrderCanceller, Protocol):
 
 
 @runtime_checkable
+class ExitDrainBroker(ScopedCancelBroker, AccountActivityBroker, Protocol):
+    """The broker capability a book-exit drain needs: list + cancel THIS strategy's open orders
+    AND ingest the account activity feed (cancel -> ingest -> recheck). The union of scoped-cancel
+    and account-activity access, satisfied by both the authorized `AlpacaLiveBroker` and the
+    account-credential `AlpacaLiveDrainBroker` (#497)."""
+
+
+@runtime_checkable
 class ExitLaneGuard(Protocol):
     """The broker-backed source-lane drain a book-exit transition runs so a resting order can't
     outlive the strategy's departure from its book and later fill into an ORPHANED position (#497

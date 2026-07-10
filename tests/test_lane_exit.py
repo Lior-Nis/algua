@@ -1,6 +1,9 @@
 """LiveExitGuard: the broker-backed LIVE-lane drain a book-exit transition runs (#497 F2/H1)."""
 
-from algua.execution.lane_exit import LiveExitGuard
+import pytest
+
+from algua.execution.alpaca_broker import AlpacaLiveDrainBroker, BrokerError
+from algua.execution.lane_exit import LiveExitGuard, build_live_drain_broker
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_broker_order_id,
@@ -78,3 +81,31 @@ def test_owned_open_order_ids_scoped_to_strategy(tmp_path):
     # After canceling it (via the drain), nothing owned remains open.
     guard.cancel_and_ingest()
     assert guard.owned_open_order_ids() == []
+
+
+# --- account-credential drain broker (#497 H1): drain a de-authorized strategy's resting orders ---
+
+def test_build_live_drain_broker_none_without_credentials(monkeypatch):
+    # No live credentials configured -> None, so the caller can FAIL CLOSED (never fall open to a
+    # positions-only check that ignores resting OPEN orders).
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_API_KEY", raising=False)
+    monkeypatch.delenv("ALGUA_ALPACA_LIVE_API_SECRET", raising=False)
+    assert build_live_drain_broker() is None
+
+
+def test_build_live_drain_broker_built_from_account_credentials(monkeypatch):
+    # With account-level credentials present, the drain broker is built WITHOUT any per-strategy
+    # go-live authorization (mirroring `_live_account_equity`'s raw-credential account read).
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_KEY", "lk")
+    monkeypatch.setenv("ALGUA_ALPACA_LIVE_API_SECRET", "ls")
+    broker = build_live_drain_broker()
+    assert isinstance(broker, AlpacaLiveDrainBroker)
+    assert broker.api_key == "lk"
+
+
+def test_drain_broker_refuses_post():
+    # A drain cancels and reads only — it must NEVER submit a new order. Every submit path POSTs, so
+    # refusing _post proves the cancel-only invariant.
+    broker = AlpacaLiveDrainBroker("lk", "ls")
+    with pytest.raises(BrokerError, match="cancel-only"):
+        broker._post("/v2/orders", {"symbol": "AAPL"})
