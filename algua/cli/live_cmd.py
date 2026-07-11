@@ -214,6 +214,10 @@ def _run_strategy_tick(  # noqa: PLR0913
         )
     except (KeyboardInterrupt, SystemExit):
         raise
+    except StrategySetupError:
+        # A nested setup helper that already classified itself: propagate as-is so its original
+        # ``code`` survives instead of being double-wrapped (defense-in-depth; unreachable today).
+        raise
     except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
         raise StrategySetupError(name, exc) from exc
     try:

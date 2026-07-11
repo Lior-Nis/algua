@@ -748,6 +748,10 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         )
     except (KeyboardInterrupt, SystemExit):
         raise
+    except StrategySetupError:
+        # A nested setup helper that already classified itself: propagate as-is so its original
+        # ``code`` survives instead of being double-wrapped (defense-in-depth; unreachable today).
+        raise
     except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
         raise StrategySetupError(name, exc) from exc
     try:
@@ -897,9 +901,17 @@ def trade_tick(
                              "reconcile": recon.mismatches}))
                     return
 
-                out = _run_paper_strategy_tick(
-                    conn, name, strategy, rec, broker, provider, max_drawdown,
-                    tick_ts, clock_source, acct, start=start, end=end)
+                try:
+                    out = _run_paper_strategy_tick(
+                        conn, name, strategy, rec, broker, provider, max_drawdown,
+                        tick_ts, clock_source, acct, start=start, end=end)
+                except StrategySetupError as exc:
+                    # SINGLE-strategy path: there are no siblings to isolate, so the per-tenant
+                    # StrategySetupError wrapper (used only to let run-all skip ONE tenant) just
+                    # buries the real fault behind an opaque "internal"/"<name>: ValueError". Unwrap
+                    # and re-raise the original cause so json_errors renders its actionable message
+                    # and specific code (e.g. a missing allocation stays `invalid_input`) (#374).
+                    raise exc.cause from exc
                 counters.ticks += 1
                 if out.get("ok") is False:
                     counters.breaches += 1
@@ -1081,6 +1093,13 @@ def run_all(
                         except (KeyboardInterrupt, SystemExit):
                             raise
                         except StrategySetupError:
+                            raise
+                        except global_halt.GlobalHaltActive:
+                            # The account-wide halt is book-wide, NOT this tenant's setup fault:
+                            # propagate RAW so it aborts the WHOLE cycle (fail closed) exactly as it
+                            # did before the per-tenant isolation wrapper existed — never demote it
+                            # to an isolatable StrategySetupError that skips one tenant and ticks
+                            # siblings on under an active book-wide halt.
                             raise
                         except Exception as load_exc:  # noqa: BLE001 - pre-side-effect setup fault
                             raise StrategySetupError(name, load_exc) from load_exc

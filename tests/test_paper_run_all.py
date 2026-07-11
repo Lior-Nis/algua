@@ -26,6 +26,7 @@ from algua.execution.alpaca_broker import AccountState
 from algua.live.live_loop import TickResult
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
+from algua.risk import global_halt
 from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
@@ -308,6 +309,50 @@ def test_run_all_tick_crash_aborts_cycle(monkeypatch):
     )
     assert result.exit_code != 0  # cycle aborted, not swallowed
     assert call_n[0] == 1         # aborted on S1; S2's tick was never reached
+
+
+def test_run_all_global_halt_mid_cycle_aborts_not_isolated(monkeypatch):
+    """#374 GATE-2 HIGH: a book-wide global halt that becomes engaged mid-cycle (e.g. a concurrent
+    process trips it) surfaces from ``load_gated_strategy`` as ``GlobalHaltActive``. It is
+    book-wide, NOT one tenant's setup fault, so the per-tenant isolation wrapper must let it
+    propagate RAW and ABORT the whole cycle (fail closed) — never demote it to an isolatable
+    ``setup_error`` that skips one tenant and keeps ticking the rest under an active halt."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()  # clean account — reconcile passes, so the loop is reached
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    ticks: list[int] = []
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda *a, **k: (ticks.append(1), _success_result())[1],
+    )
+
+    from algua.cli import paper_cmd
+    real_load = paper_cmd.load_gated_strategy
+
+    def _load(conn, name, cmd):
+        # Model a concurrent process engaging the account-wide halt just before this tenant loads:
+        # the REAL gate (registry.gating) then raises GlobalHaltActive on the halt re-check.
+        global_halt.engage(conn, reason="concurrent halt", actor="system")
+        return real_load(conn, name, cmd)
+
+    monkeypatch.setattr("algua.cli.paper_cmd.load_gated_strategy", _load)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout  # cycle aborted, not swallowed
+    assert ticks == []                            # no tenant ticked under an active book-wide halt
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    # NOT demoted to a per-tenant setup_error marker — a global halt is book-wide.
+    assert "setup_error" not in result.stdout
+    assert "global halt" in payload.get("error", "")
 
 
 # ---------------------------------------------------------------------------

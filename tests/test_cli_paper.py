@@ -1963,6 +1963,28 @@ def test_trade_tick_defers_on_unattributable_holding(monkeypatch, tmp_path):
     assert _latest_tick(name) is None  # a deferred tick records NO snapshot (no gate coverage)
 
 
+def test_trade_tick_missing_allocation_surfaces_invalid_input(monkeypatch, tmp_path):
+    # #374 GATE-2: a paper strategy with NO allocation must surface the actionable
+    # {code:"invalid_input", error:"<name> has no paper allocation"}. The per-tenant
+    # StrategySetupError wrapper (which run-all uses to isolate ONE tenant) is UNWRAPPED on the
+    # single-strategy path, so it must NOT regress to an opaque {code:"internal"} envelope.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = "cross_sectional_momentum"
+    _to_paper(name)  # PAPER stage but NO allocation seeded
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snapshot: SyntheticProvider())
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
+                                 "--start", "2026-01-01", "--end", "2026-02-01"])
+    assert result.exit_code != 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["code"] == "invalid_input"
+    assert payload["error"] == f"{name} has no paper allocation"
+
+
 def test_trade_tick_halts_after_grace_expiry(monkeypatch, tmp_path):
     # After DEFAULT_GRACE_CYCLES (=3) the persistent unattributable holding escalates from
     # deferred to halt.  Invocations 1-3 defer (exit 0); invocation 4 hits

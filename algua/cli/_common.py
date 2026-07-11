@@ -45,6 +45,10 @@ class StrategySetupError(Exception):
 
     def __init__(self, strategy: str, cause: BaseException) -> None:
         self.strategy = strategy
+        # Keep the wrapped cause reachable (not only via ``__cause__``) so a SINGLE-strategy command
+        # path — which has no siblings to isolate and wants the ORIGINAL fault's actionable message
+        # and specific error code, not this redacted wrapper — can unwrap and re-raise it (#374).
+        self.cause: BaseException = cause
         self.code = type(cause).__name__
         super().__init__(f"{strategy}: {self.code}")
 
