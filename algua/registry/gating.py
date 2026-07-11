@@ -32,7 +32,10 @@ def load_gated_strategy(
             f"{command} requires 'paper' or 'forward_tested'"
         )
     if global_halt.is_engaged(conn):
-        raise ValueError("global halt active; clear with 'algua paper resume-all'")
+        # Distinguishable type (subclass of ValueError): a book-wide halt must abort a multi-tenant
+        # run-all cycle whole, never be demoted to a single tenant's isolatable setup fault (#374).
+        raise global_halt.GlobalHaltActive(
+            "global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
         raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
     return strategy, rec

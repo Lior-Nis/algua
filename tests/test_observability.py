@@ -135,5 +135,6 @@ def test_cycle_counters_as_fields():
     f = c.as_fields()
     assert f["ticks"] == 2 and f["breaches"] == 1 and f["flatten_failures"] == 0
     assert set(f) == {
-        "ticks", "breaches", "flatten_failures", "reconcile_deferred", "reconcile_halted",
+        "ticks", "breaches", "flatten_failures", "setup_errors",
+        "reconcile_deferred", "reconcile_halted",
     }

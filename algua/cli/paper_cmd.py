@@ -12,6 +12,8 @@ import typer
 from algua.audit.log import append as audit_append
 from algua.calendar.market_calendar import MarketCalendar
 from algua.cli._common import (
+    SYSTEMIC_SETUP_EXCEPTIONS,
+    StrategySetupError,
     authenticate_actor,
     breach_payload,
     ok,
@@ -689,53 +691,79 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     recording, breach trip + scoped flatten, tick-snapshot persistence (equity = per-strategy NAV).
     Returns ok({...}) on success, or an {"ok": False, ...} marker on TickHalted/RiskBreach (so
     #316b's run-all can surface siblings on a breach, like live #270). Caller does the account
-    reconcile BEFORE calling this; no venue_belief here."""
-    alloc = active_allocation(conn, rec.id)
-    if alloc is None:
-        raise ValueError(f"{name} has no paper allocation")
-    allocation = float(alloc["capital"])
-    identity = compute_artifact_hashes(name)
+    reconcile BEFORE calling this; no venue_belief here.
 
-    # coids this tick's before_submit FRESHLY inserted an intent row for (record returned True — no
-    # prior run had this coid). Only such rows are safe to retract on a noop/skipped: a pre-existing
-    # NULL row is indistinguishable from a real accepted order whose backfill was lost to a crash
-    # and MUST be preserved (#311).
-    freshly_recorded: set[str] = set()
+    Fault-isolation boundary (#374 GATE-2): the SETUP portion below (allocation lookup, identity,
+    hook wiring) runs strictly BEFORE any broker/ledger side effect, so a failure there is wrapped
+    in ``StrategySetupError`` for run-all to isolate, UNLESS it's a
+    :data:`SYSTEMIC_SETUP_EXCEPTIONS` member (a shared-infrastructure fault, e.g. a
+    locked/unavailable sqlite3 connection), which propagates raw so it aborts the whole cycle
+    rather than being misread as this one tenant's problem. Everything from ``run_tick`` onward
+    (the before_submit/on_submitted ledger hooks once an order has been recorded/hit the venue,
+    TickHalted/RiskBreach side-effect handling — trip_for_breach / flatten_strategy / audit — and
+    snapshot persistence) is NOT wrapped: any exception escaping there is book-integrity-critical
+    and propagates RAW to abort the cycle."""
+    try:
+        alloc = active_allocation(conn, rec.id)
+        if alloc is None:
+            raise ValueError(f"{name} has no paper allocation")
+        allocation = float(alloc["capital"])
+        identity = compute_artifact_hashes(name)
 
-    def _before_submit(intent: OrderIntent, coid: str | None) -> None:
-        if coid is not None and record_paper_venue_order(
-            conn, name, intent.symbol, intent.side.value, None, coid, strategy_id=rec.id
-        ):
-            freshly_recorded.add(coid)
+        # coids this tick's before_submit FRESHLY inserted an intent row for (record returned True —
+        # no prior run had this coid). Only such rows are safe to retract on a noop/skipped: a
+        # pre-existing NULL row is indistinguishable from a real accepted order whose backfill was
+        # lost to a crash and MUST be preserved (#311).
+        freshly_recorded: set[str] = set()
 
-    def _on_submitted(rec_: SubmittedOrder) -> None:
-        # A real order landed: backfill its broker id and drop it from the fresh set so on_noop can
-        # never retract a resolved order (defense-in-depth beyond submit_sized's noop/POST split).
-        backfill_paper_venue_broker_order_id(conn, rec_.client_order_id, rec_.order_id)
-        freshly_recorded.discard(rec_.client_order_id)
+        def _before_submit(intent: OrderIntent, coid: str | None) -> None:
+            if coid is not None and record_paper_venue_order(
+                conn, name, intent.symbol, intent.side.value, None, coid, strategy_id=rec.id
+            ):
+                freshly_recorded.add(coid)
 
-    def _on_noop(intent: OrderIntent, coid: str | None) -> None:
-        # submit_sized reported noop/skipped -> no POST. Retract the phantom intent ONLY if THIS
-        # tick freshly recorded it (else it may be a prior run's real, crash-orphaned order).
-        if coid is not None and coid in freshly_recorded:
-            delete_paper_venue_order(conn, coid)
-            freshly_recorded.discard(coid)
+        def _on_submitted(rec_: SubmittedOrder) -> None:
+            # A real order landed: backfill its broker id and drop it from the fresh set so on_noop
+            # can never retract a resolved order (defense beyond submit_sized's noop/POST split).
+            backfill_paper_venue_broker_order_id(conn, rec_.client_order_id, rec_.order_id)
+            freshly_recorded.discard(rec_.client_order_id)
 
-    hooks = TickHooks(
-        client_order_id_for=client_order_id,
-        before_submit=_before_submit,
-        on_submitted=_on_submitted,
-        on_noop=_on_noop,
-        should_halt=lambda: (kill_switch.is_tripped(conn, name)
-                             or global_halt.is_engaged(conn)
-                             or not _still_paper_allocated(conn, name)),
-        cancel=cancel,
-        reserve_buy=reserve_buy,
-        peak_equity=get_peak_equity(conn, name),
-        live_snapshot=lambda bars: build_paper_sizing_snapshot(
-            conn, name, allocation, bars, strategy.universe),
-        live_positions=lambda: paper_believed_positions(conn, name),
-    )
+        def _on_noop(intent: OrderIntent, coid: str | None) -> None:
+            # submit_sized reported noop/skipped -> no POST. Retract the phantom intent ONLY if THIS
+            # tick freshly recorded it (else it may be a prior run's real, crash-orphaned order).
+            if coid is not None and coid in freshly_recorded:
+                delete_paper_venue_order(conn, coid)
+                freshly_recorded.discard(coid)
+
+        hooks = TickHooks(
+            client_order_id_for=client_order_id,
+            before_submit=_before_submit,
+            on_submitted=_on_submitted,
+            on_noop=_on_noop,
+            should_halt=lambda: (kill_switch.is_tripped(conn, name)
+                                 or global_halt.is_engaged(conn)
+                                 or not _still_paper_allocated(conn, name)),
+            cancel=cancel,
+            reserve_buy=reserve_buy,
+            peak_equity=get_peak_equity(conn, name),
+            live_snapshot=lambda bars: build_paper_sizing_snapshot(
+                conn, name, allocation, bars, strategy.universe),
+            live_positions=lambda: paper_believed_positions(conn, name),
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except StrategySetupError:
+        # A nested setup helper that already classified itself: propagate as-is so its original
+        # ``code`` survives instead of being double-wrapped (defense-in-depth; unreachable today).
+        raise
+    except SYSTEMIC_SETUP_EXCEPTIONS:
+        # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's problem: propagate
+        # RAW so run-all aborts the whole cycle and the top-level json_errors envelope's
+        # db_unavailable/retryable signal survives, instead of misclassifying it as an isolatable
+        # per-tenant setup fault (#374 GATE-2).
+        raise
+    except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
+        raise StrategySetupError(name, exc) from exc
     try:
         result = run_tick(strategy, broker, provider, utc(start), utc(end),
                           hooks=hooks, max_drawdown=max_drawdown)
@@ -883,9 +911,17 @@ def trade_tick(
                              "reconcile": recon.mismatches}))
                     return
 
-                out = _run_paper_strategy_tick(
-                    conn, name, strategy, rec, broker, provider, max_drawdown,
-                    tick_ts, clock_source, acct, start=start, end=end)
+                try:
+                    out = _run_paper_strategy_tick(
+                        conn, name, strategy, rec, broker, provider, max_drawdown,
+                        tick_ts, clock_source, acct, start=start, end=end)
+                except StrategySetupError as exc:
+                    # SINGLE-strategy path: there are no siblings to isolate, so the per-tenant
+                    # StrategySetupError wrapper (used only to let run-all skip ONE tenant) just
+                    # buries the real fault behind an opaque "internal"/"<name>: ValueError". Unwrap
+                    # and re-raise the original cause so json_errors renders its actionable message
+                    # and specific code (e.g. a missing allocation stays `invalid_input`) (#374).
+                    raise exc.cause from exc
                 counters.ticks += 1
                 if out.get("ok") is False:
                     counters.breaches += 1
@@ -1047,16 +1083,60 @@ def run_all(
                 breached = False
                 for prec in tickable:
                     name = prec.name
-                    # The allocation check already happened up front (skipped_unallocated); an
-                    # unallocated non-tenant is never imported, so a broken module on a strategy
-                    # that isn't a book member can't abort the whole book with an import error.
-                    strategy, rec = load_gated_strategy(conn, name, "paper run-all")
-                    out = _run_paper_strategy_tick(
-                        conn, name, strategy, rec, broker, provider, max_drawdown,
-                        tick_ts, clock_source, acct,
-                        reserve_buy=_paper_reserve_for(name),
-                        cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
-                        start=start, end=end)
+                    # Per-strategy fault isolation (#374 / GATE-2): ONLY a pre-side-effect setup
+                    # fault (StrategySetupError — module/gate-token load, missing allocation,
+                    # identity/config error, raised strictly before any broker/ledger side effect)
+                    # is contained here so the loop CONTINUES for siblings. TickHalted/RiskBreach
+                    # are already converted to {ok:False} markers inside the tick helper. Any OTHER
+                    # exception — one escaping the tick helper's own breach/halt side-effect
+                    # handling (trip_for_breach / flatten_strategy / audit) or a before_submit/
+                    # on_submitted ledger hook AFTER an order was recorded/hit the venue — is
+                    # book-integrity-critical and propagates RAW to abort the cycle (fail closed on
+                    # ambiguous breach/order state). The raw exception message is NEVER put in the
+                    # envelope/audit (only the stable class code + the exc_info=True log), to avoid
+                    # leaking credentials/paths.
+                    try:
+                        # load_gated_strategy is also pre-side-effect setup: a load/gate-token
+                        # failure here isolates this tenant, so wrap it as StrategySetupError too.
+                        try:
+                            strategy, rec = load_gated_strategy(conn, name, "paper run-all")
+                        except (KeyboardInterrupt, SystemExit):
+                            raise
+                        except StrategySetupError:
+                            raise
+                        except global_halt.GlobalHaltActive:
+                            # The account-wide halt is book-wide, NOT this tenant's setup fault:
+                            # propagate RAW so it aborts the WHOLE cycle (fail closed) exactly as it
+                            # did before the per-tenant isolation wrapper existed — never demote it
+                            # to an isolatable StrategySetupError that skips one tenant and ticks
+                            # siblings on under an active book-wide halt.
+                            raise
+                        except SYSTEMIC_SETUP_EXCEPTIONS:
+                            # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's
+                            # problem: propagate RAW so the cycle aborts and the top-level
+                            # json_errors envelope's db_unavailable/retryable signal survives
+                            # (#374 GATE-2), instead of misclassifying it as an isolatable
+                            # per-tenant fault.
+                            raise
+                        except Exception as load_exc:  # noqa: BLE001 - pre-side-effect setup fault
+                            raise StrategySetupError(name, load_exc) from load_exc
+                        out = _run_paper_strategy_tick(
+                            conn, name, strategy, rec, broker, provider, max_drawdown,
+                            tick_ts, clock_source, acct,
+                            reserve_buy=_paper_reserve_for(name),
+                            cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
+                            start=start, end=end)
+                    except StrategySetupError as exc:
+                        log.error("strategy_setup_error",
+                                  extra={"fields": {"lane": "paper", "strategy": name,
+                                                    "code": exc.code}},
+                                  exc_info=True)
+                        audit_append(conn, actor="system", action="strategy_setup_error",
+                                     reason=exc.code, strategy=name)
+                        results.append({"ok": False, "strategy": name, "kind": "setup_error",
+                                        "error": exc.code})
+                        counters.setup_errors += 1
+                        continue
                     results.append(out)
                     counters.ticks += 1
                     if out.get("ok") is False:  # breach/halt marker: stop, keep prior results
@@ -1066,7 +1146,8 @@ def run_all(
                         breached = True
                         break
             envelope = {"reconcile": recon_payload, "strategies": results,
-                        "skipped_unallocated": skipped_unallocated}
+                        "skipped_unallocated": skipped_unallocated,
+                        "setup_errors": [r for r in results if r.get("kind") == "setup_error"]}
             if breached:
                 # A strategy breached/halted (already tripped + scoped-flattened): surface the
                 # breaching strategy AND every sibling ticked before it in one envelope, then exit

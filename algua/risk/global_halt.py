@@ -4,6 +4,17 @@ import sqlite3
 from datetime import UTC, datetime
 
 
+class GlobalHaltActive(ValueError):
+    """Raised when a book-wide trading command is attempted while the account-wide global halt is
+    engaged.
+
+    A distinguishable type (not a bare ``ValueError``) so a MULTI-tenant ``run-all`` loop can let
+    it propagate RAW and abort the WHOLE cycle rather than isolate it per-tenant (#374 GATE-2): a
+    global halt is book-wide, never one tenant's setup fault. Subclasses ``ValueError`` so the CLI
+    error registry still codes it ``invalid_input`` and existing ``ValueError``-matching
+    callers/tests keep working."""
+
+
 def engage(conn: sqlite3.Connection, *, reason: str, actor: str) -> None:
     """Engage the account-wide halt (single row id=1).
 

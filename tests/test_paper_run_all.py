@@ -26,6 +26,7 @@ from algua.execution.alpaca_broker import AccountState
 from algua.live.live_loop import TickResult
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
+from algua.risk import global_halt
 from algua.risk.limits import RiskBreach
 
 runner = CliRunner()
@@ -220,6 +221,218 @@ def test_run_all_ticks_all_paper_strategies(monkeypatch):
     assert payload.get("ok") is True
     names = {s["strategy"] for s in payload["strategies"]}
     assert names == {_S1, _S2}
+
+
+def test_run_all_isolates_setup_error_and_ticks_siblings(monkeypatch):
+    """Per-strategy fault isolation (#374 GATE-2): S1 hits a PRE-side-effect setup fault (here its
+    identity/config hash computation fails before any broker/ledger side effect — a
+    StrategySetupError); it must be contained to a ``setup_error`` marker and S2 must still tick.
+    Only pre-side-effect setup faults are isolatable now (a crash INSIDE run_tick aborts — see
+    test_run_all_tick_crash_aborts_cycle)."""
+    # _S1 registered first → lower id → ticked first (setup-faults)
+    # _S2 registered second → higher id → ticked second (succeeds)
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()  # clean account — no broker positions
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda strategy, broker, provider, start, end, hooks=None, max_drawdown=None:
+            _success_result(),
+    )
+
+    from algua.cli import paper_cmd
+    real_hashes = paper_cmd.compute_artifact_hashes
+
+    def _fake_hashes(name):
+        if name == _S1:  # S1's identity/config resolution fails — a pre-side-effect setup fault
+            raise ValueError("bad config token /secret/leak/path")
+        return real_hashes(name)
+
+    monkeypatch.setattr("algua.cli.paper_cmd.compute_artifact_hashes", _fake_hashes)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    # A setup error is NOT a cycle abort.
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is True
+
+    by_name = {s["strategy"]: s for s in payload["strategies"]}
+    # S2 (the sibling) was NOT starved by S1's setup fault.
+    assert _S2 in by_name
+    assert by_name[_S2].get("ok") is not False
+    # S1 surfaced as a contained setup_error marker.
+    assert by_name[_S1]["kind"] == "setup_error"
+    assert by_name[_S1]["ok"] is False
+    # #374 GATE-2 (4): the raw message is REDACTED to a stable class code — no leak into the JSON.
+    assert by_name[_S1]["error"] == "ValueError"
+    assert "secret" not in result.stdout
+    # setup_errors block collects exactly the one faulted tenant.
+    setup_errors = payload["setup_errors"]
+    assert isinstance(setup_errors, list)
+    assert len(setup_errors) == 1
+    assert setup_errors[0]["strategy"] == _S1
+
+
+def test_run_all_systemic_db_error_aborts_cycle_not_isolated(monkeypatch):
+    """#374 GATE-2 HIGH fix: a shared-infrastructure fault (e.g. a locked/unavailable sqlite3
+    connection) surfacing from inside the setup boundary is NOT this tenant's problem — every
+    sibling's setup read is equally suspect. It must propagate RAW and abort the whole cycle (so the
+    top-level `json_errors` envelope's db_unavailable/retryable signal survives), never be demoted
+    to an isolatable per-tenant `setup_error` marker like an ordinary tenant-local fault is
+    (see test_run_all_isolates_setup_error_and_ticks_siblings)."""
+    import sqlite3
+
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda strategy, broker, provider, start, end, hooks=None, max_drawdown=None:
+            _success_result(),
+    )
+
+    def _boom(name):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("algua.cli.paper_cmd.compute_artifact_hashes", _boom)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout  # cycle aborted, not swallowed
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    assert payload["code"] == "db_unavailable"
+    assert payload["retryable"] is True
+    # NOT demoted to a per-tenant setup_error marker — a systemic DB fault is book-wide.
+    assert "setup_error" not in result.stdout
+
+
+def test_run_all_load_gated_systemic_db_error_aborts_cycle(monkeypatch):
+    """#374 GATE-2 HIGH fix, load_gated_strategy variant: a shared-infrastructure fault
+    (sqlite3.Error) raised from `load_gated_strategy` itself — parallel to
+    test_run_all_global_halt_mid_cycle_aborts_not_isolated's GlobalHaltActive case — is likewise
+    book-wide, not this tenant's setup fault, and must abort the whole cycle rather than being
+    isolated per-tenant."""
+    import sqlite3
+
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    ticks: list[int] = []
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda *a, **k: (ticks.append(1), _success_result())[1],
+    )
+
+    def _boom(conn, name, cmd):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("algua.cli.paper_cmd.load_gated_strategy", _boom)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout  # cycle aborted, not swallowed
+    assert ticks == []                            # no tenant ticked under a systemic DB fault
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    assert payload["code"] == "db_unavailable"
+    # NOT demoted to a per-tenant setup_error marker.
+    assert "setup_error" not in result.stdout
+
+
+def test_run_all_tick_crash_aborts_cycle(monkeypatch):
+    """#374 GATE-2 (2): a crash INSIDE run_tick (post-entry — models an escape from the tick
+    helper's own breach handling or a post-submission ledger hook) is book-integrity-critical and
+    must ABORT the cycle, NOT be demoted to a per-tenant setup_error. Siblings must not tick on
+    while the breach/order state is ambiguous."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    call_n: list[int] = [0]
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        call_n[0] += 1
+        if call_n[0] == 1:  # S1's tick crashes AFTER run_tick was entered
+            raise RuntimeError("flatten_strategy blew up mid-breach")
+        return _success_result()
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0  # cycle aborted, not swallowed
+    assert call_n[0] == 1         # aborted on S1; S2's tick was never reached
+
+
+def test_run_all_global_halt_mid_cycle_aborts_not_isolated(monkeypatch):
+    """#374 GATE-2 HIGH: a book-wide global halt that becomes engaged mid-cycle (e.g. a concurrent
+    process trips it) surfaces from ``load_gated_strategy`` as ``GlobalHaltActive``. It is
+    book-wide, NOT one tenant's setup fault, so the per-tenant isolation wrapper must let it
+    propagate RAW and ABORT the whole cycle (fail closed) — never demote it to an isolatable
+    ``setup_error`` that skips one tenant and keeps ticking the rest under an active halt."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()  # clean account — reconcile passes, so the loop is reached
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    ticks: list[int] = []
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda *a, **k: (ticks.append(1), _success_result())[1],
+    )
+
+    from algua.cli import paper_cmd
+    real_load = paper_cmd.load_gated_strategy
+
+    def _load(conn, name, cmd):
+        # Model a concurrent process engaging the account-wide halt just before this tenant loads:
+        # the REAL gate (registry.gating) then raises GlobalHaltActive on the halt re-check.
+        global_halt.engage(conn, reason="concurrent halt", actor="system")
+        return real_load(conn, name, cmd)
+
+    monkeypatch.setattr("algua.cli.paper_cmd.load_gated_strategy", _load)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout  # cycle aborted, not swallowed
+    assert ticks == []                            # no tenant ticked under an active book-wide halt
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    # NOT demoted to a per-tenant setup_error marker — a global halt is book-wide.
+    assert "setup_error" not in result.stdout
+    assert "global halt" in payload.get("error", "")
 
 
 # ---------------------------------------------------------------------------

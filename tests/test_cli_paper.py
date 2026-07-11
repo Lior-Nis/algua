@@ -1963,6 +1963,28 @@ def test_trade_tick_defers_on_unattributable_holding(monkeypatch, tmp_path):
     assert _latest_tick(name) is None  # a deferred tick records NO snapshot (no gate coverage)
 
 
+def test_trade_tick_missing_allocation_surfaces_invalid_input(monkeypatch, tmp_path):
+    # #374 GATE-2: a paper strategy with NO allocation must surface the actionable
+    # {code:"invalid_input", error:"<name> has no paper allocation"}. The per-tenant
+    # StrategySetupError wrapper (which run-all uses to isolate ONE tenant) is UNWRAPPED on the
+    # single-strategy path, so it must NOT regress to an opaque {code:"internal"} envelope.
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = "cross_sectional_momentum"
+    _to_paper(name)  # PAPER stage but NO allocation seeded
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0})
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snapshot: SyntheticProvider())
+    result = runner.invoke(app, ["paper", "trade-tick", name, "--snapshot", _SNAP,
+                                 "--start", "2026-01-01", "--end", "2026-02-01"])
+    assert result.exit_code != 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["code"] == "invalid_input"
+    assert payload["error"] == f"{name} has no paper allocation"
+
+
 def test_trade_tick_halts_after_grace_expiry(monkeypatch, tmp_path):
     # After DEFAULT_GRACE_CYCLES (=3) the persistent unattributable holding escalates from
     # deferred to halt.  Invocations 1-3 defer (exit 0); invocation 4 hits
@@ -2044,3 +2066,131 @@ def test_run_paper_strategy_tick_breach_uses_scoped_cancel(monkeypatch, tmp_path
     assert out["ok"] is False
     assert scoped_cancels["n"] >= 1                 # the scoped cancel WAS used
     assert broker.account_wide_cancels == 0          # the account-wide cancel was NOT
+
+
+def test_tick_breach_handler_failure_propagates_not_setup_error(monkeypatch, tmp_path):
+    # #374 GATE-2 (5a): an exception raised INSIDE the RiskBreach side-effect handling itself
+    # (flatten_strategy / trip / audit) must NOT be demoted to a StrategySetupError setup_error
+    # marker — it must PROPAGATE RAW so run-all fails closed while the breach's side effects are
+    # uncertain (siblings ticking on with an ambiguous breach is worse than stopping).
+    from algua.cli import paper_cmd
+    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.registry.gating import load_gated_strategy
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0})
+    # run_tick reaches a real economic breach; the breach handler's flatten then blows up.
+    monkeypatch.setattr(paper_cmd, "run_tick",
+                        lambda *a, **k: (_ for _ in ()).throw(RiskBreach("drawdown", "forced")))
+    monkeypatch.setattr(paper_cmd, "flatten_strategy",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("flatten exploded")))
+
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        with pytest.raises(RuntimeError, match="flatten exploded") as ei:
+            paper_cmd._run_paper_strategy_tick(
+                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                "tick-ts", "broker", broker.account(),
+                start="2026-01-01", end="2026-02-01")
+        # It must NOT have been wrapped/demoted to a setup fault.
+        assert not isinstance(ei.value, StrategySetupError)
+
+
+def test_tick_post_submission_ledger_failure_propagates_not_setup_error(monkeypatch, tmp_path):
+    # #374 GATE-2 (5b): a ledger-write failure in the on_submitted hook — AFTER a real order has hit
+    # the venue — must PROPAGATE (abort) rather than be swallowed as a setup_error: a live order
+    # with missing ledger attribution is worse than stopping.
+    from algua.cli import paper_cmd
+    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.registry.gating import load_gated_strategy
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0})
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        # a real order landed at the venue -> the on_submitted ledger hook fires
+        hooks.on_submitted(SubmittedOrder(symbol="AAA", side="buy", target_weight=1.0,
+                                          order_id="o-1", client_order_id="c-1",
+                                          decision_ts=datetime.now(UTC)))
+        raise AssertionError("unreachable: ledger hook must have already raised")
+
+    monkeypatch.setattr(paper_cmd, "run_tick", _fake_run_tick)
+    monkeypatch.setattr(paper_cmd, "backfill_paper_venue_broker_order_id",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("ledger write failed")))
+
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        with pytest.raises(RuntimeError, match="ledger write failed") as ei:
+            paper_cmd._run_paper_strategy_tick(
+                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                "tick-ts", "broker", broker.account(),
+                start="2026-01-01", end="2026-02-01")
+        assert not isinstance(ei.value, StrategySetupError)
+
+
+def test_tick_reserve_buy_lambda_crash_propagates_not_setup_error(monkeypatch, tmp_path):
+    # #374 GATE-2 (5d): a crash inside the caller-supplied reserve_buy lambda (fired by run_tick,
+    # part of live sizing) must PROPAGATE, not be demoted to a setup_error — the reserve pool state
+    # is ambiguous, so fail closed.
+    from algua.cli import paper_cmd
+    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.registry.gating import load_gated_strategy
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0})
+
+    def _boom_reserve(symbol, notional):
+        raise RuntimeError("reserve pool crashed")
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        return hooks.reserve_buy("AAA", 1_000.0)  # exercises the reserve lambda mid-tick
+
+    monkeypatch.setattr(paper_cmd, "run_tick", _fake_run_tick)
+
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        with pytest.raises(RuntimeError, match="reserve pool crashed") as ei:
+            paper_cmd._run_paper_strategy_tick(
+                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                "tick-ts", "broker", broker.account(), reserve_buy=_boom_reserve,
+                start="2026-01-01", end="2026-02-01")
+        assert not isinstance(ei.value, StrategySetupError)
+
+
+def test_tick_missing_allocation_is_setup_error(monkeypatch, tmp_path):
+    # #374 GATE-2 (1): a PRE-side-effect fault — here a missing allocation, discovered before any
+    # broker/ledger side effect — IS a StrategySetupError (isolatable by run-all).
+    from algua.cli import paper_cmd
+    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.registry.gating import load_gated_strategy
+
+    monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    name = _paper_strategy_with_allocation(monkeypatch, tmp_path, capital=10_000.0,
+                                           account_equity=100_000.0)
+    broker = _FakePaperBroker(account_equity=100_000.0, positions={}, marks={"AAA": 100.0})
+    # run_tick must never be reached — the allocation lookup fails first.
+    monkeypatch.setattr(paper_cmd, "active_allocation", lambda *a, **k: None)
+
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        strategy, _rec = load_gated_strategy(conn, name, "trade-tick")
+        with pytest.raises(StrategySetupError) as ei:
+            paper_cmd._run_paper_strategy_tick(
+                conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
+                "tick-ts", "broker", broker.account(),
+                start="2026-01-01", end="2026-02-01")
+        assert ei.value.code == "ValueError"          # redacted class code, not the raw message
+        assert ei.value.strategy == name
