@@ -700,6 +700,68 @@ def test_run_all_isolates_setup_error_and_ticks_siblings(monkeypatch):
     assert setup_errors[0]["strategy"] == calls[0]
 
 
+def test_run_all_real_setup_boundary_isolates_tenant_local_fault(monkeypatch):
+    # #374 GATE-2 (LOW): unlike the other run-all tests here, this does NOT monkeypatch
+    # `_run_strategy_tick` wholesale — it lets the REAL setup try/except inside `_run_strategy_tick`
+    # execute, so this actually exercises the wrapping boundary (not just the run-all loop's
+    # handling of an already-StrategySetupError-wrapped fake). A single live strategy whose
+    # identity/config computation fails with an ordinary (tenant-local) exception must still be
+    # wrapped into an isolatable ``setup_error`` marker and the cycle must complete (exit 0).
+    _permissive_book(monkeypatch)
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
+    monkeypatch.setattr("algua.cli.live_cmd.compute_artifact_hashes",
+                        lambda name: (_ for _ in ()).throw(ValueError("bad config token")))
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout  # a tenant-local setup fault is NOT a cycle abort
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert payload["strategies"][0]["kind"] == "setup_error"
+    assert payload["strategies"][0]["error"] == "ValueError"
+
+
+def test_run_all_real_setup_boundary_systemic_db_error_aborts_cycle(monkeypatch):
+    # #374 GATE-2 HIGH fix: a shared-infrastructure fault (e.g. a locked/unavailable sqlite3
+    # connection) surfacing from inside the REAL setup boundary is NOT this tenant's problem — every
+    # sibling's setup read is equally suspect. It must propagate RAW and abort the whole cycle (so
+    # the top-level `json_errors` envelope's db_unavailable/retryable signal survives), never be
+    # demoted to an isolatable per-tenant `setup_error` marker.
+    import sqlite3
+
+    _permissive_book(monkeypatch)
+    _to_live()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda broker: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
+
+    def _boom(name):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("algua.cli.live_cmd.compute_artifact_hashes", _boom)
+
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code != 0  # cycle aborted, not swallowed
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False
+    assert payload["code"] == "db_unavailable"
+    assert payload["retryable"] is True
+    # NOT demoted to a per-tenant setup_error marker — a systemic DB fault is book-wide.
+    assert "setup_error" not in r.stdout
+
+
 def test_run_all_all_strategies_setup_error_in_one_cycle(monkeypatch):
     _permissive_book(monkeypatch)
     # #374 GATE-2 (5c): EVERY tenant hitting a pre-side-effect setup fault in one cycle is contained

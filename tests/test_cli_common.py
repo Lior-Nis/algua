@@ -96,3 +96,36 @@ def test_resolve_drawdown_breaker_rejects_misconfigured_default(monkeypatch):
                         lambda: Settings(strategy_max_drawdown_default=1.5))
     with pytest.raises(ValueError):
         _common.resolve_drawdown_breaker(None, disabled=False)
+
+
+def test_strategy_setup_error_code_is_the_cause_class_name():
+    from algua.cli._common import StrategySetupError
+
+    err = StrategySetupError("s1", ValueError("bad config token /secret/path"))
+    assert err.code == "ValueError"
+    assert err.strategy == "s1"
+    assert err.cause.args == ("bad config token /secret/path",)
+    # the raw message never leaks into str(err) either.
+    assert "secret" not in str(err)
+
+
+def test_strategy_setup_error_code_sanitizes_unsafe_class_name():
+    # #374 GATE-2 MEDIUM: `code` is derived from the raising exception's CLASS NAME, which is
+    # normally a safe fixed identifier — but a dynamically-constructed class (built at runtime from
+    # untrusted data) could in principle produce an arbitrary string. Since `code` is surfaced
+    # verbatim in the JSON envelope and the audit-log `reason` column, anything that doesn't look
+    # like a plain identifier must fall back to a fixed classifier rather than being trusted as-is.
+    from algua.cli._common import StrategySetupError
+
+    Unsafe = type("../etc/passwd; DROP TABLE strategies;--", (Exception,), {})
+    err = StrategySetupError("s1", Unsafe("whatever"))
+    assert err.code == "SetupError"
+    assert "DROP TABLE" not in err.code
+
+
+def test_strategy_setup_error_code_rejects_overlong_class_name():
+    from algua.cli._common import StrategySetupError
+
+    Unsafe = type("X" * 200, (Exception,), {})
+    err = StrategySetupError("s1", Unsafe("whatever"))
+    assert err.code == "SetupError"

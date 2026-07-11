@@ -280,6 +280,86 @@ def test_run_all_isolates_setup_error_and_ticks_siblings(monkeypatch):
     assert setup_errors[0]["strategy"] == _S1
 
 
+def test_run_all_systemic_db_error_aborts_cycle_not_isolated(monkeypatch):
+    """#374 GATE-2 HIGH fix: a shared-infrastructure fault (e.g. a locked/unavailable sqlite3
+    connection) surfacing from inside the setup boundary is NOT this tenant's problem — every
+    sibling's setup read is equally suspect. It must propagate RAW and abort the whole cycle (so the
+    top-level `json_errors` envelope's db_unavailable/retryable signal survives), never be demoted
+    to an isolatable per-tenant `setup_error` marker like an ordinary tenant-local fault is
+    (see test_run_all_isolates_setup_error_and_ticks_siblings)."""
+    import sqlite3
+
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda strategy, broker, provider, start, end, hooks=None, max_drawdown=None:
+            _success_result(),
+    )
+
+    def _boom(name):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("algua.cli.paper_cmd.compute_artifact_hashes", _boom)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout  # cycle aborted, not swallowed
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    assert payload["code"] == "db_unavailable"
+    assert payload["retryable"] is True
+    # NOT demoted to a per-tenant setup_error marker — a systemic DB fault is book-wide.
+    assert "setup_error" not in result.stdout
+
+
+def test_run_all_load_gated_systemic_db_error_aborts_cycle(monkeypatch):
+    """#374 GATE-2 HIGH fix, load_gated_strategy variant: a shared-infrastructure fault
+    (sqlite3.Error) raised from `load_gated_strategy` itself — parallel to
+    test_run_all_global_halt_mid_cycle_aborts_not_isolated's GlobalHaltActive case — is likewise
+    book-wide, not this tenant's setup fault, and must abort the whole cycle rather than being
+    isolated per-tenant."""
+    import sqlite3
+
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+    ticks: list[int] = []
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda *a, **k: (ticks.append(1), _success_result())[1],
+    )
+
+    def _boom(conn, name, cmd):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("algua.cli.paper_cmd.load_gated_strategy", _boom)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code != 0, result.stdout  # cycle aborted, not swallowed
+    assert ticks == []                            # no tenant ticked under a systemic DB fault
+    payload = json.loads(result.stdout)
+    assert payload.get("ok") is False
+    assert payload["code"] == "db_unavailable"
+    # NOT demoted to a per-tenant setup_error marker.
+    assert "setup_error" not in result.stdout
+
+
 def test_run_all_tick_crash_aborts_cycle(monkeypatch):
     """#374 GATE-2 (2): a crash INSIDE run_tick (post-entry — models an escape from the tick
     helper's own breach handling or a post-submission ledger hook) is book-integrity-critical and

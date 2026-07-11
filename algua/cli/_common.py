@@ -8,6 +8,7 @@ private-import smell): the public names here are the sanctioned shared surface.
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 import sys
 from collections.abc import Collection, Iterator, Mapping
@@ -25,6 +26,25 @@ from algua.registry.db import connect, migrate
 from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
 
+# Exception types that signal a SYSTEMIC / book-wide condition rather than one tenant's setup fault
+# (#374 GATE-2 fix): a locked/unavailable shared SQLite connection during one strategy's setup read
+# means every sibling's read is equally suspect. Isolating it per-tenant would silently burn a whole
+# run-all cycle marking every strategy ``setup_error`` while masking the retryable condition that
+# the top-level ``json_errors`` envelope exists to surface (docs/contracts/cli-error-envelope.md,
+# code ``db_unavailable``, ``retryable: true``). Callers at the setup-boundary try/except re-raise
+# these RAW (never wrap in :class:`StrategySetupError`) so run-all aborts the whole cycle and the
+# top-level envelope's retry signal survives, instead of isolating a systemic DB fault as if it were
+# one tenant's config problem.
+SYSTEMIC_SETUP_EXCEPTIONS: tuple[type[BaseException], ...] = (sqlite3.Error,)
+
+# A defensively narrow allowlist for StrategySetupError.code: it is derived from an exception CLASS
+# NAME, which is normally a safe fixed identifier, but a dynamically-constructed class (e.g. built
+# at runtime from strategy-supplied or otherwise untrusted data) could in principle produce an
+# arbitrary string. Since ``code`` is surfaced verbatim in the JSON envelope and the audit-log
+# ``reason`` column, anything that doesn't look like a plain identifier is replaced with a fixed
+# fallback rather than trusted as-is (#374 GATE-2).
+_SAFE_SETUP_CODE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
 
 class StrategySetupError(Exception):
     """A per-tenant setup failure raised BEFORE any broker/ledger side effect began this cycle.
@@ -35,12 +55,16 @@ class StrategySetupError(Exception):
     book. It must NOT swallow a failure that escapes the tick helper's own breach/halt handling
     (``trip_for_breach`` / ``flatten_strategy`` / audit) or that fires from an ``on_submitted`` /
     ledger-persist hook AFTER a real order has hit the venue: those are book-integrity-critical and
-    must fail closed (abort the cycle). Only the code that runs strictly before the first side
-    effect wraps its exceptions in this type; everything else propagates raw.
+    must fail closed (abort the cycle). It must ALSO not swallow a :data:`SYSTEMIC_SETUP_EXCEPTIONS`
+    member (e.g. ``sqlite3.Error``) — a shared-infrastructure fault, not a single tenant's problem —
+    which setup-boundary callers re-raise raw instead of wrapping here. Only the code that runs
+    strictly before the first side effect, and that is genuinely tenant-local, wraps its exceptions
+    in this type; everything else propagates raw.
 
-    ``code`` is a stable, redacted classifier (the raising exception's class name) suitable for the
-    JSON envelope and audit trail — the raw ``str(exc)`` (which can carry credentials/paths) is
-    NEVER surfaced there; it survives only in the ``exc_info=True`` structured log.
+    ``code`` is a stable, redacted classifier (the raising exception's class name, allowlist-
+    sanitized via :data:`_SAFE_SETUP_CODE_RE`) suitable for the JSON envelope and audit trail — the
+    raw ``str(exc)`` (which can carry credentials/paths) is NEVER surfaced there; it survives only
+    in the ``exc_info=True`` structured log.
     """
 
     def __init__(self, strategy: str, cause: BaseException) -> None:
@@ -49,7 +73,8 @@ class StrategySetupError(Exception):
         # path — which has no siblings to isolate and wants the ORIGINAL fault's actionable message
         # and specific error code, not this redacted wrapper — can unwrap and re-raise it (#374).
         self.cause: BaseException = cause
-        self.code = type(cause).__name__
+        raw_code = type(cause).__name__
+        self.code = raw_code if _SAFE_SETUP_CODE_RE.match(raw_code) else "SetupError"
         super().__init__(f"{strategy}: {self.code}")
 
 

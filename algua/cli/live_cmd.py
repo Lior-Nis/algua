@@ -7,6 +7,7 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.cli._common import (
+    SYSTEMIC_SETUP_EXCEPTIONS,
     StrategySetupError,
     breach_payload,
     ok,
@@ -172,10 +173,13 @@ def _run_strategy_tick(  # noqa: PLR0913
     Fault-isolation boundary (#374 GATE-2): the SETUP portion below (strategy load, allocation
     lookup, identity, hook wiring) runs strictly BEFORE any broker/ledger side effect — a failure
     there is a single-tenant setup fault, wrapped in ``StrategySetupError`` so run-all can isolate
-    it and keep ticking siblings. Everything from ``run_tick`` onward (the on_submitted persist
-    hook once an order has hit the venue, TickHalted/RiskBreach side-effect handling —
-    trip_for_breach / flatten_strategy / audit — and snapshot persistence) is NOT wrapped: any
-    exception escaping there is book-integrity-critical and propagates RAW to abort the cycle."""
+    it and keep ticking siblings, UNLESS it's a :data:`SYSTEMIC_SETUP_EXCEPTIONS` member (a shared-
+    infrastructure fault, e.g. a locked/unavailable sqlite3 connection), which propagates raw so it
+    aborts the whole cycle rather than being misread as this one tenant's problem. Everything from
+    ``run_tick`` onward (the on_submitted persist hook once an order has hit the venue,
+    TickHalted/RiskBreach side-effect handling — trip_for_breach / flatten_strategy / audit — and
+    snapshot persistence) is NOT wrapped: any exception escaping there is book-integrity-critical
+    and propagates RAW to abort the cycle."""
     try:
         strategy = load_tradable_strategy(name)
 
@@ -217,6 +221,12 @@ def _run_strategy_tick(  # noqa: PLR0913
     except StrategySetupError:
         # A nested setup helper that already classified itself: propagate as-is so its original
         # ``code`` survives instead of being double-wrapped (defense-in-depth; unreachable today).
+        raise
+    except SYSTEMIC_SETUP_EXCEPTIONS:
+        # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's problem: propagate
+        # RAW so run-all aborts the whole cycle and the top-level json_errors envelope's
+        # db_unavailable/retryable signal survives, instead of misclassifying it as an isolatable
+        # per-tenant setup fault (#374 GATE-2).
         raise
     except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
         raise StrategySetupError(name, exc) from exc

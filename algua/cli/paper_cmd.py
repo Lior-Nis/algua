@@ -12,6 +12,7 @@ import typer
 from algua.audit.log import append as audit_append
 from algua.calendar.market_calendar import MarketCalendar
 from algua.cli._common import (
+    SYSTEMIC_SETUP_EXCEPTIONS,
     StrategySetupError,
     authenticate_actor,
     breach_payload,
@@ -694,8 +695,11 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
 
     Fault-isolation boundary (#374 GATE-2): the SETUP portion below (allocation lookup, identity,
     hook wiring) runs strictly BEFORE any broker/ledger side effect, so a failure there is wrapped
-    in ``StrategySetupError`` for run-all to isolate. Everything from ``run_tick`` onward (the
-    before_submit/on_submitted ledger hooks once an order has been recorded/hit the venue,
+    in ``StrategySetupError`` for run-all to isolate, UNLESS it's a
+    :data:`SYSTEMIC_SETUP_EXCEPTIONS` member (a shared-infrastructure fault, e.g. a
+    locked/unavailable sqlite3 connection), which propagates raw so it aborts the whole cycle
+    rather than being misread as this one tenant's problem. Everything from ``run_tick`` onward
+    (the before_submit/on_submitted ledger hooks once an order has been recorded/hit the venue,
     TickHalted/RiskBreach side-effect handling — trip_for_breach / flatten_strategy / audit — and
     snapshot persistence) is NOT wrapped: any exception escaping there is book-integrity-critical
     and propagates RAW to abort the cycle."""
@@ -751,6 +755,12 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     except StrategySetupError:
         # A nested setup helper that already classified itself: propagate as-is so its original
         # ``code`` survives instead of being double-wrapped (defense-in-depth; unreachable today).
+        raise
+    except SYSTEMIC_SETUP_EXCEPTIONS:
+        # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's problem: propagate
+        # RAW so run-all aborts the whole cycle and the top-level json_errors envelope's
+        # db_unavailable/retryable signal survives, instead of misclassifying it as an isolatable
+        # per-tenant setup fault (#374 GATE-2).
         raise
     except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
         raise StrategySetupError(name, exc) from exc
@@ -1100,6 +1110,13 @@ def run_all(
                             # did before the per-tenant isolation wrapper existed — never demote it
                             # to an isolatable StrategySetupError that skips one tenant and ticks
                             # siblings on under an active book-wide halt.
+                            raise
+                        except SYSTEMIC_SETUP_EXCEPTIONS:
+                            # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's
+                            # problem: propagate RAW so the cycle aborts and the top-level
+                            # json_errors envelope's db_unavailable/retryable signal survives
+                            # (#374 GATE-2), instead of misclassifying it as an isolatable
+                            # per-tenant fault.
                             raise
                         except Exception as load_exc:  # noqa: BLE001 - pre-side-effect setup fault
                             raise StrategySetupError(name, load_exc) from load_exc
