@@ -14,6 +14,7 @@ class CycleCounters:
     ticks: int = 0
     breaches: int = 0
     flatten_failures: int = 0
+    setup_errors: int = 0
     reconcile_deferred: int = 0
     reconcile_halted: int = 0
 
@@ -22,6 +23,7 @@ class CycleCounters:
             "ticks": self.ticks,
             "breaches": self.breaches,
             "flatten_failures": self.flatten_failures,
+            "setup_errors": self.setup_errors,
             "reconcile_deferred": self.reconcile_deferred,
             "reconcile_halted": self.reconcile_halted,
         }

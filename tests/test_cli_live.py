@@ -629,6 +629,119 @@ def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
     assert strategies[1]["strategy"] == calls[1]
 
 
+def _seed_second_live(monkeypatch):
+    """Bring `cross_sectional_momentum` (id 1, ticked first) and a `second_live` sibling to a
+    live+allocated state and wire a permissive broker book for the run-all loop."""
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    _to_live("cross_sectional_momentum")  # registered first → lower id → ticked first
+    assert runner.invoke(app, ["registry", "add", "second_live"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        from datetime import UTC, datetime
+
+        from algua.registry.store import SqliteStrategyRepository
+        migrate(conn)
+        conn.execute("UPDATE strategies SET stage='live' WHERE name='second_live'")
+        sid = SqliteStrategyRepository(conn).get("second_live").id
+        conn.execute(
+            "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
+            "VALUES (?,?,?,?)",
+            (sid, 10_000.0, datetime.now(UTC).isoformat(), "human"))
+        conn.commit()
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snapshot: object())
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda b, a: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions", lambda b: {})
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 100_000.0)
+
+
+def test_run_all_isolates_setup_error_and_ticks_siblings(monkeypatch):
+    _permissive_book(monkeypatch)
+    # #374 GATE-2: a PRE-side-effect setup fault on ONE strategy (module/strategy load, missing
+    # allocation, identity error — raised by _run_strategy_tick as StrategySetupError BEFORE any
+    # broker/ledger side effect) must be contained to a {ok:False, kind:'setup_error'} marker and
+    # the loop must CONTINUE to the next tenant. Only StrategySetupError is isolatable now.
+    from algua.cli._common import StrategySetupError
+    _seed_second_live(monkeypatch)
+
+    calls: list[str] = []
+
+    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
+                   reserve_buy=None, cancel=None):
+        calls.append(name)
+        if len(calls) == 1:  # first tenant's setup fault (pre-side-effect) — isolatable
+            raise StrategySetupError(name, ModuleNotFoundError("secret-token-abc/path/leak"))
+        return {"strategy": name, "venue": "live", "submitted": []}  # sibling ticks clean
+
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    # A setup error is NOT a cycle abort.
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert len(calls) == 2  # the sibling was reached despite the first tenant's setup fault
+
+    by_name = {s["strategy"]: s for s in payload["strategies"]}
+    # The sibling (ticked second) surfaced as a success.
+    assert by_name[calls[1]].get("ok") is not False
+    # The crashed tenant surfaced as a contained setup_error marker.
+    assert by_name[calls[0]]["kind"] == "setup_error"
+    assert by_name[calls[0]]["ok"] is False
+    # #374 GATE-2 (4): the raw exception message (which can carry credentials/paths) is REDACTED to
+    # a stable class code — never leaked into the JSON envelope.
+    assert by_name[calls[0]]["error"] == "ModuleNotFoundError"
+    assert "secret-token-abc" not in r.stdout
+    setup_errors = payload["setup_errors"]
+    assert isinstance(setup_errors, list)
+    assert len(setup_errors) == 1
+    assert setup_errors[0]["strategy"] == calls[0]
+
+
+def test_run_all_all_strategies_setup_error_in_one_cycle(monkeypatch):
+    _permissive_book(monkeypatch)
+    # #374 GATE-2 (5c): EVERY tenant hitting a pre-side-effect setup fault in one cycle is contained
+    # (not a cycle abort): both surface as setup_error markers and the cycle still exits 0.
+    from algua.cli._common import StrategySetupError
+    _seed_second_live(monkeypatch)
+
+    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
+                   reserve_buy=None, cancel=None):
+        raise StrategySetupError(name, ValueError("bad config"))
+
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert len(payload["setup_errors"]) == 2
+    assert all(s["kind"] == "setup_error" for s in payload["strategies"])
+    assert all(s["error"] == "ValueError" for s in payload["setup_errors"])
+
+
+def test_run_all_non_setup_exception_aborts_cycle(monkeypatch):
+    _permissive_book(monkeypatch)
+    # #374 GATE-2 (2): a NON-setup exception escaping _run_strategy_tick's OWN try/except — one from
+    # real breach side-effect handling (trip/flatten/audit) or a post-submission ledger hook — is
+    # book-integrity-critical and must ABORT the cycle (fail closed), NOT become a setup_error. Here
+    # the tick raises a raw RuntimeError (models such an escape) and the whole cycle must fail.
+    _seed_second_live(monkeypatch)
+
+    calls: list[str] = []
+
+    def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
+                   reserve_buy=None, cancel=None):
+        calls.append(name)
+        raise RuntimeError("flatten_strategy blew up mid-breach")
+
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
+    r = runner.invoke(app, ["live", "run-all", "--snapshot", "x"])
+    assert r.exit_code != 0  # cycle aborted, not swallowed
+    assert len(calls) == 1   # aborted on the first tenant; the sibling was NOT reached
+
+
 def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
     _permissive_book(monkeypatch)
     _to_live()

@@ -7,6 +7,7 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.cli._common import (
+    StrategySetupError,
     breach_payload,
     ok,
     registry_conn,
@@ -166,42 +167,55 @@ def _run_strategy_tick(  # noqa: PLR0913
     (trip + scoped flatten), snapshot persistence. ALWAYS returns a per-strategy result dict — on
     TickHalted/RiskBreach it still performs the side-effects (trip + scoped flatten + audit) and
     returns a breach/halt marker (`{"ok": False, ...}`) instead of emitting+exiting, so run-all can
-    surface the already-ticked siblings alongside the breaching strategy in one envelope (#270)."""
-    strategy = load_tradable_strategy(name)
+    surface the already-ticked siblings alongside the breaching strategy in one envelope (#270).
 
-    rec = SqliteStrategyRepository(conn).get(name)
-    alloc = active_allocation(conn, rec.id)
-    if alloc is None:
-        raise ValueError(f"{name} has no live allocation")
-    allocation = float(alloc["capital"])
-    identity = compute_artifact_hashes(name)
-    # No buying-power preflight here: min(allocation, NAV) sizing already de-risks toward what the
-    # account can fund, and a coarse allocation-vs-BP check would falsely refuse a fully-invested
-    # strategy that only rebalances. The proper per-order BP reservation is C2 (codex C1 review).
+    Fault-isolation boundary (#374 GATE-2): the SETUP portion below (strategy load, allocation
+    lookup, identity, hook wiring) runs strictly BEFORE any broker/ledger side effect — a failure
+    there is a single-tenant setup fault, wrapped in ``StrategySetupError`` so run-all can isolate
+    it and keep ticking siblings. Everything from ``run_tick`` onward (the on_submitted persist
+    hook once an order has hit the venue, TickHalted/RiskBreach side-effect handling —
+    trip_for_breach / flatten_strategy / audit — and snapshot persistence) is NOT wrapped: any
+    exception escaping there is book-integrity-critical and propagates RAW to abort the cycle."""
+    try:
+        strategy = load_tradable_strategy(name)
 
-    def _live_snap(bars):
-        return build_live_sizing_snapshot(conn, name, allocation, bars, strategy.universe)
+        rec = SqliteStrategyRepository(conn).get(name)
+        alloc = active_allocation(conn, rec.id)
+        if alloc is None:
+            raise ValueError(f"{name} has no live allocation")
+        allocation = float(alloc["capital"])
+        identity = compute_artifact_hashes(name)
+        # No buying-power preflight here: min(allocation, NAV) sizing already de-risks toward what
+        # the account can fund, and a coarse allocation-vs-BP check would falsely refuse a
+        # fully-invested strategy that only rebalances. Per-order BP reservation is C2 (codex C1).
 
-    def _persist(record: SubmittedOrder) -> None:
-        # Record the order in the BOOKS immediately (client_order_id is the durable identity): this
-        # is what lets fills attribute back to this strategy and lets scoped cancel find this
-        # strategy's own open orders. Also audit it so a mid-loop crash still records what hit the
-        # real-money venue (#18) — never batch after the loop.
-        record_live_order(conn, name, record.symbol, record.side, None, record.client_order_id)
-        backfill_broker_order_id(conn, record.client_order_id, record.order_id)
-        audit_append(conn, actor="agent", action="live_order",
-                     reason=f"{record.side} {record.symbol} {record.order_id}", strategy=name)
+        def _live_snap(bars):
+            return build_live_sizing_snapshot(conn, name, allocation, bars, strategy.universe)
 
-    hooks = TickHooks(
-        client_order_id_for=client_order_id, on_submitted=_persist, cancel=cancel,
-        live_snapshot=_live_snap,
-        live_positions=lambda: believed_positions(conn, name, LedgerKind.LIVE),
-        should_halt=lambda: (kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn)
-                             or not authorization_active(conn, authorization)
-                             or not _still_live_allocated(conn, name)),
-        peak_equity=get_nav_peak(conn, name),
-        reserve_buy=reserve_buy,
-    )
+        def _persist(record: SubmittedOrder) -> None:
+            # Record the order in the BOOKS immediately (client_order_id is the durable identity):
+            # this is what lets fills attribute back to this strategy and lets scoped cancel find
+            # this strategy's own open orders. Also audit it so a mid-loop crash still records what
+            # hit the real-money venue (#18) — never batch after the loop.
+            record_live_order(conn, name, record.symbol, record.side, None, record.client_order_id)
+            backfill_broker_order_id(conn, record.client_order_id, record.order_id)
+            audit_append(conn, actor="agent", action="live_order",
+                         reason=f"{record.side} {record.symbol} {record.order_id}", strategy=name)
+
+        hooks = TickHooks(
+            client_order_id_for=client_order_id, on_submitted=_persist, cancel=cancel,
+            live_snapshot=_live_snap,
+            live_positions=lambda: believed_positions(conn, name, LedgerKind.LIVE),
+            should_halt=lambda: (kill_switch.is_tripped(conn, name) or global_halt.is_engaged(conn)
+                                 or not authorization_active(conn, authorization)
+                                 or not _still_live_allocated(conn, name)),
+            peak_equity=get_nav_peak(conn, name),
+            reserve_buy=reserve_buy,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
+        raise StrategySetupError(name, exc) from exc
     try:
         result = run_tick(strategy, broker, provider, utc(start), utc(end),
                           hooks=hooks, max_drawdown=max_drawdown)
@@ -641,12 +655,35 @@ def run_all(
                 results = []
                 breached = False
                 for name, authorization in verified:
-                    result = _run_strategy_tick(
-                        conn, name, authorization, broker, provider, max_drawdown,
-                        start=start, end=end,
-                        reserve_buy=_reserve_for(name),
-                        cancel=lambda n=name: _scoped_cancel(conn, broker, n),
-                    )
+                    # Per-strategy fault isolation (#374 / GATE-2): ONLY a pre-side-effect setup
+                    # fault (StrategySetupError — strategy load, missing allocation, identity/config
+                    # error, raised strictly before any broker/ledger side effect) is contained here
+                    # so the loop CONTINUES for siblings. TickHalted/RiskBreach are already
+                    # converted to {ok:False} markers inside the tick helper. Any OTHER exception —
+                    # one escaping the tick helper's own breach/halt side-effect handling
+                    # (trip_for_breach / flatten_strategy / audit) or an on_submitted persist hook
+                    # AFTER a real order hit the venue — is book-integrity-critical and propagates
+                    # RAW to abort the cycle (fail closed on ambiguous breach/order state). The raw
+                    # exception message is NEVER put in the envelope/audit (only the stable class
+                    # code + the exc_info=True log), to avoid leaking credentials/paths.
+                    try:
+                        result = _run_strategy_tick(
+                            conn, name, authorization, broker, provider, max_drawdown,
+                            start=start, end=end,
+                            reserve_buy=_reserve_for(name),
+                            cancel=lambda n=name: _scoped_cancel(conn, broker, n),
+                        )
+                    except StrategySetupError as exc:
+                        log.error("strategy_setup_error",
+                                  extra={"fields": {"lane": "live", "strategy": name,
+                                                    "code": exc.code}},
+                                  exc_info=True)
+                        audit_append(conn, actor="system", action="strategy_setup_error",
+                                     reason=exc.code, strategy=name)
+                        results.append({"ok": False, "strategy": name, "kind": "setup_error",
+                                        "error": exc.code})
+                        counters.setup_errors += 1
+                        continue
                     results.append(result)
                     counters.ticks += 1
                     if result.get("ok") is False:  # breach/halt marker: stop, keep prior results
@@ -656,7 +693,8 @@ def run_all(
                         breached = True
                         break
             envelope = {"reconcile": recon_payload, "skipped": skipped,
-                        "skipped_unallocated": skipped_unallocated, "strategies": results}
+                        "skipped_unallocated": skipped_unallocated, "strategies": results,
+                        "setup_errors": [r for r in results if r.get("kind") == "setup_error"]}
             if breached:
                 # A strategy breached/halted (already tripped + scoped-flattened): surface the
                 # breaching strategy AND every sibling already ticked this cycle in one envelope,

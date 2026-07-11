@@ -26,6 +26,29 @@ from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
 
 
+class StrategySetupError(Exception):
+    """A per-tenant setup failure raised BEFORE any broker/ledger side effect began this cycle.
+
+    Fault isolation boundary (#374 GATE-2): ``run-all`` (live and paper) may safely demote ONE
+    tenant's *setup* failure — module/strategy load, missing allocation, identity/config error —
+    to a benign ``{"ok": False, "kind": "setup_error"}`` marker and keep ticking the rest of the
+    book. It must NOT swallow a failure that escapes the tick helper's own breach/halt handling
+    (``trip_for_breach`` / ``flatten_strategy`` / audit) or that fires from an ``on_submitted`` /
+    ledger-persist hook AFTER a real order has hit the venue: those are book-integrity-critical and
+    must fail closed (abort the cycle). Only the code that runs strictly before the first side
+    effect wraps its exceptions in this type; everything else propagates raw.
+
+    ``code`` is a stable, redacted classifier (the raising exception's class name) suitable for the
+    JSON envelope and audit trail — the raw ``str(exc)`` (which can carry credentials/paths) is
+    NEVER surfaced there; it survives only in the ``exc_info=True`` structured log.
+    """
+
+    def __init__(self, strategy: str, cause: BaseException) -> None:
+        self.strategy = strategy
+        self.code = type(cause).__name__
+        super().__init__(f"{strategy}: {self.code}")
+
+
 def ok(data: dict) -> dict:
     """Stamp a success payload with the ``ok: true`` discriminator.
 
