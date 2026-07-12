@@ -56,9 +56,29 @@ methodologically-aware author avoids them:
   normalizers, `shift(-1)`, or fitted thresholds. The **weight-level** parity guard proves the
   panel-derived weights *equal* the per-bar `construct(signal(view), view)` weights — it does
   **not** prove either is scientifically valid. A bug present in *both* paths passes parity silently.
-- **`adj_close` / data-provenance leaks.** Using adjustment factors, vendor-restated bars, or
-  split-adjusted history that was not knowable as of the decision date smuggles the future in
-  through the data, not the code.
+- **Raw vs PIT-adjusted vs restated — the price-provenance trichotomy.** The choice is NOT "raw
+  (safe) vs adjusted (leaky)". It is **three-way**, and only the middle arm is correct:
+  1. **PIT-correct adjusted** — split/dividend-adjusted *as-of the decision date* — is **CORRECT**.
+     A price/return/momentum signal should read the point-in-time-adjusted series.
+  2. **Future / vendor-restated adjusted** — adjustment factors, or restated history, that were
+     **not knowable as of the decision date** — is the provenance **LEAK**: it smuggles the future
+     in through the data, not the code.
+  3. **RAW `close` / `volume`** — is corporate-action **CONTAMINATED**, **not** leak-avoidance.
+     Reaching for raw to "avoid the adjustment leak" trades a leak for a correctness defect.
+  Why raw is a defect, not a virtue: a split inside a trailing-return lookback window
+  (`close[t]/close[t-N] - 1`) fabricates catastrophic **fake momentum** (a 4:1 split reads as a
+  ~75% crash), and dividends distort the return; raw share **`volume`** jumps mechanically at a
+  split (the share count changes), so a "volume surge" can be reading a corporate action, not flow.
+  State it plainly: **raw close/volume is a correctness defect, not a leak-avoidance virtue.**
+  What the platform provides **today** (honestly — this note never claims an unbuilt control):
+  `adj_close` (see `docs/contracts/bar-schema.md`) is the split+dividend-adjusted price series, and
+  it is what backtests use for returns — so price/return/momentum signals should read **`adj_close`,
+  NOT raw `close`**. Two residual gaps remain **your judgment**, not a wall:
+  (a) `adj_close` today reflects the **latest** snapshot's adjustment, not a true as-of PIT read —
+  the bar schema's `get_bars` has **no `as_of` parameter yet** (deferred), so across data revisions
+  it can carry mild restatement (arm 2 in miniature); and
+  (b) there is **no adjusted-volume column** — raw `volume` still carries split discontinuities, so a
+  volume signal that spans a split must normalize it deliberately or be understood as such.
 - **Universe-selection leaks.** Choosing membership from price availability or "the top symbols
   over the whole period" is survivorship by hand — use the opt-in PIT universe instead.
 - **Peeking at the holdout "to debug".** The burn is single-use for a reason; one look contaminates
