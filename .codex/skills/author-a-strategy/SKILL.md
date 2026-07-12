@@ -61,6 +61,7 @@ def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
     applies the t→t+1 decision lag centrally — do NOT shift or peek ahead yourself."""
     lookback = int(params["lookback"])
     wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+    wide = wide.sort_index()
     if len(wide) <= lookback:
         return pd.Series(dtype="float64")
     return (wide.iloc[-1] / wide.iloc[-1 - lookback] - 1.0).dropna()
@@ -139,6 +140,7 @@ volume`. Pivot to wide when you need a matrix:
 
 ```python
 wide = view.reset_index().pivot(index="timestamp", columns="symbol", values="adj_close")
+wide = wide.sort_index()  # never assume the pivot is already sorted before positional .iloc
 ```
 
 ## Available features — reuse before you reinvent (the factor catalogue)
