@@ -80,15 +80,34 @@ Rules that matter:
 - **Never look ahead.** The `view` contains bars only up to the current timestamp, and the engine
   enforces the `t→t+1` execution lag (`decision_lag_bars=1`). Do not re-implement or weaken this.
 - `rebalance_frequency` is `"1d"` (daily) for now.
+- **Prices: derive returns/momentum from `adj_close`, NEVER raw `close`.** Do **not** rationalize
+  raw close/volume as "leak-safe" — raw is corporate-action **CONTAMINATED**: a split inside a
+  lookback window fabricates fake momentum, and dividends distort returns. `close` is kept only for
+  reference / notional sizing, not for return computation. The choice is a **three-way** trichotomy
+  (raw contaminated / PIT-adjusted correct / future-restated leaky), not "raw safe vs adjusted
+  leaky" — see `kb/principles/research-methodology.md` and `docs/contracts/bar-schema.md` as the
+  source of truth.
+- **Volume: no adjusted-volume column exists** — raw `volume` carries split discontinuities (the
+  share count jumps at a split). If a signal uses volume across a window that may span a split,
+  normalize / handle it deliberately and understand the limitation — do **not** treat raw volume as
+  clean flow.
+- **Authoring hygiene (lessons from #521):**
+  - **Sort before positional indexing.** Call `.sort_index()` on the pivoted frame **before** any
+    positional `.iloc[-1]` / `.iloc[-1 - lookback]` — never assume the view/pivot is already sorted.
+  - **Guard the window count.** When averaging a trailing window (`.mean()` over the last N bars),
+    require the expected number of **non-NaN** observations first — pandas `.mean()` skips NaN and
+    silently shrinks a sparse window, so a thin window produces a mean off fewer bars than intended.
+  - **Guard the denominator.** Guard zero / non-finite denominators (e.g. a volume-ratio surge) so a
+    divide-by-zero doesn't emit `inf`/`NaN` scores.
 - **Read the methodology AND the risk conventions before authoring.**
   `kb/principles/research-methodology.md` covers the leakage vectors no wall catches — full-sample
-  fitting, target leakage inside a custom feature, `adj_close`/provenance leaks, and the
-  `signal_panel` parity-vs-validity trap. `kb/principles/risk-conventions.md` covers weight-space
-  risk — inverse-vol sizing, drawdown-based weight decay, conviction sizing, and the "R:R is the
-  wrong yardstick" point. Note **where** that risk now lives: judgment that shapes the *score* (e.g.
-  conviction sizing, slow-moving signals) stays in `signal`; judgment that shapes *weights from
-  scores* (selection, weighting scheme, gross normalization) belongs in the **construction policy**.
-  The rules here are the floor, not the whole job.
+  fitting, target leakage inside a custom feature, the raw/PIT-adjusted/restated price-provenance
+  trichotomy, and the `signal_panel` parity-vs-validity trap. `kb/principles/risk-conventions.md`
+  covers weight-space risk — inverse-vol sizing, drawdown-based weight decay, conviction sizing, and
+  the "R:R is the wrong yardstick" point. Note **where** that risk now lives: judgment that shapes
+  the *score* (e.g. conviction sizing, slow-moving signals) stays in `signal`; judgment that shapes
+  *weights from scores* (selection, weighting scheme, gross normalization) belongs in the
+  **construction policy**. The rules here are the floor, not the whole job.
 
 ## Construction policies
 
