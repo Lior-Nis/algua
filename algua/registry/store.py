@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 import numpy as np
 
@@ -16,18 +17,31 @@ if TYPE_CHECKING:
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
+from algua.registry.db import MAX_N_COMBOS
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
+    AgentMintBudgetExhaustedError,
+    AgentMintCapError,
+    FamilyGraphDriftError,
     FdrGateOutcome,
     FdrStreamState,
     FunnelDriftError,
     FunnelFloor,
     FunnelSnapshot,
+    PendingNovelFamily,
     StrategyExists,
     StrategyNotFound,
     StrategyRecord,
 )
 from algua.research.gates import FDR_COHORT_SIZE, MIN_FUNNEL_FLOOR_STRATEGIES
+
+# --- #524 agent-NOVEL mint governance constants (R9-M1) --------------------------------------
+# CODEOWNERS-protected: these live in algua/registry/store.py as module constants — NOT a CLI flag,
+# NOT an env var — so the autonomous loop has no surface to read or raise them. Changing either
+# requires a human PR to this protected file (the same human-gate as the promote relaxation flags).
+AGENT_NOVEL_MINT_WINDOW_DAYS = 90   # rolling window for the burst rate cap (matches FUNNEL_WINDOW)
+AGENT_NOVEL_MINT_CAP = 8            # max agent family mints per rolling window (burst control)
+AGENT_NOVEL_MINT_LIFETIME_BUDGET = 32  # durable epoch allowance before a human grant is required
 
 __all__ = [
     "SqliteStrategyRepository",
@@ -67,6 +81,16 @@ def _validated_triples(rows) -> list[tuple[int, float, float]] | None:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _parse_canonical_utc(ts: str) -> datetime:
+    """Parse a canonical UTC ISO-8601 timestamp (offset-aware, +00:00). Raises ValueError on a
+    naive/local/malformed value so the #524 rate-cap read can fail closed rather than mis-bucket a
+    row across the window cutoff."""
+    dt = datetime.fromisoformat(ts)  # ValueError on malformed
+    if dt.tzinfo is None or dt.utcoffset() != timedelta(0):
+        raise ValueError(f"non-canonical-UTC timestamp {ts!r}")
+    return dt
 
 
 def _row_to_record(row: sqlite3.Row) -> StrategyRecord:
@@ -611,6 +635,12 @@ class SqliteStrategyRepository:
         trial_sharpe_mean: float | None = None,
         trial_sharpe_var_ann: float | None = None,
     ) -> int:
+        # v37 (#524, R9-M3): type-safe + bounded so a corrupt/overlarge row can never overflow the
+        # funnel-lifetime seed SUM. `type(n_combos) is int` (NOT isinstance) excludes `bool` — an
+        # `int` subclass that would otherwise store True as 1 and pass a typeof='integer' check.
+        if type(n_combos) is not int or not (1 <= n_combos <= MAX_N_COMBOS):
+            raise ValueError(
+                f"n_combos must be an int in [1, {MAX_N_COMBOS}], got {n_combos!r}")
         with self._conn:
             cur = self._conn.execute(
                 "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at,"
@@ -647,6 +677,49 @@ class SqliteStrategyRepository:
             (strategy_name,),
         ).fetchone()
         return int(row["total"])
+
+    def funnel_lifetime_search_combos(self) -> int:
+        # v37 (#524, R9-M3): funnel-wide LIFETIME search effort. WHERE-filtered to well-typed
+        # in-range rows so each summand is <= MAX_N_COMBOS (overflow-safe) and a corrupt/overlarge
+        # legacy row is EXCLUDED (contributes 0) rather than overflowing or coercing. This is the
+        # EXACT summation the §5.1 mint seed uses, so the accessor and the seed agree. Always >= 0.
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(n_combos), 0) AS total FROM search_trials"
+            " WHERE typeof(n_combos)='integer' AND n_combos BETWEEN 1 AND ?",
+            (MAX_N_COMBOS,),
+        ).fetchone()
+        return int(row["total"])
+
+    def family_graph_fingerprint(self) -> tuple[int, ...]:
+        # v37 (#524, R9): a monotone digest over EVERY DB table the NOVEL classifier reads. The
+        # append-only triggers (db.py) make (COUNT, MAX(id)) exact: any INSERT strictly increases a
+        # component; a member removal (removed_at UPDATE) strictly decreases the active-only COUNT;
+        # persisted member profiles ride on immutable family_members rows so the profile axis is
+        # covered here. Boundary-clean (pure SQL, no algua.research). A mismatch between two reads
+        # means a concurrent family mint / member (re)assignment or removal / parentage edge /
+        # member-returns refresh landed — the CAS the mint uses to detect stale-NOVEL drift.
+        def _cm(sql: str) -> tuple[int, int]:
+            r = self._conn.execute(sql).fetchone()
+            return int(r[0]), int(r[1])
+
+        fam = _cm("SELECT COUNT(*), COALESCE(MAX(id),0) FROM families")
+        mem_all = _cm("SELECT COUNT(*), COALESCE(MAX(id),0) FROM family_members")
+        mem_active = self._conn.execute(
+            "SELECT COUNT(*) FROM family_members WHERE removed_at IS NULL").fetchone()[0]
+        # The one-time legacy profile materialisation (member_code_hash NULL→value) is the ONLY
+        # permitted UPDATE that mutates a classifier-read column WITHOUT changing COUNT/MAX(id) or
+        # the active count. Include the active-NULL-profile count so that flip DOES bump the
+        # fingerprint: a concurrent materialisation between fp_before and the under-lock re-check
+        # then trips the CAS (FamilyGraphDriftError, fail-closed) instead of silently changing the
+        # member profile the NOVEL verdict was computed against.
+        mem_null_profile = self._conn.execute(
+            "SELECT COUNT(*) FROM family_members"
+            " WHERE removed_at IS NULL AND member_code_hash IS NULL").fetchone()[0]
+        parents = _cm("SELECT COUNT(*), COALESCE(MAX(id),0) FROM family_parents")
+        events = _cm("SELECT COUNT(*), COALESCE(MAX(id),0) FROM family_events")
+        returns = _cm("SELECT COUNT(*), COALESCE(MAX(id),0) FROM backtest_returns")
+        return (*fam, *mem_all, int(mem_active), int(mem_null_profile),
+                *parents, *events, *returns)
 
     def search_trials_fingerprint(self) -> tuple[int, int]:
         # search_trials is append-only (INSERT-only, AUTOINCREMENT PK), so (COUNT(*), MAX(id))
@@ -1361,7 +1434,24 @@ class SqliteStrategyRepository:
         fdr_alpha: float,
         actor: Actor,
         reason: str | None = None,
+        pending_novel_family: PendingNovelFamily | None = None,
     ) -> FdrGateOutcome:
+        # #524: coerce the actor BEFORE the pending-mint boundary guard (callers may pass a raw
+        # string; an identity test against an un-coerced string would mis-evaluate).
+        actor = Actor(actor)
+        # #524: the mint is an AGENT-only capability and THIS method is the safety boundary, not
+        # just the (trusted) caller path. Fail-closed unless the method actor is the agent AND the
+        # pending spec's own actor/verdict are internally consistent (a caller bug must not write
+        # mismatched audit/classification metadata). 'novel' is a plain-string literal so the store
+        # never imports algua.research.SimVerdict (registry→research boundary stays clean).
+        if pending_novel_family is not None and not (
+            actor is Actor.AGENT
+            and pending_novel_family.actor == Actor.AGENT.value
+            and pending_novel_family.verdict == "novel"
+        ):
+            raise ValueError(
+                "record_gate_with_fdr_and_maybe_promote: a pending_novel_family mint requires "
+                "actor=agent and a consistent agent/novel pending spec")
         # TOP-LEVEL ONLY — mirrors reserve_holdout's contract. A manual BEGIN IMMEDIATE inside an
         # already-open transaction would raise "cannot start a transaction within a transaction";
         # catching that instead of pre-checking would leave the caller's surrounding tx open in a
@@ -1401,6 +1491,23 @@ class SqliteStrategyRepository:
         # BaseException (not Exception) so KeyboardInterrupt/SystemExit still rolls back.
         try:
             self._conn.execute("BEGIN IMMEDIATE")
+            # #524 step 1 — pending-NOVEL CAS UNDER the write lock (R3-HIGH + R5-HIGH-1). Before any
+            # other work, prove the agent-NOVEL verdict is still valid against the graph
+            # at commit: (a) the strategy is STILL unassigned (no concurrent assignment landed), and
+            # (b) the full-classifier-read-set fingerprint EQUALS the one the NOVEL verdict was
+            # computed on (captured before==after classification, §7.1). A mismatch means a family
+            # was minted / a member (re)assigned or removed / a parentage edge added / a member's
+            # returns refreshed since classification, so the verdict is stale and might now be
+            # MERGE/PARENTAGE — fail closed (the CLI re-runs preflight against the current graph).
+            if pending_novel_family is not None:
+                if self.strategy_family(rec.name) is not None:
+                    raise FamilyGraphDriftError(
+                        f"strategy {rec.name!r} was assigned to a family since NOVEL "
+                        "classification; re-run promote", axis="still_assigned")
+                if self.family_graph_fingerprint() != pending_novel_family.graph_fingerprint:
+                    raise FamilyGraphDriftError(
+                        f"family graph changed since {rec.name!r} was classified NOVEL; re-run "
+                        "promote", axis="graph_fingerprint")
             # #339 — serializability CAS: re-read the funnel-wide MUTABLE state the (lock-free)
             # decision was computed against and abort if any of it drifted, so a committed decision
             # is provably a pure function of ONE funnel snapshot. Runs BEFORE the FDR stream read
@@ -1520,6 +1627,11 @@ class SqliteStrategyRepository:
                     code_hash=gate_row["code_hash"], config_hash=gate_row["config_hash"],
                     dependency_hash=gate_row.get("dependency_hash"),
                     consume_gate_id=None, consume_forward_gate_id=None, now=_now())
+                # #524 step 5 — mint the seeded agent-NOVEL family, IN THIS SAME TRANSACTION, only
+                # on a pass. All-or-nothing with the gate row + stage CAS: a crash before commit
+                # leaves no orphan family/membership.
+                if pending_novel_family is not None:
+                    self._mint_agent_novel_family(pending_novel_family, rec.name, gate_id)
 
             self._conn.commit()
         except BaseException:
@@ -1746,14 +1858,21 @@ class SqliteStrategyRepository:
     # -------------------------------------------------------------------------
 
     def create_family(
-        self, name: str, actor: str, created_by_strategy: str | None = None
+        self,
+        name: str,
+        actor: str,
+        created_by_strategy: str | None = None,
     ) -> int:
-        """Create a new family and record the family_created event. Return the new family id."""
+        """Create a new family and record the family_created event. Return the new family id. The
+        family carries ``seeded_prior_combos = 0`` (a fresh zero-prior family). The agent-NOVEL
+        seeded family is minted by RAW INSERT inside the promote transaction (#524), NOT via this
+        public helper, so there is no agent-reachable seeded-create surface."""
         now = _now()
         with self._conn:
             cur = self._conn.execute(
-                "INSERT INTO families(name, created_at, created_by_actor, created_by_strategy)"
-                " VALUES (?,?,?,?)",
+                "INSERT INTO families"
+                "(name, created_at, created_by_actor, created_by_strategy, seeded_prior_combos)"
+                " VALUES (?,?,?,?,0)",
                 (name, now, actor, created_by_strategy),
             )
             family_id = cur.lastrowid
@@ -1777,8 +1896,12 @@ class SqliteStrategyRepository:
         clustering_config_json: str,
         axis_json: str,
         matched_family_id: int | None = None,
+        member_code_hash: str | None = None,
+        member_factors_json: str | None = None,
     ) -> None:
-        """Assign a strategy to a family (append-only: old row gets removed_at set)."""
+        """Assign a strategy to a family (append-only: old row gets removed_at set). #524: the
+        joining member's classified ``(code_hash, sorted factors)`` are persisted onto the new
+        ``family_members`` row so the classifier reads member profiles from immutable DB state."""
         now = _now()
         event_type = "strategy_merged" if verdict == "MERGE" else "strategy_assigned"
         with self._conn:
@@ -1790,9 +1913,11 @@ class SqliteStrategyRepository:
             )
             self._conn.execute(
                 "INSERT INTO family_members"
-                "(family_id, strategy_name, joined_at, joined_by_actor, removed_at)"
-                " VALUES (?,?,?,?,NULL)",
-                (family_id, strategy_name, now, actor),
+                "(family_id, strategy_name, joined_at, joined_by_actor, removed_at,"
+                " member_code_hash, member_factors_json)"
+                " VALUES (?,?,?,?,NULL,?,?)",
+                (family_id, strategy_name, now, actor,
+                 member_code_hash, member_factors_json),
             )
             self._conn.execute(
                 "INSERT INTO family_events"
@@ -1891,42 +2016,244 @@ class SqliteStrategyRepository:
         """Return [(family_id, members_list)] for all families that have active members.
 
         Each member dict: {"name": str, "code_hash": str, "factors": set[str]}.
-        The code_hash is looked up via compute_artifact_hashes; strategies whose module
-        cannot be loaded silently get code_hash='' and factors=set() (fail-closed: they
-        will not match unless the new strategy also fails to load, which is extremely
-        unlikely and also fails closed elsewhere).
-        """
-        from algua.registry.approvals import compute_artifact_hashes
-        from algua.registry.lineage import factors_used_by
 
+        v37 (#524, R9-H3): the classifier's member-profile input is now IMMUTABLE DB STATE. Each
+        active row's persisted ``member_code_hash``/``member_factors_json`` (materialised at
+        assignment) are read directly. A pre-#524 row still carrying NULL (un-materialised legacy)
+        falls back to a live ``compute_artifact_hashes``/``factors_used_by`` recompute — the
+        one-time ``materialise_legacy_member_profiles`` bootstrap eliminates that fallback in steady
+        state. A live recompute that cannot load the module fails closed (empty hash/factors).
+        """
         rows = self._conn.execute(
-            "SELECT DISTINCT family_id, strategy_name"
+            "SELECT DISTINCT family_id, strategy_name, member_code_hash, member_factors_json"
             " FROM family_members"
             " WHERE removed_at IS NULL"
             " ORDER BY family_id"
         ).fetchall()
-        # Group by family_id
         family_map: dict[int, list[dict]] = {}
         for row in rows:
             fid = int(row["family_id"])
             sname = row["strategy_name"]
-            try:
-                identity = compute_artifact_hashes(sname)
-                code_hash = identity.code_hash
-            except Exception:  # noqa: BLE001
-                code_hash = ""
-            try:
-                factor_specs = factors_used_by(sname)
-                # factors_used_by returns list[FactorSpec]; get the name string
-                factors: set[str] = {
-                    f.name if hasattr(f, "name") else str(f) for f in factor_specs
-                }
-            except Exception:  # noqa: BLE001
-                factors = set()
+            if row["member_code_hash"] is not None:
+                code_hash = row["member_code_hash"]
+                factors = set(json.loads(row["member_factors_json"] or "[]"))
+            else:
+                code_hash, factors = self._live_member_profile(sname)
             family_map.setdefault(fid, []).append({
                 "code_hash": code_hash, "factors": factors, "name": sname,
             })
         return list(family_map.items())
+
+    @staticmethod
+    def _live_member_profile(strategy_name: str) -> tuple[str, set[str]]:
+        """Recompute a member's (code_hash, factor-name set) from module source. Fail-closed to
+        ('', set()) when the module cannot be loaded (a legacy/test name)."""
+        from algua.registry.approvals import compute_artifact_hashes
+        from algua.registry.lineage import factors_used_by
+
+        try:
+            code_hash = compute_artifact_hashes(strategy_name).code_hash
+        except Exception:  # noqa: BLE001
+            code_hash = ""
+        try:
+            factor_specs = factors_used_by(strategy_name)
+            factors: set[str] = {
+                f.name if hasattr(f, "name") else str(f) for f in factor_specs
+            }
+        except Exception:  # noqa: BLE001
+            factors = set()
+        return code_hash, factors
+
+    def materialise_legacy_member_profiles(self) -> int:
+        """One-time (#524): persist ``member_code_hash``/``member_factors_json`` for active
+        ``family_members`` rows still carrying NULL profiles, via the trigger-permitted NULL→value
+        UPDATE. Idempotent. Returns the number materialised. Loads modules — call from the store
+        bootstrap, never under the promote write lock."""
+        rows = self._conn.execute(
+            "SELECT id, strategy_name FROM family_members"
+            " WHERE removed_at IS NULL AND member_code_hash IS NULL"
+        ).fetchall()
+        if not rows:
+            return 0  # steady state: no empty write-locked transaction, no module loads
+        n = 0
+        with self._conn:
+            for row in rows:
+                code_hash, factors = self._live_member_profile(row["strategy_name"])
+                self._conn.execute(
+                    "UPDATE family_members SET member_code_hash=?, member_factors_json=?"
+                    " WHERE id=?",
+                    (code_hash, json.dumps(sorted(factors)), int(row["id"])),
+                )
+                n += 1
+        return n
+
+    def grant_agent_novel_mints(
+        self, count: int, *, actor: str, reason: str | None = None,
+    ) -> int:
+        """Append a human-only ``agent_mint_grants`` row topping up the lifetime agent-NOVEL mint
+        budget by ``count`` (#524, R9-H2). ``actor`` MUST be 'human' (the DB CHECK backstops it)."""
+        if actor != "human":
+            raise ValueError("grant_agent_novel_mints is human-only (actor must be 'human')")
+        if type(count) is not int or count < 1:
+            raise ValueError(f"grant count must be an int >= 1, got {count!r}")
+        with self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO agent_mint_grants(granted_at, granted_by_actor, grant_count, reason)"
+                " VALUES (?,?,?,?)",
+                (_now(), actor, count, reason),
+            )
+        rowid = cur.lastrowid
+        assert rowid is not None
+        return rowid
+
+    def agent_novel_mint_audit(self) -> dict:
+        """Read-only mint-governance stats for the ``family-audit`` advisory block (#524)."""
+        cutoff = datetime.now(UTC) - timedelta(days=AGENT_NOVEL_MINT_WINDOW_DAYS)
+        # Bucket the window with the SAME canonical-UTC parse the enforcement path uses (a naive
+        # string `created_at >= ?` compare could mis-bucket a non-canonical timestamp and disagree
+        # with check_agent_novel_mint_bounds). A row whose created_at is not canonical UTC is
+        # surfaced as corruption (advisory — audit never raises) rather than silently in/out of the
+        # window.
+        agent_rows = self._conn.execute(
+            "SELECT created_at FROM families WHERE created_by_actor='agent'").fetchall()
+        mints_in_window = 0
+        created_at_corruption = 0
+        for r in agent_rows:
+            try:
+                if _parse_canonical_utc(r[0]) >= cutoff:
+                    mints_in_window += 1
+            except ValueError:
+                created_at_corruption += 1
+        lifetime_consumed = len(agent_rows)
+        granted = int(self._conn.execute(
+            "SELECT COALESCE(SUM(grant_count),0) FROM agent_mint_grants").fetchone()[0])
+        allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET + granted
+        n_rows, n_well_typed = self._conn.execute(
+            "SELECT COUNT(*), COUNT(CASE WHEN typeof(n_combos)='integer'"
+            " AND n_combos BETWEEN 1 AND ? THEN 1 END) FROM search_trials",
+            (MAX_N_COMBOS,),
+        ).fetchone()
+        return {
+            "mints_in_window": mints_in_window,
+            "window_cap": AGENT_NOVEL_MINT_CAP,
+            "window_days": AGENT_NOVEL_MINT_WINDOW_DAYS,
+            "lifetime_consumed": lifetime_consumed,
+            "lifetime_allowance": allowance,
+            "lifetime_remaining": max(0, allowance - lifetime_consumed),
+            "search_trials_corruption_count": int(n_rows) - int(n_well_typed),
+            "created_at_corruption_count": created_at_corruption,
+        }
+
+    def _mint_agent_novel_family(
+        self, pending: PendingNovelFamily, founder_name: str, gate_id: int,
+    ) -> int:
+        """Mint the seeded agent-NOVEL family + assign the founder, via RAW locked INSERTs INSIDE
+        the caller's open promote transaction (#524 step 5). NOT to be called on its own — it does
+        no BEGIN/commit and relies on the caller's BEGIN IMMEDIATE. Order: (5a) seed>0, (5b) rate
+        cap + lifetime budget, (5c) uuid-suffixed name + raw INSERTs. Returns the family id."""
+        # (5a) filter-before-sum seed + positivity guard. A corrupt/overlarge legacy row is EXCLUDED
+        # by the WHERE filter (contributes 0), never overflowing or shrinking the seed below the sum
+        # of the legitimate rows; an all-corrupt/empty funnel legitimately fails closed.
+        seed = self.agent_novel_mint_seed()
+        if seed <= 0:
+            raise ValueError(
+                "agent-NOVEL mint requires a strictly-positive funnel-lifetime breadth seed; the "
+                "funnel has no well-typed in-range search_trials to seed (fail closed)")
+        # (5b) authoritative under-lock rate cap + lifetime budget (fail-closed).
+        self.check_agent_novel_mint_bounds()
+        # (5c) collision-RESISTANT uuid mint name (no bounded probe → no DoS on a passed gate),
+        # regenerate-and-retry on the astronomically-unlikely UNIQUE clash so correctness never
+        # depends on uuid uniqueness. RAW INSERTs (NOT create_family/assign helpers, which
+        # open their own transactions and would break this single BEGIN IMMEDIATE).
+        now = _now()
+        family_id: int | None = None
+        for _ in range(8):
+            candidate = f"{pending.slug_base}__{uuid4().hex}"
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO families(name, created_at, created_by_actor, created_by_strategy,"
+                    " seeded_prior_combos, founder_gate_id) VALUES (?,?,?,?,?,?)",
+                    (candidate, now, Actor.AGENT.value, founder_name, seed, gate_id),
+                )
+                family_id = cur.lastrowid
+                break
+            except sqlite3.IntegrityError as exc:
+                # ONLY a families.name UNIQUE clash is a retryable uuid collision. Any OTHER
+                # integrity failure (a bad founder_gate_id FK, the seeded_prior_combos CHECK, an
+                # append-only trigger, schema corruption) is a real invariant break — re-raise it
+                # so the mint fails LOUDLY, never masked as "could not obtain a unique name".
+                if "families.name" not in str(exc):
+                    raise
+                continue  # UNIQUE name clash — regenerate the uuid and retry (statement-scoped)
+        if family_id is None:
+            raise ValueError("agent-NOVEL mint could not obtain a unique family name (fail closed)")
+        # family_created event (strategy_name = founder for audit clarity).
+        self._conn.execute(
+            "INSERT INTO family_events(event_type, family_id, strategy_name, actor, created_at)"
+            " VALUES ('family_created', ?, ?, ?, ?)",
+            (family_id, founder_name, Actor.AGENT.value, now),
+        )
+        # founding member row, with the founder's classified profile DB-persisted from birth.
+        self._conn.execute(
+            "INSERT INTO family_members(family_id, strategy_name, joined_at, joined_by_actor,"
+            " removed_at, member_code_hash, member_factors_json) VALUES (?,?,?,?,NULL,?,?)",
+            (family_id, founder_name, now, Actor.AGENT.value,
+             pending.founder_code_hash, pending.founder_factors_json),
+        )
+        # strategy_assigned event with the classification metadata.
+        self._conn.execute(
+            "INSERT INTO family_events(event_type, family_id, strategy_name, actor,"
+            " clustering_verdict, similarity_score, clustering_version, clustering_config_json,"
+            " axis_json, matched_family_id, created_at)"
+            " VALUES ('strategy_assigned', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+            (family_id, founder_name, Actor.AGENT.value, pending.verdict,
+             pending.similarity_score, pending.clustering_version,
+             pending.clustering_config_json, pending.axis_json, now),
+        )
+        return int(family_id)
+
+    def agent_novel_mint_seed(self) -> int:
+        """The durable breadth prior an agent-NOVEL family is seeded with (#524): the funnel-wide
+        LIFETIME search effort (WHERE-filtered, overflow-safe). Identical to
+        ``funnel_lifetime_search_combos``; the mint additionally requires it be > 0."""
+        return self.funnel_lifetime_search_combos()
+
+    def check_agent_novel_mint_bounds(self) -> None:
+        """Fail-closed on the two agent-NOVEL mint authority bounds (#524, R9): the per-window rate
+        cap (``AgentMintCapError``) and the human-replenished lifetime budget
+        (``AgentMintBudgetExhaustedError``). Both count the canonical ``families`` table (not the
+        derived event stream). The rate cap parses each counted agent row's ``created_at`` as
+        canonical UTC and fail-closes if any does not parse, so a stray naive/local timestamp cannot
+        silently mis-bucket a row across the cutoff. Safe to call lock-free (pre-check) OR under the
+        promote write lock (authoritative re-check)."""
+        cutoff = datetime.now(UTC) - timedelta(days=AGENT_NOVEL_MINT_WINDOW_DAYS)
+        rows = self._conn.execute(
+            "SELECT created_at FROM families WHERE created_by_actor='agent'"
+        ).fetchall()
+        in_window = 0
+        for r in rows:
+            try:
+                created = _parse_canonical_utc(r[0])
+            except ValueError as exc:
+                raise AgentMintCapError(
+                    f"agent family created_at is not canonical UTC ({exc}); refusing to mint "
+                    "to avoid mis-bucketing the rate-cap window") from exc
+            if created >= cutoff:
+                in_window += 1
+        if in_window >= AGENT_NOVEL_MINT_CAP:
+            raise AgentMintCapError(
+                f"agent-NOVEL mint rate cap reached: {in_window} agent families in the last "
+                f"{AGENT_NOVEL_MINT_WINDOW_DAYS}d (cap {AGENT_NOVEL_MINT_CAP}); wait out the "
+                "window or promote --actor human --new-family")
+        consumed = len(rows)
+        granted = int(self._conn.execute(
+            "SELECT COALESCE(SUM(grant_count),0) FROM agent_mint_grants").fetchone()[0])
+        allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET + granted
+        if consumed >= allowance:
+            raise AgentMintBudgetExhaustedError(
+                f"agent-NOVEL lifetime mint budget exhausted: {consumed} agent families minted, "
+                f"allowance {allowance} (budget {AGENT_NOVEL_MINT_LIFETIME_BUDGET} + granted "
+                f"{granted}); a human must `registry grant-novel-mints` to replenish")
 
     def _family_member_strategies(self, family_id: int) -> list[str]:
         """DISTINCT strategy names for a family and all its transitive ancestors."""
@@ -1963,17 +2290,42 @@ class SqliteStrategyRepository:
         transitive ancestors. A strategy reachable via several of the families is counted
         exactly once (the union of member-strategy sets is deduped before the sum)."""
         all_strategies: set[str] = set()
+        all_family_ids: set[int] = set()
         for fid in family_ids:
             all_strategies.update(self._family_member_strategies(fid))
-        if not all_strategies:
-            return 0
-        placeholders = ",".join("?" * len(all_strategies))
-        row = self._conn.execute(
-            f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
-            f" WHERE st.strategy_name IN ({placeholders})",
-            list(all_strategies),
-        ).fetchone()
-        return int(row[0])
+            all_family_ids.add(fid)
+            all_family_ids.update(self.family_ancestry(fid))
+        search_sum = 0
+        if all_strategies:
+            placeholders = ",".join("?" * len(all_strategies))
+            row = self._conn.execute(
+                f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
+                f" WHERE st.strategy_name IN ({placeholders})",
+                list(all_strategies),
+            ).fetchone()
+            search_sum = int(row[0])
+        # v37 (#524): add the durable breadth PRIOR of the family + all its transitive ancestors
+        # (deduped by set over the ancestor closure). The seed is a lifetime-only prior — NOT in the
+        # windowed/funnel-wide sums — so an agent-founded NOVEL family starts as if it had already
+        # accumulated the funnel-wide lifetime tests, removing the reset-gaming incentive. Every
+        # pre-#524 family has seed 0, so all current anti-reset numbers are unchanged. A NEGATIVE
+        # seed is impossible via the mint (which asserts seed>0) and the fresh-DB CHECK; treat any
+        # negative as corruption (fail closed) rather than silently subtracting from the tax.
+        seed_sum = 0
+        if all_family_ids:
+            fam_placeholders = ",".join("?" * len(all_family_ids))
+            seed_row = self._conn.execute(
+                f"SELECT COALESCE(SUM(seeded_prior_combos), 0),"
+                f" COALESCE(MIN(seeded_prior_combos), 0) FROM families"
+                f" WHERE id IN ({fam_placeholders})",
+                list(all_family_ids),
+            ).fetchone()
+            if int(seed_row[1]) < 0:
+                raise ValueError(
+                    "families.seeded_prior_combos holds a negative value (corruption); the "
+                    "breadth prior must be >= 0")
+            seed_sum = int(seed_row[0])
+        return search_sum + seed_sum
 
     def family_lifetime_combos(self, family_id: int) -> int:
         """Lifetime search combos across this family + all transitive ancestors."""

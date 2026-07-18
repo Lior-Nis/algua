@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -525,7 +525,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -549,7 +549,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 36
+    assert SCHEMA_VERSION == 37
 
 
 def test_v32_negative_results_table_created(tmp_path):

@@ -48,7 +48,11 @@ from algua.registry.negative_results import (
     record_negative_result,
     sanitize_record,
 )
-from algua.registry.promotion import promotion_preflight, run_gate
+from algua.registry.promotion import (
+    _revalidate_pending_novel,
+    promotion_preflight,
+    run_gate,
+)
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository, StrategyNotFound
 from algua.research import family_audit, lifecycle_gc
@@ -184,9 +188,10 @@ def promote(
              "key (ssh-keygen -Y sign -n algua-human-actor), then re-run with --actor-signature."),
     new_family: str = typer.Option(
         None, "--new-family",
-        help="HUMAN-ONLY: slug for a new family when clustering verdict is NOVEL or PARENTAGE. "
-             "Ignored when the strategy is already assigned to a family. "
-             "Required for a human actor facing a NOVEL verdict.",
+        help="HUMAN-ONLY: name a new family with FRESH (zero-prior) breadth on a NOVEL/PARENTAGE "
+             "verdict. Required for a human NOVEL; ignored once the strategy is assigned. An agent "
+             "NOVEL now AUTO-creates a family (auto-named) SEEDED with the funnel-wide breadth "
+             "prior (no human signature) — this flag is ignored for agents.",
     ),
     summary: bool = typer.Option(
         False, "--summary",
@@ -358,6 +363,17 @@ def promote_task(  # noqa: PLR0913, PLR0915
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             holdout_start=holdout_start, holdout_end=holdout_end,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
+        # #524 (R9-H4): the holdout is never burned on drift. on_peek commits the reservation the
+        # instant BEFORE the holdout metric is read; wrap it so it FIRST re-runs the pending-NOVEL
+        # revalidation (still-unassigned + graph fingerprint + rate cap + lifetime budget — all pure
+        # DB reads) and raises BEFORE finalize on drift/bound. The reservation then stays pending
+        # → the except-release below frees the window → no holdout burned, no residual race.
+        def _on_peek(cfg: str) -> None:
+            if breadth.pending_novel_family is not None:
+                _revalidate_pending_novel(repo, name, breadth.pending_novel_family)
+            repo.finalize_holdout_reservation(
+                reservation_id, config_hash=cfg, strategy_id=sid)
+
         try:
             wf = walk_forward(
                 strategy, provider, start_dt, end_dt, windows=windows,
@@ -370,8 +386,7 @@ def promote_task(  # noqa: PLR0913, PLR0915
                 # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
                 # committed row, the except-release below is then correct for EVERY post-peek
                 # failure (incl. KeyboardInterrupt) — a computed holdout can never be released.
-                on_peek=lambda cfg: repo.finalize_holdout_reservation(
-                    reservation_id, config_hash=cfg, strategy_id=sid),
+                on_peek=_on_peek,
             )
         except BaseException:
             # Pre-peek failure: the row is still pending, so release frees the window. Post-peek
@@ -757,10 +772,14 @@ def family_audit_cmd() -> None:
             components, kept, candidate_edges, component_breadth=component_breadth,
             individual_breadth=individual_breadth, family_names=fam_names,
             active_counts=active_counts)
+        # #524: agent-NOVEL mint governance observability (read-only) — rate-cap + lifetime-budget
+        # headroom and the legacy search_trials corruption count. Not a gate; a monitoring signal.
+        agent_novel_mints = repo.agent_novel_mint_audit()
         conn.rollback()
 
     n_pairs = len(list(combinations(profiles, 2)))
     emit(ok({
+        "agent_novel_mints": agent_novel_mints,
         "note": ("ADVISORY cross-family gaming screen; NOT a gate. Flags separate families that "
                  "behave as one thesis (return-correlation authoritative). Acting on a cluster "
                  "is a human judgement: consolidate via member reassignment (--actor human). "

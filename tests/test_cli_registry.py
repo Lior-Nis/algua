@@ -749,3 +749,27 @@ def test_transition_survives_kb_sync_failure(tmp_path, monkeypatch):
     assert json.loads(result.stdout)["stage"] == "backtested"
     show = json.loads(runner.invoke(app, ["registry", "show", "beta"]).stdout)
     assert show["stage"] == "backtested"
+
+
+# ---------------------------------------------------------------------------
+# #524: human-only `registry grant-novel-mints` (replenishes the lifetime mint budget)
+# ---------------------------------------------------------------------------
+
+def test_grant_novel_mints_human_appends_budget():
+    out = _json(runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "5", "--actor", "human",
+              "--reason", "epoch top-up"]))
+    assert out["ok"] is True
+    assert out["granted"] == 5
+    assert out["grant_row_id"] >= 1
+    # A second grant accumulates.
+    out2 = _json(runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "3", "--actor", "human"]))
+    assert out2["lifetime_allowance"] == out["lifetime_allowance"] + 3
+
+
+def test_grant_novel_mints_agent_is_refused():
+    result = runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "5", "--actor", "agent"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False

@@ -13,7 +13,14 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
+
+# v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
+# above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is
+# overflow-safe (2^63/1e9 ≈ 9.2e9 well-typed rows would be needed to overflow). Enforced by the
+# fresh-DB search_trials CHECK, record_search_trial's writer validation, and the WHERE-filtered
+# mint seed SUM (which all use this exact bound).
+MAX_N_COMBOS = 1_000_000_000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
@@ -134,7 +141,11 @@ CREATE TABLE IF NOT EXISTS book_equity_peak (
 CREATE TABLE IF NOT EXISTS search_trials (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_name TEXT NOT NULL,
-    n_combos INTEGER NOT NULL,
+    -- v37 (#524, R9-M3): type-safe + bounded so a corrupt/overlarge row can never overflow the
+    -- funnel-lifetime seed SUM. Fresh DBs enforce it here; migrated DBs rely on the writer
+    -- validation in record_search_trial + the WHERE-filtered mint SUM (ALTER cannot add a CHECK).
+    n_combos INTEGER NOT NULL CHECK (typeof(n_combos)='integer' AND n_combos >= 1
+                                     AND n_combos <= 1000000000),
     grid_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     trial_sharpe_count INTEGER,
@@ -569,16 +580,41 @@ CREATE TABLE IF NOT EXISTS families (
     name             TEXT NOT NULL UNIQUE,
     created_at       TEXT NOT NULL,
     created_by_actor TEXT NOT NULL,
-    created_by_strategy TEXT
+    created_by_strategy TEXT,
+    -- v37 (#524): durable LIFETIME breadth prior for a family. Seeded (>0) only when an agent
+    -- founds a NOVEL family at the pass moment (§5.1), so it starts as if it had already
+    -- accumulated the funnel-wide LIFETIME test effort (removes the reset-gaming incentive). It
+    -- is a lifetime-only prior (NOT in windowed sums). Human NOVEL/PARENTAGE creates keep 0.
+    seeded_prior_combos INTEGER NOT NULL DEFAULT 0 CHECK (seeded_prior_combos >= 0),
+    -- v37 (#524, R9-M2): FK to the founding gate_evaluations row (the gate that founded an
+    -- agent NOVEL family). NULL for legacy + human-created families (not agent-gate-founded).
+    founder_gate_id  INTEGER REFERENCES gate_evaluations(id)
 );
--- family_members: APPEND-ONLY (removed_at SET never DELETE; breadth never decreases)
+-- family_members: APPEND-ONLY (removed_at SET never DELETE; breadth never decreases).
+-- v37 (#524, R9-H3): member_code_hash/member_factors_json persist the (code_hash, sorted
+-- factors) the member was classified under, MATERIALISED AT ASSIGNMENT. IMMUTABLE once
+-- non-NULL (append-only trigger below): the classifier's member-profile input is DB state,
+-- transactionally covered by family_graph_fingerprint. NULL only on un-materialised legacy rows.
 CREATE TABLE IF NOT EXISTS family_members (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     family_id       INTEGER NOT NULL REFERENCES families(id),
     strategy_name   TEXT NOT NULL,
     joined_at       TEXT NOT NULL,
     joined_by_actor TEXT NOT NULL,
-    removed_at      TEXT
+    removed_at      TEXT,
+    member_code_hash    TEXT,
+    member_factors_json TEXT
+);
+-- v37 (#524, R9-H2): human-replenished lifetime agent-NOVEL mint budget. APPEND-ONLY ledger of
+-- grants; lifetime allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET (a CODEOWNERS-protected store.py
+-- constant) + COALESCE(SUM(grant_count),0). Only a HUMAN actor may append (a governance quota,
+-- NOT a statistical term — does not offend #324). Consumed = lifetime COUNT of agent families.
+CREATE TABLE IF NOT EXISTS agent_mint_grants (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    granted_at       TEXT NOT NULL,
+    granted_by_actor TEXT NOT NULL CHECK (granted_by_actor = 'human'),
+    grant_count      INTEGER NOT NULL CHECK (grant_count >= 1),
+    reason           TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy_family
     ON family_members(strategy_name, family_id) WHERE removed_at IS NULL;
@@ -607,6 +643,35 @@ CREATE TABLE IF NOT EXISTS family_events (
     matched_family_id       INTEGER REFERENCES families(id),
     created_at              TEXT NOT NULL
 );
+-- v37 (#524, R9-H1): make the classifier read-set append-only IN THE ENGINE, not just by
+-- discipline. families / family_parents / family_events / backtest_returns are pure INSERT-append
+-- → forbid UPDATE and DELETE on all four. family_members permits exactly two one-way UPDATEs: the
+-- removed_at tombstone flip (NULL→ts) and the one-time legacy profile materialisation
+-- (member_code_hash/member_factors_json NULL→value); everything else ABORTs. A hard-DELETE or
+-- in-place id/row rewrite is impossible through ANY connection (store API, repair tool, raw shell),
+-- so family_graph_fingerprint's monotone (COUNT, MAX(id)) digest is exact.
+CREATE TRIGGER IF NOT EXISTS trg_families_append_only_upd BEFORE UPDATE ON families
+  BEGIN SELECT RAISE(ABORT, 'families is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_families_append_only_del BEFORE DELETE ON families
+  BEGIN SELECT RAISE(ABORT, 'families is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_family_parents_append_only_upd BEFORE UPDATE ON family_parents
+  BEGIN SELECT RAISE(ABORT, 'family_parents is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_family_parents_append_only_del BEFORE DELETE ON family_parents
+  BEGIN SELECT RAISE(ABORT, 'family_parents is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_family_events_append_only_upd BEFORE UPDATE ON family_events
+  BEGIN SELECT RAISE(ABORT, 'family_events is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_family_events_append_only_del BEFORE DELETE ON family_events
+  BEGIN SELECT RAISE(ABORT, 'family_events is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_backtest_returns_append_only_upd BEFORE UPDATE ON backtest_returns
+  BEGIN SELECT RAISE(ABORT, 'backtest_returns is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_backtest_returns_append_only_del BEFORE DELETE ON backtest_returns
+  BEGIN SELECT RAISE(ABORT, 'backtest_returns is append-only (#524)'); END;
+CREATE TRIGGER IF NOT EXISTS trg_family_members_no_delete BEFORE DELETE ON family_members
+  BEGIN SELECT RAISE(ABORT, 'family_members is append-only (#524)'); END;
+-- NB: trg_family_members_append_only_upd references the v37 member_code_hash/member_factors_json
+-- columns, which do NOT exist on a legacy family_members table at executescript(_SCHEMA) time
+-- (they are added by ALTER in migrate() afterwards). SQLite validates a trigger's column
+-- references at CREATE time, so that trigger is created in migrate() AFTER the ALTER, not here.
 -- v32 (#332): negative_results is an ADVISORY experience log capturing failed/rejected hypotheses
 -- (gate FAILs, discards, research dead-ends) so knowledge is not lost with the branch. It NEVER
 -- gates promotion and NEVER touches the live/paper path; it is written best-effort as a side effect
@@ -782,6 +847,46 @@ def migrate(conn: sqlite3.Connection) -> None:
         "family_id": "INTEGER",
         "family_lifetime_effective": "INTEGER",
     })
+    # v37 (#524): the durable family breadth prior + founder→gate audit link + persisted member
+    # profile columns. Additive with DEFAULT/nullable, so SQLite's ALTER TABLE ADD COLUMN accepts
+    # them on a populated table (every existing family row gets seeded_prior_combos=0/founder
+    # NULL = a fresh zero-prior, non-agent-founded family — all current anti-reset numbers
+    # unchanged). ALTER cannot add a CHECK, so the seeded_prior_combos>=0 invariant on legacy DBs is
+    # enforced in app code (the §5.1 mint asserts seed>0 before its INSERT; the reader treats a
+    # negative as corruption). The append-only TRIGGERS on the five classifier-read tables are
+    # created by the executescript(_SCHEMA) bootstrap ABOVE; but on a LEGACY DB with un-materialised
+    # member profiles, the store-layer _materialise_legacy_member_profiles() one-time NULL→value
+    # backfill runs AFTER migrate() (from the store bootstrap, where module loads are legal) — the
+    # family_members UPDATE trigger explicitly permits that NULL→value flip, so ordering is safe.
+    _add_missing_columns(conn, "families", {
+        "seeded_prior_combos": "INTEGER NOT NULL DEFAULT 0",
+        "founder_gate_id": "INTEGER",
+    })
+    _add_missing_columns(conn, "family_members", {
+        "member_code_hash": "TEXT",
+        "member_factors_json": "TEXT",
+    })
+    # v37 (#524, R9-H1): the family_members BEFORE UPDATE append-only trigger references the just-
+    # added member_code_hash/member_factors_json columns, so it is created HERE (after the ALTER),
+    # not in _SCHEMA (where a legacy family_members table would not yet have those columns and
+    # SQLite would reject the trigger's column references). Permits exactly two one-way flips: the
+    # removed_at tombstone (NULL→ts) and the one-time legacy profile materialisation (NULL→value).
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS trg_family_members_append_only_upd"
+        " BEFORE UPDATE ON family_members WHEN NOT ("
+        "  (OLD.removed_at IS NULL AND NEW.removed_at IS NOT NULL"
+        "     AND NEW.member_code_hash IS OLD.member_code_hash"
+        "     AND NEW.member_factors_json IS OLD.member_factors_json"
+        "     AND NEW.family_id=OLD.family_id AND NEW.strategy_name=OLD.strategy_name"
+        "     AND NEW.joined_at=OLD.joined_at AND NEW.joined_by_actor=OLD.joined_by_actor)"
+        "  OR"
+        "  (OLD.member_code_hash IS NULL AND NEW.member_code_hash IS NOT NULL"
+        "     AND NEW.removed_at IS OLD.removed_at AND NEW.family_id=OLD.family_id"
+        "     AND NEW.strategy_name=OLD.strategy_name AND NEW.joined_at=OLD.joined_at"
+        "     AND NEW.joined_by_actor=OLD.joined_by_actor)"
+        " ) BEGIN SELECT RAISE(ABORT,"
+        " 'family_members: only removed_at or one-time profile materialise (#524)'); END;"
+    )
     # v28 (#250): live_activity_quarantine is a brand-new dead-letter table; executescript(_SCHEMA)
     # above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v29 (#132): PIT sidecar snapshot provenance on the gate audit row. Additive nullable — legacy

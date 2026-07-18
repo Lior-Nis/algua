@@ -156,6 +156,40 @@ def show(name: str) -> None:
     emit(ok({**_record_json(rec), "transitions": transitions}))
 
 
+@registry_app.command("grant-novel-mints")
+@json_errors
+def grant_novel_mints(
+    count: int = typer.Option(..., "--count", help="number of agent-NOVEL family mints to grant"),
+    actor: str = typer.Option("human", "--actor", help="MUST be human (governance quota top-up)"),
+    reason: str = typer.Option(None, "--reason", help="free-text audit note"),
+) -> None:
+    """HUMAN-ONLY (#524): replenish the durable, human-granted agent-NOVEL lifetime mint budget by
+    appending an ``agent_mint_grants`` row (lifetime allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET +
+    SUM(grants)). Once the epoch budget is spent the agent cannot found another root family until a
+    human grants more here. The ``granted_by_actor='human'`` DB CHECK backstops the actor guard.
+
+    TRUST BOUNDARY (open for the human reviewer — this PR stays open for human merge): this command
+    gates on the DECLARED ``--actor human`` string, NOT the #329 cryptographic human-actor
+    signature. The #329 challenge machinery (``actor_challenges``) is strategy-bound (nonce + stage
+    + recomputed artifact identity), and this budget top-up is a repo-global governance authority
+    with no strategy to bind to, so binding it to a #329-style single-use signature is a deliberate
+    follow-up (it needs a non-strategy challenge kind, out of scope for the R9 schema bump). Until
+    then, this shares the trust level of every other non-strategy ``registry`` subcommand."""
+    if Actor(actor) is not Actor.HUMAN:
+        raise ValueError("registry grant-novel-mints is human-only: pass --actor human")
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        row_id = repo.grant_agent_novel_mints(count, actor="human", reason=reason)
+        audit = repo.agent_novel_mint_audit()
+    emit(ok({
+        "granted": count,
+        "grant_row_id": row_id,
+        "lifetime_allowance": audit["lifetime_allowance"],
+        "lifetime_consumed": audit["lifetime_consumed"],
+        "lifetime_remaining": audit["lifetime_remaining"],
+    }))
+
+
 @registry_app.command("transition")
 @json_errors
 def transition(
