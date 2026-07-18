@@ -2298,10 +2298,16 @@ class SqliteStrategyRepository:
         search_sum = 0
         if all_strategies:
             placeholders = ",".join("?" * len(all_strategies))
+            # Same well-typed-row policy as funnel_lifetime_search_combos()/the mint-seed path
+            # (typeof='integer' AND 1..MAX_N_COMBOS): a legacy corrupt row (pre-#524, no CHECK
+            # constraint) for a family member must be EXCLUDED, not silently coerced to 0 by SUM.
+            # Without this filter the two lifetime-accounting paths could disagree and a corrupt
+            # row could quietly undercount a sibling's true family_lifetime tax.
             row = self._conn.execute(
                 f"SELECT COALESCE(SUM(st.n_combos), 0) FROM search_trials st"
-                f" WHERE st.strategy_name IN ({placeholders})",
-                list(all_strategies),
+                f" WHERE st.strategy_name IN ({placeholders})"
+                f" AND typeof(st.n_combos)='integer' AND st.n_combos BETWEEN 1 AND ?",
+                [*all_strategies, MAX_N_COMBOS],
             ).fetchone()
             search_sum = int(row[0])
         # v37 (#524): add the durable breadth PRIOR of the family + all its transitive ancestors

@@ -308,6 +308,22 @@ CREATE TABLE IF NOT EXISTS actor_challenges (
     expires_at      TEXT NOT NULL,
     consumed_at     TEXT
 );
+-- v37 (#524): the NON-strategy-scoped sibling of actor_challenges for repo-global governance
+-- authorities that have no strategy identity to bind to (currently `registry grant-novel-mints`,
+-- the human-only agent-NOVEL mint-budget top-up). It reuses the SAME algua-human-actor trust anchor
+-- + single-use-nonce discipline as actor_challenges, but binds the signature to (command + the
+-- requested integer `count`) + nonce + expiry INSTEAD OF a strategy identity, so a signature
+-- authorizes EXACTLY one grant of exactly that size and cannot be replayed onto a larger count or a
+-- second grant. Like actor_challenges we persist only the non-payload parts (nonce, count,
+-- command, expiry); verify REBUILDS the canonical challenge and consumes the nonce single-use.
+CREATE TABLE IF NOT EXISTS governance_challenges (
+    nonce        TEXT PRIMARY KEY,
+    command      TEXT NOT NULL,
+    grant_count  INTEGER NOT NULL CHECK (grant_count >= 1),
+    issued_at    TEXT NOT NULL,
+    expires_at   TEXT NOT NULL,
+    consumed_at  TEXT
+);
 -- The signed payload is NEVER stored verbatim and re-verified — an agent with DB write could then
 -- pair vetted-identity columns with a foreign signature (codex CRITICAL). We store only the
 -- non-identity payload parts (nonce, expires_at); trade-time verification REBUILDS the canonical
@@ -647,9 +663,15 @@ CREATE TABLE IF NOT EXISTS family_events (
 -- discipline. families / family_parents / family_events / backtest_returns are pure INSERT-append
 -- → forbid UPDATE and DELETE on all four. family_members permits exactly two one-way UPDATEs: the
 -- removed_at tombstone flip (NULL→ts) and the one-time legacy profile materialisation
--- (member_code_hash/member_factors_json NULL→value); everything else ABORTs. A hard-DELETE or
--- in-place id/row rewrite is impossible through ANY connection (store API, repair tool, raw shell),
--- so family_graph_fingerprint's monotone (COUNT, MAX(id)) digest is exact.
+-- (member_code_hash/member_factors_json NULL→value); everything else ABORTs. An EXPLICIT
+-- DELETE or UPDATE is aborted through ANY connection (store API, repair tool, raw shell) —
+-- those fire the BEFORE triggers unconditionally. The IMPLICIT delete SQLite performs to resolve
+-- an `INSERT/REPLACE ... OR REPLACE` conflict, however, only fires the BEFORE DELETE trigger when
+-- `PRAGMA recursive_triggers=ON` — a PER-CONNECTION setting that db.connect() turns on but a raw
+-- sqlite3.connect() bypassing that helper does NOT get. So the REPLACE-append-only guarantee holds
+-- only for connections opened via db.connect() (every production path); a repair tool that opens a
+-- raw handle without recursive_triggers could still REPLACE a row in place. Within that scope,
+-- family_graph_fingerprint's monotone (COUNT, MAX(id)) digest is exact.
 CREATE TRIGGER IF NOT EXISTS trg_families_append_only_upd BEFORE UPDATE ON families
   BEGIN SELECT RAISE(ABORT, 'families is append-only (#524)'); END;
 CREATE TRIGGER IF NOT EXISTS trg_families_append_only_del BEFORE DELETE ON families
@@ -737,6 +759,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000;")  # WAL + busy_timeout = deliberate concurrency posture
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
+    # recursive_triggers is OFF by default, and with it OFF the implicit row-delete SQLite performs
+    # to resolve an `INSERT/REPLACE ... OR REPLACE` conflict does NOT fire BEFORE DELETE triggers.
+    # The v37 append-only triggers on families/family_members/family_parents/family_events/
+    # backtest_returns (#524) would therefore be silently bypassed by a REPLACE — an in-place row
+    # rewrite masquerading as an append. Turn it ON so the append-only invariant also covers the
+    # implicit-delete path. NB: this is a PER-CONNECTION pragma, not schema-resident: a raw
+    # sqlite3.connect() that skips this helper does NOT inherit it (see the narrowed trigger comment
+    # in _SCHEMA). Explicit DELETE/UPDATE stay aborted through ANY connection regardless.
+    conn.execute("PRAGMA recursive_triggers=ON;")
     return conn
 
 

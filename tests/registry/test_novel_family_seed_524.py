@@ -152,6 +152,29 @@ def test_funnel_lifetime_excludes_mistyped_and_overlarge_rows() -> None:
     assert audit["search_trials_corruption_count"] == 2
 
 
+def test_family_lifetime_excludes_corrupt_member_rows_like_funnel_path() -> None:
+    """lifetime_combos_for_families() must apply the SAME well-typed-row filter as the funnel/
+    mint-seed path: a legacy corrupt search_trials row for a family member is EXCLUDED, not
+    silently coerced to 0 by SUM, so the two lifetime-accounting paths cannot disagree."""
+    repo = _make_repo()
+    fid = repo.create_family("f", actor="human")
+    repo.assign_strategy_to_family(
+        "m", fid, actor="human", verdict="NOVEL", similarity_score=0.0,
+        clustering_version="v1", clustering_config_json="{}", axis_json="{}")
+    repo.record_search_trial("m", 12, "{}")  # well-typed → counts
+    # A migrated-DB legacy corrupt row (pre-#524, no CHECK) for the member: mistyped + overlarge.
+    repo._conn.execute("PRAGMA ignore_check_constraints=ON")
+    repo._conn.execute(
+        "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
+        " VALUES ('m', 'abc', '{}', ?)", (datetime.now(UTC).isoformat(),))
+    repo._conn.execute(
+        "INSERT INTO search_trials(strategy_name, n_combos, grid_json, created_at)"
+        " VALUES ('m', ?, '{}', ?)", (MAX_N_COMBOS + 1, datetime.now(UTC).isoformat()))
+    repo._conn.commit()
+    # Only the well-typed row (12) is taxed; the two corrupt rows are excluded (not coerced to 0).
+    assert repo.family_lifetime_combos(fid) == 12
+
+
 # ---------------------------------------------------------------------------
 # family_graph_fingerprint — monotone digest over the classifier read-set
 # ---------------------------------------------------------------------------
@@ -291,6 +314,81 @@ def test_all_append_only_triggers_present() -> None:
         assert f"trg_{tbl}_append_only_del" in trigs
     assert "trg_family_members_no_delete" in trigs
     assert "trg_family_members_append_only_upd" in trigs
+
+
+# ---------------------------------------------------------------------------
+# REPLACE (implicit-delete) append-only guard — recursive_triggers pragma (R9-H1)
+# ---------------------------------------------------------------------------
+
+def _connect_repo(tmp_path: object) -> SqliteStrategyRepository:
+    """A repository over a real DB opened through the app's db.connect() helper (which sets
+    PRAGMA recursive_triggers=ON), so the implicit-delete path of REPLACE fires BEFORE DELETE
+    triggers. The in-memory _make_repo() above deliberately does NOT go through connect()."""
+    from pathlib import Path
+
+    conn = db.connect(Path(str(tmp_path)) / "reg.db")
+    db.migrate(conn)
+    return SqliteStrategyRepository(conn)
+
+
+def test_replace_on_existing_row_aborts_via_recursive_triggers(tmp_path: object) -> None:
+    """The implicit row-delete SQLite runs to resolve a REPLACE conflict must fire the append-only
+    BEFORE DELETE trigger. Without PRAGMA recursive_triggers=ON this silently succeeds — an in-place
+    rewrite masquerading as an append. Covers families / family_members / backtest_returns."""
+    repo = _connect_repo(tmp_path)
+    fid = repo.create_family("f", actor="human")
+    repo.assign_strategy_to_family(
+        "m", fid, actor="human", verdict="NOVEL", similarity_score=0.0,
+        clustering_version="v1", clustering_config_json="{}", axis_json="{}")
+    repo.persist_backtest_returns("s", "2024-01-01", "2024-02-01", pd.Series([0.1]))
+    repo._conn.commit()
+    mid = repo._conn.execute(
+        "SELECT id FROM family_members WHERE strategy_name='m'").fetchone()[0]
+    brid = repo._conn.execute(
+        "SELECT id FROM backtest_returns WHERE strategy_name='s'").fetchone()[0]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        repo._conn.execute(
+            "REPLACE INTO families(id,name,created_at,created_by_actor,seeded_prior_combos)"
+            " VALUES (?, 'g', '2026-01-02T00:00:00+00:00', 'agent', 9)", (fid,))
+    with pytest.raises(sqlite3.IntegrityError):
+        repo._conn.execute(
+            "REPLACE INTO family_members(id,family_id,strategy_name,joined_at,joined_by_actor)"
+            " VALUES (?, ?, 'm', '2026-01-02T00:00:00+00:00', 'agent')", (mid, fid))
+    with pytest.raises(sqlite3.IntegrityError):
+        repo._conn.execute(
+            "REPLACE INTO backtest_returns(id,strategy_name,period_start,period_end,returns_json,"
+            "created_at) VALUES (?, 's', '2024-01-01', '2024-02-01', X'00', "
+            "'2026-01-02T00:00:00+00:00')", (brid,))
+
+
+def test_raw_connection_without_connect_helper_bypasses_replace_guard(tmp_path: object) -> None:
+    """Pins the NARROWED invariant claim: the REPLACE (implicit-delete) guard holds ONLY for
+    connections opened via db.connect(). A raw sqlite3.connect() that skips the helper does not get
+    PRAGMA recursive_triggers=ON, so a REPLACE conflict-delete bypasses the BEFORE DELETE trigger.
+    (An EXPLICIT DELETE still aborts on such a handle — that is asserted separately.)"""
+    from pathlib import Path
+
+    path = Path(str(tmp_path)) / "raw.db"
+    conn = db.connect(path)
+    db.migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    fid = repo.create_family("f", actor="human")
+    repo._conn.commit()
+    conn.close()
+
+    raw = sqlite3.connect(path)  # NOT db.connect() → recursive_triggers stays OFF (default)
+    raw.execute("PRAGMA foreign_keys=ON;")
+    # REPLACE succeeds — the append-only DELETE trigger is bypassed on this raw handle.
+    raw.execute(
+        "REPLACE INTO families(id,name,created_at,created_by_actor,seeded_prior_combos)"
+        " VALUES (?, 'g', '2026-01-02T00:00:00+00:00', 'agent', 9)", (fid,))
+    raw.commit()
+    assert raw.execute("SELECT name FROM families WHERE id=?", (fid,)).fetchone()[0] == "g"
+    # ...but an EXPLICIT DELETE still aborts even here (BEFORE DELETE fires unconditionally).
+    with pytest.raises(sqlite3.IntegrityError):
+        raw.execute("DELETE FROM families WHERE id=?", (fid,))
+    raw.close()
 
 
 # ---------------------------------------------------------------------------

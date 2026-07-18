@@ -167,6 +167,55 @@ def test_news_lane_unblocked_through_funnel(tmp_path):
     assert set(failing) <= {"regime_robustness", "idiosyncratic_alpha"}, failing
 
 
+def _burned_holdout_rows(tmp_path):
+    conn = sqlite3.connect(tmp_path / "r.db")
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM holdout_evaluations WHERE committed_at IS NOT NULL"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_run_gate_failure_after_burn_releases_noop_and_audits(tmp_path, monkeypatch):
+    """#524 R9-H4 narrowed residual: if run_gate raises AFTER on_peek has committed the holdout
+    burn (e.g. its own post-peek pre-lock pending-NOVEL drift re-check), the CLI must (a) apply the
+    same release-on-failure discipline as walk_forward (a post-burn no-op — the burn survives) and
+    (b) emit an explicit WARNING audit record so the race is monitored, never silently 'closed'."""
+    import algua.cli.research_cmd as research_cmd
+
+    bid, nid, _fid = _seed(tmp_path)
+    assert _backtest_to_backtested(
+        "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", nid).exit_code == 0
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("simulated post-peek drift in run_gate")
+
+    warnings: list[tuple[str, dict]] = []
+
+    class _Rec:
+        def warning(self, event, extra=None):
+            warnings.append((event, (extra or {}).get("fields", {})))
+
+    monkeypatch.setattr(research_cmd, "run_gate", _boom)
+    monkeypatch.setattr(research_cmd, "get_logger", lambda _n: _Rec())
+
+    r = _promote(["research", "promote", "news_coverage_tilt",
+                  "--snapshot", bid, "--news-snapshot", nid, *_WINDOW, *_RELAX,
+                  "--new-family", "news_fam2"])
+    # run_gate raised → the command fails (JSON error envelope), but the burn already happened.
+    assert r.exit_code != 0, r.stdout
+    # on_peek committed the burn before run_gate ran; release_holdout_reservation is a post-burn
+    # no-op, so the burned row SURVIVES (the residual is real, not hidden).
+    assert _burned_holdout_rows(tmp_path) == 1
+    # The narrowed race is audited, not silent.
+    events = [e for e, _f in warnings]
+    assert "holdout_burned_post_peek_gate_failed" in events, warnings
+    fields = next(f for e, f in warnings if e == "holdout_burned_post_peek_gate_failed")
+    assert fields["strategy"] == "news_coverage_tilt"
+    assert fields["exc_type"] == "RuntimeError"
+
+
 def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
     """A wrong-kind PIT snapshot (a FUNDAMENTALS id passed to --news-snapshot of a needs_news
     strategy) must fail closed BEFORE the holdout reservation, so a deterministic operator typo

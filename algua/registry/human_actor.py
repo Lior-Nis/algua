@@ -194,3 +194,125 @@ def resolve_effective_actor(
             "A bare --actor human does not unlock human-only paths."
         )
     return Actor.HUMAN
+
+
+# --------------------------------------------------------------------------------------------------
+# Non-strategy-scoped ("governance") human-actor authentication (#524).
+#
+# Some human-only authorities are repo-global — they have NO strategy identity to bind a challenge
+# to. The current one is `registry grant-novel-mints`, which tops up the durable agent-NOVEL family
+# mint budget (the quota whose exhaustion is the whole point of #524's multiple-testing anti-gaming
+# defense). A bare `--actor human` string on that command is as forgeable as it is anywhere else, so
+# it must clear the SAME algua-human-actor cryptographic gate as the strategy-scoped commands. The
+# only difference is the binding: instead of (strategy + recomputed artifact identity + run_context)
+# there is no strategy, so the challenge binds to the COMMAND + the requested integer `count`. That
+# is enough to make a captured signature authorize exactly one grant of exactly that size — it
+# cannot be replayed onto a larger count or a second grant (single-use nonce).
+# --------------------------------------------------------------------------------------------------
+
+
+def build_governance_challenge(command: str, grant_count: int, nonce: str, expires_at: str) -> str:
+    """The exact bytes the human signs for a non-strategy governance authority. ONE definition, used
+    to both issue and verify so the two can never drift. Binds to command + the requested integer
+    ``grant_count`` + single-use nonce + expiry (no strategy identity — this authority is
+    repo-global)."""
+    return (
+        f"{_NAMESPACE}\ncommand={command}\ngrant_count={grant_count}\n"
+        f"nonce={nonce}\nexpires_at={expires_at}"
+    )
+
+
+def issue_governance_challenge(
+    conn: sqlite3.Connection, command: str, grant_count: int, *, now: datetime | None = None,
+) -> dict[str, str]:
+    """Create + persist a pending governance challenge; return {nonce, expires_at, challenge}."""
+    now = now or _now()
+    nonce = secrets.token_hex(32)
+    expires_at = (now + _TTL).isoformat()
+    conn.execute(
+        "INSERT INTO governance_challenges(nonce, command, grant_count, issued_at, expires_at, "
+        "consumed_at) VALUES (?,?,?,?,?,NULL)",
+        (nonce, command, grant_count, now.isoformat(), expires_at),
+    )
+    conn.commit()
+    return {
+        "nonce": nonce, "expires_at": expires_at,
+        "challenge": build_governance_challenge(command, grant_count, nonce, expires_at),
+    }
+
+
+def _find_pending_governance_challenge(
+    conn: sqlite3.Connection, command: str, grant_count: int, *, now: datetime | None = None,
+) -> sqlite3.Row | None:
+    now = now or _now()
+    return conn.execute(
+        "SELECT * FROM governance_challenges WHERE command=? AND grant_count=? "
+        "AND consumed_at IS NULL AND expires_at > ? ORDER BY issued_at DESC LIMIT 1",
+        (command, grant_count, now.isoformat()),
+    ).fetchone()
+
+
+def _consume_governance_challenge(
+    conn: sqlite3.Connection, nonce: str, *, now: datetime | None = None,
+) -> bool:
+    now = now or _now()
+    cur = conn.execute(
+        "UPDATE governance_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
+        (now.isoformat(), nonce),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def verify_governance_assertion(
+    conn: sqlite3.Connection, command: str, grant_count: int, signature: bytes,
+    allowed_signers_path: Path | None = None, *, now: datetime | None = None,
+) -> str | None:
+    """Verify a governance human-actor signature over the REBUILT (command + grant_count + nonce +
+    expiry) payload against the enrolled algua-human-actor keys, then consume the matching
+    single-use nonce. Returns the matched principal on success, or None on any failure — fail
+    closed."""
+    anchor = allowed_signers_path or ALLOWED_SIGNERS_PATH
+    now = now or _now()
+    row = _find_pending_governance_challenge(conn, command, grant_count, now=now)
+    if row is None:
+        return None
+    payload = build_governance_challenge(command, grant_count, row["nonce"], row["expires_at"])
+    principal = verify_signature(anchor, payload, signature, namespace=_NAMESPACE)
+    if principal is None:
+        return None
+    if not _consume_governance_challenge(conn, row["nonce"], now=now):
+        return None
+    return principal
+
+
+def resolve_effective_governance_actor(
+    conn: sqlite3.Connection, command: str, grant_count: int, declared_actor: Actor,
+    signature: bytes | None, allowed_signers_path: Path | None = None, *,
+    now: datetime | None = None,
+) -> Actor:
+    """The non-strategy sibling of :func:`resolve_effective_actor` for repo-global governance
+    authorities (#524). Fail closed:
+
+    - declared AGENT / SYSTEM -> returned unchanged (agents never sign).
+    - declared HUMAN, no signature -> issue+persist a fresh challenge bound to (command,
+      grant_count) and raise HumanActorChallengeRequired (the CLI prints it). A bare `--actor human`
+      thus unlocks NOTHING.
+    - declared HUMAN + signature -> verify_governance_assertion; return HUMAN iff it authenticates,
+      else raise ValueError (a forged / replayed / expired / wrong-count signature is refused)."""
+    if declared_actor is not Actor.HUMAN:
+        return declared_actor
+    if signature is None:
+        issued = issue_governance_challenge(conn, command, grant_count, now=now)
+        raise HumanActorChallengeRequired(issued)
+    principal = verify_governance_assertion(
+        conn, command, grant_count, signature, allowed_signers_path, now=now)
+    if principal is None:
+        raise ValueError(
+            "human actor authentication failed: --actor-signature does not match an enrolled "
+            "algua-human-actor key over a fresh challenge bound to this exact command and count. "
+            "Re-run without --actor-signature to get a new challenge, sign it with your enrolled "
+            "key (ssh-keygen -Y sign -n algua-human-actor), and retry. A bare --actor human does "
+            "not unlock human-only paths."
+        )
+    return Actor.HUMAN

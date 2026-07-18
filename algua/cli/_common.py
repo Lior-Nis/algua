@@ -223,6 +223,49 @@ def authenticate_actor(
         raise typer.Exit() from None
 
 
+def authenticate_governance_actor(
+    conn: sqlite3.Connection, *, command: str, grant_count: int, declared_actor: Actor,
+    actor_signature: str | None,
+) -> Actor:
+    """Non-strategy sibling of :func:`authenticate_actor` for the repo-global governance commands
+    that have no strategy identity to bind a #329 challenge to (currently
+    ``registry grant-novel-mints``). Routes the declared ``--actor`` + optional
+    ``--actor-signature`` through the SAME algua-human-actor cryptographic gate, binding the
+    challenge to the command + the requested integer ``grant_count`` instead of a strategy
+    artifact identity.
+
+    - declared agent/system -> returned unchanged.
+    - declared human, NO signature -> a fresh single-use challenge is issued+persisted and PRINTED
+      as JSON, then the command EXITS 0 having granted nothing.
+    - declared human + signature -> verified over the rebuilt (command + count) payload; HUMAN on
+      success, ValueError on a forged / replayed / expired / wrong-count signature (fail closed)."""
+    import typer
+
+    from algua.cli.app import emit
+    from algua.registry.human_actor import (
+        HumanActorChallengeRequired,
+        resolve_effective_governance_actor,
+    )
+
+    if declared_actor is not Actor.HUMAN:
+        return declared_actor
+    signature = Path(actor_signature).read_bytes() if actor_signature else None
+    try:
+        return resolve_effective_governance_actor(
+            conn, command=command, grant_count=grant_count, declared_actor=declared_actor,
+            signature=signature)
+    except HumanActorChallengeRequired as exc:
+        emit(ok({
+            "action": "human_actor_challenge", "command": command, "grant_count": grant_count,
+            **exc.challenge,
+            "instructions": (
+                "sign the 'challenge' value with your enrolled algua-human-actor key: "
+                "ssh-keygen -Y sign -n algua-human-actor -f <key> <file>; "
+                "then re-run this command with --actor-signature <file>.sig"),
+        }))
+        raise typer.Exit() from None
+
+
 def now_iso() -> str:
     """Current UTC instant as an ISO-8601 string — the shared 'now' for persisted timestamps."""
     return datetime.now(UTC).isoformat()

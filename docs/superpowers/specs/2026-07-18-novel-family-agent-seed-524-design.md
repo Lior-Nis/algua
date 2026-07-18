@@ -25,8 +25,10 @@ eight findings and their R9 resolutions (§0 details):
 4. **The holdout-burn-on-drift-race channel is closed, not logged**: the reservation burn-commit at
    `on_peek` is preceded, **in the same transaction**, by the full pending-NOVEL snapshot revalidation
    (now entirely DB state per finding 3); on any drift it raises BEFORE finalising, so the reservation
-   stays pending and the existing release path frees the window — **no holdout is burned on drift**,
-   with no residual race (§7.2).
+   stays pending and the existing release path frees the window — **no holdout is burned for drift caught
+   at/before the on_peek burn**. NARROWED RESIDUAL (documented + monitored, not fully closed): run_gate's
+   own post-peek/pre-lock re-check runs AFTER on_peek has committed the burn, so drift first visible in that
+   window burns the holdout then fails the gate; it gets release-on-failure + a WARNING audit record (§7.2).
 5. **The cap/budget constants live in CODEOWNERS-protected `algua/registry/store.py`** as module
    constants — **no CLI flag, no env var** reachable by the autonomous loop; changing them requires a
    human PR to a protected file (§5.1 step 5b, §6A).
@@ -245,8 +247,10 @@ classifier read to a fingerprint component (§2.3, §2.5); (H2) a **human-replen
 is built and enforced under the lock, making the founder channel lifetime-finite as a non-statistical
 quota (§2.1, §5.1 step 5b, §6A); (H3) member profiles are **DB-persisted at assignment** and read from
 the DB, so the profile axis is inside the under-lock `graph_fingerprint` CAS and `profile_digest` is
-removed (§2.3, §7.1); (H4) the burn-commit at `on_peek` atomically re-validates the (now fully-DB)
-snapshot and releases the reservation on drift — **no burn on drift, no residual race** (§7.2); (M1) the
+removed (§2.3, §7.1); (H4) the burn-commit at `on_peek` re-validates the (now fully-DB) snapshot and
+releases the reservation for drift caught at/before the burn — **no burn for at-burn drift; the
+post-peek run_gate re-check is a narrowed, monitored residual (release-on-failure + WARNING audit), not
+fully closed** (§7.2); (M1) the
 constants live in CODEOWNERS-protected `store.py`, no flag/env (§5.1 step 5b, §6A); (M2)
 `families.founder_gate_id` gives a canonical founder→gate query (§2.1, §6D); (M3) the seed is a
 WHERE-filtered SUM over well-typed in-range rows — a corrupt row is excluded, never a permanent DoS
@@ -954,7 +958,16 @@ in the same PR: `record_search_trial` validates `type(n_combos) is int and 1 <= 
 int` excludes `bool`, an `int` subclass — R8-MEDIUM) and the
 fresh-DB `search_trials` DDL gains `CHECK (typeof(n_combos)='integer' AND n_combos >= 1)` (these stop
 NEW corruption; the mint-time integrity guard is the load-bearing control that also covers pre-existing
-legacy rows). Thus no agent can ever obtain a zero-prior (reset) or corruption-undersized family.
+legacy rows). Thus no agent driving the platform **through the CLI** (the CLAUDE.md contract — "drive
+the system through `uv run algua …`; never reach into modules to bypass the CLI") can ever obtain a
+zero-prior (reset) or corruption-undersized family: the only agent-reachable path to a family is the
+gated `research promote` NOVEL mint, which always seeds `>0`. The lower-level
+`SqliteStrategyRepository.create_family` / `assign_strategy_to_family` helpers still accept an
+arbitrary `actor` string with no caller-identity enforcement, so a script that *bypasses the CLI* to
+call them directly could pre-seat a strategy into a zero-prior family — but that is a pre-existing
+property of those helpers (the same bypass has existed for MERGE/PARENTAGE assignment since #222, and
+is not a #524 regression), squarely outside the CLI trust boundary this design defends. Hardening the
+store helpers to enforce actor identity themselves is a separate, cross-cutting follow-up.
 Zero-seed families are exactly the human-authorized ones (legacy
 *or* deliberate fresh grant) — both legitimately carry no prior because a human vouched. The
 legacy-vs-deliberate distinction is not security-relevant (both are human-authorized); if a future
@@ -1068,8 +1081,8 @@ else:
      raise `FamilyGraphDriftError(axis=…)`.
   All are **clean pre-peek refusals that burn NO holdout and mint NO consumable gate row**. The §5.1
   step-1/step-5b under-lock checks remain the authoritative race-safe re-checks.
-- **The holdout is never burned on drift — atomic re-check AT the burn instant (Finding R9-HIGH-4, closes
-  the R8 during-`walk_forward` residual).** R8 left a residual: drift landing *during* `walk_forward`
+- **The holdout-burn-on-drift window is NARROWED at the burn instant (Finding R9-HIGH-4, shrinks — does NOT
+  fully close — the R8 during-`walk_forward` residual).** R8 left a residual: drift landing *during* `walk_forward`
   (after the pre-peek check, while the holdout metric is computed) still burned the holdout and was only
   logged. R9 closes it by exploiting the existing reserve→run→finalize holdout architecture (#161): the
   burn commits at the `on_peek` callback (the instant before the holdout metric is read), and the CLI
@@ -1078,11 +1091,17 @@ else:
   reads thanks to R9-HIGH-3)**; on any drift it raises `FamilyGraphDriftError`/`AgentMintCapError`/
   `AgentMintBudgetExhaustedError` **before** `finalize_holdout_reservation` runs, so the reservation stays
   **pending** and the existing `except`-clause `release_holdout_reservation` frees the window — **no
-  holdout burned**. Because the snapshot check and the burn-commit are one transaction, there is **no
-  residual race** (contrast R8's "unavoidable narrow during-peek race"): the holdout is burned only if the
-  snapshot is provably still valid at the atomic burn instant. This is the reviewer's asked-for
-  "reservation semantics releasable on drift," not logging. (The subsequent under-lock §5.1 step-1/5b
-  checks in the promote tx remain as the final authority for anything landing between the burn and the
+  holdout burned** for drift caught at/before the burn. RESIDUAL, honestly scoped (not "no residual race"):
+  run_gate runs its OWN pre-lock pending-NOVEL re-check AFTER `walk_forward` returns — i.e. AFTER `on_peek`
+  already committed the burn — so drift that first becomes visible in that post-peek/pre-lock window burns
+  the holdout and then fails the gate. That path is given the SAME release-on-failure discipline as
+  `walk_forward` (a post-burn no-op `release_holdout_reservation`) PLUS an explicit WARNING audit record
+  (`holdout_burned_post_peek_gate_failed`), so the narrowed race is observable and monitored, never
+  silently claimed as closed — consistent with how R7/R8 residuals were required to be explicitly scoped.
+  Fully closing it would require folding `finalize_holdout_reservation` into the same atomic tx as the mint
+  (`record_gate_with_fdr_and_maybe_promote`); deferred as out of scope for this round. This is the reviewer's
+  asked-for "reservation semantics releasable on drift," not logging-only. (The subsequent under-lock §5.1
+  step-1/5b checks in the promote tx remain as the final authority for anything landing between the burn and the
   promote commit; those, if they fire, roll back the whole promote with no family and no consumable gate
   row — and, since the reservation already committed at `on_peek`, that is the one narrow case a holdout
   is spent, now reduced to "drift in the microseconds between the atomic burn and the promote-tx lock,"

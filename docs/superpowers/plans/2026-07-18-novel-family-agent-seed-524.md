@@ -102,8 +102,10 @@ append-only triggers + the `agent_mint_grants` ledger).
 - `research_cmd.py` (CLI): **wrap the `on_peek` burn callback so it re-runs the pending-NOVEL revalidation
   (still-unassigned + fingerprint + cap + budget — all pure DB) in the SAME tx as
   `finalize_holdout_reservation`, raising BEFORE finalize on any drift** → reservation stays pending → the
-  existing `except` `release_holdout_reservation` frees the window → **no holdout burned on drift, no
-  residual race** (R9-H4). CLI handles `FamilyGraphDriftError`/`AgentMintCapError`/
+  existing `except` `release_holdout_reservation` frees the window → **no holdout burned for drift caught
+  at/before on_peek; the post-peek/pre-lock run_gate re-check is a NARROWED residual — documented and
+  monitored (WARNING audit + release-on-failure), not silently closed** (R9-H4). CLI handles
+  `FamilyGraphDriftError`/`AgentMintCapError`/
   `AgentMintBudgetExhaustedError` like `FunnelDriftError` (re-run preflight / surface the bound), logging
   strategy name + drift axis.
 - `promotion.py` `run_gate`: pre-lock mirror — when pending, require `strategy_family(name) is None` AND
@@ -125,8 +127,9 @@ append-only triggers + the `agent_mint_grants` ledger).
   drift abort (returns-refresh + parentage + member-removal sub-cases + the R6-CRITICAL capture race);
   **persisted-profile: live source edit cannot flip a member / bumps no fingerprint (R9-H3)**; load-bearing
   rate cap fail-closed canonical `families` + boundary/roll-off/human-not-counted/event-missing; **lifetime
-  budget fail-closed + human grant replenishes + agent cannot self-grant (R9-H2)**; **atomic burn-time
-  release-on-drift → NO holdout burned even during walk_forward (R9-H4)**; **founder_gate_id query both
+  budget fail-closed + human grant replenishes + agent cannot self-grant (R9-H2)**; **burn-time
+  release-on-drift → no holdout burned for drift caught at/before on_peek; post-peek run_gate re-check is a
+  narrowed, monitored residual (R9-H4)**; **founder_gate_id query both
   directions (R9-M2)**; **UTC fail-closed on the cap query (R9-LOW)**; **constants are CODEOWNERS store.py
   module constants, no flag/env (R9-M1 scanner)**; actor string-vs-enum coercion + pending-object
   validation; #339 drift still trips; family-audit advisory. End-to-end agent NOVEL promote now passes
@@ -153,8 +156,9 @@ append-only triggers + the `agent_mint_grants` ledger).
   3. `profile_digest` pre-lock-only trust boundary → **member profiles DB-persisted at assignment**, read
      from DB, so the profile axis is inside the under-lock `graph_fingerprint` CAS; `profile_digest`
      REMOVED (Tasks 1+3).
-  4. Holdout-burn-via-drift-race only logged → **atomic re-check at the `on_peek` burn instant releases the
-     reservation on drift** — no holdout burned, no residual race (Task 3).
+  4. Holdout-burn-via-drift-race → **re-check at the `on_peek` burn instant releases the reservation for
+     drift caught at/before the burn (no holdout burned); the post-peek/pre-lock run_gate re-check remains a
+     NARROWED residual — release-on-failure + WARNING audit, documented + monitored, not fully closed** (Task 3).
   5. Cap/window constants' home unstated → **CODEOWNERS-protected `store.py` module constants, no CLI flag /
      env var** (Task 3 + a scanner test).
   6. Founder audit blind spot → **`families.founder_gate_id`** queryable both directions (Tasks 1+3).

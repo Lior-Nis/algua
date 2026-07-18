@@ -41,6 +41,7 @@ from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.knowledge.experience import write_experience_note
+from algua.observability.log import get_logger
 from algua.registry import live_gate
 from algua.registry.human_actor import canonical_run_context
 from algua.registry.negative_results import (
@@ -363,11 +364,19 @@ def promote_task(  # noqa: PLR0913, PLR0915
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             holdout_start=holdout_start, holdout_end=holdout_end,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
-        # #524 (R9-H4): the holdout is never burned on drift. on_peek commits the reservation the
-        # instant BEFORE the holdout metric is read; wrap it so it FIRST re-runs the pending-NOVEL
-        # revalidation (still-unassigned + graph fingerprint + rate cap + lifetime budget — all pure
-        # DB reads) and raises BEFORE finalize on drift/bound. The reservation then stays pending
-        # → the except-release below frees the window → no holdout burned, no residual race.
+        # #524 (R9-H4): the holdout-burn-on-drift window is NARROWED, not fully closed. on_peek
+        # commits the reservation the instant BEFORE the holdout metric is read; wrap it so it FIRST
+        # re-runs the pending-NOVEL revalidation (still-unassigned + graph fingerprint + rate cap +
+        # lifetime budget — all pure DB reads) and raises BEFORE finalize on drift/bound. Drift
+        # caught here → the reservation stays pending → the except-release below frees the window →
+        # no holdout burned. RESIDUAL (documented + monitored, NOT silently "closed"): run_gate
+        # below runs its OWN pre-lock pending-NOVEL re-check AFTER walk_forward has returned — AFTER
+        # on_peek already committed the burn. Drift that first becomes visible in that post-peek
+        # pre-lock window burns the holdout and then fails the gate. That path is given the same
+        # release-on-failure discipline as walk_forward (release_holdout_reservation, a post-burn
+        # no-op) PLUS an explicit WARNING audit record below, so the race is observable and cannot
+        # masquerade as fully closed. Fully closing it would require folding finalize_holdout into
+        # the same atomic tx as the mint (record_gate_with_fdr_and_maybe_promote) — deferred.
         def _on_peek(cfg: str) -> None:
             if breadth.pending_novel_family is not None:
                 _revalidate_pending_novel(repo, name, breadth.pending_novel_family)
@@ -397,13 +406,35 @@ def promote_task(  # noqa: PLR0913, PLR0915
             except Exception:
                 pass
             raise
-        outcome = run_gate(
-            repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
-            universe_name=universe, universe_snapshots=universe_prov,
-            period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
-            data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
-            holdout_evaluation_id=reservation_id, attempt_token=attempt_token,
-            reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
+        # walk_forward returned, so on_peek ran and the holdout burn is ALREADY committed. Give
+        # run_gate the same release-on-failure discipline (#524 R9-H4 residual): a raise here —
+        # including run_gate's own pre-lock pending-NOVEL drift re-check — leaves a burned holdout,
+        # so release_holdout_reservation is a post-burn no-op. Emit an explicit WARNING audit record
+        # for exactly this post-peek/pre-commit failure so the narrowed race is monitored, never
+        # silently masquerading as fully closed. Then re-raise unchanged.
+        try:
+            outcome = run_gate(
+                repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
+                universe_name=universe, universe_snapshots=universe_prov,
+                period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
+                data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
+                holdout_evaluation_id=reservation_id, attempt_token=attempt_token,
+                reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
+        except BaseException as exc:
+            try:
+                repo.release_holdout_reservation(reservation_id)  # post-burn no-op
+            except Exception:
+                pass
+            get_logger(__name__).warning(
+                "holdout_burned_post_peek_gate_failed",
+                extra={"fields": {
+                    "strategy": name, "reservation_id": reservation_id,
+                    "exc_type": type(exc).__name__, "exc_message": str(exc),
+                    "note": "#524 R9-H4 narrowed residual: holdout was burned at on_peek before "
+                            "run_gate raised; window documented + monitored, not fully closed",
+                }},
+            )
+            raise
         decision, promoted = outcome.decision, outcome.promoted
         # Advisory negative-result capture (#332): on a gate FAIL only, record the refuted
         # hypothesis into the experience log so it is not lost with the branch. BEST-EFFORT — a

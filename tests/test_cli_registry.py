@@ -5,6 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
 runner = CliRunner()
 
@@ -752,20 +753,56 @@ def test_transition_survives_kb_sync_failure(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# #524: human-only `registry grant-novel-mints` (replenishes the lifetime mint budget)
+# #524: human-only `registry grant-novel-mints` (replenishes the lifetime mint budget). The human
+# assertion clears the SAME #329 algua-human-actor gate the promote commands use, via the
+# non-strategy governance-challenge sibling — a bare `--actor human` only issues a challenge.
 # ---------------------------------------------------------------------------
 
-def test_grant_novel_mints_human_appends_budget():
-    out = _json(runner.invoke(
-        app, ["registry", "grant-novel-mints", "--count", "5", "--actor", "human",
-              "--reason", "epoch top-up"]))
+def test_grant_novel_mints_human_appends_budget(monkeypatch, tmp_path):
+    key = install_human_actor_anchor(monkeypatch, tmp_path)
+    out = _json(promote_signed(
+        runner, app,
+        ["registry", "grant-novel-mints", "--count", "5", "--actor", "human",
+         "--reason", "epoch top-up"], key, tmp_path))
     assert out["ok"] is True
     assert out["granted"] == 5
     assert out["grant_row_id"] >= 1
-    # A second grant accumulates.
-    out2 = _json(runner.invoke(
-        app, ["registry", "grant-novel-mints", "--count", "3", "--actor", "human"]))
+    # A second grant accumulates (a fresh challenge is signed for the new count).
+    out2 = _json(promote_signed(
+        runner, app,
+        ["registry", "grant-novel-mints", "--count", "3", "--actor", "human"], key, tmp_path))
     assert out2["lifetime_allowance"] == out["lifetime_allowance"] + 3
+
+
+def test_grant_novel_mints_bare_human_only_issues_challenge_grants_nothing(monkeypatch, tmp_path):
+    install_human_actor_anchor(monkeypatch, tmp_path)
+    # A bare `--actor human` WITHOUT a signature prints a challenge and grants nothing (exit 0).
+    out = _json(runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "5", "--actor", "human"]))
+    assert out["action"] == "human_actor_challenge"
+    assert out["grant_count"] == 5
+    # No grant occurred: the grant-only result keys are absent.
+    assert "granted" not in out
+    assert "grant_row_id" not in out
+
+
+def test_grant_novel_mints_signature_for_wrong_count_is_refused(monkeypatch, tmp_path):
+    key = install_human_actor_anchor(monkeypatch, tmp_path)
+    # Sign a challenge for count=5, then try to redeem it for count=500 (replay/escalation).
+    first = runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "5", "--actor", "human"])
+    challenge = json.loads(first.stdout)["challenge"]
+    import subprocess
+    data = tmp_path / "c.txt"
+    data.write_text(challenge)
+    subprocess.run(
+        ["ssh-keygen", "-Y", "sign", "-n", "algua-human-actor", "-f", str(key), str(data)],
+        check=True, capture_output=True)
+    result = runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "500", "--actor", "human",
+              "--actor-signature", str(tmp_path / "c.txt.sig")])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["ok"] is False
 
 
 def test_grant_novel_mints_agent_is_refused():
