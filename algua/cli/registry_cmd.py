@@ -8,7 +8,6 @@ import typer
 
 from algua.audit.log import append as audit_append
 from algua.cli._common import (
-    authenticate_governance_actor,
     ok,
     registry_conn,
     sync_kb_doc,
@@ -159,46 +158,6 @@ def show(name: str) -> None:
         rec = repo.get(name)
         transitions = repo.list_transitions(name)
     emit(ok({**_record_json(rec), "transitions": transitions}))
-
-
-@registry_app.command("grant-novel-mints")
-@json_errors
-def grant_novel_mints(
-    count: int = typer.Option(..., "--count", help="number of agent-NOVEL family mints to grant"),
-    actor: str = typer.Option("human", "--actor", help="MUST be human (governance quota top-up)"),
-    actor_signature: str = typer.Option(
-        None, "--actor-signature",
-        help="path to the SSH signature over the printed algua-human-actor challenge (#329/#524)"),
-    reason: str = typer.Option(None, "--reason", help="free-text audit note"),
-) -> None:
-    """HUMAN-ONLY (#524): replenish the durable, human-granted agent-NOVEL lifetime mint budget by
-    appending an ``agent_mint_grants`` row (lifetime allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET +
-    SUM(grants)). Once the epoch budget is spent the agent cannot found another root family until a
-    human grants more here. The ``granted_by_actor='human'`` DB CHECK backstops the actor guard.
-
-    Human authentication is the SAME #329 cryptographic gate the strategy-scoped promote commands
-    use, via the non-strategy ``governance_challenges`` sibling (#524): a bare ``--actor human``
-    only PRINTS a single-use challenge (bound to this command + the requested ``count``); the grant
-    happens only when re-run with ``--actor-signature`` over that challenge, signed by an enrolled
-    ``algua-human-actor`` key. A forged/replayed signature, or one for a different count, is refused
-    (fail closed) — so this authority is no longer unlockable by a declared-string alone."""
-    target_actor = Actor(actor)
-    with registry_conn() as conn:
-        effective = authenticate_governance_actor(
-            conn, command="registry grant-novel-mints", grant_count=count,
-            declared_actor=target_actor, actor_signature=actor_signature)
-        if effective is not Actor.HUMAN:
-            raise ValueError("registry grant-novel-mints is human-only: pass --actor human")
-        repo = SqliteStrategyRepository(conn)
-        row_id = repo.grant_agent_novel_mints(count, actor="human", reason=reason)
-        audit = repo.agent_novel_mint_audit()
-    emit(ok({
-        "granted": count,
-        "grant_row_id": row_id,
-        "lifetime_allowance": audit["lifetime_allowance"],
-        "lifetime_consumed": audit["lifetime_consumed"],
-        "lifetime_remaining": audit["lifetime_remaining"],
-    }))
 
 
 @registry_app.command("transition")

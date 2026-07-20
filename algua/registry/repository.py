@@ -159,15 +159,6 @@ class AgentMintCapError(ValueError):
     pass
 
 
-class AgentMintBudgetExhaustedError(ValueError):
-    """Raised (fail-closed) when an agent-NOVEL mint would exceed the durable, human-replenished
-    lifetime mint budget (``AGENT_NOVEL_MINT_LIFETIME_BUDGET`` + granted top-ups) (#524). A human
-    must append an ``agent_mint_grants`` row (``registry grant-novel-mints``) before the agent can
-    found again. A ``ValueError`` for clean JSON surfacing."""
-
-    pass
-
-
 class PendingNovelFamily(NamedTuple):
     """A deferred agent-NOVEL family spec carried on the breadth context (#524, R9). NO family is
     created at classification time; this spec is materialised into a seeded family INSIDE the atomic
@@ -663,8 +654,8 @@ class GateLedger(Protocol):
         ``pending_novel_family`` (#524): when set AND ``final_passed`` is True, the seeded agent
         NOVEL family is created and the founder assigned in the SAME transaction, gated by: a
         still-unassigned + ``family_graph_fingerprint`` CAS (else ``FamilyGraphDriftError``), the
-        per-window rate cap (else ``AgentMintCapError``) and the lifetime budget (else
-        ``AgentMintBudgetExhaustedError``) and a WHERE-filtered ``seeded_prior_combos > 0`` seed.
+        per-window rate cap (else ``AgentMintCapError``) and a WHERE-filtered
+        ``seeded_prior_combos > 0`` seed.
         The family is minted by RAW locked INSERTs (never the public ``create_family``/
         ``assign_strategy_to_family`` helpers, which open their own transactions). ``actor`` is
         coerced to ``Actor`` at entry; the mint fail-closes unless ``actor is Actor.AGENT`` AND the
@@ -876,16 +867,10 @@ class FamilyGraph(Protocol):
         NOT under the promote write lock."""
         ...
 
-    def grant_agent_novel_mints(self, count: int, *, actor: str, reason: str | None = None) -> int:
-        """Append a human-only ``agent_mint_grants`` row topping up the lifetime agent-NOVEL mint
-        budget by ``count`` (#524, R9-H2). ``actor`` MUST be 'human' (the DB CHECK backstops it).
-        Returns the new row id."""
-        ...
-
     def agent_novel_mint_audit(self) -> dict:
         """Read-only mint-governance stats for the ``family-audit`` advisory block (#524): rate-cap
-        headroom (``mints_in_window``/``window_cap``/``window_days``), lifetime-budget headroom
-        (``lifetime_consumed``/``lifetime_allowance``/``lifetime_remaining``), and
+        headroom (``mints_in_window``/``window_cap``/``window_days``), ``lifetime_consumed`` (the
+        lifetime COUNT of agent families minted, monitoring-only), and
         ``search_trials_corruption_count`` (``n_rows − n_well_typed``)."""
         ...
 
@@ -895,11 +880,10 @@ class FamilyGraph(Protocol):
         ...
 
     def check_agent_novel_mint_bounds(self) -> None:
-        """Fail-closed on the agent-NOVEL per-window rate cap (``AgentMintCapError``) and the
-        human-replenished lifetime budget (``AgentMintBudgetExhaustedError``) (#524). Both count the
-        canonical ``families`` table; the rate cap parses each counted ``created_at`` as canonical
-        UTC and fail-closes on a non-canonical value. Safe lock-free or under the promote
-        write lock (authoritative)."""
+        """Fail-closed on the agent-NOVEL per-window rate cap (``AgentMintCapError``) (#524) — the
+        SOLE automatic bound on agent-NOVEL minting. Counts the canonical ``families`` table; parses
+        each counted ``created_at`` as canonical UTC and fail-closes on a non-canonical value. Safe
+        lock-free or under the promote write lock (authoritative)."""
         ...
 
     def strategy_family(self, strategy_name: str) -> int | None:

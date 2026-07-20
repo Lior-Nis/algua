@@ -308,22 +308,6 @@ CREATE TABLE IF NOT EXISTS actor_challenges (
     expires_at      TEXT NOT NULL,
     consumed_at     TEXT
 );
--- v37 (#524): the NON-strategy-scoped sibling of actor_challenges for repo-global governance
--- authorities that have no strategy identity to bind to (currently `registry grant-novel-mints`,
--- the human-only agent-NOVEL mint-budget top-up). It reuses the SAME algua-human-actor trust anchor
--- + single-use-nonce discipline as actor_challenges, but binds the signature to (command + the
--- requested integer `count`) + nonce + expiry INSTEAD OF a strategy identity, so a signature
--- authorizes EXACTLY one grant of exactly that size and cannot be replayed onto a larger count or a
--- second grant. Like actor_challenges we persist only the non-payload parts (nonce, count,
--- command, expiry); verify REBUILDS the canonical challenge and consumes the nonce single-use.
-CREATE TABLE IF NOT EXISTS governance_challenges (
-    nonce        TEXT PRIMARY KEY,
-    command      TEXT NOT NULL,
-    grant_count  INTEGER NOT NULL CHECK (grant_count >= 1),
-    issued_at    TEXT NOT NULL,
-    expires_at   TEXT NOT NULL,
-    consumed_at  TEXT
-);
 -- The signed payload is NEVER stored verbatim and re-verified — an agent with DB write could then
 -- pair vetted-identity columns with a foreign signature (codex CRITICAL). We store only the
 -- non-identity payload parts (nonce, expires_at); trade-time verification REBUILDS the canonical
@@ -620,17 +604,6 @@ CREATE TABLE IF NOT EXISTS family_members (
     removed_at      TEXT,
     member_code_hash    TEXT,
     member_factors_json TEXT
-);
--- v37 (#524, R9-H2): human-replenished lifetime agent-NOVEL mint budget. APPEND-ONLY ledger of
--- grants; lifetime allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET (a CODEOWNERS-protected store.py
--- constant) + COALESCE(SUM(grant_count),0). Only a HUMAN actor may append (a governance quota,
--- NOT a statistical term — does not offend #324). Consumed = lifetime COUNT of agent families.
-CREATE TABLE IF NOT EXISTS agent_mint_grants (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    granted_at       TEXT NOT NULL,
-    granted_by_actor TEXT NOT NULL CHECK (granted_by_actor = 'human'),
-    grant_count      INTEGER NOT NULL CHECK (grant_count >= 1),
-    reason           TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_family_members_strategy_family
     ON family_members(strategy_name, family_id) WHERE removed_at IS NULL;

@@ -1,5 +1,42 @@
 # NOVEL family: agent-create with a durable seeded lifetime-breadth prior (#524)
 
+## R10 amendment (2026-07-20) — drop the human mint budget; keep the automatic rate cap as the SOLE bound
+
+**Decision (user-approved, after a Codex adversarial consult).** The R9 implementation shipped TWO
+count-bounds on agent-NOVEL family minting: (1) an **automatic per-window rate cap** (`AGENT_NOVEL_MINT_CAP`
+≈ 8 mints / 90 days, canonical-UTC, fail-closed) and (2) a **human-replenished lifetime mint budget**
+(`AGENT_NOVEL_MINT_LIFETIME_BUDGET` + an append-only `agent_mint_grants` ledger, topped up via a human-only
+`registry grant-novel-mints` CLI). **R10 REMOVES bound (2) entirely and KEEPS bound (1) as the sole
+automatic bound.**
+
+**Rationale.** The project goal is zero-human autonomy; a human-replenished budget is a recurring
+human-in-the-loop friction that defeats that goal, and its `grant-novel-mints` gate leaned on a declared
+`--actor human` string (a forgeable surface; the governance-challenge signature machinery added to shore it
+up was extra attack surface that existed ONLY for this one command). A Codex adversarial consult confirmed
+that *some* automatic count-bound must remain: the deferred pass-time seed alone does NOT stop the
+**repeated-founder attack**, because the family is minted (and seeded with the lifetime-breadth prior) only
+*after* the founder's gate passes — the founder itself escapes the tax, so an attacker who keeps founding
+fresh families each escapes their own arm-0 seed. The automatic per-window rate cap is the retained
+count-bound that throttles that repetition without any human action. Removing the human budget therefore
+(a) restores full autonomy, (b) deletes the forgeable-`--actor` grant gap, and (c) reopens **no** gaming
+vector beyond the already-accepted rate-cap-throttled residual — the rate cap was always the burst control;
+it is now simply the *only* control.
+
+**What R10 removes:** the `registry grant-novel-mints` CLI + `grant_agent_novel_mints` repo method; the
+`agent_mint_grants` ledger table (never created — dropped from the v37 schema); `AgentMintBudgetExhaustedError`;
+the `AGENT_NOVEL_MINT_LIFETIME_BUDGET` constant + the under-lock budget check; and the non-strategy
+`governance_challenges` table + `human_actor` governance-challenge helpers, which existed only to gate
+`grant-novel-mints`. **What R10 keeps unchanged:** the deferred pass-time mint architecture, the
+lifetime-breadth SEED (`seeded_prior_combos` / `founder_gate_id`), the automatic per-window rate cap
+(`AgentMintCapError`), the still-NOVEL fingerprint CAS (`FamilyGraphDriftError`), the append-only triggers,
+the on_peek release-on-drift, the type-safe `n_combos` CHECK, and the NOVEL+human fresh-0-prior-family path.
+
+The R9 sections below describe the original two-bound design and are retained for history; where they
+reference the human lifetime budget / `grant-novel-mints` / `agent_mint_grants`, read them as superseded by
+this R10 amendment.
+
+---
+
 **Status:** design — **R9 (2026-07-18), revised after GATE-1 BLOCK.** R8 had a Codex APPROVE, but three
 independent Codex read-only adversarial GATE-1 passes (condensed summary; summary + governance-residual
 arguments; and the FULL verbatim body §1-9) all returned **BLOCK** with new *structural* objections —

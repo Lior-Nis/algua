@@ -1,6 +1,9 @@
-"""#524 (R9) — agent-NOVEL durable seed: schema v37, append-only triggers, the funnel-lifetime
-accessor + graph fingerprint, and the mint authority bounds (rate cap + human-replenished lifetime
-budget). Store-layer proof the deferred-pass-time-mint architecture is enforced by mechanism.
+"""#524 (R9, R10) — agent-NOVEL durable seed: schema v37, append-only triggers, the funnel-lifetime
+accessor + graph fingerprint, and the SOLE automatic mint bound (per-window rate cap). Store-layer
+proof the deferred-pass-time-mint architecture is enforced by mechanism.
+
+R10 (2026-07-20) removed the human-replenished lifetime mint budget + `grant-novel-mints` grant CLI;
+the automatic per-window rate cap is now the only count-bound on agent-NOVEL minting.
 
 These tests exercise the store/repository seams directly; the atomic pass-time mint end-to-end
 path (record_gate_with_fdr_and_maybe_promote) is covered by the promote CLI tests.
@@ -16,13 +19,11 @@ import pytest
 from algua.registry import db
 from algua.registry.db import MAX_N_COMBOS
 from algua.registry.repository import (
-    AgentMintBudgetExhaustedError,
     AgentMintCapError,
     PendingNovelFamily,
 )
 from algua.registry.store import (
     AGENT_NOVEL_MINT_CAP,
-    AGENT_NOVEL_MINT_LIFETIME_BUDGET,
     SqliteStrategyRepository,
 )
 
@@ -51,7 +52,7 @@ def _insert_agent_family(
 
 
 # ---------------------------------------------------------------------------
-# Schema v37: columns, grants table, user_version
+# Schema v37: columns, user_version
 # ---------------------------------------------------------------------------
 
 def test_schema_version_is_37() -> None:
@@ -73,18 +74,15 @@ def test_family_members_has_persisted_profile_columns() -> None:
     assert "member_factors_json" in cols
 
 
-def test_agent_mint_grants_table_exists_and_is_human_only() -> None:
+def test_dropped_budget_tables_do_not_exist() -> None:
+    """R10: the human-mint-budget machinery is gone — neither the grant ledger nor the governance
+    challenge table is ever created."""
     repo = _make_repo()
-    # granted_by_actor CHECK ='human'
-    with pytest.raises(sqlite3.IntegrityError):
-        repo._conn.execute(
-            "INSERT INTO agent_mint_grants(granted_at, granted_by_actor, grant_count)"
-            " VALUES ('2026-01-01T00:00:00+00:00', 'agent', 1)")
-    # grant_count CHECK >=1
-    with pytest.raises(sqlite3.IntegrityError):
-        repo._conn.execute(
-            "INSERT INTO agent_mint_grants(granted_at, granted_by_actor, grant_count)"
-            " VALUES ('2026-01-01T00:00:00+00:00', 'human', 0)")
+    tables = {
+        r[0] for r in repo._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert "agent_mint_grants" not in tables
+    assert "governance_challenges" not in tables
 
 
 def test_seeded_prior_combos_check_rejects_negative_on_fresh_db() -> None:
@@ -411,9 +409,10 @@ def test_rate_cap_fails_closed_at_window_limit() -> None:
 def test_rate_cap_ignores_out_of_window_families() -> None:
     repo = _make_repo()
     old = (datetime.now(UTC) - timedelta(days=200)).isoformat()
-    for i in range(AGENT_NOVEL_MINT_CAP):
+    # Far MORE than the cap, but all out of the 90d window → the rate cap (the SOLE bound) is not
+    # tripped. Proves there is no lifetime count-bound anymore: unbounded old mints are fine.
+    for i in range(AGENT_NOVEL_MINT_CAP * 5):
         _insert_agent_family(repo, f"old{i}", created_at=old)
-    # All out of the 90d window → rate cap not tripped (budget still has room).
     repo.check_agent_novel_mint_bounds()
 
 
@@ -435,30 +434,28 @@ def test_rate_cap_fails_closed_on_non_canonical_created_at() -> None:
         repo.check_agent_novel_mint_bounds()
 
 
-def test_lifetime_budget_fails_closed_when_exhausted_and_human_grant_replenishes() -> None:
+def test_rate_cap_is_the_sole_bound_no_lifetime_budget() -> None:
+    """R10: the per-window rate cap is the ONLY count-bound. A funnel with the cap's worth of
+    IN-window mints fails closed; a funnel with an UNBOUNDED number of already-aged mints (window
+    rolled) passes with NO human action — there is no lifetime budget to exhaust and no
+    `grant_agent_novel_mints` method to replenish one."""
     repo = _make_repo()
-    # Fill the lifetime budget with out-of-window agent families (so the RATE cap is not the
-    # one that trips — we want to prove the BUDGET is the binding bound).
-    old = (datetime.now(UTC) - timedelta(days=200)).isoformat()
-    for i in range(AGENT_NOVEL_MINT_LIFETIME_BUDGET):
-        _insert_agent_family(repo, f"life{i}", created_at=old)
-    with pytest.raises(AgentMintBudgetExhaustedError):
+    # The budget/grant API is gone entirely.
+    assert not hasattr(repo, "grant_agent_novel_mints")
+    # Cap tripped by in-window mints.
+    for i in range(AGENT_NOVEL_MINT_CAP):
+        _insert_agent_family(repo, f"win{i}")
+    with pytest.raises(AgentMintCapError):
         repo.check_agent_novel_mint_bounds()
-    # A human grant replenishes the budget.
-    repo.grant_agent_novel_mints(5, actor="human", reason="epoch top-up")
-    repo.check_agent_novel_mint_bounds()  # now passes
 
-
-def test_agent_cannot_self_grant() -> None:
-    repo = _make_repo()
-    with pytest.raises(ValueError):
-        repo.grant_agent_novel_mints(3, actor="agent")
-
-
-def test_grant_rejects_non_positive_count() -> None:
-    repo = _make_repo()
-    with pytest.raises(ValueError):
-        repo.grant_agent_novel_mints(0, actor="human")
+    # A DIFFERENT funnel whose mints have all aged out of the window passes regardless of count —
+    # the window roll restores headroom, no human grant needed (created_at is immutable under the
+    # append-only families trigger, so this is a fresh repo, not an in-place update).
+    aged = _make_repo()
+    old = (datetime.now(UTC) - timedelta(days=200)).isoformat()
+    for i in range(AGENT_NOVEL_MINT_CAP * 3):
+        _insert_agent_family(aged, f"aged{i}", created_at=old)
+    aged.check_agent_novel_mint_bounds()
 
 
 # ---------------------------------------------------------------------------
@@ -531,11 +528,14 @@ def test_mint_succeeds_and_persists_seed_founder_and_profile() -> None:
     assert repo.family_lifetime_combos(fid) == 40 + 40  # seed + the founder's own real trial
 
 
-def test_grant_agent_novel_mints_audit_math() -> None:
+def test_mint_audit_reports_rate_cap_and_lifetime_count_only() -> None:
+    """R10: the audit block surfaces per-window rate-cap headroom + a monitoring lifetime COUNT, but
+    carries NO budget/allowance/remaining fields (those bounds no longer exist)."""
     repo = _make_repo()
-    row_id = repo.grant_agent_novel_mints(10, actor="human", reason="r")
-    assert row_id >= 1
+    _insert_agent_family(repo, "a")
     audit = repo.agent_novel_mint_audit()
-    assert audit["lifetime_allowance"] == AGENT_NOVEL_MINT_LIFETIME_BUDGET + 10
-    assert audit["lifetime_consumed"] == 0
-    assert audit["lifetime_remaining"] == AGENT_NOVEL_MINT_LIFETIME_BUDGET + 10
+    assert audit["window_cap"] == AGENT_NOVEL_MINT_CAP
+    assert audit["mints_in_window"] == 1
+    assert audit["lifetime_consumed"] == 1
+    assert "lifetime_allowance" not in audit
+    assert "lifetime_remaining" not in audit

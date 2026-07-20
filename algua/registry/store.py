@@ -20,7 +20,6 @@ from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
 from algua.registry.db import MAX_N_COMBOS
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
-    AgentMintBudgetExhaustedError,
     AgentMintCapError,
     FamilyGraphDriftError,
     FdrGateOutcome,
@@ -40,8 +39,7 @@ from algua.research.gates import FDR_COHORT_SIZE, MIN_FUNNEL_FLOOR_STRATEGIES
 # NOT an env var — so the autonomous loop has no surface to read or raise them. Changing either
 # requires a human PR to this protected file (the same human-gate as the promote relaxation flags).
 AGENT_NOVEL_MINT_WINDOW_DAYS = 90   # rolling window for the burst rate cap (matches FUNNEL_WINDOW)
-AGENT_NOVEL_MINT_CAP = 8            # max agent family mints per rolling window (burst control)
-AGENT_NOVEL_MINT_LIFETIME_BUDGET = 32  # durable epoch allowance before a human grant is required
+AGENT_NOVEL_MINT_CAP = 8            # max agent mints per rolling window (SOLE automatic bound)
 
 __all__ = [
     "SqliteStrategyRepository",
@@ -2087,25 +2085,6 @@ class SqliteStrategyRepository:
                 n += 1
         return n
 
-    def grant_agent_novel_mints(
-        self, count: int, *, actor: str, reason: str | None = None,
-    ) -> int:
-        """Append a human-only ``agent_mint_grants`` row topping up the lifetime agent-NOVEL mint
-        budget by ``count`` (#524, R9-H2). ``actor`` MUST be 'human' (the DB CHECK backstops it)."""
-        if actor != "human":
-            raise ValueError("grant_agent_novel_mints is human-only (actor must be 'human')")
-        if type(count) is not int or count < 1:
-            raise ValueError(f"grant count must be an int >= 1, got {count!r}")
-        with self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO agent_mint_grants(granted_at, granted_by_actor, grant_count, reason)"
-                " VALUES (?,?,?,?)",
-                (_now(), actor, count, reason),
-            )
-        rowid = cur.lastrowid
-        assert rowid is not None
-        return rowid
-
     def agent_novel_mint_audit(self) -> dict:
         """Read-only mint-governance stats for the ``family-audit`` advisory block (#524)."""
         cutoff = datetime.now(UTC) - timedelta(days=AGENT_NOVEL_MINT_WINDOW_DAYS)
@@ -2125,9 +2104,6 @@ class SqliteStrategyRepository:
             except ValueError:
                 created_at_corruption += 1
         lifetime_consumed = len(agent_rows)
-        granted = int(self._conn.execute(
-            "SELECT COALESCE(SUM(grant_count),0) FROM agent_mint_grants").fetchone()[0])
-        allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET + granted
         n_rows, n_well_typed = self._conn.execute(
             "SELECT COUNT(*), COUNT(CASE WHEN typeof(n_combos)='integer'"
             " AND n_combos BETWEEN 1 AND ? THEN 1 END) FROM search_trials",
@@ -2138,8 +2114,6 @@ class SqliteStrategyRepository:
             "window_cap": AGENT_NOVEL_MINT_CAP,
             "window_days": AGENT_NOVEL_MINT_WINDOW_DAYS,
             "lifetime_consumed": lifetime_consumed,
-            "lifetime_allowance": allowance,
-            "lifetime_remaining": max(0, allowance - lifetime_consumed),
             "search_trials_corruption_count": int(n_rows) - int(n_well_typed),
             "created_at_corruption_count": created_at_corruption,
         }
@@ -2149,8 +2123,8 @@ class SqliteStrategyRepository:
     ) -> int:
         """Mint the seeded agent-NOVEL family + assign the founder, via RAW locked INSERTs INSIDE
         the caller's open promote transaction (#524 step 5). NOT to be called on its own — it does
-        no BEGIN/commit and relies on the caller's BEGIN IMMEDIATE. Order: (5a) seed>0, (5b) rate
-        cap + lifetime budget, (5c) uuid-suffixed name + raw INSERTs. Returns the family id."""
+        no BEGIN/commit and relies on the caller's BEGIN IMMEDIATE. Order: (5a) seed>0, (5b) the
+        per-window rate cap, (5c) uuid-suffixed name + raw INSERTs. Returns the family id."""
         # (5a) filter-before-sum seed + positivity guard. A corrupt/overlarge legacy row is EXCLUDED
         # by the WHERE filter (contributes 0), never overflowing or shrinking the seed below the sum
         # of the legitimate rows; an all-corrupt/empty funnel legitimately fails closed.
@@ -2159,7 +2133,7 @@ class SqliteStrategyRepository:
             raise ValueError(
                 "agent-NOVEL mint requires a strictly-positive funnel-lifetime breadth seed; the "
                 "funnel has no well-typed in-range search_trials to seed (fail closed)")
-        # (5b) authoritative under-lock rate cap + lifetime budget (fail-closed).
+        # (5b) authoritative under-lock per-window rate cap (fail-closed).
         self.check_agent_novel_mint_bounds()
         # (5c) collision-RESISTANT uuid mint name (no bounded probe → no DoS on a passed gate),
         # regenerate-and-retry on the astronomically-unlikely UNIQUE clash so correctness never
@@ -2219,13 +2193,12 @@ class SqliteStrategyRepository:
         return self.funnel_lifetime_search_combos()
 
     def check_agent_novel_mint_bounds(self) -> None:
-        """Fail-closed on the two agent-NOVEL mint authority bounds (#524, R9): the per-window rate
-        cap (``AgentMintCapError``) and the human-replenished lifetime budget
-        (``AgentMintBudgetExhaustedError``). Both count the canonical ``families`` table (not the
-        derived event stream). The rate cap parses each counted agent row's ``created_at`` as
-        canonical UTC and fail-closes if any does not parse, so a stray naive/local timestamp cannot
-        silently mis-bucket a row across the cutoff. Safe to call lock-free (pre-check) OR under the
-        promote write lock (authoritative re-check)."""
+        """Fail-closed on the SOLE automatic agent-NOVEL mint bound (#524, R9): the per-window rate
+        cap (``AgentMintCapError``). Counts the canonical ``families`` table (not the derived event
+        stream). Parses each counted agent row's ``created_at`` as canonical UTC and fail-closes if
+        any does not parse, so a stray naive/local timestamp cannot silently mis-bucket a row across
+        the cutoff. Safe to call lock-free (pre-check) OR under the promote write lock
+        (authoritative re-check)."""
         cutoff = datetime.now(UTC) - timedelta(days=AGENT_NOVEL_MINT_WINDOW_DAYS)
         rows = self._conn.execute(
             "SELECT created_at FROM families WHERE created_by_actor='agent'"
@@ -2245,15 +2218,6 @@ class SqliteStrategyRepository:
                 f"agent-NOVEL mint rate cap reached: {in_window} agent families in the last "
                 f"{AGENT_NOVEL_MINT_WINDOW_DAYS}d (cap {AGENT_NOVEL_MINT_CAP}); wait out the "
                 "window or promote --actor human --new-family")
-        consumed = len(rows)
-        granted = int(self._conn.execute(
-            "SELECT COALESCE(SUM(grant_count),0) FROM agent_mint_grants").fetchone()[0])
-        allowance = AGENT_NOVEL_MINT_LIFETIME_BUDGET + granted
-        if consumed >= allowance:
-            raise AgentMintBudgetExhaustedError(
-                f"agent-NOVEL lifetime mint budget exhausted: {consumed} agent families minted, "
-                f"allowance {allowance} (budget {AGENT_NOVEL_MINT_LIFETIME_BUDGET} + granted "
-                f"{granted}); a human must `registry grant-novel-mints` to replenish")
 
     def _family_member_strategies(self, family_id: int) -> list[str]:
         """DISTINCT strategy names for a family and all its transitive ancestors."""

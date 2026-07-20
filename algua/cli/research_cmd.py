@@ -366,8 +366,8 @@ def promote_task(  # noqa: PLR0913, PLR0915
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
         # #524 (R9-H4): the holdout-burn-on-drift window is NARROWED, not fully closed. on_peek
         # commits the reservation the instant BEFORE the holdout metric is read; wrap it so it FIRST
-        # re-runs the pending-NOVEL revalidation (still-unassigned + graph fingerprint + rate cap +
-        # lifetime budget — all pure DB reads) and raises BEFORE finalize on drift/bound. Drift
+        # re-runs the pending-NOVEL revalidation (still-unassigned + graph fingerprint + per-window
+        # rate cap — all pure DB reads) and raises BEFORE finalize on drift/bound. Drift
         # caught here → the reservation stays pending → the except-release below frees the window →
         # no holdout burned. RESIDUAL (documented + monitored, NOT silently "closed"): run_gate
         # below runs its OWN pre-lock pending-NOVEL re-check AFTER walk_forward has returned — AFTER
@@ -803,8 +803,9 @@ def family_audit_cmd() -> None:
             components, kept, candidate_edges, component_breadth=component_breadth,
             individual_breadth=individual_breadth, family_names=fam_names,
             active_counts=active_counts)
-        # #524: agent-NOVEL mint governance observability (read-only) — rate-cap + lifetime-budget
-        # headroom and the legacy search_trials corruption count. Not a gate; a monitoring signal.
+        # #524: agent-NOVEL mint governance observability (read-only) — per-window rate-cap
+        # headroom, lifetime mint count, and the legacy search_trials corruption count. Not a gate;
+        # a monitoring signal.
         agent_novel_mints = repo.agent_novel_mint_audit()
         conn.rollback()
 

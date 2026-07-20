@@ -426,7 +426,7 @@ def promotion_preflight(
     ctx.pending_novel_family = classify.pending_novel_family
     # #524: as the LAST preflight step BEFORE the holdout peek, re-validate a pending agent-NOVEL
     # spec so every hard refusal burns NO holdout and mints NO consumable gate row (R6-HIGH-3,
-    # R7-HIGH-1, R8-HIGH): (1) the rate cap AND lifetime budget, and (2) still-unassigned + the
+    # R7-HIGH-1, R8-HIGH): (1) the per-window rate cap, and (2) still-unassigned + the
     # full-classifier-read-set fingerprint unchanged since classification. The under-lock re-checks
     # in record_gate_with_fdr_and_maybe_promote remain the authoritative race-safe guards.
     if classify.pending_novel_family is not None:
@@ -437,10 +437,10 @@ def promotion_preflight(
 def _revalidate_pending_novel(
     repo: StrategyRepository, name: str, pending: PendingNovelFamily,
 ) -> None:
-    """Fail-closed re-check of a deferred agent-NOVEL spec: the mint authority bounds (rate cap +
-    lifetime budget) AND the still-unassigned + graph-fingerprint snapshot (#524). Raises
-    ``AgentMintCapError`` / ``AgentMintBudgetExhaustedError`` / ``FamilyGraphDriftError``. All are
-    pure DB reads (no holdout, no gate row), safe to call both pre-peek and at the atomic burn."""
+    """Fail-closed re-check of a deferred agent-NOVEL spec: the per-window rate cap AND the
+    still-unassigned + graph-fingerprint snapshot (#524). Raises ``AgentMintCapError`` /
+    ``FamilyGraphDriftError``. All are pure DB reads (no holdout, no gate row), safe to call both
+    pre-peek and at the atomic burn."""
     repo.check_agent_novel_mint_bounds()
     if repo.strategy_family(name) is not None:
         raise FamilyGraphDriftError(
