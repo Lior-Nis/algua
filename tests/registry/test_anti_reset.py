@@ -129,3 +129,104 @@ def test_cycle_guard_prevents_infinite_bfs() -> None:
     # Must terminate (visited-set guard), not hang
     result = repo.family_lifetime_combos(a)
     assert result >= 50  # at least own family's combos
+
+
+# ---------------------------------------------------------------------------
+# #524 (R9): family lifetime breadth PRIOR (families.seeded_prior_combos). A lifetime-only prior
+# that flows through family_lifetime_combos (own + ancestor trials + own + ancestor seeds) but is
+# NEVER counted in windowed/funnel-wide sums. Default 0 keeps all pre-#524 numbers unchanged.
+# Under R9 the seed is written ONLY by the atomic pass-time mint (no create_family kwarg); tests
+# set it via a direct families INSERT (allowed by the append-only triggers, which block only
+# UPDATE/DELETE), mirroring what _mint_agent_novel_family persists at commit.
+# ---------------------------------------------------------------------------
+
+def _seed_family(repo: SqliteStrategyRepository, name: str, seed: int) -> int:
+    """Insert a family row carrying ``seeded_prior_combos = seed`` + its family_created event,
+    the way the atomic agent-NOVEL mint does. INSERT is trigger-permitted (append-only forbids
+    only UPDATE/DELETE)."""
+    now = datetime.now(UTC).isoformat()
+    cur = repo._conn.execute(
+        "INSERT INTO families(name, created_at, created_by_actor, created_by_strategy,"
+        " seeded_prior_combos) VALUES (?,?,?,?,?)",
+        (name, now, "agent", None, seed),
+    )
+    fid = int(cur.lastrowid)
+    repo._conn.execute(
+        "INSERT INTO family_events(event_type, family_id, actor, created_at)"
+        " VALUES ('family_created', ?, 'agent', ?)",
+        (fid, now),
+    )
+    repo._conn.commit()
+    return fid
+
+
+def test_seed_prior_counts_in_lifetime_with_no_trials() -> None:
+    """A family seeded with 500 and no trials has family_lifetime_combos == 500."""
+    repo = _make_repo()
+    fid = _seed_family(repo, "seeded", 500)
+    assert repo.family_lifetime_combos(fid) == 500
+
+
+def test_seed_prior_adds_to_own_trials() -> None:
+    """seed 500 + a 30-combo trial -> lifetime 530 (prior and trials both count)."""
+    repo = _make_repo()
+    fid = _seed_family(repo, "seeded_trials", 500)
+    _assign(repo, "strat_seeded", fid)
+    repo.record_search_trial("strat_seeded", n_combos=30, grid_json="{}")
+    assert repo.family_lifetime_combos(fid) == 530
+
+
+def test_seed_prior_is_lifetime_only_not_windowed() -> None:
+    """The seed prior is a LIFETIME-only prior: it must NOT leak into windowed_family_combos."""
+    repo = _make_repo()
+    fid = _seed_family(repo, "seeded_win", 500)
+    _assign(repo, "strat_seeded_win", fid)
+    repo.record_search_trial("strat_seeded_win", n_combos=7, grid_json="{}")
+    # windowed sees only the recent trial (seed excluded); lifetime includes the seed.
+    assert repo.windowed_family_combos(fid, window_days=90) == 7
+    assert repo.family_lifetime_combos(fid) == 507
+
+
+def test_child_inherits_parent_seed_via_ancestry() -> None:
+    """A child of a family seeded with 500 inherits the parent's seed via ancestry."""
+    repo = _make_repo()
+    parent = _seed_family(repo, "seed_parent", 500)
+    child = repo.create_family("seed_child", actor="human")
+    repo.add_parent_edge(child, parent)
+    # No trials anywhere: the child's lifetime is entirely the inherited parent seed.
+    assert repo.family_lifetime_combos(child) == 500
+
+
+def test_seed_prior_deduped_across_diamond_ancestry() -> None:
+    """A seed on a diamond apex is counted ONCE through both paths (set-dedup of family ids)."""
+    repo = _make_repo()
+    a = _seed_family(repo, "apex", 400)
+    b = repo.create_family("Bd", actor="human")
+    c = repo.create_family("Cd", actor="human")
+    d = repo.create_family("Dd", actor="human")
+    repo.add_parent_edge(b, a)
+    repo.add_parent_edge(c, a)
+    repo.add_parent_edge(d, b)
+    repo.add_parent_edge(d, c)
+    assert repo.family_lifetime_combos(d) == 400  # not 800
+
+
+def test_default_create_family_has_zero_seed_unchanged_accounting() -> None:
+    """create_family (the public helper) yields seed 0 and leaves lifetime accounting untouched
+    (guards the existing PARENTAGE inheritance numbers against regression)."""
+    repo = _make_repo()
+    parent = repo.create_family("plain_parent", actor="human")
+    child = repo.create_family("plain_child", actor="human")
+    repo.add_parent_edge(child, parent)
+
+    seed_row = repo._conn.execute(
+        "SELECT seeded_prior_combos FROM families WHERE id=?", (parent,)
+    ).fetchone()
+    assert seed_row[0] == 0
+
+    _assign(repo, "strat_pp", parent)
+    repo.record_search_trial("strat_pp", n_combos=100, grid_json="{}")
+    _assign(repo, "strat_pc", child)
+    repo.record_search_trial("strat_pc", n_combos=5, grid_json="{}")
+    # Purely trial-driven, exactly as before #524 (100 parent + 5 child, seeds are 0).
+    assert repo.family_lifetime_combos(child) == 105

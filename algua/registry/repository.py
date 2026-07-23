@@ -138,6 +138,62 @@ class FunnelDriftError(ValueError):
     pass
 
 
+class FamilyGraphDriftError(ValueError):
+    """Raised (fail-closed) when the family graph the NOVEL classification was computed against
+    changed before the agent-NOVEL family could be minted (#524). Conservative: it only PREVENTS
+    a stale mint — the caller re-runs ``promotion_preflight`` from scratch, which re-classifies
+    against the now-current graph (yielding MERGE/PARENTAGE if a sibling family now exists, or a
+    fresh NOVEL with an updated fingerprint). ``axis`` names which check tripped for observability.
+    A ``ValueError`` so the CLI's ``@json_errors`` surfaces it as a clean JSON error."""
+
+    def __init__(self, message: str, *, axis: str = "graph_fingerprint") -> None:
+        super().__init__(message)
+        self.axis = axis
+
+
+class AgentMintCapError(ValueError):
+    """Raised (fail-closed) when an agent-NOVEL mint would exceed the per-window rate cap
+    (``AGENT_NOVEL_MINT_CAP`` families per ``AGENT_NOVEL_MINT_WINDOW_DAYS``) (#524). Human action
+    (waiting out the window) is required. A ``ValueError`` for clean JSON surfacing."""
+
+    pass
+
+
+class PendingNovelFamily(NamedTuple):
+    """A deferred agent-NOVEL family spec carried on the breadth context (#524, R9). NO family is
+    created at classification time; this spec is materialised into a seeded family INSIDE the atomic
+    promote transaction, ONLY when the gate passes. Plain scalars only — no ``algua.research``
+    import, so the ``registry`` → ``research`` boundary stays clean.
+
+    ``graph_fingerprint`` is the FULL DB classifier read-set digest (families / active membership /
+    parentage / family_events / backtest_returns / persisted member profiles), captured
+    before==after classification so it provably equals the graph the NOVEL verdict was computed on;
+    the mint CAS-re-checks it under the write lock. ``founder_code_hash``/``founder_factors_json``
+    are the founder's OWN classified profile, persisted onto the founding member row at mint so the
+    store never loads modules under the write lock."""
+
+    slug_base: str
+    actor: str              # MUST be 'agent' — validated at the store boundary
+    verdict: str            # MUST be 'novel' — validated at the store boundary
+    similarity_score: float
+    clustering_version: str
+    clustering_config_json: str
+    axis_json: str
+    graph_fingerprint: tuple[int, ...]
+    founder_code_hash: str
+    founder_factors_json: str
+
+
+class ClassifyResult(NamedTuple):
+    """The result of ``_classify_and_assign_family`` (#524, R9): either a resolved ``family_id``
+    (MERGE / PARENTAGE / human-NOVEL / already-assigned) OR a deferred ``pending_novel_family`` spec
+    (agent NOVEL — no family created yet). Exactly one is non-None for the agent-NOVEL case
+    (``family_id is None`` + ``pending_novel_family`` set); all other cases set ``family_id``."""
+
+    family_id: int | None
+    pending_novel_family: PendingNovelFamily | None = None
+
+
 class StrategyExists(ValueError):
     pass
 
@@ -387,6 +443,15 @@ class SearchBreadthLedger(Protocol):
         ``window_days`` — funnel-wide search effort for the breadth wall (0 if none)."""
         ...
 
+    def funnel_lifetime_search_combos(self) -> int:
+        """Sum of ``n_combos`` across ALL strategies' ``search_trials`` for ALL TIME (no window) —
+        the funnel-wide LIFETIME search effort (#524). Distinct from ``windowed_search_combos``
+        (rolling window) and ``total_search_combos`` (per-strategy). Uses the SAME WHERE-filtered,
+        overflow-safe summation as the §5.1 mint seed (``typeof(n_combos)='integer' AND n_combos
+        BETWEEN 1 AND MAX_N_COMBOS``), so the seed and this accessor agree exactly and a corrupt
+        legacy row is uniformly excluded. Always >= 0; 0 iff no well-typed in-range rows exist."""
+        ...
+
     def search_trials_fingerprint(self) -> tuple[int, int]:
         """``(COUNT(*), COALESCE(MAX(id), 0))`` over ALL ``search_trials`` rows. Because that table
         is append-only (INSERT-only, AUTOINCREMENT PK), this pair strictly increases on every
@@ -558,6 +623,7 @@ class GateLedger(Protocol):
         fdr_alpha: float,
         actor: Actor,
         reason: str | None = None,
+        pending_novel_family: PendingNovelFamily | None = None,
     ) -> FdrGateOutcome:
         """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
         ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
@@ -585,9 +651,20 @@ class GateLedger(Protocol):
         CAS-verified; on any drift the whole transaction rolls back and raises ``FunnelDriftError``,
         so a committed decision is provably a pure function of ONE funnel snapshot (serializable).
 
+        ``pending_novel_family`` (#524): when set AND ``final_passed`` is True, the seeded agent
+        NOVEL family is created and the founder assigned in the SAME transaction, gated by: a
+        still-unassigned + ``family_graph_fingerprint`` CAS (else ``FamilyGraphDriftError``), the
+        per-window rate cap (else ``AgentMintCapError``) and a WHERE-filtered
+        ``seeded_prior_combos > 0`` seed.
+        The family is minted by RAW locked INSERTs (never the public ``create_family``/
+        ``assign_strategy_to_family`` helpers, which open their own transactions). ``actor`` is
+        coerced to ``Actor`` at entry; the mint fail-closes unless ``actor is Actor.AGENT`` AND the
+        pending spec's ``actor=='agent'`` AND ``verdict=='novel'``.
+
         TOP-LEVEL ONLY: raises ``RuntimeError`` if called inside an open transaction (mirrors
         ``reserve_holdout``). Crash semantics: a process crash before commit rolls back both
-        the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy.
+        the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy,
+        no orphan family/membership.
         """
         ...
 
@@ -747,8 +824,14 @@ class FactorLedger(Protocol):
 class FamilyGraph(Protocol):
     """Family registry + parentage DAG + family-scoped breadth accounting (#222)."""
 
-    def create_family(self, name: str, actor: str, created_by_strategy: str | None = None) -> int:
-        """Create a new family and record the family_created event. Return the new family id."""
+    def create_family(
+        self, name: str, actor: str, created_by_strategy: str | None = None,
+    ) -> int:
+        """Create a new family and record the family_created event. Return the new family id. The
+        family carries ``seeded_prior_combos = 0`` (a fresh zero-prior family). The agent-NOVEL
+        seeded family is minted by RAW INSERT inside the promote transaction (#524), NOT via this
+        public helper (which opens its own transaction), so there is no agent-reachable seeded
+        create."""
         ...
 
     def assign_strategy_to_family(
@@ -756,8 +839,51 @@ class FamilyGraph(Protocol):
         verdict: str, similarity_score: float, clustering_version: str,
         clustering_config_json: str, axis_json: str,
         matched_family_id: int | None = None,
+        member_code_hash: str | None = None,
+        member_factors_json: str | None = None,
     ) -> None:
-        """Assign a strategy to a family (append-only: old row gets removed_at set)."""
+        """Assign a strategy to a family (append-only: old row gets removed_at set). #524: the
+        joining member's classified ``(code_hash, sorted factors)`` are persisted onto the new
+        ``family_members`` row (member_code_hash/member_factors_json) so the classifier reads
+        member profiles from immutable DB state, transactionally covered by
+        ``family_graph_fingerprint``."""
+        ...
+
+    def family_graph_fingerprint(self) -> tuple[int, ...]:
+        """A monotone digest over EVERY DB table the NOVEL classifier reads (#524, R9): families,
+        family_members (all-rows COUNT+MAX id AND active-only COUNT), family_parents, family_events,
+        backtest_returns — each ``(COUNT, MAX(id))``. Any mutation that could re-decide a NOVEL
+        verdict (a family mint, a member assignment OR removal, a parentage edge, a member-returns
+        refresh) bumps at least one component; the append-only DB triggers make the digest exact.
+        Pure SQL, boundary-clean. Persisted member profiles live in immutable ``family_members``
+        rows, so this single digest covers the FULL classifier read-set."""
+        ...
+
+    def materialise_legacy_member_profiles(self) -> int:
+        """One-time backfill (#524): compute and persist member_code_hash/member_factors_json
+        for active ``family_members`` rows still carrying NULL profiles (pre-#524), via a
+        trigger-permitted NULL→value UPDATE. Idempotent (skips already-materialised rows). Returns
+        the number of rows materialised. Loads strategy modules, so it runs in the store bootstrap,
+        NOT under the promote write lock."""
+        ...
+
+    def agent_novel_mint_audit(self) -> dict:
+        """Read-only mint-governance stats for the ``family-audit`` advisory block (#524): rate-cap
+        headroom (``mints_in_window``/``window_cap``/``window_days``), ``lifetime_consumed`` (the
+        lifetime COUNT of agent families minted, monitoring-only), and
+        ``search_trials_corruption_count`` (``n_rows − n_well_typed``)."""
+        ...
+
+    def agent_novel_mint_seed(self) -> int:
+        """The durable breadth prior an agent-NOVEL family is seeded with (#524): the funnel-wide
+        LIFETIME search effort (WHERE-filtered, overflow-safe). The mint requires >0."""
+        ...
+
+    def check_agent_novel_mint_bounds(self) -> None:
+        """Fail-closed on the agent-NOVEL per-window rate cap (``AgentMintCapError``) (#524) — the
+        SOLE automatic bound on agent-NOVEL minting. Counts the canonical ``families`` table; parses
+        each counted ``created_at`` as canonical UTC and fail-closes on a non-canonical value. Safe
+        lock-free or under the promote write lock (authoritative)."""
         ...
 
     def strategy_family(self, strategy_name: str) -> int | None:

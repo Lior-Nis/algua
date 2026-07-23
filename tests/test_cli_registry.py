@@ -749,3 +749,19 @@ def test_transition_survives_kb_sync_failure(tmp_path, monkeypatch):
     assert json.loads(result.stdout)["stage"] == "backtested"
     show = json.loads(runner.invoke(app, ["registry", "show", "beta"]).stdout)
     assert show["stage"] == "backtested"
+
+
+# ---------------------------------------------------------------------------
+# #524 (R10): the human-only `registry grant-novel-mints` command was REMOVED along with the
+# human-replenished lifetime mint budget. The automatic per-window rate cap is now the sole bound.
+# ---------------------------------------------------------------------------
+
+def test_grant_novel_mints_command_does_not_exist():
+    # Invoking the removed command is a usage error (no such command), never a successful grant.
+    result = runner.invoke(
+        app, ["registry", "grant-novel-mints", "--count", "5", "--actor", "human"])
+    assert result.exit_code != 0
+    assert "granted" not in (result.stdout or "")
+    # It is absent from the registry command surface / help.
+    help_out = runner.invoke(app, ["registry", "--help"]).stdout
+    assert "grant-novel-mints" not in help_out

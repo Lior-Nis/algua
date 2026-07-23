@@ -41,6 +41,7 @@ from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.knowledge.experience import write_experience_note
+from algua.observability.log import get_logger
 from algua.registry import live_gate
 from algua.registry.human_actor import canonical_run_context
 from algua.registry.negative_results import (
@@ -48,7 +49,11 @@ from algua.registry.negative_results import (
     record_negative_result,
     sanitize_record,
 )
-from algua.registry.promotion import promotion_preflight, run_gate
+from algua.registry.promotion import (
+    _revalidate_pending_novel,
+    promotion_preflight,
+    run_gate,
+)
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository, StrategyNotFound
 from algua.research import family_audit, lifecycle_gc
@@ -184,9 +189,10 @@ def promote(
              "key (ssh-keygen -Y sign -n algua-human-actor), then re-run with --actor-signature."),
     new_family: str = typer.Option(
         None, "--new-family",
-        help="HUMAN-ONLY: slug for a new family when clustering verdict is NOVEL or PARENTAGE. "
-             "Ignored when the strategy is already assigned to a family. "
-             "Required for a human actor facing a NOVEL verdict.",
+        help="HUMAN-ONLY: name a new family with FRESH (zero-prior) breadth on a NOVEL/PARENTAGE "
+             "verdict. Required for a human NOVEL; ignored once the strategy is assigned. An agent "
+             "NOVEL now AUTO-creates a family (auto-named) SEEDED with the funnel-wide breadth "
+             "prior (no human signature) — this flag is ignored for agents.",
     ),
     summary: bool = typer.Option(
         False, "--summary",
@@ -358,6 +364,25 @@ def promote_task(  # noqa: PLR0913, PLR0915
             period_start=period_start, period_end=period_end, holdout_frac=holdout_frac,
             holdout_start=holdout_start, holdout_end=holdout_end,
             allow_reuse=allow_holdout_reuse)  # raises here = fail closed (overlap, no reuse)
+        # #524 (R9-H4): the holdout-burn-on-drift window is NARROWED, not fully closed. on_peek
+        # commits the reservation the instant BEFORE the holdout metric is read; wrap it so it FIRST
+        # re-runs the pending-NOVEL revalidation (still-unassigned + graph fingerprint + per-window
+        # rate cap — all pure DB reads) and raises BEFORE finalize on drift/bound. Drift
+        # caught here → the reservation stays pending → the except-release below frees the window →
+        # no holdout burned. RESIDUAL (documented + monitored, NOT silently "closed"): run_gate
+        # below runs its OWN pre-lock pending-NOVEL re-check AFTER walk_forward has returned — AFTER
+        # on_peek already committed the burn. Drift that first becomes visible in that post-peek
+        # pre-lock window burns the holdout and then fails the gate. That path is given the same
+        # release-on-failure discipline as walk_forward (release_holdout_reservation, a post-burn
+        # no-op) PLUS an explicit WARNING audit record below, so the race is observable and cannot
+        # masquerade as fully closed. Fully closing it would require folding finalize_holdout into
+        # the same atomic tx as the mint (record_gate_with_fdr_and_maybe_promote) — deferred.
+        def _on_peek(cfg: str) -> None:
+            if breadth.pending_novel_family is not None:
+                _revalidate_pending_novel(repo, name, breadth.pending_novel_family)
+            repo.finalize_holdout_reservation(
+                reservation_id, config_hash=cfg, strategy_id=sid)
+
         try:
             wf = walk_forward(
                 strategy, provider, start_dt, end_dt, windows=windows,
@@ -370,8 +395,7 @@ def promote_task(  # noqa: PLR0913, PLR0915
                 # evaluates the holdout metric. Because release_holdout_reservation no-ops on a
                 # committed row, the except-release below is then correct for EVERY post-peek
                 # failure (incl. KeyboardInterrupt) — a computed holdout can never be released.
-                on_peek=lambda cfg: repo.finalize_holdout_reservation(
-                    reservation_id, config_hash=cfg, strategy_id=sid),
+                on_peek=_on_peek,
             )
         except BaseException:
             # Pre-peek failure: the row is still pending, so release frees the window. Post-peek
@@ -382,13 +406,35 @@ def promote_task(  # noqa: PLR0913, PLR0915
             except Exception:
                 pass
             raise
-        outcome = run_gate(
-            repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
-            universe_name=universe, universe_snapshots=universe_prov,
-            period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
-            data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
-            holdout_evaluation_id=reservation_id, attempt_token=attempt_token,
-            reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
+        # walk_forward returned, so on_peek ran and the holdout burn is ALREADY committed. Give
+        # run_gate the same release-on-failure discipline (#524 R9-H4 residual): a raise here —
+        # including run_gate's own pre-lock pending-NOVEL drift re-check — leaves a burned holdout,
+        # so release_holdout_reservation is a post-burn no-op. Emit an explicit WARNING audit record
+        # for exactly this post-peek/pre-commit failure so the narrowed race is monitored, never
+        # silently masquerading as fully closed. Then re-raise unchanged.
+        try:
+            outcome = run_gate(
+                repo, wf, name=name, actor=actor_enum, criteria=criteria, breadth=breadth,
+                universe_name=universe, universe_snapshots=universe_prov,
+                period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
+                data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
+                holdout_evaluation_id=reservation_id, attempt_token=attempt_token,
+                reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
+        except BaseException as exc:
+            try:
+                repo.release_holdout_reservation(reservation_id)  # post-burn no-op
+            except Exception:
+                pass
+            get_logger(__name__).warning(
+                "holdout_burned_post_peek_gate_failed",
+                extra={"fields": {
+                    "strategy": name, "reservation_id": reservation_id,
+                    "exc_type": type(exc).__name__, "exc_message": str(exc),
+                    "note": "#524 R9-H4 narrowed residual: holdout was burned at on_peek before "
+                            "run_gate raised; window documented + monitored, not fully closed",
+                }},
+            )
+            raise
         decision, promoted = outcome.decision, outcome.promoted
         # Advisory negative-result capture (#332): on a gate FAIL only, record the refuted
         # hypothesis into the experience log so it is not lost with the branch. BEST-EFFORT — a
@@ -757,10 +803,15 @@ def family_audit_cmd() -> None:
             components, kept, candidate_edges, component_breadth=component_breadth,
             individual_breadth=individual_breadth, family_names=fam_names,
             active_counts=active_counts)
+        # #524: agent-NOVEL mint governance observability (read-only) — per-window rate-cap
+        # headroom, lifetime mint count, and the legacy search_trials corruption count. Not a gate;
+        # a monitoring signal.
+        agent_novel_mints = repo.agent_novel_mint_audit()
         conn.rollback()
 
     n_pairs = len(list(combinations(profiles, 2)))
     emit(ok({
+        "agent_novel_mints": agent_novel_mints,
         "note": ("ADVISORY cross-family gaming screen; NOT a gate. Flags separate families that "
                  "behave as one thesis (return-correlation authoritative). Acting on a cluster "
                  "is a human judgement: consolidate via member reassignment (--actor human). "

@@ -7,7 +7,11 @@ from pathlib import Path
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.cli._common import ok, registry_conn, sync_kb_doc
+from algua.cli._common import (
+    ok,
+    registry_conn,
+    sync_kb_doc,
+)
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings

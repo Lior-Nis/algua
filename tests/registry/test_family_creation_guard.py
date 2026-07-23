@@ -126,22 +126,48 @@ def test_breadth_context_has_family_id_field() -> None:
 # NOVEL verdict — agent path
 # ---------------------------------------------------------------------------
 
-def test_agent_novel_verdict_raises(tmp_path) -> None:
-    """No existing families; actor=agent → ValueError (empty-registry message)."""
+def test_agent_novel_returns_pending_spec_no_family_created(tmp_path) -> None:
+    """#524 (R9): actor=agent NOVEL against a non-matching registry does NOT create a family in
+    preflight — it returns a deferred PendingNovelFamily spec (family_id None). The seeded family
+    is minted only at the pass moment inside the atomic promote tx, so preflight mints nothing."""
     repo = _make_repo()
+    # Agent NOVEL requires an existing (non-matching) family — an empty registry is refused.
+    _setup_family_for_clustering(repo, "unrelated_fam", "unrelated_member")
     _add_backtested_strategy(repo, "strat_novel_agent")
+    n_families_before = repo.connection.execute(
+        "SELECT COUNT(*) c FROM families").fetchone()["c"]
 
-    with pytest.raises(ValueError, match="family registry is empty"):
-        _call_preflight(repo, "strat_novel_agent", actor=Actor.AGENT)
+    ctx = _call_preflight(repo, "strat_novel_agent", actor=Actor.AGENT)
+
+    # No family resolved / created; a pending spec is carried on the breadth context instead.
+    assert ctx.family_id is None
+    assert ctx.expected_family_id is None
+    assert ctx.pending_novel_family is not None
+    pending = ctx.pending_novel_family
+    assert pending.slug_base == "strat_novel_agent_family"
+    assert pending.actor == "agent"
+    assert pending.verdict == "novel"
+    # The strategy is NOT yet a member, and NO new family row was minted in preflight.
+    assert repo.strategy_family("strat_novel_agent") is None
+    n_families_after = repo.connection.execute(
+        "SELECT COUNT(*) c FROM families").fetchone()["c"]
+    assert n_families_after == n_families_before
 
 
-def test_agent_novel_message_mentions_family_assignment(tmp_path) -> None:
-    """The ValueError for an agent NOVEL should mention family."""
+def test_agent_novel_pending_ignores_slug(tmp_path) -> None:
+    """#524 (R9): an agent NOVEL pending spec auto-names via slug_base f'{name}_family', IGNORING
+    --new-family so naming a family stays a human privilege."""
     repo = _make_repo()
+    _setup_family_for_clustering(repo, "unrelated_fam2", "unrelated_member2")
     _add_backtested_strategy(repo, "strat_novel_msg")
 
-    with pytest.raises(ValueError, match="family"):
-        _call_preflight(repo, "strat_novel_msg", actor=Actor.AGENT)
+    ctx = _call_preflight(
+        repo, "strat_novel_msg", actor=Actor.AGENT, new_family_slug="agent_tried_to_name_it"
+    )
+
+    assert ctx.family_id is None
+    assert ctx.pending_novel_family is not None
+    assert ctx.pending_novel_family.slug_base == "strat_novel_msg_family"  # slug ignored
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +201,23 @@ def test_human_novel_creates_family() -> None:
         "SELECT name FROM families WHERE id=?", (fam_id,)
     ).fetchone()
     assert row["name"] == "momentum_v2"
+
+
+def test_human_novel_family_has_zero_seed() -> None:
+    """#524: a human-created NOVEL family is FRESH — seed_lifetime_combos == 0 (the human
+    privilege of a fresh multiple-testing budget, unlike the agent-seeded auto-create)."""
+    repo = _make_repo()
+    _add_backtested_strategy(repo, "strat_human_zero_seed")
+
+    _call_preflight(
+        repo, "strat_human_zero_seed", actor=Actor.HUMAN, new_family_slug="fresh_human_fam"
+    )
+
+    fam_id = repo.strategy_family("strat_human_zero_seed")
+    row = repo.connection.execute(
+        "SELECT seeded_prior_combos FROM families WHERE id=?", (fam_id,)
+    ).fetchone()
+    assert row["seeded_prior_combos"] == 0
 
 
 def test_human_novel_family_event_row_written() -> None:
@@ -532,7 +575,7 @@ def test_return_match_does_not_displace_blend_match_338():
         assigned = _classify_and_assign_family(
             repo, "cand", actor=Actor.AGENT, new_family_slug=None)
 
-    assert assigned == fam_a_id  # stayed in the broad code/factor family, not displaced to B
+    assert assigned.family_id == fam_a_id  # stayed in the broad code/factor family, not to B
     # the recorded verdict is PARENTAGE (blend 0.80), NOT a return-escalated MERGE into B
     _args, kwargs = repo.assign_strategy_to_family.call_args
     assert kwargs["verdict"] == SimVerdict.PARENTAGE.value
@@ -562,7 +605,36 @@ def test_return_only_clone_is_rescued_from_novel_338():
         assigned = _classify_and_assign_family(
             repo, "cand", actor=Actor.AGENT, new_family_slug=None)
 
-    assert assigned == fam_b_id  # rescued into B instead of escaping to a fresh family
+    assert assigned.family_id == fam_b_id  # rescued into B instead of escaping to a fresh family
     _args, kwargs = repo.assign_strategy_to_family.call_args
     assert kwargs["verdict"] == SimVerdict.MERGE.value
     assert kwargs["similarity_score"] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# #524: seeding confers no reset advantage — property test on effective_funnel_breadth.
+# An agent-created NOVEL family seeded with the funnel-wide windowed prior has a 3-way max
+# breadth that is NEVER LOWER than merging into an existing family that already carries that
+# same accumulated funnel-wide breadth. So escaping to a fresh family buys no laxer bar.
+# ---------------------------------------------------------------------------
+
+import itertools  # noqa: E402
+
+from algua.research.dsr import effective_funnel_breadth  # noqa: E402
+
+
+def test_agent_novel_seed_confers_no_reset_advantage_property() -> None:
+    """#524 (R9): the agent-NOVEL family is seeded with the funnel-wide LIFETIME total (>= the
+    90-day windowed total, since lifetime never forgets). For every (own, windowed) combo the
+    seeded family's effective breadth is >= a MERGE into a family carrying only the windowed
+    total, and never DROPS below the plain 2-way (own, windowed) max — seeding can only tighten
+    the bar, never loosen it, so escaping to a fresh family buys no reset advantage."""
+    for own, windowed in itertools.product(range(0, 40, 7), range(0, 40, 5)):
+        # Lifetime seed is >= windowed (older tests rolled out of the window survive in lifetime).
+        lifetime_seed = windowed + 13  # any value >= windowed exercises the durable prior
+        novel_eff = effective_funnel_breadth(
+            own, windowed, family_lifetime_effective=lifetime_seed)
+        merge_eff = effective_funnel_breadth(
+            own, windowed, family_lifetime_effective=windowed)
+        assert novel_eff >= merge_eff
+        assert novel_eff >= max(own, windowed)

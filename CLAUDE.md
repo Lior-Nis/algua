@@ -90,10 +90,23 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   — there is no
   raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
   `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).
-  **Family governance (#222):** at preflight, the strategy is empirically classified into a family
-  via code-ancestry + factor-lineage + return-correlation clustering; MERGE verdict → assign into the
-  incumbent family (inherits its breadth); PARENTAGE → new family but inherits the incumbent's
-  accumulated breadth via a parent edge; NOVEL → **agent fail-closed** (new family requires
+  **Family governance (#222, #524):** at preflight, the strategy is empirically classified into a
+  family via code-ancestry + factor-lineage + return-correlation clustering; MERGE verdict → assign
+  into the incumbent family (inherits its breadth); PARENTAGE → new family but inherits the
+  incumbent's accumulated breadth via a parent edge; NOVEL + agent → **the family is NOT created in
+  preflight**: classification returns a deferred spec and the seeded family is minted **only if the
+  gate passes, AT THE PASS MOMENT**, inside the atomic promote transaction — seeded with the
+  funnel-wide **LIFETIME** search total (a durable prior that survives the 90-day window roll, so a
+  future sibling can never wait out the window to reset the tax). The founder itself pays family arm
+  0 (a no-op, symmetric with a human fresh family). Agent minting is bounded SOLELY by an automatic
+  per-window rate cap (`AGENT_NOVEL_MINT_CAP` ≈ 8 mints / 90 days, fail-closed, canonical-UTC,
+  CODEOWNERS-protected `store.py` constant — no human budget, no human top-up: zero-human autonomy).
+  The rate cap is the retained count-bound because the deferred pass-time seed alone can't stop a
+  repeated-founder attack (the founder passes and escapes the tax before its family is seeded). The
+  mint re-checks a still-NOVEL family-graph fingerprint CAS under the write lock (drift →
+  `FamilyGraphDrift` re-run; no holdout burned for drift caught at/before the `on_peek` burn — the
+  post-peek/pre-lock re-check is a narrowed, monitored residual, release-on-failure + WARNING audit,
+  not fully closed). NOVEL + human still creates a fresh 0-prior family in preflight (requires
   `--new-family` + `--actor human`). Family-scoped lifetime breadth feeds the 3-way
   `effective_funnel_breadth(own, windowed_total, family_lifetime_effective)` tighten-only max.
 - `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the

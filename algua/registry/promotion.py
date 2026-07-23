@@ -14,7 +14,13 @@ from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_tr
 from algua.contracts.types import DataProvider, assert_gated_costs
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.lineage import factors_used_by
-from algua.registry.repository import FunnelSnapshot, StrategyRepository
+from algua.registry.repository import (
+    ClassifyResult,
+    FamilyGraphDriftError,
+    FunnelSnapshot,
+    PendingNovelFamily,
+    StrategyRepository,
+)
 from algua.research.clustering import (
     _RETURN_STANDALONE_ESCALATION,
     MERGE_THRESHOLD,
@@ -92,6 +98,9 @@ class BreadthContext:
     provenance: str
     family_id: int | None = field(default=None)         # resolved family after classification
     expected_family_id: int | None = field(default=None)  # CAS token for run_gate (Task 5)
+    # #524: a deferred agent-NOVEL family spec (family created only at the pass moment, never in
+    # preflight). None for every non-agent-NOVEL case.
+    pending_novel_family: PendingNovelFamily | None = field(default=None)
 
 
 def _get_all_family_members_for_clustering(
@@ -111,24 +120,36 @@ def _classify_and_assign_family(
     *,
     actor: Actor,
     new_family_slug: str | None,
-) -> int | None:
-    """Classify ``name`` against all known families and assign it if needed.
+) -> ClassifyResult:
+    """Classify ``name`` against all known families and assign it if needed (#524, R9).
 
-    Returns the resolved family_id (or None only if it somehow stays unassigned, which
-    should not happen — every branch either raises or assigns).
+    Returns a ``ClassifyResult``: a resolved ``family_id`` (MERGE / PARENTAGE / human-NOVEL /
+    already-assigned) OR a deferred ``pending_novel_family`` spec (agent NOVEL — NO family created
+    here; it is minted at the pass moment inside the atomic promote tx).
 
     Decision tree:
     - Already assigned: return current family_id, no re-classification.
     - MERGE: assign to best-matching family.
     - PARENTAGE + agent: fold into best parent family (agents cannot mint child families).
     - PARENTAGE + human: create a child family with a parent edge, assign there.
-    - NOVEL + agent: raise ValueError (agents cannot mint new families).
-    - NOVEL + human: create a new root family using new_family_slug (required); assign.
+    - NOVEL + agent: return a PendingNovelFamily spec (deferred create) with a graph-fingerprint
+      snapshot captured before==after classification (fail closed on mid-classification drift).
+    - NOVEL + human: create a new root family using new_family_slug (required, fresh 0 prior);
+      assign.
     """
+    # #524 (R9-H3): one-time-materialise any legacy family_members row still carrying a NULL
+    # profile BEFORE the classifier reads member profiles, so the profile axis is DB state covered
+    # by the graph fingerprint. Idempotent + cheap (steady state selects zero rows, early-returns);
+    # a NULL→value UPDATE leaves family_members COUNT/MAX(id) unchanged, so the fingerprint captured
+    # below is unaffected. Runs top-level (no open tx here) so the brief write lock is safe.
+    repo.materialise_legacy_member_profiles()
+    # #524 (R6-CRITICAL): capture the classifier read-set fingerprint at the TOP, before the graph
+    # read below, so the stored snapshot provably equals the graph the NOVEL verdict is computed on.
+    fp_before = repo.family_graph_fingerprint()
     current_family_id = repo.strategy_family(name)
     if current_family_id is not None:
         # Already assigned — skip reclassification, keep existing assignment.
-        return current_family_id
+        return ClassifyResult(family_id=current_family_id)
 
     # Get the strategy's identity for clustering comparison. A strategy whose module cannot be
     # loaded (e.g. test-only names) gets code_hash="" and factors=set(): it will never match an
@@ -193,9 +214,9 @@ def _classify_and_assign_family(
     # identical-trading clone out of NOVEL. This guarantees a return-only match can never
     # DISPLACE a code/factor (blend) match into a narrower-breadth family — escalation can
     # only pull a would-be-NOVEL strategy INTO a family (strictly tightening).
-    best_family_id, best_verdict, best_score, has_any_family = _rank(escalate=False)
+    best_family_id, best_verdict, best_score, _has_any_family = _rank(escalate=False)
     if best_verdict == SimVerdict.NOVEL:
-        best_family_id, best_verdict, best_score, has_any_family = _rank(escalate=True)
+        best_family_id, best_verdict, best_score, _has_any_family = _rank(escalate=True)
 
     cv = clustering_version()
     clustering_config_json = json.dumps({
@@ -215,6 +236,9 @@ def _classify_and_assign_family(
         "has_returns_data": bool(returns_lookup),
     }, sort_keys=True)
 
+    # #524 (R9-H3): every new member's classified profile is persisted onto its family_members row.
+    member_factors_json = json.dumps(sorted(strategy_factors))
+
     def _do_assign(target_family_id: int, *, matched_family_id: int | None = None) -> None:
         repo.assign_strategy_to_family(
             name, target_family_id, actor=actor.value,
@@ -223,19 +247,21 @@ def _classify_and_assign_family(
             axis_json=axis_json,
             matched_family_id=matched_family_id if matched_family_id is not None
             else target_family_id,
+            member_code_hash=strategy_code_hash,
+            member_factors_json=member_factors_json,
         )
 
     if best_verdict == SimVerdict.MERGE:
         assert best_family_id is not None
         _do_assign(best_family_id)
-        return best_family_id
+        return ClassifyResult(family_id=best_family_id)
 
     if best_verdict == SimVerdict.PARENTAGE:
         assert best_family_id is not None
         if actor is Actor.AGENT:
             # Agent cannot mint a child family. Fold into the best parent.
             _do_assign(best_family_id)
-            return best_family_id
+            return ClassifyResult(family_id=best_family_id)
         else:
             # Human: create a child family, add a parent edge, assign.
             child_name = new_family_slug or f"{name}_family"
@@ -243,22 +269,39 @@ def _classify_and_assign_family(
                                                created_by_strategy=name)
             repo.add_parent_edge(child_fam_id, best_family_id)
             _do_assign(child_fam_id, matched_family_id=best_family_id)
-            return child_fam_id
+            return ClassifyResult(family_id=child_fam_id)
 
     # NOVEL verdict
     if actor is Actor.AGENT:
-        if not has_any_family:
+        if not _has_any_family:
+            # An empty registry has no existing family to merge into; a human must found the first
+            # family before agents can promote (unchanged pre-#524 refusal).
             raise ValueError(
                 f"strategy {name!r}: the family registry is empty — no existing family to "
                 "merge into. A human operator must create the first family via "
                 "`research promote --actor human --new-family <slug>` before agents can promote."
             )
-        raise ValueError(
-            f"strategy {name!r} has no matching family (clustering verdict: NOVEL). "
-            "Assign to a family or use --actor human with --new-family <slug>."
+        # #524 (R9): do NOT create here. Defer to the atomic pass-moment. The classification
+        # snapshot is a single graph_fingerprint (member profiles are DB-persisted, so the whole
+        # classifier read-set is one DB digest). It MUST equal the state the NOVEL verdict was
+        # computed on: re-read fp_after and require fp_before == fp_after (R6-CRITICAL) — a mismatch
+        # means the graph mutated DURING classification, so the verdict is already stale.
+        fp_after = repo.family_graph_fingerprint()
+        if fp_after != fp_before:
+            raise FamilyGraphDriftError(
+                f"family graph changed while {name!r} was being classified NOVEL; re-run promote",
+                axis="graph_fingerprint")
+        pending = PendingNovelFamily(
+            slug_base=f"{name}_family", actor=actor.value, verdict=best_verdict.value,
+            similarity_score=best_score, clustering_version=cv,
+            clustering_config_json=clustering_config_json, axis_json=axis_json,
+            graph_fingerprint=fp_after,
+            founder_code_hash=strategy_code_hash,
+            founder_factors_json=member_factors_json,
         )
+        return ClassifyResult(family_id=None, pending_novel_family=pending)
     else:
-        # Human: create a new root family using the provided slug.
+        # Human: create a new root family using the provided slug (fresh zero-prior).
         if new_family_slug is None:
             raise ValueError(
                 f"strategy {name!r}: clustering verdict is NOVEL (no matching family). "
@@ -267,7 +310,7 @@ def _classify_and_assign_family(
         new_fam_id = repo.create_family(new_family_slug, actor=actor.value,
                                          created_by_strategy=name)
         _do_assign(new_fam_id, matched_family_id=None)
-        return new_fam_id
+        return ClassifyResult(family_id=new_fam_id)
 
 
 def promotion_preflight(
@@ -356,15 +399,17 @@ def promotion_preflight(
             f"in-sample/holdout boundary (#345). Declare it on the strategy CONFIG (0 if the "
             f"signal has no rolling feature window); promote with --actor human to accept the "
             f"default.")
-    # --- Family classification (clustering verdict, #222) ---
-    # Runs BEFORE breadth resolution (no holdout has been touched yet). A strategy already
-    # assigned to a family is left as-is (no reclassification). A NOVEL verdict refuses an
-    # agent (agents cannot mint new families). A human NOVEL requires --new-family <slug>.
-    family_id_resolved = _classify_and_assign_family(
-        repo, name, actor=actor, new_family_slug=new_family_slug
+    # --- Family classification (clustering verdict, #222 / #524) ---
+    # Runs BEFORE breadth resolution and BEFORE the holdout is touched. A strategy already assigned
+    # to a family is left as-is. An agent NOVEL verdict is DEFERRED (#524): no family is created
+    # here — classification returns a PendingNovelFamily spec, and the seeded family is minted only
+    # at the pass moment inside the atomic promote tx. A human NOVEL still creates the fresh 0-prior
+    # family in preflight (requires --new-family <slug>, the human privilege).
+    classify = _classify_and_assign_family(
+        repo, name, actor=actor, new_family_slug=new_family_slug,
     )
-    measured = repo.total_search_combos(name)
     windowed_total = repo.windowed_search_combos(FUNNEL_WINDOW_DAYS)
+    measured = repo.total_search_combos(name)
     if measured > 0:
         own, provenance = measured, "measured"
     elif declared_combos is not None:  # human-only path (already guarded above)
@@ -376,9 +421,35 @@ def promotion_preflight(
         )
     ctx = BreadthContext(effective_funnel_breadth(own, windowed_total), own, windowed_total,
                          provenance)
-    ctx.family_id = family_id_resolved
-    ctx.expected_family_id = family_id_resolved  # run_gate will CAS-verify this (Task 5)
+    ctx.family_id = classify.family_id
+    ctx.expected_family_id = classify.family_id  # run_gate will CAS-verify this (Task 5)
+    ctx.pending_novel_family = classify.pending_novel_family
+    # #524: as the LAST preflight step BEFORE the holdout peek, re-validate a pending agent-NOVEL
+    # spec so every hard refusal burns NO holdout and mints NO consumable gate row (R6-HIGH-3,
+    # R7-HIGH-1, R8-HIGH): (1) the per-window rate cap, and (2) still-unassigned + the
+    # full-classifier-read-set fingerprint unchanged since classification. The under-lock re-checks
+    # in record_gate_with_fdr_and_maybe_promote remain the authoritative race-safe guards.
+    if classify.pending_novel_family is not None:
+        _revalidate_pending_novel(repo, name, classify.pending_novel_family)
     return ctx
+
+
+def _revalidate_pending_novel(
+    repo: StrategyRepository, name: str, pending: PendingNovelFamily,
+) -> None:
+    """Fail-closed re-check of a deferred agent-NOVEL spec: the per-window rate cap AND the
+    still-unassigned + graph-fingerprint snapshot (#524). Raises ``AgentMintCapError`` /
+    ``FamilyGraphDriftError``. All are pure DB reads (no holdout, no gate row), safe to call both
+    pre-peek and at the atomic burn."""
+    repo.check_agent_novel_mint_bounds()
+    if repo.strategy_family(name) is not None:
+        raise FamilyGraphDriftError(
+            f"strategy {name!r} assigned to a family since NOVEL classification; re-run promote",
+            axis="still_assigned")
+    if repo.family_graph_fingerprint() != pending.graph_fingerprint:
+        raise FamilyGraphDriftError(
+            f"family graph changed since {name!r} was classified NOVEL; re-run promote",
+            axis="graph_fingerprint")
 
 
 @dataclass
@@ -420,8 +491,22 @@ def run_gate(
     family_lifetime_effective = (
         repo.family_lifetime_combos(family_id) if family_id is not None else 0
     )
+    # #524: pending agent-NOVEL — pre-lock mirror of the under-lock step-1 CAS (a fast, lock-free
+    # early reject). The founder is evaluated with family arm 0 / family_id None (the family does
+    # not exist yet); require it is STILL unassigned AND the classifier read-set fingerprint is
+    # unchanged since classification, else re-run preflight. The authoritative re-checks are the
+    # under-lock step-1 in record_gate_with_fdr_and_maybe_promote and the atomic on_peek re-check.
+    if breadth.pending_novel_family is not None:
+        if family_id is not None:
+            raise FamilyGraphDriftError(
+                f"strategy {name!r} was assigned to a family since NOVEL classification; re-run "
+                "promote", axis="still_assigned")
+        if repo.family_graph_fingerprint() != breadth.pending_novel_family.graph_fingerprint:
+            raise FamilyGraphDriftError(
+                f"family graph changed since {name!r} was classified NOVEL; re-run promote",
+                axis="graph_fingerprint")
     # CAS: verify the family hasn't changed since preflight (concurrent-preflight safety R2-F5).
-    if breadth.expected_family_id is not None and family_id != breadth.expected_family_id:
+    elif breadth.expected_family_id is not None and family_id != breadth.expected_family_id:
         raise ValueError(
             f"family assignment changed between preflight and gate evaluation "
             f"(expected {breadth.expected_family_id}, got {family_id}); re-run promote."
@@ -593,6 +678,7 @@ def run_gate(
         rec, gate_row=gate_row, p_value=p_value, funnel=funnel, level_fn=level_fn,
         fdr_alpha=FDR_ALPHA, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
+        pending_novel_family=breadth.pending_novel_family,  # #524: minted only on pass, in-tx
     )
 
     # Fold binding FDR audit fields into the GateDecision so they surface in to_dict() → CLI
