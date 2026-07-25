@@ -343,10 +343,11 @@ def test_run_gate_measured_but_missing_stats_fails_closed(tmp_path):
     assert outcome.promoted is False
 
 
-# --- run_gate FDR binding (#220, Phase 2) -----------------------------------------------
-# Calibration notes:
-#   sharpe=7.0 → dsr_confidence≈1.0 → p≈0.0 ≤ α_1≈0.00165 → FDR accepts (discovery)
-#   sharpe=2.0 → dsr_confidence≈0.96 → p≈0.04 > α_1≈0.00165 → FDR rejects (no discovery)
+# --- run_gate FDR binding (#220, Phase 2; recalibrated #529) ----------------------------
+# Calibration notes (breadth-deflated holdout-Sharpe bar ≈ 2.294 here; α_1≈0.00764 after #529):
+#   sharpe=7.0 → dsr_confidence≈1.0  → p≈0.0    ≤ α_1≈0.00764 → FDR accepts (discovery) → promoted
+#   sharpe=3.0 → dsr_confidence≈0.997→ p≈0.0032 ≤ α_1≈0.00764 → accepts (OLD α_1≈0.00165 REJECTED)
+#   sharpe=2.3 → dsr_confidence≈0.980→ p≈0.020  > α_1≈0.00764 → FDR rejects → NOT promoted (blocks)
 
 
 def _wf_sharpe(sharpe: float):
@@ -364,7 +365,7 @@ def _run_measured(repo, *, sharpe: float = 7.0):
 
 
 def test_run_gate_fdr_binding_accept_promotes(tmp_path):
-    """Sharpe=7.0 → DSR passes + p≈0 ≤ α_1 → FDR accepts (discovery) → promoted."""
+    """Sharpe=7.0 → DSR passes + p≈0 ≤ α_1≈0.00764 → FDR accepts (discovery) → promoted."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
@@ -377,22 +378,47 @@ def test_run_gate_fdr_binding_accept_promotes(tmp_path):
     assert d.fdr_p_value is not None and d.fdr_p_value < 1e-6
     assert d.fdr_alpha_level is not None and d.fdr_alpha_level > 0
     assert outcome.promoted is True
+    # #529: (c) is a HARD gate surfaced as the fdr_evidence check + the fdr_throttle check.
     assert any(c["name"] == "fdr_evidence" and c["passed"] is True for c in d.checks)
+    assert any(c["name"] == "fdr_throttle" and c["passed"] is True for c in d.checks)
+    assert d.passed == all(c["passed"] for c in d.checks)
 
 
 def test_run_gate_fdr_binding_reject_no_promotion(tmp_path):
-    """Sharpe=2.0 → DSR passes + p≈0.04 > α_1≈0.00165 → FDR rejects → not promoted."""
+    """#529: Sharpe=2.3 clears the breadth-deflated bar (~2.29) and DSR≥0.95, but p≈0.020 > α_1≈
+    0.00764 → LORD++ rejects (a GENUINE reject, not the throttle) → NOT promoted. (c) is HARD."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
-    outcome = _run_measured(repo, sharpe=2.0)
+    outcome = _run_measured(repo, sharpe=2.3)
     d = outcome.decision
     assert d.dsr_binding is True
     assert d.fdr_binding is True
-    assert d.fdr_rejected is False    # not a discovery
+    assert d.fdr_rejected is False    # not a discovery (p > α_1)
     assert d.fdr_test_index == 1
+    assert d.fdr_throttle_tripped is False   # a pure LORD++ reject, NOT the throttle
     assert outcome.promoted is False
     assert any(c["name"] == "fdr_evidence" and c["passed"] is False for c in d.checks)
+    assert d.passed is False and d.passed == all(c["passed"] for c in d.checks)
+
+
+def test_run_gate_fdr_recalibration_promotes_previously_unpassable(tmp_path):
+    """#529 regression: Sharpe=3.0 clears (a)+(b), p≈0.0032 within budget. Under the OLD α_1≈0.00165
+    this was REJECTED; the recalibrated α_1≈0.00764 ACCEPTS it → promoted. Proves the fix works."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=3.0)
+    d = outcome.decision
+    assert d.fdr_binding is True
+    assert d.fdr_p_value is not None
+    # p sits in the gap that the recalibration opened: OLD α_1 rejected, new α_1 accepts.
+    assert 0.00165 < d.fdr_p_value < 0.00764
+    assert d.fdr_alpha_level == pytest.approx(0.00764, abs=1e-4)
+    assert d.fdr_rejected is True
+    assert outcome.promoted is True
+    assert any(c["name"] == "fdr_evidence" and c["passed"] is True for c in d.checks)
+    assert d.passed == all(c["passed"] for c in d.checks)
 
 
 def test_run_gate_declared_breadth_omits_fdr_entirely(tmp_path):
@@ -451,18 +477,42 @@ def test_run_gate_fdr_discovery_increments_stream(tmp_path):
 
 
 def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
-    """A failing FDR-binding gate (t=1, no discovery) increments t but leaves discoveries empty."""
+    """A failing FDR-binding gate (t=1, no discovery) still commits a binding row that advances the
+    stream (increments t) but leaves discoveries empty — even though it is NOT promoted (#529: (c)
+    is hard, so the reject blocks promotion; the binding row is still recorded)."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
-    outcome = _run_measured(repo, sharpe=2.0)
-    assert outcome.promoted is False
+    outcome = _run_measured(repo, sharpe=2.3)  # clears (a)+(b); p≈0.02 > α_1 → LORD++ reject
+    assert outcome.promoted is False  # #529: (c) is hard — the reject blocks promotion
+    assert outcome.decision.fdr_rejected is False  # non-discovery binding row
     stream = repo.fdr_stream_state()
     assert stream is not None
     # #324: one binding (non-discovery) row recorded -> next within-cohort position is 2.
     assert stream.t == 2
     assert stream.binding_tests == 1
     assert stream.discovery_indices == []
+
+
+def test_dsr_below_threshold_blocks_independent_of_fdr(tmp_path):
+    """#529: DSR≥0.95 remains a hard multiplicity defense ANDed alongside (a) and (c). A run whose
+    dsr_confidence < 0.95 is blocked by the dsr_evidence check even when the breadth-deflated Sharpe
+    bar clears — the three checks are independent hard ANDs."""
+    repo = _gate_repo(tmp_path)
+    # Larger trial dispersion (var_ann=0.8) pushes dsr_confidence below 0.95 while holdout Sharpe
+    # 2.5 still clears the breadth-deflated bar (~2.29), so dsr_evidence is the sole blocker.
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.8)
+    outcome = _run_measured(repo, sharpe=2.5)
+    d = outcome.decision
+    assert d.dsr_binding is True
+    assert d.dsr_confidence is not None and d.dsr_confidence < 0.95
+    hs_checks = [c for c in d.checks if c["name"] == "holdout_sharpe"]
+    assert len(hs_checks) == 1 and hs_checks[0]["passed"] is True  # breadth bar still clears
+    dsr_checks = [c for c in d.checks if c["name"] == "dsr_evidence"]
+    assert len(dsr_checks) == 1 and dsr_checks[0]["passed"] is False
+    assert outcome.promoted is False
+    assert d.passed == all(c["passed"] for c in d.checks)
 
 
 def test_run_gate_non_binding_decision_json_has_fdr_skip_reason(tmp_path):

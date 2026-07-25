@@ -10,7 +10,9 @@ from algua.research.gates import (
     DSR_ALPHA,
     EULER_MASCHERONI,
     FDR_ALPHA,
-    FDR_GAMMA_TRUNCATION,
+    FDR_COHORT_SIZE,
+    FDR_NEAR_TERM_BINDING_BUDGET,
+    FDR_THROTTLE_WINDOW_DAYS,
     FDR_W0,
     FUNNEL_WINDOW_DAYS,
     MIN_HOLDOUT_OBSERVATIONS,
@@ -361,12 +363,18 @@ def test_tighten_only_invariant():
 
 def test_fdr_constants():
     assert FDR_ALPHA == 0.05
+    # #529: W0 UNCHANGED at FDR_ALPHA/2 (round-2's doubling reverted); cohort recalibrated 64→8;
+    # the two throttle constants pin the near-term exposure budget H_near / its window.
     assert FDR_W0 == pytest.approx(FDR_ALPHA / 2)
-    assert FDR_GAMMA_TRUNCATION == 10_000
+    assert FDR_COHORT_SIZE == 8
+    assert FDR_NEAR_TERM_BINDING_BUDGET == 16
+    assert FDR_THROTTLE_WINDOW_DAYS == 365
 
 
-def test_gamma_weights_sum_to_at_most_one():
-    # Normalized weights must sum to ≤ 1.0 + tol (normalized by definition, rounding ≤ 1e-9).
+def test_gamma_weights_normalized_over_cohort_size():
+    # #529: γ is normalized over the RESTART horizon (FDR_COHORT_SIZE terms), so it sums to exactly
+    # 1.0 across the cohort — a cohort spends its full W0 dry-spell budget.
+    assert len(_LORD_GAMMA) == FDR_COHORT_SIZE
     assert abs(sum(_LORD_GAMMA) - 1.0) < 1e-9
 
 
@@ -374,21 +382,70 @@ def test_gamma_weights_are_positive():
     assert all(g > 0 for g in _LORD_GAMMA)
 
 
-def test_gamma_weights_are_eventually_decreasing():
-    # The raw formula is eventually monotone-decreasing; after the first few terms, γ is ↓.
-    # We check that the tail is strictly decreasing (j=10 onward is reliable).
-    for j in range(10, 100):
+def test_gamma_weights_are_decreasing_across_cohort():
+    # The raw γ formula is monotone-decreasing across the whole N=8 cohort horizon.
+    for j in range(1, len(_LORD_GAMMA)):
         assert _LORD_GAMMA[j] <= _LORD_GAMMA[j - 1], f"γ not decreasing at j={j+1}"
 
 
 def test_lord_no_discoveries_alpha_decreasing():
-    # With no prior discoveries, α_t = γ_t · W_0 → decreases as γ_t → 0.
-    levels = [lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0) for t in range(1, 50)]
-    # All positive (weights are positive)
+    # With no prior discoveries, α_t = γ_t · W_0 → decreases across the cohort horizon (1..N).
+    levels = [
+        lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
+        for t in range(1, FDR_COHORT_SIZE + 1)
+    ]
+    # All positive within the cohort (weights are positive over 1..N).
     assert all(lv > 0 for lv in levels)
-    # Monotone non-increasing after the first position (tail of γ is ↓ past j~2)
-    for i in range(2, len(levels)):
-        assert levels[i] <= levels[i - 1] + 1e-15, f"level not decreasing at t={i+2}"
+    # Monotone non-increasing across the cohort.
+    for i in range(1, len(levels)):
+        assert levels[i] <= levels[i - 1] + 1e-15, f"level not decreasing at t={i+1}"
+
+
+def test_lord_cohort_spends_full_budget():
+    # #529: Σ_{t=1..N} α_t^dry == W0 (γ normalized over the restart horizon) AND the pinned
+    # recalibrated first two dry-spell levels (§3.1 table row N=8).
+    dry = [lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
+           for t in range(1, FDR_COHORT_SIZE + 1)]
+    assert sum(dry) == pytest.approx(FDR_W0)
+    assert dry[0] == pytest.approx(0.00764, abs=1e-4)
+    assert dry[1] == pytest.approx(0.00382, abs=1e-4)
+    # Pin the FULL dry-spell vector against the §3.1 table row so the S(16) arithmetic below is
+    # proven to use the ACTUAL level function, not hand-copied table constants.
+    expected = [0.00764, 0.00382, 0.00325, 0.00271, 0.00229, 0.00198, 0.00175, 0.00156]
+    assert dry == pytest.approx(expected, abs=1e-4)
+
+
+def test_lord_all_null_first_discovery_probability():
+    # #529 §3.5 adversarial: per FRESH cohort, P(≥1 false discovery) = p_cohort EXACTLY, computed
+    # from the ACTUAL dry-spell levels (pre-first-discovery state — levels are dry-spell UP TO the
+    # first discovery, so the ≥1 event lives entirely in this product). Assert it is ≈ FDR_ALPHA/2
+    # (≈2.5%), NOT the 72% an alpha-FLOOR would have produced.
+    # ASSUMPTION (standard LORD++): null p-values are super-uniform and the LORD++
+    # predictability/independence conditions hold — the SAME assumption the pre-existing per-cohort
+    # FDR guarantee already relies on, not a new one.
+    dry = [lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
+           for t in range(1, FDR_COHORT_SIZE + 1)]
+    p_cohort = 1.0 - math.prod(1.0 - a for a in dry)
+    assert p_cohort <= FDR_ALPHA / 2 + 1e-6
+    assert p_cohort == pytest.approx(0.0247, abs=1e-3)
+
+
+def test_lord_retry_surface_within_near_term_budget():
+    # #529 §3.1/§3.5: the cohort-ALIGNED idealized near-term surface S(16) stays within the 5%
+    # budget at N=8, AND — the load-bearing bound — the RIGOROUS worst-case for ANY rolling window
+    # (≤ ceil(H_near/N)+1 == 3 always-fresh cohorts touched) stays ≤ 8%. Also pin H_near to the cap.
+    dry = [lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
+           for t in range(1, FDR_COHORT_SIZE + 1)]
+    p_cohort = 1.0 - math.prod(1.0 - a for a in dry)
+    h_near = FDR_NEAR_TERM_BINDING_BUDGET
+    aligned = 1.0 - (1.0 - p_cohort) ** (h_near / FDR_COHORT_SIZE)
+    assert aligned <= 0.05
+    max_touched_cohorts = math.ceil(h_near / FDR_COHORT_SIZE) + 1
+    assert max_touched_cohorts == 3
+    worst_case = 1.0 - (1.0 - p_cohort) ** max_touched_cohorts
+    assert worst_case <= 0.08
+    # The cap MUST equal H_near (the derivation horizon) — they can't desync.
+    assert h_near == FDR_NEAR_TERM_BINDING_BUDGET
 
 
 def test_lord_first_discovery_bumps_alpha():
@@ -404,8 +461,9 @@ def test_lord_first_discovery_bumps_alpha():
 
 
 def test_lord_multiple_discoveries_replenish():
-    # More discoveries → more replenishment → higher α_t vs no-discovery baseline.
-    t = 10
+    # More discoveries → more replenishment → higher α_t vs no-discovery baseline. t=6 is within
+    # the N=8 cohort horizon (γ is 0 past FDR_COHORT_SIZE).
+    t = 6
     alpha_no_disc = lord_plus_plus_level(t, [], alpha=FDR_ALPHA, w0=FDR_W0)
     alpha_1disc = lord_plus_plus_level(t, [1], alpha=FDR_ALPHA, w0=FDR_W0)
     alpha_3disc = lord_plus_plus_level(t, [1, 3, 5], alpha=FDR_ALPHA, w0=FDR_W0)
