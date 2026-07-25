@@ -454,6 +454,70 @@ def test_v33_backfills_legacy_binding_rows_into_cohorts(tmp_path):
     assert before == after
 
 
+def test_529_relabels_old_cohort_size_binding_rows(tmp_path):
+    """#529: binding rows labeled under a PRIOR (larger) FDR_COHORT_SIZE — e.g. (cohort=0,
+    index=1..10) as recorded under N=64 — are re-partitioned to the CURRENT size (N=8) so a stale
+    within-cohort index > N can never wedge fdr_stream_state. Idempotent; fdr_alpha_level/passed
+    frozen; the re-labeled stream reads back cleanly."""
+    from algua.registry.store import SqliteStrategyRepository
+    from algua.research.gates import FDR_COHORT_SIZE
+
+    assert FDR_COHORT_SIZE == 8
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO strategies(id, name, stage, created_at, updated_at)"
+        " VALUES (1, 's', 'backtested', '2026-01-01', '2026-01-01')")
+    # Emulate an upgraded ledger: 10 binding rows ALL in cohort 0 with global within-cohort indices
+    # 1..10 (valid under the old N=64, invalid under N=8 where index 9,10 exceed the cohort).
+    n = FDR_COHORT_SIZE + 2  # 10
+    for g in range(1, n + 1):
+        conn.execute(
+            "INSERT INTO gate_evaluations"
+            " (strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+            "  funnel_window_days, breadth_provenance, pit_ok, holdout_n_bars,"
+            "  min_holdout_observations, code_hash, config_hash, dependency_hash, data_source,"
+            "  period_start, period_end, holdout_frac, actor, decision_json, created_at,"
+            "  fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index, fdr_cohort)"
+            " VALUES (?,?,9,9,9,90,'measured',1,80,63,'c0','cfg0','dep0','SyntheticProvider',"
+            "         '2022-01-01','2023-12-31',0.2,'agent','{}','2024-01-01T00:00:00+00:00',"
+            "         1,0.5,?,0,?,0)",
+            (1, g % 2, 0.01 * g, g),
+        )
+    conn.commit()
+
+    migrate(conn)  # #529 re-partition
+
+    rows = conn.execute(
+        "SELECT fdr_cohort, fdr_test_index, fdr_alpha_level, passed"
+        " FROM gate_evaluations WHERE fdr_binding=1 ORDER BY id"
+    ).fetchall()
+    # Re-partitioned under N=8: rows 1..8 -> cohort 0 (index 1..8); rows 9,10 -> cohort 1 (idx 1,2).
+    assert (rows[0]["fdr_cohort"], rows[0]["fdr_test_index"]) == (0, 1)
+    assert (rows[7]["fdr_cohort"], rows[7]["fdr_test_index"]) == (0, 8)
+    assert (rows[8]["fdr_cohort"], rows[8]["fdr_test_index"]) == (1, 1)
+    assert (rows[9]["fdr_cohort"], rows[9]["fdr_test_index"]) == (1, 2)
+    # fdr_alpha_level frozen (row g had 0.01*g) and passed untouched (g % 2).
+    assert rows[0]["fdr_alpha_level"] == 0.01
+    assert abs(rows[8]["fdr_alpha_level"] - 0.09) < 1e-9
+    assert rows[0]["passed"] == 1 % 2
+    # The stream reads back cleanly (was None-wedged before the re-partition): the next test joins
+    # the partially-filled cohort 1 at within-cohort position 3.
+    repo = SqliteStrategyRepository(conn)
+    stream = repo.fdr_stream_state()
+    assert stream is not None
+    assert (stream.t, stream.cohort_index, stream.binding_tests) == (3, 1, n)
+
+    before = [dict(r) for r in rows]
+    migrate(conn)  # idempotent — no second re-partition
+    after = [
+        dict(r) for r in conn.execute(
+            "SELECT fdr_cohort, fdr_test_index, fdr_alpha_level, passed"
+            " FROM gate_evaluations WHERE fdr_binding=1 ORDER BY id")
+    ]
+    assert before == after
+
+
 def test_v33_fdr_cohort_composite_unique_index_replaces_global(tmp_path):
     # #324: the global fdr_test_index unique index is replaced by a (cohort, index) composite so
     # per-cohort restarted positions do not false-conflict.

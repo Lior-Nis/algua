@@ -842,6 +842,13 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_cohort_index"
         " ON gate_evaluations(fdr_cohort, fdr_test_index) WHERE fdr_binding=1"
     )
+    # #529: FDR_COHORT_SIZE was recalibrated (64 -> 8), which re-scopes the cohort partition.
+    # Binding rows labeled under the OLD size carry stale (fdr_cohort, fdr_test_index) — e.g. a row
+    # at global ordinal 9 was (cohort=0, index=9) under N=64 but must be (cohort=1, index=1) under
+    # N=8. A stale within-cohort index > the new size fails fdr_stream_state's check + wedges every
+    # future binding promotion. Re-partition ALL binding rows to the CURRENT size (idempotent; a
+    # steady-state DB is a no-op). MUST run after _backfill_fdr_cohorts (which fills NULL labels).
+    _relabel_fdr_cohorts_for_current_size(conn)
     # v26 (#222): backtest_returns is a brand-new table; executescript creates it.
     # v26 (#222): family registry tables (families/family_members/family_parents/family_events).
     # All brand-new tables; executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
@@ -1023,6 +1030,46 @@ def _backfill_fdr_cohorts(conn: sqlite3.Connection) -> None:
             "UPDATE gate_evaluations SET fdr_cohort=?, fdr_test_index=? WHERE id=?",
             (cohort, t, row_id),
         )
+
+
+def _relabel_fdr_cohorts_for_current_size(conn: sqlite3.Connection) -> None:
+    """Re-partition ALL LORD++ binding rows into cohorts of the CURRENT ``FDR_COHORT_SIZE`` (#529).
+
+    Changing ``FDR_COHORT_SIZE`` re-scopes the cohort partition, so binding rows labeled under a
+    PRIOR size carry stale ``(fdr_cohort, fdr_test_index)`` — a within-cohort index greater than the
+    new size would fail ``fdr_stream_state``'s integrity check and wedge every future binding
+    promotion (``FDR stream integrity failure``). This one-time, idempotent migration re-labels
+    every ``fdr_binding=1`` row, in ``id`` order, to ``(cohort, t) = fdr_cohort_position(g)`` under
+    the CURRENT size. It is guarded by a mismatch scan, so a steady-state DB (labels already right)
+    is a pure no-op. ``fdr_alpha_level`` / ``fdr_rejected`` / ``passed`` are LEFT FROZEN (the
+    historical audit record), exactly like :func:`_backfill_fdr_cohorts`: only the partition labels
+    move; no past verdict changes. The composite unique index is dropped BEFORE and recreated AFTER
+    the rewrite so a row-by-row re-label can never hit a transient ``(cohort, index)`` collision.
+    """
+    from algua.research.gates import fdr_cohort_position
+
+    rows = conn.execute(
+        "SELECT id, fdr_cohort, fdr_test_index FROM gate_evaluations"
+        " WHERE fdr_binding=1 ORDER BY id"
+    ).fetchall()
+    if not rows:
+        return
+    targets: list[tuple[int, int, int]] = []
+    mismatch = False
+    for g, row in enumerate(rows, start=1):
+        cohort, t = fdr_cohort_position(g)
+        targets.append((cohort, t, row["id"]))
+        if row["fdr_cohort"] != cohort or row["fdr_test_index"] != t:
+            mismatch = True
+    if not mismatch:
+        return
+    conn.execute("DROP INDEX IF EXISTS ix_gate_evaluations_fdr_cohort_index")
+    conn.executemany(
+        "UPDATE gate_evaluations SET fdr_cohort=?, fdr_test_index=? WHERE id=?", targets)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_gate_evaluations_fdr_cohort_index"
+        " ON gate_evaluations(fdr_cohort, fdr_test_index) WHERE fdr_binding=1"
+    )
 
 
 def _add_missing_columns(
