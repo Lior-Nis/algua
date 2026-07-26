@@ -37,6 +37,7 @@ from algua.research.gates import (
     DSR_BOOTSTRAP_LOWER_QUANTILE,
     DSR_BOOTSTRAP_RESAMPLES,
     FDR_ALPHA,
+    FDR_NEAR_TERM_BINDING_BUDGET,
     FDR_W0,
     FUNNEL_WINDOW_DAYS,
     MIN_CORR_OVERLAP_BARS,
@@ -477,6 +478,7 @@ def run_gate(
     reason_suffix: str,
     holdout_evaluation_id: int | None = None,
     attempt_token: str | None = None,
+    fdr_throttle_override: bool = False,
 ) -> PromotionOutcome:
     """Post-walk phase: resolve PIT, evaluate, record the gate_evaluations row (pass AND fail), and
     on pass transition BACKTESTED->CANDIDATE (which consumes the just-minted agent token).
@@ -679,10 +681,14 @@ def run_gate(
         fdr_alpha=FDR_ALPHA, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
         pending_novel_family=breadth.pending_novel_family,  # #524: minted only on pass, in-tx
+        fdr_throttle_override=fdr_throttle_override,  # #529: human-only throttle bypass
     )
 
-    # Fold binding FDR audit fields into the GateDecision so they surface in to_dict() → CLI
-    # JSON. Non-binding fields (fdr_binding=False, fdr_skip_reason) were set above, before
+    # Fold binding LORD++ FDR fields into the GateDecision so they surface in to_dict() → CLI JSON.
+    # #529: (c) is a HARD gate again — fdr_rejected (p ≤ α_t) and the windowed throttle are the two
+    # `final_passed` terms surfaced as their own checks (fdr_evidence / fdr_throttle) so
+    # decision.passed == all(checks passed). The cohort/exposure/active-cohort/throttle-state fields
+    # are audit-only. Non-binding fields (fdr_binding=False, fdr_skip_reason) were set above, before
     # decision_json was serialized, so the DB record and the return value are consistent.
     if fdr_binding_this_row:
         decision.fdr_binding = True
@@ -696,12 +702,29 @@ def run_gate(
         decision.fdr_binding_tests = fdr_outcome.fdr_binding_tests
         decision.fdr_discoveries = fdr_outcome.fdr_discoveries
         decision.fdr_expected_false_discoveries = fdr_outcome.fdr_expected_false_discoveries
+        # #529 §3.5 throttle state + §4 active-cohort exposure (audit-only).
+        decision.fdr_throttle_window_binding = fdr_outcome.fdr_throttle_window_binding
+        decision.fdr_throttle_tripped = fdr_outcome.fdr_throttle_tripped
+        decision.fdr_throttle_override = fdr_outcome.fdr_throttle_override
+        decision.fdr_active_cohort_position = fdr_outcome.fdr_active_cohort_position
+        decision.fdr_active_cohort_applied_alpha = fdr_outcome.fdr_active_cohort_applied_alpha
+        decision.fdr_expected_false_discoveries_incl_active = (
+            fdr_outcome.fdr_expected_false_discoveries_incl_active)
+        # Two hard terms as their own checks (mirrors store.py's raw_decision) so decision.passed ==
+        # all(checks passed) == provisional AND fdr_rejected AND promotion_eligible.
         decision.checks.append({
             "name": "fdr_evidence",
             "value": fdr_outcome.fdr_p_value,
             "threshold": fdr_outcome.fdr_alpha_level,
             "op": "<=",
             "passed": bool(fdr_outcome.fdr_rejected),
+        })
+        decision.checks.append({
+            "name": "fdr_throttle",
+            "value": fdr_outcome.fdr_throttle_window_binding,
+            "threshold": FDR_NEAR_TERM_BINDING_BUDGET,
+            "op": "<",
+            "passed": not bool(fdr_outcome.fdr_throttle_tripped),
         })
     decision.passed = fdr_outcome.final_passed
 

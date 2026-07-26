@@ -77,16 +77,27 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   `backtest sweep` (declaring it with `--n-combos` is human-only); the holdout-Sharpe bar is
   DEFLATED by funnel-wide search breadth (multiple-testing defense); a minimum holdout-observations
   floor (63) applies (underpowered holdouts fail closed); a funnel-wide **LORD++ FDR alpha-wealth
-  ledger** (#220, schema v26; **#324 cohort restarts**, schema v33) applies a SECOND tighten-only
-  AND-check on measured runs — the per-strategy DSR p-value (p = 1 − dsr_confidence) must ≤ α_t
-  (LORD++ level); FDR is an operating target (FDR_ALPHA=0.05, W0=0.025); declared/human breadth and
-  missing dsr_confidence skip FDR. The stream is **partitioned into cohorts of FDR_COHORT_SIZE=64
-  binding tests by arrival order**, each an independent LORD++ stream (fresh W0), so FDR is
-  controlled **PER COHORT of 64 binding tests, NOT per lifetime**. This defeats anti-scaling: a
-  single lifetime stream let a dry spell of failed attempts drive α_t → 0 (testing more garbage
-  lowered everyone's bar); bounding the count floors the worst-case dry-spell level at γ_64·W0
-  independent of throughput. Cumulative exposure over K completed cohorts is ≈ FDR_ALPHA·K, surfaced
-  as audit-only `fdr_*` exposure fields. A passing run is the ONLY way an agent reaches `candidate`
+  ledger** (#220, schema v26; **#324 cohort restarts**, schema v33; **#529 recalibration**) applies
+  a SECOND tighten-only AND-check on measured runs — the per-strategy DSR p-value
+  (p = 1 − dsr_confidence) must ≤ α_t (LORD++ level); FDR is a per-cohort operating target
+  (FDR_ALPHA=0.05, W0=0.025 UNCHANGED); declared/human breadth and missing dsr_confidence skip FDR.
+  The stream is **partitioned into cohorts of FDR_COHORT_SIZE=8 binding tests by arrival order**
+  (#529 recalibrated 64→8 for this LOW-throughput funnel, under an explicit near-term cumulative-
+  exposure budget S(16 attempts)≤5%), each an independent LORD++ stream (fresh W0), so FDR is
+  controlled **PER COHORT of 8 binding tests, NOT per lifetime**. #529 also normalized γ over the
+  cohort restart horizon (was 10 000 terms — half-wasted the budget), lifting per-test α to
+  O(0.5–0.8%) (α_1≈0.00764, ~4.6× the old 0.00165 first-test level) so a genuinely strong strategy
+  can clear (c). The budget is ENFORCED, not hoped: a **hard windowed PROMOTION-ELIGIBILITY throttle**
+  caps promotion-eligible binding tests at **≤16 per 365 days** (`FDR_NEAR_TERM_BINDING_BUDGET=16`,
+  `FDR_THROTTLE_WINDOW_DAYS=365`) — the 17th+ still COMMIT a fail-closed binding row and still advance
+  the LORD++ stream but CANNOT promote, bounding the per-window all-null false-promotion probability
+  to a worst-case ≤3·p_cohort≈7.2% (typical aligned ≈4.9%) for agents, in code. A human-only
+  `--fdr-throttle-override` (#329-signed, rejected on the agent path like `--allow-non-pit`) is the
+  sole escape hatch. Cumulative exposure over K completed cohorts is ≈ FDR_ALPHA·K, and lifetime
+  exposure is now RATE-CAPPED by the throttle (≤16 promotion-eligible/window, not unbounded-at-burst,
+  though still unbounded-in-count — a genuine lifetime FDR bound is provably incompatible with a
+  passable gate). Surfaced as audit-only `fdr_*` exposure + throttle-state + active-cohort fields.
+  A passing run is the ONLY way an agent reaches `candidate`
   — there is no
   raw `registry transition --to candidate` shortcut for an agent (`--allow-non-pit`,
   `--allow-holdout-reuse`, `--n-combos`, and the raw shortlist transition are all human-only).

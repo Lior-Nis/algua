@@ -4,7 +4,9 @@ The pure-maths responsibilities that ``evaluate_gate`` composes now live in cohe
 modules (mirroring the ``backtest/bootstrap.py`` / ``backtest/neff.py`` precedent):
 
 - ``algua.research.regime``   — volatility-tertile regime robustness + CAPM idiosyncratic-alpha.
-- ``algua.research.fdr_lord``  — LORD++ online-FDR γ-sequence, cohort restarts, and α_t level.
+- ``algua.research.fdr_lord``  — LORD++ online-FDR γ-sequence, cohort restarts, and α_t level
+  (recalibrated N=8 + γ-over-restart-horizon + hard windowed promotion throttle since #529 — a HARD
+  per-cohort FDR gate, not merely advisory).
 - ``algua.research.dsr``       — DSR SR*/confidence, dispersion floor, effective funnel breadth.
 - ``algua.research.haircut``   — the deflated-Sharpe multiple-testing haircut.
 - ``algua.research._constants`` — the shared holdout-power floor (MIN_HOLDOUT_OBSERVATIONS).
@@ -46,7 +48,8 @@ from algua.research.fdr_lord import (
     _LORD_GAMMA,
     FDR_ALPHA,
     FDR_COHORT_SIZE,
-    FDR_GAMMA_TRUNCATION,
+    FDR_NEAR_TERM_BINDING_BUDGET,
+    FDR_THROTTLE_WINDOW_DAYS,
     FDR_W0,
     _compute_lord_gamma,
     fdr_cohort_position,
@@ -85,7 +88,8 @@ __all__ = [
     "EULER_MASCHERONI",
     "FDR_ALPHA",
     "FDR_COHORT_SIZE",
-    "FDR_GAMMA_TRUNCATION",
+    "FDR_NEAR_TERM_BINDING_BUDGET",
+    "FDR_THROTTLE_WINDOW_DAYS",
     "FDR_W0",
     "FUNNEL_WINDOW_DAYS",
     "GATE_SPECS",
@@ -189,9 +193,13 @@ class GateDecision:
     dsr_funnel_floor_var_ann: float | None = None
     dsr_funnel_floor_n_strategies: int | None = None
     dsr_funnel_floor_n_total_rows: int | None = None
-    # LORD++ FDR accounting (#220, Phase 2). Populated by run_gate() AFTER the atomic store
-    # call (α_t is only known inside the write transaction). Non-binding rows leave all fdr_*
-    # fields at their defaults (False/None); fdr_skip_reason explains why FDR was omitted.
+    # LORD++ FDR accounting (#220, Phase 2; recalibrated #529). HARD across-strategy FDR gate:
+    # fdr_rejected (p ≤ α_t) is ANDed into the promotion verdict alongside (a) the breadth-deflated
+    # Sharpe bar and (b) DSR ≥ 0.95; #529 lifted α_1 0.00165 → 0.00764 (N=8 + γ over the restart
+    # horizon) and added the hard windowed promotion-eligibility throttle (fdr_throttle_* below).
+    # Populated by run_gate() AFTER the atomic store call (α_t is only known inside the write
+    # transaction). Non-binding rows leave all fdr_* fields at their defaults (False/None);
+    # fdr_skip_reason explains why FDR was omitted.
     fdr_binding: bool = False
     fdr_p_value: float | None = None
     fdr_alpha_level: float | None = None
@@ -211,6 +219,21 @@ class GateDecision:
     fdr_binding_tests: int | None = None
     fdr_discoveries: int | None = None
     fdr_expected_false_discoveries: float | None = None
+    # Windowed promotion-eligibility throttle (#529, §3.5). fdr_throttle_window_binding = count of
+    # PRIOR committed binding tests within FDR_THROTTLE_WINDOW_DAYS at decision time;
+    # fdr_throttle_tripped = the budget was already spent so promotion was blocked (final_passed
+    # forced False, but the binding row still committed and the LORD++ stream still advanced);
+    # fdr_throttle_override = a human #329-signed --fdr-throttle-override lifted the cap.
+    fdr_throttle_window_binding: int | None = None
+    fdr_throttle_tripped: bool | None = None
+    fdr_throttle_override: bool | None = None
+    # Active (in-progress) cohort exposure audit (#529, §4) — surfaces partial-cohort spend that the
+    # completed-only fdr_expected_false_discoveries hides at small N. Position 1..FDR_COHORT_SIZE;
+    # applied_alpha = Σ stored α over the open cohort's binding rows incl. this one;
+    # ..._incl_active = FDR_ALPHA·cohorts_completed + applied_alpha.
+    fdr_active_cohort_position: int | None = None
+    fdr_active_cohort_applied_alpha: float | None = None
+    fdr_expected_false_discoveries_incl_active: float | None = None
     # Returns-persistence audit (#221 Slice 1). Non-binding: True iff run_gate wrote a
     # holdout_returns row for this evaluation. False for pre-Slice-1 promotions (omit-not-fail).
     returns_available: bool = False

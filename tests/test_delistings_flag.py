@@ -141,6 +141,21 @@ def test_research_promote_rejects_assume_terminal_last_close_for_agent():
     assert "human" in out or "human-only" in out or "not allowed" in out
 
 
+def test_research_promote_rejects_fdr_throttle_override_for_agent():
+    """#529: --fdr-throttle-override is human-only — the agent path must fail closed early with the
+    human-only guard message (mirrors --assume-terminal-last-close / --allow-non-pit)."""
+    res = runner.invoke(app, [
+        "research", "promote", STRATEGY,
+        "--universe", "U",
+        "--start", "2020-01-01", "--end", "2020-12-31",
+        "--fdr-throttle-override",
+        # default --actor is "agent"
+    ])
+    assert res.exit_code != 0
+    out = res.output.lower()
+    assert "fdr-throttle-override is human-only" in out or "human-only" in out
+
+
 def test_research_promote_human_actor_can_pass_assume_terminal_last_close(tmp_path, monkeypatch):
     """With --actor human the flag is accepted (not rejected at the human-only guard).
 

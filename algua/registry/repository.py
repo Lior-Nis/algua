@@ -30,6 +30,14 @@ class FdrGateOutcome(NamedTuple):
     fdr_binding_tests: int | None = None
     fdr_discoveries: int | None = None
     fdr_expected_false_discoveries: float | None = None
+    # Windowed promotion-eligibility throttle (#529, §3.5). None on non-binding rows.
+    fdr_throttle_window_binding: int | None = None
+    fdr_throttle_tripped: bool | None = None
+    fdr_throttle_override: bool | None = None
+    # Active (in-progress) cohort exposure audit (#529, §4). None on non-binding rows.
+    fdr_active_cohort_position: int | None = None
+    fdr_active_cohort_applied_alpha: float | None = None
+    fdr_expected_false_discoveries_incl_active: float | None = None
 
 
 class FdrStreamState(NamedTuple):
@@ -48,6 +56,9 @@ class FdrStreamState(NamedTuple):
     - ``cohorts_completed`` — number of FULLY-filled cohorts (each == FDR_COHORT_SIZE tests).
     - ``binding_tests`` — total binding rows so far (the next test is ``binding_tests + 1``).
     - ``discoveries`` — total ``fdr_rejected=1`` rows across all cohorts.
+    - ``current_cohort_applied_alpha`` (#529) — Σ of the stored ``fdr_alpha_level`` over the binding
+      rows already in the cohort the NEXT test joins (0.0 for a fresh cohort). The active-cohort
+      exposure audit adds this row's own α to it.
 
     ``t`` + ``discovery_indices`` fully determine ``lord_plus_plus_level`` for the NEXT test."""
 
@@ -57,6 +68,7 @@ class FdrStreamState(NamedTuple):
     cohorts_completed: int = 0
     binding_tests: int = 0
     discoveries: int = 0
+    current_cohort_applied_alpha: float = 0.0
 
 
 class FunnelFloor(NamedTuple):
@@ -624,6 +636,7 @@ class GateLedger(Protocol):
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
+        fdr_throttle_override: bool = False,
     ) -> FdrGateOutcome:
         """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
         ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from

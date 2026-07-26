@@ -32,7 +32,12 @@ from algua.registry.repository import (
     StrategyNotFound,
     StrategyRecord,
 )
-from algua.research.gates import FDR_COHORT_SIZE, MIN_FUNNEL_FLOOR_STRATEGIES
+from algua.research.gates import (
+    FDR_COHORT_SIZE,
+    FDR_NEAR_TERM_BINDING_BUDGET,
+    FDR_THROTTLE_WINDOW_DAYS,
+    MIN_FUNNEL_FLOOR_STRATEGIES,
+)
 
 # --- #524 agent-NOVEL mint governance constants (R9-M1) --------------------------------------
 # CODEOWNERS-protected: these live in algua/registry/store.py as module constants — NOT a CLI flag,
@@ -1292,7 +1297,8 @@ class SqliteStrategyRepository:
         if not rows:
             return FdrStreamState(
                 t=1, discovery_indices=[], cohort_index=0,
-                cohorts_completed=0, binding_tests=0, discoveries=0)
+                cohorts_completed=0, binding_tests=0, discoveries=0,
+                current_cohort_applied_alpha=0.0)
         discoveries = 0
         # Per-cohort bookkeeping validated in id order: each cohort's fdr_test_index must run
         # 1..size and no cohort may exceed FDR_COHORT_SIZE; cohort index must advance by exactly 1
@@ -1302,6 +1308,9 @@ class SqliteStrategyRepository:
         # α_t depends on. Rebuilt whenever a new cohort begins.
         cur_cohort = 0
         cur_discovery_indices: list[int] = []
+        # #529: Σ of stored α over the CURRENT cohort's rows (active-cohort exposure audit). Reset
+        # whenever a new cohort begins; accumulated per row of the current cohort.
+        cur_applied_alpha = 0.0
         prev_cohort: int | None = None
         for r in rows:
             p, alpha, rejected, idx, cohort = (
@@ -1324,6 +1333,7 @@ class SqliteStrategyRepository:
                     return None
                 cur_cohort = 0
                 cur_discovery_indices = []
+                cur_applied_alpha = 0.0
             elif cohort == prev_cohort:
                 # Same cohort: index must be the next contiguous position.
                 if idx != cohort_sizes[cohort] + 1:
@@ -1336,12 +1346,14 @@ class SqliteStrategyRepository:
                     return None
                 cur_cohort = cohort
                 cur_discovery_indices = []
+                cur_applied_alpha = 0.0
             else:
                 return None
             cohort_sizes[cohort] = cohort_sizes.get(cohort, 0) + 1
             if cohort_sizes[cohort] > FDR_COHORT_SIZE:
                 return None
             prev_cohort = cohort
+            cur_applied_alpha += float(alpha)
             if int(rejected) == 1:
                 discoveries += 1
                 cur_discovery_indices.append(idx)
@@ -1354,16 +1366,38 @@ class SqliteStrategyRepository:
             next_cohort = last_cohort
             next_t = last_size + 1
             next_discovery_indices = cur_discovery_indices
+            next_applied_alpha = cur_applied_alpha
         else:
             # The last cohort is sealed — the next test opens a fresh cohort at t=1.
             next_cohort = last_cohort + 1
             next_t = 1
             next_discovery_indices = []
+            next_applied_alpha = 0.0
         cohorts_completed = sum(1 for s in cohort_sizes.values() if s == FDR_COHORT_SIZE)
         return FdrStreamState(
             t=next_t, discovery_indices=next_discovery_indices, cohort_index=next_cohort,
             cohorts_completed=cohorts_completed, binding_tests=binding_tests,
-            discoveries=discoveries)
+            discoveries=discoveries, current_cohort_applied_alpha=next_applied_alpha)
+
+    def _windowed_binding_test_count(self, window_days: int) -> int:
+        """#529 §3.5 — count PRIOR committed binding FDR tests whose ``created_at`` is within the
+        trailing ``window_days``. Drives the windowed PROMOTION-ELIGIBILITY throttle: once this
+        count reaches ``FDR_NEAR_TERM_BINDING_BUDGET`` a further binding test is not promotable
+        (it still commits its binding row and advances the stream — only ``final_passed`` is forced
+        False). MUST run inside the ``BEGIN IMMEDIATE`` in
+        ``record_gate_with_fdr_and_maybe_promote`` and BEFORE this row's INSERT, so it counts PRIOR
+        rows only — a per-decision cap on the count
+        of prior in-window binding rows, not a retrospective property of an arbitrary window.
+
+        ``created_at`` is a canonical UTC ISO-8601 string (``_now()``), so lexicographic ``>=`` on
+        the cutoff is chronologically correct (identical +00:00 offset, zero-padded fields)."""
+        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM gate_evaluations"
+            " WHERE fdr_binding=1 AND created_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        return int(row["n"])
 
     @staticmethod
     def _cas_funnel(name: str, expected: object, actual: object) -> None:
@@ -1433,10 +1467,19 @@ class SqliteStrategyRepository:
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
+        fdr_throttle_override: bool = False,
     ) -> FdrGateOutcome:
         # #524: coerce the actor BEFORE the pending-mint boundary guard (callers may pass a raw
         # string; an identity test against an un-coerced string would mis-evaluate).
         actor = Actor(actor)
+        # #529 §3.5 — the throttle override is a HUMAN-ONLY relaxation (mirrors --allow-non-pit /
+        # --allow-holdout-reuse). THIS method is the safety boundary, not just the CLI: fail closed
+        # unless the actor is human, so an agent can never lift the windowed promotion cap even if a
+        # caller mis-threads the flag.
+        if fdr_throttle_override and actor is not Actor.HUMAN:
+            raise ValueError(
+                "fdr_throttle_override is human-only: an agent can never bypass the windowed "
+                "FDR promotion throttle (--fdr-throttle-override requires --actor human, #329)")
         # #524: the mint is an AGENT-only capability and THIS method is the safety boundary, not
         # just the (trusted) caller path. Fail-closed unless the method actor is the agent AND the
         # pending spec's own actor/verdict are internally consistent (a caller bug must not write
@@ -1481,6 +1524,13 @@ class SqliteStrategyRepository:
         binding_tests_after: int | None = None
         discoveries_after: int | None = None
         expected_false_discoveries: float | None = None
+        # #529 windowed throttle + active-cohort exposure audit (binding rows only).
+        throttle_window_binding: int | None = None
+        throttle_tripped: bool | None = None
+        promotion_eligible: bool | None = None
+        active_cohort_position: int | None = None
+        active_cohort_applied_alpha: float | None = None
+        expected_false_discoveries_incl_active: float | None = None
         final_passed: bool
 
         # BEGIN IMMEDIATE takes the write lock up front so the stream-state SELECT, the gate row
@@ -1523,8 +1573,26 @@ class SqliteStrategyRepository:
                 cohort_index = stream.cohort_index
                 alpha_t = level_fn(t_next, stream.discovery_indices)
                 assert p_value is not None
+                # #529 (c) — HARD per-cohort LORD++ FDR check. fdr_rejected = p ≤ α_t stays the
+                # PURE LORD++ verdict (unchanged meaning) and is ANDed into final_passed alongside
+                # (a)+(b) via provisional_passed. The recalibration (N=8 + γ over the restart) lifts
+                # α_1 to ≈0.00764 so a genuinely strong strategy can clear it.
                 fdr_rejected = p_value <= alpha_t
-                final_passed = provisional_passed and fdr_rejected
+                # #529 §3.5 — hard windowed PROMOTION-ELIGIBILITY throttle. Count PRIOR committed
+                # in-window binding tests (this row not yet inserted); once the near-term budget is
+                # spent, this test is promotion-INELIGIBLE. A human #329-signed override lifts it.
+                # The throttled row STILL commits a binding row and STILL advances the LORD++ stream
+                # below (a real FDR test ran) — only final_passed is forced False. This is a
+                # per-decision cap on prior in-window rows, not a retrospective-window property.
+                throttle_window_binding = self._windowed_binding_test_count(
+                    FDR_THROTTLE_WINDOW_DAYS)
+                promotion_eligible = (
+                    throttle_window_binding < FDR_NEAR_TERM_BINDING_BUDGET
+                    or fdr_throttle_override)
+                throttle_tripped = not promotion_eligible
+                # final_passed AND-chains (a)+(b)+floors (provisional) with (c) fdr_rejected AND the
+                # throttle eligibility — restoring the hard AND (#529 is NOT advisory).
+                final_passed = provisional_passed and fdr_rejected and promotion_eligible
                 # AUDIT-ONLY cumulative exposure (never changes the decision). This test adds one
                 # binding row and, if it rejects, one discovery. Completed cohorts fill AFTER this
                 # test only if it lands at the last position of its cohort.
@@ -1536,11 +1604,25 @@ class SqliteStrategyRepository:
                 # independent cohorts each controlled at FDR ≤ fdr_alpha (NOT conditioned on
                 # cohorts-with-discoveries — that would be post-selection and understate exposure).
                 expected_false_discoveries = fdr_alpha * cohorts_completed
+                # #529 §4 — active (in-progress) cohort exposure so partial-cohort spend at small
+                # N is never hidden by the completed-only field. Position = this row's within-cohort
+                # ordinal; applied_alpha = Σ stored α over the open cohort INCLUDING this row. The
+                # incl_active total uses cohorts_completed BEFORE this test (stream value)
+                # + the actual applied α of the active cohort, so a cohort-sealing row is never
+                # double-counted (once as fdr_alpha, once as its applied α).
+                active_cohort_position = t_next
+                active_cohort_applied_alpha = (
+                    stream.current_cohort_applied_alpha + alpha_t)
+                expected_false_discoveries_incl_active = (
+                    fdr_alpha * stream.cohorts_completed + active_cohort_applied_alpha)
             else:
                 final_passed = provisional_passed
 
             # Patch decision_json so the stored audit record reflects final_passed and the FDR
-            # outcome — both are only known after the stream read inside this transaction.
+            # gate outcome — both are only known after the stream read inside this transaction.
+            # #529: (c) fdr_rejected (p ≤ α_t) is surfaced as the HARD `fdr_evidence` check and the
+            # windowed throttle as the SEPARATE `fdr_throttle` check, so decision.passed ==
+            # all(checks passed) == provisional AND fdr_rejected AND promotion_eligible.
             raw_decision = json.loads(gate_row.get("decision_json") or "{}")
             raw_decision["passed"] = final_passed
             if fdr_binding:
@@ -1556,13 +1638,33 @@ class SqliteStrategyRepository:
                 raw_decision["fdr_binding_tests"] = binding_tests_after
                 raw_decision["fdr_discoveries"] = discoveries_after
                 raw_decision["fdr_expected_false_discoveries"] = expected_false_discoveries
-                raw_decision["checks"] = raw_decision.get("checks", []) + [{
-                    "name": "fdr_evidence",
-                    "value": p_value,
-                    "threshold": alpha_t,
-                    "op": "<=",
-                    "passed": bool(fdr_rejected),
-                }]
+                # #529 §3.5 throttle state + §4 active-cohort exposure (audit fields).
+                raw_decision["fdr_throttle_window_binding"] = throttle_window_binding
+                raw_decision["fdr_throttle_tripped"] = bool(throttle_tripped)
+                raw_decision["fdr_throttle_override"] = bool(fdr_throttle_override)
+                raw_decision["fdr_active_cohort_position"] = active_cohort_position
+                raw_decision["fdr_active_cohort_applied_alpha"] = active_cohort_applied_alpha
+                raw_decision["fdr_expected_false_discoveries_incl_active"] = (
+                    expected_false_discoveries_incl_active)
+                # Two hard `final_passed` terms surfaced as their own checks so decision.passed ==
+                # all(checks passed): the pure LORD++ FDR verdict (fdr_evidence) and the windowed
+                # promotion throttle (fdr_throttle). fdr_rejected is NOT overloaded by the throttle.
+                raw_decision["checks"] = raw_decision.get("checks", []) + [
+                    {
+                        "name": "fdr_evidence",
+                        "value": p_value,
+                        "threshold": alpha_t,
+                        "op": "<=",
+                        "passed": bool(fdr_rejected),
+                    },
+                    {
+                        "name": "fdr_throttle",
+                        "value": throttle_window_binding,
+                        "threshold": FDR_NEAR_TERM_BINDING_BUDGET,
+                        "op": "<",
+                        "passed": bool(promotion_eligible),
+                    },
+                ]
             decision_json = json.dumps(raw_decision)
 
             cur = self._conn.execute(
@@ -1650,6 +1752,12 @@ class SqliteStrategyRepository:
             fdr_binding_tests=binding_tests_after,
             fdr_discoveries=discoveries_after,
             fdr_expected_false_discoveries=expected_false_discoveries,
+            fdr_throttle_window_binding=throttle_window_binding,
+            fdr_throttle_tripped=throttle_tripped,
+            fdr_throttle_override=(bool(fdr_throttle_override) if fdr_binding else None),
+            fdr_active_cohort_position=active_cohort_position,
+            fdr_active_cohort_applied_alpha=active_cohort_applied_alpha,
+            fdr_expected_false_discoveries_incl_active=expected_false_discoveries_incl_active,
         )
 
     def passing_gate_by_token(self, strategy: str, attempt_token: str) -> int | None:

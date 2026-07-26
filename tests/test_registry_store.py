@@ -1316,8 +1316,10 @@ def test_fdr_gate_binding_accept_promotes_when_provisional_passes(repo):
 
 
 def test_fdr_gate_binding_reject_blocks_promotion(repo):
+    # #529: (c) is a HARD gate. A LORD++ reject (p > α_t) blocks promotion even when the provisional
+    # gate passed — final_passed = provisional AND fdr_rejected AND promotion_eligible.
     rec = _at_backtested(repo)
-    # p=0.03 > level_reject(1, []) = 0.0 → FDR rejects → final_passed=False
+    # p=0.03 > level_reject(1, []) = 0.0 → fdr_rejected=False → final_passed=False.
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_reject, fdr_alpha=0.05, actor=Actor.AGENT)
@@ -1325,6 +1327,9 @@ def test_fdr_gate_binding_reject_blocks_promotion(repo):
     assert outcome.fdr_binding is True
     assert outcome.fdr_rejected is False
     assert outcome.fdr_test_index == 1
+    # #529 §3.5: the throttle did NOT fire (first in-window binding test); the block is the pure
+    # LORD++ reject, and the binding row still committed + advanced the stream.
+    assert outcome.fdr_throttle_tripped is False
     assert outcome.updated_rec is None
     assert repo.get("s").stage is Stage.BACKTESTED
 
@@ -1340,8 +1345,8 @@ def test_fdr_gate_provisional_fail_skips_fdr_promotion(repo):
 
 
 def test_fdr_gate_db_passed_column_reflects_final_not_provisional(repo):
+    # #529: provisional=True but LORD++ rejects → final_passed=False → DB `passed` column is 0.
     rec = _at_backtested(repo)
-    # provisional=True but FDR rejects → DB must store passed=0
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
         level_fn=_level_reject, fdr_alpha=0.05, actor=Actor.AGENT)
@@ -1364,8 +1369,10 @@ def test_fdr_gate_db_passed_column_true_on_accept(repo):
     assert row["passed"] == 1
 
 
-def test_fdr_gate_decision_json_contains_fdr_evidence_check(repo):
-    """decision_json stored in DB must include fdr_evidence in its checks list."""
+def test_fdr_gate_decision_json_contains_fdr_evidence_and_throttle_checks(repo):
+    """#529: decision_json stored in DB must include BOTH the hard fdr_evidence check (pure LORD++
+    p ≤ α_t) and the fdr_throttle check (windowed promotion-eligibility), so the persisted
+    decision.passed == all(checks passed). The audit fdr_* fields are recorded top-level too."""
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
@@ -1377,10 +1384,18 @@ def test_fdr_gate_decision_json_contains_fdr_evidence_check(repo):
     stored = json.loads(row["decision_json"])
     fdr_checks = [c for c in stored.get("checks", []) if c.get("name") == "fdr_evidence"]
     assert len(fdr_checks) == 1
-    check = fdr_checks[0]
-    assert check["value"] == pytest.approx(0.03)
-    assert check["op"] == "<="
-    assert check["passed"] is True
+    assert fdr_checks[0]["value"] == pytest.approx(0.03)
+    assert fdr_checks[0]["op"] == "<="
+    assert fdr_checks[0]["passed"] is True
+    thr_checks = [c for c in stored.get("checks", []) if c.get("name") == "fdr_throttle"]
+    assert len(thr_checks) == 1
+    assert thr_checks[0]["threshold"] == 16 and thr_checks[0]["op"] == "<"
+    assert thr_checks[0]["passed"] is True   # first in-window binding test → eligible
+    assert stored["fdr_binding"] is True
+    assert stored["fdr_cohort"] == 0
+    # §4 active-cohort exposure audit fields present.
+    assert stored["fdr_active_cohort_position"] == 1
+    assert stored["fdr_throttle_window_binding"] == 0
 
 
 def test_fdr_gate_stream_grows_for_binding_rows(repo):
@@ -1442,6 +1457,120 @@ def test_fdr_gate_surfaces_cohort_and_exposure(repo):
     assert stored["fdr_cohort"] == 0
     assert stored["fdr_binding_tests"] == 1
     assert stored["fdr_expected_false_discoveries"] == 0.0
+
+
+def _land_binding_rows(repo, n, *, start=0, level_fn=_level_accept):
+    """Land ``n`` in-window binding FDR rows (distinct strategies), so the windowed throttle counter
+    reaches ``n``. Each provisionally passes and is a binding accept (it promotes; only the binding-
+    row COUNT matters to the throttle)."""
+    for i in range(start, start + n):
+        name = f"b{i}"
+        rec = _at_backtested(repo, name)
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=_EMPTY_FUNNEL._replace(strategy_name=name),
+            gate_row=_make_gate_row(passed=True), p_value=0.001,
+            level_fn=level_fn, fdr_alpha=0.05, actor=Actor.AGENT)
+
+
+def test_fdr_throttle_blocks_promotion_beyond_budget(repo):
+    """#529 §3.5: at most FDR_NEAR_TERM_BINDING_BUDGET (16) binding tests are PROMOTION-eligible per
+    365-day window. The 16th (prior count 15) promotes; the 17th (prior count 16) is throttled — it
+    STILL commits a binding row and advances the LORD++ stream with its TRUE fdr_rejected, but
+    final_passed=False and no stage advance. Proves it is a PROMOTION throttle, not a row cap."""
+    _land_binding_rows(repo, 15)
+    # 16th binding eval: prior count 15 < 16 → eligible → promotes.
+    rec16 = _at_backtested(repo, "b15")
+    o16 = repo.record_gate_with_fdr_and_maybe_promote(
+        rec16, funnel=_EMPTY_FUNNEL._replace(strategy_name="b15"),
+        gate_row=_make_gate_row(passed=True), p_value=0.001,
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT)
+    assert o16.fdr_throttle_window_binding == 15
+    assert o16.fdr_throttle_tripped is False
+    assert o16.final_passed is True
+    assert repo.get("b15").stage is Stage.CANDIDATE
+    # 17th binding eval: prior count 16 → NOT < 16 → throttled.
+    stream_before = repo.fdr_stream_state()
+    victim = _at_backtested(repo, "victim")
+    o17 = repo.record_gate_with_fdr_and_maybe_promote(
+        victim, funnel=_EMPTY_FUNNEL._replace(strategy_name="victim"),
+        gate_row=_make_gate_row(passed=True), p_value=0.001,
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT)
+    assert o17.fdr_throttle_window_binding == 16
+    assert o17.fdr_throttle_tripped is True
+    assert o17.fdr_rejected is True            # pure LORD++ verdict unchanged (p ≤ α_t)
+    assert o17.final_passed is False
+    assert o17.updated_rec is None
+    assert repo.get("victim").stage is Stage.BACKTESTED
+    # still committed a binding row + advanced the stream (PROMOTION throttle, not a row cap).
+    stream_after = repo.fdr_stream_state()
+    assert stream_after is not None and stream_before is not None
+    assert stream_after.binding_tests == stream_before.binding_tests + 1
+
+
+def test_fdr_throttle_out_of_window_row_not_counted(repo):
+    """#529 §3.5: only binding rows within FDR_THROTTLE_WINDOW_DAYS count toward the budget. Ageing
+    one of 16 in-window rows out of the window drops the count to 15, re-opening eligibility."""
+    _land_binding_rows(repo, 16)
+    repo._conn.execute(
+        "UPDATE gate_evaluations SET created_at='2024-01-01T00:00:00+00:00'"
+        " WHERE id=(SELECT MIN(id) FROM gate_evaluations WHERE fdr_binding=1)")
+    repo._conn.commit()
+    rec = _at_backtested(repo, "fresh")
+    o = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_EMPTY_FUNNEL._replace(strategy_name="fresh"),
+        gate_row=_make_gate_row(passed=True), p_value=0.001,
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT)
+    assert o.fdr_throttle_window_binding == 15     # the aged-out row does not count
+    assert o.fdr_throttle_tripped is False
+    assert o.final_passed is True
+    assert repo.get("fresh").stage is Stage.CANDIDATE
+
+
+def test_fdr_throttle_human_override_promotes(repo):
+    """#529 §3.5: an over-budget throttle is bypassable ONLY by a human #329-signed override; the
+    agent path can never pass it (fail closed at the store boundary)."""
+    _land_binding_rows(repo, 16)  # at budget → an agent would be throttled
+    rec = _at_backtested(repo, "h")
+    o = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_EMPTY_FUNNEL._replace(strategy_name="h"),
+        gate_row=_make_gate_row(passed=True), p_value=0.001,
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.HUMAN,
+        fdr_throttle_override=True)
+    assert o.fdr_throttle_window_binding == 16
+    assert o.fdr_throttle_tripped is False        # override lifts the cap
+    assert o.fdr_throttle_override is True
+    assert o.final_passed is True
+    assert repo.get("h").stage is Stage.CANDIDATE
+    # An agent may NEVER pass the override — fail closed at the store safety boundary.
+    rec2 = _at_backtested(repo, "a")
+    with pytest.raises(ValueError, match="human-only"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="a"),
+            gate_row=_make_gate_row(passed=True), p_value=0.001,
+            level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT,
+            fdr_throttle_override=True)
+
+
+def test_fdr_active_cohort_exposure_surfaced(repo):
+    """#529 §4: the active (in-progress) cohort exposure audit surfaces partial-cohort spend the
+    completed-only field hides at small N. After k<N binding rows, the k-th row reports position k,
+    applied_alpha = Σ stored α, and incl_active = FDR_ALPHA·cohorts_completed + that sum; the
+    completed-only field stays 0.0 (no full cohort yet)."""
+    def _level(t, taus):
+        return 0.01
+    k = 3  # k < FDR_COHORT_SIZE (8) → the cohort is still open
+    last = None
+    for i in range(k):
+        rec = _at_backtested(repo, f"e{i}")
+        last = repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=_EMPTY_FUNNEL._replace(strategy_name=f"e{i}"),
+            gate_row=_make_gate_row(passed=True), p_value=0.005,
+            level_fn=_level, fdr_alpha=0.05, actor=Actor.AGENT)
+    assert last is not None
+    assert last.fdr_active_cohort_position == k
+    assert last.fdr_active_cohort_applied_alpha == pytest.approx(0.01 * k)
+    assert last.fdr_expected_false_discoveries_incl_active == pytest.approx(0.05 * 0 + 0.01 * k)
+    assert last.fdr_expected_false_discoveries == 0.0   # completed-only unchanged (no full cohort)
 
 
 def test_fdr_gate_top_level_only_guard(repo):
@@ -1782,7 +1911,8 @@ def test_fdr_gate_agent_pass_is_born_consumed(repo):
 
 def test_fdr_gate_agent_fail_and_human_pass_not_consumed(repo):
     """Non-passing agent rows and human rows must have consumed=0."""
-    # Agent row that fails FDR (provisional pass but FDR rejects) → consumed=0
+    # Agent row that provisionally passes but FAILS the hard LORD++ gate (p > α_t) → final_passed=
+    # False → consumed=0 (#529: the LORD++ reject makes the agent row non-passing again).
     rec = _at_backtested(repo)
     repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True),
