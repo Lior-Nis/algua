@@ -28,7 +28,8 @@ def test_helper_allows_plain_strategy():
 
 def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
     # After #132 slice 4: the needs_fundamentals block is removed from promotion_preflight.
-    # Preflight now proceeds past the PIT check and fails LATER at the #222 family-governance gate.
+    # Preflight now proceeds past the PIT check and proceeds past family governance (#532 cold-start
+    # no longer refused) and fails at the breadth gate (no recorded search breadth).
     # The paper/live guards (assert_tradable_without_fundamentals) are tested separately above.
     from algua.registry.promotion import promotion_preflight
     from algua.registry.transitions import transition_strategy
@@ -37,8 +38,8 @@ def test_promotion_preflight_passes_fundamentals_pit_check(tmp_path):
     repo.add("fundamentals_earnings_tilt")
     # advance to backtested (HUMAN actor to skip any gate-token requirement)
     transition_strategy(repo, "fundamentals_earnings_tilt", Stage.BACKTESTED, Actor.HUMAN, "seed")
-    # Preflight no longer refuses on needs_fundamentals; it fails later at family governance.
-    with pytest.raises(ValueError, match="family registry is empty"):
+    # Preflight no longer refuses on needs_fundamentals; it fails later at the breadth gate.
+    with pytest.raises(ValueError, match="no recorded search breadth"):
         promotion_preflight(
             repo,
             "fundamentals_earnings_tilt",

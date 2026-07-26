@@ -274,14 +274,24 @@ def _classify_and_assign_family(
 
     # NOVEL verdict
     if actor is Actor.AGENT:
-        if not _has_any_family:
-            # An empty registry has no existing family to merge into; a human must found the first
-            # family before agents can promote (unchanged pre-#524 refusal).
+        # #532 (Finding 1): `_has_any_family` (from the clustering rank over ACTIVE members) is
+        # False in TWO distinct states: (a) a true cold-start — the `families` table is genuinely
+        # empty; and (b) families exist but every one has zero active members (all removed).
+        # Only (a) is the "nothing to game" case the issue permits an agent to found #0 in. In
+        # state (b) real (if dead) sibling families are on the graph, so letting an agent silently
+        # found a fresh near-zero-prior family alongside them is exactly the multiplicity evasion
+        # #524 defends against — fail closed, human-only. `family_count()` is fingerprint component
+        # 0 and is read here inside the fp_before/fp_after window, so this branch decision is
+        # covered by the same CAS that guards the NOVEL verdict (a mint bumps the fingerprint).
+        if not _has_any_family and repo.family_count() > 0:
             raise ValueError(
-                f"strategy {name!r}: the family registry is empty — no existing family to "
-                "merge into. A human operator must create the first family via "
-                "`research promote --actor human --new-family <slug>` before agents can promote."
+                f"strategy {name!r}: the family registry has {repo.family_count()} family(ies) but "
+                "none with an active member. An agent cannot found a new family alongside existing "
+                "(if dormant) families; a human must intervene via "
+                "`research promote --actor human --new-family <slug>`."
             )
+        # Cold-start (family_count()==0) OR the normal non-empty case both fall through to the #524
+        # deferred PendingNovelFamily mint — no branch on emptiness in the seed or the mint.
         # #524 (R9): do NOT create here. Defer to the atomic pass-moment. The classification
         # snapshot is a single graph_fingerprint (member profiles are DB-persisted, so the whole
         # classifier read-set is one DB digest). It MUST equal the state the NOVEL verdict was
@@ -443,6 +453,17 @@ def _revalidate_pending_novel(
     ``FamilyGraphDriftError``. All are pure DB reads (no holdout, no gate row), safe to call both
     pre-peek and at the atomic burn."""
     repo.check_agent_novel_mint_bounds()
+    # #532 (Finding 3a): fail closed on a non-positive funnel-lifetime breadth seed BEFORE the
+    # holdout peek. The authoritative guard lives under the promote write lock in
+    # _mint_agent_novel_family (step 5a), but that runs AFTER the holdout is burned; a promote that
+    # is certain to fail the seed guard would otherwise spend its single-use holdout before the mint
+    # rejects it. This pure read is the early advisory copy (defense-in-depth, not a replacement — a
+    # concurrent search_trials change between here and commit is still caught under the lock).
+    if repo.agent_novel_mint_seed() <= 0:
+        raise ValueError(
+            f"strategy {name!r}: agent-NOVEL mint requires a strictly-positive funnel-lifetime "
+            "breadth seed; the funnel has no well-typed in-range search_trials (fail closed)"
+        )
     if repo.strategy_family(name) is not None:
         raise FamilyGraphDriftError(
             f"strategy {name!r} assigned to a family since NOVEL classification; re-run promote",

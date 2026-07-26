@@ -10,14 +10,17 @@ from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.registry.db import connect, migrate
 from algua.registry.repository import (
+    FamilyGraphDriftError,
     FdrGateOutcome,
     FdrStreamState,
     FunnelDriftError,
     FunnelSnapshot,
+    PendingNovelFamily,
     StrategyExists,
 )
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+from algua.research.clustering import clustering_version
 
 
 def test_record_exposes_metadata_defaults(tmp_path):
@@ -1774,6 +1777,104 @@ def _live_funnel(repo, name: str = "s", *, dsr_binding: bool = False) -> FunnelS
         funnel_floor_n_total_rows=(floor.n_total_rows if dsr_binding else 0),
         search_trials_count=count, search_trials_max_id=mx,
     )
+
+
+def _cold_start_pending(repo):
+    return PendingNovelFamily(
+        slug_base="s_family", actor="agent", verdict="novel", similarity_score=0.0,
+        clustering_version=clustering_version(), clustering_config_json="{}", axis_json="{}",
+        graph_fingerprint=repo.family_graph_fingerprint(),
+        founder_code_hash="", founder_factors_json="[]")
+
+
+def test_cold_start_pass_mints_family_zero(repo):
+    # #532: agent NOVEL cold-start (empty registry) + PASS -> founds family #0 in the SAME tx,
+    # seeded with the funnel-lifetime prior, founder assigned, one rate-cap mint consumed.
+    _at_backtested(repo, "s")
+    repo.record_search_trial("s", 500, "{}")  # seed>0 for the mint
+    rec = repo.get("s")
+    pending = _cold_start_pending(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_live_funnel(repo, "s"), gate_row=_make_gate_row(passed=True), p_value=None,
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT, reason="promote",
+        pending_novel_family=pending)
+    assert outcome.final_passed is True
+    assert outcome.updated_rec is not None and outcome.updated_rec.stage is Stage.CANDIDATE
+    row = repo.connection.execute(
+        "SELECT id, created_by_actor, created_by_strategy, seeded_prior_combos, founder_gate_id"
+        " FROM families").fetchall()
+    assert len(row) == 1                       # exactly family #0
+    fam = row[0]
+    assert fam["created_by_actor"] == "agent"
+    assert fam["created_by_strategy"] == "s"
+    assert fam["seeded_prior_combos"] == 500   # funnel-lifetime prior, not a special zero
+    assert fam["founder_gate_id"] == outcome.gate_id
+    assert repo.strategy_family("s") == fam["id"]
+
+
+def test_cold_start_fail_mints_nothing(repo):
+    # #532: cold-start + gate FAIL -> deferred-mint semantics: NO family created, strategy stays
+    # BACKTESTED.
+    _at_backtested(repo, "s")
+    rec = repo.get("s")
+    pending = _cold_start_pending(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_live_funnel(repo, "s"), gate_row=_make_gate_row(passed=False), p_value=None,
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT, reason="promote",
+        pending_novel_family=pending)
+    assert outcome.final_passed is False
+    assert outcome.updated_rec is None
+    assert repo.connection.execute("SELECT COUNT(*) c FROM families").fetchone()["c"] == 0
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def test_cold_start_concurrent_double_founding_prevented(repo):
+    # #532: two agents cold-starting -> the loser's empty-graph fingerprint no longer matches after
+    # family #0 exists; the under-lock CAS raises FamilyGraphDriftError, rolls back, no
+    # double-founding.
+    _at_backtested(repo, "s")
+    repo.record_search_trial("s", 500, "{}")
+    rec = repo.get("s")
+    pending = _cold_start_pending(repo)          # captures the empty-graph fingerprint
+    repo.create_family("other", actor="human")   # a concurrent founder mutates the graph
+    with pytest.raises(FamilyGraphDriftError, match="family graph changed"):
+        repo.record_gate_with_fdr_and_maybe_promote(
+            rec, funnel=_live_funnel(repo, "s"), gate_row=_make_gate_row(passed=True), p_value=None,
+            level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT, reason="promote",
+            pending_novel_family=pending)
+    # only 'other'
+    assert repo.connection.execute("SELECT COUNT(*) c FROM families").fetchone()["c"] == 1
+    assert repo.strategy_family("s") is None
+    assert repo.connection.execute("SELECT COUNT(*) FROM gate_evaluations").fetchone()[0] == 0
+    assert repo.get("s").stage is Stage.BACKTESTED
+
+
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+    return datetime.now(UTC).isoformat()
+
+
+def test_family_count_raw_table_count(repo):
+    # #532: family_count() is a raw SELECT COUNT(*) FROM families — a TABLE count, independent of
+    # whether any family has an active member.
+    assert repo.family_count() == 0                      # fresh DB
+    fam_id = repo.create_family("fam_a", actor="human")
+    assert repo.family_count() == 1                      # increments on create
+    repo.create_family("fam_b", actor="agent")
+    assert repo.family_count() == 2
+    # Assign then soft-delete a member: the family row remains, so family_count() still counts it
+    # (it is NOT an active-member count) even though it has zero active members.
+    repo.add("m")
+    repo.assign_strategy_to_family(
+        "m", fam_id, "human", verdict="NOVEL", similarity_score=0.0,
+        clustering_version=clustering_version(), clustering_config_json="{}", axis_json="{}",
+        matched_family_id=None)
+    repo.connection.execute(
+        "UPDATE family_members SET removed_at=? WHERE family_id=? AND removed_at IS NULL",
+        (_now_iso(), fam_id))
+    repo.connection.commit()
+    assert repo.all_families_with_member_profiles() == []  # no active members anywhere
+    assert repo.family_count() == 2                        # but both family rows still counted
 
 
 def test_funnel_cas_passes_when_snapshot_matches(repo):
