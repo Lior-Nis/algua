@@ -131,7 +131,9 @@ def test_agent_novel_returns_pending_spec_no_family_created(tmp_path) -> None:
     preflight — it returns a deferred PendingNovelFamily spec (family_id None). The seeded family
     is minted only at the pass moment inside the atomic promote tx, so preflight mints nothing."""
     repo = _make_repo()
-    # Agent NOVEL requires an existing (non-matching) family — an empty registry is refused.
+    # The empty-registry cold-start case (#532) is covered by
+    # test_agent_novel_cold_start_defers_on_empty_registry; here we exercise the non-empty
+    # deferral path.
     _setup_family_for_clustering(repo, "unrelated_fam", "unrelated_member")
     _add_backtested_strategy(repo, "strat_novel_agent")
     n_families_before = repo.connection.execute(
@@ -168,6 +170,83 @@ def test_agent_novel_pending_ignores_slug(tmp_path) -> None:
     assert ctx.family_id is None
     assert ctx.pending_novel_family is not None
     assert ctx.pending_novel_family.slug_base == "strat_novel_msg_family"  # slug ignored
+
+
+def test_agent_novel_cold_start_defers_on_empty_registry() -> None:
+    """#532: an agent NOVEL verdict on a TRULY EMPTY family registry is no longer refused — it
+    returns the SAME deferred PendingNovelFamily spec as the non-empty case (family #0 is minted
+    only at the pass moment). No family row is created in preflight."""
+    repo = _make_repo()
+    # records breadth so the breadth gate is silent; seeds NO family
+    _add_backtested_strategy(repo, "strat_cold_start")
+    ctx = _call_preflight(repo, "strat_cold_start", actor=Actor.AGENT)
+    assert ctx.family_id is None
+    assert ctx.expected_family_id is None
+    assert ctx.pending_novel_family is not None
+    assert ctx.pending_novel_family.slug_base == "strat_cold_start_family"
+    assert ctx.pending_novel_family.actor == "agent"
+    assert ctx.pending_novel_family.verdict == "novel"
+    # empty-graph fingerprint is deterministic (all-zeros) and captured on the pending spec
+    assert ctx.pending_novel_family.graph_fingerprint == repo.family_graph_fingerprint()
+    assert repo.strategy_family("strat_cold_start") is None
+    assert repo.connection.execute("SELECT COUNT(*) c FROM families").fetchone()["c"] == 0
+    # cold-start is NOT spuriously rate-blocked (0 prior mints)
+    repo.check_agent_novel_mint_bounds()
+
+
+def test_agent_novel_families_exist_but_no_active_member_fails_closed() -> None:
+    """#532 (Finding 1): families exist but EVERY family has zero active members (all soft-deleted)
+    is NOT a cold-start — real (if dead) sibling families are on the graph. An agent NOVEL verdict
+    here must fail closed (human-only), NOT silently found a fresh near-zero-prior family. Preflight
+    raises before the holdout is touched and mints no family."""
+    repo = _make_repo()
+    # A family with one member, then soft-delete the member so `_has_any_family` is False (the
+    # clustering rank sees zero ACTIVE members) while family_count() stays > 0 (state (b)).
+    fam_id = _setup_family_for_clustering(repo, "dead_fam", "dead_member")
+    repo.connection.execute(
+        "UPDATE family_members SET removed_at=? WHERE family_id=? AND removed_at IS NULL",
+        (datetime.now(UTC).isoformat(), fam_id),
+    )
+    repo.connection.commit()
+    assert repo.family_count() == 1
+    # no active members anywhere → _has_any_family is False
+    assert repo.all_families_with_member_profiles() == []
+
+    _add_backtested_strategy(repo, "strat_state_b")
+    with pytest.raises(ValueError, match="none with an active member"):
+        _call_preflight(repo, "strat_state_b", actor=Actor.AGENT)
+
+    # No family minted, strategy not assigned, no extra family row created.
+    assert repo.family_count() == 1
+    assert repo.strategy_family("strat_state_b") is None
+
+
+def test_agent_novel_seed_zero_rejected_at_preflight_before_holdout() -> None:
+    """#532 (Finding 3a): the strictly-positive funnel-lifetime seed guard fires in
+    _revalidate_pending_novel — the LAST preflight step BEFORE the holdout peek. With an empty
+    search_trials funnel the seed is 0, so an agent-NOVEL pending spec is rejected pre-peek (pure DB
+    reads, no holdout burned, no gate row minted). This is the early advisory copy of the
+    authoritative under-lock guard in _mint_agent_novel_family.
+
+    Note: through full promotion_preflight the empty-search_trials case is shadowed by the earlier
+    "no recorded search breadth" breadth gate; this pre-peek seed guard is the defense that also
+    covers a migrated-DB corrupt/overlarge search_trials row (counted by total_search_combos but
+    excluded from the WHERE-filtered lifetime seed). We exercise the guard directly, at its
+    preflight pre-peek position."""
+    from algua.registry.promotion import _revalidate_pending_novel
+    from algua.registry.repository import PendingNovelFamily
+
+    repo = _make_repo()
+    repo.add("strat_zero_seed")
+    assert repo.agent_novel_mint_seed() == 0  # empty funnel → zero seed
+    pending = PendingNovelFamily(
+        slug_base="strat_zero_seed_family", actor="agent", verdict="novel", similarity_score=0.0,
+        clustering_version=clustering_version(), clustering_config_json="{}", axis_json="{}",
+        graph_fingerprint=repo.family_graph_fingerprint(),
+        founder_code_hash="", founder_factors_json="[]",
+    )
+    with pytest.raises(ValueError, match="strictly-positive funnel-lifetime"):
+        _revalidate_pending_novel(repo, "strat_zero_seed", pending)
 
 
 # ---------------------------------------------------------------------------

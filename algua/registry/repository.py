@@ -903,6 +903,15 @@ class FamilyGraph(Protocol):
         """Return the current (active) family_id for the strategy, or None."""
         ...
 
+    def family_count(self) -> int:
+        """Raw ``SELECT COUNT(*) FROM families`` — the number of family rows regardless of whether
+        any has an active member (#532). Distinguishes a true cold-start (empty ``families`` table)
+        from the state where families exist but every one has zero active members. Read at
+        classification time inside the ``family_graph_fingerprint`` CAS window (``COUNT(*)`` FROM
+        families is fingerprint component 0), so a concurrent mint between this read and the CAS
+        trips the existing fingerprint check — no new TOCTOU."""
+        ...
+
     def family_ancestry(self, family_id: int) -> list[int]:
         """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
         ...

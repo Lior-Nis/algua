@@ -2044,6 +2044,14 @@ class SqliteStrategyRepository:
         ).fetchone()
         return int(row["family_id"]) if row is not None else None
 
+    def family_count(self) -> int:
+        # #532: raw table count, NOT an active-member count. Distinguishes a true cold-start (0
+        # rows) from "families exist but no active member" (COUNT>0, members soft-deleted). It is
+        # fingerprint component 0 (family_graph_fingerprint's leading families COUNT), so reading it
+        # at classification time inside the fp_before/fp_after window adds no TOCTOU: a concurrent
+        # mint bumps the fingerprint and trips the existing CAS.
+        return int(self._conn.execute("SELECT COUNT(*) FROM families").fetchone()[0])
+
     def family_ancestry(self, family_id: int) -> list[int]:
         """BFS-transitive list of all ancestor family_ids (cycle-safe via visited set)."""
         visited: set[int] = {family_id}
@@ -2306,7 +2314,14 @@ class SqliteStrategyRepository:
         stream). Parses each counted agent row's ``created_at`` as canonical UTC and fail-closes if
         any does not parse, so a stray naive/local timestamp cannot silently mis-bucket a row across
         the cutoff. Safe to call lock-free (pre-check) OR under the promote write lock
-        (authoritative re-check)."""
+        (authoritative re-check).
+
+        #532 (3b) scope note: this rate cap counts live rows in the ``families`` table of the
+        CURRENTLY CONNECTED registry DB file — it is per-DB, NOT global across environments.
+        Staging/CI must use a separate ``registry.sqlite`` from prod (the norm); a staging promote
+        consumes only staging's budget. A DB wipe/rotation resets the window with it (the cap counts
+        live rows, not an append-only external ledger) — acceptable because the cap is a throughput
+        bound on autonomous minting within one registry, not a cross-environment audit trail."""
         cutoff = datetime.now(UTC) - timedelta(days=AGENT_NOVEL_MINT_WINDOW_DAYS)
         rows = self._conn.execute(
             "SELECT created_at FROM families WHERE created_by_actor='agent'"
