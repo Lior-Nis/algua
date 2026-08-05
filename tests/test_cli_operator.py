@@ -527,7 +527,15 @@ def test_paper_systemd_units_present_and_shaped():
     assert "Persistent=true" in tmr
 
 
-def test_research_systemd_units_not_shipped():
-    # The research timer is deferred (round-3 fix #1) — it must not ship.
-    assert not (_SYSTEMD / "algua-research.service").exists()
-    assert not (_SYSTEMD / "algua-research.timer").exists()
+def test_research_systemd_units_shipped_and_sandboxed():
+    # The research producer now ships (candidate producer). Verify the units exist and encode the
+    # key safety properties: the service runs the launcher, and it scrubs broker creds (the sandboxed
+    # agent has network but must not carry secrets); the timer is a weekly non-session-gated cycle.
+    service = (_SYSTEMD / "algua-research.service").read_text()
+    timer = (_SYSTEMD / "algua-research.timer").read_text()
+    assert "run-research-loop.sh" in service            # drives the launcher
+    assert "UnsetEnvironment=" in service               # broker creds scrubbed from the unit env
+    assert "ALGUA_ALPACA_API_KEY" in service
+    assert "ALGUA_ALPACA_API_SECRET" in service
+    assert "OnCalendar=" in timer                        # scheduled cadence
+    assert "WantedBy=timers.target" in timer

@@ -8,9 +8,12 @@ sibling all no-op cleanly.
 
 - `algua-paper.{service,timer}` — the daily paper trading cycle (`--job paper`), ~30m after the US
   close (21:30 UTC).
+- `algua-research.{service,timer}` — the weekly autonomous **research producer** cycle (Sunday 06:00
+  UTC): a Codex agent ideates → authors → backtests/walk-forwards/sweeps → gates (`research promote`)
+  up to `candidate`, against the persistent authoritative funnel. See "Autonomous research loop" below.
 
-The overnight **research merge-back** timer is intentionally **not shipped** — see "Deferred research
-timer" below.
+The overnight **research merge-back** (consumer) timer is still intentionally **not shipped** — see
+"Deferred merge-back timer" below.
 
 ## Install
 
@@ -92,12 +95,72 @@ pipe/redirect in a script). Delivery is best-effort and never crashes the run. A
 alert means the exchange calendar has run past its precomputed horizon — **refresh the calendar /
 upgrade `exchange-calendars`**.
 
-## Deferred research timer
+## Autonomous research loop
 
-A research-cycle / `merge-back` always-on timer is a filed follow-up, intentionally not shipped here.
-A static `ExecStart` cannot know *which* candidate branch/strategy/universe/window to merge back — that
-requires FIRST solving candidate **selection** (a queue / pointer file the research unit's `ExecStart`
-resolves before invoking merge-back) AND that selection's *producer*, the research authoring loop that
-enqueues candidate branches (out of scope). Until both exist, a research timer would no-op forever. The
-generic `operator run` wrapper accepts it later as a new `OPERATOR_JOBS` manifest entry + selection
-mechanism + unit pair, with **no wrapper change**.
+`algua-research.{service,timer}` runs the candidate **producer** — the piece that was "out of scope"
+when only the paper operator shipped. It uses the **explore-isolated** topology. Each firing runs
+`.codex/scripts/run-research-loop.sh`, which:
+
+- creates a throwaway git worktree on `research-run/<stamp>` so the **code** the agent authors never
+  touches your working tree or `main`;
+- seeds a **per-run scratch funnel** from the real registry via sqlite's consistent online backup, and
+  wires the agent to it — `ALGUA_DB_PATH`, `ALGUA_KNOWLEDGE_DIR`, `ALGUA_MLFLOW_TRACKING_URI` point at
+  scratch; only `ALGUA_DATA_DIR` (the immutable snapshots) is the real one, shared read-only. So the
+  agent's walk-forward/sweep/promote see the REAL accumulated breadth, families, and burned holdouts (a
+  realistic pass/fail **preview**), but every write lands on the copy — **exploration can never mutate
+  the authoritative FDR ledger / family graph / holdout rows**, and wasted search never taxes the real
+  funnel;
+- runs `codex exec` (bounded by `TIMEOUT`, default 45m) to drive ideate → author → walk-forward/sweep →
+  `research promote` (preview) up to `candidate`, then writes `run-report.md` on the branch with the
+  exact `paper merge-back` command for any candidate whose preview passed.
+
+**Why isolated and not "direct authoritative".** `codex exec` runs unsandboxed and could edit
+`promotion.py`/`gates.py`/`fdr_lord.py` in its mutable worktree; strategy code and gate code are the
+same Python package, so if the agent ran against the real funnel it could execute altered gate logic
+against the real registry. CODEOWNERS only gates *merges to main*, not a live agent's local execution.
+Exploration therefore runs on a throwaway copy, and the **only** path to the authoritative funnel is
+`paper merge-back` — whose diff-policy rejects gate-core edits *before* the merge and whose promote runs
+trusted (main + allowlisted diff) code. That is the trusted reconciler.
+
+**Prerequisites.** `codex` must be on `PATH` and **authenticated** for the user the unit runs as
+(`codex exec` is invoked headless with `--dangerously-bypass-approvals-and-sandbox` inside the isolated
+worktree). Enable with `sudo systemctl enable --now algua-research.timer`.
+
+**The authoritative step (human-reviewed).** A passed *preview* is a candidate, not a promotion. To
+commit it to the real funnel + main, review the branch, then run the `paper merge-back --branch
+research-run/<stamp> --strategy <name> --universe <u> --start D --end D` line from the run report. That
+is the trusted, authoritative promote (real breadth tax, real single-use holdout burn, family mint) +
+gated code merge + paper intake. The agent **cannot go live** (human-signed cryptographic wall) and
+cannot merge the CODEOWNERS-protected integrity files.
+
+**Pace merge-back deliberately.** Each *authoritative* `paper merge-back` records a metered search-breadth
+tax that raises the promotion Sharpe bar for ALL future strategies, and the FDR gate throttles
+**promotion-eligible** binding tests to **≤16 per rolling 365 days** (the 17th+ still commits a
+fail-closed row but cannot promote). Exploration previews are free (scratch), so run the producer as
+often as you like; it's the human-run merge-backs that consume the budget. The holdout is single-use
+*per strategy* (a fresh strategy gets a fresh holdout on the same window), so the loop can keep authoring
+new strategies on the existing snapshot — the breadth/FDR tax, not the holdout, is what makes it harder.
+
+**Contention.** The driver holds a non-blocking `data/research-loop.lock` for the whole cycle and skips
+(no-op) rather than queue if another research cycle holds it. It does **not** contend with the paper
+operator (research writes only scratch; the sole authoritative writer, `paper merge-back`, has its own
+`merge_back.lock` + operator policy). The weekly Sunday-06:00-UTC slot is also clear of the paper window.
+
+**Failure propagation.** The driver captures the `codex exec` exit code and propagates a non-zero
+(timeout=124, or an auth/runtime error) so the systemd unit **fails** rather than silently reporting a
+no-op cycle as success. `TimeoutStartSec` (4200s) must stay above the driver's `TIMEOUT + SYNC_TIMEOUT`.
+
+**Worktree cleanup (known limitation).** The driver leaves each `research-run/<stamp>` worktree in place
+for review; it does not auto-prune. Periodically reap stale ones that produced no candidate:
+`git worktree list` then `git worktree remove ../algua-research-<stamp>` (and `git branch -D
+research-run/<stamp>`). Auto-pruning discarded cycles is a filed follow-up.
+
+## Deferred merge-back timer
+
+A `merge-back` (candidate **consumer**) always-on timer is still a filed follow-up, intentionally not
+shipped here. A static `ExecStart` cannot know *which* candidate branch/strategy/universe/window to merge
+back — that requires a candidate **selection** mechanism (a queue / pointer file the unit's `ExecStart`
+resolves before invoking merge-back). The producer above now enqueues candidates (as `research-run/<stamp>`
+branches + `run-report.md`), so what remains is the selection queue; the generic `operator run` wrapper
+accepts the consumer later as a new `OPERATOR_JOBS` manifest entry + selection mechanism + unit pair, with
+**no wrapper change**.

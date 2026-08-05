@@ -1,0 +1,34 @@
+[Unit]
+Description=Algua autonomous research cycle (Codex-driven, authoritative funnel)
+# Fired by algua-research.timer. A Codex agent ideates -> authors -> backtests/walk-forwards/sweeps
+# -> gates (preview research promote) up to 'candidate' in a SANDBOXED worktree (codex `-s
+# workspace-write`: model-generated writes are confined to the worktree; every path outside it is
+# read-only), against a THROWAWAY COPY of the funnel (scratch registry seeded via a consistent sqlite
+# backup + a per-run COPY of the immutable snapshots, all inside the worktree). So the agent CANNOT
+# write the authoritative registry/FDR ledger/holdouts/snapshots even if it edits gate code. The driver
+# holds a non-blocking flock (data/research-loop.lock) serializing overlapping RESEARCH cycles (NOT the
+# paper operator's operator.lock — the two don't contend, since research writes only scratch; the sole
+# authoritative writer, `paper merge-back`, has its own merge_back.lock + operator policy). This is the
+# candidate PRODUCER; the authoritative promote + code-merge is a separate human-reviewed `paper
+# merge-back`, and going live remains a human-signed wall the agent cannot cross.
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/algua/algua.env
+# Scrub broker credentials from the research unit — the offline research loop never needs them, and
+# the sandboxed agent has network access (for uv), so leaving secrets in its environment is needless
+# exfiltration surface. UnsetEnvironment= is applied AFTER EnvironmentFile=, so it removes these from
+# the loaded env for this unit only (and, unlike `Environment=KEY=`, carries no `KEY=<value>` shape).
+UnsetEnvironment=ALGUA_ALPACA_API_KEY ALGUA_ALPACA_API_SECRET ALGUA_ALPACA_LIVE_API_KEY ALGUA_ALPACA_LIVE_API_SECRET
+WorkingDirectory=/opt/algua
+# The driver bounds the codex run itself (TIMEOUT, default 45m) and the env pre-warm (SYNC_TIMEOUT,
+# default 5m). This is the last-resort backstop if the WRAPPER hangs (e.g. a stuck flock); it MUST be
+# set comfortably ABOVE the driver's own caps (TIMEOUT + SYNC_TIMEOUT) so the driver's own timeout
+# fires first (propagating a clean non-zero exit) instead of systemd SIGKILLing mid-run. If you raise
+# TIMEOUT in the env file past ~60m, raise this too — keep TimeoutStartSec > TIMEOUT + SYNC_TIMEOUT.
+TimeoutStartSec=4200
+# codex must be on PATH and AUTHENTICATED for the user this unit runs as (see README). The driver
+# reads the authoritative ALGUA_DB_PATH to SEED a scratch copy, then points the agent's
+# ALGUA_DB_PATH/DATA_DIR/KNOWLEDGE_DIR/MLFLOW at per-run scratch inside the sandboxed worktree.
+# Tune cadence/breadth via the timer + N_HYPOTHESES/THESIS env.
+ExecStart=/opt/algua/.codex/scripts/run-research-loop.sh
