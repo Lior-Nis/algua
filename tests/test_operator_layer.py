@@ -44,13 +44,13 @@ def test_launcher_dry_run_emits_bounded_sandboxed_codex_command():
     assert "DRY RUN" in out
     assert "codex exec" in out
     # REAL filesystem containment — the workspace-write sandbox confines writes to the worktree.
-    # The old --dangerously-bypass-approvals-and-sandbox must NOT be used (env routing is not a wall).
+    # The old bypass-sandbox flag must NOT be used (env routing alone is not a wall).
     assert "-s workspace-write" in out
     assert "approval_policy=never" in out                         # headless, no prompts
     assert "--dangerously-bypass-approvals-and-sandbox" not in out
     assert "timeout 10m" in out                                  # OS-level hard bound
     assert "research-run/" in out                                # isolated branch
-    assert ".funnel-scratch" in out                              # per-run scratch funnel (in-worktree)
+    assert ".funnel-scratch" in out                              # per-run scratch funnel
     assert "hypotheses: 2" in out                                # goal-level bound
 
 
