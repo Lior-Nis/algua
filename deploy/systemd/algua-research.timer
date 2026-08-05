@@ -1,0 +1,22 @@
+[Unit]
+Description=Algua autonomous research cycle — weekly
+
+[Timer]
+# WEEKLY, Sunday 06:00 UTC — clear of the paper window (21:30 UTC) and market hours. Research and
+# paper do NOT share a lock and do not need to: research exploration writes only its per-run scratch
+# funnel (never the authoritative DB), so it cannot contend with the paper operator; the sole
+# authoritative funnel writer, `paper merge-back`, has its own merge_back.lock + operator policy.
+# Research is NOT session-gated — it runs on historical snapshots any day — so the time is non-critical.
+#
+# PACE THIS DELIBERATELY. Every `research promote` records search breadth that raises the promotion
+# Sharpe bar for ALL future strategies, and the FDR gate hard-throttles PROMOTION-ELIGIBLE binding
+# tests to <=16 per rolling 365 days (the 17th+ still commits a fail-closed row but cannot promote).
+# Weekly with a small N_HYPOTHESES is a conservative start; if you see throttle fail-closes or the bar
+# creeping up from wasted search, lengthen this interval (OnCalendar=Sun *-*-1..7 for monthly) or drop
+# N_HYPOTHESES in the env file.
+OnCalendar=Sun *-*-* 06:00:00 UTC
+# Cover a fire missed while the box was off; research has no session gate, so it just runs once late.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
