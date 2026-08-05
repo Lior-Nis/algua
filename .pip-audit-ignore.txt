@@ -23,8 +23,19 @@ GHSA-wqp7-x3pw-xc5r
 GHSA-x746-7m8f-x49c
 
 # ---------------------------------------------------------------------------
-# cryptography 46.0.7 — fix is 48.0.1, but the version is pinned transitively via
-# mlflow -> databricks-sdk -> google-auth and does not resolve to 48.x without a
-# major mlflow-tree bump. Clears when mlflow is next major-upgraded.
-# tracking: #395 — review: 2026-10
+# cryptography 46.0.7 — pinned transitively via mlflow -> databricks-sdk -> google-auth;
+# does not resolve to the fix lines (48.0.1 / 49.0.0 / 50.0.0) without a major mlflow-tree
+# bump. Clears when mlflow is next major-upgraded. tracking: #395 — review: 2026-10
+#
+# The four advisories below are all in cryptography's x509/pkcs7 verification of
+# UNTRUSTED input (S/MIME EnvelopedData decryption; attacker-controlled certificate-chain
+# validation). algua never does this — cryptography is a transitive TLS/JWT dependency to
+# FIXED hosts (Alpaca + our own data), not a verifier of attacker-supplied certs/messages —
+# so none is reachable in algua's usage. Ignored pending the mlflow-tree major bump.
 GHSA-537c-gmf6-5ccf
+# PYSEC-2026-3552 — pkcs7_decrypt Bleichenbacher oracle (S/MIME decrypt of untrusted input; fix 50.0.0)
+PYSEC-2026-3552
+# PYSEC-2026-3553 — cert-chain validation DoS on duplicate self-signed certs (fix 49.0.0)
+PYSEC-2026-3553
+# PYSEC-2026-3554 — name-constrained wildcard SAN escape in cert verification (fix 49.0.0)
+PYSEC-2026-3554
