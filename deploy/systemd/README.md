@@ -8,7 +8,7 @@ sibling all no-op cleanly.
 
 - `algua-paper.{service,timer}` — the daily paper trading cycle (`--job paper`), ~30m after the US
   close (21:30 UTC).
-- `algua-research.{service,timer}` — the weekly autonomous **research producer** cycle (Sunday 06:00
+- `algua-research.{service,timer}` — the daily autonomous **research producer** cycle (06:00
   UTC): a Codex agent ideates → authors → backtests/walk-forwards/sweeps → gates (`research promote`)
   up to `candidate`, against the persistent authoritative funnel. See "Autonomous research loop" below.
 
@@ -133,27 +133,30 @@ is the trusted, authoritative promote (real breadth tax, real single-use holdout
 gated code merge + paper intake. The agent **cannot go live** (human-signed cryptographic wall) and
 cannot merge the CODEOWNERS-protected integrity files.
 
-**Pace merge-back deliberately.** Each *authoritative* `paper merge-back` records a metered search-breadth
-tax that raises the promotion Sharpe bar for ALL future strategies, and the FDR gate throttles
-**promotion-eligible** binding tests to **≤16 per rolling 365 days** (the 17th+ still commits a
-fail-closed row but cannot promote). Exploration previews are free (scratch), so run the producer as
-often as you like; it's the human-run merge-backs that consume the budget. The holdout is single-use
-*per strategy* (a fresh strategy gets a fresh holdout on the same window), so the loop can keep authoring
-new strategies on the existing snapshot — the breadth/FDR tax, not the holdout, is what makes it harder.
+**Cadence and the FDR budget.** The timer runs **daily** (06:00 UTC). Daily is safe for the funnel
+*because* exploration is scratch: a cycle's `research promote` is a preview that records NO breadth and
+burns NO holdout on the authoritative funnel, so it never consumes the FDR budget (**≤16
+promotion-eligible binding tests / rolling 365 days**). That budget is spent only by a human-run `paper
+merge-back` — which records a metered breadth tax that raises the promotion Sharpe bar for ALL future
+strategies. So run the producer as often as you like; pace the *merge-backs*. The holdout is single-use
+*per strategy*, so the loop keeps authoring new strategies on the existing snapshot — the breadth/FDR
+tax at merge-back, not the holdout, is what makes it progressively harder. The real per-cycle costs are
+compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in the env file) and disk (auto-pruned; see below).
 
 **Contention.** The driver holds a non-blocking `data/research-loop.lock` for the whole cycle and skips
 (no-op) rather than queue if another research cycle holds it. It does **not** contend with the paper
 operator (research writes only scratch; the sole authoritative writer, `paper merge-back`, has its own
-`merge_back.lock` + operator policy). The weekly Sunday-06:00-UTC slot is also clear of the paper window.
+`merge_back.lock` + operator policy). The daily 06:00-UTC slot is also clear of the paper window.
 
 **Failure propagation.** The driver captures the `codex exec` exit code and propagates a non-zero
 (timeout=124, or an auth/runtime error) so the systemd unit **fails** rather than silently reporting a
 no-op cycle as success. `TimeoutStartSec` (4200s) must stay above the driver's `TIMEOUT + SYNC_TIMEOUT`.
 
-**Worktree cleanup (known limitation).** The driver leaves each `research-run/<stamp>` worktree in place
-for review; it does not auto-prune. Periodically reap stale ones that produced no candidate:
-`git worktree list` then `git worktree remove ../algua-research-<stamp>` (and `git branch -D
-research-run/<stamp>`). Auto-pruning discarded cycles is a filed follow-up.
+**Worktree cleanup (automatic).** Each cycle leaves its `research-run/<stamp>` worktree in place for
+review, then a later cycle **auto-prunes** worktrees older than `RESEARCH_WORKTREE_RETENTION_DAYS`
+(default 7) at startup — reclaiming only the disposable venv + scratch; the authored code persists on
+its `research-run/<stamp>` branch after the worktree dir is removed. Lengthen the window (env file) if
+you want more review time, or reap on demand with `git worktree remove ../algua-research-<stamp>`.
 
 ## Deferred merge-back timer
 

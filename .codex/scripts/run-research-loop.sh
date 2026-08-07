@@ -142,6 +142,18 @@ if ! flock -n 9; then
   exit 0
 fi
 
+# Auto-prune stale research-run worktrees so a daily/unattended cadence doesn't fill the disk. Only
+# the disposable working dir (venv + scratch) is reclaimed — the authored code persists on its
+# research-run/<stamp> BRANCH after the worktree is removed, so nothing committed is lost. Under the
+# flock, so two cycles can't prune concurrently. Never matches the run we're about to create (mtime=now).
+RETENTION_DAYS="${RESEARCH_WORKTREE_RETENTION_DAYS:-7}"
+git -C "${REPO_ROOT}" worktree prune 2>/dev/null || true
+while IFS= read -r stale; do
+  [[ -n "${stale}" ]] || continue
+  echo "pruning stale research worktree (>${RETENTION_DAYS}d): ${stale}"
+  git -C "${REPO_ROOT}" worktree remove --force "${stale}" 2>/dev/null || rm -rf "${stale}"
+done < <(find "${REPO_ROOT}/.." -maxdepth 1 -type d -name 'algua-research-*' -mtime "+${RETENTION_DAYS}" 2>/dev/null)
+
 # Clean up the worktree if we fail during SETUP (before codex runs). Cleared before codex so a real
 # run's worktree is kept for review.
 cleanup_setup() {
