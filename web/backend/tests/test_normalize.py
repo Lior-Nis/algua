@@ -17,6 +17,16 @@ async def test_error_envelope_raises_cli_error(fake_cli: Any) -> None:
     assert excinfo.value.error == "no such strategy"
 
 
+async def test_error_envelope_without_code_still_classifies_as_error(fake_cli: Any) -> None:
+    """A regressed envelope missing `code` must not flow through as data — ok:false + error is
+    already unambiguous (fleet health's alerting payload has no top-level `error` key)."""
+    fake_cli(json.dumps({"ok": False, "error": "boom"}))
+    with pytest.raises(CliError) as excinfo:
+        await run_cli("x", ttl_s=10.0)
+    assert excinfo.value.code == "cli_error"
+    assert excinfo.value.error == "boom"
+
+
 async def test_fleet_health_alerting_payload_is_data_not_error(fake_cli: Any) -> None:
     # fleet health exits 1 with ok: false while alerting BY DESIGN — that dict has
     # no "error"/"code" keys, so it is DATA, passed through with inner ok preserved.

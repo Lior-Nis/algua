@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 /** Error thrown by getJSON on a non-2xx response, carrying the backend envelope's code. */
 export class ApiError extends Error {
@@ -46,6 +46,18 @@ interface CacheEntry {
 /** Module-level cache: survives route changes, shared across hook instances. */
 const cache = new Map<string, CacheEntry>()
 
+/** Module-level in-flight dedup: concurrent consumers of one URL (or StrictMode double
+ * effects) share a single HTTP request instead of racing the cache. */
+const inFlightByUrl = new Map<string, Promise<unknown>>()
+
+function fetchShared<T>(url: string): Promise<T> {
+  const existing = inFlightByUrl.get(url)
+  if (existing) return existing as Promise<T>
+  const p = getJSON<T>(url).finally(() => inFlightByUrl.delete(url))
+  inFlightByUrl.set(url, p)
+  return p
+}
+
 export interface UseFetchResult<T> {
   data: T | undefined
   error: Error | null
@@ -65,21 +77,17 @@ export function useFetch<T>(url: string, opts: { ttlMs?: number } = {}): UseFetc
   const [data, setData] = useState<T | undefined>(initial ? (initial.data as T) : undefined)
   const [error, setError] = useState<Error | null>(null)
   const [loading, setLoading] = useState(!initial)
-  const inFlight = useRef(false)
 
   const load = useCallback(async () => {
-    if (inFlight.current) return
-    inFlight.current = true
     if (!cache.has(url)) setLoading(true)
     try {
-      const fresh = await getJSON<T>(url)
+      const fresh = await fetchShared<T>(url)
       cache.set(url, { at: Date.now(), data: fresh })
       setData(fresh)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e : new Error(String(e)))
     } finally {
-      inFlight.current = false
       setLoading(false)
     }
   }, [url])

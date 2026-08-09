@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from typing import Any
 
 import pytest
+from backend import algua_cli
 from backend.algua_cli import CliError, run_cli
 
 
@@ -59,9 +61,50 @@ async def test_failure_without_cache_raises(fake_cli: Any) -> None:
     assert excinfo.value.code == "cli_error"
 
 
-async def test_timeout_classified_as_cli_timeout_and_process_terminated(fake_cli: Any) -> None:
+async def test_timeout_kills_the_process_group_not_just_the_child(
+    fake_cli: Any, group_signals: list[tuple[int, int]]
+) -> None:
+    """start_new_session makes the child a group leader; timeout cleanup must signal the whole
+    group (the uv-run fallback's real CLI process lives there), never just the direct child."""
     calls = fake_cli(json.dumps({"ok": True}), hang_s=5.0)
     with pytest.raises(CliError) as excinfo:
         await run_cli("fleet", "health", ttl_s=10.0, timeout_s=0.05)
     assert excinfo.value.code == "cli_timeout"
-    assert calls["procs"][0].terminated is True
+    proc = calls["procs"][0]
+    assert (proc.pid, int(signal.SIGTERM)) in group_signals
+    assert proc.terminated is False  # group signal, not direct-child terminate()
+
+
+async def test_cancellation_reaps_the_process_group(
+    fake_cli: Any, group_signals: list[tuple[int, int]]
+) -> None:
+    """Server shutdown / request cancellation mid-communicate must not leak the subprocess."""
+    calls = fake_cli(json.dumps({"ok": True}), hang_s=5.0)
+    task = asyncio.ensure_future(run_cli("fleet", "health", ttl_s=10.0))
+    await asyncio.sleep(0.05)  # let it reach communicate()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    proc = calls["procs"][0]
+    assert (proc.pid, int(signal.SIGTERM)) in group_signals
+
+
+async def test_spawn_failure_is_cli_error_and_stale_serves(
+    fake_cli: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spawn OSError (missing/non-executable binary) must classify as CliError so the
+    stale-serving path still works — never an uncaught 500."""
+    fake_cli(json.dumps({"ok": True, "n": 1}))
+    await run_cli("fleet", "health", ttl_s=0.0)  # warm the cache
+
+    async def broken_spawn(*cmd: str, **kwargs: Any) -> Any:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", broken_spawn)
+    stale = await run_cli("fleet", "health", ttl_s=0.0)
+    assert stale["stale"] is True
+    assert stale["last_error_code"] == "cli_spawn_failed"
+    algua_cli._cache.clear()
+    with pytest.raises(CliError) as excinfo:
+        await run_cli("fleet", "health", ttl_s=0.0)
+    assert excinfo.value.code == "cli_spawn_failed"

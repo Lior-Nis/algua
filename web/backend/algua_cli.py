@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -74,37 +76,62 @@ def _classify(payload: Any) -> Any:
     ``{"data": [...]}``. Anything else is not a known CLI payload -> bad_output.
     """
     if isinstance(payload, dict):
-        if payload.get("ok") is False and "error" in payload and "code" in payload:
-            raise CliError(str(payload["code"]), str(payload["error"]))
+        # "code" may be absent on a malformed/regressed error envelope — ok:false + error is
+        # already unambiguous (fleet health's alerting payload has NO top-level "error" key),
+        # and letting it through as data would hand the frontend a shape it can't render.
+        if payload.get("ok") is False and "error" in payload:
+            raise CliError(str(payload.get("code") or "cli_error"), str(payload["error"]))
         return payload
     if isinstance(payload, list):
         return {"data": payload}
     raise CliError("bad_output", f"unexpected JSON payload of type {type(payload).__name__}")
 
 
+def _signal_group(proc: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+    """Signal the subprocess's WHOLE process group (start_new_session makes it the leader) —
+    signalling only the direct child would orphan the uv-run fallback's real CLI process."""
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+async def _reap_group(proc: asyncio.subprocess.Process) -> None:
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_S)
+    except TimeoutError:
+        _signal_group(proc, signal.SIGKILL)
+        await proc.wait()
+
+
 async def _execute(args: tuple[str, ...], timeout_s: float) -> Any:
     """Run the CLI once and return the classified payload. Raises CliError."""
     cmd = _cli_command(args)
     async with _semaphore:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=REPO,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=REPO,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            # A spawn failure (missing/non-executable binary, uv absent) must be a CliError,
+            # not an uncaught 500 — stale-serving only catches CliError.
+            raise CliError("cli_spawn_failed", f"{cmd[0]}: {exc}") from None
         try:
             stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         except TimeoutError:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_S)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
+            await _reap_group(proc)
             raise CliError(
                 "cli_timeout", f"algua {' '.join(args)} exceeded {timeout_s}s wall timeout"
             ) from None
+        except asyncio.CancelledError:
+            # Request/server cancellation mid-communicate would otherwise leak the subprocess.
+            await _reap_group(proc)
+            raise
     text = stdout.decode("utf-8", errors="replace")
     # Parse REGARDLESS of exit code: fleet health exits 1 while alerting by design,
     # and typer usage errors (exit 2) still emit the JSON error envelope.

@@ -27,6 +27,7 @@ class FakeProcess:
         self._stdout = stdout
         self._hang_s = hang_s
         self.returncode = returncode
+        self.pid = 4242
         self.terminated = False
         self.killed = False
 
@@ -43,6 +44,18 @@ class FakeProcess:
 
     async def wait(self) -> int:
         return self.returncode
+
+
+@pytest.fixture
+def group_signals(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Record (pgid, signal) pairs sent via os.killpg — the group-kill contract."""
+    sent: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid: int, sig: int) -> None:
+        sent.append((pgid, int(sig)))
+
+    monkeypatch.setattr(algua_cli.os, "killpg", fake_killpg)
+    return sent
 
 
 @pytest.fixture
