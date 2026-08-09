@@ -218,20 +218,25 @@ def create_app() -> FastAPI:
     @app.post("/api/push/subscribe")
     async def push_subscribe(request: Request) -> dict[str, Any]:
         # Body cap BEFORE parsing: the Content-Length header is the cheap first
-        # line; the read-back length check is the backstop for chunked/lying
-        # clients (FastAPI has already buffered the body — this bounds parsing,
-        # not memory).
+        # line; the incremental stream read is the real cap for chunked/lying
+        # clients — it aborts as soon as the accumulated bytes exceed the limit,
+        # never buffering an unbounded body.
         content_length = request.headers.get("content-length")
         if content_length is not None:
             try:
                 declared = int(content_length)
             except ValueError:
-                declared = None  # malformed header -> rely on the body backstop
+                declared = None  # malformed header -> rely on the stream cap
             if declared is not None and declared > MAX_SUBSCRIBE_BODY_BYTES:
                 raise InvalidParam("body too large")
-        body = await request.body()
-        if len(body) > MAX_SUBSCRIBE_BODY_BYTES:
-            raise InvalidParam("body too large")
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > MAX_SUBSCRIBE_BODY_BYTES:
+                raise InvalidParam("body too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
         try:
             sub = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError):
