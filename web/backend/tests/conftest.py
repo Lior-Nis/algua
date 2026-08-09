@@ -10,6 +10,12 @@ from backend import algua_cli
 
 
 @pytest.fixture(autouse=True)
+def isolated_push_state(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ALGUA_WEB_STATE at a per-test tmp dir so no test ever writes web/.state."""
+    monkeypatch.setenv("ALGUA_WEB_STATE", str(tmp_path / "push-state"))
+
+
+@pytest.fixture(autouse=True)
 def reset_cli_state() -> Any:
     """Fresh cache/locks/semaphore per test (each test runs its own event loop)."""
     algua_cli._cache.clear()

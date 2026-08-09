@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -27,6 +28,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from backend import push
 from backend.algua_cli import CliError, run_cli
 from backend.params import (
     InvalidParam,
@@ -44,6 +46,9 @@ logger = logging.getLogger(__name__)
 # `research idea stats` default --window-days (algua/cli/idea_cmd.py); the UI must
 # label the window the stats cover.
 IDEA_STATS_WINDOW_DAYS = 90
+
+# A real PushSubscription JSON is well under 1 KiB; anything over 16 KiB is abuse.
+MAX_SUBSCRIBE_BODY_BYTES = 16 * 1024
 
 
 @asynccontextmanager
@@ -73,6 +78,15 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=422,
             content={"ok": False, "error": exc.error, "code": "invalid_param"},
+        )
+
+    @app.exception_handler(push.SubscriptionLimit)
+    async def subscription_limit_handler(
+        request: Request, exc: push.SubscriptionLimit
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": str(exc), "code": "subscription_limit"},
         )
 
     @app.exception_handler(RequestValidationError)
@@ -195,6 +209,48 @@ def create_app() -> FastAPI:
             "fetched_at": min(idea_list["fetched_at"], idea_stats["fetched_at"]),
             "stale": bool(idea_list["stale"]) or bool(idea_stats["stale"]),
         }
+
+    @app.get("/api/push/key")
+    async def push_key() -> dict[str, Any]:
+        # First call generates + persists the VAPID keypair (disk + EC keygen) -> thread.
+        return {"ok": True, "key": await asyncio.to_thread(push.vapid_public_key)}
+
+    @app.post("/api/push/subscribe")
+    async def push_subscribe(request: Request) -> dict[str, Any]:
+        # Body cap BEFORE parsing: the Content-Length header is the cheap first
+        # line; the incremental stream read is the real cap for chunked/lying
+        # clients — it aborts as soon as the accumulated bytes exceed the limit,
+        # never buffering an unbounded body.
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared = int(content_length)
+            except ValueError:
+                declared = None  # malformed header -> rely on the stream cap
+            if declared is not None and declared > MAX_SUBSCRIBE_BODY_BYTES:
+                raise InvalidParam("body too large")
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > MAX_SUBSCRIBE_BODY_BYTES:
+                raise InvalidParam("body too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
+        try:
+            sub = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise InvalidParam("body must be valid JSON") from None
+        # add_subscription re-validates shape/size/limit (R12): InvalidParam -> 422
+        # invalid_param, SubscriptionLimit -> 422 subscription_limit.
+        await asyncio.to_thread(push.add_subscription, sub)
+        return {"ok": True}
+
+    @app.delete("/api/push/subscribe")
+    async def push_unsubscribe(endpoint: str) -> dict[str, Any]:
+        # Idempotent: removing an unknown endpoint is still {ok: true}.
+        await asyncio.to_thread(push.remove_subscription, endpoint)
+        return {"ok": True}
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
