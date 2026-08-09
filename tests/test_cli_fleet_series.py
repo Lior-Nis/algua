@@ -123,6 +123,20 @@ def test_invalid_lane_row_skipped_and_counted(monkeypatch, tmp_path):
     assert payload["series"]["live"] == []
 
 
+def test_invalid_lane_precedence_over_unparseable(monkeypatch, tmp_path):
+    """A row that is BOTH invalid-lane and unparseable-timestamp classifies as invalid-lane
+    (lane is checked first) — counters must not double- or mis-count."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "s")
+        _raw_row(conn, strategy=rec.name, tick_ts="not-a-timestamp",
+                 strategy_id=rec.id, lane="bogus")
+    result, payload = _invoke("s")
+    assert result.exit_code == 0, result.stdout
+    assert payload["n_invalid_lane"] == 1
+    assert payload["n_unparseable"] == 0
+
+
 def test_filter_then_limit(monkeypatch, tmp_path):
     """--since filters BEFORE the newest-N cut: the result is the newest N of the FILTERED
     interval, and truncated reflects the filtered count exceeding the limit."""

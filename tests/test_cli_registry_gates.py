@@ -226,6 +226,65 @@ def test_golden_drift_allowlists_cover_dataclass_fields():
     assert not FORWARD_DECISION_ALLOWLIST & FORWARD_DECISION_EXCLUDED
 
 
+def test_vector_smuggled_as_dict_under_allowlisted_key_dropped(monkeypatch, tmp_path):
+    """A returns vector re-encoded as a {date: return} dict under an ALLOWLISTED key must be
+    dropped by the dict-entry cap — dict-of-scalars is bounded, not a bulk channel."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    smuggled = {f"2020-01-{i:02d}": 0.01 * i for i in range(1, 41)}  # 40 entries > cap
+    with closing(_conn()) as conn:
+        rec = _register(conn)
+        _insert_gate_row(conn, rec.id, decision_json=json.dumps(
+            {"passed": True, "dsr_confidence": smuggled}))
+    result, payload = _invoke()
+    assert result.exit_code == 0, result.stdout
+    row = payload["gate_evaluations"][0]
+    assert "dsr_confidence" not in row["decision"]
+    assert "dsr_confidence" in row["decision_dropped_keys"]
+
+
+def test_vector_smuggled_as_string_under_allowlisted_key_dropped(monkeypatch, tmp_path):
+    """A serialized vector smuggled as one long string under an allowlisted key must be dropped
+    by the string-length cap."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    smuggled = ",".join(f"{0.001 * i:.6f}" for i in range(500))  # far beyond the cap
+    with closing(_conn()) as conn:
+        rec = _register(conn)
+        _insert_gate_row(conn, rec.id, decision_json=json.dumps(
+            {"passed": True, "dsr_skip_reason": smuggled}))
+    result, payload = _invoke()
+    assert result.exit_code == 0, result.stdout
+    row = payload["gate_evaluations"][0]
+    assert "dsr_skip_reason" not in row["decision"]
+    assert "dsr_skip_reason" in row["decision_dropped_keys"]
+
+
+def test_vector_smuggled_as_checks_rows_dropped(monkeypatch, tmp_path):
+    """A vector re-encoded as hundreds of fabricated checks rows must be dropped whole by the
+    checks-count cap; and non-numeric check threshold/value fields are stripped."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    fabricated = [{"name": f"r{i}", "op": ">=", "threshold": 0.0, "value": 0.001 * i,
+                   "passed": True} for i in range(200)]  # 200 > cap
+    with closing(_conn()) as conn:
+        rec = _register(conn)
+        _insert_gate_row(conn, rec.id, decision_json=json.dumps(
+            {"passed": True, "checks": fabricated}))
+        _insert_gate_row(conn, rec.id, decision_json=json.dumps(
+            {"passed": True,
+             "checks": [{"name": "sharpe", "op": ">=", "threshold": "0.1,0.2,0.3",
+                         "value": 1.2, "passed": True}]}))
+    result, payload = _invoke()
+    assert result.exit_code == 0, result.stdout
+    capped_row = next(r for r in payload["gate_evaluations"]
+                      if "checks" in r["decision_dropped_keys"])
+    assert "checks" not in capped_row["decision"]
+    typed_row = next(r for r in payload["gate_evaluations"]
+                     if "checks" in r["decision"])
+    (check,) = typed_row["decision"]["checks"]
+    assert "threshold" not in check  # string threshold stripped, not passed through
+    assert check["value"] == 1.2
+    assert check["passed"] is True
+
+
 def test_legacy_row_null_fdr_columns_emit_as_nulls(monkeypatch, tmp_path):
     """A legacy-shaped row (inserted without the migration-added fdr_* columns) must emit them as
     JSON nulls, not crash."""

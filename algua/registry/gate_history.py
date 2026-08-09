@@ -17,6 +17,7 @@ reported in ``decision_dropped_keys``, so a vector planted in the blob can never
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from typing import Any
 
@@ -123,20 +124,65 @@ _FORWARD_COLUMNS = (
 
 _SCALAR_TYPES = (str, int, float, bool, type(None))
 
+# Bulk-exfiltration bounds: a projected string longer than this, a dict with more entries, or a
+# checks list longer than this is dropped whole. The legitimate writers (GateDecision /
+# ForwardGateDecision serialization) sit far below every bound; only a smuggled payload hits them.
+_MAX_STRING_LEN = 512
+_MAX_DICT_ENTRIES = 32
+_MAX_CHECKS = 64
+
 # The scalar fields kept from each checks[] entry (drops free-text `detail` and anything else).
+# threshold/value must be finite-numeric-or-null and passed must be bool — a vector cannot be
+# re-encoded as check fields.
 _CHECK_FIELDS = ("name", "op", "threshold", "value", "passed")
 
 
+def _bounded_scalar(value: Any) -> bool:
+    if isinstance(value, str):
+        return len(value) <= _MAX_STRING_LEN
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, _SCALAR_TYPES)
+
+
+def _finite_number_or_none(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return value is None
+    return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
+
+
+def _check_field_ok(field: str, value: Any) -> bool:
+    if field in ("threshold", "value"):
+        return _finite_number_or_none(value)
+    if field == "passed":
+        return isinstance(value, bool)
+    return isinstance(value, str) and len(value) <= _MAX_STRING_LEN  # name / op
+
+
 def _shape(key: str, value: Any) -> tuple[bool, Any]:
-    """Layer-2 shape guard: (survives, projected_value). Scalars and dicts-of-scalars pass
-    through; the ``checks`` list is reduced to its scalar fields; everything else is dropped."""
+    """Layer-2 shape guard: (survives, projected_value). Bounded scalars and small
+    numeric-or-null dicts pass through; the ``checks`` list is reduced to its typed scalar
+    fields; everything else — including oversized or non-numeric-dict payloads that could
+    smuggle a vector under an allowlisted key — is dropped."""
     if isinstance(value, _SCALAR_TYPES):
+        return (True, value) if _bounded_scalar(value) else (False, None)
+    if (
+        isinstance(value, dict)
+        and len(value) <= _MAX_DICT_ENTRIES
+        and all(
+            isinstance(k, str) and len(k) <= _MAX_STRING_LEN and _finite_number_or_none(v)
+            for k, v in value.items()
+        )
+    ):
         return True, value
-    if isinstance(value, dict) and all(isinstance(v, _SCALAR_TYPES) for v in value.values()):
-        return True, value
-    if key == "checks" and isinstance(value, list) and all(isinstance(c, dict) for c in value):
+    if (
+        key == "checks"
+        and isinstance(value, list)
+        and len(value) <= _MAX_CHECKS
+        and all(isinstance(c, dict) for c in value)
+    ):
         return True, [
-            {f: c[f] for f in _CHECK_FIELDS if f in c and isinstance(c[f], _SCALAR_TYPES)}
+            {f: c[f] for f in _CHECK_FIELDS if f in c and _check_field_ok(f, c[f])}
             for c in value
         ]
     return False, None

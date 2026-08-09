@@ -282,22 +282,29 @@ def tick_snapshot_series(
 
     A lane not requested (when ``lane`` is given) is ``None`` in ``series``/``truncated``; a
     requested lane with no rows is ``[]``/``False``.
+
+    The diagnostic counters (``n_legacy_excluded``, ``n_unparseable``, ``n_invalid_lane``) are
+    GLOBAL across the strategy's rows, not scoped to the requested lane — they describe data
+    hygiene, not the filtered view.
     """
     # Explicit BEGIN DEFERRED: a plain `with conn:` does not pin a read snapshot, so the series
     # SELECT and the legacy COUNT could otherwise straddle a concurrent writer's commit. Never
     # IMMEDIATE — this is a reader and must not take the write lock.
     conn.execute("BEGIN DEFERRED")
     try:
+        # The name predicate is a pure index assist: ix_tick_snapshots_strategy_ts is keyed on
+        # (strategy, tick_ts) and there is no strategy_id index (adding one means touching the
+        # CODEOWNERS-protected db.py) — strategy_id stays the row-selection authority.
         raw = conn.execute(
             "SELECT id, tick_ts, recorded_at, equity, peak_equity, reconcile_ok, lane "
-            "FROM tick_snapshots WHERE strategy_id = ?",
-            (strategy_id,),
+            "FROM tick_snapshots WHERE strategy = ? AND strategy_id = ?",
+            (strategy_name, strategy_id),
         ).fetchall()
         n_legacy_excluded = int(
             conn.execute(
-                "SELECT COUNT(*) FROM tick_snapshots WHERE strategy = ? "
-                "AND (strategy_id IS NULL OR lane IS NULL)",
-                (strategy_name,),
+                "SELECT COUNT(*) FROM tick_snapshots WHERE "
+                "(strategy_id IS NULL AND strategy = ?) OR (strategy_id = ? AND lane IS NULL)",
+                (strategy_name, strategy_id),
             ).fetchone()[0]
         )
         conn.commit()
@@ -315,14 +322,16 @@ def tick_snapshot_series(
             # A strategy_id-bearing row with NULL lane is in the legacy bucket by definition
             # (already counted in n_legacy_excluded above) — skip without double-counting.
             continue
-        parsed = _parse_snapshot_ts(row["tick_ts"])
-        if parsed is None:
-            n_unparseable += 1
-            continue
         if row_lane not in _VALID_LANES:
             # Lane discipline is writer-enforced only (no DB CHECK constraint) — a raw-write
             # fabrication must be surfaced as a count, never silently mixed into a lane.
+            # Classified BEFORE timestamp parsing so an invalid-lane row with a bad timestamp
+            # lands here, not in n_unparseable.
             n_invalid_lane += 1
+            continue
+        parsed = _parse_snapshot_ts(row["tick_ts"])
+        if parsed is None:
+            n_unparseable += 1
             continue
         if since is not None and parsed < since:
             continue
