@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
+import StaleNotice from '../components/StaleNotice'
 import { utcDate, utcTime } from '../format'
 import type { ActivityRow, ApiEnvelope, ListPayload } from '../types'
 
@@ -101,6 +102,7 @@ export default function Activity() {
 
   return (
     <>
+      <StaleNotice env={data} />
       {filters}
       {visible.length === 0 ? (
         <section className="panel all-clear">

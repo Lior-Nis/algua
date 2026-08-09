@@ -213,3 +213,7 @@ run that mints an identity-matched, single-use gate token, not a raw `registry t
 
 ## Quality gates before committing
 `uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`
+
+When a change touches `web/` (the monitor PWA — a STANDALONE uv project; NEVER add web deps to
+the root project, the root `uv.lock` is dependency_hash identity), also run:
+`uv run --project web pytest web/backend/tests -q` and `cd web/frontend && npm run check && npm run build`.
