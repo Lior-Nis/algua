@@ -24,6 +24,61 @@ Endpoints:
   with `stale: true` + error metadata if the CLI fails).
 - `GET /healthz` — backend liveness.
 
+When a frontend build exists (`web/frontend/dist/index.html`, overridable via
+`ALGUA_WEB_DIST`), the backend also serves it: hashed `/assets/*` with an
+immutable cache header, `sw.js`/`manifest.webmanifest` with `no-cache` (so
+service-worker updates propagate), and an `index.html` catch-all for deep
+links (`/funnel`, `/s/x`). Without a build it runs api-only (logged at
+startup). A background poller (interval `ALGUA_WEB_POLL_SECONDS`, default 600)
+prewarms the fleet + strategies cache so an idle monitor still opens warm.
+
+## Deploy (systemd + tailscale)
+
+Assumes the repo at `/opt/algua` (matching the other units) and the env file at
+`/etc/algua/algua.env` (see `deploy/systemd/README.md`). In order:
+
+1. Root deps — provides `.venv/bin/algua`, the CLI the backend execs:
+
+   ```sh
+   cd /opt/algua && uv sync
+   ```
+
+2. Web backend deps — provides `web/.venv/bin/uvicorn`:
+
+   ```sh
+   uv sync --project web
+   ```
+
+3. Frontend build — the `dist/` the backend serves:
+
+   ```sh
+   cd web/frontend && npm ci && npm run build
+   ```
+
+4. Install and start the service (or run uvicorn directly for dev, see "Run"):
+
+   ```sh
+   sudo cp deploy/systemd/algua-web.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now algua-web
+   ```
+
+   The unit's DB-access note applies: the DB's parent dir must be writable by
+   the service user (SQLite WAL sidecar `-shm`/`-wal` files + the idempotent
+   `migrate()`).
+
+5. Tailscale exposure — one-time: enable **MagicDNS** and **HTTPS
+   certificates** for the tailnet in the admin console, then:
+
+   ```sh
+   tailscale serve --bg https:443 http://127.0.0.1:8787
+   ```
+
+6. Access the monitor ONLY via `https://<box>.<tailnet>.ts.net`. The service
+   worker (and future push) need the ONE stable secure origin — hitting the
+   bare tailnet IP is a different origin, which breaks the PWA install, its
+   cache, and any notification subscription.
+
 ## Network rule
 
 **Bind 127.0.0.1 ONLY. Never bind 0.0.0.0.** Tailnet access goes through

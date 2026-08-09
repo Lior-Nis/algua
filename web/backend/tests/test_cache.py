@@ -89,6 +89,48 @@ async def test_cancellation_reaps_the_process_group(
     assert (proc.pid, int(signal.SIGTERM)) in group_signals
 
 
+def _age_entry_past_skew(key: tuple[str, ...]) -> None:
+    """Back-date a cache entry past the force_refresh just-fetched guard."""
+    algua_cli._cache[key]["fetched_monotonic"] -= algua_cli._FORCE_REFRESH_SKEW_S + 1.0
+
+
+async def test_force_refresh_bypasses_a_fresh_ttl(fake_cli: Any) -> None:
+    calls = fake_cli(json.dumps({"ok": True, "n": 1}))
+    await run_cli("fleet", "health", ttl_s=60.0)
+    _age_entry_past_skew(("fleet", "health"))  # still well inside the 60s TTL
+    refreshed = await run_cli("fleet", "health", ttl_s=60.0, force_refresh=True)
+    assert calls["count"] == 2  # fresh cache, but force_refresh re-ran the CLI
+    assert refreshed["stale"] is False
+
+
+async def test_force_refresh_skew_guard_dedups_back_to_back_refreshes(fake_cli: Any) -> None:
+    """An entry fetched <2s ago (a refresh that just completed ahead of us) is
+    served as fresh even under force_refresh — ONE subprocess for the pair."""
+    calls = fake_cli(json.dumps({"ok": True, "n": 1}))
+    await run_cli("fleet", "health", ttl_s=10.0, force_refresh=True)
+    await run_cli("fleet", "health", ttl_s=10.0, force_refresh=True)
+    assert calls["count"] == 1
+
+
+async def test_force_refresh_failure_with_cache_serves_stale(fake_cli: Any) -> None:
+    fake_cli(json.dumps({"ok": True, "n": 1}))
+    await run_cli("fleet", "health", ttl_s=60.0)  # warm the cache
+    _age_entry_past_skew(("fleet", "health"))
+    fake_cli("not json at all")  # the forced refresh fails
+    stale = await run_cli("fleet", "health", ttl_s=60.0, force_refresh=True)
+    assert stale["ok"] is True
+    assert stale["data"] == {"ok": True, "n": 1}
+    assert stale["stale"] is True
+    assert stale["last_error_code"] == "bad_output"
+
+
+async def test_force_refresh_failure_without_cache_raises(fake_cli: Any) -> None:
+    fake_cli("not json at all")
+    with pytest.raises(CliError) as excinfo:
+        await run_cli("fleet", "health", ttl_s=60.0, force_refresh=True)
+    assert excinfo.value.code == "bad_output"
+
+
 async def test_spawn_failure_is_cli_error_and_stale_serves(
     fake_cli: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

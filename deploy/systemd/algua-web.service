@@ -1,0 +1,29 @@
+[Unit]
+Description=Algua web monitor (read-only FastAPI backend + built frontend)
+# Long-running loopback HTTP server on 127.0.0.1:8787 — tailnet exposure goes through
+# `tailscale serve`, NEVER a 0.0.0.0 bind (see web/README.md; loopback + tailscale is the
+# security boundary, there is no auth layer in the app). Before first start, at /opt/algua:
+#   - root `uv sync`            (provides /opt/algua/.venv/bin/algua — the CLI seam the app execs)
+#   - `uv sync --project web`   (provides /opt/algua/web/.venv/bin/uvicorn)
+#   - `cd web/frontend && npm ci && npm run build`  (the dist/ build the backend serves;
+#     without it the app runs api-only)
+# The DB's parent directory must be WRITABLE by the user this unit runs as: even read-only
+# CLI commands open the SQLite registry in WAL mode (sidecar -shm/-wal files beside the DB)
+# and run the idempotent migrate().
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/algua/algua.env
+# Scrub broker credentials — the read-only monitor never needs them (same rationale and the
+# same name set as algua-research.service). UnsetEnvironment= is applied AFTER
+# EnvironmentFile=, so it removes these from the loaded env for this unit only.
+UnsetEnvironment=ALGUA_ALPACA_API_KEY ALGUA_ALPACA_API_SECRET ALGUA_ALPACA_LIVE_API_KEY ALGUA_ALPACA_LIVE_API_SECRET
+WorkingDirectory=/opt/algua
+ExecStart=/opt/algua/web/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8787 --app-dir /opt/algua/web
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

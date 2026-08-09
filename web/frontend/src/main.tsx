@@ -8,6 +8,7 @@ import './theme.css'
 
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { registerSW } from 'virtual:pwa-register'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import App from './App'
 import Activity from './screens/Activity'
@@ -15,6 +16,18 @@ import Funnel from './screens/Funnel'
 import Home from './screens/Home'
 import Ideas from './screens/Ideas'
 import StrategyDetail from './screens/StrategyDetail'
+
+// PROD only — a dev service worker would fight the Vite proxy.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  registerSW({ immediate: true })
+  // ONE-SHOT reload on controller change so an update can never reload-loop.
+  let reloaded = false
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded) return
+    reloaded = true
+    window.location.reload()
+  })
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
