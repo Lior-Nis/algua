@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import MetricTile from '../components/MetricTile'
+import StaleNotice from '../components/StaleNotice'
 import { utcDate } from '../format'
 import type { IdeaRow, IdeasResponse } from '../types'
 
@@ -71,6 +72,7 @@ export default function Ideas() {
 
   return (
     <>
+      <StaleNotice env={data} />
       <section>
         {/* The stats window MUST be labeled (reviewed) — counts are windowed, the list is not. */}
         <div className="micro-label" style={{ marginBottom: 6 }}>

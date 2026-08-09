@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { ApiError, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import HealthBadge from '../components/HealthBadge'
+import StaleNotice from '../components/StaleNotice'
 import type { ApiEnvelope, FleetHealth, ListPayload, StrategyRecord } from '../types'
 
 /** Lifecycle order (algua/contracts/lifecycle.py); unknown stages append at the end. */
@@ -66,15 +67,19 @@ export default function Funnel() {
 
   if (stages.length === 0) {
     return (
-      <section className="panel all-clear">
-        <span className="micro-label">funnel empty</span>
-        no strategies registered
-      </section>
+      <>
+        <StaleNotice env={strategies.data} />
+        <section className="panel all-clear">
+          <span className="micro-label">funnel empty</span>
+          no strategies registered
+        </section>
+      </>
     )
   }
 
   return (
     <>
+      <StaleNotice env={strategies.data} />
       {stages.map((stage) => {
         const group = byStage.get(stage)!
         return (
