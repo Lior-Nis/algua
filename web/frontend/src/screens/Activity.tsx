@@ -22,6 +22,9 @@ export function ActorChip({ actor }: { actor: string }) {
   )
 }
 
+// The backend clamps limit to <=500 (422 above it) — the doubling must saturate there.
+const MAX_LIMIT = 500
+
 export default function Activity() {
   const [actor, setActor] = useState<Actor | null>(null)
   const [limit, setLimit] = useState(100)
@@ -54,7 +57,7 @@ export default function Activity() {
       <input
         type="search"
         className="text-filter"
-        placeholder="filter by strategy"
+        placeholder="filter loaded rows"
         value={strategyFilter}
         onChange={(e) => setStrategyFilter(e.target.value)}
       />
@@ -136,8 +139,12 @@ export default function Activity() {
           })}
         </section>
       )}
-      {rows.length >= limit && (
-        <button type="button" className="load-more-btn" onClick={() => setLimit(limit * 2)}>
+      {rows.length >= limit && limit < MAX_LIMIT && (
+        <button
+          type="button"
+          className="load-more-btn"
+          onClick={() => setLimit(Math.min(limit * 2, MAX_LIMIT))}
+        >
           load more
         </button>
       )}

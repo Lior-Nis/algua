@@ -148,6 +148,15 @@ function PaperTiles({ paper }: { paper: PaperRollup }) {
 }
 
 function PassMark({ passed }: { passed: number | boolean | null | undefined }) {
+  // The gate projection strips malformed fields — a missing verdict is UNKNOWN data,
+  // not a real failed check.
+  if (passed !== true && passed !== 1 && passed !== false && passed !== 0) {
+    return (
+      <span className="pass-mark" style={{ color: 'var(--text-dim)' }}>
+        unknown
+      </span>
+    )
+  }
   const ok = passed === true || passed === 1
   return (
     <span className="pass-mark" style={{ color: ok ? 'var(--green)' : 'var(--red)' }}>

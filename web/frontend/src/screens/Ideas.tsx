@@ -58,7 +58,10 @@ export default function Ideas() {
 
   const ideas = ideaList(data)
   const counts = statusCounts(data.stats)
-  const statusesPresent = new Set([...Object.keys(counts), ...ideas.map((i) => i.status)])
+  // "total" is an aggregate in windowed_idea_counts(), not a status — never a filter chip.
+  const statusesPresent = new Set(
+    [...Object.keys(counts), ...ideas.map((i) => i.status)].filter((s) => s !== 'total'),
+  )
   const statuses = [
     ...STATUS_ORDER.filter((s) => statusesPresent.has(s)),
     ...[...statusesPresent].filter((s) => !STATUS_ORDER.includes(s)),
