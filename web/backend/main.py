@@ -27,6 +27,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from backend import push
 from backend.algua_cli import CliError, run_cli
 from backend.params import (
     InvalidParam,
@@ -73,6 +74,15 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=422,
             content={"ok": False, "error": exc.error, "code": "invalid_param"},
+        )
+
+    @app.exception_handler(push.SubscriptionLimit)
+    async def subscription_limit_handler(
+        request: Request, exc: push.SubscriptionLimit
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": str(exc), "code": "subscription_limit"},
         )
 
     @app.exception_handler(RequestValidationError)
@@ -195,6 +205,24 @@ def create_app() -> FastAPI:
             "fetched_at": min(idea_list["fetched_at"], idea_stats["fetched_at"]),
             "stale": bool(idea_list["stale"]) or bool(idea_stats["stale"]),
         }
+
+    @app.get("/api/push/key")
+    async def push_key() -> dict[str, Any]:
+        # First call generates + persists the VAPID keypair (disk + EC keygen) -> thread.
+        return {"ok": True, "key": await asyncio.to_thread(push.vapid_public_key)}
+
+    @app.post("/api/push/subscribe")
+    async def push_subscribe(sub: dict[str, Any]) -> dict[str, Any]:
+        # add_subscription re-validates shape/size/limit (R12): InvalidParam -> 422
+        # invalid_param, SubscriptionLimit -> 422 subscription_limit.
+        await asyncio.to_thread(push.add_subscription, sub)
+        return {"ok": True}
+
+    @app.delete("/api/push/subscribe")
+    async def push_unsubscribe(endpoint: str) -> dict[str, Any]:
+        # Idempotent: removing an unknown endpoint is still {ok: true}.
+        await asyncio.to_thread(push.remove_subscription, endpoint)
+        return {"ok": True}
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:

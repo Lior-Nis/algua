@@ -1,9 +1,10 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { ApiError, formatTimestamp, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
 import StageChip from '../components/StageChip'
+import { alertsState, disableAlerts, enableAlerts, type AlertsState } from '../push'
 import type { ApiEnvelope, FleetHealth, FleetRow } from '../types'
 
 /** Worst → best; orders the per-health summary tiles. */
@@ -93,7 +94,68 @@ export default function Home() {
           {fleet.summary.total} strategies ok
         </section>
       )}
+
+      <AlertsPanel />
     </>
+  )
+}
+
+function AlertsPanel() {
+  const [state, setState] = useState<AlertsState | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let alive = true
+    void alertsState().then((s) => {
+      if (alive) setState(s)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // Unknown yet or genuinely unsupported: no control at all.
+  if (state === null || state === 'unsupported') return null
+
+  const run = (action: () => Promise<AlertsState>) => {
+    if (busy) return
+    setBusy(true)
+    action()
+      .then(setState)
+      // On failure, re-derive the truth from the browser instead of guessing.
+      .catch(() => alertsState().then(setState))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <section className="panel">
+      <span className="micro-label">push alerts</span>
+      {state === 'off' && (
+        <button
+          type="button"
+          className="retry-btn"
+          disabled={busy}
+          onClick={() => run(enableAlerts)}
+        >
+          enable alerts
+        </button>
+      )}
+      {state === 'on' && (
+        <div>
+          alerts on{' '}
+          <button
+            type="button"
+            className="retry-btn"
+            disabled={busy}
+            onClick={() => run(disableAlerts)}
+          >
+            disable
+          </button>
+        </div>
+      )}
+      {state === 'denied' && <div>notifications blocked — enable in browser settings</div>}
+      {state === 'needs-install' && <div>install to home screen to enable alerts</div>}
+    </section>
   )
 }
 

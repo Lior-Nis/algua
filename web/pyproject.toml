@@ -5,6 +5,7 @@ description = "Read-only web monitor for algua (backend, slice B)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi",
+    "pywebpush>=2.4.0",
     "uvicorn[standard]",
 ]
 
