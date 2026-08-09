@@ -1,0 +1,125 @@
+import { useEffect, useState } from 'react'
+import { ApiError, useFetch } from '../api'
+import { useSetFetchedAt } from '../App'
+import MetricTile from '../components/MetricTile'
+import { utcDate } from '../format'
+import type { IdeaRow, IdeasResponse } from '../types'
+
+/** Idea lifecycle order (algua/contracts/idea.py IdeaStatus); unknowns append. */
+const STATUS_ORDER = ['open', 'needs_data', 'authored', 'refuted', 'discarded']
+
+function ideaList(resp: IdeasResponse): IdeaRow[] {
+  const ideas = resp.ideas
+  if (Array.isArray(ideas)) return ideas
+  return ideas?.data ?? []
+}
+
+/** `idea stats` emits {window_days, counts:{status: n}}; tolerate a pre-flattened map too. */
+function statusCounts(stats: IdeasResponse['stats']): Record<string, number> {
+  if (stats === null || typeof stats !== 'object') return {}
+  const source =
+    typeof stats.counts === 'object' && stats.counts !== null
+      ? (stats.counts as Record<string, unknown>)
+      : stats
+  const out: Record<string, number> = {}
+  for (const [k, v] of Object.entries(source)) {
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+  }
+  return out
+}
+
+export default function Ideas() {
+  const { data, error, loading, refetch } = useFetch<IdeasResponse>('/api/ideas')
+  const [statusFilter, setStatusFilter] = useState<string | null>(null)
+  const setFetchedAt = useSetFetchedAt()
+
+  const fetchedAt = data?.fetched_at ?? null
+  useEffect(() => {
+    setFetchedAt(fetchedAt)
+    return () => setFetchedAt(null)
+  }, [fetchedAt, setFetchedAt])
+
+  if (data === undefined) {
+    if (loading) return <div className="skeleton-block" style={{ height: 260 }} aria-hidden="true" />
+    return (
+      <section className="panel error-panel">
+        <span className="micro-label">fetch failed</span>
+        <div className="error-code">
+          {error instanceof ApiError && error.code !== null
+            ? error.code
+            : (error?.message ?? 'unknown error')}
+        </div>
+        <button type="button" className="retry-btn" onClick={refetch}>
+          retry
+        </button>
+      </section>
+    )
+  }
+
+  const ideas = ideaList(data)
+  const counts = statusCounts(data.stats)
+  const statusesPresent = new Set([...Object.keys(counts), ...ideas.map((i) => i.status)])
+  const statuses = [
+    ...STATUS_ORDER.filter((s) => statusesPresent.has(s)),
+    ...[...statusesPresent].filter((s) => !STATUS_ORDER.includes(s)),
+  ]
+
+  const visible = statusFilter === null ? ideas : ideas.filter((i) => i.status === statusFilter)
+
+  return (
+    <>
+      <section>
+        {/* The stats window MUST be labeled (reviewed) — counts are windowed, the list is not. */}
+        <div className="micro-label" style={{ marginBottom: 6 }}>
+          idea pool — stats last {data.stats_window_days}d
+        </div>
+        <div className="tile-row">
+          <MetricTile label="in pool" value={ideas.length} />
+          {statuses
+            .filter((s) => s in counts)
+            .map((s) => (
+              <MetricTile key={s} label={s} value={counts[s]} />
+            ))}
+        </div>
+      </section>
+
+      {statuses.length > 0 && (
+        <div className="chip-row">
+          {statuses.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={s === statusFilter ? 'filter-chip active' : 'filter-chip'}
+              onClick={() => setStatusFilter(statusFilter === s ? null : s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {visible.length === 0 ? (
+        <section className="panel all-clear">
+          <span className="micro-label">no ideas</span>
+          nothing matches
+        </section>
+      ) : (
+        <section className="alert-list">
+          {visible.map((idea) => (
+            <div key={idea.id} className="idea-row">
+              <div className="idea-row-head">
+                <span className="idea-title">{idea.title}</span>
+                <span className="stage-chip">{idea.status}</span>
+              </div>
+              <div className="dim-note idea-hypothesis">{idea.hypothesis}</div>
+              <div className="dim-note num">
+                {idea.family !== null ? `${idea.family} · ` : ''}
+                {utcDate(idea.created_at)}
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+    </>
+  )
+}
