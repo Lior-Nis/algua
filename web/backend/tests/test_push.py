@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,6 +39,26 @@ def test_vapid_keygen_is_idempotent() -> None:
     raw = b64urldecode(first.encode())
     assert len(raw) == 65
     assert raw[0] == 0x04
+
+
+def test_concurrent_first_vapid_calls_yield_one_key() -> None:
+    """Gate-2 keygen-race pin: parallel first calls must agree on ONE persisted key."""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        keys = list(pool.map(lambda _: push.vapid_public_key(), range(8)))
+    assert len(set(keys)) == 1
+    assert push.vapid_public_key() == keys[0]  # and it matches the persisted key
+
+
+def test_state_dir_perms_pinned_on_preexisting_lax_dir(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gate-2 hygiene pin: an already-existing 0755 state dir gets chmodded to 0700."""
+    lax = tmp_path / "lax-state"
+    lax.mkdir()
+    os.chmod(lax, 0o755)
+    monkeypatch.setenv("ALGUA_WEB_STATE", str(lax))
+    assert push.state_dir() == lax
+    assert _mode(lax) == 0o700
 
 
 def test_state_dir_and_files_are_private() -> None:

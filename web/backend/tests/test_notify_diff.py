@@ -15,13 +15,22 @@ NOW = datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC)
 
 
 def _row(
-    name: str, stage: str = "live", health: str = "ok", reason: str | None = None
+    name: str,
+    stage: str = "live",
+    health: str = "ok",
+    reason: str | None = None,
+    global_halt: bool = False,
 ) -> dict[str, Any]:
+    # kill_switch mirrors algua/execution/fleet_health.py: {tripped, reason, global_halt}.
     return {
         "strategy": name,
         "stage": stage,
         "health": health,
-        "kill_switch": {"tripped": reason is not None, "reason": reason, "global_halt": False},
+        "kill_switch": {
+            "tripped": reason is not None,
+            "reason": reason,
+            "global_halt": global_halt,
+        },
     }
 
 
@@ -111,7 +120,79 @@ def test_non_operational_stage_never_notifies() -> None:
     assert new_state["strategies"]["momo"]["observed_health"] == "halted"
 
 
-# --- dedup + recovery reset (R3) ---
+# --- cooldown + recovery reset (R3) ---
+
+
+def test_flapping_between_bad_healths_within_cooldown_is_silent() -> None:
+    """The Gate-2 flapping pin: stale<->drift alternation must not notify every cycle."""
+    _, state = _diff(_fleet([_row("momo")]), None)  # baseline: ok
+    notifications, state = _diff(_fleet([_row("momo", health="stale")]), state)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+    mark_notified(state, notifications[0], NOW.isoformat())
+    for hours, health in enumerate(("drift", "stale", "drift", "stale"), start=1):
+        t = NOW + timedelta(hours=hours)
+        notifications, state = _diff(_fleet([_row("momo", health=health)]), state, t)
+        assert notifications == [], f"flap to {health} at +{hours}h notified"
+
+
+def test_halted_bypass_pierces_the_cooldown_exactly_once() -> None:
+    _, state = _diff(_fleet([_row("momo")]), None)
+    notifications, state = _diff(_fleet([_row("momo", health="stale")]), state)
+    mark_notified(state, notifications[0], NOW.isoformat())
+    # A lateral bad flap inside the cooldown is silent...
+    notifications, state = _diff(
+        _fleet([_row("momo", health="drift")]), state, NOW + timedelta(hours=1)
+    )
+    assert notifications == []
+    # ...but the transition INTO halted is materially worse: it bypasses once.
+    t_halt = NOW + timedelta(hours=2)
+    notifications, state = _diff(_fleet([_row("momo", health="halted")]), state, t_halt)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+    assert notifications[0]["health"] == "halted"
+    mark_notified(state, notifications[0], t_halt.isoformat())
+    # After the accepted bypass the cooldown covers halted too: a halted->stale
+    # ->halted flap inside the window stays silent.
+    notifications, state = _diff(
+        _fleet([_row("momo", health="stale")]), state, NOW + timedelta(hours=3)
+    )
+    assert notifications == []
+    notifications, state = _diff(
+        _fleet([_row("momo", health="halted")]), state, NOW + timedelta(hours=4)
+    )
+    assert notifications == []
+
+
+def test_recovery_to_ok_resets_the_cooldown() -> None:
+    _, state = _diff(_fleet([_row("momo")]), None)
+    notifications, state = _diff(_fleet([_row("momo", health="stale")]), state)
+    mark_notified(state, notifications[0], NOW.isoformat())
+    notifications, state = _diff(_fleet([_row("momo")]), state, NOW + timedelta(hours=1))
+    assert [n["kind"] for n in notifications] == ["fleet_clear"]  # recovery itself
+    mark_notified(state, notifications[0], (NOW + timedelta(hours=1)).isoformat())
+    assert state["strategies"]["momo"]["last_bad_notified_at"] is None
+    # Well inside the original 24h window, but the recovery reset the cooldown.
+    notifications, _ = _diff(
+        _fleet([_row("momo", health="stale")]), state, NOW + timedelta(hours=2)
+    )
+    assert [n["kind"] for n in notifications] == ["strategy"]
+
+
+def test_old_schema_state_missing_last_bad_notified_at_reads_as_null() -> None:
+    """Migration tolerance: a pre-cooldown state file must not wedge or crash the diff."""
+    state = {
+        "strategies": {
+            "momo": {
+                "observed_health": "ok",
+                "observed_at": NOW.isoformat(),
+                "notified": None,
+            }
+        },
+        "global_halt": {"observed": False, "notified_at": None},
+        "unhealthy": False,
+    }
+    notifications, new_state = _diff(_fleet([_row("momo", health="stale")]), state)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+    assert new_state["strategies"]["momo"]["last_bad_notified_at"] is None
 
 
 def test_same_health_within_24h_dedups() -> None:
@@ -175,6 +256,26 @@ def test_global_halt_flip_notifies_high_urgency_once() -> None:
     # Still halted next cycle: no repeat.
     notifications, state = _diff(fleet, state)
     assert [n for n in notifications if n["kind"] == "global_halt"] == []
+
+
+def test_account_halt_fanout_collapses_to_one_global_notification() -> None:
+    """The Gate-2 fan-out pin: an account halt marks EVERY row halted; only global:halt fires."""
+    _, state = _diff(_fleet([_row(f"s{i}") for i in range(3)]), None)
+    halted_rows = [_row(f"s{i}", health="halted", global_halt=True) for i in range(3)]
+    notifications, state = _diff(_fleet(halted_rows, global_halt=True), state)
+    assert [n["kind"] for n in notifications] == ["global_halt"]
+    assert notifications[0]["payload"]["tag"] == "global:halt"
+    # Rows are still OBSERVED so the eventual un-halt diffs from truth.
+    assert all(state["strategies"][f"s{i}"]["observed_health"] == "halted" for i in range(3))
+
+
+def test_independent_kill_switch_trip_still_notifies_per_strategy() -> None:
+    _, state = _diff(_fleet([_row("momo")]), None)
+    # tripped=True with its own reason, global_halt=False: an independent trip.
+    fleet = _fleet([_row("momo", health="halted", reason="drawdown breach")])
+    notifications, _ = _diff(fleet, state)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+    assert "drawdown breach" in notifications[0]["payload"]["body"]
 
 
 def test_global_halt_clear_resets_marker_so_next_engage_notifies() -> None:

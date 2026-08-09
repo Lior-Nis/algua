@@ -63,6 +63,36 @@ async def test_subscribe_non_object_body_is_422() -> None:
     assert resp.json()["code"] == "invalid_param"
 
 
+async def test_subscribe_body_over_16k_is_422_body_too_large() -> None:
+    # httpx sets Content-Length for json= bodies -> exercises the header check.
+    big = _sub()
+    big["padding"] = "x" * (17 * 1024)
+    async with _client() as client:
+        resp = await client.post("/api/push/subscribe", json=big)
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == "invalid_param"
+    assert body["error"] == "body too large"
+    assert push.load_subscriptions() == {}
+
+
+async def test_subscribe_chunked_oversize_body_hits_the_backstop() -> None:
+    # A chunked request carries no Content-Length -> the post-read size check.
+    async def chunks() -> Any:
+        yield b'{"padding": "' + b"x" * (17 * 1024) + b'"}'
+
+    async with _client() as client:
+        resp = await client.post(
+            "/api/push/subscribe",
+            content=chunks(),
+            headers={"content-type": "application/json"},
+        )
+    assert resp.status_code == 422
+    assert resp.json()["error"] == "body too large"
+    assert push.load_subscriptions() == {}
+
+
 async def test_subscribe_limit_is_422_subscription_limit() -> None:
     for i in range(push.MAX_SUBSCRIPTIONS):
         push.add_subscription(_sub(i))

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -45,6 +46,9 @@ logger = logging.getLogger(__name__)
 # `research idea stats` default --window-days (algua/cli/idea_cmd.py); the UI must
 # label the window the stats cover.
 IDEA_STATS_WINDOW_DAYS = 90
+
+# A real PushSubscription JSON is well under 1 KiB; anything over 16 KiB is abuse.
+MAX_SUBSCRIBE_BODY_BYTES = 16 * 1024
 
 
 @asynccontextmanager
@@ -212,7 +216,26 @@ def create_app() -> FastAPI:
         return {"ok": True, "key": await asyncio.to_thread(push.vapid_public_key)}
 
     @app.post("/api/push/subscribe")
-    async def push_subscribe(sub: dict[str, Any]) -> dict[str, Any]:
+    async def push_subscribe(request: Request) -> dict[str, Any]:
+        # Body cap BEFORE parsing: the Content-Length header is the cheap first
+        # line; the read-back length check is the backstop for chunked/lying
+        # clients (FastAPI has already buffered the body — this bounds parsing,
+        # not memory).
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared = int(content_length)
+            except ValueError:
+                declared = None  # malformed header -> rely on the body backstop
+            if declared is not None and declared > MAX_SUBSCRIBE_BODY_BYTES:
+                raise InvalidParam("body too large")
+        body = await request.body()
+        if len(body) > MAX_SUBSCRIBE_BODY_BYTES:
+            raise InvalidParam("body too large")
+        try:
+            sub = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise InvalidParam("body must be valid JSON") from None
         # add_subscription re-validates shape/size/limit (R12): InvalidParam -> 422
         # invalid_param, SubscriptionLimit -> 422 subscription_limit.
         await asyncio.to_thread(push.add_subscription, sub)

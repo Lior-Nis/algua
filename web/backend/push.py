@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -47,17 +48,23 @@ class SubscriptionLimit(Exception):
 
 
 def state_dir() -> Path:
-    """The push-state directory, created 0700 on first use (R9)."""
+    """The push-state directory, created — and ALWAYS pinned — 0700 (R9)."""
     override = os.environ.get("ALGUA_WEB_STATE")
     directory = Path(override) if override else _DEFAULT_STATE
-    if not directory.is_dir():
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        directory.chmod(0o700)  # mkdir's mode is umask-filtered; pin it explicitly
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Pin on EVERY use, not only creation: mkdir's mode is umask-filtered and a
+    # pre-existing lax directory (0755) must not leave the key world-listable.
+    directory.chmod(0o700)
     return directory
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
-    """0600 tmp file + flush + fsync + os.replace — never a torn or world-readable file."""
+    """0600 tmp file + flush + fsync + os.replace + parent-dir fsync.
+
+    The directory fsync makes the RENAME itself durable — without it a power
+    loss right after os.replace can roll the directory entry back to the old
+    (or no) file even though the data blocks were fsynced.
+    """
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
     try:
         os.fchmod(fd, 0o600)
@@ -66,6 +73,11 @@ def _write_atomic(path: Path, data: bytes) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -74,16 +86,24 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 # --- VAPID ---
 
+# Guards first-use keygen: two concurrent first calls must not each generate a
+# keypair and race the os.replace (the loser's key would already be handed to a
+# browser). Single-process uvicorn -> a process-local lock suffices.
+_vapid_lock = threading.Lock()
+
 
 def _vapid() -> Vapid02:
     """The server's VAPID keypair, generated on first use and persisted 0600."""
     path = state_dir() / "vapid_private.pem"
     if path.is_file():
         return Vapid02.from_file(str(path))
-    vapid = Vapid02()
-    vapid.generate_keys()
-    _write_atomic(path, vapid.private_pem())
-    return vapid
+    with _vapid_lock:
+        if path.is_file():  # re-check: another thread may have won the keygen
+            return Vapid02.from_file(str(path))
+        vapid = Vapid02()
+        vapid.generate_keys()
+        _write_atomic(path, vapid.private_pem())
+        return vapid
 
 
 def vapid_public_key() -> str:
@@ -95,6 +115,11 @@ def vapid_public_key() -> str:
 
 
 # --- subscription store ---
+
+# Guards EVERY subscription load-modify-write (add / remove / 410-prune): the
+# store is one JSON file, so unsynchronized mutations lose writes. The server
+# is single-process uvicorn, so a process-local lock suffices.
+_subscriptions_lock = threading.Lock()
 
 
 def _subscriptions_path() -> Path:
@@ -141,18 +166,20 @@ def add_subscription(sub: Any) -> None:
         if not isinstance(value, str) or not value or len(value) > _MAX_KEY_CHARS:
             raise InvalidParam(f"keys.{name} must be a string of 1..{_MAX_KEY_CHARS} chars")
         clean_keys[name] = value
-    subs = load_subscriptions()
-    if endpoint not in subs and len(subs) >= MAX_SUBSCRIPTIONS:
-        raise SubscriptionLimit(f"subscription limit ({MAX_SUBSCRIPTIONS}) reached")
-    subs[endpoint] = {"endpoint": endpoint, "keys": clean_keys}
-    _save_subscriptions(subs)
+    with _subscriptions_lock:
+        subs = load_subscriptions()
+        if endpoint not in subs and len(subs) >= MAX_SUBSCRIPTIONS:
+            raise SubscriptionLimit(f"subscription limit ({MAX_SUBSCRIPTIONS}) reached")
+        subs[endpoint] = {"endpoint": endpoint, "keys": clean_keys}
+        _save_subscriptions(subs)
 
 
 def remove_subscription(endpoint: str) -> None:
     """Idempotent removal by endpoint."""
-    subs = load_subscriptions()
-    if subs.pop(endpoint, None) is not None:
-        _save_subscriptions(subs)
+    with _subscriptions_lock:
+        subs = load_subscriptions()
+        if subs.pop(endpoint, None) is not None:
+            _save_subscriptions(subs)
 
 
 # --- notify state (the poller's diff memory; schema owned by backend.poller) ---

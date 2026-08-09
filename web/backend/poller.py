@@ -43,7 +43,7 @@ _OK_SEVERITY = _SEVERITY["ok"]
 # Mirror of algua/execution/fleet_health.py::OPERATIONAL_STAGES — only these
 # stages have an operator loop whose health is worth waking a phone for.
 _OPERATIONAL_STAGES = frozenset({"live", "paper", "forward_tested"})
-_RENOTIFY_AFTER_S = 24 * 60 * 60.0  # R3: same-health dedup window
+_RENOTIFY_AFTER_S = 24 * 60 * 60.0  # R3: per-strategy bad-health notification cooldown
 
 
 def poll_seconds() -> float:
@@ -71,15 +71,31 @@ def _severity(health: Any) -> int:
     return _SEVERITY.get(str(health), 99)
 
 
-def _deduped(notified: Any, health: str, now: datetime) -> bool:
-    """True when this candidate was already notified with the SAME health within 24h (R3)."""
-    if not isinstance(notified, dict) or notified.get("health") != health:
+def _cooldown_active(last_bad_notified_at: Any, now: datetime) -> bool:
+    """True when ANY bad-health notification for this strategy landed within 24h (R3).
+
+    The cooldown is deliberately independent of WHICH bad health was notified —
+    keying on the exact health let a stale<->drift flap notify every cycle.
+    """
+    if last_bad_notified_at is None:
         return False
     try:
-        at = datetime.fromisoformat(str(notified.get("at")))
+        at = datetime.fromisoformat(str(last_bad_notified_at))
     except ValueError:
         return False  # corrupt marker -> notify rather than stay silent
     return (now - at).total_seconds() < _RENOTIFY_AFTER_S
+
+
+def _halted_bypass(notified: Any, health: str) -> bool:
+    """A transition INTO ``halted`` is materially worse: it may pierce the cooldown ONCE.
+
+    "Once" is enforced by ``notified.health`` — set only after an accepted send
+    (R5), so an undelivered halted alert still retries, while a delivered one
+    puts halted itself under the cooldown.
+    """
+    if health != "halted":
+        return False
+    return not (isinstance(notified, dict) and notified.get("health") == "halted")
 
 
 def _strategy_notification(row: dict[str, Any]) -> dict[str, Any]:
@@ -111,21 +127,32 @@ def diff_fleet(
     """Pure diff of a FRESH fleet-health payload against the persisted notify state.
 
     Returns ``(notifications, new_state)``. ``new_state`` carries only the
-    ALWAYS-committed observed side (R5) — the ``notified``/``notified_at``/
-    ``unhealthy``-clear marks are applied via :func:`mark_notified` ONLY after
-    ``send_to_all`` accepted >= 1, so an undelivered alert retries next cycle.
+    ALWAYS-committed observed side (R5) — the ``notified``/
+    ``last_bad_notified_at``/``notified_at``/``unhealthy``-clear marks are
+    applied via :func:`mark_notified` ONLY after ``send_to_all`` accepted
+    >= 1, so an undelivered alert retries next cycle.
 
     Baseline (R2): ``state is None`` (file missing) -> record observed state
     for everything, notify NOTHING. A restart with an existing file diffs
     against persisted state, so transitions during downtime DO notify.
 
-    Worsening/dedup (R3): an operational-stage row whose health is bad
-    (severity < ok) is a candidate on every non-improving cycle; the 24h
-    same-health dedup against ``notified`` keeps that from spamming while
-    letting a persistent condition re-alert daily and an unACKed send retry.
-    An observed improvement clears ``notified`` (next degradation always
-    alerts) and never notifies itself — fleet-recovered (R6) is the only
-    improvement that pushes.
+    Cooldown (R3): an operational-stage row whose health is bad (severity < ok)
+    is a candidate every cycle, gated by a per-strategy 24h cooldown
+    (``last_bad_notified_at``) that is INDEPENDENT of which bad health was
+    notified — so a stale<->drift flap alerts once per day, not once per cycle,
+    while a persistent condition still re-alerts daily and an unACKed send
+    retries (the cooldown commits only via :func:`mark_notified`). The one
+    bypass: a transition INTO ``halted`` may pierce the cooldown once; after
+    that accepted send the cooldown covers halted too. The cooldown (and the
+    ``notified`` debug marker) resets ONLY on recovery to ok, on the row
+    leaving the operational stages, or on the row disappearing. Old state
+    files without ``last_bad_notified_at`` read as null (no cooldown).
+
+    Fan-out suppression: when the account-wide global halt marks a row halted
+    (``row.kill_switch.global_halt`` truthy), the row is NOT a per-strategy
+    candidate — the single ``global:halt`` notification carries the event. A
+    row tripped for its own reason (``kill_switch.tripped`` with
+    ``global_halt`` false) still notifies individually.
     """
     now_iso = now.isoformat()
     rows = fleet.get("rows") or []
@@ -146,24 +173,39 @@ def diff_fleet(
         name = str(row.get("strategy"))
         health = str(row.get("health"))
         sev = _severity(health)
+        operational = str(row.get("stage")) in _OPERATIONAL_STAGES
         prev = prev_strategies.get(name)
         prev_sev = _severity(prev.get("observed_health")) if isinstance(prev, dict) else None
         notified = prev.get("notified") if isinstance(prev, dict) else None
-        improved = prev_sev is not None and sev > prev_sev
-        if improved:
-            notified = None  # R3: reset so the next degradation always alerts
+        # Migration tolerance: pre-cooldown state files lack the key -> null.
+        last_bad_notified_at = (
+            prev.get("last_bad_notified_at") if isinstance(prev, dict) else None
+        )
+        if health == "ok" or not operational:
+            # The ONLY cooldown resets: recovery to ok / leaving operational
+            # stages (disappearing rows drop out of new_strategies entirely).
+            notified = None
+            last_bad_notified_at = None
+        # Account-wide halt fans out as health=halted on EVERY row; suppress the
+        # per-strategy alert — the single global:halt notification carries it. A
+        # row tripped for its own reason has global_halt false and still fires.
+        account_halted_row = bool((row.get("kill_switch") or {}).get("global_halt"))
         candidate = (
             prev_sev is not None  # a first-ever observation is baseline, never an alert
-            and str(row.get("stage")) in _OPERATIONAL_STAGES
+            and operational
             and sev < _OK_SEVERITY
-            and not improved  # improvements never notify (fleet-recovered below is the only one)
+            and not account_halted_row
         )
-        if candidate and not _deduped(notified, health, now):
+        if candidate and (
+            not _cooldown_active(last_bad_notified_at, now)
+            or _halted_bypass(notified, health)
+        ):
             notifications.append(_strategy_notification(row))
         new_strategies[name] = {
             "observed_health": health,
             "observed_at": now_iso,
             "notified": notified,
+            "last_bad_notified_at": last_bad_notified_at,
         }
 
     halt_notified_at = None if baseline else prev_halt.get("notified_at")
@@ -221,7 +263,10 @@ def mark_notified(state: dict[str, Any], notification: dict[str, Any], now_iso: 
     if kind == "strategy":
         entry = state["strategies"].get(notification["strategy"])
         if entry is not None:
+            # notified.health stays for debug + the halted-bypass once-check;
+            # the notification GATE is the last_bad_notified_at cooldown.
             entry["notified"] = {"health": notification["health"], "at": now_iso}
+            entry["last_bad_notified_at"] = now_iso
     elif kind == "global_halt":
         state["global_halt"]["notified_at"] = now_iso
     elif kind == "fleet_clear":
