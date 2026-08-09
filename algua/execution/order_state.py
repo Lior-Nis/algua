@@ -251,6 +251,104 @@ def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None
     }
 
 
+def _parse_snapshot_ts(value: str) -> datetime | None:
+    """Parse a persisted tick_ts to an aware-UTC datetime; naive is assumed UTC. Returns None on
+    unparseable input — tick_ts writers accept arbitrary strings, so readers must never trust the
+    column to sort/compare as SQL text."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def tick_snapshot_series(
+    conn: sqlite3.Connection,
+    strategy_id: int,
+    strategy_name: str,
+    *,
+    lane: str | None = None,
+    since: datetime | None = None,
+    limit: int = 500,
+) -> dict:
+    """Per-lane tick-snapshot time series for one strategy (the equity-curve read behind
+    ``fleet series``), event-time-ordered ascending, newest-``limit`` per lane.
+
+    Data rows are keyed by ``strategy_id`` (never by name — names can be reused); legacy pre-v21
+    rows predate the ``strategy_id``/``lane`` columns, so they are only findable by name and are
+    surfaced as an exclusion COUNT, never as series rows. All ordering/filtering happens in Python
+    on parsed timestamps — no SQL text comparison anywhere (see ``_parse_snapshot_ts``). ``since``
+    filtering happens BEFORE the newest-N cut: the result is the newest N of the filtered interval.
+
+    A lane not requested (when ``lane`` is given) is ``None`` in ``series``/``truncated``; a
+    requested lane with no rows is ``[]``/``False``.
+    """
+    # Explicit BEGIN DEFERRED: a plain `with conn:` does not pin a read snapshot, so the series
+    # SELECT and the legacy COUNT could otherwise straddle a concurrent writer's commit. Never
+    # IMMEDIATE — this is a reader and must not take the write lock.
+    conn.execute("BEGIN DEFERRED")
+    try:
+        raw = conn.execute(
+            "SELECT id, tick_ts, recorded_at, equity, peak_equity, reconcile_ok, lane "
+            "FROM tick_snapshots WHERE strategy_id = ?",
+            (strategy_id,),
+        ).fetchall()
+        n_legacy_excluded = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM tick_snapshots WHERE strategy = ? "
+                "AND (strategy_id IS NULL OR lane IS NULL)",
+                (strategy_name,),
+            ).fetchone()[0]
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+    lanes = tuple(sorted(_VALID_LANES)) if lane is None else (lane,)
+    per_lane: dict[str, list[tuple[datetime, int, dict]]] = {ln: [] for ln in lanes}
+    n_unparseable = 0
+    n_invalid_lane = 0
+    for row in raw:
+        row_lane = row["lane"]
+        if row_lane is None:
+            # A strategy_id-bearing row with NULL lane is in the legacy bucket by definition
+            # (already counted in n_legacy_excluded above) — skip without double-counting.
+            continue
+        parsed = _parse_snapshot_ts(row["tick_ts"])
+        if parsed is None:
+            n_unparseable += 1
+            continue
+        if row_lane not in _VALID_LANES:
+            # Lane discipline is writer-enforced only (no DB CHECK constraint) — a raw-write
+            # fabrication must be surfaced as a count, never silently mixed into a lane.
+            n_invalid_lane += 1
+            continue
+        if since is not None and parsed < since:
+            continue
+        if row_lane not in per_lane:
+            continue  # valid lane, just not requested by the lane filter
+        per_lane[row_lane].append((parsed, row["id"], {
+            "id": row["id"], "tick_ts": row["tick_ts"], "recorded_at": row["recorded_at"],
+            "equity": row["equity"], "peak_equity": row["peak_equity"],
+            "reconcile_ok": bool(row["reconcile_ok"]),
+        }))
+
+    series: dict[str, list[dict] | None] = {"paper": None, "live": None}
+    truncated: dict[str, bool | None] = {"paper": None, "live": None}
+    for ln in lanes:
+        entries = sorted(per_lane[ln], key=lambda e: (e[0], e[1]))
+        truncated[ln] = len(entries) > limit
+        series[ln] = [e[2] for e in entries[-limit:]]
+    return {
+        "series": series,
+        "truncated": truncated,
+        "n_legacy_excluded": n_legacy_excluded,
+        "n_unparseable": n_unparseable,
+        "n_invalid_lane": n_invalid_lane,
+    }
+
+
 def recent_orders(conn: sqlite3.Connection, strategy: str, limit: int = 10) -> list[dict]:
     """The most recent paper_orders rows for a strategy, newest first."""
     rows = conn.execute(
