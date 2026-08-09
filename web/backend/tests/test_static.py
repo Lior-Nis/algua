@@ -81,6 +81,17 @@ async def test_unknown_api_path_is_json_404_never_index(dist: Path) -> None:
     assert resp.json() == {"ok": False, "error": "not found", "code": "not_found"}
 
 
+async def test_bare_api_path_is_json_404_never_index(dist: Path) -> None:
+    """/api (no trailing segment) is still API namespace — the shell must never leak there."""
+    app = main_mod.create_app()
+    async with _client(app) as client:
+        get_resp = await client.get("/api")
+        head_resp = await client.head("/api")
+    assert get_resp.status_code == 404
+    assert get_resp.json() == {"ok": False, "error": "not found", "code": "not_found"}
+    assert head_resp.status_code == 404
+
+
 async def test_healthz_still_works_with_static_installed(dist: Path) -> None:
     app = main_mod.create_app()
     async with _client(app) as client:

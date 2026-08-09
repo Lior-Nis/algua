@@ -75,7 +75,7 @@ def install_static(app: FastAPI, dist: Path) -> None:
     async def spa_fallback(full_path: str) -> Response:
         # The API namespace must NEVER fall through to index.html: an unknown
         # /api/* path is a JSON 404 in the standard error envelope.
-        if full_path.startswith("api/") or full_path == "healthz":
+        if full_path == "api" or full_path.startswith("api/") or full_path == "healthz":
             return JSONResponse(
                 status_code=404,
                 content={"ok": False, "error": "not found", "code": "not_found"},

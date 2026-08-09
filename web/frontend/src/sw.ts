@@ -13,7 +13,7 @@ precacheAndRoute(self.__WB_MANIFEST)
 // Deep links (/s/x, /funnel, ...) get the precached shell; API/health never.
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('index.html'), {
-    denylist: [/^\/api\//, /^\/healthz$/],
+    denylist: [/^\/api(?:\/|$)/, /^\/healthz$/],
   }),
 )
 
