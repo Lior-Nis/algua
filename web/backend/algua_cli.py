@@ -28,6 +28,10 @@ REPO = Path(__file__).resolve().parents[2]
 _MAX_CONCURRENT_SUBPROCESSES = 2
 _KILL_GRACE_S = 2.0
 _BAD_OUTPUT_PREVIEW_CHARS = 200
+# force_refresh's "just fetched" guard: an entry younger than this is served as fresh even
+# under force_refresh. A poller queued behind a user request on the same per-key lock would
+# otherwise re-run the CLI back-to-back the moment the lock is released.
+_FORCE_REFRESH_SKEW_S = 2.0
 
 
 class CliError(Exception):
@@ -142,12 +146,22 @@ async def _execute(args: tuple[str, ...], timeout_s: float) -> Any:
     return _classify(payload)
 
 
-async def run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+async def run_cli(
+    *args: str, ttl_s: float, timeout_s: float = 60.0, force_refresh: bool = False
+) -> dict[str, Any]:
     """Run an algua CLI command with caching, singleflight, and stale-serving.
 
     Returns ``{"ok": True, "data": ..., "fetched_at": iso, "stale": bool, ...}``.
     On failure with a cached value, serves the cache with LOUD stale metadata;
     on failure without one, raises :class:`CliError`.
+
+    ``force_refresh=True`` (the background poller's mode) skips the TTL freshness
+    check inside the same per-key lock — the CLI re-runs even on a fresh cache,
+    updating the same entry on success and stale-serving on CliError like any
+    other call. One guard remains: an entry fetched less than
+    ``_FORCE_REFRESH_SKEW_S`` (2s) ago — i.e. a refresh that just completed while
+    we waited on the lock — is served as fresh, so a poller queued behind a user
+    request never runs a duplicate refresh back-to-back.
     """
     key = tuple(args)
     lock = _locks.setdefault(key, asyncio.Lock())
@@ -155,13 +169,16 @@ async def run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str
     # the fresh cache instead of spawning a duplicate subprocess.
     async with lock:
         entry = _cache.get(key)
-        if entry is not None and (time.monotonic() - entry["fetched_monotonic"]) < ttl_s:
-            return {
-                "ok": True,
-                "data": entry["value"],
-                "fetched_at": entry["fetched_at"],
-                "stale": False,
-            }
+        if entry is not None:
+            age_s = time.monotonic() - entry["fetched_monotonic"]
+            freshness_window_s = _FORCE_REFRESH_SKEW_S if force_refresh else ttl_s
+            if age_s < freshness_window_s:
+                return {
+                    "ok": True,
+                    "data": entry["value"],
+                    "fetched_at": entry["fetched_at"],
+                    "stale": False,
+                }
         try:
             payload = await _execute(key, timeout_s)
         except CliError as exc:
