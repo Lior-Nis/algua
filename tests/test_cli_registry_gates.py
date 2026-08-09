@@ -285,6 +285,27 @@ def test_vector_smuggled_as_checks_rows_dropped(monkeypatch, tmp_path):
     assert check["passed"] is True
 
 
+def test_vector_smuggled_as_giant_int_dropped(monkeypatch, tmp_path):
+    """json.loads accepts integer literals thousands of digits long — a vector packed into one
+    giant int under an allowlisted key must be dropped by the magnitude bound."""
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
+    giant = int("42" * 1000)  # a 2000-digit payload channel
+    with closing(_conn()) as conn:
+        rec = _register(conn)
+        _insert_gate_row(conn, rec.id, decision_json=json.dumps(
+            {"passed": True, "dsr_n_trials": giant,
+             "checks": [{"name": "sharpe", "op": ">=", "threshold": giant, "value": 1.2,
+                         "passed": True}]}))
+    result, payload = _invoke()
+    assert result.exit_code == 0, result.stdout
+    row = payload["gate_evaluations"][0]
+    assert "dsr_n_trials" not in row["decision"]
+    assert "dsr_n_trials" in row["decision_dropped_keys"]
+    (check,) = row["decision"]["checks"]
+    assert "threshold" not in check  # giant-int check field stripped
+    assert check["value"] == 1.2
+
+
 def test_legacy_row_null_fdr_columns_emit_as_nulls(monkeypatch, tmp_path):
     """A legacy-shaped row (inserted without the migration-added fdr_* columns) must emit them as
     JSON nulls, not crash."""

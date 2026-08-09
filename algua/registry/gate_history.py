@@ -130,6 +130,10 @@ _SCALAR_TYPES = (str, int, float, bool, type(None))
 _MAX_STRING_LEN = 512
 _MAX_DICT_ENTRIES = 32
 _MAX_CHECKS = 64
+# json.loads accepts integer literals thousands of digits long (interpreter cap ~4300), so an
+# unbounded int is a bulk channel just like an unbounded string. Every legitimate decision int is
+# a count/index/flag — 10**18 is orders of magnitude above all of them.
+_MAX_INT_MAGNITUDE = 10**18
 
 # The scalar fields kept from each checks[] entry (drops free-text `detail` and anything else).
 # threshold/value must be finite-numeric-or-null and passed must be bool — a vector cannot be
@@ -140,15 +144,21 @@ _CHECK_FIELDS = ("name", "op", "threshold", "value", "passed")
 def _bounded_scalar(value: Any) -> bool:
     if isinstance(value, str):
         return len(value) <= _MAX_STRING_LEN
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return abs(value) <= _MAX_INT_MAGNITUDE
     if isinstance(value, float):
         return math.isfinite(value)
-    return isinstance(value, _SCALAR_TYPES)
+    return value is None
 
 
 def _finite_number_or_none(value: Any) -> bool:
     if value is None or isinstance(value, bool):
         return value is None
-    return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
+    if isinstance(value, int):
+        return abs(value) <= _MAX_INT_MAGNITUDE
+    return isinstance(value, float) and math.isfinite(value)
 
 
 def _check_field_ok(field: str, value: Any) -> bool:
