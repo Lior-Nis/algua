@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import typer
 
 from algua.calendar.market_calendar import MarketCalendar
-from algua.cli._common import registry_conn
+from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.execution.fleet_health import (
@@ -14,10 +14,23 @@ from algua.execution.fleet_health import (
     fleet_alert,
     fleet_status,
 )
+from algua.execution.order_state import tick_snapshot_series
+from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt
 
 fleet_app = typer.Typer(help="Fleet-wide observability across all strategies", no_args_is_help=True)
 app.add_typer(fleet_app, name="fleet")
+
+_SERIES_LANES = ("live", "paper")
+
+
+def _norm_since(value: str) -> datetime:
+    """Parse a user-supplied --since bound to an aware-UTC datetime (ISO-8601; naive assumed UTC,
+    offset-aware converted to the true UTC instant). Unparseable input raises ``ValueError``
+    (rendered as the JSON error envelope by @json_errors). Local copy of ``audit_cmd._norm_ts``
+    semantics — cli command modules never import each other (composition-root rule, see main.py)."""
+    dt = datetime.fromisoformat(value)
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 @fleet_app.command("status")
@@ -33,6 +46,35 @@ def status() -> None:
     with registry_conn() as conn:
         rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC))
     emit(rows)
+
+
+@fleet_app.command("series")
+@json_errors
+def series(
+    name: str = typer.Argument(..., help="strategy name"),
+    since: str = typer.Option(
+        None, "--since",
+        help="inclusive lower bound on tick_ts (ISO-8601, assumed UTC if naive); "
+             "filtering happens BEFORE the newest-N cut"),
+    limit: int = typer.Option(
+        500, "--limit", min=1, max=5000, help="max rows kept per lane (the newest N)"),
+    lane: str = typer.Option(None, "--lane", help="restrict to one lane: paper|live"),
+) -> None:
+    """Per-lane tick-snapshot time series for ONE strategy (the equity curve behind the fleet
+    rollup), event-time-ordered ascending. A pure read of persisted state (no broker call) — the
+    drill-down companion to ``fleet status``'s one-row-per-strategy view. Legacy pre-v21 rows
+    (no strategy_id/lane) are excluded and surfaced as ``n_legacy_excluded``; unparseable/
+    invalid-lane rows are skipped and counted, never silently dropped."""
+    if lane is not None and lane not in _SERIES_LANES:
+        raise ValueError(f"lane must be one of {list(_SERIES_LANES)!r}, got {lane!r}")
+    since_dt = _norm_since(since) if since is not None else None
+    with registry_conn() as conn:
+        # get() raises StrategyNotFound (a LookupError) for an unknown name -> {ok:false,
+        # code:"not_found"} via @json_errors.
+        rec = SqliteStrategyRepository(conn).get(name)
+        result = tick_snapshot_series(
+            conn, rec.id, rec.name, lane=lane, since=since_dt, limit=limit)
+    emit(ok({"strategy": name, "lane_filter": lane, **result}))
 
 
 @fleet_app.command("health")

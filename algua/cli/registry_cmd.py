@@ -26,6 +26,7 @@ from algua.execution.lane_exit import (
 from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
+from algua.registry.gate_history import strategy_gate_history
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, LiveAuthorizationError
 from algua.registry.repository import StrategyRecord, kb_metadata
 from algua.registry.store import SqliteStrategyRepository
@@ -158,6 +159,26 @@ def show(name: str) -> None:
         rec = repo.get(name)
         transitions = repo.list_transitions(name)
     emit(ok({**_record_json(rec), "transitions": transitions}))
+
+
+@registry_app.command("gates")
+@json_errors
+def gates(
+    name: str,
+    limit: int = typer.Option(20, "--limit", min=1, max=200,
+                              help="max rows per ledger, newest first"),
+) -> None:
+    """Show a strategy's gate-evaluation history: the research (backtested->candidate) and forward
+    (paper->forward_tested) ledgers, newest first. Pure read — decision_json is allowlist-projected
+    (see registry/gate_history.py), never emitted raw."""
+    with registry_conn() as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        gate_rows, forward_rows = strategy_gate_history(conn, rec.id, limit=limit)
+    emit(ok({
+        "strategy": name,
+        "gate_evaluations": gate_rows,
+        "forward_gate_evaluations": forward_rows,
+    }))
 
 
 @registry_app.command("transition")
