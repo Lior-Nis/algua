@@ -345,3 +345,392 @@ button { font: inherit; }
   0%, 100% { opacity: 0.45; }
   50% { opacity: 0.9; }
 }
+
+/* ---- shared bits (slice C) ---------------------------------------------- */
+
+.back-btn {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.dim-note {
+  color: var(--text-dim);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.row-link {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.row-link:active { color: var(--cyan); }
+
+.row-list {
+  display: grid;
+  gap: 0;
+}
+
+/* Tables never widen the page — they scroll inside their own container. */
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.data-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.data-table th {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: left;
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.data-table td {
+  padding: 5px 10px 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.data-table tr:last-child td { border-bottom: none; }
+
+.pass-mark {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+/* ---- equity chart -------------------------------------------------------- */
+
+.chart-panel { display: grid; gap: 8px; }
+
+.chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.seg-control {
+  display: inline-flex;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.seg {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.seg + .seg { border-left: 1px solid var(--line-2); }
+
+.seg.active {
+  color: var(--ink);
+  background: var(--cyan);
+  font-weight: 600;
+}
+
+.chart-host { width: 100%; }
+
+.chart-placeholder {
+  height: 220px;
+  display: grid;
+  place-items: center;
+  color: var(--text-fade);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px dashed var(--line-2);
+  border-radius: 6px;
+}
+
+.chart-footnote {
+  font-size: 10px;
+  color: var(--text-fade);
+  font-variant-numeric: tabular-nums;
+}
+
+/* uPlot renders its own inline styles; keep the canvas from overflowing. */
+.uplot { font-family: var(--code); }
+
+/* ---- funnel --------------------------------------------------------------- */
+
+.stage-section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.stage-summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.stage-summary::-webkit-details-marker { display: none; }
+
+.stage-summary::before {
+  content: '▸ ';
+  color: var(--text-fade);
+  font-size: 10px;
+}
+
+details[open] > .stage-summary::before { content: '▾ '; }
+
+.funnel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.funnel-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.funnel-row-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* ---- strategy detail ------------------------------------------------------ */
+
+.detail-header { display: grid; gap: 4px; }
+
+.detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.detail-name {
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.detail-description {
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 2px;
+}
+
+.gates-panel { display: grid; gap: 10px; }
+
+.latest-gate { display: grid; gap: 8px; }
+
+.gate-verdict-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sub-details > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.sub-details > summary::-webkit-details-marker { display: none; }
+
+.sub-details > summary::before {
+  content: '▸ ';
+  color: var(--text-fade);
+}
+
+.sub-details[open] > summary::before { content: '▾ '; }
+
+.compact-gate-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.compact-gate-row:last-child { border-bottom: none; }
+
+.timeline { margin-top: 6px; }
+
+.timeline-row {
+  display: grid;
+  gap: 3px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.timeline-row:last-child { border-bottom: none; }
+
+.timeline-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.timeline-stages {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ---- activity / ideas ------------------------------------------------------ */
+
+.filter-bar { display: grid; gap: 8px; }
+
+.chip-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-chip {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.filter-chip.active {
+  color: var(--ink);
+  background: var(--gold);
+  border-color: var(--gold);
+  font-weight: 600;
+}
+
+.text-filter {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 7px 10px;
+  width: 100%;
+}
+
+.text-filter::placeholder { color: var(--text-fade); }
+
+.date-divider {
+  padding: 6px 14px 2px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-fade);
+  border-bottom: 1px solid var(--line);
+}
+
+.activity-row {
+  display: grid;
+  gap: 3px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.activity-row:last-child { border-bottom: none; }
+
+.activity-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.activity-action {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.activity-reason { font-size: 11px; }
+
+.load-more-btn {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 9px 0;
+  cursor: pointer;
+  width: 100%;
+}
+
+.load-more-btn:active { color: var(--gold); border-color: var(--gold); }
+
+.idea-row {
+  display: grid;
+  gap: 3px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.idea-row:last-child { border-bottom: none; }
+
+.idea-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.idea-title {
+  font-weight: 600;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.idea-hypothesis { font-size: 11px; }
