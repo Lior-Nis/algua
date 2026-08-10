@@ -76,6 +76,13 @@ render_unit() {
       line="WantedBy=default.target"
     fi
     printf '%s\n' "${line//\/opt\/algua/${REPO_ROOT}}"
+    # The user manager's default PATH omits ~/.local/bin, where uv (and codex, for the
+    # research driver) live — the /opt system deploy gets PATH from the env file instead,
+    # so the injection belongs HERE, not in the shared templates. Injected right after
+    # [Service] so a template-provided Environment=PATH later in the section would win.
+    if [[ "${line}" == "[Service]" ]]; then
+      printf 'Environment=PATH=%%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n'
+    fi
   done < "${src}"
 }
 
