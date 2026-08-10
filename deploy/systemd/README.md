@@ -60,13 +60,16 @@ deploy/systemd/install-user-units.sh --dry-run  # print the rendered units, writ
 
 For each of `algua-research.{service,timer}`, `algua-paper.{service,timer}`, `algua-web.service`
 it renders the `/opt/algua` template to `~/.config/systemd/user/<name>`, replacing `/opt/algua`
-with the actual repo root (resolved from the script's own location), dropping
-`EnvironmentFile=/etc/algua/algua.env` when that file doesn't exist (keeping the
-credential-scrubbing `UnsetEnvironment=` lines), and rewriting `WantedBy=multi-user.target` →
-`default.target` (timers keep `timers.target`). It then runs `systemctl --user daemon-reload` and
-**prints** — never executes — the per-unit enable commands. Re-running is safe: installs are
-atomic overwrites, so the installed units can never drift from the repo templates for longer than
-one re-run. Use `loginctl enable-linger <user>` so user timers fire without an active login, and
+with the actual repo root (resolved from the script's own location; a root containing whitespace
+or any character outside `[A-Za-z0-9/._-]` fails closed — plain substitution can't safely render
+it into a unit), dropping `EnvironmentFile=/etc/algua/algua.env` when that file is missing or
+unreadable (keeping the credential-scrubbing `UnsetEnvironment=` lines), and rewriting
+`WantedBy=multi-user.target` → `default.target` (timers keep `timers.target`). It preflights
+`systemctl --user` reachability before writing anything, stages ALL rendered units and moves them
+into place together, then runs one `systemctl --user daemon-reload` and **prints** — never
+executes — the per-unit enable commands. Re-running is safe: the all-then-move install means the
+live unit set is never left half-updated, and the installed units can never drift from the repo
+templates for longer than one re-run. Use `loginctl enable-linger <user>` so user timers fire without an active login, and
 inspect with `systemctl --user list-timers 'algua-*'` / `journalctl --user -u algua-research.service`.
 
 **Factory cadence (slice 1).** Research fires **every 2h** (`OnCalendar=*-*-* 00/2:00:00 UTC`,
@@ -181,17 +184,25 @@ compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in the env file; Codex plan rate-li
 expected at 12/day and are recorded per run in the digest — see below) and disk (auto-pruned; see
 below).
 
-**Run digest (feedback contract, slice 1).** After every firing — success, codex failure, or
-timeout — the launcher appends **one JSON line** to the durable, authority-side digest at
-`data/research-runs.jsonl` (beside the authoritative DB; `ALGUA_RESEARCH_DIGEST_PATH` overrides).
-Fields: `stamp`, `branch`, `thesis`, `exit_code`, `timed_out` (bool, `timeout` exit 124), `wall_s`,
+**Run digest (feedback contract, slice 1).** After **every firing** — a completed run (success,
+codex failure, or timeout), a lock-skip, or a setup failure — the launcher appends **one JSON
+line** to the durable, authority-side digest at `data/research-runs.jsonl` (beside the
+authoritative DB; `ALGUA_RESEARCH_DIGEST_PATH` overrides). Fields: `stamp`, `branch` (`null` if
+the run branch was never created), `thesis`, `outcome` (`"completed"` | `"skipped_lock"` |
+`"setup_failed"`), `exit_code`, `timed_out` (bool, `timeout` exit 124), `wall_s`,
 `n_strategy_files` (strategy files in the driver's commit), `hypotheses` (sanitized titles from the
 run-report's machine-readable trailer — charset-filtered, ≤120 chars, ≤40), `preview_gate`
-(`{"passed": bool, "failed_checks": [...]}` or `null`), `trailer_parse_error` (bool),
-`rate_limited` (bool, grepped from the in-worktree codex log), `report`
-(`research-run/<stamp>:run-report.md`). This is the improve-algua backlog: `trailer_parse_error`/
-`rate_limited`/`timed_out` clusters are machinery bugs to fix, `preview_gate.failed_checks`
-clusters show where hypotheses die. The digest also feeds the next runs' anti-dup prompt context
+(`{"passed": bool, "failed_checks": [...]}` or `null`), `trailer_parse_error` (bool for completed
+runs), `rate_limited` (bool, grepped from the in-worktree codex log), `report`
+(`research-run/<stamp>:run-report.md`). A skipped/setup-failed firing produces a line with
+`outcome != "completed"` and null-ish run fields (`exit_code`/`wall_s`/`n_strategy_files`/`report`
+null — for a lock-skip `branch` too — plus `hypotheses` `[]`, `preview_gate` and
+`trailer_parse_error` null: no trailer was expected). The trailer itself is parsed defensively:
+only the last 64KB of `run-report.md` is read, the fenced ```json block must be **EOF-anchored**
+(nothing but whitespace after its closing fence), and the schema is strictly validated —
+any violation yields `hypotheses [] / preview_gate null / trailer_parse_error true`. This is the
+improve-algua backlog: `trailer_parse_error`/`rate_limited`/`timed_out` clusters are machinery
+bugs to fix, `preview_gate.failed_checks` clusters show where hypotheses die. The digest also feeds the next runs' anti-dup prompt context
 (recent hypothesis titles, injected as sanitized untrusted data). A digest write failure warns but
 never fails the run; the digest never stores raw report prose.
 

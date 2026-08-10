@@ -8,8 +8,9 @@
 #   - every /opt/algua path        -> the ACTUAL repo root (git rev-parse from this script's
 #                                     own location — works from any checkout/worktree);
 #   - EnvironmentFile=/etc/algua/algua.env
-#                                  -> DROPPED when that file does not exist (a unit referencing a
-#                                     missing EnvironmentFile= fails to start); KEPT when present.
+#                                  -> DROPPED when that file is missing or unreadable (a unit
+#                                     referencing an unusable EnvironmentFile= fails to start);
+#                                     KEPT when present AND readable.
 #                                     UnsetEnvironment= lines are ALWAYS kept — they scrub broker
 #                                     creds regardless of where the environment came from;
 #   - WantedBy=multi-user.target   -> default.target (user managers have no multi-user.target);
@@ -22,7 +23,9 @@
 #
 #   --dry-run   print the rendered units to stdout; write nothing, no daemon-reload.
 #
-# Safe to re-run: rendering is deterministic and installs are atomic overwrites (mktemp + mv).
+# Safe to re-run: rendering is deterministic; all units are rendered into a staging dir first,
+# then moved into place together and daemon-reloaded ONCE — a mid-run failure can never leave a
+# half-updated unit set with no reload.
 #
 set -euo pipefail
 
@@ -37,6 +40,14 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel)"
+# Fail closed on a repo root that plain substitution can't safely put into a unit file: systemd
+# splits ExecStart= on whitespace and gives specifier/quote characters meaning, so anything
+# outside [A-Za-z0-9/._-] would render a broken or subtly-wrong unit.
+if [[ ! "${REPO_ROOT}" =~ ^[A-Za-z0-9/._-]+$ ]]; then
+  echo "error: repo root '${REPO_ROOT}' contains whitespace or a systemd-unsafe character" >&2
+  echo "       (allowed: A-Za-z0-9 / . _ -). Move the checkout to a safe path and re-run." >&2
+  exit 1
+fi
 UNIT_DIR="${HOME}/.config/systemd/user"
 ENV_FILE="/etc/algua/algua.env"
 UNITS=(
@@ -47,8 +58,10 @@ UNITS=(
   algua-web.service
 )
 
+# Keep EnvironmentFile= only when the file exists AND is readable — a present-but-unreadable
+# env file breaks the unit exactly like a missing one.
 HAVE_ENV_FILE=1
-[[ -f "${ENV_FILE}" ]] || HAVE_ENV_FILE=0
+[[ -f "${ENV_FILE}" && -r "${ENV_FILE}" ]] || HAVE_ENV_FILE=0
 
 # Pure-bash line rendering: bash ${var//pat/repl} replacement is LITERAL, so a repo path containing
 # sed/awk metacharacters (&, \, delimiters) can never corrupt the rendered unit.
@@ -71,30 +84,40 @@ for unit in "${UNITS[@]}"; do
 done
 
 if [[ "${HAVE_ENV_FILE}" -eq 0 ]]; then
-  echo "note: ${ENV_FILE} not found — EnvironmentFile= lines are dropped from the rendered units."
-  echo "      Provide ALGUA_* config another way (create the env file and re-run this installer,"
+  echo "note: ${ENV_FILE} missing or unreadable — EnvironmentFile= lines are dropped from the rendered units."
+  echo "      Provide ALGUA_* config another way (create/fix the env file and re-run this installer,"
   echo "      or 'systemctl --user set-environment'); algua-paper.service needs ALGUA_PAPER_SNAPSHOT."
 fi
 
-for unit in "${UNITS[@]}"; do
-  src="${SCRIPT_DIR}/${unit}"
-  if [[ "${DRY_RUN}" -eq 1 ]]; then
-    echo "==> ${unit}  (dry-run; would install to ${UNIT_DIR}/${unit})"
-    render_unit "${src}"
-    echo
-  else
-    mkdir -p "${UNIT_DIR}"
-    tmp="$(mktemp "${UNIT_DIR}/.${unit}.tmp.XXXXXX")"
-    render_unit "${src}" > "${tmp}"
-    mv "${tmp}" "${UNIT_DIR}/${unit}"
-    echo "installed ${UNIT_DIR}/${unit}"
-  fi
-done
-
 if [[ "${DRY_RUN}" -eq 1 ]]; then
+  for unit in "${UNITS[@]}"; do
+    echo "==> ${unit}  (dry-run; would install to ${UNIT_DIR}/${unit})"
+    render_unit "${SCRIPT_DIR}/${unit}"
+    echo
+  done
   echo "dry-run complete — nothing written, no daemon-reload."
   exit 0
 fi
+
+# Preflight: the user systemd manager must be reachable BEFORE any file is written — otherwise
+# units could land on disk with no daemon-reload to pick them up.
+systemctl --user show-environment >/dev/null \
+  || { echo "error: 'systemctl --user' is not reachable (no user manager / DBus session?);" >&2
+       echo "       aborting before touching any files." >&2; exit 1; }
+
+# Stage ALL rendered units first, then move them ALL into place, THEN daemon-reload once — a
+# mid-run failure aborts before any installed unit is replaced, so the live set is never left
+# half-updated without a reload. Staging dir lives inside UNIT_DIR so each mv is a same-fs rename.
+mkdir -p "${UNIT_DIR}"
+STAGE_DIR="$(mktemp -d "${UNIT_DIR}/.stage.XXXXXX")"
+trap 'rm -rf "${STAGE_DIR}"' EXIT
+for unit in "${UNITS[@]}"; do
+  render_unit "${SCRIPT_DIR}/${unit}" > "${STAGE_DIR}/${unit}"
+done
+for unit in "${UNITS[@]}"; do
+  mv "${STAGE_DIR}/${unit}" "${UNIT_DIR}/${unit}"
+  echo "installed ${UNIT_DIR}/${unit}"
+done
 
 systemctl --user daemon-reload
 echo

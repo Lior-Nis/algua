@@ -27,9 +27,9 @@
 # Factory feedback (slice 1): when THESIS is not explicitly set, the driver rotates it
 # DETERMINISTICALLY through .codex/research-themes.txt; it injects the last runs' sanitized
 # hypothesis titles (from the digest, as untrusted anti-dup context) into the prompt; and after
-# every run — success, failure, or timeout — it appends ONE JSON line to the durable
-# authority-side digest (data/research-runs.jsonl by default; ALGUA_RESEARCH_DIGEST_PATH
-# overrides), built from the run-report's machine-readable trailer. Codex output also tees to an
+# EVERY firing — completed run (success, failure, or timeout), lock-skip, or setup failure — it
+# appends ONE JSON line to the durable authority-side digest (data/research-runs.jsonl by default;
+# ALGUA_RESEARCH_DIGEST_PATH overrides), built from the run-report's machine-readable trailer. Codex output also tees to an
 # in-worktree research-loop.log for rate-limit detection (only the boolean goes durable).
 #
 # Bounds: an OS-level `timeout` hard-kills the run; a repo-root flock serializes research cycles;
@@ -102,6 +102,120 @@ AUTH_DATA_DIR="${ALGUA_DATA_DIR:-${REPO_ROOT}/data}"
 # per run (see the append site near the end of this script for the schema).
 AUTH_DIGEST="${ALGUA_RESEARCH_DIGEST_PATH:-${AUTH_DATA_DIR}/research-runs.jsonl}"
 
+# Durable feedback digest (factory slice 1): ONE JSON line per FIRING — not just per completed
+# run. Defined EARLY (STAMP/THESIS are already known; the branch may still be null) with safe
+# defaults so the lock-skip and setup-failure exits can record themselves too. The row's
+# "outcome" field distinguishes "skipped_lock" | "setup_failed" | "completed"; non-completed
+# rows carry null-ish run fields (null exit_code/wall_s/n_strategy_files/report, and
+# trailer_parse_error null — no trailer was expected). A digest write failure NEVER fails the
+# run (it's feedback, not control flow) and never changes the script's exit code.
+DIGEST_BRANCH=""        # set once the run branch actually exists (null in the digest until then)
+DIGEST_REPORT_PATH=""   # set once a completed run may have written run-report.md
+rc=""                   # codex exit code (or the setup-failure exit code); null until known
+timed_out=0
+wall_s=""
+n_strategy_files=""
+rate_limited=0
+append_digest() {
+  local outcome="$1" digest_ok=0
+  mkdir -p "$(dirname "${AUTH_DIGEST}")" 2>/dev/null || true
+  python3 - "${AUTH_DIGEST}" "${outcome}" "${STAMP}" "${DIGEST_BRANCH}" "${THESIS}" \
+    "${rc}" "${timed_out}" "${wall_s}" "${n_strategy_files}" "${rate_limited}" \
+    "${DIGEST_REPORT_PATH}" <<'PY' && digest_ok=1
+import json
+import os
+import re
+import sys
+
+(digest_path, outcome, stamp, branch, thesis,
+ exit_code, timed_out, wall_s, n_files, rate_limited, report_path) = sys.argv[1:12]
+
+
+def _clean(s: str) -> str:
+    # Trailer content is MODEL OUTPUT (untrusted): strip to a safe charset + truncate.
+    return re.sub(r"[^A-Za-z0-9 ._,%+-]", "", s)[:120].strip()
+
+
+class _TrailerError(Exception):
+    pass
+
+
+def _parse_trailer(path: str) -> tuple[list, dict | None]:
+    # Bounded tail: read only the LAST 64KB, so a runaway report can't blow memory.
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - 65536))
+        text = f.read().decode("utf-8", errors="replace")
+    # EOF-ANCHORED trailer: the LAST ```json fence whose closing ``` is followed by nothing
+    # but whitespace/blank lines to end-of-file. A trailer followed by prose does NOT count.
+    start = text.rfind("```json")
+    if start == -1:
+        raise _TrailerError("no fenced json trailer")
+    m = re.match(r"\s*(.*?)\s*```\s*\Z", text[start + len("```json"):], flags=re.DOTALL)
+    if m is None:
+        raise _TrailerError("trailer not EOF-anchored")
+    data = json.loads(m.group(1))
+    # STRICT schema validation — any violation invalidates the whole trailer.
+    if not isinstance(data, dict):
+        raise _TrailerError("trailer is not a dict")
+    raw_hyps = data.get("hypotheses")
+    if not isinstance(raw_hyps, list):
+        raise _TrailerError("hypotheses is not a list")
+    hyps: list = []
+    for h in raw_hyps[:40]:
+        title = h.get("title") if isinstance(h, dict) else h
+        if not isinstance(title, str):
+            raise _TrailerError("non-string hypothesis title")
+        if _clean(title):
+            hyps.append(_clean(title))
+    pg = data.get("preview_gate")
+    gate = None
+    if pg is not None:
+        if not isinstance(pg, dict) or not isinstance(pg.get("passed"), bool):
+            raise _TrailerError("preview_gate.passed is not a real bool")
+        checks = pg.get("failed_checks")
+        if not isinstance(checks, list) or any(not isinstance(c, str) for c in checks):
+            raise _TrailerError("preview_gate.failed_checks is not a list of strings")
+        gate = {
+            "passed": pg["passed"],
+            "failed_checks": [_clean(c) for c in checks[:40] if _clean(c)],
+        }
+    return hyps, gate
+
+
+hypotheses: list = []
+preview_gate = None
+trailer_parse_error = None  # only a completed run is expected to have a trailer
+if outcome == "completed":
+    try:
+        hypotheses, preview_gate = _parse_trailer(report_path)
+        trailer_parse_error = False
+    except Exception:
+        hypotheses, preview_gate, trailer_parse_error = [], None, True
+
+row = {
+    "stamp": stamp,
+    "branch": branch or None,
+    "thesis": thesis,
+    "outcome": outcome,
+    "exit_code": int(exit_code) if exit_code else None,
+    "timed_out": timed_out == "1",
+    "wall_s": int(wall_s) if wall_s else None,
+    "n_strategy_files": int(n_files) if n_files else None,
+    "hypotheses": hypotheses,
+    "preview_gate": preview_gate,
+    "trailer_parse_error": trailer_parse_error,
+    "rate_limited": rate_limited == "1",
+    "report": f"{branch}:run-report.md" if outcome == "completed" and branch else None,
+}
+with open(digest_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+PY
+  if [[ "${digest_ok}" -ne 1 ]]; then
+    echo "WARNING: digest append to ${AUTH_DIGEST} failed — run outcome unaffected." >&2
+  fi
+}
+
 # Everything the agent reads/writes lives INSIDE the worktree (so workspace-write contains it):
 #   scratch registry (seeded copy) + scratch kb/mlruns + a per-run COPY of the snapshots.
 SCRATCH="${WORKTREE}/.funnel-scratch"
@@ -144,7 +258,9 @@ for line in last_lines:
     except Exception:
         continue
     hyps = row.get("hypotheses") if isinstance(row, dict) else None
-    for t in hyps or []:
+    if not isinstance(hyps, list):  # non-conforming row: skip silently
+        continue
+    for t in hyps:
         if not isinstance(t, str):
             continue
         s = re.sub(r"[^A-Za-z0-9 ._,%+-]", "", t)[:120].strip()
@@ -242,6 +358,7 @@ mkdir -p "$(dirname "${LOCK}")"
 exec 9>"${LOCK}"
 if ! flock -n 9; then
   echo "another research cycle holds ${LOCK}; skipping this firing." >&2
+  append_digest skipped_lock
   exit 0
 fi
 
@@ -257,15 +374,20 @@ while IFS= read -r stale; do
   git -C "${REPO_ROOT}" worktree remove --force "${stale}" 2>/dev/null || rm -rf "${stale}"
 done < <(find "${REPO_ROOT}/.." -maxdepth 1 -type d -name 'algua-research-*' -mtime "+${RETENTION_DAYS}" 2>/dev/null)
 
-# Clean up the worktree if we fail during SETUP (before codex runs). Cleared before codex so a real
-# run's worktree is kept for review.
+# Clean up the worktree if we fail during SETUP (before codex runs), and record the firing in the
+# digest (outcome "setup_failed"; the original non-zero exit code is preserved — an EXIT trap never
+# changes it). Cleared before codex so a real run's worktree is kept for review.
 cleanup_setup() {
+  local ec=$?
   git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE}" 2>/dev/null || true
+  rc="${ec}"
+  append_digest setup_failed
 }
 trap cleanup_setup EXIT
 
 echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}" >/dev/null
+DIGEST_BRANCH="${BRANCH}"
 
 echo "Building the scratch funnel inside the worktree..."
 mkdir -p "${SCRATCH}/data" "${SCRATCH}/kb" "${SCRATCH}/mlruns"
@@ -339,73 +461,14 @@ else
   echo "  nothing to commit."
 fi
 
-# Durable feedback digest (factory slice 1): append ONE JSON line per run, authority-side, on ALL
-# paths (success, codex failure, timeout — rc is already captured, so we get here regardless) and
-# BEFORE the final exit. Built by python3 from the run-report's machine-readable trailer (the LAST
-# fenced json block) — never by hand-rolled shell string interpolation. Trailer missing/unparseable
-# => hypotheses [], preview_gate null, trailer_parse_error true. A digest write failure NEVER fails
-# the run (it's feedback, not control flow).
+# Durable feedback digest: append the COMPLETED-run line (see append_digest, defined near the top,
+# for the full schema and the skipped_lock/setup_failed lines). rc is already captured, so we get
+# here on success, codex failure, and timeout alike, BEFORE the final exit. The run-report trailer
+# is read bounded-tail (last 64KB), must be EOF-anchored, and is strictly schema-validated —
+# missing/unparseable/non-conforming => hypotheses [], preview_gate null, trailer_parse_error true.
 echo "Appending run digest to ${AUTH_DIGEST}..."
-mkdir -p "$(dirname "${AUTH_DIGEST}")" 2>/dev/null || true
-digest_ok=0
-python3 - "${WORKTREE}/run-report.md" "${AUTH_DIGEST}" "${STAMP}" "${BRANCH}" "${THESIS}" \
-  "${rc}" "${timed_out}" "${wall_s}" "${n_strategy_files}" "${rate_limited}" <<'PY' && digest_ok=1
-import json
-import re
-import sys
-
-(report_path, digest_path, stamp, branch, thesis,
- exit_code, timed_out, wall_s, n_files, rate_limited) = sys.argv[1:11]
-
-
-def _clean(s: str) -> str:
-    # Trailer content is MODEL OUTPUT (untrusted): strip to a safe charset + truncate.
-    return re.sub(r"[^A-Za-z0-9 ._,%+-]", "", s)[:120].strip()
-
-
-hypotheses: list = []
-preview_gate = None
-trailer_parse_error = True
-try:
-    with open(report_path, encoding="utf-8", errors="replace") as f:
-        text = f.read()
-    blocks = re.findall(r"```json\s*(.*?)```", text, flags=re.DOTALL)
-    data = json.loads(blocks[-1])  # the LAST fenced json block is the trailer
-    for h in (data.get("hypotheses") or [])[:40]:
-        title = h.get("title") if isinstance(h, dict) else h
-        if isinstance(title, str) and _clean(title):
-            hypotheses.append(_clean(title))
-    pg = data.get("preview_gate")
-    if isinstance(pg, dict):
-        preview_gate = {
-            "passed": bool(pg.get("passed")),
-            "failed_checks": [_clean(c) for c in (pg.get("failed_checks") or [])
-                              if isinstance(c, str) and _clean(c)][:40],
-        }
-    trailer_parse_error = False
-except Exception:
-    hypotheses, preview_gate, trailer_parse_error = [], None, True
-
-row = {
-    "stamp": stamp,
-    "branch": branch,
-    "thesis": thesis,
-    "exit_code": int(exit_code),
-    "timed_out": timed_out == "1",
-    "wall_s": int(wall_s),
-    "n_strategy_files": int(n_files),
-    "hypotheses": hypotheses,
-    "preview_gate": preview_gate,
-    "trailer_parse_error": trailer_parse_error,
-    "rate_limited": rate_limited == "1",
-    "report": f"{branch}:run-report.md",
-}
-with open(digest_path, "a", encoding="utf-8") as f:
-    f.write(json.dumps(row, ensure_ascii=False) + "\n")
-PY
-if [[ "${digest_ok}" -ne 1 ]]; then
-  echo "WARNING: digest append to ${AUTH_DIGEST} failed — run outcome unaffected." >&2
-fi
+DIGEST_REPORT_PATH="${WORKTREE}/run-report.md"
+append_digest completed
 
 echo
 echo "Done. Review the run:"
