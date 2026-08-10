@@ -1,0 +1,16 @@
+# Research-loop THESIS rotation list (factory diversity minimum, slice 1).
+#
+# One self-contained thesis per line, usable verbatim as the launcher's THESIS. When THESIS is not
+# explicitly set (env or --thesis), .codex/scripts/run-research-loop.sh picks a line
+# DETERMINISTICALLY by run slot: index = (days_since_epoch * 12 + hour_of_day / 2) % line_count —
+# one step per 2h firing, cycling the whole list. Lines starting with # (and blank lines) are
+# ignored. Keep every thesis PIT-safe on price+volume data only — no fundamentals/news lane
+# dependencies (those lanes need their own snapshots).
+a cross-sectional momentum edge on the liquid US equity universe — rank names by trailing 6-12 month adjusted returns skipping the most recent month, favoring persistent relative winners over recent spike movers
+a short-horizon mean-reversion edge — liquid names with the sharpest multi-day adjusted-price selloffs relative to peers tend to rebound over the following days, strongest away from earnings-style volatility spikes
+a low-volatility structural edge — the least volatile liquid names by trailing 60-120 day realized volatility earn better risk-adjusted returns than the high-volatility cohort, a defensive cross-sectional tilt
+a seasonality and calendar-effect edge — turn-of-month, day-of-week, or month-of-year return patterns in liquid US equities that persist out of sample after costs
+a liquidity and turnover edge — liquid-universe names with quietly declining dollar-volume turnover outperform names with turnover spikes over multi-week horizons, a cross-sectional attention/crowding signal
+a price-and-volume quality proxy edge — names with smooth, low-drawdown long-run adjusted price paths (PIT-safe quality proxies from price and volume only, no fundamentals) outperform choppy high-drawdown names of similar momentum
+a regime-filtered trend-following edge — time-series momentum on liquid names that is only active when a market-level volatility or breadth regime filter indicates trends tend to persist
+a relative-strength rotation edge — rotate into the strongest liquid names by risk-adjusted trailing return on a multi-day rebalance cadence with explicit turnover discipline
