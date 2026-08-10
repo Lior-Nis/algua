@@ -23,9 +23,10 @@
 #
 #   --dry-run   print the rendered units to stdout; write nothing, no daemon-reload.
 #
-# Safe to re-run: rendering is deterministic; all units are rendered into a staging dir first,
-# then moved into place together and daemon-reloaded ONCE — a mid-run failure can never leave a
-# half-updated unit set with no reload.
+# Safe to re-run: rendering is deterministic; all units render into a staging dir first (render
+# failures abort before any install), then move into place (per-unit atomic renames, NOT
+# cross-unit transactional) and daemon-reload ONCE. Recovery from any mid-run failure is simply
+# re-running this idempotent installer.
 #
 set -euo pipefail
 
