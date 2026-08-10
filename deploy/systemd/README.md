@@ -66,7 +66,9 @@ it into a unit), dropping `EnvironmentFile=/etc/algua/algua.env` when that file 
 unreadable (keeping the credential-scrubbing `UnsetEnvironment=` lines), and rewriting
 `WantedBy=multi-user.target` → `default.target` (timers keep `timers.target`). It preflights
 `systemctl --user` reachability before writing anything, stages ALL rendered units and moves them
-into place together, then runs one `systemctl --user daemon-reload` and **prints** — never
+into place together (render failures abort before any install; the moves themselves are per-unit
+atomic, not transactional across units — recovery from a mid-move failure is re-running the
+idempotent installer), then runs one `systemctl --user daemon-reload` and **prints** — never
 executes — the per-unit enable commands. Re-running is safe: the all-then-move install means the
 live unit set is never left half-updated, and the installed units can never drift from the repo
 templates for longer than one re-run. Use `loginctl enable-linger <user>` so user timers fire without an active login, and

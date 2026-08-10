@@ -351,6 +351,20 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   exit 0
 fi
 
+# Record ANY setup failure from here on in the digest (outcome "setup_failed"; the original
+# non-zero exit code is preserved — an EXIT trap never changes it). Installed BEFORE the lock
+# acquisition so even a failing mkdir/exec on the lock file produces a digest line; the worktree
+# removal inside tolerates the worktree not existing yet. Cleared before codex runs.
+cleanup_setup() {
+  local ec=$?
+  if [[ -n "${WORKTREE:-}" ]]; then
+    git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE}" 2>/dev/null || true
+  fi
+  rc="${ec}"
+  append_digest setup_failed
+}
+trap cleanup_setup EXIT
+
 # Serialize overlapping research cycles (non-blocking: skip, don't queue). Not a funnel-write lock —
 # exploration writes only scratch; the sole authoritative writer, `paper merge-back`, has its own lock.
 LOCK="${REPO_ROOT}/data/research-loop.lock"
@@ -358,6 +372,7 @@ mkdir -p "$(dirname "${LOCK}")"
 exec 9>"${LOCK}"
 if ! flock -n 9; then
   echo "another research cycle holds ${LOCK}; skipping this firing." >&2
+  trap - EXIT  # a skip is not a setup failure
   append_digest skipped_lock
   exit 0
 fi
@@ -373,17 +388,6 @@ while IFS= read -r stale; do
   echo "pruning stale research worktree (>${RETENTION_DAYS}d): ${stale}"
   git -C "${REPO_ROOT}" worktree remove --force "${stale}" 2>/dev/null || rm -rf "${stale}"
 done < <(find "${REPO_ROOT}/.." -maxdepth 1 -type d -name 'algua-research-*' -mtime "+${RETENTION_DAYS}" 2>/dev/null)
-
-# Clean up the worktree if we fail during SETUP (before codex runs), and record the firing in the
-# digest (outcome "setup_failed"; the original non-zero exit code is preserved — an EXIT trap never
-# changes it). Cleared before codex so a real run's worktree is kept for review.
-cleanup_setup() {
-  local ec=$?
-  git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE}" 2>/dev/null || true
-  rc="${ec}"
-  append_digest setup_failed
-}
-trap cleanup_setup EXIT
 
 echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}" >/dev/null

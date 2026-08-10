@@ -105,9 +105,12 @@ systemctl --user show-environment >/dev/null \
   || { echo "error: 'systemctl --user' is not reachable (no user manager / DBus session?);" >&2
        echo "       aborting before touching any files." >&2; exit 1; }
 
-# Stage ALL rendered units first, then move them ALL into place, THEN daemon-reload once — a
-# mid-run failure aborts before any installed unit is replaced, so the live set is never left
-# half-updated without a reload. Staging dir lives inside UNIT_DIR so each mv is a same-fs rename.
+# Stage ALL rendered units first, then move them ALL into place, THEN daemon-reload once.
+# Render failures abort before any installed unit is replaced. The move loop itself is per-unit
+# atomic (same-fs rename), NOT transactional across units: a mid-loop mv failure can leave a
+# partially updated, un-reloaded set — the recovery is simply re-running this idempotent
+# installer, which re-renders and re-moves everything. Staging inside UNIT_DIR keeps renames
+# same-fs.
 mkdir -p "${UNIT_DIR}"
 STAGE_DIR="$(mktemp -d "${UNIT_DIR}/.stage.XXXXXX")"
 trap 'rm -rf "${STAGE_DIR}"' EXIT
