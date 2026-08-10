@@ -1,21 +1,29 @@
 [Unit]
-Description=Algua autonomous research cycle — daily
+Description=Algua autonomous research cycle — factory cadence, every 2h
 
 [Timer]
-# DAILY, 06:00 UTC — clear of the paper window (21:30 UTC) and market hours. Research and paper do NOT
-# share a lock and do not need to: research exploration writes only its per-run scratch funnel (never
-# the authoritative DB), so it cannot contend with the paper operator; the sole authoritative funnel
+# FACTORY CADENCE: every 2 hours (12 runs/day) — the strategy-factory throughput slice (see
+# docs/superpowers/specs/2026-08-10-strategy-factory-design.md). Research and paper do NOT share a
+# lock and do not need to: research exploration writes only its per-run scratch funnel (never the
+# authoritative DB), so it cannot contend with the paper operator; the sole authoritative funnel
 # writer, `paper merge-back`, has its own merge_back.lock + operator policy. Research is NOT
-# session-gated — it runs on historical snapshots any day — so the time is non-critical.
+# session-gated — it runs on historical snapshots any hour — so the exact firing times are
+# non-critical.
 #
-# WHY DAILY IS SAFE FOR THE FUNNEL. Because exploration runs on a THROWAWAY scratch copy, a cycle's
+# OVERLAP: a firing that lands while a previous cycle is still running SKIPS cleanly via the
+# launcher's NON-BLOCKING flock (data/research-loop.lock) — it never queues. Normally it never even
+# gets there: the driver caps the codex run at TIMEOUT=45m (+ SYNC_TIMEOUT=5m pre-warm) and the
+# service's TimeoutStartSec=4200 (70m) backstops the wrapper, leaving ~50m of headroom inside each
+# 2h slot.
+#
+# WHY 12/DAY IS SAFE FOR THE FUNNEL. Exploration runs on a THROWAWAY scratch copy, so a cycle's
 # `research promote` is a PREVIEW that records NO breadth and burns NO holdout on the authoritative
-# funnel — so it never consumes the FDR budget (<=16 promotion-eligible binding tests / 365 days).
-# That budget is spent only by a human-run `paper merge-back`. Daily exploration is therefore free of
-# funnel cost; its only real costs are compute/API per cycle (tune N_HYPOTHESES/TIMEOUT in the env
-# file) and disk — each cycle leaves a worktree, which the driver AUTO-PRUNES after
-# RESEARCH_WORKTREE_RETENTION_DAYS (default 7; the authored code persists on its branch regardless).
-OnCalendar=*-*-* 06:00:00 UTC
+# funnel — that budget is spent only by `paper merge-back`. The real per-cycle costs are compute/API
+# (tune N_HYPOTHESES/TIMEOUT in the env file; Codex rate-limit hits are recorded per run in the
+# data/research-runs.jsonl digest) and disk — each cycle leaves a worktree, which the driver
+# AUTO-PRUNES after RESEARCH_WORKTREE_RETENTION_DAYS (default 7; the authored code persists on its
+# branch regardless).
+OnCalendar=*-*-* 00/2:00:00 UTC
 # Cover a fire missed while the box was off; research has no session gate, so it just runs once late.
 Persistent=true
 

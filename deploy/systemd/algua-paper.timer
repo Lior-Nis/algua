@@ -5,6 +5,8 @@ Description=Algua paper-operator daily timer (~30m after the US close)
 # 21:30 UTC is ~16:30 ET, roughly 30 minutes after the 16:00 ET XNYS close. The exact time is
 # NON-CRITICAL: the XNYS calendar gate inside `algua operator run` no-ops weekend/holiday firings,
 # and the per-session marker makes a firing idempotent — so an early/late/DST-shifted fire is safe.
+# DAILY on purpose, NOT Mon..Fri: the calendar gate — not the timer spec — owns session logic; a
+# weekdays-only spec would double-encode the exchange calendar and silently drift on holidays.
 OnCalendar=*-*-* 21:30:00 UTC
 # Catch up a fire missed while the box was off (the calendar gate still decides if it acts).
 Persistent=true

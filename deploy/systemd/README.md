@@ -7,10 +7,13 @@ weekend/holiday firing, a re-fire of a session already completed, or an overlap 
 sibling all no-op cleanly.
 
 - `algua-paper.{service,timer}` — the daily paper trading cycle (`--job paper`), ~30m after the US
-  close (21:30 UTC).
-- `algua-research.{service,timer}` — the daily autonomous **research producer** cycle (06:00
-  UTC): a Codex agent ideates → authors → backtests/walk-forwards/sweeps → gates (`research promote`)
-  up to `candidate`, against the persistent authoritative funnel. See "Autonomous research loop" below.
+  close (21:30 UTC). **Daily on purpose, NOT weekdays-only**: the operator wrapper's XNYS calendar
+  gate no-ops non-session firings, so the timer never re-encodes the exchange calendar.
+- `algua-research.{service,timer}` — the autonomous **research producer** cycle at **factory
+  cadence: every 2 hours** (12/day; see
+  `docs/superpowers/specs/2026-08-10-strategy-factory-design.md`): a Codex agent ideates → authors
+  → backtests/walk-forwards/sweeps → gates (preview `research promote`) up to `candidate` in an
+  explore-isolated worktree. See "Autonomous research loop" below.
 
 The overnight **research merge-back** (consumer) timer is still intentionally **not shipped** — see
 "Deferred merge-back timer" below.
@@ -44,6 +47,38 @@ Assumes the app is deployed at `/opt/algua` with its virtualenv at `/opt/algua/.
    ```
 
 Inspect with `systemctl list-timers 'algua-*'` and `journalctl -u algua-paper.service`.
+
+## Install as user units (single-box, no /opt deploy)
+
+When the repo lives in a home directory (no `/opt/algua`, no root), install the same units as
+**systemd user units** with the idempotent installer:
+
+```sh
+deploy/systemd/install-user-units.sh            # render + install + daemon-reload
+deploy/systemd/install-user-units.sh --dry-run  # print the rendered units, write nothing
+```
+
+For each of `algua-research.{service,timer}`, `algua-paper.{service,timer}`, `algua-web.service`
+it renders the `/opt/algua` template to `~/.config/systemd/user/<name>`, replacing `/opt/algua`
+with the actual repo root (resolved from the script's own location), dropping
+`EnvironmentFile=/etc/algua/algua.env` when that file doesn't exist (keeping the
+credential-scrubbing `UnsetEnvironment=` lines), and rewriting `WantedBy=multi-user.target` →
+`default.target` (timers keep `timers.target`). It then runs `systemctl --user daemon-reload` and
+**prints** — never executes — the per-unit enable commands. Re-running is safe: installs are
+atomic overwrites, so the installed units can never drift from the repo templates for longer than
+one re-run. Use `loginctl enable-linger <user>` so user timers fire without an active login, and
+inspect with `systemctl --user list-timers 'algua-*'` / `journalctl --user -u algua-research.service`.
+
+**Factory cadence (slice 1).** Research fires **every 2h** (`OnCalendar=*-*-* 00/2:00:00 UTC`,
+overlaps skip via the launcher's non-blocking flock); paper ticks **daily at 21:30 UTC**
+(post-close; the calendar gate no-ops non-sessions — do NOT make it weekdays-only). Enable BOTH so
+paper evidence starts accruing the moment the first strategy reaches the book.
+
+**Mutual exclusion around the paper tick (#316).** `paper merge-back` and `paper trade-tick`/
+`run-all` are mutually exclusive **by operator discipline**, not by a shared kernel lock. Until
+slice 3 automates that discipline, do not run a manual `paper merge-back` around the 21:30 UTC
+paper tick window — run merge-backs well clear of it (the research timer's schedule is already
+offset from the paper window).
 
 ## Why the wrapper, not just the timer
 
@@ -133,20 +168,45 @@ is the trusted, authoritative promote (real breadth tax, real single-use holdout
 gated code merge + paper intake. The agent **cannot go live** (human-signed cryptographic wall) and
 cannot merge the CODEOWNERS-protected integrity files.
 
-**Cadence and the FDR budget.** The timer runs **daily** (06:00 UTC). Daily is safe for the funnel
-*because* exploration is scratch: a cycle's `research promote` is a preview that records NO breadth and
-burns NO holdout on the authoritative funnel, so it never consumes the FDR budget (**≤16
-promotion-eligible binding tests / rolling 365 days**). That budget is spent only by a human-run `paper
-merge-back` — which records a metered breadth tax that raises the promotion Sharpe bar for ALL future
-strategies. So run the producer as often as you like; pace the *merge-backs*. The holdout is single-use
-*per strategy*, so the loop keeps authoring new strategies on the existing snapshot — the breadth/FDR
-tax at merge-back, not the holdout, is what makes it progressively harder. The real per-cycle costs are
-compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in the env file) and disk (auto-pruned; see below).
+**Cadence and the FDR budget.** The timer runs at **factory cadence: every 2h, 12 runs/day**
+(`OnCalendar=*-*-* 00/2:00:00 UTC`). That rate is safe for the funnel *because* exploration is
+scratch: a cycle's `research promote` is a preview that records NO breadth and burns NO holdout on
+the authoritative funnel, so it never consumes the FDR budget (**≤16 promotion-eligible binding
+tests / rolling 365 days**). That budget is spent only by a human-run `paper merge-back` — which
+records a metered breadth tax that raises the promotion Sharpe bar for ALL future strategies. So run
+the producer as often as you like; pace the *merge-backs*. The holdout is single-use *per strategy*,
+so the loop keeps authoring new strategies on the existing snapshot — the breadth/FDR tax at
+merge-back, not the holdout, is what makes it progressively harder. The real per-cycle costs are
+compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in the env file; Codex plan rate-limit hits are
+expected at 12/day and are recorded per run in the digest — see below) and disk (auto-pruned; see
+below).
+
+**Run digest (feedback contract, slice 1).** After every firing — success, codex failure, or
+timeout — the launcher appends **one JSON line** to the durable, authority-side digest at
+`data/research-runs.jsonl` (beside the authoritative DB; `ALGUA_RESEARCH_DIGEST_PATH` overrides).
+Fields: `stamp`, `branch`, `thesis`, `exit_code`, `timed_out` (bool, `timeout` exit 124), `wall_s`,
+`n_strategy_files` (strategy files in the driver's commit), `hypotheses` (sanitized titles from the
+run-report's machine-readable trailer — charset-filtered, ≤120 chars, ≤40), `preview_gate`
+(`{"passed": bool, "failed_checks": [...]}` or `null`), `trailer_parse_error` (bool),
+`rate_limited` (bool, grepped from the in-worktree codex log), `report`
+(`research-run/<stamp>:run-report.md`). This is the improve-algua backlog: `trailer_parse_error`/
+`rate_limited`/`timed_out` clusters are machinery bugs to fix, `preview_gate.failed_checks`
+clusters show where hypotheses die. The digest also feeds the next runs' anti-dup prompt context
+(recent hypothesis titles, injected as sanitized untrusted data). A digest write failure warns but
+never fails the run; the digest never stores raw report prose.
+
+**Thesis rotation (slice 1).** When `THESIS` is not explicitly set, the launcher rotates
+deterministically through `.codex/research-themes.txt` (one thesis per line;
+`index = (days_since_epoch * 12 + hour_of_day / 2) % line_count`, i.e. one theme per 2h slot).
+Edit that file to steer the factory's alpha-category mix; an explicit `THESIS`/`--thesis`
+overrides rotation entirely.
 
 **Contention.** The driver holds a non-blocking `data/research-loop.lock` for the whole cycle and skips
-(no-op) rather than queue if another research cycle holds it. It does **not** contend with the paper
-operator (research writes only scratch; the sole authoritative writer, `paper merge-back`, has its own
-`merge_back.lock` + operator policy). The daily 06:00-UTC slot is also clear of the paper window.
+(no-op) rather than queue if another research cycle holds it — so the 2h cadence can never stack
+overlapping cycles (with `TIMEOUT=45m` + `SYNC_TIMEOUT=5m` under `TimeoutStartSec=4200`, each slot has
+~50m of headroom anyway). It does **not** contend with the paper operator (research writes only
+scratch; the sole authoritative writer, `paper merge-back`, has its own `merge_back.lock` + operator
+policy), and no research firing coincides with the 21:30-UTC paper slot.
 
 **Failure propagation.** The driver captures the `codex exec` exit code and propagates a non-zero
 (timeout=124, or an auth/runtime error) so the systemd unit **fails** rather than silently reporting a
