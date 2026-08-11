@@ -1,0 +1,14 @@
+[Unit]
+Description=Algua merge-back queue drainer timer — every 30 minutes
+
+[Timer]
+# Every 30 minutes: draining more than one item per cycle risks self-overlap within the window (a
+# single quality gate already runs ~9 minutes — see algua-mergeback-drain.service), so the drainer
+# processes exactly one eligible queue item per firing and lets the NEXT firing pick up the rest.
+OnCalendar=*-*-* *:00/30:00 UTC
+# Catch up a fire missed while the box was off; the queue is durable on disk, so a late fire just
+# drains whatever is still eligible.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

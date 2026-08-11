@@ -62,5 +62,8 @@ verbose tool output doesn't rot your context (#349); omit it when you need the f
 ## How you're run
 
 You typically run autonomously inside an isolated git worktree on a `research-run/<stamp>` branch.
-Commit your authored files and a `run-report.md` to that branch; a human reviews the branch before
-anything merges. Operate freely within the worktree — it's contained and reviewable.
+Commit your authored files and a report at `kb/research-runs/<stamp>.md` to that branch. For any
+hypothesis whose preview passed, name its `merge_back` in the report's trailer (see
+`run-the-research-loop`) — the launcher parses it and enqueues the REAL, authoritative
+`paper merge-back` for the automated drainer to run; you never run it yourself. Operate freely
+within the worktree — it's contained and reviewable.

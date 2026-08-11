@@ -94,6 +94,26 @@ def test_every_skill_has_name_and_description_frontmatter():
         assert fm.get("description"), f"{name}: frontmatter description is required"
 
 
+def test_mergeback_drain_systemd_units_present_and_shaped():
+    # Factory slice 3: the auto merge-back drainer's own oneshot service + 30-minute timer pair,
+    # following the exact conventions of the existing algua-research/algua-paper pairs.
+    svc = (REPO / "deploy" / "systemd" / "algua-mergeback-drain.service").read_text()
+    assert "Type=oneshot" in svc
+    assert "drain-mergeback-queue.sh" in svc
+    assert "TimeoutStartSec=" in svc
+
+    tmr = (REPO / "deploy" / "systemd" / "algua-mergeback-drain.timer").read_text()
+    assert "OnCalendar=" in tmr
+    assert "Persistent=true" in tmr
+    assert "WantedBy=timers.target" in tmr
+
+
+def test_install_user_units_includes_mergeback_drain_pair():
+    installer = (REPO / "deploy" / "systemd" / "install-user-units.sh").read_text()
+    assert "algua-mergeback-drain.service" in installer
+    assert "algua-mergeback-drain.timer" in installer
+
+
 def test_skills_reachable_via_claude_skills_symlinks():
     # Canonical skills live in .codex/skills/ (Codex). Claude Code reads .claude/skills/,
     # so the same skills serve the co-dev harness too via symlink.
