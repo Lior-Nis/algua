@@ -208,8 +208,9 @@ def test_genuine_alpha_passes_gate():
     assert dec.passed is True
 
 
-def test_levered_beta_blocks_gate():
-    """A high-raw-Sharpe levered-beta book (passes holdout_sharpe=7.0) is BLOCKED by the check."""
+def test_levered_beta_flagged_advisory_not_blocking():
+    """A high-raw-Sharpe levered-beta book (passes holdout_sharpe=7.0) FAILS the check — recorded
+    as a failed ADVISORY flag under the factory soft gate (the forward gate is the blocker now)."""
     n = 252
     d = _dates(n)
     rng = np.random.default_rng(11)
@@ -221,11 +222,13 @@ def test_levered_beta_blocks_gate():
     dec = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(market, d))
     ir_check = next(c for c in dec.checks if c["name"] == "idiosyncratic_alpha")
     assert ir_check["passed"] is False
-    assert dec.passed is False
+    assert ir_check["advisory"] is True
+    assert dec.passed is True
 
 
 def test_degenerate_market_fails_closed_when_binding():
-    """Armed (>=63 overlap) but constant market -> check present and FAILED (fail closed)."""
+    """Armed (>=63 overlap) but constant market -> check present and FAILED (fail closed in the
+    RECORD; advisory, so the integrity-floor verdict is unchanged)."""
     n = 100
     d = _dates(n)
     strat = list(np.random.default_rng(12).normal(0.001, 0.01, n))
@@ -234,8 +237,9 @@ def test_degenerate_market_fails_closed_when_binding():
     dec = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=(market, d))
     ir_check = next(c for c in dec.checks if c["name"] == "idiosyncratic_alpha")
     assert ir_check["passed"] is False
+    assert ir_check["advisory"] is True
     assert dec.ir_binding is True
-    assert dec.passed is False
+    assert dec.passed is True
 
 
 def test_no_market_returns_omits_check():

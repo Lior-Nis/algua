@@ -323,5 +323,8 @@ def test_evaluate_gate_degenerate_own_var_negative_with_positive_floor_fails_clo
     assert dsr_checks[0]["passed"] is False, (
         f"dsr_evidence check must be passed=False for degenerate own var, got {dsr_checks[0]!r}"
     )
-    # The overall gate decision must be False
-    assert decision.passed is False
+    # Factory soft gate: the failed dsr_evidence is ADVISORY (fail-closed in the RECORD, not a
+    # veto) — the floor must not rescue the degenerate variance INTO a passing dsr check, but
+    # the gate itself passes on the integrity floor.
+    assert dsr_checks[0]["advisory"] is True
+    assert decision.passed is True

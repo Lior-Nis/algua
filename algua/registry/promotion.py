@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import functools
 import json
-import math
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -37,7 +36,6 @@ from algua.research.gates import (
     DSR_BOOTSTRAP_LOWER_QUANTILE,
     DSR_BOOTSTRAP_RESAMPLES,
     FDR_ALPHA,
-    FDR_NEAR_TERM_BINDING_BUDGET,
     FDR_W0,
     FUNNEL_WINDOW_DAYS,
     MIN_CORR_OVERLAP_BARS,
@@ -499,7 +497,6 @@ def run_gate(
     reason_suffix: str,
     holdout_evaluation_id: int | None = None,
     attempt_token: str | None = None,
-    fdr_throttle_override: bool = False,
 ) -> PromotionOutcome:
     """Post-walk phase: resolve PIT, evaluate, record the gate_evaluations row (pass AND fail), and
     on pass transition BACKTESTED->CANDIDATE (which consumes the just-minted agent token).
@@ -539,8 +536,8 @@ def run_gate(
     n_funnel = effective_funnel_breadth(
         breadth.own, breadth.windowed_total, family_lifetime_effective,
     )
-    # DSR evidence (#211): binding iff breadth is MEASURED. Declared breadth (human, no sweep)
-    # omits DSR — and consequently FDR too (p_value requires a finite dsr_confidence).
+    # DSR evidence (#211): armed/evaluated iff breadth is MEASURED (the advisory dsr_evidence
+    # check is appended only then). Declared breadth (human, no sweep) omits DSR entirely.
     dsr_binding = breadth.provenance == "measured"
     dsr_trial_var_ann = repo.pooled_trial_sharpe_var(name) if dsr_binding else None
     funnel_floor = repo.funnel_trial_sharpe_var(FUNNEL_WINDOW_DAYS) if dsr_binding else None
@@ -574,28 +571,15 @@ def run_gate(
         bootstrap_seed=boot_seed, bootstrap_b=boot_b, bootstrap_block_len=boot_block,
         market_returns=wf.market_returns,
     )
-    # LORD++ FDR binding (#220): dsr_confidence must be finite (not None and not ±inf).
-    # p = 1 − dsr_confidence is P(SR_true ≤ SR*) under the DSR null — an explicit conversion
-    # here guards the ≥/≤ inversion hazard (see GATE-1 finding H3 in the design doc).
-    dsr_conf = decision.dsr_confidence
-    if dsr_conf is not None and not (0.0 <= dsr_conf <= 1.0):
-        raise ValueError(
-            f"dsr_confidence={dsr_conf!r} is outside [0, 1]; this is a DSR computation bug"
-        )
-    fdr_binding_this_row = (
-        dsr_binding and dsr_conf is not None and math.isfinite(dsr_conf)
-    )
-    p_value = (1.0 - dsr_conf) if (fdr_binding_this_row and dsr_conf is not None) else None
-
-    # Pre-populate non-binding FDR skip reason before decision_json is serialized so the DB
-    # audit record matches the in-memory GateDecision (binding fields are unknown until the
-    # store call and are patched there).
-    if not fdr_binding_this_row:
-        decision.fdr_binding = False
-        if not dsr_binding:
-            decision.fdr_skip_reason = "no_measured_dispersion"
-        else:
-            decision.fdr_skip_reason = "no_dsr_confidence"
+    # Factory soft gate (2026-08-10 spec): the statistical stack is ADVISORY, so the LORD++
+    # BINDING stream is never consumed on this path — p_value is ALWAYS None, the store writes an
+    # fdr_binding=NULL row (invisible to the stream reader and the windowed throttle count), and
+    # final_passed collapses to the provisional integrity-floor verdict. dsr_confidence is still
+    # computed and recorded in the decision above (advisory telemetry); the whole LORD++/throttle
+    # ledger machinery is PRESERVED in the store for future re-tightening.
+    p_value = None
+    decision.fdr_binding = False
+    decision.fdr_skip_reason = "stats_advisory"
 
     identity = compute_artifact_hashes(name)
     rec = repo.get(name)
@@ -702,51 +686,11 @@ def run_gate(
         fdr_alpha=FDR_ALPHA, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
         pending_novel_family=breadth.pending_novel_family,  # #524: minted only on pass, in-tx
-        fdr_throttle_override=fdr_throttle_override,  # #529: human-only throttle bypass
     )
 
-    # Fold binding LORD++ FDR fields into the GateDecision so they surface in to_dict() → CLI JSON.
-    # #529: (c) is a HARD gate again — fdr_rejected (p ≤ α_t) and the windowed throttle are the two
-    # `final_passed` terms surfaced as their own checks (fdr_evidence / fdr_throttle) so
-    # decision.passed == all(checks passed). The cohort/exposure/active-cohort/throttle-state fields
-    # are audit-only. Non-binding fields (fdr_binding=False, fdr_skip_reason) were set above, before
-    # decision_json was serialized, so the DB record and the return value are consistent.
-    if fdr_binding_this_row:
-        decision.fdr_binding = True
-        decision.fdr_p_value = fdr_outcome.fdr_p_value
-        decision.fdr_alpha_level = fdr_outcome.fdr_alpha_level
-        decision.fdr_test_index = fdr_outcome.fdr_test_index
-        decision.fdr_rejected = fdr_outcome.fdr_rejected
-        # #324 cohort restart + cumulative-exposure audit (audit-only; never changes pass/fail).
-        decision.fdr_cohort = fdr_outcome.fdr_cohort
-        decision.fdr_cohorts_completed = fdr_outcome.fdr_cohorts_completed
-        decision.fdr_binding_tests = fdr_outcome.fdr_binding_tests
-        decision.fdr_discoveries = fdr_outcome.fdr_discoveries
-        decision.fdr_expected_false_discoveries = fdr_outcome.fdr_expected_false_discoveries
-        # #529 §3.5 throttle state + §4 active-cohort exposure (audit-only).
-        decision.fdr_throttle_window_binding = fdr_outcome.fdr_throttle_window_binding
-        decision.fdr_throttle_tripped = fdr_outcome.fdr_throttle_tripped
-        decision.fdr_throttle_override = fdr_outcome.fdr_throttle_override
-        decision.fdr_active_cohort_position = fdr_outcome.fdr_active_cohort_position
-        decision.fdr_active_cohort_applied_alpha = fdr_outcome.fdr_active_cohort_applied_alpha
-        decision.fdr_expected_false_discoveries_incl_active = (
-            fdr_outcome.fdr_expected_false_discoveries_incl_active)
-        # Two hard terms as their own checks (mirrors store.py's raw_decision) so decision.passed ==
-        # all(checks passed) == provisional AND fdr_rejected AND promotion_eligible.
-        decision.checks.append({
-            "name": "fdr_evidence",
-            "value": fdr_outcome.fdr_p_value,
-            "threshold": fdr_outcome.fdr_alpha_level,
-            "op": "<=",
-            "passed": bool(fdr_outcome.fdr_rejected),
-        })
-        decision.checks.append({
-            "name": "fdr_throttle",
-            "value": fdr_outcome.fdr_throttle_window_binding,
-            "threshold": FDR_NEAR_TERM_BINDING_BUDGET,
-            "op": "<",
-            "passed": not bool(fdr_outcome.fdr_throttle_tripped),
-        })
+    # With p_value=None the store skipped the LORD++/throttle logic entirely, so final_passed ==
+    # provisional_passed (the integrity floor). Kept as an assignment (not an assert) so the
+    # decision always mirrors what the store committed.
     decision.passed = fdr_outcome.final_passed
 
     return PromotionOutcome(decision=decision, promoted=fdr_outcome.final_passed)

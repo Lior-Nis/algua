@@ -141,19 +141,46 @@ def test_research_promote_rejects_assume_terminal_last_close_for_agent():
     assert "human" in out or "human-only" in out or "not allowed" in out
 
 
-def test_research_promote_rejects_fdr_throttle_override_for_agent():
-    """#529: --fdr-throttle-override is human-only — the agent path must fail closed early with the
-    human-only guard message (mirrors --assume-terminal-last-close / --allow-non-pit)."""
+def test_research_promote_fdr_throttle_override_flag_removed():
+    """Factory soft gate: --fdr-throttle-override was REMOVED with the FDR freeze — the CLI must
+    reject it as an UNKNOWN option (usage error), for every actor, not route it anywhere."""
+    for actor_args in ([], ["--actor", "human"]):
+        res = runner.invoke(app, [
+            "research", "promote", STRATEGY,
+            "--universe", "U",
+            "--start", "2020-01-01", "--end", "2020-12-31",
+            "--fdr-throttle-override",
+            *actor_args,
+        ])
+        assert res.exit_code == 2  # usage error: unknown option
+        assert "no such option" in res.output.lower() or "unexpected" in res.output.lower()
+
+
+def test_promote_signed_run_context_no_longer_contains_fdr_throttle_override(monkeypatch):
+    """The #329 canonical run_context (the exact input set a human signature binds) no longer
+    carries the removed fdr_throttle_override key — old signatures are nonce-bound and die
+    naturally; no compat key is kept."""
+    import algua.cli.research_cmd as rc
+
+    captured: dict = {}
+    orig = rc.canonical_run_context
+
+    def _capture(d):
+        captured.update(d)
+        return orig(d)
+
+    monkeypatch.setattr(rc, "canonical_run_context", _capture)
+    add = runner.invoke(app, ["registry", "add", STRATEGY])
+    assert add.exit_code == 0, add.output
+    # Fails later (stage is idea, not backtested) — but AFTER the run_context was built.
     res = runner.invoke(app, [
-        "research", "promote", STRATEGY,
-        "--universe", "U",
+        "research", "promote", STRATEGY, "--demo",
         "--start", "2020-01-01", "--end", "2020-12-31",
-        "--fdr-throttle-override",
-        # default --actor is "agent"
     ])
     assert res.exit_code != 0
-    out = res.output.lower()
-    assert "fdr-throttle-override is human-only" in out or "human-only" in out
+    assert captured, "canonical_run_context was not reached"
+    assert "fdr_throttle_override" not in captured
+    assert "allow_non_pit" in captured  # the rest of the signed input set is intact
 
 
 def test_research_promote_human_actor_can_pass_assume_terminal_last_close(tmp_path, monkeypatch):

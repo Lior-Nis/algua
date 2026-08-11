@@ -122,12 +122,32 @@ def test_sanitize_record_scrubs_note_surface():
 
 
 def test_build_gate_fail_record_shape():
-    decision = {"checks": [{"name": "holdout_sharpe", "passed": False},
+    decision = {"checks": [{"name": "holdout_sharpe_floor", "passed": False},
                            {"name": "dsr", "passed": True}], "n_combos": 3}
     rec = build_gate_fail_record(
         "s", decision, actor="agent", period_start="2020-01-01", period_end="2021-01-01",
         holdout={"sharpe": 0.1}, stability=None)
     assert rec["kind"] == "gate_fail" and rec["verdict"] == "FAIL"
     assert rec["source"] == "auto:research_promote"
-    assert "holdout_sharpe" in rec["reason"]  # names the failed check
+    assert "holdout_sharpe_floor" in rec["reason"]  # names the failed BINDING check
     assert rec["params"]["checks"] == decision["checks"]
+    assert rec["params"]["advisory_flags"] == []
+
+
+def test_build_gate_fail_record_reason_binding_only_advisory_flagged():
+    """Factory soft gate: the refutation reason names BINDING failed checks only (an advisory
+    stat cannot have failed the gate); failed advisory checks are recorded separately in the
+    schema-additive params["advisory_flags"] list."""
+    decision = {"checks": [
+        {"name": "min_holdout_observations", "passed": False},               # binding fail
+        {"name": "holdout_sharpe", "passed": False, "advisory": True},       # advisory fail
+        {"name": "dsr_evidence", "passed": False, "advisory": True},         # advisory fail
+        {"name": "pit_required", "passed": True},
+    ], "n_combos": 3}
+    rec = build_gate_fail_record(
+        "s", decision, actor="agent", period_start="2020-01-01", period_end="2021-01-01",
+        holdout={"sharpe": 0.1}, stability=None)
+    assert "min_holdout_observations" in rec["reason"]
+    assert "holdout_sharpe" not in rec["reason"]
+    assert "dsr_evidence" not in rec["reason"]
+    assert rec["params"]["advisory_flags"] == ["holdout_sharpe", "dsr_evidence"]

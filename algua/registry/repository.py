@@ -33,7 +33,6 @@ class FdrGateOutcome(NamedTuple):
     # Windowed promotion-eligibility throttle (#529, §3.5). None on non-binding rows.
     fdr_throttle_window_binding: int | None = None
     fdr_throttle_tripped: bool | None = None
-    fdr_throttle_override: bool | None = None
     # Active (in-progress) cohort exposure audit (#529, §4). None on non-binding rows.
     fdr_active_cohort_position: int | None = None
     fdr_active_cohort_applied_alpha: float | None = None
@@ -636,16 +635,17 @@ class GateLedger(Protocol):
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
-        fdr_throttle_override: bool = False,
     ) -> FdrGateOutcome:
         """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
         ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
         the stream-state SELECT through the INSERT + stage CAS).
 
         ``gate_row`` carries ``record_gate_evaluation``'s keyword arguments (including the
-        provisional ``passed`` flag). ``p_value`` is ``1 − dsr_confidence`` when the row is
-        FDR-binding (``dsr_binding=True`` AND ``dsr_confidence`` is finite); ``None`` means
-        non-binding and FDR is skipped entirely for this row.
+        provisional ``passed`` flag). ``None`` ``p_value`` means non-binding and FDR is skipped
+        entirely for this row — since the factory soft gate this is the ONLY value the promote
+        path supplies (``fdr_skip_reason="stats_advisory"``): the row commits with
+        ``fdr_binding`` NULL, invisible to the stream reader and the windowed throttle count.
+        The binding branch below is the PRESERVED LORD++ ledger machinery (future re-tightening).
 
         When binding: reads the prior stream state UNDER the write lock — SCOPED to the cohort the
         next test joins (#324) — computes ``α_t = level_fn(prior.t, prior.discovery_indices)`` where

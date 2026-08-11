@@ -59,7 +59,6 @@ GATE_DECISION_ALLOWLIST: frozenset[str] = frozenset({
     "fdr_expected_false_discoveries",
     "fdr_throttle_window_binding",
     "fdr_throttle_tripped",
-    "fdr_throttle_override",
     "fdr_active_cohort_position",
     "fdr_active_cohort_applied_alpha",
     "fdr_expected_false_discoveries_incl_active",
@@ -136,9 +135,11 @@ _MAX_CHECKS = 64
 _MAX_INT_MAGNITUDE = 10**18
 
 # The scalar fields kept from each checks[] entry (drops free-text `detail` and anything else).
-# threshold/value must be finite-numeric-or-null and passed must be bool — a vector cannot be
-# re-encoded as check fields.
-_CHECK_FIELDS = ("name", "op", "threshold", "value", "passed")
+# threshold/value must be finite-numeric-or-null and passed/advisory must be bool — a vector
+# cannot be re-encoded as check fields. `advisory` (factory soft gate) marks a recorded-but-
+# non-vetoing check; the monitor projection must carry it so a failed stat is distinguishable
+# from a failed floor.
+_CHECK_FIELDS = ("name", "op", "threshold", "value", "passed", "advisory")
 
 
 def _bounded_scalar(value: Any) -> bool:
@@ -164,7 +165,7 @@ def _finite_number_or_none(value: Any) -> bool:
 def _check_field_ok(field: str, value: Any) -> bool:
     if field in ("threshold", "value"):
         return _finite_number_or_none(value)
-    if field == "passed":
+    if field in ("passed", "advisory"):
         return isinstance(value, bool)
     return isinstance(value, str) and len(value) <= _MAX_STRING_LEN  # name / op
 

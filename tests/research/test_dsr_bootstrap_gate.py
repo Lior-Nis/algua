@@ -109,12 +109,15 @@ def test_bootstrap_check_appended_only_when_binding(make_wf):
 
 
 def test_bootstrap_none_is_failed_when_binding(make_wf):
+    # A missing lower-confidence still records a FAILED dsr_bootstrap check — but the check is
+    # advisory under the factory soft gate, so `passed` stays on the integrity floor.
     d = evaluate_gate(make_wf(sharpe=7.0), GateCriteria(), n_combos=5, pit_ok=True,
                       dsr_binding=True, dsr_trial_var_ann=0.04 * 252, bootstrap_binding=True,
                       bootstrap_lower_confidence=None)
     chk = next(c for c in d.checks if c["name"] == "dsr_bootstrap")
     assert chk["passed"] is False
-    assert d.passed is False
+    assert chk["advisory"] is True
+    assert d.passed is True
 
 
 def test_bootstrap_tighten_only(make_wf):

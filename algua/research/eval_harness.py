@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 import subprocess
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Literal
@@ -74,12 +74,17 @@ class Scenario:
     symbols: tuple[str, ...] = ("AAA", "BBB")
 
 
-# Scenarios chosen FAR from the 0.5 Sharpe bar so the label is not in dispute; `marginal_edge`
-# deliberately straddles it (consistency-only). drift/vol are per-bar GBM parameters.
+# Scenarios chosen FAR from the gate's discriminating boundary so the label is not in dispute.
+# Under the factory SOFT gate (integrity floor: raw holdout Sharpe > 0) the boundary is Sharpe 0:
+# `negative_edge` is the unambiguous discard class (a losing book must NEVER pass the floor);
+# `no_edge` (drift 0) straddles the floor — its sampled holdout Sharpe sign is a coin flip, and
+# letting a lucky zero-edge book through to the paper book is the DELIBERATE market-first design
+# (the forward gate is the discard point) — so it is consistency-only, like `marginal_edge`.
+# drift/vol are per-bar GBM parameters.
 SCENARIO_BANK: tuple[Scenario, ...] = (
     Scenario("obvious_edge", "promote", drift=0.0030, vol=0.010),
     Scenario("marginal_edge", "ambiguous", drift=0.0009, vol=0.020),
-    Scenario("no_edge", "discard", drift=0.0, vol=0.020),
+    Scenario("no_edge", "ambiguous", drift=0.0, vol=0.020),
     Scenario("negative_edge", "discard", drift=-0.0015, vol=0.015),
 )
 
@@ -104,9 +109,10 @@ class RunTrace:
     seed: int
     actual: str  # "promote" | "discard" | "crashed"
     outcome: str
-    failed_checks: list[str]  # FACTUAL: gate checks that did not pass (no causal claim)
+    failed_checks: list[str]  # FACTUAL: BINDING gate checks that did not pass (no causal claim)
     stats: dict[str, float]  # measured numbers (holdout_sharpe/return/n_obs, window stats)
     reason: str
+    advisory_failed: list[str] = field(default_factory=list)  # failed ADVISORY checks (no veto)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -116,6 +122,7 @@ class RunTrace:
             "actual": self.actual,
             "outcome": self.outcome,
             "failed_checks": list(self.failed_checks),
+            "advisory_failed": list(self.advisory_failed),
             "stats": {k: _clean(v) for k, v in self.stats.items()},
             "reason": self.reason,
         }
@@ -259,7 +266,11 @@ def run_one(
         wf = walk_forward(strat, provider, START, END, seed=seed)
         decision = evaluate_gate(wf, GateCriteria(), n_combos=1, pit_ok=True)
         actual = "promote" if decision.passed else "discard"
-        failed = [c["name"] for c in decision.checks if not c["passed"]]
+        # BINDING failures only — an advisory check can't have caused a discard (soft gate).
+        failed = [c["name"] for c in decision.checks
+                  if not c["passed"] and not c.get("advisory")]
+        advisory_failed = [c["name"] for c in decision.checks
+                           if not c["passed"] and c.get("advisory")]
         hm = wf.holdout_metrics
         stab = wf.stability
         stats = {
@@ -278,6 +289,7 @@ def run_one(
         return RunTrace(
             scenario=scenario.name, kind=scenario.kind, seed=seed, actual=actual,
             outcome=outcome, failed_checks=failed, stats=stats, reason=reason,
+            advisory_failed=advisory_failed,
         )
     except Exception as exc:  # noqa: BLE001 - a crash is a recorded outcome, never a sweep abort
         return RunTrace(

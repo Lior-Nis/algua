@@ -331,23 +331,27 @@ def test_run_gate_declared_breadth_omits_dsr(tmp_path):
     assert d.dsr_skip_reason == "no_measured_dispersion"
 
 
-def test_run_gate_measured_but_missing_stats_fails_closed(tmp_path):
+def test_run_gate_measured_but_missing_stats_records_failed_advisory(tmp_path):
+    # Soft gate: a measured run with NULL trial stats still records a FAILED dsr_evidence check
+    # (the gap is visible), marked advisory — it no longer vetoes the integrity-floor pass.
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}")  # measured row, NULL stats (pre-migration)
     breadth = _breadth(repo, "measured")
     outcome = _run(repo, breadth)
     d = outcome.decision
     assert d.dsr_binding is True
-    assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
-    assert d.passed is False
-    assert outcome.promoted is False
+    dsr = next(c for c in d.checks if c["name"] == "dsr_evidence")
+    assert dsr["passed"] is False and dsr["advisory"] is True
+    assert d.passed is True
+    assert outcome.promoted is True
 
 
-# --- run_gate FDR binding (#220, Phase 2; recalibrated #529) ----------------------------
-# Calibration notes (breadth-deflated holdout-Sharpe bar ≈ 2.294 here; α_1≈0.00764 after #529):
-#   sharpe=7.0 → dsr_confidence≈1.0  → p≈0.0    ≤ α_1≈0.00764 → FDR accepts (discovery) → promoted
-#   sharpe=3.0 → dsr_confidence≈0.997→ p≈0.0032 ≤ α_1≈0.00764 → accepts (OLD α_1≈0.00165 REJECTED)
-#   sharpe=2.3 → dsr_confidence≈0.980→ p≈0.020  > α_1≈0.00764 → FDR rejects → NOT promoted (blocks)
+# --- run_gate FDR freeze (factory soft gate, 2026-08-10 spec) ----------------------------
+# The statistical stack is advisory, so the promote path NEVER writes a LORD++ binding row:
+# every gate_evaluations row lands with fdr_binding NULL + fdr_skip_reason="stats_advisory",
+# the stream reader and the windowed throttle count see nothing, and final_passed collapses to
+# the provisional integrity-floor verdict. The ledger machinery itself is pinned alive by the
+# direct-store tests in tests/test_registry_store.py.
 
 
 def _wf_sharpe(sharpe: float):
@@ -364,143 +368,120 @@ def _run_measured(repo, *, sharpe: float = 7.0):
         data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="")
 
 
-def test_run_gate_fdr_binding_accept_promotes(tmp_path):
-    """Sharpe=7.0 → DSR passes + p≈0 ≤ α_1≈0.00764 → FDR accepts (discovery) → promoted."""
+def test_run_gate_measured_promote_writes_no_binding_row(tmp_path):
+    """A measured promote with full trial stats — the OLD maximal-FDR case — now records
+    fdr_binding NULL + stats_advisory and never consults the stream/throttle."""
+    import json as _json
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
     outcome = _run_measured(repo, sharpe=7.0)
     d = outcome.decision
-    assert d.dsr_binding is True
-    assert d.fdr_binding is True
-    assert d.fdr_rejected is True     # a discovery
-    assert d.fdr_test_index == 1
-    assert d.fdr_p_value is not None and d.fdr_p_value < 1e-6
-    assert d.fdr_alpha_level is not None and d.fdr_alpha_level > 0
+    assert d.dsr_binding is True                       # DSR still armed + recorded
+    assert d.dsr_confidence is not None
+    assert d.fdr_binding is False
+    assert d.fdr_skip_reason == "stats_advisory"
+    assert d.fdr_p_value is None and d.fdr_alpha_level is None and d.fdr_test_index is None
     assert outcome.promoted is True
-    # #529: (c) is a HARD gate surfaced as the fdr_evidence check + the fdr_throttle check.
-    assert any(c["name"] == "fdr_evidence" and c["passed"] is True for c in d.checks)
-    assert any(c["name"] == "fdr_throttle" and c["passed"] is True for c in d.checks)
-    assert d.passed == all(c["passed"] for c in d.checks)
+    # No fdr_evidence / fdr_throttle checks anywhere — returned decision or stored row.
+    assert all(c["name"] not in ("fdr_evidence", "fdr_throttle") for c in d.checks)
+    row = repo._conn.execute(
+        "SELECT fdr_binding, decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["fdr_binding"] is None                  # NULL, not 0 — invisible to the stream
+    stored = _json.loads(row["decision_json"])
+    assert stored["fdr_binding"] is False
+    assert stored["fdr_skip_reason"] == "stats_advisory"
+    assert all(c["name"] not in ("fdr_evidence", "fdr_throttle")
+               for c in stored.get("checks", []))
 
 
-def test_run_gate_fdr_binding_reject_no_promotion(tmp_path):
-    """#529: Sharpe=2.3 clears the breadth-deflated bar (~2.29) and DSR≥0.95, but p≈0.020 > α_1≈
-    0.00764 → LORD++ rejects (a GENUINE reject, not the throttle) → NOT promoted. (c) is HARD."""
+def test_run_gate_stream_and_throttle_see_zero_binding_rows_across_promotes(tmp_path):
+    """N promotes (pass and fail) advance NEITHER the LORD++ stream nor the windowed
+    promotion-throttle count — the ledger stays frozen while stats are advisory."""
+    from algua.research.gates import FDR_THROTTLE_WINDOW_DAYS
+
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    out1 = _run_measured(repo, sharpe=7.0)             # floor pass → promoted
+    assert out1.promoted is True
+    # Back-step to backtested and promote again (a legal candidate→backtested back-step).
+    repo.apply_transition(repo.get(_GATE_NAME), Stage.BACKTESTED, Actor.HUMAN, "re-run")
+    out2 = _run_measured(repo, sharpe=7.0)
+    assert out2.promoted is True
+    # A floor FAILURE row too (short holdout): commits a failing row, still non-binding.
+    repo.apply_transition(repo.get(_GATE_NAME), Stage.BACKTESTED, Actor.HUMAN, "re-run")
+    out3 = _run_measured(repo, sharpe=-1.0)            # holdout_sharpe_floor fails
+    assert out3.promoted is False
+    n_rows = repo._conn.execute("SELECT COUNT(*) c FROM gate_evaluations").fetchone()["c"]
+    assert n_rows == 3                                 # every attempt is still audited
+    # The stream reader sees an untouched (fresh) stream and the throttle count stays 0.
+    stream = repo.fdr_stream_state()
+    assert stream is not None
+    assert stream.t == 1 and stream.binding_tests == 0 and stream.discoveries == 0
+    assert repo._windowed_binding_test_count(FDR_THROTTLE_WINDOW_DAYS) == 0
+
+
+def test_run_gate_final_passed_equals_provisional(tmp_path):
+    """final_passed == provisional integrity-floor verdict: no FDR term can flip it either way."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = _run_measured(repo, sharpe=7.0)
+    d = outcome.decision
+    assert d.passed is True
+    assert d.passed == all(c["passed"] for c in d.checks if not c.get("advisory"))
+    assert outcome.promoted is d.passed
+
+
+def test_run_gate_weak_evidence_stats_fail_advisory_still_promotes(tmp_path):
+    """Sharpe=2.3 (weak evidence the OLD LORD++ gate rejected): every floor check passes, the
+    stats record whatever they record, and the strategy PROMOTES — market-first selection."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
     outcome = _run_measured(repo, sharpe=2.3)
     d = outcome.decision
-    assert d.dsr_binding is True
-    assert d.fdr_binding is True
-    assert d.fdr_rejected is False    # not a discovery (p > α_1)
-    assert d.fdr_test_index == 1
-    assert d.fdr_throttle_tripped is False   # a pure LORD++ reject, NOT the throttle
-    assert outcome.promoted is False
-    assert any(c["name"] == "fdr_evidence" and c["passed"] is False for c in d.checks)
-    assert d.passed is False and d.passed == all(c["passed"] for c in d.checks)
-
-
-def test_run_gate_fdr_recalibration_promotes_previously_unpassable(tmp_path):
-    """#529 regression: Sharpe=3.0 clears (a)+(b), p≈0.0032 within budget. Under the OLD α_1≈0.00165
-    this was REJECTED; the recalibrated α_1≈0.00764 ACCEPTS it → promoted. Proves the fix works."""
-    repo = _gate_repo(tmp_path)
-    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
-                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
-    outcome = _run_measured(repo, sharpe=3.0)
-    d = outcome.decision
-    assert d.fdr_binding is True
-    assert d.fdr_p_value is not None
-    # p sits in the gap that the recalibration opened: OLD α_1 rejected, new α_1 accepts.
-    assert 0.00165 < d.fdr_p_value < 0.00764
-    assert d.fdr_alpha_level == pytest.approx(0.00764, abs=1e-4)
-    assert d.fdr_rejected is True
+    assert d.fdr_binding is False and d.fdr_skip_reason == "stats_advisory"
     assert outcome.promoted is True
-    assert any(c["name"] == "fdr_evidence" and c["passed"] is True for c in d.checks)
-    assert d.passed == all(c["passed"] for c in d.checks)
+    assert repo.get(_GATE_NAME).stage is Stage.CANDIDATE
 
 
-def test_run_gate_declared_breadth_omits_fdr_entirely(tmp_path):
-    """Declared breadth → dsr_binding=False → fdr_binding=False → no fdr_evidence check."""
+def test_run_gate_declared_breadth_also_stats_advisory(tmp_path):
+    """Declared breadth (no DSR armed) records the SAME stats_advisory skip reason — the FDR
+    freeze is unconditional, not a dsr_binding branch."""
     repo = _gate_repo(tmp_path)
     breadth = _breadth(repo, "declared")
     outcome = _run(repo, breadth)
     d = outcome.decision
+    assert d.dsr_binding is False
+    assert d.dsr_skip_reason == "no_measured_dispersion"   # the DSR reason is unchanged
     assert d.fdr_binding is False
-    assert d.fdr_skip_reason is not None
+    assert d.fdr_skip_reason == "stats_advisory"
     assert all(c["name"] != "fdr_evidence" for c in d.checks)
 
 
-def test_run_gate_missing_dsr_stats_omits_fdr(tmp_path):
-    """Measured breadth but NULL trial stats → dsr_confidence=None → fdr_binding=False."""
-    repo = _gate_repo(tmp_path)
-    repo.record_search_trial(_GATE_NAME, 5, "{}")  # no stats → pooled_trial_sharpe_var=None
-    breadth = _breadth(repo, "measured")
-    outcome = _run(repo, breadth)
-    d = outcome.decision
-    assert d.dsr_binding is True
-    assert d.fdr_binding is False
-    assert d.fdr_skip_reason is not None
-    assert all(c["name"] != "fdr_evidence" for c in d.checks)
-
-
-def test_run_gate_fdr_decision_in_to_dict(tmp_path):
-    """FDR audit fields appear in decision.to_dict() for downstream CLI serialisation."""
+def test_run_gate_fdr_freeze_in_to_dict(tmp_path):
+    """to_dict() carries the frozen-FDR audit state for downstream CLI serialisation."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
     outcome = _run_measured(repo, sharpe=7.0)
     d_dict = outcome.decision.to_dict()
-    assert d_dict["fdr_binding"] is True
-    assert d_dict["fdr_rejected"] is True
-    assert d_dict["fdr_test_index"] == 1
-    assert d_dict["fdr_p_value"] is not None
-    assert d_dict["fdr_alpha_level"] is not None
+    assert d_dict["fdr_binding"] is False
+    assert d_dict["fdr_skip_reason"] == "stats_advisory"
+    assert d_dict["fdr_rejected"] is None
+    assert d_dict["fdr_test_index"] is None
+    assert d_dict["fdr_p_value"] is None
 
 
-def test_run_gate_fdr_discovery_increments_stream(tmp_path):
-    """A passing FDR-binding gate (t=1, discovery) is recorded in the stream."""
-    repo = _gate_repo(tmp_path)
-    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
-                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
-    outcome = _run_measured(repo, sharpe=7.0)
-    assert outcome.promoted is True
-    stream = repo.fdr_stream_state()
-    assert stream is not None
-    # #324: the recorded discovery is at cohort-0 position 1; the NEXT test's within-cohort
-    # position is 2, and the in-cohort discovery positions carry forward.
-    assert stream.t == 2
-    assert stream.cohort_index == 0
-    assert stream.discoveries == 1
-    assert stream.discovery_indices == [1]
-
-
-def test_run_gate_fdr_reject_increments_stream_without_discovery(tmp_path):
-    """A failing FDR-binding gate (t=1, no discovery) still commits a binding row that advances the
-    stream (increments t) but leaves discoveries empty — even though it is NOT promoted (#529: (c)
-    is hard, so the reject blocks promotion; the binding row is still recorded)."""
-    repo = _gate_repo(tmp_path)
-    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
-                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
-    outcome = _run_measured(repo, sharpe=2.3)  # clears (a)+(b); p≈0.02 > α_1 → LORD++ reject
-    assert outcome.promoted is False  # #529: (c) is hard — the reject blocks promotion
-    assert outcome.decision.fdr_rejected is False  # non-discovery binding row
-    stream = repo.fdr_stream_state()
-    assert stream is not None
-    # #324: one binding (non-discovery) row recorded -> next within-cohort position is 2.
-    assert stream.t == 2
-    assert stream.binding_tests == 1
-    assert stream.discovery_indices == []
-
-
-def test_dsr_below_threshold_blocks_independent_of_fdr(tmp_path):
-    """#529: DSR≥0.95 remains a hard multiplicity defense ANDed alongside (a) and (c). A run whose
-    dsr_confidence < 0.95 is blocked by the dsr_evidence check even when the breadth-deflated Sharpe
-    bar clears — the three checks are independent hard ANDs."""
+def test_dsr_below_threshold_records_failed_advisory_and_promotes(tmp_path):
+    """A run whose dsr_confidence < 0.95 records the FAILED dsr_evidence check (advisory) and
+    still promotes on the floor — the DSR verdict is telemetry for the audit trail now."""
     repo = _gate_repo(tmp_path)
     # Larger trial dispersion (var_ann=0.8) pushes dsr_confidence below 0.95 while holdout Sharpe
-    # 2.5 still clears the breadth-deflated bar (~2.29), so dsr_evidence is the sole blocker.
+    # 2.5 still clears the (advisory) breadth-deflated bar (~2.29).
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.8)
     outcome = _run_measured(repo, sharpe=2.5)
@@ -511,25 +492,119 @@ def test_dsr_below_threshold_blocks_independent_of_fdr(tmp_path):
     assert len(hs_checks) == 1 and hs_checks[0]["passed"] is True  # breadth bar still clears
     dsr_checks = [c for c in d.checks if c["name"] == "dsr_evidence"]
     assert len(dsr_checks) == 1 and dsr_checks[0]["passed"] is False
-    assert outcome.promoted is False
-    assert d.passed == all(c["passed"] for c in d.checks)
+    assert dsr_checks[0]["advisory"] is True
+    assert outcome.promoted is True
+    assert d.passed == all(c["passed"] for c in d.checks if not c.get("advisory"))
 
 
 def test_run_gate_non_binding_decision_json_has_fdr_skip_reason(tmp_path):
-    """Non-binding rows must store fdr_binding=False and fdr_skip_reason in decision_json so the
-    DB audit record matches the returned GateDecision (C3 guard)."""
+    """Every row must store fdr_binding=False and fdr_skip_reason='stats_advisory' in
+    decision_json so the DB audit record matches the returned GateDecision (C3 guard)."""
     import json as _json
     repo = _gate_repo(tmp_path)
     breadth = _breadth(repo, "declared")
     outcome = _run(repo, breadth)
     assert outcome.decision.fdr_binding is False
-    assert outcome.decision.fdr_skip_reason == "no_measured_dispersion"
+    assert outcome.decision.fdr_skip_reason == "stats_advisory"
     row = repo._conn.execute(
         "SELECT decision_json FROM gate_evaluations ORDER BY id DESC LIMIT 1"
     ).fetchone()
     stored = _json.loads(row["decision_json"])
     assert stored.get("fdr_binding") is False
-    assert stored.get("fdr_skip_reason") == "no_measured_dispersion"
+    assert stored.get("fdr_skip_reason") == "stats_advisory"
+
+
+# --- the soft gate end-to-end: floor-only promotion + born-consumed token ----------------------
+
+
+def test_e2e_all_stats_fail_floor_pass_promotes_with_born_consumed_token(tmp_path):
+    """A strategy failing EVERY statistical check but clearing the integrity floor PROMOTES to
+    candidate, minting a born-consumed agent gate token (the stage advanced in the same tx)."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=400.0)  # DSR will fail
+    wf = _gate_wf(
+        holdout={**_GATE_HOLDOUT, "sharpe": 0.05, "total_return": -0.01},  # stats fail, floor ok
+        stability={"pct_positive_windows": 0.0, "min_sharpe": -2.0})
+    outcome = run_gate(
+        repo, wf, name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="")
+    d = outcome.decision
+    failed = [c for c in d.checks if not c["passed"]]
+    assert {c["name"] for c in failed} >= {
+        "holdout_sharpe", "holdout_return", "pct_positive_windows", "min_window_sharpe",
+        "dsr_evidence"}
+    assert all(c.get("advisory") is True for c in failed)
+    assert outcome.promoted is True
+    assert repo.get(_GATE_NAME).stage is Stage.CANDIDATE
+    row = repo._conn.execute(
+        "SELECT passed, consumed, actor FROM gate_evaluations ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    assert row["passed"] == 1 and row["consumed"] == 1 and row["actor"] == "agent"
+
+
+@pytest.mark.parametrize("holdout_patch, stability_patch", [
+    ({"sharpe": 0.0}, None),                        # raw Sharpe <= 0 (strict >)
+    ({"sharpe": -0.5}, None),                       # losing holdout
+    ({"n_bars": 62}, None),                         # under the observations floor
+])
+def test_e2e_floor_failures_still_fail_closed(tmp_path, holdout_patch, stability_patch):
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    wf = _gate_wf(holdout={**_GATE_HOLDOUT, **holdout_patch},
+                  stability={**_GATE_STAB, **(stability_patch or {})})
+    outcome = run_gate(
+        repo, wf, name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=True, reason_suffix="")
+    assert outcome.promoted is False
+    assert repo.get(_GATE_NAME).stage is Stage.BACKTESTED
+
+
+def test_e2e_pit_failure_still_fails_closed(tmp_path):
+    """No universe + no allow_non_pit → pit_required (binding) vetoes even a stellar holdout."""
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    outcome = run_gate(
+        repo, _gate_wf(), name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name=None, universe_snapshots=None,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=False, reason_suffix="")
+    assert outcome.promoted is False
+    pit = next(c for c in outcome.decision.checks if c["name"] == "pit_required")
+    assert pit["passed"] is False and not pit.get("advisory")
+    assert repo.get(_GATE_NAME).stage is Stage.BACKTESTED
+
+
+def test_forward_gate_reads_holdout_sharpe_value_from_soft_pass_row(tmp_path):
+    """Forward coupling: qualified_holdout_sharpe resolves the (advisory) holdout_sharpe check's
+    VALUE by name from a soft-pass row written via the REAL run_gate path — the 0.5×holdout
+    forward-bar parameterization survives the advisory flip byte-identically."""
+    from algua.registry.approvals import compute_artifact_hashes
+    from algua.registry.forward_promotion import qualified_holdout_sharpe
+
+    repo = _gate_repo(tmp_path)
+    repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
+                             trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
+    # PIT-clean row (pit_ok=1, no override): a real universe snapshot covering the period.
+    snapshots = [{"snapshot_id": "u1", "effective_date": "2020-01-01"}]
+    # sharpe=0.3 FAILS the (advisory) 0.5 statistical bar but clears the floor → soft pass.
+    outcome = run_gate(
+        repo, _wf_sharpe(0.3), name=_GATE_NAME, actor=Actor.AGENT, criteria=GateCriteria(),
+        breadth=_breadth(repo, "measured"), universe_name="u", universe_snapshots=snapshots,
+        period_start=_GATE_START, period_end=_GATE_END, holdout_frac=0.2,
+        data_source="synthetic", snapshot_id=None, allow_non_pit=False, reason_suffix="")
+    assert outcome.promoted is True
+    hs = next(c for c in outcome.decision.checks if c["name"] == "holdout_sharpe")
+    assert hs["passed"] is False and hs["advisory"] is True   # a genuine soft pass
+    sid = repo.get(_GATE_NAME).id
+    identity = compute_artifact_hashes(_GATE_NAME)
+    assert qualified_holdout_sharpe(repo._conn, sid, identity) == pytest.approx(0.3)
 
 
 # --- run_gate returns_available audit (#221 Slice 1) ------------------------------------------
@@ -1115,9 +1190,10 @@ def test_regime_robustness_omits_when_no_market_returns(tmp_path):
     assert outcome.promoted is True
 
 
-def test_regime_robustness_blocks_failing_high_vol_regime(tmp_path):
-    """Strategy that passes aggregate holdout Sharpe but fails the high-vol regime is BLOCKED
-    by regime_robustness check (tighten-only: regime check can only move PASS→FAIL)."""
+def test_regime_robustness_failure_recorded_advisory_still_promotes(tmp_path):
+    """Strategy that passes aggregate holdout Sharpe but fails the high-vol regime records the
+    FAILED regime_robustness check as an advisory flag — the soft gate still promotes on the
+    integrity floor (the forward gate is the blocker)."""
     repo = _gate_repo_with_stats(tmp_path)
     wf = _wf_with_regime(
         _REGIME_FAIL_RETS, _REGIME_HOLDOUT_DATES,
@@ -1126,15 +1202,15 @@ def test_regime_robustness_blocks_failing_high_vol_regime(tmp_path):
     outcome = _run_regime(repo, wf)
     d = outcome.decision
 
-    # Regime check must bind and be present
+    # Regime check must be armed and present
     assert d.regime_robustness_binding is True
     regime_check = next(c for c in d.checks if c["name"] == "regime_robustness")
-    # High-vol regime returns are negative → regime_robustness check FAILS
+    # High-vol regime returns are negative → regime_robustness check FAILS (advisory)
     assert regime_check["passed"] is False, (
         "high-vol regime has negative returns; regime_robustness check must fail")
-    # Gate must be blocked (passed=False)
-    assert d.passed is False, "gate must be blocked when regime_robustness fails"
-    assert outcome.promoted is False
+    assert regime_check["advisory"] is True
+    assert d.passed is True
+    assert outcome.promoted is True
 
     # decision_json must carry regime fields
     d_dict = d.to_dict()

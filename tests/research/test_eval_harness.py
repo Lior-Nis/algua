@@ -25,8 +25,10 @@ def test_obvious_edge_is_correct_promote_and_pass_pow_k():
     assert r.promote_rate == 1.0
 
 
-@pytest.mark.parametrize("name", ["no_edge", "negative_edge"])
+@pytest.mark.parametrize("name", ["negative_edge"])
 def test_discard_scenarios_never_wrongly_promote(name):
+    # Soft gate: the unambiguous discard class is the LOSING book (raw holdout Sharpe <= 0 fails
+    # the binding holdout_sharpe_floor). `no_edge` is no longer a labelled discard — see below.
     r = eh.run_scenario(_scenario(name), K)
     assert r.kind == "discard"
     assert all(t.outcome == eh.CORRECT_DISCARD for t in r.traces)
@@ -35,11 +37,22 @@ def test_discard_scenarios_never_wrongly_promote(name):
     assert r.promote_rate == 0.0
 
 
+def test_no_edge_is_consistency_only_under_soft_gate():
+    """`no_edge` (drift 0) straddles the integrity floor (holdout Sharpe sign is a coin flip):
+    market-first selection DELIBERATELY lets a lucky zero-edge book through to the paper book,
+    so the scenario is ambiguous (consistency-only), never in the safety rates."""
+    r = eh.run_scenario(_scenario("no_edge"), K)
+    assert r.kind == "ambiguous"
+    assert r.pass_pow_k is None and r.pass_at_k is None
+    assert all(t.outcome in (eh.AMBIGUOUS_PROMOTE, eh.AMBIGUOUS_DISCARD) for t in r.traces)
+
+
 # --- headline safety metrics over the full bank ----------------------------------------------
 
 def test_false_promote_rate_within_regression_guard():
-    """The load-bearing safety assertion: the core gate never promotes a no-edge/losing book on
-    the fixed, well-separated bank. A deterministic CI guard, not a statistical bound.
+    """The load-bearing safety assertion: the core gate never promotes a LOSING book on the
+    fixed, well-separated bank (the soft gate's binding floor). A deterministic CI guard, not a
+    statistical bound.
 
     Run at the harness DEFAULT_K (not the fast K) so the CI guard covers exactly the seed set the
     default `algua eval gate` run uses — otherwise a regression that only false-promotes on the
@@ -62,17 +75,19 @@ def test_marginal_edge_is_consistency_only_no_label():
     assert all(
         t.outcome in (eh.AMBIGUOUS_PROMOTE, eh.AMBIGUOUS_DISCARD) for t in marg.traces
     )
-    # the headline pass^k denominator is labelled scenarios only (3 of the 4)
+    # the headline pass^k denominator is labelled scenarios only (2 of the 4 under the soft
+    # gate: obvious_edge + negative_edge; no_edge joined marginal_edge as consistency-only)
     labelled = [s for s in report.scenarios if s.kind != "ambiguous"]
-    assert len(labelled) == 3
+    assert len(labelled) == 2
 
 
 # --- the failure taxonomy + metrics react correctly ------------------------------------------
 
-def test_mislabeled_promote_on_no_edge_is_wrongly_discarded():
-    """A scenario LABELLED promote but run on a no-edge provider must surface wrongly_discarded and
-    drop pass^k — proves the taxonomy + metrics are wired, not hard-coded to pass."""
-    mis = eh.Scenario("mislabel", "promote", drift=0.0, vol=0.02)
+def test_mislabeled_promote_on_losing_edge_is_wrongly_discarded():
+    """A scenario LABELLED promote but run on a losing-edge provider must surface
+    wrongly_discarded and drop pass^k — proves the taxonomy + metrics are wired, not hard-coded
+    to pass. (negative drift so the integrity floor deterministically discards every seed.)"""
+    mis = eh.Scenario("mislabel", "promote", drift=-0.0015, vol=0.015)
     r = eh.run_scenario(mis, K)
     assert all(t.outcome == eh.WRONGLY_DISCARDED for t in r.traces)
     assert r.pass_pow_k is False and r.pass_at_k is False
@@ -100,7 +115,7 @@ def test_crashed_run_is_recorded_and_sweep_completes():
         signal_fn=lambda v, p: (_ for _ in ()).throw(RuntimeError("boom")),
         construct_fn=get_construction_policy("equal_weight_positive"),
     )
-    r = eh.run_scenario(_scenario("no_edge"), K, strategy=boom)
+    r = eh.run_scenario(_scenario("negative_edge"), K, strategy=boom)
     assert r.n_crashed == K
     assert all(t.outcome == eh.CRASHED for t in r.traces)
     assert "boom" in r.traces[0].reason
@@ -118,7 +133,7 @@ def test_crashes_excluded_from_false_promote_denominator():
         construct_fn=get_construction_policy("equal_weight_positive"),
     )
     # Build a report by hand from a crashing single discard scenario.
-    res = eh.run_scenario(_scenario("no_edge"), K, strategy=boom)
+    res = eh.run_scenario(_scenario("negative_edge"), K, strategy=boom)
     # mimic run_eval aggregation surface via the public function on one scenario, but with a crash:
     # use run_eval's logic by checking the crashed traces are not counted as promotes.
     assert res.n_promote == 0 and res.n_crashed == K

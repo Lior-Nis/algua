@@ -136,10 +136,10 @@ def test_needs_news_without_snapshot_fails_closed_before_reservation(tmp_path):
 def test_news_lane_unblocked_through_funnel(tmp_path):
     # #132 slice 4: a needs_news strategy is no longer blocked at the PIT gate. `research promote`
     # threads the news snapshot through walk_forward + the holdout into the gate evaluation and
-    # records it in provenance. Reaching `candidate` ALSO requires passing the orthogonal #221
-    # regime-robustness gate, which this flat synthetic fixture cannot (no vol structure → tertiles
-    # collapse, fail-closed by design; that gate is covered by main's own regime tests). So we
-    # prove the PIT lane is unblocked THROUGH the funnel — gated only by regime-robustness.
+    # records it in provenance. Reaching `candidate` ALSO requires clearing the integrity floor,
+    # which this flat synthetic fixture cannot (zero raw holdout Sharpe fails the strict-positive
+    # holdout_sharpe_floor). So we prove the PIT lane is unblocked THROUGH the funnel — blocked
+    # only by the PIT-unrelated floor, with the regime/IR misses recorded as advisory flags.
     bid, nid, _fid = _seed(tmp_path)
     assert _backtest_to_backtested(
         "news_coverage_tilt", "--snapshot", bid, "--news-snapshot", nid).exit_code == 0
@@ -155,16 +155,20 @@ def test_news_lane_unblocked_through_funnel(tmp_path):
     fund_snap, news_snap = _latest_gate_snapshots(tmp_path)
     assert news_snap == nid and fund_snap is None
     # It got PAST the (removed) PIT block, family governance, and breadth, into the holdout + gate
-    # evaluation (a holdout was reserved/burned). The sole remaining blocker is the PIT-unrelated
-    # #221 regime-robustness gate — proving the funnel is unblocked for the PIT lane.
+    # evaluation (a holdout was reserved/burned). The sole remaining BINDING blocker is the
+    # PIT-unrelated holdout_sharpe_floor — proving the funnel is unblocked for the PIT lane.
     assert _holdout_count(tmp_path) >= 1
     assert payload["promoted"] is False
-    failing = [c["name"] for c in payload.get("checks", []) if not c["passed"]]
-    # The flat synthetic fixture fails the two PIT-unrelated holdout-robustness gates
-    # (#221 regime-robustness and #328 idiosyncratic-alpha); both prove the funnel reached the
-    # gate evaluation. The PIT lane itself is unblocked (holdout reserved/burned above).
-    assert "regime_robustness" in failing, failing
-    assert set(failing) <= {"regime_robustness", "idiosyncratic_alpha"}, failing
+    checks = payload.get("checks", [])
+    failing = [c["name"] for c in checks if not c["passed"]]
+    # The flat fixture fails the strict-positive floor (binding) plus the two PIT-unrelated
+    # holdout-robustness stats (recorded as ADVISORY flags under the soft gate); all prove the
+    # funnel reached the gate evaluation. The PIT lane itself is unblocked (holdout burned above).
+    assert "holdout_sharpe_floor" in failing, failing
+    assert set(failing) <= {
+        "holdout_sharpe_floor", "regime_robustness", "idiosyncratic_alpha"}, failing
+    assert all(c.get("advisory") is True for c in checks
+               if not c["passed"] and c["name"] != "holdout_sharpe_floor")
 
 
 def _burned_holdout_rows(tmp_path):
@@ -237,8 +241,9 @@ def test_promote_with_wrong_kind_snapshot_errors_before_reservation(tmp_path):
 def test_fundamentals_lane_unblocked_through_funnel(tmp_path):
     # #132 slice 4: a needs_fundamentals strategy is no longer blocked at the PIT gate; the snapshot
     # threads through walk_forward + the holdout into the gate-row provenance. Reaching `candidate`
-    # also needs the orthogonal #221 regime-robustness gate (unreachable on this flat fixture — see
-    # the news-lane test). Here we prove the PIT lane is unblocked THROUGH the funnel.
+    # also needs the integrity floor (unreachable on this flat fixture — zero raw holdout Sharpe
+    # fails the strict-positive holdout_sharpe_floor; see the news-lane test). Here we prove the
+    # PIT lane is unblocked THROUGH the funnel.
     bid, _nid, fid = _seed(tmp_path)
     assert _backtest_to_backtested(
         "fundamentals_earnings_tilt", "--snapshot", bid,
@@ -255,8 +260,9 @@ def test_fundamentals_lane_unblocked_through_funnel(tmp_path):
     assert _holdout_count(tmp_path) >= 1
     assert payload["promoted"] is False
     failing = [c["name"] for c in payload.get("checks", []) if not c["passed"]]
-    # The flat synthetic fixture fails the two PIT-unrelated holdout-robustness gates
-    # (#221 regime-robustness and #328 idiosyncratic-alpha); both prove the funnel reached the
+    # The flat fixture fails the strict-positive floor (binding) plus the two PIT-unrelated
+    # holdout-robustness stats (advisory under the soft gate); all prove the funnel reached the
     # gate evaluation. The PIT lane itself is unblocked (holdout reserved/burned above).
-    assert "regime_robustness" in failing, failing
-    assert set(failing) <= {"regime_robustness", "idiosyncratic_alpha"}, failing
+    assert "holdout_sharpe_floor" in failing, failing
+    assert set(failing) <= {
+        "holdout_sharpe_floor", "regime_robustness", "idiosyncratic_alpha"}, failing

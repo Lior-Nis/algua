@@ -1372,10 +1372,11 @@ def test_fdr_gate_db_passed_column_true_on_accept(repo):
     assert row["passed"] == 1
 
 
-def test_fdr_gate_decision_json_contains_fdr_evidence_and_throttle_checks(repo):
-    """#529: decision_json stored in DB must include BOTH the hard fdr_evidence check (pure LORD++
-    p ≤ α_t) and the fdr_throttle check (windowed promotion-eligibility), so the persisted
-    decision.passed == all(checks passed). The audit fdr_* fields are recorded top-level too."""
+def test_fdr_gate_binding_row_appends_fdr_checks_to_decision_json(repo):
+    """Preserved ledger machinery (direct store call with a real p_value — the promote path never
+    gets here since the factory soft gate): a BINDING row's veto must stay explainable, so the
+    fdr_evidence/fdr_throttle CHECKS are appended to decision_json alongside the top-level fdr_*
+    audit fields (a veto with no failed check would be an unexplainable audit record)."""
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
@@ -1385,20 +1386,34 @@ def test_fdr_gate_decision_json_contains_fdr_evidence_and_throttle_checks(repo):
     ).fetchone()
     import json
     stored = json.loads(row["decision_json"])
-    fdr_checks = [c for c in stored.get("checks", []) if c.get("name") == "fdr_evidence"]
-    assert len(fdr_checks) == 1
-    assert fdr_checks[0]["value"] == pytest.approx(0.03)
-    assert fdr_checks[0]["op"] == "<="
-    assert fdr_checks[0]["passed"] is True
-    thr_checks = [c for c in stored.get("checks", []) if c.get("name") == "fdr_throttle"]
-    assert len(thr_checks) == 1
-    assert thr_checks[0]["threshold"] == 16 and thr_checks[0]["op"] == "<"
-    assert thr_checks[0]["passed"] is True   # first in-window binding test → eligible
+    by_name = {c.get("name"): c for c in stored.get("checks", [])}
+    assert by_name["fdr_evidence"]["passed"] is True
+    assert by_name["fdr_evidence"]["value"] == 0.03
+    assert by_name["fdr_throttle"]["passed"] is True
     assert stored["fdr_binding"] is True
     assert stored["fdr_cohort"] == 0
-    # §4 active-cohort exposure audit fields present.
+    # §4 active-cohort exposure audit fields present; the removed override key is NOT written.
     assert stored["fdr_active_cohort_position"] == 1
     assert stored["fdr_throttle_window_binding"] == 0
+    assert "fdr_throttle_override" not in stored
+
+
+def test_fdr_gate_binding_reject_carries_failing_fdr_check(repo):
+    """A binding row vetoed by the FDR evidence check records fdr_evidence.passed=False in its
+    checks — the audit invariant the soft-gate refactor must not weaken."""
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.9,
+        level_fn=_level_reject, fdr_alpha=0.05, actor=Actor.AGENT)
+    assert outcome.final_passed is False
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()
+    import json
+    stored = json.loads(row["decision_json"])
+    by_name = {c.get("name"): c for c in stored.get("checks", [])}
+    assert by_name["fdr_evidence"]["passed"] is False
+    assert stored["passed"] is False
 
 
 def test_fdr_gate_stream_grows_for_binding_rows(repo):
@@ -1529,28 +1544,28 @@ def test_fdr_throttle_out_of_window_row_not_counted(repo):
     assert repo.get("fresh").stage is Stage.CANDIDATE
 
 
-def test_fdr_throttle_human_override_promotes(repo):
-    """#529 §3.5: an over-budget throttle is bypassable ONLY by a human #329-signed override; the
-    agent path can never pass it (fail closed at the store boundary)."""
-    _land_binding_rows(repo, 16)  # at budget → an agent would be throttled
+def test_fdr_throttle_has_no_override(repo):
+    """Factory soft gate: --fdr-throttle-override was REMOVED. An over-budget binding test is
+    throttled for EVERY actor (human included) and the store signature no longer accepts the
+    old keyword — the sole escape hatch is gone with the soft gate (binding rows are only ever
+    written by direct/future re-tightened callers)."""
+    _land_binding_rows(repo, 16)  # at budget → the 17th binding test is throttled
     rec = _at_backtested(repo, "h")
     o = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL._replace(strategy_name="h"),
         gate_row=_make_gate_row(passed=True), p_value=0.001,
-        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.HUMAN,
-        fdr_throttle_override=True)
+        level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.HUMAN)
     assert o.fdr_throttle_window_binding == 16
-    assert o.fdr_throttle_tripped is False        # override lifts the cap
-    assert o.fdr_throttle_override is True
-    assert o.final_passed is True
-    assert repo.get("h").stage is Stage.CANDIDATE
-    # An agent may NEVER pass the override — fail closed at the store safety boundary.
+    assert o.fdr_throttle_tripped is True         # no override exists to lift the cap
+    assert o.final_passed is False
+    assert repo.get("h").stage is Stage.BACKTESTED
+    # The removed keyword is rejected outright (plumbing deleted, not ignored).
     rec2 = _at_backtested(repo, "a")
-    with pytest.raises(ValueError, match="human-only"):
+    with pytest.raises(TypeError, match="fdr_throttle_override"):
         repo.record_gate_with_fdr_and_maybe_promote(
             rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="a"),
             gate_row=_make_gate_row(passed=True), p_value=0.001,
-            level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.AGENT,
+            level_fn=_level_accept, fdr_alpha=0.05, actor=Actor.HUMAN,
             fdr_throttle_override=True)
 
 

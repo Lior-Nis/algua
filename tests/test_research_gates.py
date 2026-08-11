@@ -46,9 +46,82 @@ def test_all_thresholds_met_passes():
     assert d.passed is True
     assert {c["name"] for c in d.checks} == {
         "holdout_sharpe", "holdout_return", "pct_positive_windows", "min_window_sharpe",
-        "min_holdout_observations", "pit_required"}
+        "min_holdout_observations", "holdout_sharpe_floor", "pit_required"}
     assert all(c["passed"] for c in d.checks)
     assert d.n_combos == 1
+
+
+# --- the factory soft gate: binding/advisory partition (2026-08-10 spec) ---------------------
+
+# The integrity floor — the ONLY checks allowed to veto `passed`.
+_BINDING_FLOOR = {"min_holdout_observations", "holdout_sharpe_floor", "pit_required"}
+
+
+def test_binding_partition_is_floor_only():
+    # Arm everything armable without market data: DSR + spec checks. The set of checks NOT marked
+    # advisory must be exactly the integrity floor.
+    d = evaluate_gate(_wf(), GateCriteria(), n_combos=10, pit_ok=True,
+                      dsr_binding=True, dsr_trial_var_ann=0.04)
+    binding = {c["name"] for c in d.checks if not c.get("advisory")}
+    assert binding == _BINDING_FLOOR
+    advisory = {c["name"] for c in d.checks if c.get("advisory") is True}
+    assert advisory == {"holdout_sharpe", "holdout_return", "pct_positive_windows",
+                        "min_window_sharpe", "dsr_evidence"}
+
+
+def test_passed_composes_binding_checks_only():
+    # A decision failing EVERY statistical check but clearing the floor must PASS; a decision
+    # clearing every stat but failing any floor check must FAIL.
+    all_stats_fail = evaluate_gate(
+        _wf(holdout_sharpe=0.01, holdout_return=-0.05, pct_positive=0.0, min_sharpe=-2.0),
+        GateCriteria(), n_combos=200, pit_ok=True, dsr_binding=True, dsr_trial_var_ann=400.0)
+    assert all_stats_fail.passed is True
+    failed = {c["name"] for c in all_stats_fail.checks if not c["passed"]}
+    assert failed  # the stats really did fail
+    assert all(c.get("advisory") is True
+               for c in all_stats_fail.checks if not c["passed"])
+    # Floor failure (short holdout) vetoes even a perfect stat sheet.
+    floor_fail = evaluate_gate(_wf(n_bars=10), GateCriteria(), n_combos=1, pit_ok=True)
+    assert floor_fail.passed is False
+
+
+def test_holdout_sharpe_floor_strictly_positive():
+    # value = the RAW holdout Sharpe (same value the holdout_sharpe check scores), threshold 0.0,
+    # strict >. Zero and negative fail; positive passes; the check is BINDING (no advisory key).
+    pos = evaluate_gate(_wf(holdout_sharpe=0.01), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
+    floor = next(c for c in pos.checks if c["name"] == "holdout_sharpe_floor")
+    assert floor == {"name": "holdout_sharpe_floor", "value": 0.01, "threshold": 0.0,
+                     "op": ">", "passed": True}
+    assert pos.passed is True
+    for bad in (0.0, -0.5):
+        d = evaluate_gate(_wf(holdout_sharpe=bad), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
+        floor = next(c for c in d.checks if c["name"] == "holdout_sharpe_floor")
+        assert floor["passed"] is False and d.passed is False
+
+
+def test_holdout_sharpe_floor_non_finite_fails_closed():
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        d = evaluate_gate(_wf(holdout_sharpe=bad), GateCriteria(**_LAX), n_combos=1, pit_ok=True)
+        floor = next(c for c in d.checks if c["name"] == "holdout_sharpe_floor")
+        assert floor["passed"] is False
+        assert floor["value"] is None  # never a raw NaN/inf in the payload
+        assert d.passed is False
+
+
+def test_each_floor_check_alone_vetoes():
+    # Each binding floor check fail-closes the gate on its own, with every stat passing.
+    short = evaluate_gate(_wf(n_bars=62), GateCriteria(), n_combos=1, pit_ok=True)
+    assert short.passed is False
+    assert next(c for c in short.checks
+                if c["name"] == "min_holdout_observations")["passed"] is False
+    non_pit = evaluate_gate(_wf(), GateCriteria(), n_combos=1, pit_ok=False)
+    assert non_pit.passed is False
+    assert next(c for c in non_pit.checks if c["name"] == "pit_required")["passed"] is False
+    losing = evaluate_gate(_wf(holdout_sharpe=-0.1), GateCriteria(**_LAX), n_combos=1,
+                           pit_ok=True)
+    assert losing.passed is False
+    assert next(c for c in losing.checks
+                if c["name"] == "holdout_sharpe_floor")["passed"] is False
 
 
 # --- multiple-testing haircut (deflated Sharpe) ---------------------------------------------
@@ -121,15 +194,20 @@ def test_more_combos_strictly_raises_effective_bar():
     assert high.effective_min_holdout_sharpe > low.effective_min_holdout_sharpe > 0.5
 
 
-def test_passes_at_n1_fails_at_large_n_with_identical_metrics():
-    # Holdout sharpe 0.8 clears base 0.5 at N=1, but the N=200 haircut lifts the bar above 0.8.
+def test_deflated_bar_recorded_but_advisory_at_large_n():
+    # Holdout sharpe 0.8 clears base 0.5 at N=1; the N=200 haircut lifts the recorded bar above
+    # 0.8 so the (advisory) holdout_sharpe check FAILS — but the soft gate still passes: the
+    # deflation is telemetry now, not a veto.
     base = GateCriteria(min_holdout_sharpe=0.5)
     at_one = evaluate_gate(_wf(holdout_sharpe=0.8), base, n_combos=1, pit_ok=True)
     at_many = evaluate_gate(_wf(holdout_sharpe=0.8), base, n_combos=200, pit_ok=True)
     assert at_one.passed is True
-    assert at_many.passed is False
-    failed = [c["name"] for c in at_many.checks if not c["passed"]]
-    assert failed == ["holdout_sharpe"]
+    assert at_many.passed is True
+    failed = [c for c in at_many.checks if not c["passed"]]
+    assert [c["name"] for c in failed] == ["holdout_sharpe"]
+    assert failed[0]["advisory"] is True
+    # The deflated threshold is still computed and recorded byte-identically.
+    assert failed[0]["threshold"] == at_many.effective_min_holdout_sharpe > 0.8
 
 
 def test_effective_threshold_equals_base_plus_haircut():
@@ -147,23 +225,28 @@ def test_provenance_carried_into_decision_and_dict():
     assert "effective_min_holdout_sharpe" in d.to_dict()
 
 
-def test_low_holdout_sharpe_fails_that_check():
+def test_low_holdout_sharpe_marks_advisory_check_failed_without_veto():
     d = evaluate_gate(_wf(holdout_sharpe=0.1), GateCriteria(min_holdout_sharpe=0.5), pit_ok=True)
-    assert d.passed is False
-    assert [c["name"] for c in d.checks if not c["passed"]] == ["holdout_sharpe"]
+    failed = [c for c in d.checks if not c["passed"]]
+    assert [c["name"] for c in failed] == ["holdout_sharpe"]
+    assert failed[0]["advisory"] is True
+    assert d.passed is True  # soft gate: the stat records the miss but does not veto
 
 
-def test_zero_holdout_return_fails_strict_gt():
+def test_zero_holdout_return_fails_strict_gt_advisory():
     d = evaluate_gate(_wf(holdout_return=0.0), GateCriteria(), pit_ok=True)
-    assert d.passed is False
-    assert [c["name"] for c in d.checks if not c["passed"]] == ["holdout_return"]
+    failed = [c for c in d.checks if not c["passed"]]
+    assert [c["name"] for c in failed] == ["holdout_return"]
+    assert failed[0]["advisory"] is True
+    assert d.passed is True
 
 
-def test_low_pct_positive_and_negative_window_fail():
+def test_low_pct_positive_and_negative_window_fail_advisory():
     d = evaluate_gate(_wf(pct_positive=0.4, min_sharpe=-0.5), GateCriteria(), pit_ok=True)
-    assert d.passed is False
-    failed = {c["name"] for c in d.checks if not c["passed"]}
-    assert failed == {"pct_positive_windows", "min_window_sharpe"}
+    failed = [c for c in d.checks if not c["passed"]]
+    assert {c["name"] for c in failed} == {"pct_positive_windows", "min_window_sharpe"}
+    assert all(c["advisory"] is True for c in failed)
+    assert d.passed is True
 
 
 def test_infinite_metric_fails_gate_not_passes():
@@ -200,14 +283,17 @@ def test_to_dict_serializable():
 
 def test_gate_checks_are_table_driven():
     # #40: gate checks come from a declarative spec, not hand-built literals per call site.
+    # holdout_sharpe_floor + pit_required are the two non-table integrity-floor checks.
     from algua.research.gates import GATE_SPECS
 
     names_from_table = {spec.name for spec in GATE_SPECS}
     names_from_eval = {c["name"] for c in evaluate_gate(_wf(), GateCriteria(), pit_ok=True).checks}
-    assert names_from_eval == names_from_table | {"pit_required"}
+    assert names_from_eval == names_from_table | {"pit_required", "holdout_sharpe_floor"}
     # Each spec points at a real GateCriteria threshold attribute.
     for spec in GATE_SPECS:
         assert hasattr(GateCriteria(), spec.threshold_attr)
+    # The advisory partition is declared on the table: only the observations floor binds there.
+    assert {s.name for s in GATE_SPECS if not s.advisory} == {"min_holdout_observations"}
 
 
 # --- DS-integrity walls (issue 137) ---------------------------------------------------------
@@ -323,26 +409,31 @@ def test_dsr_omitted_when_not_binding_does_not_change_passed():
     assert d.dsr_binding is False and d.dsr_confidence is None
 
 
-def test_dsr_binding_can_only_reject():
+def test_dsr_armed_failure_recorded_but_never_vetoes():
     wf = _wf_with(_GOOD_HOLDOUT, _GOOD_STAB)
-    # huge trial dispersion + many trials -> SR* far above the holdout Sharpe -> DSR fails
+    # huge trial dispersion + many trials -> SR* far above the holdout Sharpe -> DSR check fails,
+    # marked advisory — the soft gate still passes on the floor.
     d = evaluate_gate(wf, GateCriteria(), n_combos=500, pit_ok=True,
                       dsr_binding=True, dsr_trial_var_ann=400.0)
-    assert d.passed is False
-    assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
+    dsr = next(c for c in d.checks if c["name"] == "dsr_evidence")
+    assert dsr["passed"] is False and dsr["advisory"] is True
+    assert d.passed is True
 
 
-def test_dsr_binding_missing_variance_fails_closed():
+def test_dsr_armed_missing_variance_recorded_failed_advisory():
     wf = _wf_with(_GOOD_HOLDOUT, _GOOD_STAB)
     d = evaluate_gate(wf, GateCriteria(), n_combos=10, pit_ok=True,
                       dsr_binding=True, dsr_trial_var_ann=None)
-    assert d.passed is False
-    assert any(c["name"] == "dsr_evidence" and c["passed"] is False for c in d.checks)
+    dsr = next(c for c in d.checks if c["name"] == "dsr_evidence")
+    assert dsr["passed"] is False and dsr["advisory"] is True
     assert d.dsr_confidence is None
+    assert d.passed is True  # a missing-stat advisory row records the gap, never vetoes
 
 
-def test_tighten_only_invariant():
-    # new_pass == old_pass AND (not dsr_binding or dsr_pass), over a grid of decisions.
+def test_advisory_stats_never_change_passed():
+    # Soft-gate invariant (replaces the old tighten-only invariant): over a grid of decisions,
+    # `passed` is a pure function of the integrity floor — arming/failing the DSR stack can
+    # NEVER flip it in either direction.
     for sharpe, nbars, binding, var in itertools.product(
             [0.2, 0.6, 1.2], [80, 252], [False, True], [None, 0.0, 4.0, 400.0]):
         holdout = {"sharpe": sharpe, "total_return": 0.1, "n_bars": nbars,
@@ -352,9 +443,8 @@ def test_tighten_only_invariant():
         old = evaluate_gate(wf, GateCriteria(), n_combos=20, pit_ok=True, dsr_binding=False)
         new = evaluate_gate(wf, GateCriteria(), n_combos=20, pit_ok=True,
                             dsr_binding=binding, dsr_trial_var_ann=var)
-        dsr_check = next((c for c in new.checks if c["name"] == "dsr_evidence"), None)
-        dsr_pass = (dsr_check is None) or dsr_check["passed"]
-        assert new.passed == (old.passed and ((not binding) or dsr_pass))
+        assert new.passed == old.passed == all(
+            c["passed"] for c in new.checks if not c.get("advisory"))
 
 
 # ---------------------------------------------------------------------------

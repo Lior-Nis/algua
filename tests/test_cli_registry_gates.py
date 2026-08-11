@@ -114,7 +114,7 @@ def test_realistic_decision_round_trips_allowlisted_fields(monkeypatch, tmp_path
         "appraisal_ratio": 1.1,
         "checks": [
             {"name": "holdout_sharpe", "op": ">=", "threshold": 0.91, "value": 1.2,
-             "passed": True, "detail": None},
+             "passed": True, "advisory": True, "detail": None},
             {"name": "holdout_total_return", "op": ">", "threshold": 0.0, "value": 0.15,
              "passed": True, "detail": "free text that must be stripped"},
         ],
@@ -131,9 +131,12 @@ def test_realistic_decision_round_trips_allowlisted_fields(monkeypatch, tmp_path
     for key in ("passed", "breadth_provenance", "effective_min_holdout_sharpe", "dsr_confidence",
                 "fdr_p_value", "fdr_rejected", "market_beta", "appraisal_ratio"):
         assert d[key] == decision[key]
-    # each check keeps EXACTLY the scalar quintet — `detail` never transits
-    for check in d["checks"]:
-        assert set(check) == {"name", "op", "threshold", "value", "passed"}
+    # each check keeps EXACTLY the typed scalar fields — `detail` never transits; the factory
+    # soft gate's `advisory` marker (bool) DOES carry through to the API payload so a failed
+    # stat is distinguishable from a failed floor, and a binding check simply omits the key.
+    assert set(d["checks"][0]) == {"name", "op", "threshold", "value", "passed", "advisory"}
+    assert d["checks"][0]["advisory"] is True
+    assert set(d["checks"][1]) == {"name", "op", "threshold", "value", "passed"}
     assert payload["gate_evaluations"][0]["decision_dropped_keys"] == []
     fd = payload["forward_gate_evaluations"][0]["decision"]
     assert fd["passed"] is False

@@ -1467,19 +1467,10 @@ class SqliteStrategyRepository:
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
-        fdr_throttle_override: bool = False,
     ) -> FdrGateOutcome:
         # #524: coerce the actor BEFORE the pending-mint boundary guard (callers may pass a raw
         # string; an identity test against an un-coerced string would mis-evaluate).
         actor = Actor(actor)
-        # #529 §3.5 — the throttle override is a HUMAN-ONLY relaxation (mirrors --allow-non-pit /
-        # --allow-holdout-reuse). THIS method is the safety boundary, not just the CLI: fail closed
-        # unless the actor is human, so an agent can never lift the windowed promotion cap even if a
-        # caller mis-threads the flag.
-        if fdr_throttle_override and actor is not Actor.HUMAN:
-            raise ValueError(
-                "fdr_throttle_override is human-only: an agent can never bypass the windowed "
-                "FDR promotion throttle (--fdr-throttle-override requires --actor human, #329)")
         # #524: the mint is an AGENT-only capability and THIS method is the safety boundary, not
         # just the (trusted) caller path. Fail-closed unless the method actor is the agent AND the
         # pending spec's own actor/verdict are internally consistent (a caller bug must not write
@@ -1580,15 +1571,15 @@ class SqliteStrategyRepository:
                 fdr_rejected = p_value <= alpha_t
                 # #529 §3.5 — hard windowed PROMOTION-ELIGIBILITY throttle. Count PRIOR committed
                 # in-window binding tests (this row not yet inserted); once the near-term budget is
-                # spent, this test is promotion-INELIGIBLE. A human #329-signed override lifts it.
+                # spent, this test is promotion-INELIGIBLE (--fdr-throttle-override was REMOVED
+                # with the factory soft gate — the promote path no longer writes binding rows).
                 # The throttled row STILL commits a binding row and STILL advances the LORD++ stream
                 # below (a real FDR test ran) — only final_passed is forced False. This is a
                 # per-decision cap on prior in-window rows, not a retrospective-window property.
                 throttle_window_binding = self._windowed_binding_test_count(
                     FDR_THROTTLE_WINDOW_DAYS)
                 promotion_eligible = (
-                    throttle_window_binding < FDR_NEAR_TERM_BINDING_BUDGET
-                    or fdr_throttle_override)
+                    throttle_window_binding < FDR_NEAR_TERM_BINDING_BUDGET)
                 throttle_tripped = not promotion_eligible
                 # final_passed AND-chains (a)+(b)+floors (provisional) with (c) fdr_rejected AND the
                 # throttle eligibility — restoring the hard AND (#529 is NOT advisory).
@@ -1620,12 +1611,27 @@ class SqliteStrategyRepository:
 
             # Patch decision_json so the stored audit record reflects final_passed and the FDR
             # gate outcome — both are only known after the stream read inside this transaction.
-            # #529: (c) fdr_rejected (p ≤ α_t) is surfaced as the HARD `fdr_evidence` check and the
-            # windowed throttle as the SEPARATE `fdr_throttle` check, so decision.passed ==
-            # all(checks passed) == provisional AND fdr_rejected AND promotion_eligible.
+            # The promote path never reaches the binding branch (run_gate forces p_value=None,
+            # skip reason "stats_advisory"); this branch is the preserved ledger machinery for
+            # future re-tightening, and its audit invariant MUST hold: a binding row vetoed by
+            # FDR/throttle carries the failing check in decision_json (Gate-2 finding — a veto
+            # with no failed check would be an unexplainable audit record).
             raw_decision = json.loads(gate_row.get("decision_json") or "{}")
             raw_decision["passed"] = final_passed
             if fdr_binding:
+                fdr_checks = raw_decision.get("checks")
+                if not isinstance(fdr_checks, list):
+                    fdr_checks = []
+                    raw_decision["checks"] = fdr_checks
+                fdr_checks.append({
+                    "name": "fdr_evidence", "value": p_value, "threshold": alpha_t,
+                    "op": "<=", "passed": bool(fdr_rejected),
+                })
+                fdr_checks.append({
+                    "name": "fdr_throttle", "value": throttle_window_binding,
+                    "threshold": FDR_NEAR_TERM_BINDING_BUDGET, "op": "<",
+                    "passed": bool(promotion_eligible),
+                })
                 raw_decision["fdr_binding"] = True
                 raw_decision["fdr_p_value"] = p_value
                 raw_decision["fdr_alpha_level"] = alpha_t
@@ -1641,30 +1647,10 @@ class SqliteStrategyRepository:
                 # #529 §3.5 throttle state + §4 active-cohort exposure (audit fields).
                 raw_decision["fdr_throttle_window_binding"] = throttle_window_binding
                 raw_decision["fdr_throttle_tripped"] = bool(throttle_tripped)
-                raw_decision["fdr_throttle_override"] = bool(fdr_throttle_override)
                 raw_decision["fdr_active_cohort_position"] = active_cohort_position
                 raw_decision["fdr_active_cohort_applied_alpha"] = active_cohort_applied_alpha
                 raw_decision["fdr_expected_false_discoveries_incl_active"] = (
                     expected_false_discoveries_incl_active)
-                # Two hard `final_passed` terms surfaced as their own checks so decision.passed ==
-                # all(checks passed): the pure LORD++ FDR verdict (fdr_evidence) and the windowed
-                # promotion throttle (fdr_throttle). fdr_rejected is NOT overloaded by the throttle.
-                raw_decision["checks"] = raw_decision.get("checks", []) + [
-                    {
-                        "name": "fdr_evidence",
-                        "value": p_value,
-                        "threshold": alpha_t,
-                        "op": "<=",
-                        "passed": bool(fdr_rejected),
-                    },
-                    {
-                        "name": "fdr_throttle",
-                        "value": throttle_window_binding,
-                        "threshold": FDR_NEAR_TERM_BINDING_BUDGET,
-                        "op": "<",
-                        "passed": bool(promotion_eligible),
-                    },
-                ]
             decision_json = json.dumps(raw_decision)
 
             cur = self._conn.execute(
@@ -1754,7 +1740,6 @@ class SqliteStrategyRepository:
             fdr_expected_false_discoveries=expected_false_discoveries,
             fdr_throttle_window_binding=throttle_window_binding,
             fdr_throttle_tripped=throttle_tripped,
-            fdr_throttle_override=(bool(fdr_throttle_override) if fdr_binding else None),
             fdr_active_cohort_position=active_cohort_position,
             fdr_active_cohort_applied_alpha=active_cohort_applied_alpha,
             fdr_expected_false_discoveries_incl_active=expected_false_discoveries_incl_active,
