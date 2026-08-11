@@ -210,3 +210,78 @@ def test_dry_run_never_invokes_algua(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert not marker.exists()
     assert _items(tmp_path)["s@research-run/1"]["status"] == "pending"
+
+
+# --- reservation (TOCTOU fix): the drainer reserves via select-and-reserve, never a bare select ---
+
+
+def test_dry_run_is_read_only_never_reserves(tmp_path):
+    # `select` (read-only), never `select-and-reserve`, must be used on the dry-run path — a dry
+    # run must never flip a real queue item to `in_progress`.
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    stub = _make_stub(tmp_path, response={"ok": True, "status": "promoted_allocated"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub, dry_run=True)
+    assert proc.returncode == 0, proc.stderr
+    item = _items(tmp_path)["s@research-run/1"]
+    assert item["status"] == "pending"
+    assert "reserved_at" not in item
+
+
+def test_real_drain_reserves_item_in_progress_before_invoking_algua(tmp_path):
+    # The stub, while running, cannot observe the reservation directly (it's a single subprocess
+    # call), but a lock_contention/transient outcome exercises the release path, and the terminal
+    # path proves the item passed THROUGH `in_progress` — asserted indirectly via the item's final
+    # `pre_reservation_status` bookkeeping being cleared and status landing on the real outcome.
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    stub = _make_stub(tmp_path, response={"ok": True, "status": "promoted_allocated"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert "selecting + reserving" in proc.stdout
+    item = _items(tmp_path)["s@research-run/1"]
+    assert item["status"] == "promoted_allocated"
+    assert "pre_reservation_status" not in item
+    assert "reserved_at" not in item
+
+
+def test_lock_contention_releases_reservation_back_to_pending(tmp_path):
+    # A benign lock-contention outcome must release the reservation immediately (back to
+    # "pending"), not leave the item wedged `in_progress` until RESERVATION_STALE_SECONDS elapses.
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    stub = _make_stub(tmp_path, response={"ok": True, "ran": False, "reason": "locked"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    item = _items(tmp_path)["s@research-run/1"]
+    assert item["status"] == "pending"
+    assert item["attempts"] == 0
+    assert "reserved_at" not in item
+
+    # A SECOND drain cycle immediately (no stale wait) still finds and drains the same item.
+    proc2 = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc2.returncode == 0, proc2.stderr
+    assert "selected s@research-run/1" in proc2.stdout
+
+
+def test_overlapping_drainer_cannot_double_act_on_same_item(tmp_path):
+    # Simulates the TOCTOU this fix closes: a second drainer invocation firing while an item is
+    # ALREADY reserved (e.g. a prior invocation still mid-attempt) must find nothing eligible,
+    # rather than re-selecting and re-running the same item.
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    # Reserve the item directly (as if a first drainer invocation is mid-flight).
+    mergeback_queue.select_and_reserve(_queue_path(tmp_path), _lock_path(tmp_path))
+    assert _items(tmp_path)["s@research-run/1"]["status"] == "in_progress"
+
+    marker = tmp_path / "invoked.marker"
+    stub = _make_stub(
+        tmp_path, response={"ok": True, "status": "promoted_allocated"}, marker=marker)
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert "nothing to drain" in proc.stdout
+    assert not marker.exists()  # the second invocation never invoked algua at all
+    assert _items(tmp_path)["s@research-run/1"]["status"] == "in_progress"  # untouched

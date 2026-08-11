@@ -590,7 +590,16 @@ git -C "${WORKTREE}" add algua/strategies kb/research-runs 2>/dev/null || true
 n_strategy_files=0
 if git -C "${WORKTREE}" commit -q -m "research-run ${STAMP}: authored strategies + run report" 2>/dev/null; then
   echo "  committed."
-  STRATEGY_FILE_LIST="$(git -C "${WORKTREE}" show --name-only --pretty=format: HEAD -- algua/strategies 2>/dev/null | grep . || true)"
+  # ADDED-only (--diff-filter=A), never modified: the whole point of the cross-check is "the agent
+  # can't nominate an unrelated pre-existing strategy for merge-back", and a strategy file this
+  # commit merely MODIFIED (a pre-existing module) is exactly that unrelated-strategy case, just
+  # disguised as a diff instead of an untouched file. `git show --name-only` (the prior form here)
+  # listed ALL changed files (added OR modified) and so wrongly let a modified-not-added file pass
+  # the cross-check. Verified against real commits in this repo (see #536 follow-on review): a
+  # commit that only MODIFIES an existing strategies/ file yields an EMPTY list here, while a
+  # commit that ADDS a new one still lists it.
+  STRATEGY_FILE_LIST="$(git -C "${WORKTREE}" diff-tree --no-commit-id --name-only \
+    --diff-filter=A -r HEAD -- algua/strategies 2>/dev/null | grep . || true)"
   n_strategy_files="$(printf '%s\n' "${STRATEGY_FILE_LIST}" | grep -c . || true)"
   # The cross-check set `_validate_merge_back` uses (module name = filename without .py) for
   # THIS run's own commit — a hypothesis can only nominate a strategy this commit actually added.

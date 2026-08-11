@@ -23,14 +23,27 @@ Queue schema (one JSON object per file):
     {"items": {"<strategy>@<branch>": {
         "strategy": str, "universe": str, "start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
         "branch": str, "enqueued_at": ISO8601, "attempts": int,
-        "status": "pending" | "gate_failed" | "terminal_failed"
+        "status": "pending" | "in_progress" | "gate_failed" | "terminal_failed"
                  | "promoted_allocated" | "promoted_queued" | "already_done",
         "last_attempt_at": ISO8601 | None, "last_result": dict | None,
+        "reserved_at": ISO8601 | None,
     }}}
 
-Status lifecycle: a fresh item starts ``pending``. The drainer's ``record_attempt`` classifies
-every REAL merge-back invocation (never a lock-contention no-op, never an unparseable/hard
-failure — see ``record_attempt``'s docstring) into:
+Status lifecycle: a fresh item starts ``pending``. The drainer reserves an item ATOMICALLY via
+:func:`select_and_reserve` — in the SAME locked read-modify-write as selection, the item's status
+flips to ``in_progress`` (with a ``reserved_at`` timestamp) so a second, overlapping drainer
+invocation (a manual run overlapping the timer, a wedged prior invocation re-fired by systemd)
+cannot ALSO select and act on the same item before the first attempt's result lands — closing the
+TOCTOU window a read-only select-then-later-record two-step leaves open (``operator.lock`` only
+prevents the two ``paper merge-back`` calls from running SIMULTANEOUSLY, not the second one from
+starting, blocking, then running the same item after the first already completed it). A reservation
+older than ``RESERVATION_STALE_SECONDS`` is treated as eligible again — sized generously above one
+full merge-back attempt's realistic worst case, so a crashed/killed drainer can never permanently
+wedge a queue item.
+
+The drainer's ``record_attempt`` then classifies every REAL merge-back invocation (never a
+lock-contention no-op, never an unparseable/hard failure — see ``record_attempt``'s docstring) from
+``in_progress`` into:
   - ``promoted_allocated`` / ``promoted_queued`` / ``already_done`` — terminal SUCCESS, kept in
     the file for audit.
   - ``diff_policy_rejected`` / ``promote_failed`` -> ``terminal_failed`` — terminal FAILURE, never
@@ -38,8 +51,10 @@ failure — see ``record_attempt``'s docstring) into:
     identical outcome).
   - ``gate_failed`` -> stays ``gate_failed`` (retryable) while ``attempts <
     MAX_MERGEBACK_ATTEMPTS``, else ``terminal_failed`` (cap reached).
-Lock contention and hard/unparseable failures leave the item COMPLETELY untouched (not even
-``last_attempt_at`` moves) — see ``record_attempt``.
+Lock contention and hard/unparseable failures never counted as an attempt (``attempts`` /
+``last_attempt_at`` / ``last_result`` are left untouched) — see ``record_attempt`` — and RELEASE
+the reservation immediately back to the item's pre-reservation status (never left wedged
+``in_progress`` waiting out ``RESERVATION_STALE_SECONDS``, since no real attempt happened).
 """
 
 from __future__ import annotations
@@ -59,10 +74,12 @@ from typing import Any
 
 __all__ = [
     "MAX_MERGEBACK_ATTEMPTS",
+    "RESERVATION_STALE_SECONDS",
     "QueueLockTimeout",
     "enqueue",
     "read_locked",
     "record_attempt",
+    "select_and_reserve",
     "select_eligible",
 ]
 
@@ -72,9 +89,16 @@ _SUCCESS_STATUSES = frozenset({"promoted_allocated", "promoted_queued", "already
 _TERMINAL_FAILURE_STATUSES = frozenset({"diff_policy_rejected", "promote_failed"})
 # The one retryable-with-a-cap status.
 _RETRYABLE_STATUS = "gate_failed"
+# The reservation status `select_and_reserve` atomically stamps onto a selected item.
+_RESERVED_STATUS = "in_progress"
 
 MAX_MERGEBACK_ATTEMPTS = 3
 _DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT = 10
+# Generously above one full merge-back attempt's realistic worst case (the FULL quality gate is
+# observed ~9 minutes; the systemd unit's own TimeoutStartSec for the drainer is sized similarly
+# generously) — long enough that a live drain is never mistaken for stale, but short enough that a
+# crashed/killed drainer doesn't wedge the item for long.
+RESERVATION_STALE_SECONDS = 1800
 _LOCK_RETRIES = 10
 _LOCK_RETRY_SLEEP_S = 0.2  # ~2s total bounded retry budget
 
@@ -247,9 +271,14 @@ def select_eligible(
 
     Eligible = ``status == "pending"``, OR ``status == "gate_failed"`` with
     ``attempts < max_attempts`` AND the simple linear backoff window (``attempts * per-attempt
-    minutes`` since ``last_attempt_at``) has elapsed. Read-only (no write) — the drainer calls
-    :func:`record_attempt` separately, AFTER the merge-back attempt itself, to avoid holding the
-    queue lock across a multi-minute quality-gate run."""
+    minutes`` since ``last_attempt_at``) has elapsed. Read-only (no write) — a read-only snapshot
+    for inspection/tooling.
+
+    NOTE: the drainer itself does NOT use this function — a read-only select here followed by a
+    separate, later, out-of-lock :func:`record_attempt` leaves a TOCTOU window open (a second,
+    overlapping drainer invocation could select and act on the same item twice before the first
+    one's result lands). The drainer uses :func:`select_and_reserve`, which selects AND reserves
+    atomically under one locked operation."""
     now = datetime.now(UTC)
     data = read_locked(queue_path, lock_path)
     for key, item in data["items"].items():
@@ -261,23 +290,161 @@ def select_eligible(
     return {"key": None, "item": None}
 
 
+def _is_reservable(
+    item: dict, *, now: datetime, max_attempts: int, backoff_minutes_per_attempt: float,
+    stale_reservation_seconds: float,
+) -> bool:
+    """Same predicate as :func:`_is_eligible`, PLUS a currently-``in_progress`` item whose
+    ``reserved_at`` is older than ``stale_reservation_seconds`` (a crashed/killed drainer's
+    reservation is reclaimed rather than wedging the item forever). A non-stale ``in_progress``
+    item is never eligible — that's the whole point of the reservation."""
+    if item.get("status") == _RESERVED_STATUS:
+        reserved_at = item.get("reserved_at")
+        if not isinstance(reserved_at, str):
+            return True  # no recorded reservation timestamp — fail OPEN rather than wedge
+        try:
+            reserved_dt = datetime.fromisoformat(reserved_at)
+        except ValueError:
+            return True  # unparseable timestamp — fail OPEN to eligible rather than wedge
+        if reserved_dt.tzinfo is None:
+            reserved_dt = reserved_dt.replace(tzinfo=UTC)
+        return (now - reserved_dt).total_seconds() >= stale_reservation_seconds
+    return _is_eligible(
+        item, now=now, max_attempts=max_attempts,
+        backoff_minutes_per_attempt=backoff_minutes_per_attempt,
+    )
+
+
+def select_and_reserve(
+    queue_path: Path, lock_path: Path, *, max_attempts: int = MAX_MERGEBACK_ATTEMPTS,
+    backoff_minutes_per_attempt: float = _DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT,
+    stale_reservation_seconds: float = RESERVATION_STALE_SECONDS,
+) -> dict:
+    """Atomically select AND reserve the single eligible item for this drain cycle, in the SAME
+    locked read-modify-write (closes the TOCTOU window a read-only :func:`select_eligible` plus a
+    later, out-of-lock :func:`record_attempt` leaves open: ``operator.lock`` prevents two
+    ``paper merge-back`` calls from running SIMULTANEOUSLY, but not a second drainer invocation from
+    starting, blocking on that lock, then ALSO running the same item after the first one already
+    completed it, since the item was never marked in-progress).
+
+    On selecting an item, immediately flips its ``status`` to ``"in_progress"`` and stamps
+    ``reserved_at`` = now, before releasing the lock — so a second, concurrently-racing call sees
+    the reservation and skips it. Eligibility is the same predicate as :func:`select_eligible`
+    (``pending``, or backed-off ``gate_failed`` under the attempt cap) PLUS a STALE
+    ``in_progress`` item (``reserved_at`` older than ``stale_reservation_seconds`` — see
+    :func:`_is_reservable`); a non-stale ``in_progress`` item is simply not eligible, so a `pending`
+    item elsewhere in the file is picked instead (no special-cased "prefer pending" logic needed —
+    it falls out of the eligibility predicate itself). FIFO by enqueue order, same as
+    :func:`select_eligible`.
+
+    :func:`record_attempt` is the counterpart: it transitions the reserved item FROM
+    ``"in_progress"`` to the appropriate terminal/retry status once the (possibly multi-minute)
+    merge-back attempt completes.
+
+    Returns ``{"key": None, "item": None}`` if nothing is eligible; otherwise
+    ``{"key": ..., "item": <item dict AFTER the reservation was stamped>}``.
+    """
+    now = datetime.now(UTC)
+
+    def _mutate(data: dict) -> tuple[dict, dict]:
+        for key, item in data["items"].items():
+            if _is_reservable(
+                item, now=now, max_attempts=max_attempts,
+                backoff_minutes_per_attempt=backoff_minutes_per_attempt,
+                stale_reservation_seconds=stale_reservation_seconds,
+            ):
+                # Remember the status the item actually had BEFORE this reservation (never
+                # "in_progress" itself — re-reserving an already-stale "in_progress" item keeps
+                # whatever was stashed the FIRST time it was reserved) so record_attempt can
+                # release the lease back to it on a lock_contention/transient_failure outcome
+                # (no real attempt happened — the item must be immediately eligible again, not
+                # wait out stale_reservation_seconds).
+                pre_status = item.get("pre_reservation_status", item.get("status"))
+                item["pre_reservation_status"] = pre_status
+                item["status"] = _RESERVED_STATUS
+                item["reserved_at"] = now.isoformat()
+                return data, {"key": key, "item": dict(item)}
+        return data, {"key": None, "item": None}
+
+    return _with_queue_lock(queue_path, lock_path, _mutate)
+
+
+def _last_top_level_object(text: str) -> str | None:
+    """Locate the last balanced top-level ``{...}`` in ``text`` via brace-depth counting.
+
+    Scans from the END: finds the final ``}``, then walks backwards tracking brace depth (ignoring
+    braces inside JSON string literals) until depth returns to zero, yielding the matching ``{``.
+    Returns the substring, or ``None`` if no balanced object is found.
+
+    This is the SAME algorithm as ``algua/cli/operator_cmd.py``'s ``_last_top_level_object``
+    (ported here, not imported, because this module is stdlib-only / no ``algua`` import — see the
+    module docstring), reused deliberately rather than inventing a second way to solve the same
+    "extract the JSON envelope from a subprocess's mixed stdout" problem."""
+    end = text.rfind("}")
+    if end == -1:
+        return None
+    depth = 0
+    in_string = False
+    i = end
+    while i >= 0:
+        ch = text[i]
+        if in_string:
+            if ch == '"':
+                backslashes = 0
+                j = i - 1
+                while j >= 0 and text[j] == "\\":
+                    backslashes += 1
+                    j -= 1
+                if backslashes % 2 == 0:
+                    in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "}":
+            depth += 1
+        elif ch == "{":
+            depth -= 1
+            if depth == 0:
+                return text[i : end + 1]
+        i -= 1
+    return None
+
+
 def _parse_result_json(stdout_text: str) -> dict | None:
-    """Best-effort parse of ``algua operator lock-run``'s stdout as ONE JSON object.
+    """Best-effort parse of ``algua operator lock-run``'s stdout as a JSON object — tolerating
+    arbitrary non-JSON noise BEFORE the final JSON line.
 
     ``lock-run`` is a transparent passthrough (see ``algua/cli/operator_cmd.py``): on a benign
     lock-contention no-op it prints its OWN single-line envelope; on an actual run it prints
-    NOTHING of its own — the wrapped ``paper merge-back`` command's single ``emit()`` call is the
-    entire stdout. Either way, the common case is "the whole trimmed stdout is one JSON object".
+    NOTHING of its own — the wrapped ``paper merge-back`` command's single ``emit()`` call is its
+    stdout's final line. But ``paper merge-back`` itself first runs the FULL quality gate
+    (pytest/ruff/mypy/lint-imports) with INHERITED stdout (see ``algua/cli/paper_cmd.py``'s
+    ``_run_quality_gate`` — each check is a plain ``subprocess.run(cmd, cwd=repo_root)``, no
+    ``capture_output``), so on every REAL invocation the captured stdout is
+    ``<gate tool noise>\\n<final JSON line>``. This is the NORMAL case for a real gate run, not a
+    hypothetical — a parser that requires the ENTIRE stdout to be exactly one JSON object would
+    return ``None`` on every real merge-back attempt.
+
+    Tries the whole trimmed stdout as JSON first (the common case for a benign lock-contention
+    envelope, and for tests that stub a bare JSON payload); if that fails, falls back to the LAST
+    balanced top-level ``{...}`` object in the text (see :func:`_last_top_level_object`) — the SAME
+    algorithm ``algua/cli/operator_cmd.py``'s ``_parse_driver_payload`` already uses to solve this
+    exact problem for the ``paper`` operator job path, reused here rather than reinvented.
+
     Returns ``None`` (not ``{}``) when nothing parses, so the caller can tell an unparseable/absent
     result from a real-but-atypical envelope."""
     text = stdout_text.strip()
     if not text:
         return None
-    try:
-        parsed = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    for candidate in (text, _last_top_level_object(text)):
+        if candidate is None:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def classify_attempt(payload: dict | None, *, attempts: int, max_attempts: int) -> dict:
@@ -328,8 +495,16 @@ def record_attempt(
 
     Reads the CURRENT item fresh (under the lock) so ``attempts``/``status`` are always advanced
     from authoritative state, never from a value the drainer cached before the (multi-minute)
-    merge-back attempt ran. On ``lock_contention``/``transient_failure`` the item is left
-    COMPLETELY untouched (not even ``last_attempt_at`` moves) and no write happens at all.
+    merge-back attempt ran. This is the counterpart to :func:`select_and_reserve`: it transitions
+    the item FROM ``"in_progress"`` to the appropriate terminal/retry status.
+
+    On ``lock_contention``/``transient_failure`` — no real merge-back attempt happened — the item's
+    ``attempts``/``last_attempt_at``/``last_result`` are left COMPLETELY untouched. If the item was
+    reserved (``status == "in_progress"``), the reservation is RELEASED back to whatever status it
+    had before the reservation (not left wedged ``in_progress`` until
+    ``RESERVATION_STALE_SECONDS`` elapses) so it is immediately eligible again next cycle. A caller
+    that never went through :func:`select_and_reserve` (e.g. a direct call against a plain
+    ``pending``/``gate_failed`` item) sees no change at all, exactly as before reservations existed.
     """
     payload = _parse_result_json(stdout_text)
 
@@ -340,6 +515,9 @@ def record_attempt(
         verdict = classify_attempt(
             payload, attempts=item.get("attempts", 0), max_attempts=max_attempts)
         if verdict["action"] in ("lock_contention", "transient_failure"):
+            if item.get("status") == _RESERVED_STATUS:
+                item["status"] = item.pop("pre_reservation_status", "pending")
+                item.pop("reserved_at", None)
             return data, {"action": verdict["action"], "key": key, "item": dict(item)}
         if verdict["action"] == "exhausted" or verdict["status"] in _TERMINAL_FAILURE_STATUSES:
             # gate_failed-at-cap, diff_policy_rejected, and promote_failed all land on the SAME
@@ -352,6 +530,8 @@ def record_attempt(
         item["attempts"] = verdict["attempts"]
         item["last_attempt_at"] = _now_iso()
         item["last_result"] = payload
+        item.pop("reserved_at", None)
+        item.pop("pre_reservation_status", None)
         return data, {"action": verdict["action"], "key": key, "item": dict(item)}
 
     return _with_queue_lock(queue_path, lock_path, _mutate)
@@ -377,6 +557,28 @@ def _cmd_select(args: argparse.Namespace) -> int:
     result = select_eligible(
         Path(args.queue), Path(args.lock), max_attempts=args.max_attempts,
         backoff_minutes_per_attempt=args.backoff_minutes,
+    )
+    if args.format == "shell":
+        item = result["item"]
+        if item is None:
+            print(_shell_line(MERGEBACK_SELECTED="0"))
+        else:
+            print(_shell_line(
+                MERGEBACK_SELECTED="1", MERGEBACK_KEY=result["key"],
+                MERGEBACK_STRATEGY=item["strategy"], MERGEBACK_UNIVERSE=item["universe"],
+                MERGEBACK_START=item["start"], MERGEBACK_END=item["end"],
+                MERGEBACK_BRANCH=item["branch"],
+            ))
+    else:
+        print(json.dumps(result))
+    return 0
+
+
+def _cmd_select_and_reserve(args: argparse.Namespace) -> int:
+    result = select_and_reserve(
+        Path(args.queue), Path(args.lock), max_attempts=args.max_attempts,
+        backoff_minutes_per_attempt=args.backoff_minutes,
+        stale_reservation_seconds=args.stale_reservation_seconds,
     )
     if args.format == "shell":
         item = result["item"]
@@ -426,6 +628,17 @@ def main(argv: list[str] | None = None) -> int:
         "--backoff-minutes", type=float, default=_DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT)
     p_select.add_argument("--format", choices=("json", "shell"), default="json")
     p_select.set_defaults(fn=_cmd_select)
+
+    p_select_reserve = sub.add_parser("select-and-reserve")
+    p_select_reserve.add_argument("--queue", required=True)
+    p_select_reserve.add_argument("--lock", required=True)
+    p_select_reserve.add_argument("--max-attempts", type=int, default=MAX_MERGEBACK_ATTEMPTS)
+    p_select_reserve.add_argument(
+        "--backoff-minutes", type=float, default=_DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT)
+    p_select_reserve.add_argument(
+        "--stale-reservation-seconds", type=float, default=RESERVATION_STALE_SECONDS)
+    p_select_reserve.add_argument("--format", choices=("json", "shell"), default="json")
+    p_select_reserve.set_defaults(fn=_cmd_select_and_reserve)
 
     p_record = sub.add_parser("record-attempt")
     p_record.add_argument("--queue", required=True)

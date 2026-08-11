@@ -11,6 +11,7 @@ import importlib.util
 import json
 import sys
 import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -284,6 +285,174 @@ def test_record_attempt_missing_key_reports_missing(paths):
     result = mergeback_queue.record_attempt(
         queue_path, lock_path, key="no_such_key", stdout_text=json.dumps({"ok": True}))
     assert result["action"] == "missing_key"
+
+
+# --- record_attempt: robust JSON extraction from noisy REAL stdout ------------------------------
+#
+# `paper merge-back` runs the FULL quality gate (pytest/ruff/mypy/lint-imports) with INHERITED
+# stdout before printing its own final `emit()` JSON line (see algua/cli/paper_cmd.py's
+# `_run_quality_gate`), so on every REAL invocation the drainer's captured stdout is
+# "<gate tool noise>\n<final JSON line>" — never just the bare JSON object the mocked-subprocess
+# unit tests above use. A parser requiring the WHOLE stdout to be exactly one JSON object returns
+# None on every real attempt (the bug this fixes).
+
+
+def test_record_attempt_parses_last_json_line_amid_real_gate_noise(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    payload = {"ok": True, "status": "promoted_allocated", "strategy": "strat_a"}
+    noisy_stdout = (
+        "182 passed in 4.2s\n"
+        "All checks passed!\n"
+        "Success: no issues found\n"
+        "Contracts: 24 kept\n"
+        + json.dumps(payload)
+    )
+    result = mergeback_queue.record_attempt(
+        queue_path, lock_path, key="strat_a@research-run/1", stdout_text=noisy_stdout,
+    )
+    assert result["action"] == "terminal"
+    item = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
+    assert item["status"] == "promoted_allocated"
+    assert item["attempts"] == 1
+    assert item["last_result"] == payload
+
+
+def test_record_attempt_parses_json_object_not_on_the_final_line(paths):
+    # Leading tool noise PLUS trailing blank line(s)/newline after the JSON object — the object is
+    # not literally the last thing in the buffer either.
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    payload = {"ok": True, "status": "gate_failed"}
+    noisy_stdout = "some preamble tool output\nmore noise\n" + json.dumps(payload) + "\n\n"
+    result = mergeback_queue.record_attempt(
+        queue_path, lock_path, key="strat_a@research-run/1", stdout_text=noisy_stdout,
+    )
+    assert result["action"] == "retry"
+    item = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
+    assert item["status"] == "gate_failed"
+    assert item["attempts"] == 1
+
+
+# --- select_and_reserve: atomic reserve step (TOCTOU fix) ----------------------------------------
+
+
+def test_select_and_reserve_then_record_attempt_lifecycle(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+
+    reserved = mergeback_queue.select_and_reserve(queue_path, lock_path)
+    assert reserved["key"] == "strat_a@research-run/1"
+    assert reserved["item"]["status"] == "in_progress"
+    on_disk = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
+    assert on_disk["status"] == "in_progress"
+    assert on_disk["reserved_at"] is not None
+
+    # A second reserve attempt finds nothing else eligible (only item is now in_progress, fresh).
+    assert mergeback_queue.select_and_reserve(queue_path, lock_path) == {
+        "key": None, "item": None,
+    }
+
+    outcome = mergeback_queue.record_attempt(
+        queue_path, lock_path, key="strat_a@research-run/1",
+        stdout_text=json.dumps({"ok": True, "status": "promoted_allocated"}),
+    )
+    assert outcome["action"] == "terminal"
+    final = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
+    assert final["status"] == "promoted_allocated"
+    assert final["attempts"] == 1
+
+
+def test_select_and_reserve_prefers_pending_over_non_stale_in_progress(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(
+        queue_path, lock_path, **_item(strategy="strat_a", branch="research-run/1"))
+    mergeback_queue.enqueue(
+        queue_path, lock_path, **_item(strategy="strat_b", branch="research-run/1"))
+
+    first = mergeback_queue.select_and_reserve(queue_path, lock_path)
+    assert first["key"] == "strat_a@research-run/1"  # FIFO: reserved first
+
+    # strat_b is still pending, strat_a is now in_progress (non-stale) -> strat_b must win next.
+    second = mergeback_queue.select_and_reserve(queue_path, lock_path)
+    assert second["key"] == "strat_b@research-run/1"
+
+    # Nothing left eligible: both items are now in_progress and fresh.
+    assert mergeback_queue.select_and_reserve(queue_path, lock_path) == {
+        "key": None, "item": None,
+    }
+
+
+def test_stale_in_progress_reservation_becomes_eligible_again(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    mergeback_queue.select_and_reserve(queue_path, lock_path)
+
+    # Fresh reservation: not eligible yet.
+    assert mergeback_queue.select_and_reserve(queue_path, lock_path) == {
+        "key": None, "item": None,
+    }
+
+    # Backdate the reservation past the staleness threshold (simulating a crashed/killed drainer).
+    data = json.loads(queue_path.read_text())
+    stale_ts = (
+        datetime.now(UTC)
+        - timedelta(seconds=mergeback_queue.RESERVATION_STALE_SECONDS + 60)
+    ).isoformat()
+    data["items"]["strat_a@research-run/1"]["reserved_at"] = stale_ts
+    queue_path.write_text(json.dumps(data))
+
+    result = mergeback_queue.select_and_reserve(queue_path, lock_path)
+    assert result["key"] == "strat_a@research-run/1"
+    assert result["item"]["status"] == "in_progress"
+
+
+def test_select_and_reserve_releases_reservation_on_lock_contention(paths):
+    # A benign lock-contention outcome is NOT a real attempt: the reservation must be released
+    # back to "pending" immediately, not left wedged `in_progress` until it goes stale.
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    mergeback_queue.select_and_reserve(queue_path, lock_path)
+
+    result = mergeback_queue.record_attempt(
+        queue_path, lock_path, key="strat_a@research-run/1",
+        stdout_text=json.dumps({"ok": True, "ran": False, "reason": "locked"}),
+    )
+    assert result["action"] == "lock_contention"
+    item = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
+    assert item["status"] == "pending"
+    assert item["attempts"] == 0
+    assert "reserved_at" not in item
+
+    # Immediately eligible again (no need to wait out RESERVATION_STALE_SECONDS).
+    again = mergeback_queue.select_and_reserve(queue_path, lock_path)
+    assert again["key"] == "strat_a@research-run/1"
+
+
+def test_concurrent_select_and_reserve_only_one_wins(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+
+    results: list[dict] = []
+    results_lock = threading.Lock()
+
+    def _attempt() -> None:
+        r = mergeback_queue.select_and_reserve(queue_path, lock_path)
+        with results_lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=_attempt) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert all(not t.is_alive() for t in threads)
+    winners = [r for r in results if r["key"] is not None]
+    assert len(winners) == 1
+    assert winners[0]["key"] == "strat_a@research-run/1"
+    item = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
+    assert item["status"] == "in_progress"
 
 
 # --- concurrency: enqueue + record_attempt racing must not lose an update -------------------------

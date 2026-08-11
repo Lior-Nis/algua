@@ -11,6 +11,13 @@
 # meant to fire every 30 minutes (see deploy/systemd/algua-mergeback-drain.timer) — draining more
 # than one item risks a cycle self-overlapping its own next firing.
 #
+# Selection RESERVES the item atomically (`select-and-reserve`, flips it to `in_progress` under the
+# queue lock in the SAME operation as selection) rather than a read-only select followed by a later
+# `record-attempt` — closing a TOCTOU window where a second, overlapping drainer invocation (a
+# manual run overlapping the timer, or a wedged prior invocation re-fired by systemd) could select
+# and act on the SAME pending item twice before the first one's result lands. A reservation stuck
+# `in_progress` past `RESERVATION_STALE_SECONDS` (mergeback_queue.py) is reclaimed automatically.
+#
 # Usage:
 #   .codex/scripts/drain-mergeback-queue.sh [--dry-run]
 #
@@ -31,6 +38,7 @@ QUEUE_PATH="${ALGUA_MERGEBACK_QUEUE_PATH:-${DATA_DIR}/mergeback-queue.json}"
 QUEUE_LOCK_PATH="${ALGUA_MERGEBACK_QUEUE_LOCK_PATH:-${DATA_DIR}/mergeback-queue.lock}"
 MAX_MERGEBACK_ATTEMPTS="${MAX_MERGEBACK_ATTEMPTS:-3}"
 BACKOFF_MINUTES="${MERGEBACK_BACKOFF_MINUTES_PER_ATTEMPT:-10}"
+RESERVATION_STALE_SECONDS="${MERGEBACK_RESERVATION_STALE_SECONDS:-1800}"
 QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
 ALGUA_BIN="${ALGUA_BIN:-algua}"
 
@@ -39,10 +47,32 @@ if [[ ! -f "${QUEUE_PATH}" ]]; then
   exit 0
 fi
 
-echo "selecting an eligible merge-back queue item from ${QUEUE_PATH}..."
-SELECTION="$(python3 "${QUEUE_MOD}" select --queue "${QUEUE_PATH}" --lock "${QUEUE_LOCK_PATH}" \
-  --max-attempts "${MAX_MERGEBACK_ATTEMPTS}" --backoff-minutes "${BACKOFF_MINUTES}" \
-  --format shell)"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  # Read-only preview: `select` (never `select-and-reserve`) so a dry run cannot mutate the queue
+  # — it must never flip a real item to `in_progress`.
+  echo "selecting an eligible merge-back queue item (read-only; DRY RUN) from ${QUEUE_PATH}..."
+  SELECTION="$(python3 "${QUEUE_MOD}" select --queue "${QUEUE_PATH}" --lock "${QUEUE_LOCK_PATH}" \
+    --max-attempts "${MAX_MERGEBACK_ATTEMPTS}" --backoff-minutes "${BACKOFF_MINUTES}" \
+    --format shell)"
+  eval "${SELECTION}"
+  if [[ "${MERGEBACK_SELECTED:-0}" -ne 1 ]]; then
+    echo "no eligible merge-back queue item (all pending/exhausted/terminal); nothing to drain."
+    exit 0
+  fi
+  echo "selected ${MERGEBACK_KEY}: strategy=${MERGEBACK_STRATEGY} universe=${MERGEBACK_UNIVERSE}" \
+       "window=${MERGEBACK_START}..${MERGEBACK_END} branch=${MERGEBACK_BRANCH}"
+  echo "DRY RUN — would invoke:"
+  echo "  ${ALGUA_BIN} operator lock-run -- ${ALGUA_BIN} paper merge-back --branch ${MERGEBACK_BRANCH}" \
+       "--strategy ${MERGEBACK_STRATEGY} --universe ${MERGEBACK_UNIVERSE} --start ${MERGEBACK_START}" \
+       "--end ${MERGEBACK_END}"
+  exit 0
+fi
+
+echo "selecting + reserving an eligible merge-back queue item from ${QUEUE_PATH}..."
+SELECTION="$(python3 "${QUEUE_MOD}" select-and-reserve --queue "${QUEUE_PATH}" \
+  --lock "${QUEUE_LOCK_PATH}" --max-attempts "${MAX_MERGEBACK_ATTEMPTS}" \
+  --backoff-minutes "${BACKOFF_MINUTES}" \
+  --stale-reservation-seconds "${RESERVATION_STALE_SECONDS}" --format shell)"
 eval "${SELECTION}"
 
 if [[ "${MERGEBACK_SELECTED:-0}" -ne 1 ]]; then
@@ -52,14 +82,6 @@ fi
 
 echo "selected ${MERGEBACK_KEY}: strategy=${MERGEBACK_STRATEGY} universe=${MERGEBACK_UNIVERSE}" \
      "window=${MERGEBACK_START}..${MERGEBACK_END} branch=${MERGEBACK_BRANCH}"
-
-if [[ "${DRY_RUN}" -eq 1 ]]; then
-  echo "DRY RUN — would invoke:"
-  echo "  ${ALGUA_BIN} operator lock-run -- ${ALGUA_BIN} paper merge-back --branch ${MERGEBACK_BRANCH}" \
-       "--strategy ${MERGEBACK_STRATEGY} --universe ${MERGEBACK_UNIVERSE} --start ${MERGEBACK_START}" \
-       "--end ${MERGEBACK_END}"
-  exit 0
-fi
 
 # Built as a bash ARRAY (never a shell string) so the pre-validated-but-still-untrusted-origin
 # strategy/universe/date values can never be reinterpreted by a shell — argv, not concatenation.

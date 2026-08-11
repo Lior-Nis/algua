@@ -360,6 +360,111 @@ def test_setup_failed_outcome_skips_trailer_and_queue(tmp_path):
     assert not queue_path.exists()
 
 
+# --- (m) ADDED-only strategy cross-check: a real git commit, not a reimplementation --------------
+#
+# `run-research-loop.sh` computes the cross-check set (STRATEGY_MODULE_NAMES) from
+# `git diff-tree --no-commit-id --name-only --diff-filter=A -r HEAD -- algua/strategies` — the
+# EXACT command copied below, run against a REAL throwaway git repo/commit, never a
+# reimplementation of git's diff semantics. A file this run's commit only MODIFIES (a pre-existing
+# strategy module) must NOT satisfy the cross-check — that's exactly the "agent nominates an
+# unrelated pre-existing strategy" case the check exists to catch, just disguised as a diff instead
+# of an untouched file.
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _init_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git("init", "-q", cwd=repo)
+    _git("config", "user.email", "test@example.com", cwd=repo)
+    _git("config", "user.name", "Test", cwd=repo)
+    return repo
+
+
+def _compute_added_strategy_module_names(repo_dir: Path) -> str:
+    """The EXACT `git diff-tree` invocation run-research-loop.sh uses (see its "ADDED-only" comment
+    block, near the STRATEGY_FILE_LIST assignment) to build the cross-check set for HEAD — executed
+    here against a real git repo/commit, not reimplemented."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_dir), "diff-tree", "--no-commit-id", "--name-only",
+         "--diff-filter=A", "-r", "HEAD", "--", "algua/strategies"],
+        capture_output=True, text=True, check=True,
+    )
+    files = [line for line in result.stdout.splitlines() if line.strip()]
+    return ",".join(Path(f).stem for f in files)
+
+
+def test_git_diff_filter_a_accepts_a_truly_added_strategy_file(tmp_path):
+    repo = _init_repo(tmp_path)
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "seed", cwd=repo)
+
+    strat_dir = repo / "algua" / "strategies" / "family"
+    strat_dir.mkdir(parents=True)
+    (strat_dir / "new_strat.py").write_text("CONFIG = {}\n", encoding="utf-8")
+    _git("add", "algua/strategies", cwd=repo)
+    _git("commit", "-q", "-m", "research-run: author new_strat", cwd=repo)
+
+    strategy_names = _compute_added_strategy_module_names(repo)
+    assert strategy_names == "new_strat"
+
+    trailer = {
+        "hypotheses": [{
+            "title": "Added strategy", "verdict": "candidate-preview-pass",
+            "merge_back": {"strategy": "new_strat", "universe": "sp500",
+                           "start": "2024-01-01", "end": "2024-06-01"},
+        }],
+        "preview_gate": {"passed": True, "failed_checks": []},
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names=strategy_names)
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"][0]["merge_back"] == {
+        "strategy": "new_strat", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01",
+    }
+    items = _queue_items(queue_path)
+    assert set(items) == {"new_strat@research-run/20260811-000000"}
+
+
+def test_git_diff_filter_a_rejects_a_merely_modified_pre_existing_strategy_file(tmp_path):
+    repo = _init_repo(tmp_path)
+    strat_dir = repo / "algua" / "strategies" / "family"
+    strat_dir.mkdir(parents=True)
+    (strat_dir / "existing_strat.py").write_text("CONFIG = {}\n", encoding="utf-8")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "seed existing_strat", cwd=repo)
+
+    # THIS run's commit only MODIFIES the pre-existing file — never adds anything.
+    (strat_dir / "existing_strat.py").write_text("CONFIG = {}\nEXTRA = 1\n", encoding="utf-8")
+    _git("add", "algua/strategies", cwd=repo)
+    _git("commit", "-q", "-m", "research-run: tweak existing_strat", cwd=repo)
+
+    strategy_names = _compute_added_strategy_module_names(repo)
+    assert strategy_names == ""  # nothing ADDED by this commit
+
+    trailer = {
+        "hypotheses": [{
+            "title": "Nominates a merely-modified pre-existing strategy",
+            "verdict": "candidate-preview-pass",
+            "merge_back": {"strategy": "existing_strat", "universe": "sp500",
+                           "start": "2024-01-01", "end": "2024-06-01"},
+        }],
+        "preview_gate": {"passed": True, "failed_checks": []},
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names=strategy_names)
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"][0]["merge_back"] is None  # dropped silently, run still completes
+    assert not queue_path.exists()
+    assert "not among this run's own committed" in proc.stdout
+
+
 # --- anti-dup reader: backward-compat over BOTH bare-string and object-shaped digest lines --------
 
 
