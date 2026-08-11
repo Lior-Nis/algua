@@ -240,6 +240,70 @@ def run(
             raise typer.Exit(1) from None
 
 
+def _run_locked_command(command: list[str]) -> subprocess.CompletedProcess:
+    """Subprocess seam (monkeypatched in tests): run the wrapped command with stdout/stderr
+    INHERITED (transparent passthrough) — nothing else is printed by ``lock-run`` on the ran path,
+    so the wrapped command's own JSON envelope is the ONLY output. A caller (the merge-back
+    drainer) capturing THIS process's stdout gets exactly what the wrapped command itself emitted,
+    with no wrapper envelope to strip."""
+    return subprocess.run(command)  # noqa: S603 — fixed argv (a bash array), never a shell string
+
+
+@operator_app.command("lock-run")
+@json_errors
+def lock_run(
+    command: list[str] = typer.Argument(
+        None,
+        help="command to run under the shared operator.lock — transparent stdout/stderr/exit-code "
+        "passthrough, no session gate, no completion marker",
+    ),
+) -> None:
+    """Acquire the SAME ``operator.lock`` ``operator run --job paper`` takes, run the trailing
+    command underneath it, and get out of the way.
+
+    Purely additive (#486/#534 factory slice 3): merge-back has no notion of "once per trading
+    session" (it fires once per drain cycle, many times a day), so it cannot reuse ``operator run``
+    — that wrapper is SESSION-GATED (``_run_session`` calls ``session_gate`` unconditionally), and
+    forcing a many-times-a-day job through a once-per-session gate would silently cap it at one run
+    per session. This command deliberately bypasses ``session_gate``/``SessionMarker`` entirely —
+    zero lines of ``_run_session`` are touched by this command's existence or its tests — while
+    still sharing ``operator.lock`` with the paper job, turning "don't run a paper tick concurrently
+    with a merge-back" from operator discipline into real kernel-enforced mutual exclusion.
+
+    TRANSPARENT PASSTHROUGH: on a run, stdout/stderr are inherited untouched and the wrapped
+    command's real exit code becomes this process's own exit code — no wrapper envelope is ever
+    printed on this path, so a caller parsing this process's stdout parses exactly what the wrapped
+    command printed.
+
+    BENIGN NO-OP ON CONTENTION: if the lock is already held (a paper tick or another merge-back
+    attempt is running), the wrapped command is NEVER invoked. This prints
+    ``{"ok": true, "ran": false, "reason": "locked"}`` and exits 0 — a caller must treat this as
+    "try again next cycle", never as a failure and never as an attempt (matching how the existing
+    ``paper`` job treats run-lock contention as a benign no-op)."""
+    if not command:
+        raise ValueError("operator lock-run requires a command after --")
+    host, pid = socket.gethostname(), os.getpid()
+    try:
+        lock_path = _resolve_git_dir() / "operator.lock"
+    except (OSError, subprocess.CalledProcessError) as exc:
+        emit({"ok": False, "ran": False, "reason": "git_dir_unresolved", "error": str(exc)})
+        raise typer.Exit(1) from None
+    try:
+        with operator_run_lock(lock_path, job="merge-back", host=host, pid=pid):
+            proc = _run_locked_command(command)
+    except OperatorLockHeld:
+        emit(ok({"ran": False, "reason": "locked"}))
+        return
+    except OSError as exc:
+        # `operator_run_lock` raises a RAW OSError (not OperatorLockHeld) when it cannot even
+        # open/create the lock file (permission denied, read-only fs, disk full) — this is a setup
+        # failure, not lock contention; the wrapped command never ran. Mirrors `operator run`'s
+        # `lock_unavailable` handling of the identical raw-OSError case.
+        emit({"ok": False, "ran": False, "reason": "lock_unavailable", "error": str(exc)})
+        raise typer.Exit(1) from None
+    raise typer.Exit(proc.returncode)
+
+
 def _held_seconds(holder: dict | None, now_dt: datetime) -> float | None:
     """Seconds the lock has been held, from the holder's ``started_at``; ``None`` if unknown."""
     if not holder:

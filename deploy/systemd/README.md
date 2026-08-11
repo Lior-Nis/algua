@@ -14,9 +14,12 @@ sibling all no-op cleanly.
   `docs/superpowers/specs/2026-08-10-strategy-factory-design.md`): a Codex agent ideates → authors
   → backtests/walk-forwards/sweeps → gates (preview `research promote`) up to `candidate` in an
   explore-isolated worktree. See "Autonomous research loop" below.
-
-The overnight **research merge-back** (consumer) timer is still intentionally **not shipped** — see
-"Deferred merge-back timer" below.
+- `algua-mergeback-drain.{service,timer}` — the **research consumer** (factory slice 3): every 30
+  minutes, drains exactly one eligible candidate off the durable `data/mergeback-queue.json` (the
+  producer enqueues into it — see "Autonomous research loop" below) and runs the REAL,
+  authoritative `paper merge-back` through `algua operator lock-run`, which shares `operator.lock`
+  with the daily paper tick. Trusted plumbing, no LLM, no sandbox. See "Auto merge-back (factory
+  slice 3)" below.
 
 ## Install
 
@@ -76,14 +79,19 @@ inspect with `systemctl --user list-timers 'algua-*'` / `journalctl --user -u al
 
 **Factory cadence (slice 1).** Research fires **every 2h** (`OnCalendar=*-*-* 00/2:00:00 UTC`,
 overlaps skip via the launcher's non-blocking flock); paper ticks **daily at 21:30 UTC**
-(post-close; the calendar gate no-ops non-sessions — do NOT make it weekdays-only). Enable BOTH so
-paper evidence starts accruing the moment the first strategy reaches the book.
+(post-close; the calendar gate no-ops non-sessions — do NOT make it weekdays-only); the merge-back
+drainer fires **every 30 minutes**. Enable ALL THREE so paper evidence starts accruing the moment
+the first strategy reaches the book.
 
-**Mutual exclusion around the paper tick (#316).** `paper merge-back` and `paper trade-tick`/
-`run-all` are mutually exclusive **by operator discipline**, not by a shared kernel lock. Until
-slice 3 automates that discipline, do not run a manual `paper merge-back` around the 21:30 UTC
-paper tick window — run merge-backs well clear of it (the research timer's schedule is already
-offset from the paper window).
+**Mutual exclusion around the paper tick (#316, closed by factory slice 3).** `paper merge-back`
+and `paper trade-tick`/`run-all` mutate the same shared checkout + registry. When the drainer
+invokes merge-back through `algua operator lock-run` (its only invocation path — see "Auto
+merge-back" below), this is **real kernel-enforced mutual exclusion**: `lock-run` takes the SAME
+`operator.lock` `operator run --job paper` takes, so the two can never run concurrently — a
+contended attempt is a benign no-op that retries next cycle, never a race. This guarantee is
+per-invocation-path, not per-command: a HUMAN running `paper merge-back` directly (bypassing
+`lock-run`) still relies on operator discipline, exactly as before — do not run a direct manual
+`paper merge-back` around the 21:30 UTC paper tick window.
 
 ## Why the wrapper, not just the timer
 
@@ -151,8 +159,12 @@ when only the paper operator shipped. It uses the **explore-isolated** topology.
   the authoritative FDR ledger / family graph / holdout rows**, and wasted search never taxes the real
   funnel;
 - runs `codex exec` (bounded by `TIMEOUT`, default 45m) to drive ideate → author → walk-forward/sweep →
-  `research promote` (preview) up to `candidate`, then writes `run-report.md` on the branch with the
-  exact `paper merge-back` command for any candidate whose preview passed.
+  `research promote` (preview) up to `candidate`, then writes a report to `kb/research-runs/<stamp>.md`
+  on the branch, ending in a machine-readable trailer naming, per hypothesis, its verdict and — for a
+  passed preview — a `merge_back` object (strategy/universe/window). The launcher validates each
+  `merge_back` (branch is NEVER trusted from the trailer; strategy must match a module THIS run's own
+  commit actually added) and enqueues every valid one to `data/mergeback-queue.json` for the automated
+  drainer (factory slice 3) to run for real — see "Auto merge-back" below.
 
 **Why isolated and not "direct authoritative".** `codex exec` runs unsandboxed and could edit
 `promotion.py`/`gates.py`/`fdr_lord.py` in its mutable worktree; strategy code and gate code are the
@@ -166,43 +178,53 @@ trusted (main + allowlisted diff) code. That is the trusted reconciler.
 (`codex exec` is invoked headless with `--dangerously-bypass-approvals-and-sandbox` inside the isolated
 worktree). Enable with `sudo systemctl enable --now algua-research.timer`.
 
-**The authoritative step (human-reviewed).** A passed *preview* is a candidate, not a promotion. To
-commit it to the real funnel + main, review the branch, then run the `paper merge-back --branch
-research-run/<stamp> --strategy <name> --universe <u> --start D --end D` line from the run report. That
-is the trusted, authoritative promote (real breadth tax, real single-use holdout burn, family mint) +
-gated code merge + paper intake. The agent **cannot go live** (human-signed cryptographic wall) and
-cannot merge the CODEOWNERS-protected integrity files.
+**The authoritative step is now automatic (factory slice 3).** A passed *preview* is a candidate,
+not a promotion. The launcher enqueues every valid `merge_back` it parses from the report trailer;
+the merge-back drainer (`algua-mergeback-drain.timer`, every 30m) runs the REAL
+`paper merge-back --branch research-run/<stamp> --strategy <name> --universe <u> --start D --end D`
+for it through `algua operator lock-run`. That is the trusted, authoritative promote (real breadth
+tax, real single-use holdout burn, family mint) + gated code merge + paper intake. The agent
+**cannot go live** (human-signed cryptographic wall) and cannot merge the CODEOWNERS-protected
+integrity files. A human can still force one through immediately instead of waiting for the next
+drain cycle: `uv run algua paper merge-back --branch <b> --strategy <s> --universe <u> --start D
+--end D` (see "Direct-invocation residual risk" above for why that bypasses the shared lock).
 
 **Cadence and the FDR budget.** The timer runs at **factory cadence: every 2h, 12 runs/day**
 (`OnCalendar=*-*-* 00/2:00:00 UTC`). That rate is safe for the funnel *because* exploration is
 scratch: a cycle's `research promote` is a preview that records NO breadth and burns NO holdout on
 the authoritative funnel, so it never consumes the FDR budget (**≤16 promotion-eligible binding
-tests / rolling 365 days**). That budget is spent only by a human-run `paper merge-back` — which
-records a metered breadth tax that raises the promotion Sharpe bar for ALL future strategies. So run
-the producer as often as you like; pace the *merge-backs*. The holdout is single-use *per strategy*,
-so the loop keeps authoring new strategies on the existing snapshot — the breadth/FDR tax at
-merge-back, not the holdout, is what makes it progressively harder. The real per-cycle costs are
-compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in the env file; Codex plan rate-limit hits are
-expected at 12/day and are recorded per run in the digest — see below) and disk (auto-pruned; see
-below).
+tests / rolling 365 days**). That budget is spent only by an actual `paper merge-back` run — which
+records a metered breadth tax that raises the promotion Sharpe bar for ALL future strategies. So the
+producer can run as often as configured; the drainer paces the *merge-backs* (one per 30-minute
+cycle). The holdout is single-use *per strategy*, so the loop keeps authoring new strategies on the
+existing snapshot — the breadth/FDR tax at merge-back, not the holdout, is what makes it
+progressively harder. The real per-cycle costs are compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in
+the env file; Codex plan rate-limit hits are expected at 12/day and are recorded per run in the
+digest — see below) and disk (auto-pruned; see below).
 
-**Run digest (feedback contract, slice 1).** After **every firing** — a completed run (success,
-codex failure, or timeout), a lock-skip, or a setup failure — the launcher appends **one JSON
-line** to the durable, authority-side digest at `data/research-runs.jsonl` (beside the
-authoritative DB; `ALGUA_RESEARCH_DIGEST_PATH` overrides). Fields: `stamp`, `branch` (`null` if
-the run branch was never created), `thesis`, `outcome` (`"completed"` | `"skipped_lock"` |
-`"setup_failed"`), `exit_code`, `timed_out` (bool, `timeout` exit 124), `wall_s`,
-`n_strategy_files` (strategy files in the driver's commit), `hypotheses` (sanitized titles from the
-run-report's machine-readable trailer — charset-filtered, ≤120 chars, ≤40), `preview_gate`
-(`{"passed": bool, "failed_checks": [...]}` or `null`), `trailer_parse_error` (bool for completed
-runs), `rate_limited` (bool, grepped from the in-worktree codex log), `report`
-(`research-run/<stamp>:run-report.md`). A skipped/setup-failed firing produces a line with
+**Run digest (feedback contract, slice 1; schema widened in slice 3).** After **every firing** — a
+completed run (success, codex failure, or timeout), a lock-skip, or a setup failure — the launcher
+appends **one JSON line** to the durable, authority-side digest at `data/research-runs.jsonl`
+(beside the authoritative DB; `ALGUA_RESEARCH_DIGEST_PATH` overrides). Fields: `stamp`, `branch`
+(`null` if the run branch was never created), `thesis`, `outcome` (`"completed"` |
+`"skipped_lock"` | `"setup_failed"`), `exit_code`, `timed_out` (bool, `timeout` exit 124), `wall_s`,
+`n_strategy_files` (strategy files in the driver's commit), `hypotheses` — a list of
+`{"title", "verdict", "merge_back"}` objects (slice 3; an OLDER digest line's `hypotheses` are
+bare title strings — both shapes are read by the anti-dup context builder, no historical rewrite),
+`preview_gate` (`{"passed": bool, "failed_checks": [...]}` or `null`, UNCHANGED — the cheap
+aggregate "did anything look promising" signal, kept alongside the new per-hypothesis `verdict`),
+`trailer_parse_error` (bool for completed runs), `rate_limited` (bool, grepped from the in-worktree
+codex log), `report` (`research-run/<stamp>:kb/research-runs/<stamp>.md` — migrated off the repo
+root in slice 3; see "Auto merge-back" for why). A skipped/setup-failed firing produces a line with
 `outcome != "completed"` and null-ish run fields (`exit_code`/`wall_s`/`n_strategy_files`/`report`
 null — for a lock-skip `branch` too — plus `hypotheses` `[]`, `preview_gate` and
 `trailer_parse_error` null: no trailer was expected). The trailer itself is parsed defensively:
-only the last 64KB of `run-report.md` is read, the fenced ```json block must be **EOF-anchored**
+only the last 64KB of the report is read, the fenced ```json block must be **EOF-anchored**
 (nothing but whitespace after its closing fence), and the schema is strictly validated —
-any violation yields `hypotheses [] / preview_gate null / trailer_parse_error true`. This is the
+any violation yields `hypotheses [] / preview_gate null / trailer_parse_error true`. A single
+hypothesis's malformed `merge_back` (bad strategy/universe/date format, an unrelated strategy name,
+a duplicate strategy claim, start>end, end>today) drops ONLY that candidate's merge-back
+candidacy — logged, never a reason to invalidate the rest of the trailer or the run. This is the
 improve-algua backlog: `trailer_parse_error`/`rate_limited`/`timed_out` clusters are machinery
 bugs to fix, `preview_gate.failed_checks` clusters show where hypotheses die. The digest also feeds the next runs' anti-dup prompt context
 (recent hypothesis titles, injected as sanitized untrusted data). A digest write failure warns but
@@ -231,12 +253,52 @@ review, then a later cycle **auto-prunes** worktrees older than `RESEARCH_WORKTR
 its `research-run/<stamp>` branch after the worktree dir is removed. Lengthen the window (env file) if
 you want more review time, or reap on demand with `git worktree remove ../algua-research-<stamp>`.
 
-## Deferred merge-back timer
+## Auto merge-back (factory slice 3)
 
-A `merge-back` (candidate **consumer**) always-on timer is still a filed follow-up, intentionally not
-shipped here. A static `ExecStart` cannot know *which* candidate branch/strategy/universe/window to merge
-back — that requires a candidate **selection** mechanism (a queue / pointer file the unit's `ExecStart`
-resolves before invoking merge-back). The producer above now enqueues candidates (as `research-run/<stamp>`
-branches + `run-report.md`), so what remains is the selection queue; the generic `operator run` wrapper
-accepts the consumer later as a new `OPERATOR_JOBS` manifest entry + selection mechanism + unit pair, with
-**no wrapper change**.
+The candidate **consumer** is now an always-on timer (`algua-mergeback-drain.{service,timer}`),
+closing the last human-run gap between the research loop and the authoritative funnel. Three
+pieces make this work together:
+
+**The queue (`data/mergeback-queue.json` + `data/mergeback-queue.lock`).** One JSON object file:
+`{"items": {"<strategy>@<branch>": {strategy, universe, start, end, branch, enqueued_at,
+attempts, status, last_attempt_at, last_result}}}`. `status` ∈ `pending` (fresh, or lock-contention
+left it alone) | `gate_failed` (retryable, capped) | `terminal_failed` (diff-policy-rejected /
+promote-failed / gate-failed-exhausted — never retried) | `promoted_allocated` / `promoted_queued`
+/ `already_done` (terminal success). BOTH writers — the research driver (enqueue) and the drainer
+(status update) — mutate it ONLY under `mergeback-queue.lock` (a dedicated, non-blocking flock with
+a short bounded retry; queue mutations are sub-second), via
+`.codex/scripts/mergeback_queue.py`'s atomic tmp+fsync+`os.replace` read-modify-write (the same
+idiom `web/backend/push.py` uses for its subscription store, ported to this bash-driven side of the
+system since that module is FastAPI-process-local). The research driver only enqueues (idempotent
+on the `(strategy, branch)` key — a re-enqueue of an existing key is a no-op, since a branch is
+produced exactly once per research-run stamp); it never runs merge-back itself, so queue depth can
+never extend a research cycle past its own `TIMEOUT` budget.
+
+**The drainer (`.codex/scripts/drain-mergeback-queue.sh`).** Trusted, unsandboxed, no LLM. Every 30
+minutes it selects **exactly one** eligible item (`pending`, or `gate_failed` with
+`attempts < MAX_MERGEBACK_ATTEMPTS=3` past a linear backoff window since its last attempt — draining
+more per cycle risks self-overlapping the next 30-minute firing, since a single quality gate already
+runs ~9 minutes) and invokes
+`algua operator lock-run -- algua paper merge-back --branch <b> --strategy <s> --universe <u>
+--start <a> --end <e>` as a bash ARRAY (never a shell string, even though these values are already
+format-validated). It classifies the result and updates the queue entry under the lock:
+`promoted_allocated`/`promoted_queued`/`already_done` → terminal (kept for audit);
+`diff_policy_rejected`/`promote_failed` → `terminal_failed`, never retried (the branch content
+itself is wrong — retrying wastes a gate cycle for a guaranteed-identical outcome); `gate_failed` →
+retried up to the cap, then `terminal_failed` (the merge-back JSON does not expose which quality-gate
+phase failed, so this is the flat cap, not a same-phase-twice refinement); lock contention on
+`operator.lock` (the paper tick is running) or an unparseable/hard-failure result → the item is left
+**completely untouched** (not even `last_attempt_at` moves) and is NEVER counted as an attempt.
+
+**`algua operator lock-run -- <command...>`** (new, additive-only command in
+`algua/cli/operator_cmd.py`): resolves the SAME `operator.lock` `operator run --job paper` uses,
+acquires it via the existing `operator_run_lock` primitive, and runs the trailing command with
+stdout/stderr/exit-code **transparently passed through** (no wrapper envelope on the ran path, so a
+caller parsing this process's stdout parses exactly what the wrapped command printed) — or, on
+contention, prints its own `{"ok": true, "ran": false, "reason": "locked"}` and exits 0 without ever
+running the wrapped command. It **deliberately bypasses `session_gate`/`SessionMarker` entirely**:
+merge-back has no notion of "once per trading session" (it fires many times a day), so reusing the
+session-gated `operator run` wrapper would silently cap it at once per session. Merge-back therefore
+gets **no `OPERATOR_JOBS` manifest entry** — `lock-run` is a parallel, purpose-built command, not a
+new job key. Zero lines of `_run_session`/`session_gate`/the existing `run` command are touched by
+its existence.

@@ -392,6 +392,21 @@ def account() -> None:
     emit(ok({"equity": acct.equity, "cash": acct.cash, "buying_power": acct.buying_power}))
 
 
+def _resolve_max_concurrent(explicit: int | None) -> int:
+    """Resolve ``--max-concurrent`` for ``intake``/``merge-back``/``allocate`` (factory slice 3).
+
+    An omitted value (``None``) resolves to ``settings.paper_book_capacity`` (the shared wide-book
+    default, env ``ALGUA_PAPER_BOOK_CAPACITY``); an explicit CLI value is honored as-is. Mirrors
+    ``resolve_drawdown_breaker``'s None-sentinel shape rather than embedding ``get_settings()``
+    directly in the ``typer.Option(...)`` default expression: a Python default value is evaluated
+    ONCE, at function-definition (module-import) time, so baking ``get_settings()`` into the
+    decorator would freeze the capacity at whatever the environment was when ``paper_cmd`` first
+    imported — never re-reading `ALGUA_PAPER_BOOK_CAPACITY` afterward (including in tests that
+    monkeypatch the env post-import). Resolving fresh, per invocation, inside the command body is
+    what actually makes the setting env-overridable at runtime."""
+    return explicit if explicit is not None else get_settings().paper_book_capacity
+
+
 def _run_intake(
     conn: sqlite3.Connection, *, equity: float, max_concurrent: int, actor: Actor,
 ) -> dict:
@@ -450,8 +465,9 @@ def _run_intake(
 @paper_app.command('intake')
 @json_errors
 def intake(
-    max_concurrent: int = typer.Option(5, '--max-concurrent',
-        help='max concurrent paper-lane strategies admitted into the shared book'),
+    max_concurrent: int | None = typer.Option(None, '--max-concurrent',
+        help='max concurrent paper-lane strategies admitted into the shared book '
+             '(default: settings.paper_book_capacity / ALGUA_PAPER_BOOK_CAPACITY)'),
     actor: str = typer.Option('agent', '--actor', help='human | agent'),
 ) -> None:
     """Deterministic paper-book intake: admit candidate strategies into the shared paper book up to
@@ -469,6 +485,7 @@ def intake(
     non-token-gated transition legal for ``agent`` already (the multiple-testing gates were paid at
     the ``candidate`` boundary), so ``--actor human`` grants no privilege the agent lacks and needs
     no authenticated-actor discipline (unlike the ``forward_tested→live`` go-live edge)."""
+    max_concurrent = _resolve_max_concurrent(max_concurrent)
     if max_concurrent <= 0:
         raise ValueError('--max-concurrent must be positive')
     actor_enum = Actor(actor)  # fail fast on a bad actor before touching the DB
@@ -483,8 +500,9 @@ def intake(
 def allocate(
     name: str,
     capital: float = typer.Option(..., '--capital', help='paper capital base $'),
-    max_concurrent: int = typer.Option(8, '--max-concurrent',
-        help='max concurrent active paper-lane tenants'),
+    max_concurrent: int | None = typer.Option(None, '--max-concurrent',
+        help='max concurrent active paper-lane tenants '
+             '(default: settings.paper_book_capacity / ALGUA_PAPER_BOOK_CAPACITY)'),
 ) -> None:
     """Set a paper/forward_tested strategy's capital base (the fixed sizing denominator).
 
@@ -496,6 +514,7 @@ def allocate(
     the stage check here is only a friendly early error before the network account read (a strategy
     that leaves the lane between this check and the write can never be allocated). Re-allocating an
     existing tenant RESIZES it (exempt from the count cap; emits prior→new capital)."""
+    max_concurrent = _resolve_max_concurrent(max_concurrent)
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)  # friendly early error only
         if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
@@ -545,8 +564,9 @@ def merge_back(
         help='PIT universe for the strict-agent promote gate (non-PIT fails closed)'),
     start: str = typer.Option(..., '--start', help='promote-window start (YYYY-MM-DD)'),
     end: str = typer.Option(..., '--end', help='promote-window end (YYYY-MM-DD)'),
-    max_concurrent: int = typer.Option(5, '--max-concurrent',
-        help='max concurrent paper-lane strategies admitted into the shared book'),
+    max_concurrent: int | None = typer.Option(None, '--max-concurrent',
+        help='max concurrent paper-lane strategies admitted into the shared book '
+             '(default: settings.paper_book_capacity / ALGUA_PAPER_BOOK_CAPACITY)'),
     actor: str = typer.Option('agent', '--actor', help='human | agent (audit label)'),
 ) -> None:
     """Autonomous research-cycle merge-back (#485): turn a research candidate branch into an
@@ -564,9 +584,14 @@ def merge_back(
 
     MUTUAL EXCLUSION: like ``paper trade-tick``/``run-all`` (#316), ``merge-back`` mutates shared
     state (the working tree + the registry) and is mutually exclusive with the paper-account cycles
-    BY OPERATOR DISCIPLINE — do not run a paper trade-tick / run-all concurrently with a merge-back.
-    Concurrent merge-back invocations are hard-serialized by a repo-global ``merge_back.lock``
-    flock; a second live invocation fails closed."""
+    BY OPERATOR DISCIPLINE when invoked directly — do not run a paper trade-tick / run-all
+    concurrently with a direct merge-back invocation. Concurrent merge-back invocations are
+    hard-serialized by a repo-global ``merge_back.lock`` flock; a second live invocation fails
+    closed. The automated merge-back drainer (factory slice 3) invokes this command wrapped as
+    ``algua operator lock-run -- algua paper merge-back ...``, which shares the SAME
+    ``operator.lock`` the daily paper tick takes — turning that discipline into real kernel-enforced
+    mutual exclusion for the automated path (see ``algua operator lock-run``)."""
+    max_concurrent = _resolve_max_concurrent(max_concurrent)
     if max_concurrent <= 0:
         raise ValueError('--max-concurrent must be positive')
     actor_enum = Actor(actor)  # fail fast on a bad actor before any git mutation

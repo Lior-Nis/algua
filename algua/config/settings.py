@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     # ALGUA_BOOK_MAX_DAILY_LOSS.
     book_max_drawdown: float = 0.15
     book_max_daily_loss: float = 0.05
+    # Wide paper book (factory slice 3, market-first selection): the shared default for
+    # `--max-concurrent` across `paper intake` / `paper merge-back` / `paper allocate` (previously
+    # three independently-hardcoded 5/5/8 constants in paper_cmd.py). Default 64 sits inside the
+    # design's 50-100 target range for the paper book, now the rationed resource (FIFO intake) now
+    # that the backtested->candidate gate is an integrity floor rather than a statistical veto. An
+    # explicit --max-concurrent still overrides this per-invocation. env: ALGUA_PAPER_BOOK_CAPACITY.
+    paper_book_capacity: int = 64
 
     @field_validator("db_path", "data_dir")
     @classmethod

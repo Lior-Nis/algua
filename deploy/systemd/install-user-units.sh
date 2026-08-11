@@ -56,6 +56,8 @@ UNITS=(
   algua-research.timer
   algua-paper.service
   algua-paper.timer
+  algua-mergeback-drain.service
+  algua-mergeback-drain.timer
   algua-web.service
 )
 
@@ -133,9 +135,10 @@ done
 systemctl --user daemon-reload
 echo
 echo "Units installed and user daemon reloaded. To enable (printed, NOT executed by this script):"
-echo "  systemctl --user enable --now algua-research.timer   # research producer, every 2h"
-echo "  systemctl --user enable --now algua-paper.timer      # paper tick, daily 21:30 UTC (calendar-gated)"
-echo "  systemctl --user enable --now algua-web.service      # read-only monitor on 127.0.0.1:8787"
-echo "(algua-research.service / algua-paper.service are oneshot units fired by their timers —"
-echo " do not enable them directly.)"
+echo "  systemctl --user enable --now algua-research.timer          # research producer, every 2h"
+echo "  systemctl --user enable --now algua-paper.timer             # paper tick, daily 21:30 UTC (calendar-gated)"
+echo "  systemctl --user enable --now algua-mergeback-drain.timer   # merge-back consumer, every 30m"
+echo "  systemctl --user enable --now algua-web.service             # read-only monitor on 127.0.0.1:8787"
+echo "(algua-research.service / algua-paper.service / algua-mergeback-drain.service are oneshot"
+echo " units fired by their timers — do not enable them directly.)"
 echo "Consider 'loginctl enable-linger ${USER:-$(id -un)}' so user timers run without an active login."

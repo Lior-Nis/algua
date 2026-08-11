@@ -101,6 +101,14 @@ AUTH_DATA_DIR="${ALGUA_DATA_DIR:-${REPO_ROOT}/data}"
 # DB, resolved BEFORE the scratch repointing below so it survives worktree pruning. One JSON line
 # per run (see the append site near the end of this script for the schema).
 AUTH_DIGEST="${ALGUA_RESEARCH_DIGEST_PATH:-${AUTH_DATA_DIR}/research-runs.jsonl}"
+# The durable merge-back queue (factory slice 3) — same authority-side resolution as the digest
+# above, so it too survives worktree pruning. `.codex/scripts/mergeback_queue.py` owns the
+# lock+atomic-write discipline; this script only calls into it (once per validated merge_back
+# candidate — see the trailer-parsing step below). Never blocks on / runs merge-back itself, so
+# queue depth can never extend a research cycle past its TIMEOUT budget.
+AUTH_QUEUE="${ALGUA_MERGEBACK_QUEUE_PATH:-${AUTH_DATA_DIR}/mergeback-queue.json}"
+AUTH_QUEUE_LOCK="${ALGUA_MERGEBACK_QUEUE_LOCK_PATH:-${AUTH_DATA_DIR}/mergeback-queue.lock}"
+QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
 
 # Durable feedback digest (factory slice 1): ONE JSON line per FIRING — not just per completed
 # run. Defined EARLY (STAMP/THESIS are already known; the branch may still be null) with safe
@@ -110,7 +118,8 @@ AUTH_DIGEST="${ALGUA_RESEARCH_DIGEST_PATH:-${AUTH_DATA_DIR}/research-runs.jsonl}
 # trailer_parse_error null — no trailer was expected). A digest write failure NEVER fails the
 # run (it's feedback, not control flow) and never changes the script's exit code.
 DIGEST_BRANCH=""        # set once the run branch actually exists (null in the digest until then)
-DIGEST_REPORT_PATH=""   # set once a completed run may have written run-report.md
+DIGEST_REPORT_PATH=""   # set once a completed run may have written kb/research-runs/<stamp>.md
+STRATEGY_MODULE_NAMES=""  # comma-joined module names this run's own commit added (cross-check set)
 rc=""                   # codex exit code (or the setup-failure exit code); null until known
 timed_out=0
 wall_s=""
@@ -121,14 +130,24 @@ append_digest() {
   mkdir -p "$(dirname "${AUTH_DIGEST}")" 2>/dev/null || true
   python3 - "${AUTH_DIGEST}" "${outcome}" "${STAMP}" "${DIGEST_BRANCH}" "${THESIS}" \
     "${rc}" "${timed_out}" "${wall_s}" "${n_strategy_files}" "${rate_limited}" \
-    "${DIGEST_REPORT_PATH}" <<'PY' && digest_ok=1
+    "${DIGEST_REPORT_PATH}" "${STRATEGY_MODULE_NAMES}" "${REPO_ROOT}" \
+    "${AUTH_QUEUE}" "${AUTH_QUEUE_LOCK}" <<'PY' && digest_ok=1
+import importlib.util
 import json
 import os
 import re
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
 (digest_path, outcome, stamp, branch, thesis,
- exit_code, timed_out, wall_s, n_files, rate_limited, report_path) = sys.argv[1:12]
+ exit_code, timed_out, wall_s, n_files, rate_limited, report_path,
+ strategy_names_csv, repo_root, queue_path, queue_lock_path) = sys.argv[1:16]
+
+_VALID_VERDICTS = {"discarded", "candidate-preview-pass", "error"}
+_STRATEGY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_UNIVERSE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _clean(s: str) -> str:
@@ -140,7 +159,54 @@ class _TrailerError(Exception):
     pass
 
 
-def _parse_trailer(path: str) -> tuple[list, dict | None]:
+def _validate_merge_back(mb, *, verdict, strategy_names, seen_strategies, today):
+    """Validate ONE hypothesis's merge_back candidacy (slice 3). Returns (validated_dict, strategy)
+    on success, or (None, None) — LOGGING why to stdout — on ANY violation. Never raises: a bad
+    merge_back candidacy is dropped, never a reason to abort the run or the digest write."""
+    if verdict != "candidate-preview-pass":
+        return None, None  # merge_back is only meaningful for a preview-pass verdict
+    if mb is None:
+        return None, None
+    if not isinstance(mb, dict):
+        print("WARNING: merge_back is not a JSON object; dropping candidacy")
+        return None, None
+    strategy = mb.get("strategy")
+    universe = mb.get("universe")
+    start = mb.get("start")
+    end = mb.get("end")
+    if not isinstance(strategy, str) or not _STRATEGY_RE.match(strategy):
+        print(f"WARNING: merge_back.strategy {strategy!r} fails the format check; dropping "
+              "candidacy")
+        return None, None
+    if strategy not in strategy_names:
+        print(f"WARNING: merge_back.strategy {strategy!r} is not among this run's own committed "
+              f"algua/strategies/**.py modules {sorted(strategy_names)!r}; dropping candidacy "
+              "(an agent cannot nominate an unrelated strategy)")
+        return None, None
+    if strategy in seen_strategies:
+        print(f"WARNING: duplicate merge_back.strategy {strategy!r} in this run; keeping the "
+              "FIRST candidacy, dropping this one")
+        return None, None
+    if not isinstance(universe, str) or not _UNIVERSE_RE.match(universe):
+        print(f"WARNING: merge_back.universe {universe!r} fails the format check for "
+              f"{strategy!r}; dropping candidacy")
+        return None, None
+    if not isinstance(start, str) or not _DATE_RE.match(start):
+        print(f"WARNING: merge_back.start {start!r} fails the YYYY-MM-DD format check for "
+              f"{strategy!r}; dropping candidacy")
+        return None, None
+    if not isinstance(end, str) or not _DATE_RE.match(end):
+        print(f"WARNING: merge_back.end {end!r} fails the YYYY-MM-DD format check for "
+              f"{strategy!r}; dropping candidacy")
+        return None, None
+    if not (start <= end <= today):
+        print(f"WARNING: merge_back window start<=end<=today violated ({start}..{end} vs today "
+              f"{today}) for {strategy!r}; dropping candidacy")
+        return None, None
+    return {"strategy": strategy, "universe": universe, "start": start, "end": end}, strategy
+
+
+def _parse_trailer(path: str, *, strategy_names: set) -> tuple[list, dict | None, list]:
     # Bounded tail: read only the LAST 64KB, so a runaway report can't blow memory.
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
@@ -148,10 +214,10 @@ def _parse_trailer(path: str) -> tuple[list, dict | None]:
         text = f.read().decode("utf-8", errors="replace")
     # EOF-ANCHORED trailer: the LAST ```json fence whose closing ``` is followed by nothing
     # but whitespace/blank lines to end-of-file. A trailer followed by prose does NOT count.
-    start = text.rfind("```json")
-    if start == -1:
+    start_idx = text.rfind("```json")
+    if start_idx == -1:
         raise _TrailerError("no fenced json trailer")
-    m = re.match(r"\s*(.*?)\s*```\s*\Z", text[start + len("```json"):], flags=re.DOTALL)
+    m = re.match(r"\s*(.*?)\s*```\s*\Z", text[start_idx + len("```json"):], flags=re.DOTALL)
     if m is None:
         raise _TrailerError("trailer not EOF-anchored")
     data = json.loads(m.group(1))
@@ -161,13 +227,38 @@ def _parse_trailer(path: str) -> tuple[list, dict | None]:
     raw_hyps = data.get("hypotheses")
     if not isinstance(raw_hyps, list):
         raise _TrailerError("hypotheses is not a list")
+    today = datetime.now(UTC).date().isoformat()
     hyps: list = []
+    candidates: list = []
+    seen_strategies: set = set()
     for h in raw_hyps[:40]:
-        title = h.get("title") if isinstance(h, dict) else h
-        if not isinstance(title, str):
-            raise _TrailerError("non-string hypothesis title")
-        if _clean(title):
-            hyps.append(_clean(title))
+        validated_mb = None
+        if isinstance(h, dict):
+            title = h.get("title")
+            if not isinstance(title, str):
+                raise _TrailerError("non-string hypothesis title")
+            verdict = h.get("verdict")
+            if verdict is not None and verdict not in _VALID_VERDICTS:
+                # A PRESENT-but-invalid verdict is malformed model output on the strict-schema
+                # field, not a merge_back format nit — invalidates the whole trailer (same class
+                # of strictness as the title check above). An ABSENT verdict (mid-rollout / an
+                # older prompt) is lenient-tolerated as unknown (None), never an error.
+                raise _TrailerError(f"invalid verdict {verdict!r}")
+            validated_mb, strategy = _validate_merge_back(
+                h.get("merge_back"), verdict=verdict, strategy_names=strategy_names,
+                seen_strategies=seen_strategies, today=today)
+            if strategy is not None:
+                seen_strategies.add(strategy)
+                candidates.append(validated_mb)
+        else:
+            # Legacy/degenerate bare-string shape: title only, no verdict/merge_back.
+            title = h
+            verdict = None
+            if not isinstance(title, str):
+                raise _TrailerError("non-string hypothesis title")
+        clean_title = _clean(title)
+        if clean_title:
+            hyps.append({"title": clean_title, "verdict": verdict, "merge_back": validated_mb})
     pg = data.get("preview_gate")
     gate = None
     if pg is not None:
@@ -180,18 +271,21 @@ def _parse_trailer(path: str) -> tuple[list, dict | None]:
             "passed": pg["passed"],
             "failed_checks": [_clean(c) for c in checks[:40] if _clean(c)],
         }
-    return hyps, gate
+    return hyps, gate, candidates
 
 
+strategy_names = {s for s in strategy_names_csv.split(",") if s}
 hypotheses: list = []
 preview_gate = None
 trailer_parse_error = None  # only a completed run is expected to have a trailer
+candidates: list = []
 if outcome == "completed":
     try:
-        hypotheses, preview_gate = _parse_trailer(report_path)
+        hypotheses, preview_gate, candidates = _parse_trailer(
+            report_path, strategy_names=strategy_names)
         trailer_parse_error = False
     except Exception:
-        hypotheses, preview_gate, trailer_parse_error = [], None, True
+        hypotheses, preview_gate, trailer_parse_error, candidates = [], None, True, []
 
 row = {
     "stamp": stamp,
@@ -206,10 +300,32 @@ row = {
     "preview_gate": preview_gate,
     "trailer_parse_error": trailer_parse_error,
     "rate_limited": rate_limited == "1",
-    "report": f"{branch}:run-report.md" if outcome == "completed" and branch else None,
+    "report": f"{branch}:kb/research-runs/{stamp}.md" if outcome == "completed" and branch else None,
 }
 with open(digest_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+# Enqueue every validated merge_back candidate (factory slice 3) — branch is the DRIVER's own
+# known branch, NEVER read from the trailer. One enqueue call per candidate; a failure here is
+# logged loudly but NEVER fails the digest write (already committed above) or the run.
+if candidates and branch:
+    spec = importlib.util.spec_from_file_location(
+        "mergeback_queue", os.path.join(repo_root, ".codex", "scripts", "mergeback_queue.py"))
+    try:
+        mergeback_queue = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mergeback_queue)
+        for cand in candidates:
+            try:
+                result = mergeback_queue.enqueue(
+                    Path(queue_path), Path(queue_lock_path),
+                    strategy=cand["strategy"], universe=cand["universe"],
+                    start=cand["start"], end=cand["end"], branch=branch)
+                print(f"merge-back queue: {result}")
+            except Exception as exc:
+                print(f"WARNING: failed to enqueue merge-back candidate "
+                      f"{cand['strategy']!r}: {exc}")
+    except Exception as exc:
+        print(f"WARNING: could not load mergeback_queue module from {repo_root}: {exc}")
 PY
   if [[ "${digest_ok}" -ne 1 ]]; then
     echo "WARNING: digest append to ${AUTH_DIGEST} failed — run outcome unaffected." >&2
@@ -260,7 +376,11 @@ for line in last_lines:
     hyps = row.get("hypotheses") if isinstance(row, dict) else None
     if not isinstance(hyps, list):  # non-conforming row: skip silently
         continue
-    for t in hyps:
+    for h in hyps:
+        # Backward-compat (factory slice 3): an OLD digest line's hypotheses are bare title
+        # strings; a NEW line's are {"title", "verdict", "merge_back"} objects. Anti-dup only ever
+        # needed titles, so both shapes contribute the same way — no historical digest rewrite.
+        t = h.get("title") if isinstance(h, dict) else h
         if not isinstance(t, str):
             continue
         s = re.sub(r"[^A-Za-z0-9 ._,%+-]", "", t)[:120].strip()
@@ -288,8 +408,10 @@ ${ANTI_DUP_BLOCK}
 You are sandboxed and operating a THROWAWAY COPY of the funnel (a per-run scratch registry seeded
 from the real one; scratch copies of the immutable snapshots). Nothing you do here touches the
 authoritative funnel, so explore freely: 'research promote' on this scratch copy is a realistic
-pass/fail PREVIEW, not the real promotion. The REAL authoritative promote + code-merge happens later
-when a human runs 'paper merge-back' on a candidate you surface.
+pass/fail PREVIEW, not the real promotion. The REAL authoritative promote + code-merge happens
+AUTOMATICALLY afterward: the launcher parses your report's trailer, and for any hypothesis whose
+merge_back you name it enqueues the real 'paper merge-back' for the trusted drainer to run — you do
+not run it yourself, and no human needs to either.
 
 Hold the research discipline (it makes your preview trustworthy):
   - Use PIT-CORRECT ADJUSTED prices, never raw close/volume (raw is corporate-action contaminated).
@@ -302,21 +424,27 @@ transition --to backtested; backtest walk-forward; backtest sweep; research prom
 --snapshot <id> --start D --end D). Delegate results to the 'interpret' subagent for a promote/discard
 call. Never go past 'candidate'; never put a strategy live. Author strategy files under
 algua/strategies/<family>/ in this worktree; you do NOT need to 'git commit' — the launcher commits
-your files afterward. Write run-report.md at the repo (worktree) root summarizing every hypothesis,
-its walk-forward / sweep / preview-gate numbers and the promote/discard reason, and for any strategy
-whose preview PASSED, the EXACT 'paper merge-back --branch ${BRANCH} --strategy <name> --universe <u>
---start D --end D' command a human should run for the real authoritative promote + merge.
+your files afterward. Write your run report to kb/research-runs/${STAMP}.md (relative to this
+worktree's root; create the kb/research-runs/ directory if it does not exist) summarizing every
+hypothesis, its walk-forward / sweep / preview-gate numbers, and the promote/discard reason.
 
-run-report.md MUST END with a machine-readable trailer — exactly one fenced json code block as the
-FINAL element of the file:
+kb/research-runs/${STAMP}.md MUST END with a machine-readable trailer — exactly one fenced json code
+block as the FINAL element of the file:
 \`\`\`json
-{"hypotheses": [{"title": "<short hypothesis title>", "verdict": "discarded|candidate-preview-pass|error"}],
+{"hypotheses": [{"title": "<short hypothesis title>", "verdict": "discarded|candidate-preview-pass|error",
+  "merge_back": {"strategy": "<strategy_module_name>", "universe": "<universe>", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}],
  "preview_gate": {"passed": false, "failed_checks": ["<failed check name>"]}}
 \`\`\`
-One hypotheses[] entry per hypothesis you evaluated (title <= 120 chars, plain ASCII). preview_gate
-summarizes your final preview 'research promote' run ("passed": true with "failed_checks": [] on a
-pass); use null for preview_gate if no preview ran. The launcher parses this trailer into the
-durable run digest that seeds future runs' do-not-retest context.
+One hypotheses[] entry per hypothesis you evaluated (title <= 120 chars, plain ASCII). Include
+"merge_back" ONLY when that hypothesis's "verdict" is "candidate-preview-pass" — name the exact
+strategy module you authored (its filename under algua/strategies/<family>/, WITHOUT the .py
+suffix — this must be a module your own commit actually adds, or the launcher drops it), the PIT
+universe you promoted against, and the promote window (start <= end <= today, YYYY-MM-DD). Omit
+"merge_back" (or set it to null) for "discarded"/"error" verdicts. preview_gate summarizes your
+final preview 'research promote' run ("passed": true with "failed_checks": [] on a pass); use null
+for preview_gate if no preview ran. The launcher parses this trailer into the durable run digest
+that seeds future runs' do-not-retest context, and enqueues every valid "merge_back" for the
+automated authoritative merge-back drainer.
 EOF
 
 # `-s workspace-write` confines model-generated writes to the worktree (verified: a write to any path
@@ -453,14 +581,32 @@ rate_limited=0
 if grep -qiE 'rate.?limit|429|quota|usage limit' "${RUN_LOG}" 2>/dev/null; then rate_limited=1; fi
 
 # The agent doesn't commit (it's sandboxed off the git dir); the DRIVER (trusted) commits its files.
-# Scoped to the strategies tree + run-report so nothing stray is swept in. Best-effort: a failed
-# commit (e.g. nothing authored) doesn't mask the codex exit code.
+# Scoped to the strategies tree + the kb/research-runs report (kb/** is diff-policy-allowlisted;
+# a root-level run-report.md is NOT — see the diff-policy landmine note at the top of this file) so
+# nothing stray is swept in. Best-effort: a failed commit (e.g. nothing authored) doesn't mask the
+# codex exit code.
 echo "Committing any authored strategies on ${BRANCH} (trusted driver)..."
-git -C "${WORKTREE}" add algua/strategies run-report.md 2>/dev/null || true
+git -C "${WORKTREE}" add algua/strategies kb/research-runs 2>/dev/null || true
 n_strategy_files=0
 if git -C "${WORKTREE}" commit -q -m "research-run ${STAMP}: authored strategies + run report" 2>/dev/null; then
   echo "  committed."
-  n_strategy_files="$(git -C "${WORKTREE}" show --name-only --pretty=format: HEAD -- algua/strategies 2>/dev/null | grep -c . || true)"
+  # ADDED-only (--diff-filter=A), never modified: the whole point of the cross-check is "the agent
+  # can't nominate an unrelated pre-existing strategy for merge-back", and a strategy file this
+  # commit merely MODIFIED (a pre-existing module) is exactly that unrelated-strategy case, just
+  # disguised as a diff instead of an untouched file. `git show --name-only` (the prior form here)
+  # listed ALL changed files (added OR modified) and so wrongly let a modified-not-added file pass
+  # the cross-check. Verified against real commits in this repo (see #536 follow-on review): a
+  # commit that only MODIFIES an existing strategies/ file yields an EMPTY list here, while a
+  # commit that ADDS a new one still lists it.
+  STRATEGY_FILE_LIST="$(git -C "${WORKTREE}" diff-tree --no-commit-id --name-only \
+    --diff-filter=A -r HEAD -- algua/strategies 2>/dev/null | grep . || true)"
+  n_strategy_files="$(printf '%s\n' "${STRATEGY_FILE_LIST}" | grep -c . || true)"
+  # The cross-check set `_validate_merge_back` uses (module name = filename without .py) for
+  # THIS run's own commit — a hypothesis can only nominate a strategy this commit actually added.
+  if [[ -n "${STRATEGY_FILE_LIST}" ]]; then
+    STRATEGY_MODULE_NAMES="$(printf '%s\n' "${STRATEGY_FILE_LIST}" \
+      | xargs -r -n1 basename | sed -E 's/\.py$//' | paste -sd, -)"
+  fi
 else
   echo "  nothing to commit."
 fi
@@ -471,14 +617,16 @@ fi
 # is read bounded-tail (last 64KB), must be EOF-anchored, and is strictly schema-validated —
 # missing/unparseable/non-conforming => hypotheses [], preview_gate null, trailer_parse_error true.
 echo "Appending run digest to ${AUTH_DIGEST}..."
-DIGEST_REPORT_PATH="${WORKTREE}/run-report.md"
+DIGEST_REPORT_PATH="${WORKTREE}/kb/research-runs/${STAMP}.md"
 append_digest completed
 
 echo
 echo "Done. Review the run:"
 echo "  git -C ${REPO_ROOT} diff main...${BRANCH}"
-echo "  cat ${WORKTREE}/run-report.md"
-echo "  # For a PASSED preview, do the REAL authoritative promote + merge (trusted, from main):"
+echo "  cat ${WORKTREE}/kb/research-runs/${STAMP}.md"
+echo "  # Every valid 'merge_back' in the trailer above was just enqueued to ${AUTH_QUEUE}"
+echo "  # for the automated drainer (.codex/scripts/drain-mergeback-queue.sh) to run for real."
+echo "  # To force one through right now instead of waiting for the next drain cycle:"
 echo "  uv run algua paper merge-back --branch ${BRANCH} --strategy <name> --universe <u> --start D --end D"
 echo "When finished, remove the worktree:  git -C ${REPO_ROOT} worktree remove ${WORKTREE}"
 

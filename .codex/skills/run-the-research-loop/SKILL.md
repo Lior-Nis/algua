@@ -46,9 +46,9 @@ For each hypothesis:
    the doc's `## Verdict & next` (what was learned + the next idea as a `[[dangling-link]]`),
    set `hypothesis_status`, and update the family doc's `## State of exploration` and
    `status`. Finally append the hypothesis, params, key metrics, the gate decision, and your
-   candidate/discard rationale to `run-report.md`. For a strategy worth a deeper write-up, the
-   `report-experiments` skill turns its tracked sweep/walk-forward runs into a plotted,
-   provenance-stamped report in the vault.
+   candidate/discard rationale to your run report (see "Finishing a run" below). For a strategy
+   worth a deeper write-up, the `report-experiments` skill turns its tracked sweep/walk-forward
+   runs into a plotted, provenance-stamped report in the vault.
 
 ## Stopping
 
@@ -66,6 +66,15 @@ time, stop early — but always finish by committing your work and writing the r
 ## Finishing a run
 
 1. Ensure every authored strategy file is committed on the current `research-run/<stamp>` branch.
-2. Write `run-report.md` at the repo root: one section per hypothesis (name, params, backtest +
-   walk-forward + gate results, decision + why), then a summary of what you promoted to candidate.
-3. Commit the report. The human reviews the branch (`git diff main...<branch>`) and merges what's worth keeping.
+2. Write your report to `kb/research-runs/<stamp>.md` (create the directory if it doesn't exist):
+   one section per hypothesis (name, params, backtest + walk-forward + gate results, decision +
+   why), then a summary of what you promoted to candidate.
+3. The report MUST end with a machine-readable trailer — one fenced ```json block naming, per
+   hypothesis, its `title`, `verdict` (`"discarded"|"candidate-preview-pass"|"error"`), and — only
+   when `verdict` is `"candidate-preview-pass"` — a `merge_back` object (`strategy`, `universe`,
+   `start`, `end`) naming the exact strategy module you authored and its promote window. The
+   launcher parses this into the durable run digest and, for every valid `merge_back`, enqueues
+   the REAL, authoritative `paper merge-back` for the automated drainer to run — the merge-back
+   you'd otherwise hand a human is now automatic; do not run it yourself.
+4. Commit the report (the launcher does this for you). Review the branch afterward with
+   `git diff main...<branch>` if you want to double-check what shipped.

@@ -86,7 +86,15 @@ OPERATOR_JOBS: dict[str, OperatorJob] = {
         ),
     ),
 }
-# The "research" job (`algua paper merge-back …`, completed ⇔ rc0, grace 3600) is DEFERRED to a
-# follow-up (round-3 fix #1): a static ExecStart cannot resolve WHICH candidate branch/strategy to
-# merge back — that selection mechanism must land first. It drops in here as a new manifest entry +
-# unit pair with no wrapper change.
+# Merge-back does NOT get an OPERATOR_JOBS entry (factory slice 3). `algua operator run --job X` is
+# SESSION-GATED (`_run_session` calls `session_gate` unconditionally, once per XNYS session) — but
+# merge-back must fire repeatedly through the day (once per drain cycle), so reusing this wrapper
+# would silently cap it at once per session. The candidate-selection gap this comment used to note
+# (WHICH branch/strategy/universe/window to merge back) is closed by a durable queue
+# (`data/mergeback-queue.json`, populated by the research driver + drained by
+# `.codex/scripts/drain-mergeback-queue.sh`), but the drainer does NOT invoke merge-back through
+# THIS manifest. It uses the separate, purely additive `algua operator lock-run -- <command…>`
+# command instead: same `operator.lock` (so merge-back and the paper job still share real
+# kernel-enforced mutual exclusion), but no session marker and no completion recording — exactly
+# what a fires-many-times-per-day job needs, without reintroducing the once-per-session bug a naive
+# OPERATOR_JOBS entry would cause.

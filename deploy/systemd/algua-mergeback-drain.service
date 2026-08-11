@@ -1,0 +1,18 @@
+[Unit]
+Description=Algua merge-back queue drainer (trusted, unsandboxed, no LLM)
+# Fired by algua-mergeback-drain.timer. Selects exactly ONE eligible item from
+# data/mergeback-queue.json (populated by the research producer's driver — see
+# algua-research.service) and drives the REAL, authoritative `algua paper merge-back` through
+# `algua operator lock-run`, which shares `operator.lock` with the daily paper tick (algua-paper.
+# service) so the two can never mutate the shared checkout/registry concurrently. Pure plumbing:
+# no Codex, no LLM, no sandboxing — this is trusted code driving trusted code.
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/algua/algua.env
+WorkingDirectory=/opt/algua
+# One merge-back attempt's worst case is dominated by the FULL quality gate (pytest+ruff+mypy+
+# lint-imports), observed ~9 minutes; this leaves generous margin. Must stay comfortably below the
+# 30-minute timer cadence so a slow cycle never overlaps its own next firing.
+TimeoutStartSec=1200
+ExecStart=/opt/algua/.codex/scripts/drain-mergeback-queue.sh
