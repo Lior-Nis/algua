@@ -469,8 +469,8 @@ def test_regime_check_in_to_dict():
 # --- FAIL-CLOSED: binding + <2 survivors -> check FAILED -> gate passed=False ------
 
 def test_regime_binding_negative_sharpe_regime_fails_gate():
-    """Strategy has strongly negative returns in the high-vol regime -> regime_robustness FAILED.
-    A strategy that passes the aggregate holdout_sharpe (sharpe=7.0) must fail overall.
+    """Strategy has strongly negative returns in the high-vol regime -> regime_robustness FAILED
+    (recorded as a failed advisory flag; the soft gate itself passes on the integrity floor).
 
     Mechanism:
     - Market: first 63 bars low-vol, last 189 bars high-vol (clear tertile split).
@@ -495,7 +495,10 @@ def test_regime_binding_negative_sharpe_regime_fails_gate():
     d = evaluate_gate(wf, GateCriteria(), pit_ok=True, market_returns=market)
     regime_check = next(c for c in d.checks if c["name"] == "regime_robustness")
     assert regime_check["passed"] is False
-    assert d.passed is False
+    # Factory soft gate: the failed regime check is recorded as an ADVISORY flag — the aggregate
+    # holdout clears the integrity floor, so the gate passes (the forward gate is the blocker).
+    assert regime_check["advisory"] is True
+    assert d.passed is True
 
 
 # --- market_returns=None -> NO check, regime_method="unavailable" ----------

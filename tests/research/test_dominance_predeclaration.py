@@ -210,11 +210,15 @@ def test_shadow_fields_do_not_affect_passed() -> None:
 
     assert d.haircut_would_have_blocked is True  # confirms shadow field is True
 
-    # `passed` must be False because the holdout_sharpe check itself fails (sharpe < effective)
-    # The key test: the holdout_sharpe check caused passed=False, NOT haircut_would_have_blocked
+    # The holdout_sharpe check itself fails (sharpe < effective) — but it is ADVISORY under the
+    # factory soft gate, so `passed` stays True on the integrity floor. The key test is
+    # unchanged in spirit: neither shadow field enters passed or the checks list.
     holdout_check = next(c for c in d.checks if c["name"] == "holdout_sharpe")
     assert holdout_check["passed"] is False, "holdout_sharpe check must fail (sharpe < effective)"
-    assert d.passed is False
+    assert holdout_check["advisory"] is True
+    assert d.passed is True
+    assert all(c["name"] not in ("haircut_would_have_blocked", "phase3_component_mask")
+               for c in d.checks)
 
     # Shadow fields must NOT appear in checks
     check_names = {c["name"] for c in d.checks}

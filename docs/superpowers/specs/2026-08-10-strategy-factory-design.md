@@ -115,10 +115,15 @@ the monitor PWA (Funnel/Activity/Ideas + fleet health) is the observation surfac
 
 **Slice 2 — the soft gate (CODEOWNERS: gates/promotion; human-merged):**
 - Agent-path `research promote`: binding set reduced to the integrity floor (decision 2);
-  statistical stack computes + records as advisory (`*_binding=false` semantics); FDR ledger rows
-  still written; throttle non-binding on this path. Human paths unchanged. Tests pin: floor
+  statistical stack computes + records as advisory (`*_binding=false` semantics);
+  `gate_evaluations` rows are still written; LORD++ BINDING stream rows are NOT written while
+  stats are advisory (`fdr_binding` NULL, skip reason `stats_advisory`); the ledger machinery is
+  preserved for re-tightening. Human paths unchanged. Tests pin: floor
   failures still fail closed; statistical failures no longer veto; advisory fields still recorded;
   forward-bar parameterization (0.5×holdout) unchanged.
+- Rollout invariant: slice 2 may merge before slice 3 only because authoritative
+  merge-back/paper intake remains HUMAN-run — the soft gate must not be combined with automated
+  intake until the wide book + early-kill land.
 
 **Slice 3 — flow + paper at scale (CODEOWNERS adjacency; human-merged):**
 - Driver auto-invokes `paper merge-back` on preview PASS (decision 6).

@@ -126,8 +126,9 @@ _PROMOTE_SUMMARY_KEYS = (
     "promoted", "strategy", "passed", "checks", "n_combos", "n_funnel", "breadth_provenance",
     "base_min_holdout_sharpe", "effective_min_holdout_sharpe", "pit_ok", "pit_override",
     "dsr_binding", "dsr_bootstrap_binding", "fdr_binding", "regime_robustness_binding",
-    "returns_available", "holdout", "stability", "config_hash", "snapshot_id", "universe_name",
-    "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "holdout_reuse",
+    "ir_binding", "returns_available", "holdout", "stability", "config_hash", "snapshot_id",
+    "universe_name", "universe_snapshots", "fundamentals_snapshot", "news_snapshot",
+    "holdout_reuse",
 )
 
 
@@ -180,12 +181,6 @@ def promote(
         help="HUMAN-ONLY: realize a held-into-gap name at its last close when no delisting record "
              "exists. An agent must supply explicit delisting records; no-record-gap fails closed.",
     ),
-    fdr_throttle_override: bool = typer.Option(
-        False, "--fdr-throttle-override",
-        help="HUMAN-ONLY (#529): bypass the windowed FDR promotion-eligibility throttle (≤16 "
-             "binding tests / 365d). An agent may never pass this; each use is one #329-signed, "
-             "audited acceptance of one marginal promotion beyond the near-term exposure budget.",
-    ),
     actor: str = typer.Option("agent", "--actor", help="human | agent | system"),
     actor_signature: str = typer.Option(
         None, "--actor-signature",
@@ -205,17 +200,19 @@ def promote(
         help="emit only decision-relevant scalars (drops deep dsr_*/fdr_*/regime diagnostics; "
              "context-rot defense)"),
 ) -> None:
-    """Gate backtested->candidate on walk-forward holdout + stability; promote only on pass.
+    """Gate backtested->candidate on the INTEGRITY FLOOR; promote only on pass (factory soft gate).
 
-    The holdout-Sharpe bar is DEFLATED by FUNNEL-WIDE search breadth (the multiple-testing defense):
-    the max of this strategy's lifetime recorded breadth and the funnel-wide breadth in the rolling
-    window. Breadth is MEASURED as the sum of recorded `search_trials` (from `backtest sweep`); an
+    BINDING (the floor): PIT universe (`--universe`; non-PIT fails closed unless a human passes
+    --allow-non-pit), holdout >= 63 observations (underpowered holdouts fail closed), and raw
+    holdout Sharpe > 0. Everything statistical — the breadth-DEFLATED holdout-Sharpe bar, window
+    stability, DSR/bootstrap evidence, regime robustness, idiosyncratic alpha — is computed and
+    recorded as ADVISORY (`"advisory": true` on the check; never vetoes). The FORWARD gate is the
+    harsh threshold (its bar is 0.5x the holdout Sharpe recorded here — overfit self-punishes).
+    Breadth is still MEASURED as the sum of recorded `search_trials` (from `backtest sweep`); an
     agent must have measured breadth (no measured trials => refused). Declaring breadth via
     --n-combos is HUMAN-ONLY and recorded with provenance="declared" (auditably less trustworthy).
-    For an agent the universe must be PIT (`--universe`); non-PIT fails closed unless a human passes
-    --allow-non-pit. A minimum holdout-observations floor (63) also fails closed (underpowered
-    holdouts). On pass for an agent this mints the single-use gate token the BACKTESTED->CANDIDATE
-    transition consumes.
+    On pass for an agent this mints the single-use gate token the BACKTESTED->CANDIDATE
+    transition consumes. See docs/superpowers/specs/2026-08-10-strategy-factory-design.md.
     """
     payload = promote_task(
         name, start=start, end=end, demo=demo, snapshot=snapshot,
@@ -226,7 +223,6 @@ def promote(
         n_combos=n_combos, allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit,
         delistings=delistings, assume_terminal_last_close=assume_terminal_last_close,
         actor=actor, actor_signature=actor_signature, new_family=new_family,
-        fdr_throttle_override=fdr_throttle_override,
     )
     out = ok(payload)
     emit(project(out, _PROMOTE_SUMMARY_KEYS) if summary else out)
@@ -243,7 +239,6 @@ def promote_task(  # noqa: PLR0913, PLR0915
     actor_signature: str | None = None,
     new_family: str | None = None, reload: bool = False,
     attempt_token: str | None = None,
-    fdr_throttle_override: bool = False,
 ) -> dict:
     """Run the backtested->candidate gate and return the (pre-``--summary``) payload dict — the
     body of ``research promote``, shared with the ``research run-all`` batch worker (#326).
@@ -267,16 +262,6 @@ def promote_task(  # noqa: PLR0913, PLR0915
             "--assume-terminal-last-close is human-only (an agent must supply delisting records "
             "via --delistings; a held-into-gap name without a record fails closed for the agent "
             "path). Pass --actor human to accept the cost."
-        )
-    # #529 §3.5: the windowed FDR promotion-throttle bypass is human-only (mirrors --allow-non-pit /
-    # --allow-holdout-reuse). An agent can never lift the near-term exposure cap; each human use is
-    # a separate #329-signed acceptance of one marginal promotion. (record_gate re-enforces this at
-    # the store boundary — defense in depth.)
-    if fdr_throttle_override and actor_enum is not Actor.HUMAN:
-        raise ValueError(
-            "--fdr-throttle-override is human-only: an agent may not bypass the windowed FDR "
-            "promotion-eligibility throttle. Pass --actor human (with a #329 signature) to accept "
-            "one marginal promotion beyond the near-term exposure budget."
         )
     # 1. Resolve inputs. The PIT universe is resolved up front alongside the other inputs (a bad
     # --universe refuses here, before any holdout is peeked at). The universe is intentionally NOT
@@ -350,9 +335,6 @@ def promote_task(  # noqa: PLR0913, PLR0915
                 "allow_non_pit": allow_non_pit, "delistings": delistings,
                 "assume_terminal_last_close": assume_terminal_last_close,
                 "new_family": new_family,
-                # #529: bind the throttle-bypass into the signed run so a captured signature cannot
-                # be replayed to add/drop the override.
-                "fdr_throttle_override": fdr_throttle_override,
                 # Bind the RESOLVED immutable data provenance, not just the mutable name: an agent
                 # can `data ingest-universe`/`import-delistings` a new effective-date between the
                 # challenge and the signature to change what the SAME name resolves to. Binding the
@@ -440,7 +422,6 @@ def promote_task(  # noqa: PLR0913, PLR0915
                 period_start=start_dt.date(), period_end=end_dt.date(), holdout_frac=holdout_frac,
                 data_source=data_source, snapshot_id=snapshot_id, allow_non_pit=allow_non_pit,
                 holdout_evaluation_id=reservation_id, attempt_token=attempt_token,
-                fdr_throttle_override=fdr_throttle_override,
                 reason_suffix=("; holdout_reuse=" + _HOLDOUT_REUSE_OVERRIDE) if reused else "")
         except BaseException as exc:
             try:

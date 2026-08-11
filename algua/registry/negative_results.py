@@ -242,17 +242,23 @@ def build_gate_fail_record(
 ) -> dict[str, Any]:
     """Turn a FAILED gate ``decision`` (``GateDecision.to_dict()``) into record fields.
 
-    Pure — no I/O. The ``reason`` names the failed checks (the refutation, human-readable); the
-    ``params`` carry the full checks list plus period/breadth/holdout so the evidence survives.
+    Pure — no I/O. The ``reason`` names the BINDING failed checks only (the refutation,
+    human-readable — an advisory stat can't have failed the gate); failed ADVISORY checks are
+    recorded separately as ``params["advisory_flags"]`` (schema-additive). The ``params`` carry
+    the full checks list plus period/breadth/holdout so the evidence survives.
     """
     checks = decision.get("checks") or []
-    failed = [c.get("name", "?") for c in checks if not c.get("passed", True)]
+    failed = [c.get("name", "?") for c in checks
+              if not c.get("passed", True) and not c.get("advisory")]
+    advisory_flags = [c.get("name", "?") for c in checks
+                      if not c.get("passed", True) and c.get("advisory")]
     reason = (
         "gate FAILED: " + ", ".join(failed) if failed else "gate FAILED (no failing check named)"
     )
     params = {
         "period": {"start": period_start, "end": period_end},
         "checks": checks,
+        "advisory_flags": advisory_flags,
         "n_funnel": decision.get("n_combos"),
         "breadth_provenance": decision.get("breadth_provenance"),
         "effective_min_holdout_sharpe": decision.get("effective_min_holdout_sharpe"),

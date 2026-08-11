@@ -217,12 +217,13 @@ def test_promote_refuses_with_no_breadth():
 
 
 def test_promote_fails_does_not_transition():
+    # Soft gate: force a BINDING failure via pit_required (no --universe and no --allow-non-pit
+    # fails closed); a raised holdout-Sharpe bar is advisory now and cannot fail the gate.
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
     result = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--min-holdout-sharpe", "999", "--n-combos", "1",
-                                 "--allow-non-pit", "--actor", "human"])
+                                 "--n-combos", "1", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
     assert payload["passed"] is False
@@ -298,15 +299,14 @@ def test_promote_system_actor_refused_before_holdout_and_gate_row(tmp_path):
 
 
 def test_gate_row_written_on_both_pass_and_fail(tmp_path):
-    # A FAILING gate (impossible Sharpe) still records an audit row with passed=0; a PASSING gate
-    # records one with passed=1. The strategy stays `backtested` after the fail so the second
-    # (passing) promote on the same lifecycle is legal.
+    # A FAILING gate (binding pit_required fail: no universe, no --allow-non-pit) still records an
+    # audit row with passed=0; a PASSING gate records one with passed=1. The strategy stays
+    # `backtested` after the fail so the second (passing) promote on the same lifecycle is legal.
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
     fail = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                "--start", "2022-01-01", "--end", "2023-12-31",
-                               "--min-holdout-sharpe", "999", "--n-combos", "9",
-                               "--allow-non-pit", "--actor", "human"])
+                               "--n-combos", "9", "--actor", "human"])
     assert fail.exit_code == 0, fail.stdout
     assert json.loads(fail.stdout)["passed"] is False
     rows = _gate_rows(tmp_path)
@@ -341,12 +341,12 @@ def test_first_promote_records_holdout_evaluation(tmp_path):
 def test_second_promote_same_window_refused(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
-    # First promote FAILS the gate (impossible Sharpe) so the strategy stays `backtested`; this
-    # isolates the holdout-reuse refusal on the second run from the stage-legality preflight check.
+    # First promote FAILS the gate (binding pit_required fail: no --allow-non-pit) so the strategy
+    # stays `backtested`; this isolates the holdout-reuse refusal on the second run from the
+    # stage-legality preflight check.
     first = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "9",
-                                "--allow-non-pit", "--actor", "human"])
+                                "--n-combos", "9", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     assert json.loads(first.stdout)["passed"] is False
     second = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
@@ -363,11 +363,11 @@ def test_second_promote_same_window_refused(tmp_path):
 def test_failing_first_promote_still_burns_holdout(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
-    # Impossible Sharpe bar -> gate fails, but the holdout was looked at and is now burned.
+    # Binding pit_required fail (no --allow-non-pit) -> gate fails, but the holdout was looked at
+    # and is now burned.
     first = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "1",
-                                "--allow-non-pit", "--actor", "human"])
+                                "--n-combos", "1", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     assert json.loads(first.stdout)["passed"] is False
     assert len(_holdout_rows(tmp_path)) == 1
@@ -382,12 +382,12 @@ def test_failing_first_promote_still_burns_holdout(tmp_path):
 def test_allow_holdout_reuse_overrides(tmp_path):
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
-    # First promote FAILS the gate (impossible Sharpe) so the strategy stays `backtested`, but the
-    # holdout is burned. The override then re-evaluates the same window and promotes on the merits.
+    # First promote FAILS the gate (binding pit_required fail: no --allow-non-pit) so the strategy
+    # stays `backtested`, but the holdout is burned. The override then re-evaluates the same
+    # window and promotes on the merits.
     first = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "9",
-                                "--allow-non-pit", "--actor", "human"])
+                                "--n-combos", "9", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     assert json.loads(first.stdout)["passed"] is False
     second = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
@@ -502,15 +502,12 @@ def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
                                  *_PASS, "--n-combos", "9", "--actor", "human"])
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout)
-    # Net of the default transaction costs (#325) AND the next-bar-OPEN fill basis (#383, which
-    # reprices every fill from adj_close(t+1) to adj_open(t+1)), cross_sectional_momentum is
-    # market-beta (market_beta ~1.0) and still FAILS the gate — ir_binding is not relaxed by _PASS.
-    # This test's subject is PIT-provenance THREADING, recorded on the run regardless of the
-    # pass/fail verdict, so we assert the (now correct, open-fill) FAIL and keep every provenance
-    # assertion. The open-fill basis lifted the idiosyncratic alpha into positive territory, so we
-    # no longer pin the appraisal_ratio SIGN — only that the run failed and ir_binding is present.
-    assert payload["passed"] is False
-    assert payload["promoted"] is False
+    # cross_sectional_momentum is market-beta (market_beta ~1.0) and fails the idiosyncratic-alpha
+    # check — under the factory soft gate that miss is ADVISORY (recorded, never a veto), so this
+    # PIT-clean run now PASSES on the integrity floor. This test's subject is PIT-provenance
+    # THREADING, recorded on the run regardless of the verdict; ir_binding stays armed/evaluated.
+    assert payload["passed"] is True
+    assert payload["promoted"] is True
     assert payload["ir_binding"] is True
     assert payload["universe_name"] == "pit_core"
     eff = [s["effective_date"] for s in payload["universe_snapshots"]]
@@ -518,7 +515,7 @@ def test_promote_with_universe_threads_pit_provenance(tmp_path, monkeypatch):
     assert {s["snapshot_id"] for s in payload["universe_snapshots"]} == {first_u, second_u}
     # The bars snapshot_id is a SEPARATE provenance dimension — still the bars snapshot.
     assert payload["snapshot_id"] == snap
-    assert _stage() == "backtested"  # gate failed -> no transition
+    assert _stage() == "candidate"  # soft-gate pass -> promoted
 
 
 def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):
@@ -531,11 +528,12 @@ def test_promote_pit_membership_changes_holdout_outcome(tmp_path, monkeypatch):
     assert _register_backtested_on_snapshot(snap).exit_code == 0
     _ensure_family()
 
+    # The static run FAILS on binding pit_required (no universe, no --allow-non-pit) so the stage
+    # stays `backtested` for the PIT run below; its holdout metrics are still computed + emitted.
     static = _promote(["research", "promote", "cross_sectional_momentum",
                                  "--snapshot", snap,
                                  "--start", "2022-01-01", "--end", "2023-12-31",
-                                 "--min-holdout-sharpe", "999", "--n-combos", "9",
-                                 "--allow-non-pit", "--actor", "human"])
+                                 "--n-combos", "9", "--actor", "human"])
     assert static.exit_code == 0, static.stdout
     static_holdout = json.loads(static.stdout)["holdout"]
 
@@ -587,13 +585,13 @@ def test_promote_universe_burn_keyed_on_window_not_universe(tmp_path, monkeypatc
     _ingest_pit_universe(tmp_path)
     assert _register_backtested_on_snapshot(snap).exit_code == 0
     _ensure_family()
-    # First promote FAILS the gate (impossible Sharpe) so the strategy stays `backtested`; this
-    # isolates the holdout-burn refusal on the second run from the stage-legality preflight check.
+    # First promote FAILS the gate (binding pit_required fail: no universe, no --allow-non-pit) so
+    # the strategy stays `backtested`; this isolates the holdout-burn refusal on the second run
+    # from the stage-legality preflight check.
     first = _promote(["research", "promote", "cross_sectional_momentum",
                                 "--snapshot", snap,
                                 "--start", "2022-01-01", "--end", "2023-12-31",
-                                "--min-holdout-sharpe", "999", "--n-combos", "9",
-                                "--allow-non-pit", "--actor", "human"])
+                                "--n-combos", "9", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     assert json.loads(first.stdout)["passed"] is False
     # Same window/snapshot, now WITH a universe -> still refused (universe not in burn identity).
@@ -780,13 +778,13 @@ def test_promote_different_holdout_frac_is_refused_as_reburn(tmp_path):
     """
     assert _backtest_to_backtested().exit_code == 0
     _ensure_family()
-    # First promote: impossible Sharpe bar -> gate fails, strategy stays `backtested`.
-    # But the holdout IS peeked (walk_forward ran), so the burn is committed before the gate check.
+    # First promote: binding pit_required fail (no --allow-non-pit) -> gate fails, strategy stays
+    # `backtested`. But the holdout IS peeked (walk_forward ran), so the burn is committed before
+    # the gate check.
     first = _promote(["research", "promote", "cross_sectional_momentum", "--demo",
                                 "--start", "2022-01-01", "--end", "2023-12-31",
                                 "--holdout-frac", "0.2",
-                                "--min-holdout-sharpe", "999", "--n-combos", "1",
-                                "--allow-non-pit", "--actor", "human"])
+                                "--n-combos", "1", "--actor", "human"])
     assert first.exit_code == 0, first.stdout
     first_payload = json.loads(first.stdout)
     # The first call must NOT itself be a "holdout already consumed" refusal.

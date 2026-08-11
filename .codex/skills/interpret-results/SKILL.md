@@ -23,15 +23,21 @@ accident.
 
 ## The promotion gate (what `research promote` checks)
 
-The gate passes only if **all** hold (defaults in `algua/research/gates.py`):
-- `holdout_sharpe >= 0.5`
-- `holdout_total_return > 0.0` (strict)
-- `pct_positive_windows >= 0.6`
-- `min_window_sharpe >= 0.0` (the worst window isn't badly negative)
+The gate is an **integrity floor** (factory soft gate, market-first selection — see
+`docs/superpowers/specs/2026-08-10-strategy-factory-design.md`). It passes iff the BINDING
+checks hold (those without `"advisory": true` in `checks`):
+- `pit_required` — PIT universe coverage
+- `min_holdout_observations >= 63` (the power floor)
+- `holdout_sharpe_floor > 0.0` — the RAW holdout Sharpe (a losing book never passes)
 
-A pass is a genuine signal of out-of-sample robustness; a fail is informative — read which check
-failed. **Never lower these thresholds to force a pass.** If a strategy fails, discard it (or form
-a better hypothesis) — that's the gate doing its job.
+Everything statistical is computed and recorded as **advisory** (`"advisory": true` on the
+check; it never vetoes): the breadth-deflated `holdout_sharpe` bar (base 0.5), `holdout_return`,
+`pct_positive_windows >= 0.6`, `min_window_sharpe`, `dsr_evidence`/`dsr_bootstrap`,
+`regime_robustness`, `idiosyncratic_alpha`. READ the failed advisory flags anyway — they are the
+quality telemetry for your promote/discard judgement, and the recorded holdout Sharpe sets the
+FORWARD gate's bar (realized Sharpe >= 0.5×holdout): an overfit-inflated holdout self-punishes
+in paper. The forward gate, not this one, is the harsh threshold.
+**Never relax the floor to force a pass.** A floor fail means discard (or a better hypothesis).
 
 ## What "good" looks like
 
