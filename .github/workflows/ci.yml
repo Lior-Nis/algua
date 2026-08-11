@@ -23,3 +23,29 @@ jobs:
         run: uv run mypy algua
       - name: Import boundaries
         run: uv run lint-imports
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+      - name: Install web backend (standalone project — root uv.lock untouched)
+        run: uv sync --project web --locked
+      - name: Backend tests
+        run: uv run --project web pytest web/backend/tests -q
+      - name: Frontend install
+        run: npm ci
+        working-directory: web/frontend
+      - name: Frontend check (tsc + vitest)
+        run: npm run check
+        working-directory: web/frontend
+      - name: Frontend build
+        run: npm run build
+        working-directory: web/frontend
