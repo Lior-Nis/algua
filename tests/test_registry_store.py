@@ -1372,10 +1372,11 @@ def test_fdr_gate_db_passed_column_true_on_accept(repo):
     assert row["passed"] == 1
 
 
-def test_fdr_gate_decision_json_has_audit_fields_but_no_fdr_checks(repo):
-    """Factory soft gate: even a BINDING row (direct store call — the preserved ledger machinery)
-    no longer appends fdr_evidence/fdr_throttle CHECKS to decision_json. The top-level fdr_*
-    AUDIT fields are still recorded (stream position, throttle state, active-cohort exposure)."""
+def test_fdr_gate_binding_row_appends_fdr_checks_to_decision_json(repo):
+    """Preserved ledger machinery (direct store call with a real p_value — the promote path never
+    gets here since the factory soft gate): a BINDING row's veto must stay explainable, so the
+    fdr_evidence/fdr_throttle CHECKS are appended to decision_json alongside the top-level fdr_*
+    audit fields (a veto with no failed check would be an unexplainable audit record)."""
     rec = _at_backtested(repo)
     outcome = repo.record_gate_with_fdr_and_maybe_promote(
         rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.03,
@@ -1385,15 +1386,34 @@ def test_fdr_gate_decision_json_has_audit_fields_but_no_fdr_checks(repo):
     ).fetchone()
     import json
     stored = json.loads(row["decision_json"])
-    names = {c.get("name") for c in stored.get("checks", [])}
-    assert "fdr_evidence" not in names
-    assert "fdr_throttle" not in names
+    by_name = {c.get("name"): c for c in stored.get("checks", [])}
+    assert by_name["fdr_evidence"]["passed"] is True
+    assert by_name["fdr_evidence"]["value"] == 0.03
+    assert by_name["fdr_throttle"]["passed"] is True
     assert stored["fdr_binding"] is True
     assert stored["fdr_cohort"] == 0
     # §4 active-cohort exposure audit fields present; the removed override key is NOT written.
     assert stored["fdr_active_cohort_position"] == 1
     assert stored["fdr_throttle_window_binding"] == 0
     assert "fdr_throttle_override" not in stored
+
+
+def test_fdr_gate_binding_reject_carries_failing_fdr_check(repo):
+    """A binding row vetoed by the FDR evidence check records fdr_evidence.passed=False in its
+    checks — the audit invariant the soft-gate refactor must not weaken."""
+    rec = _at_backtested(repo)
+    outcome = repo.record_gate_with_fdr_and_maybe_promote(
+        rec, funnel=_EMPTY_FUNNEL, gate_row=_make_gate_row(passed=True), p_value=0.9,
+        level_fn=_level_reject, fdr_alpha=0.05, actor=Actor.AGENT)
+    assert outcome.final_passed is False
+    row = repo._conn.execute(
+        "SELECT decision_json FROM gate_evaluations WHERE id=?", (outcome.gate_id,)
+    ).fetchone()
+    import json
+    stored = json.loads(row["decision_json"])
+    by_name = {c.get("name"): c for c in stored.get("checks", [])}
+    assert by_name["fdr_evidence"]["passed"] is False
+    assert stored["passed"] is False
 
 
 def test_fdr_gate_stream_grows_for_binding_rows(repo):

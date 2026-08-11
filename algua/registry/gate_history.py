@@ -59,7 +59,6 @@ GATE_DECISION_ALLOWLIST: frozenset[str] = frozenset({
     "fdr_expected_false_discoveries",
     "fdr_throttle_window_binding",
     "fdr_throttle_tripped",
-    "fdr_throttle_override",
     "fdr_active_cohort_position",
     "fdr_active_cohort_applied_alpha",
     "fdr_expected_false_discoveries_incl_active",

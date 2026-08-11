@@ -67,8 +67,10 @@ FDR_COHORT_SIZE = 8
 # binding FDR tests within the trailing FDR_THROTTLE_WINDOW_DAYS is counted at decision time; once
 # it reaches FDR_NEAR_TERM_BINDING_BUDGET, further binding tests are PROMOTION-INELIGIBLE — STILL
 # commit a fail-closed binding row and STILL advance the LORD++ stream (a real FDR test ran; a
-# holdout was burned) but final_passed is forced False, so they cannot promote. A human with a #329
-# signature can bypass it via `--fdr-throttle-override` (REJECTED on the agent path).
+# holdout was burned) but final_passed is forced False, so they cannot promote. NOTE (factory soft
+# gate): the promote path no longer writes binding rows (stats are advisory), so this machinery is
+# FROZEN — preserved for future re-tightening; the --fdr-throttle-override bypass was removed with
+# the rest of the flag's plumbing.
 #
 # WHY (protected constants — raising the budget or shrinking nothing else re-opens the exposure).
 # Only the FIRST FDR_NEAR_TERM_BINDING_BUDGET (=H_near) in-window binding tests can promote; those

@@ -1611,13 +1611,27 @@ class SqliteStrategyRepository:
 
             # Patch decision_json so the stored audit record reflects final_passed and the FDR
             # gate outcome — both are only known after the stream read inside this transaction.
-            # The fdr_* patches below are AUDIT fields only: since the factory soft gate, no
-            # fdr_evidence/fdr_throttle CHECKS are appended anywhere (the statistical stack is
-            # advisory and the promote path never writes a binding row; this branch is the
-            # preserved ledger machinery for future re-tightening).
+            # The promote path never reaches the binding branch (run_gate forces p_value=None,
+            # skip reason "stats_advisory"); this branch is the preserved ledger machinery for
+            # future re-tightening, and its audit invariant MUST hold: a binding row vetoed by
+            # FDR/throttle carries the failing check in decision_json (Gate-2 finding — a veto
+            # with no failed check would be an unexplainable audit record).
             raw_decision = json.loads(gate_row.get("decision_json") or "{}")
             raw_decision["passed"] = final_passed
             if fdr_binding:
+                fdr_checks = raw_decision.get("checks")
+                if not isinstance(fdr_checks, list):
+                    fdr_checks = []
+                    raw_decision["checks"] = fdr_checks
+                fdr_checks.append({
+                    "name": "fdr_evidence", "value": p_value, "threshold": alpha_t,
+                    "op": "<=", "passed": bool(fdr_rejected),
+                })
+                fdr_checks.append({
+                    "name": "fdr_throttle", "value": throttle_window_binding,
+                    "threshold": FDR_NEAR_TERM_BINDING_BUDGET, "op": "<",
+                    "passed": bool(promotion_eligible),
+                })
                 raw_decision["fdr_binding"] = True
                 raw_decision["fdr_p_value"] = p_value
                 raw_decision["fdr_alpha_level"] = alpha_t

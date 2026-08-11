@@ -234,10 +234,10 @@ class GateDecision:
     # Windowed promotion-eligibility throttle (#529, §3.5). fdr_throttle_window_binding = count of
     # PRIOR committed binding tests within FDR_THROTTLE_WINDOW_DAYS at decision time;
     # fdr_throttle_tripped = the budget was already spent so promotion was blocked. Never populated
-    # while stats are advisory (no binding rows are written); --fdr-throttle-override is REMOVED.
+    # while stats are advisory (no binding rows are written). fdr_throttle_override was REMOVED
+    # with the flag itself (no dead cruft — legacy rows keep the key in their stored JSON only).
     fdr_throttle_window_binding: int | None = None
     fdr_throttle_tripped: bool | None = None
-    fdr_throttle_override: bool | None = None
     # Active (in-progress) cohort exposure audit (#529, §4) — surfaces partial-cohort spend that the
     # completed-only fdr_expected_false_discoveries hides at small N. Position 1..FDR_COHORT_SIZE;
     # applied_alpha = Σ stored α over the open cohort's binding rows incl. this one;
