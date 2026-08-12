@@ -26,6 +26,13 @@ The hard correctness properties it encodes (each closing a specific GATE-2 findi
 * **Token-bound promote attribution (finding #5).** Promotion success is read from the registry by
   the per-attempt ``attempt_token`` stamped on the gate row, never from the ambient stage nor from
   "did the call raise".
+* **Authoritative intake chokepoint (mergeback-authoritative-intake).** A factory survivor has NO
+  authoritative registry row (``stage_of`` -> None) and NO authoritative promote evidence; after
+  the gate-green merge is durably on ``main`` and immediately before promote, the injected
+  ``ensure_backtested`` registers it (one-tx create + CAS to ``backtested``) and
+  ``produce_evidence`` reproduces the evidence recipe authoritatively. A missing registry row that
+  the journal says was promoted/allocated fails closed (:class:`JournalRegistryMismatchError`) —
+  replay never manufactures success out of registry corruption.
 
 Imports only from within ``algua.operator`` (a package leaf), so no import-linter contract touches
 it. ``RealGitOps``/``merge_back_lock`` re-export from :mod:`algua.operator.gitops` for the CLI.
@@ -48,6 +55,7 @@ from algua.operator.journal import (
 __all__ = [
     "CycleResult",
     "GitOps",
+    "JournalRegistryMismatchError",
     "LocalMainDriftError",
     "MergeContentAbsentError",
     "RealGitOps",
@@ -78,6 +86,18 @@ class StageDriftError(RuntimeError):
     Raised when the journal cannot prove this driver produced the observed ``candidate``/``paper``
     stage. Reverting a possibly-committed external promotion is the dangerous direction, so the
     driver fails closed for human triage rather than acting on drifted state.
+    """
+
+
+class JournalRegistryMismatchError(RuntimeError):
+    """The journal proves a promotion/allocation this registry no longer has a row for.
+
+    An UNREGISTERED strategy (``stage_of`` -> None) is the canonical factory-fresh state — but only
+    when the journal carries no promoted/allocated proof for this ``(strategy, branch_tip)``. A
+    journal record that says this attempt promoted (``promote_status == "passed"``), allocated
+    (``intake_status == "allocated"``), or reached a promoted terminal, paired with a MISSING
+    registry row, means the registry was mutated/lost out-of-band. Journal replay must never
+    manufacture success out of registry corruption, so the driver fails closed for human triage.
     """
 
 
@@ -118,8 +138,10 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     strategy: str,
     branch: str,
     codeowners_text: str,
-    stage_of: Callable[[str], str],
+    stage_of: Callable[[str], str | None],
     run_gate: Callable[[], bool],
+    ensure_backtested: Callable[[str, str, str], str],
+    produce_evidence: Callable[[str, str], str],
     promote: Callable[[str], object],
     passing_gate_by_token: Callable[[str], int | None],
     gate_exists_by_token: Callable[[str], bool],
@@ -132,7 +154,15 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
 
     The concrete effects are injected: ``git`` (:class:`~algua.operator.gitops.GitOps`), ``journal``
     (:class:`~algua.operator.journal.Journal`), ``codeowners_text`` (for the diff-policy denylist),
-    ``stage_of`` (read the lifecycle stage), ``run_gate`` (full quality gate on the staged tree),
+    ``stage_of`` (read the lifecycle stage; ``None`` = unregistered — the canonical factory-fresh
+    state), ``run_gate`` (full quality gate on the staged tree),
+    ``ensure_backtested`` (the authoritative-intake registration chokepoint — one-tx create-if-
+    absent + CAS to ``backtested``; called with ``(branch_tip, merge_sha, base_sha)`` and returning
+    ``"created" | "existed"``), ``produce_evidence`` (authoritative promote-evidence reproduction —
+    called with ``(ensure_status, branch_tip)`` and returning the evidence status the journal
+    mirrors; both run ONLY after the gate-green merge is durably on ``main``, immediately before
+    promote, and their failures route through the same proven-failure revert as a promote
+    exception),
     ``promote`` (the strict-agent promote seam — it takes the ``attempt_token`` and stamps it on the
     gate row), ``passing_gate_by_token`` (authoritative read of THIS attempt's passing gate row id,
     or None), ``gate_exists_by_token`` (does ANY gate row — passing OR failing — already bear this
@@ -207,6 +237,19 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                     f"it; refusing to merge onto a drifted local main (would bypass the "
                     f"diff-policy/CODEOWNERS gate)")
     stage = stage_of(strategy)
+    # Journal-proof corruption guard: an unregistered strategy (stage None) is factory-fresh ONLY
+    # when the journal carries no promoted/allocated proof for this branch_tip. A journal that says
+    # this attempt promoted/allocated, paired with a MISSING registry row, is registry corruption —
+    # replay must never manufacture success out of it (checked BEFORE the terminal replay below).
+    if stage is None and rec is not None and (
+            rec.terminal in {"promoted_allocated", "promoted_queued"}
+            or rec.intake_status == "allocated"
+            or rec.promote_status == "passed"):
+        raise JournalRegistryMismatchError(
+            f"journal for {strategy!r} @ {branch_tip} proves a promotion "
+            f"(terminal={rec.terminal!r}, intake={rec.intake_status!r}, "
+            f"promote={rec.promote_status!r}) but the registry has NO row for it; refusing to "
+            f"treat a corrupted registry as factory-fresh")
 
     def _allow_paths() -> list[str]:
         """The allowlisted paths the branch introduces vs merge-base(base, tip) — re-derivable on
@@ -340,8 +383,9 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                 f"origin/{base_ref}")
         return _do_intake(rec.merge_sha)
 
-    # Fresh / early-resume paths require a backtested source stage.
-    if stage != "backtested":
+    # Fresh / early-resume paths require a backtested source stage OR an unregistered strategy
+    # (None — the factory-fresh state the post-merge ensure_backtested chokepoint registers).
+    if stage not in (None, "backtested"):
         raise ValueError(f"unexpected stage for merge-back: {stage!r}")
 
     # ------------------------------------------------------------------ 3. resume: merge recorded?
@@ -458,7 +502,22 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     raised: BaseException | None = None
     gate_id = passing_gate_by_token(token)
     if gate_id is None and not gate_exists_by_token(token):
+        # Authoritative-intake chokepoint: the gate-green merge is durably on main (verified just
+        # above), so the module the registration + evidence recipe touch IS the merged code. Runs
+        # on BOTH the fresh path and the have_merge crash-resume path — and NEVER on the
+        # diff_policy_rejected / gate_failed / already_done / revert-completion / intake-resume
+        # paths (all returned earlier) nor when a gate row already bears this attempt's token (a
+        # crashed prior attempt already ran the metered promote — converge, don't re-drive). A
+        # failure in either helper is a proven pre-promote failure and routes through the same
+        # revert machinery as a promote exception below.
         try:
+            ensure_status = ensure_backtested(branch_tip, merge_sha, base_sha)
+            evidence_status = produce_evidence(ensure_status, branch_tip)
+            # Journal MIRROR only (observability): recovery reads the registry's evidence marker,
+            # never this field.
+            _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
+                   merge_sha=merge_sha, push_status="pushed", attempt_token=token,
+                   evidence_status=evidence_status)
             promote(token)
         except BaseException as exc:  # noqa: BLE001 — outcome read authoritatively below, not raise
             raised = exc
@@ -475,9 +534,11 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         return _do_intake(merge_sha)
 
     # No gate row bearing our token. If the stage also drifted off backtested, we cannot prove state
-    # → fail closed (reverting a possibly-committed promotion is the dangerous direction).
+    # → fail closed (reverting a possibly-committed promotion is the dangerous direction). ``None``
+    # is tolerated alongside "backtested": an ensure_backtested that failed BEFORE creating the row
+    # (its one-tx create rolled back) is a proven pre-promote failure, not drift — revert + surface.
     stage_now = stage_of(strategy)
-    if stage_now != "backtested":
+    if stage_now not in (None, "backtested"):
         raise StageDriftError(
             f"promote left no gate row for token {token[:12]}… yet {strategy!r} is at "
             f"{stage_now!r}; cannot prove promotion state, failing closed without revert")

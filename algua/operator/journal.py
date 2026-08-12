@@ -70,6 +70,11 @@ class MergeBackRecord:
     merge_sha: str | None = None
     push_status: str = "pending"          # pending | pushed
     attempt_token: str | None = None
+    # Observability MIRROR of the intake chokepoint's produce_evidence outcome (mergeback
+    # authoritative intake): "produced" | "already_produced" | "authoritative_breadth" |
+    # "no_context". NEVER a recovery input — evidence idempotency is owned by the registry's
+    # mergeback_evidence marker, not the journal.
+    evidence_status: str | None = None
     promote_status: str = "pending"       # pending | passed | failed
     promote_gate_id: int | None = None
     intake_status: str = "pending"        # pending | allocated | queued | failed
