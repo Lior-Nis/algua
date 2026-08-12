@@ -40,7 +40,11 @@ MAX_MERGEBACK_ATTEMPTS="${MAX_MERGEBACK_ATTEMPTS:-3}"
 BACKOFF_MINUTES="${MERGEBACK_BACKOFF_MINUTES_PER_ATTEMPT:-10}"
 RESERVATION_STALE_SECONDS="${MERGEBACK_RESERVATION_STALE_SECONDS:-1800}"
 QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
-ALGUA_BIN="${ALGUA_BIN:-algua}"
+# The repo venv's algua, NOT a bare `algua` from PATH: the systemd user unit's PATH
+# (~/.local/bin:/usr/local/bin:...) never contains the project venv, so a bare default made every
+# timer-fired drain exit 127 (`algua: command not found`) — classified transient_failure and
+# retried silently forever. Still env-overridable for tests/alt checkouts.
+ALGUA_BIN="${ALGUA_BIN:-${REPO_ROOT}/.venv/bin/algua}"
 
 if [[ ! -f "${QUEUE_PATH}" ]]; then
   echo "no merge-back queue at ${QUEUE_PATH} yet; nothing to drain."
