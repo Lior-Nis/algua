@@ -38,7 +38,9 @@ QUEUE_PATH="${ALGUA_MERGEBACK_QUEUE_PATH:-${DATA_DIR}/mergeback-queue.json}"
 QUEUE_LOCK_PATH="${ALGUA_MERGEBACK_QUEUE_LOCK_PATH:-${DATA_DIR}/mergeback-queue.lock}"
 MAX_MERGEBACK_ATTEMPTS="${MAX_MERGEBACK_ATTEMPTS:-3}"
 BACKOFF_MINUTES="${MERGEBACK_BACKOFF_MINUTES_PER_ATTEMPT:-10}"
-RESERVATION_STALE_SECONDS="${MERGEBACK_RESERVATION_STALE_SECONDS:-1800}"
+# Raised 1800 -> 4200 in lockstep with the drainer unit's TimeoutStartSec 1200 -> 3600 (stale >
+# timeout always): the cycle now stacks quality gate + evidence sweep + backtest + promote.
+RESERVATION_STALE_SECONDS="${MERGEBACK_RESERVATION_STALE_SECONDS:-4200}"
 QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
 # The repo venv's algua, NOT a bare `algua` from PATH: the systemd user unit's PATH
 # (~/.local/bin:/usr/local/bin:...) never contains the project venv, so a bare default made every
@@ -92,6 +94,20 @@ echo "selected ${MERGEBACK_KEY}: strategy=${MERGEBACK_STRATEGY} universe=${MERGE
 CMD=("${ALGUA_BIN}" operator lock-run -- "${ALGUA_BIN}" paper merge-back
      --branch "${MERGEBACK_BRANCH}" --strategy "${MERGEBACK_STRATEGY}"
      --universe "${MERGEBACK_UNIVERSE}" --start "${MERGEBACK_START}" --end "${MERGEBACK_END}")
+# eval_context transport (mergeback authoritative intake): the validated recipe rides the same
+# argv discipline. Every value was charset-validated at enqueue (whitespace-free), so the
+# space-joined MERGEBACK_SWEEP_PARAMS tokens split back losslessly with `read -r -a`.
+if [[ "${MERGEBACK_DEMO:-0}" -eq 1 ]]; then CMD+=(--demo); fi
+[[ -n "${MERGEBACK_SNAPSHOT:-}" ]] && CMD+=(--snapshot "${MERGEBACK_SNAPSHOT}")
+[[ -n "${MERGEBACK_FUNDAMENTALS_SNAPSHOT:-}" ]] \
+  && CMD+=(--fundamentals-snapshot "${MERGEBACK_FUNDAMENTALS_SNAPSHOT}")
+[[ -n "${MERGEBACK_NEWS_SNAPSHOT:-}" ]] && CMD+=(--news-snapshot "${MERGEBACK_NEWS_SNAPSHOT}")
+[[ -n "${MERGEBACK_DELISTINGS:-}" ]] && CMD+=(--delistings "${MERGEBACK_DELISTINGS}")
+[[ -n "${MERGEBACK_RANK_BY:-}" ]] && CMD+=(--rank-by "${MERGEBACK_RANK_BY}")
+if [[ -n "${MERGEBACK_SWEEP_PARAMS:-}" ]]; then
+  read -r -a SWEEP_PARAM_TOKENS <<< "${MERGEBACK_SWEEP_PARAMS}"
+  for token in "${SWEEP_PARAM_TOKENS[@]}"; do CMD+=(--sweep-param "${token}"); done
+fi
 
 echo "invoking: ${CMD[*]}"
 set +e

@@ -22,12 +22,22 @@ in two heredocs — is the whole point: a single place to get the concurrency st
 Queue schema (one JSON object per file):
     {"items": {"<strategy>@<branch>": {
         "strategy": str, "universe": str, "start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
-        "branch": str, "enqueued_at": ISO8601, "attempts": int,
+        "branch": str, "eval_context": dict (see validate_eval_context), "enqueued_at": ISO8601,
+        "attempts": int,
         "status": "pending" | "in_progress" | "gate_failed" | "terminal_failed"
                  | "promoted_allocated" | "promoted_queued" | "already_done",
         "last_attempt_at": ISO8601 | None, "last_result": dict | None,
         "reserved_at": ISO8601 | None,
     }}}
+
+``eval_context`` (mergeback authoritative intake) is the validated RECIPE the trusted drainer
+replays authoritatively post-merge — data-context snapshot ids + the exact sweep grid the scratch
+preview swept — never scratch evidence itself (a sandboxed agent could under-report breadth).
+It is validated FAIL-CLOSED at enqueue by :func:`validate_eval_context` (an invalid candidate is
+rejected with a raised ValueError the producer logs + drops; a malformed queue item is never
+written). ``windows``/``holdout_frac``/thresholds/relaxations are deliberately NOT part of the
+context: the authoritative run pins the strict-agent defaults, and the producer refuses to enqueue
+a candidate whose preview deviated from them.
 
 Status lifecycle: a fresh item starts ``pending``. The drainer reserves an item ATOMICALLY via
 :func:`select_and_reserve` — in the SAME locked read-modify-write as selection, the item's status
@@ -62,7 +72,9 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
+import re
 import shlex
 import sys
 import tempfile
@@ -74,13 +86,16 @@ from typing import Any
 
 __all__ = [
     "MAX_MERGEBACK_ATTEMPTS",
+    "MAX_SWEEP_COMBOS",
     "RESERVATION_STALE_SECONDS",
+    "VALID_RANK_BY",
     "QueueLockTimeout",
     "enqueue",
     "read_locked",
     "record_attempt",
     "select_and_reserve",
     "select_eligible",
+    "validate_eval_context",
 ]
 
 # Terminal success statuses a completed cycle can land in (kept in the file for audit).
@@ -94,11 +109,14 @@ _RESERVED_STATUS = "in_progress"
 
 MAX_MERGEBACK_ATTEMPTS = 3
 _DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT = 10
-# Generously above one full merge-back attempt's realistic worst case (the FULL quality gate is
-# observed ~9 minutes; the systemd unit's own TimeoutStartSec for the drainer is sized similarly
-# generously) — long enough that a live drain is never mistaken for stale, but short enough that a
-# crashed/killed drainer doesn't wedge the item for long.
-RESERVATION_STALE_SECONDS = 1800
+# Generously above one full merge-back attempt's realistic worst case. The cycle now stacks the
+# FULL quality gate (~9 min observed) + a <=200-combo authoritative evidence sweep + a full-period
+# backtest + the promote walk-forward/holdout (mergeback authoritative intake), so this rose
+# 1800 -> 4200 IN LOCKSTEP with the drainer unit's TimeoutStartSec 1200 -> 3600 (stale > timeout
+# ALWAYS: a systemd-killed attempt must already be reclaimable, never wedged). The flock +
+# one-item-per-firing keep the 30-min timer safe — a long-running attempt just makes the next
+# firing a no-op selection.
+RESERVATION_STALE_SECONDS = 4200
 _LOCK_RETRIES = 10
 _LOCK_RETRY_SLEEP_S = 0.2  # ~2s total bounded retry budget
 
@@ -207,9 +225,144 @@ def _with_queue_lock(
         _release_lock(handle)
 
 
+# --- eval_context validation (mergeback authoritative intake) ------------------------------------
+
+# Mirrors the sweep engine's `_MAX_COMBOS` (algua/backtest/sweep.py). Duplicated as a literal, with
+# a test cross-checking the two, because this module is deliberately stdlib-only / no `algua`
+# import (see the module docstring).
+MAX_SWEEP_COMBOS = 200
+# Mirrors the sweep engine's `_RANK_KEYS` (same stdlib-only rationale).
+VALID_RANK_BY = frozenset({"mean_sharpe", "min_sharpe"})
+
+_ALLOWED_CONTEXT_KEYS = frozenset({
+    "demo", "snapshot", "fundamentals_snapshot", "news_snapshot", "delistings",
+    "sweep_grid", "rank_by",
+})
+_SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# `construction.<key>` names are permitted (they tune the construction policy in a sweep).
+_GRID_KEY_RE = re.compile(r"^(construction\.)?[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# A STRING grid value must survive the argv round-trip (KEY=v1,v2 -> parse_grid): no comma, no
+# whitespace, no shell-hostile chars — and it must not LOOK numeric (parse_grid would coerce it to
+# int/float drainer-side, silently changing the grid the preview declared).
+_GRID_STR_VALUE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,63}$")
+
+
+def _validated_grid_values(key: str, values: object) -> list:
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"sweep_grid[{key!r}] must be a non-empty list")
+    out: list = []
+    for v in values:
+        if isinstance(v, bool):  # bool is an int subclass — never a legitimate grid value
+            raise ValueError(f"sweep_grid[{key!r}] contains a bool {v!r}")
+        if isinstance(v, float):
+            if not math.isfinite(v):
+                raise ValueError(f"sweep_grid[{key!r}] contains a non-finite float {v!r}")
+            out.append(v)
+        elif isinstance(v, int):
+            out.append(v)
+        elif isinstance(v, str):
+            if not _GRID_STR_VALUE_RE.match(v):
+                raise ValueError(
+                    f"sweep_grid[{key!r}] string value {v!r} fails the transport-safe format "
+                    f"check (must not look numeric; no commas/whitespace)")
+            out.append(v)
+        else:
+            raise ValueError(f"sweep_grid[{key!r}] value {v!r} is not int/float/str")
+    # Mirror the sweep parser's widening rule (`_coerce_values`): a homogeneous-numeric list with
+    # any float widens to all-float, so the canonical grid equals what parse_grid re-derives.
+    if any(type(v) is float for v in out) and all(isinstance(v, (int, float)) for v in out):
+        out = [float(v) for v in out]
+    return out
+
+
+def validate_eval_context(ctx: object) -> dict:
+    """Validate + canonicalize one candidate's ``eval_context`` recipe; raise ValueError if bad.
+
+    FAIL-CLOSED shape validation at enqueue (the drainer-side, strategy-dependent half — grid keys
+    vs the strategy module — runs post-merge via ``validate_sweep_grid``, because the module isn't
+    on ``main`` at enqueue time): required dict; ``snapshot`` XOR ``demo: true``; optional
+    ``fundamentals_snapshot``/``news_snapshot``/``delistings`` snapshot handles; a required
+    non-empty ``sweep_grid`` of JSON-canonical parsed values (sorted keys, no NaN/inf, no bools,
+    combos <= ``MAX_SWEEP_COMBOS``, ``construction.<key>`` names permitted); ``rank_by``
+    allowlisted against ``VALID_RANK_BY`` (default ``mean_sharpe``). Unknown keys — including
+    ``windows``/``holdout_frac``: the strict-agent defaults are pinned, never transported — are
+    rejected. Returns the canonicalized context dict to persist.
+    """
+    if not isinstance(ctx, dict):
+        raise ValueError("eval_context must be a JSON object")
+    unknown = set(ctx) - _ALLOWED_CONTEXT_KEYS
+    if unknown:
+        raise ValueError(f"eval_context has unknown keys {sorted(unknown)} "
+                         f"(windows/holdout_frac/thresholds are never transported)")
+    demo = ctx.get("demo", False)
+    snapshot = ctx.get("snapshot")
+    if demo is not False and demo is not True:
+        raise ValueError("eval_context.demo must be the JSON literal true (or absent)")
+    if snapshot is not None and (
+            not isinstance(snapshot, str) or not _SNAPSHOT_ID_RE.match(snapshot)):
+        raise ValueError(f"eval_context.snapshot {snapshot!r} fails the snapshot-id format check")
+    if (demo is True) == (snapshot is not None):
+        raise ValueError("eval_context requires exactly one of demo: true | snapshot: <id>")
+    out: dict = {"demo": True} if demo is True else {"snapshot": snapshot}
+    for opt in ("fundamentals_snapshot", "news_snapshot", "delistings"):
+        val = ctx.get(opt)
+        if val is None:
+            continue
+        if not isinstance(val, str) or not _SNAPSHOT_ID_RE.match(val):
+            raise ValueError(f"eval_context.{opt} {val!r} fails the snapshot-id format check")
+        out[opt] = val
+    rank_by = ctx.get("rank_by", "mean_sharpe")
+    if rank_by not in VALID_RANK_BY:
+        raise ValueError(f"eval_context.rank_by {rank_by!r} not in {sorted(VALID_RANK_BY)}")
+    out["rank_by"] = rank_by
+    grid = ctx.get("sweep_grid")
+    if not isinstance(grid, dict) or not grid:
+        raise ValueError("eval_context.sweep_grid must be a non-empty object of param: [values]")
+    canonical_grid: dict = {}
+    combos = 1
+    for key in sorted(grid):
+        if not isinstance(key, str) or not _GRID_KEY_RE.match(key):
+            raise ValueError(f"sweep_grid key {key!r} fails the param-name format check")
+        canonical_grid[key] = _validated_grid_values(key, grid[key])
+        combos *= len(canonical_grid[key])
+        if combos > MAX_SWEEP_COMBOS:
+            raise ValueError(
+                f"sweep_grid too large: > {MAX_SWEEP_COMBOS} combos (the sweep engine cap)")
+    out["sweep_grid"] = canonical_grid
+    return out
+
+
+def _grid_value_str(v: object) -> str:
+    # repr for floats (round-trips through parse_grid's float()); plain str otherwise.
+    return repr(v) if isinstance(v, float) else str(v)
+
+
+def _sweep_param_tokens(grid: dict) -> list[str]:
+    """The ``KEY=v1,v2`` tokens the drainer passes as repeatable ``--sweep-param`` argv."""
+    return [f"{key}={','.join(_grid_value_str(v) for v in values)}"
+            for key, values in sorted(grid.items())]
+
+
+def _shell_context_fields(item: dict) -> dict[str, str]:
+    """The eval_context transport vars for ``--format shell`` (empty-string = absent)."""
+    ctx = item.get("eval_context") or {}
+    grid = ctx.get("sweep_grid") or {}
+    return {
+        "MERGEBACK_DEMO": "1" if ctx.get("demo") is True else "0",
+        "MERGEBACK_SNAPSHOT": ctx.get("snapshot") or "",
+        "MERGEBACK_FUNDAMENTALS_SNAPSHOT": ctx.get("fundamentals_snapshot") or "",
+        "MERGEBACK_NEWS_SNAPSHOT": ctx.get("news_snapshot") or "",
+        "MERGEBACK_DELISTINGS": ctx.get("delistings") or "",
+        "MERGEBACK_RANK_BY": ctx.get("rank_by") or "",
+        # Space-joined KEY=v1,v2 tokens: every charset is validated at enqueue to be whitespace-
+        # free, so bash `read -r -a` splits them back losslessly.
+        "MERGEBACK_SWEEP_PARAMS": " ".join(_sweep_param_tokens(grid)),
+    }
+
+
 def enqueue(
     queue_path: Path, lock_path: Path, *, strategy: str, universe: str, start: str, end: str,
-    branch: str,
+    branch: str, eval_context: dict,
 ) -> dict:
     """Idempotently enqueue one validated merge-back candidate, keyed on ``"<strategy>@<branch>"``.
 
@@ -222,7 +375,12 @@ def enqueue(
     TERMINAL item (a resurrected ``terminal_failed`` would silently re-attempt a branch already
     proven bad; a resurrected success would be pure noise). This is a defensive no-op path, not
     the common case.
+
+    ``eval_context`` is REQUIRED and validated fail-closed via :func:`validate_eval_context`
+    BEFORE the lock is even taken — an invalid candidate raises ValueError and never touches the
+    queue file (the producer logs the warning and drops the candidacy).
     """
+    context = validate_eval_context(eval_context)
     key = f"{strategy}@{branch}"
 
     def _mutate(data: dict) -> tuple[dict, dict]:
@@ -230,7 +388,7 @@ def enqueue(
             return data, {"key": key, "created": False, "item": data["items"][key]}
         item = {
             "strategy": strategy, "universe": universe, "start": start, "end": end,
-            "branch": branch, "enqueued_at": _now_iso(), "attempts": 0,
+            "branch": branch, "eval_context": context, "enqueued_at": _now_iso(), "attempts": 0,
             "status": "pending", "last_attempt_at": None, "last_result": None,
         }
         data["items"][key] = item
@@ -548,9 +706,27 @@ def _cmd_enqueue(args: argparse.Namespace) -> int:
     result = enqueue(
         Path(args.queue), Path(args.lock), strategy=args.strategy, universe=args.universe,
         start=args.start, end=args.end, branch=args.branch,
+        eval_context=json.loads(args.eval_context),
     )
     print(json.dumps(result))
     return 0
+
+
+def _print_selection(result: dict, fmt: str) -> None:
+    if fmt != "shell":
+        print(json.dumps(result))
+        return
+    item = result["item"]
+    if item is None:
+        print(_shell_line(MERGEBACK_SELECTED="0"))
+        return
+    print(_shell_line(
+        MERGEBACK_SELECTED="1", MERGEBACK_KEY=result["key"],
+        MERGEBACK_STRATEGY=item["strategy"], MERGEBACK_UNIVERSE=item["universe"],
+        MERGEBACK_START=item["start"], MERGEBACK_END=item["end"],
+        MERGEBACK_BRANCH=item["branch"],
+        **_shell_context_fields(item),
+    ))
 
 
 def _cmd_select(args: argparse.Namespace) -> int:
@@ -558,19 +734,7 @@ def _cmd_select(args: argparse.Namespace) -> int:
         Path(args.queue), Path(args.lock), max_attempts=args.max_attempts,
         backoff_minutes_per_attempt=args.backoff_minutes,
     )
-    if args.format == "shell":
-        item = result["item"]
-        if item is None:
-            print(_shell_line(MERGEBACK_SELECTED="0"))
-        else:
-            print(_shell_line(
-                MERGEBACK_SELECTED="1", MERGEBACK_KEY=result["key"],
-                MERGEBACK_STRATEGY=item["strategy"], MERGEBACK_UNIVERSE=item["universe"],
-                MERGEBACK_START=item["start"], MERGEBACK_END=item["end"],
-                MERGEBACK_BRANCH=item["branch"],
-            ))
-    else:
-        print(json.dumps(result))
+    _print_selection(result, args.format)
     return 0
 
 
@@ -580,19 +744,7 @@ def _cmd_select_and_reserve(args: argparse.Namespace) -> int:
         backoff_minutes_per_attempt=args.backoff_minutes,
         stale_reservation_seconds=args.stale_reservation_seconds,
     )
-    if args.format == "shell":
-        item = result["item"]
-        if item is None:
-            print(_shell_line(MERGEBACK_SELECTED="0"))
-        else:
-            print(_shell_line(
-                MERGEBACK_SELECTED="1", MERGEBACK_KEY=result["key"],
-                MERGEBACK_STRATEGY=item["strategy"], MERGEBACK_UNIVERSE=item["universe"],
-                MERGEBACK_START=item["start"], MERGEBACK_END=item["end"],
-                MERGEBACK_BRANCH=item["branch"],
-            ))
-    else:
-        print(json.dumps(result))
+    _print_selection(result, args.format)
     return 0
 
 
@@ -618,6 +770,9 @@ def main(argv: list[str] | None = None) -> int:
     p_enqueue.add_argument("--start", required=True)
     p_enqueue.add_argument("--end", required=True)
     p_enqueue.add_argument("--branch", required=True)
+    p_enqueue.add_argument(
+        "--eval-context", required=True, dest="eval_context",
+        help="the eval_context recipe as a JSON object (validated fail-closed)")
     p_enqueue.set_defaults(fn=_cmd_enqueue)
 
     p_select = sub.add_parser("select")
