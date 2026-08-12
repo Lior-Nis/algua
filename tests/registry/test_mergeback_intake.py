@@ -29,6 +29,10 @@ _STRAT = "factory_momo"
 _TIP = "BRANCHTIP0"
 _GRID = ["lookback=10,20"]
 _CANONICAL = json.dumps({"lookback": [10, 20]}, sort_keys=True)
+# The full transported data context bound into the marker's recipe hash (GATE-2 #4).
+_CTX = {"demo": True, "snapshot": None, "fundamentals_snapshot": None, "news_snapshot": None,
+        "delistings": None, "rank_by": "mean_sharpe", "universe": "sp500",
+        "start": "2024-01-01", "end": "2024-06-01"}
 
 
 @pytest.fixture
@@ -102,12 +106,13 @@ class _Task:
 
 
 def _produce(conn_factory, *, ensure_status="created", sweep_params=_GRID, sweep=None,
-             backtest=None, strategy_stub=None):
+             backtest=None, strategy_stub=None, eval_context=_CTX, produce_conn_factory=None):
     sweep = sweep if sweep is not None else _Task(conn_factory, record="trial")
     backtest = backtest if backtest is not None else _Task(conn_factory, record="returns")
     status = produce_evidence(
         strategy=_STRAT, branch_tip=_TIP, ensure_status=ensure_status,
-        sweep_params=sweep_params, conn_factory=conn_factory,
+        sweep_params=sweep_params, eval_context=eval_context,
+        conn_factory=produce_conn_factory if produce_conn_factory is not None else conn_factory,
         sweep_fn=sweep, backtest_fn=backtest,
         load_strategy_fn=lambda name: (strategy_stub or _stub_strategy()),
     )
@@ -217,17 +222,55 @@ def test_produce_completed_marker_blocks_any_rerecord(conn_factory):
 
 def test_produce_skips_preexisting_strategy_with_authoritative_breadth(conn_factory):
     # The direct-authoritative-funnel no-op: a pre-existing strategy that already carries measured
-    # breadth is never re-swept — and no marker is minted for it.
+    # breadth AND a persisted returns series is never re-swept — and no marker is minted for it.
     with conn_factory() as conn:
         repo = SqliteStrategyRepository(conn)
         repo.add(_STRAT)
         repo.record_search_trial(_STRAT, 7, json.dumps({"other": [1]}))
+        repo.persist_backtest_returns(
+            _STRAT, "2024-01-01", "2024-06-01",
+            pd.Series([0.01, -0.02], index=pd.to_datetime(["2024-01-02", "2024-01-03"])))
     _ensure(conn_factory)
     status, sweep, backtest = _produce(conn_factory, ensure_status="existed")
     assert status == "authoritative_breadth"
     assert sweep.calls == 0 and backtest.calls == 0
     assert _marker(conn_factory) is None
     assert _trial_count(conn_factory) == 1
+
+
+def test_produce_backfills_missing_returns_when_breadth_exists(conn_factory):
+    # GATE-2 #2: authoritative breadth proves search_trials, NOT the classifier's
+    # return-correlation axis. Missing backtest_returns -> ONLY the backtest runs (never a
+    # re-sweep, never a marker), and the cost floor is asserted first.
+    with conn_factory() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(_STRAT)
+        repo.record_search_trial(_STRAT, 7, json.dumps({"other": [1]}))
+    _ensure(conn_factory)
+    status, sweep, backtest = _produce(conn_factory, ensure_status="existed")
+    assert status == "authoritative_breadth_returns_backfilled"
+    assert sweep.calls == 0 and backtest.calls == 1
+    assert _marker(conn_factory) is None
+    assert _trial_count(conn_factory) == 1  # breadth untouched
+    with conn_factory() as conn:
+        assert SqliteStrategyRepository(conn).load_backtest_returns(_STRAT) is not None
+    # Re-run: returns now exist -> pure skip.
+    status2, sweep2, backtest2 = _produce(conn_factory, ensure_status="existed")
+    assert status2 == "authoritative_breadth"
+    assert sweep2.calls == 0 and backtest2.calls == 0
+
+
+def test_returns_backfill_asserts_the_cost_floor_before_persisting(conn_factory):
+    with conn_factory() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(_STRAT)
+        repo.record_search_trial(_STRAT, 7, json.dumps({"other": [1]}))
+    _ensure(conn_factory)
+    with pytest.raises(ValueError, match="fees"):
+        _produce(conn_factory, ensure_status="existed",
+                 strategy_stub=_stub_strategy(fees=0.0, slippage=0.0))
+    with conn_factory() as conn:
+        assert SqliteStrategyRepository(conn).load_backtest_returns(_STRAT) is None
 
 
 def test_produce_runs_for_a_created_row_even_with_stale_same_name_breadth(conn_factory):
@@ -317,3 +360,55 @@ def test_produce_validates_grid_keys_against_the_merged_module(conn_factory):
     with pytest.raises(ValueError, match="not a base signal param"):
         _produce(conn_factory, sweep_params=["not_a_param=1,2"])
     assert _marker(conn_factory) is None
+
+
+def test_fresh_marker_always_sweeps_despite_concurrent_same_grid_trial(conn_factory, db_path):
+    # GATE-2 #3: the watermark dedup is a RESUME-only device. On a marker NEWLY created by this
+    # call, a concurrent/manual same-grid trial landing AFTER the watermark must NOT be
+    # misattributed to this attempt — the authoritative sweep still runs. Simulated with a racing
+    # conn_factory that injects a same-grid trial row immediately after the marker's creation
+    # connection closes (id > watermark by construction).
+    _ensure(conn_factory)
+    injected = {"done": False}
+
+    @contextmanager
+    def racing_factory():
+        with conn_factory() as conn:
+            yield conn
+        if not injected["done"]:
+            with conn_factory() as probe:
+                rec = SqliteStrategyRepository(probe).get(_STRAT)
+                if evidence_marker(probe, rec.id, _TIP) is not None:
+                    SqliteStrategyRepository(probe).record_search_trial(_STRAT, 2, _CANONICAL)
+                    injected["done"] = True
+
+    status, sweep, backtest = _produce(conn_factory, produce_conn_factory=racing_factory)
+    assert status == "produced"
+    assert injected["done"] is True     # the concurrent same-grid trial DID land after the marker
+    assert sweep.calls == 1             # ...and the authoritative sweep still ran (no dedup skip)
+    assert backtest.calls == 1
+    assert _trial_count(conn_factory) == 2  # concurrent row + this attempt's own row
+
+
+def test_resume_with_same_grid_but_different_context_fails_closed(conn_factory):
+    # GATE-2 #4: the marker binds the FULL recipe. A resume transporting the SAME grid but a
+    # DIFFERENT data context (here: another end date) must fail closed, never silently reuse the
+    # marker — evidence produced against other data is not this attempt's evidence.
+    _ensure(conn_factory)
+    with pytest.raises(RuntimeError):
+        _produce(conn_factory, sweep=_Task(conn_factory, raises=RuntimeError("crash")))
+    drifted = dict(_CTX, end="2024-12-31")
+    with pytest.raises(MergeBackIntakeError, match="data context drifted"):
+        _produce(conn_factory, eval_context=drifted)
+    # The matching recipe still resumes fine.
+    status, _, _ = _produce(conn_factory)
+    assert status == "produced"
+
+
+def test_completed_marker_with_drifted_context_fails_closed_not_already_produced(conn_factory):
+    _ensure(conn_factory)
+    _produce(conn_factory)
+    assert _marker(conn_factory)["status"] == "completed"
+    drifted = dict(_CTX, snapshot="bars-other", demo=False)
+    with pytest.raises(MergeBackIntakeError, match="data context drifted"):
+        _produce(conn_factory, ensure_status="existed", eval_context=drifted)

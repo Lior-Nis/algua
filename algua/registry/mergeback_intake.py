@@ -27,9 +27,11 @@ Idempotency mechanism (design §C.2): ``record_search_trial`` and ``persist_back
 single-row AUTOCOMMIT inserts running INSIDE the reused task functions, so trial + returns + marker
 cannot land in one caller transaction. The fallback the design mandates is used instead:
 a ``mergeback_evidence`` marker row (UNIQUE on ``strategy_id + branch_tip``) written ``'started'``
-— with a ``search_trials`` MAX(id) watermark and the canonical grid hash — BEFORE the compute and
-flipped ``'completed'`` AFTER both evidence rows landed, plus keyed dedup of the trial layer on
-``(strategy_name, grid_json, id > watermark)`` at resume. Duplicate trials are NOT harmless (they
+— with a ``search_trials`` MAX(id) watermark and the canonical RECIPE hash over the full eval
+context (grid + snapshot|demo + sidecars + universe + window + delistings + rank_by) — BEFORE the
+compute and flipped ``'completed'`` AFTER both evidence rows landed, plus keyed dedup of the trial
+layer on ``(strategy_name, grid_json, id > watermark)`` at resume (resume ONLY — a fresh marker
+always sweeps). Duplicate trials are NOT harmless (they
 permanently inflate funnel/window breadth and the agent-NOVEL lifetime seed for later siblings),
 so the dedup is REQUIRED, not cosmetic; a duplicate *returns* row is benign (the classifier reads
 only the newest series for a name).
@@ -50,7 +52,7 @@ from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Any
 
-from algua.backtest.sweep import parse_grid, validate_sweep_grid
+from algua.backtest.sweep import _RANK_KEYS, parse_grid, validate_sweep_grid
 from algua.contracts.lifecycle import Actor, Stage, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import assert_gated_costs
@@ -64,6 +66,7 @@ __all__ = [
     "ensure_backtested",
     "evidence_marker",
     "produce_evidence",
+    "validate_transport_inputs",
 ]
 
 # The provenance tag stamped on every strategy row this chokepoint CREATES, so a promote-failed
@@ -197,18 +200,32 @@ def evidence_marker(
 
 
 def _create_started_marker(
-    conn: sqlite3.Connection, strategy_id: int, branch_tip: str, grid_hash: str,
-) -> None:
-    """Insert the ``'started'`` marker with the current ``search_trials`` MAX(id) watermark."""
-    watermark = conn.execute(
-        "SELECT COALESCE(MAX(id), 0) FROM search_trials").fetchone()[0]
-    with conn:
+    conn: sqlite3.Connection, strategy_id: int, branch_tip: str, recipe_hash: str,
+) -> int:
+    """Insert the ``'started'`` marker and return its ``search_trials`` MAX(id) watermark.
+
+    The watermark read and the marker insert happen under ONE ``BEGIN IMMEDIATE`` (GATE-2 #3): a
+    separate autocommit read would let a trial row land between the read and the insert, making
+    the recorded watermark lie about what predated this attempt. TOP-LEVEL ONLY.
+    """
+    if conn.in_transaction:
+        raise RuntimeError(
+            "_create_started_marker must run at top level, not inside an open transaction")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        watermark = int(conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM search_trials").fetchone()[0])
         conn.execute(
             "INSERT INTO mergeback_evidence"
-            "(strategy_id, branch_tip, grid_hash, search_trials_watermark, status, created_at)"
+            "(strategy_id, branch_tip, recipe_hash, search_trials_watermark, status, created_at)"
             " VALUES (?,?,?,?,'started',?)",
-            (strategy_id, branch_tip, grid_hash, int(watermark), _now()),
+            (strategy_id, branch_tip, recipe_hash, watermark, _now()),
         )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return watermark
 
 
 def _complete_marker(conn: sqlite3.Connection, strategy_id: int, branch_tip: str) -> None:
@@ -224,16 +241,51 @@ def _complete_marker(conn: sqlite3.Connection, strategy_id: int, branch_tip: str
                 f"vanished/flipped mid-produce; refusing to claim completion")
 
 
-def _canonical_grid(sweep_params: list[str]) -> tuple[dict[str, list[Any]], str, str]:
-    """Parse the transported ``KEY=v1,v2`` params into ``(grid, canonical_json, grid_hash)``.
+def _canonical_grid(sweep_params: list[str]) -> tuple[dict[str, list[Any]], str]:
+    """Parse the transported ``KEY=v1,v2`` params into ``(grid, canonical_json)``.
 
     The canonical JSON is byte-identical to what ``record_search_breadth`` stores as
     ``grid_json`` (``json.dumps(result.grid, sort_keys=True)`` over the SAME ``parse_grid``
     output), so the trial-layer dedup can key on exact equality.
     """
     grid = parse_grid(sweep_params)
-    canonical = json.dumps(grid, sort_keys=True)
-    return grid, canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return grid, json.dumps(grid, sort_keys=True)
+
+
+def _recipe_hash(canonical_grid_json: str, eval_context: dict[str, Any]) -> str:
+    """SHA-256 over the FULL evidence recipe: the canonical grid AND the whole eval context
+    (snapshot|demo, fundamentals/news snapshots, universe, start/end, delistings, rank_by).
+
+    GATE-2 #4: a marker binding only the grid would let a resumed attempt with a DIFFERENT data
+    context silently reuse a prior attempt's marker — claiming evidence that was produced against
+    other data. The recipe hash makes any context drift a fail-closed mismatch on resume.
+    """
+    payload = json.dumps(
+        {"grid_json": canonical_grid_json, "context": eval_context}, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validate_transport_inputs(
+    *, demo: bool, snapshot: str | None, rank_by: str, sweep_params: list[str] | None,
+) -> None:
+    """Fail-fast CLI preflight for the merge-back eval-context transport flags (GATE-2 #5).
+
+    A typo'd operator invocation must die BEFORE the saga takes the repo lock or touches
+    git/journal state — not preview-merge, run the ~9-minute quality gate, and then fail/revert
+    deep inside promote. Raises ValueError on: ``--demo``/``--snapshot`` not EXACTLY one; a
+    ``--rank-by`` outside the sweep engine's rank keys; an unparseable ``--sweep-param`` grid.
+    (Strategy-dependent grid-KEY validation still runs post-merge in :func:`produce_evidence` —
+    the merged module isn't on ``main`` yet at invocation time.)
+    """
+    if demo == (snapshot is not None):
+        raise ValueError(
+            "pass exactly one of --demo or --snapshot: the eval context the authoritative "
+            "evidence + promote run against (neither/both can never promote and would waste a "
+            "full merge + quality-gate cycle)")
+    if rank_by not in _RANK_KEYS:
+        raise ValueError(f"--rank-by must be one of {sorted(_RANK_KEYS)}, got {rank_by!r}")
+    if sweep_params:
+        parse_grid(sweep_params)  # raises ValueError on a malformed KEY=v1,v2 flag
 
 
 def produce_evidence(
@@ -242,6 +294,7 @@ def produce_evidence(
     branch_tip: str,
     ensure_status: str,
     sweep_params: list[str] | None,
+    eval_context: dict[str, Any],
     conn_factory: Callable[[], AbstractContextManager[sqlite3.Connection]],
     sweep_fn: Callable[[], dict],
     backtest_fn: Callable[[], dict],
@@ -251,15 +304,24 @@ def produce_evidence(
 
     Runs at the saga chokepoint AFTER the gate-green merge is durably on ``main`` (so the module
     the injected tasks load IS the merged code) and immediately before the metered promote.
-    Returns the ``evidence_status`` the saga mirrors into its journal:
+    ``ensure_status`` must be the saga's JOURNALED first-attempt value, never a fresh re-read
+    (GATE-2 #1); ``eval_context`` is the full transported data context (snapshot|demo,
+    fundamentals/news snapshots, universe, start/end, delistings, rank_by) — it binds the marker
+    via the recipe hash (GATE-2 #4). Returns the ``evidence_status`` the saga mirrors into its
+    journal:
 
-    * ``"already_produced"`` — a ``'completed'`` marker exists for this ``(strategy, branch_tip)``:
-      a prior attempt finished recording; nothing is re-recorded (re-recording would permanently
-      inflate breadth).
+    * ``"already_produced"`` — a ``'completed'`` marker exists for this ``(strategy, branch_tip)``
+      AND its recipe hash matches this invocation: a prior attempt finished recording; nothing is
+      re-recorded (re-recording would permanently inflate breadth).
     * ``"authoritative_breadth"`` — the row pre-existed this attempt (``ensure_status ==
-      "existed"``), no marker was ever started for this attempt, and the strategy already carries
-      authoritative measured breadth: the direct-authoritative-funnel no-op (a #534-style strategy
-      with fresh authoritative evidence must not be re-swept or double-counted).
+      "existed"``), no marker was ever started for this attempt, the strategy already carries
+      authoritative measured breadth, AND a persisted ``backtest_returns`` series exists: the
+      direct-authoritative-funnel no-op (a #534-style strategy with fresh authoritative evidence
+      must not be re-swept or double-counted).
+    * ``"authoritative_breadth_returns_backfilled"`` — same as above but the classifier's
+      ``backtest_returns`` series was MISSING (GATE-2 #2: breadth alone does not prove the
+      correlation axis the intake must guarantee) — only the full-period backtest ran (cost floor
+      asserted first); the sweep was still skipped.
     * ``"no_context"`` — no sweep grid was transported. Nothing is produced; the promote gate's own
       binding breadth floor fails closed downstream if evidence is genuinely missing, so this
       cannot manufacture a promotable state.
@@ -270,58 +332,76 @@ def produce_evidence(
       the measured breadth, the injected full-period backtest task persisted ``backtest_returns``,
       and the marker flipped ``'completed'``.
 
-    Crash idempotency (design §C.2, marker-last + keyed dedup): the ``'started'`` marker (with a
-    ``search_trials`` watermark) lands BEFORE any compute; on resume the trial layer is deduped on
-    ``(strategy_name, canonical grid_json, id > watermark)`` so a crash between the sweep task's
-    autocommitted trial row and the marker flip can never double-count breadth. A resume that
-    transports a DIFFERENT grid than the one that started the marker fails closed.
+    Crash idempotency (design §C.2, marker-last + keyed dedup): the ``'started'`` marker (recipe
+    hash + a ``search_trials`` watermark, read+inserted under ONE ``BEGIN IMMEDIATE``) lands
+    BEFORE any compute. The sweep runs UNCONDITIONALLY when the marker was newly created by THIS
+    call; the ``(strategy_name, canonical grid_json, id > watermark)`` dedup applies ONLY when
+    resuming a pre-existing ``'started'`` marker (GATE-2 #3 — otherwise a concurrent/manual
+    same-grid sweep landing after the watermark would be misattributed to this attempt and the
+    authoritative sweep silently skipped). A resume whose grid OR data context differs from the
+    recipe that started (or completed) the marker fails closed — never a silent re-produce.
     """
-    grid_inputs = _canonical_grid(sweep_params) if sweep_params else None
+    grid: dict[str, list[Any]] | None = None
+    canonical_json = ""
+    recipe_hash = ""
+    if sweep_params:
+        grid, canonical_json = _canonical_grid(sweep_params)
+        recipe_hash = _recipe_hash(canonical_json, eval_context)
+    needs_returns_backfill = False
     with conn_factory() as conn:
-        rec = SqliteStrategyRepository(conn).get(strategy)
+        repo = SqliteStrategyRepository(conn)
+        rec = repo.get(strategy)
         marker = evidence_marker(conn, rec.id, branch_tip)
-        if marker is not None and marker["status"] == "completed":
-            return "already_produced"
-        if marker is None and ensure_status == "existed" and (
-                SqliteStrategyRepository(conn).total_search_combos(strategy) > 0):
-            return "authoritative_breadth"
-        if grid_inputs is None:
+        if (marker is None and ensure_status == "existed"
+                and repo.total_search_combos(strategy) > 0):
+            if repo.load_backtest_returns(strategy) is not None:
+                return "authoritative_breadth"
+            # GATE-2 #2: authoritative breadth proves search_trials, NOT the classifier's
+            # return-correlation axis. Backfill ONLY the returns below (never re-sweep).
+            needs_returns_backfill = True
+        if grid is None and not needs_returns_backfill:
             if marker is not None:
                 raise MergeBackIntakeError(
                     f"evidence production for {strategy!r} @ {branch_tip} was started with a "
                     f"sweep grid but this resume transported none; refusing an inconsistent "
                     f"resume (fail closed)")
             return "no_context"
-        grid, canonical_json, grid_hash = grid_inputs
-        if marker is not None and marker["grid_hash"] != grid_hash:
+        if grid is not None and marker is not None and marker["recipe_hash"] != recipe_hash:
             raise MergeBackIntakeError(
-                f"evidence production for {strategy!r} @ {branch_tip} was started with grid_hash "
-                f"{marker['grid_hash']} but this resume transported {grid_hash}; refusing an "
-                f"inconsistent resume (fail closed)")
+                f"evidence production for {strategy!r} @ {branch_tip} was started with recipe "
+                f"{marker['recipe_hash']} but this resume transported {recipe_hash} (grid or "
+                f"data context drifted); refusing an inconsistent resume (fail closed)")
+        if marker is not None and marker["status"] == "completed":
+            return "already_produced"
 
     # Validate BEFORE the marker exists (an invalid recipe must leave no 'started' residue) and
     # BEFORE anything persists (cost floor: classifier returns == promote's cost-realistic stream).
     loaded = load_strategy_fn(strategy)
-    validate_sweep_grid(loaded, grid)
     assert_gated_costs(loaded.execution)
+    if needs_returns_backfill:
+        backtest_fn()  # persists backtest_returns (autocommit, inside the task); sweep skipped
+        return "authoritative_breadth_returns_backfilled"
+    assert grid is not None  # every no-grid path returned or raised above
+    validate_sweep_grid(loaded, grid)
 
     if marker is None:
         with conn_factory() as conn:
-            _create_started_marker(conn, rec.id, branch_tip, grid_hash)
-            created = evidence_marker(conn, rec.id, branch_tip)
-            assert created is not None  # just inserted under the same connection
-            watermark = created["search_trials_watermark"]
-    else:
-        watermark = marker["search_trials_watermark"]
-
-    with conn_factory() as conn:
-        trial_recorded = conn.execute(
-            "SELECT 1 FROM search_trials"
-            " WHERE strategy_name = ? AND grid_json = ? AND id > ? LIMIT 1",
-            (strategy, canonical_json, int(watermark)),
-        ).fetchone() is not None
-    if not trial_recorded:
+            watermark = _create_started_marker(conn, rec.id, branch_tip, recipe_hash)
+        # GATE-2 #3: a marker newly created by THIS call means THIS attempt has recorded nothing
+        # yet — sweep unconditionally. The watermark dedup below is a RESUME-only device; applying
+        # it here would let a concurrent/manual same-grid sweep (landing after the watermark) be
+        # misattributed to this attempt, silently skipping the authoritative sweep.
         sweep_fn()  # records the single search_trials breadth row (autocommit, inside the task)
+    else:
+        watermark = int(marker["search_trials_watermark"])
+        with conn_factory() as conn:
+            trial_recorded = conn.execute(
+                "SELECT 1 FROM search_trials"
+                " WHERE strategy_name = ? AND grid_json = ? AND id > ? LIMIT 1",
+                (strategy, canonical_json, watermark),
+            ).fetchone() is not None
+        if not trial_recorded:
+            sweep_fn()
     backtest_fn()  # persists backtest_returns for the registered strategy (autocommit, inside)
 
     with conn_factory() as conn:
