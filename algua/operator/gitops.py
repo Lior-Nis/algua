@@ -154,7 +154,8 @@ class RealGitOps:
         #   :100644 100644 <src> <dst> M\tpath
         #   :100644 100644 <src> <dst> R100\told\tnew
         raw = self._run(
-            ["diff", "--raw", "-M", "-C", "--find-copies-harder", "-z", base, tip]).stdout
+            ["diff", "--raw", "--no-abbrev", "-M", "-C", "--find-copies-harder", "-z",
+             base, tip]).stdout
         return _parse_raw_z(raw)
 
     def begin_merge(self, tip: str) -> None:
@@ -227,10 +228,23 @@ class RealGitOps:
         return r.stdout.strip() if r.returncode == 0 else None
 
 
+# The empty blob's object id under SHA-1 and SHA-256 repos. `changed_entries` passes
+# ``--no-abbrev`` so the raw meta field always carries the full id these are compared against.
+_EMPTY_BLOB_SHAS = frozenset({
+    "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813",
+})
+
+
 def _parse_raw_z(raw: str) -> list[DiffEntry]:
     """Parse ``git diff --raw -M -C -z`` output. The ``-z`` form separates every field (including
     the meta field and each path) with NUL. A meta field looks like ``:<srcmode> <dstmode> <srcsha>
-    <dstsha> <status>``; A/M/D/T carry one path, R/C carry two (old then new)."""
+    <dstsha> <status>``; A/M/D/T carry one path, R/C carry two (old then new).
+
+    A ``C`` (copy) entry whose DESTINATION blob is the empty blob is demoted to a plain ``A``:
+    zero-byte content cannot launder a denied file into an allowlisted path, and
+    ``--find-copies-harder`` otherwise pairs every fresh empty ``__init__.py`` with some
+    pre-existing empty file, handing the diff policy a false denied-source veto."""
     fields = raw.split("\0")
     entries: list[DiffEntry] = []
     i = 0
@@ -242,11 +256,21 @@ def _parse_raw_z(raw: str) -> list[DiffEntry]:
         # meta = ":100644 100644 <src> <dst> M100"
         parts = meta.lstrip(":").split()
         dst_mode = parts[1]
+        dst_sha = parts[3]
         status = parts[4]
         if status.startswith(("R", "C")):
             old_path = fields[i + 1]
             new_path = fields[i + 2]
-            entries.append(DiffEntry(dst_mode, status, old_path, new_path))
+            if status.startswith("C") and dst_sha in _EMPTY_BLOB_SHAS:
+                # A zero-byte COPY carries no content, so the R5 dual-path source check has
+                # nothing to guard — but `--find-copies-harder` pairs every new EMPTY file (a
+                # fresh family `__init__.py`) with whatever empty file it scans first (e.g.
+                # `algua/audit/__init__.py`), and the denied SOURCE then vetoes a perfectly
+                # allowlisted add. Demote to a plain add. Renames keep their source path: an R
+                # entry deletes its source, and a denied-path deletion must stay visible.
+                entries.append(DiffEntry(dst_mode, "A", None, new_path))
+            else:
+                entries.append(DiffEntry(dst_mode, status, old_path, new_path))
             i += 3
         else:
             path = fields[i + 1]
