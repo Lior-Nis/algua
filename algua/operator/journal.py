@@ -70,10 +70,16 @@ class MergeBackRecord:
     merge_sha: str | None = None
     push_status: str = "pending"          # pending | pushed
     attempt_token: str | None = None
+    # The FIRST attempt's durable ensure_backtested outcome ("created" | "existed") — GATE-2 #1.
+    # A crash after the ensure CREATED the row makes every resume's fresh call return "existed",
+    # and stale SAME-NAME search_trials (breadth is keyed by strategy NAME) could then satisfy the
+    # direct-funnel skip predicate; recovery therefore always feeds produce_evidence the JOURNALED
+    # value, never a fresh re-read.
+    ensure_status: str | None = None
     # Observability MIRROR of the intake chokepoint's produce_evidence outcome (mergeback
     # authoritative intake): "produced" | "already_produced" | "authoritative_breadth" |
-    # "no_context". NEVER a recovery input — evidence idempotency is owned by the registry's
-    # mergeback_evidence marker, not the journal.
+    # "authoritative_breadth_returns_backfilled" | "no_context". NEVER a recovery input — evidence
+    # idempotency is owned by the registry's mergeback_evidence marker, not the journal.
     evidence_status: str | None = None
     promote_status: str = "pending"       # pending | passed | failed
     promote_gate_id: int | None = None

@@ -916,3 +916,45 @@ def test_crash_resume_after_evidence_before_promote_redrives_promote() -> None:
     assert producer.calls == [("existed", _TIP)]
     assert len(p.tokens) == 1
     assert journal.latest("s", _TIP).evidence_status == "already_produced"
+
+
+# (GATE-2 #1) ensure_status durability: the FIRST attempt's outcome is journaled before
+# produce_evidence and a resume feeds the JOURNALED value, never the fresh re-read.
+
+
+def test_fresh_ensure_outcome_is_journaled_before_produce() -> None:
+    journal = FakeJournal()
+    seen_at_produce: list[str | None] = []
+
+    class JournalPeekingProducer(Producer):
+        def __call__(self, ensure_status, branch_tip):
+            # The journal must ALREADY carry the ensure outcome when produce runs (a crash here
+            # must not lose it).
+            seen_at_produce.append(journal.latest("s", _TIP).ensure_status)
+            return super().__call__(ensure_status, branch_tip)
+
+    result = _run(FakeGit(), journal, stage={"s": None}, ensurer=Ensurer(status="created"),
+                  producer=JournalPeekingProducer())
+    assert result.status == "promoted_allocated"
+    assert seen_at_produce == ["created"]
+    assert journal.latest("s", _TIP).ensure_status == "created"
+
+
+def test_resume_feeds_journaled_ensure_status_not_the_fresh_reread() -> None:
+    # Crash AFTER the first attempt journaled ensure_status="created" (row created), BEFORE
+    # evidence/promote. The resume's fresh ensure returns "existed" (the row now exists) — and
+    # stale SAME-NAME breadth could then satisfy the direct-funnel skip. produce_evidence must
+    # receive the JOURNALED "created".
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed",
+        ensure_status="created"))
+    ensurer = Ensurer(status="existed")  # the fresh re-read lies about attempt provenance
+    producer = Producer(status="produced")
+    git = FakeGit(origin_main=_MERGE, local_main=_MERGE)
+    result = _run(git, journal, stage={"s": "backtested"}, ensurer=ensurer, producer=producer)
+    assert result.status == "promoted_allocated"
+    assert ensurer.calls == [(_TIP, _MERGE, _BASE)]   # ensure still runs (idempotent)
+    assert producer.calls == [("created", _TIP)]      # ...but the JOURNALED status wins
+    assert journal.latest("s", _TIP).ensure_status == "created"

@@ -511,13 +511,29 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         # failure in either helper is a proven pre-promote failure and routes through the same
         # revert machinery as a promote exception below.
         try:
-            ensure_status = ensure_backtested(branch_tip, merge_sha, base_sha)
+            fresh_ensure = ensure_backtested(branch_tip, merge_sha, base_sha)
+            # GATE-2 #1: the FIRST attempt's ensure outcome is the durable truth for the skip
+            # predicate. A crash AFTER the ensure created the row makes every resume's fresh call
+            # return "existed", and stale SAME-NAME search_trials (breadth is keyed by strategy
+            # NAME — a retired/unrelated same-name strategy's trials count) could then satisfy the
+            # direct-funnel skip → promote without THIS attempt's evidence. So the first outcome
+            # is journaled IMMEDIATELY (before produce_evidence) and a resume always feeds the
+            # JOURNALED value into produce_evidence, never the fresh return. Residual: a crash
+            # between the ensure tx commit and this journal append still resumes as "existed" —
+            # narrowed to a single write window, accepted at review.
+            if rec is not None and rec.ensure_status is not None:
+                ensure_status = rec.ensure_status
+            else:
+                ensure_status = fresh_ensure
+                _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
+                       merge_sha=merge_sha, push_status="pushed", attempt_token=token,
+                       ensure_status=ensure_status)
             evidence_status = produce_evidence(ensure_status, branch_tip)
             # Journal MIRROR only (observability): recovery reads the registry's evidence marker,
             # never this field.
             _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
                    merge_sha=merge_sha, push_status="pushed", attempt_token=token,
-                   evidence_status=evidence_status)
+                   ensure_status=ensure_status, evidence_status=evidence_status)
             promote(token)
         except BaseException as exc:  # noqa: BLE001 — outcome read authoritatively below, not raise
             raised = exc
