@@ -513,14 +513,15 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         try:
             fresh_ensure = ensure_backtested(branch_tip, merge_sha, base_sha)
             # GATE-2 #1: the FIRST attempt's ensure outcome is the durable truth for the skip
-            # predicate. A crash AFTER the ensure created the row makes every resume's fresh call
-            # return "existed", and stale SAME-NAME search_trials (breadth is keyed by strategy
-            # NAME — a retired/unrelated same-name strategy's trials count) could then satisfy the
-            # direct-funnel skip → promote without THIS attempt's evidence. So the first outcome
-            # is journaled IMMEDIATELY (before produce_evidence) and a resume always feeds the
-            # JOURNALED value into produce_evidence, never the fresh return. Residual: a crash
-            # between the ensure tx commit and this journal append still resumes as "existed" —
-            # narrowed to a single write window, accepted at review.
+            # predicate. A naive fresh re-read after a crash-after-create would say "existed", and
+            # stale SAME-NAME search_trials (breadth is keyed by strategy NAME — a retired/
+            # unrelated same-name strategy's trials count) could then satisfy the direct-funnel
+            # skip → promote without THIS attempt's evidence. Two layers close every window: the
+            # first outcome is journaled IMMEDIATELY (before produce_evidence) and a resume always
+            # feeds the JOURNALED value in, never the fresh return; and ensure_backtested itself
+            # re-derives created-by-THIS-attempt from the branch-tip provenance tag committed
+            # ATOMICALLY with the row create — so even a crash BETWEEN the registry commit and
+            # this journal append resumes as "created" (no residual).
             if rec is not None and rec.ensure_status is not None:
                 ensure_status = rec.ensure_status
             else:

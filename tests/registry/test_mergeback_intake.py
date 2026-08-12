@@ -151,9 +151,13 @@ def test_ensure_creates_row_at_backtested_with_provenance(conn_factory):
         assert token in reason
 
 
-def test_ensure_is_idempotent_and_reports_existed(conn_factory):
+def test_ensure_is_idempotent_and_reclassifies_own_row_as_created(conn_factory):
+    # GATE-2 #1 (residual closed): a re-run of the SAME attempt finds the row it created — the
+    # branch-tip provenance tag (committed atomically with the create) classifies it "created",
+    # NOT "existed", so a crash between the registry commit and the saga's journal write can never
+    # let stale same-name breadth satisfy the direct-funnel skip. Still a registry no-op.
     assert _ensure(conn_factory) == "created"
-    assert _ensure(conn_factory) == "existed"
+    assert _ensure(conn_factory) == "created"
     with conn_factory() as conn:
         assert len(SqliteStrategyRepository(conn).list_transitions(_STRAT)) == 2  # no new rows
 
@@ -412,3 +416,74 @@ def test_completed_marker_with_drifted_context_fails_closed_not_already_produced
     drifted = dict(_CTX, snapshot="bars-other", demo=False)
     with pytest.raises(MergeBackIntakeError, match="data context drifted"):
         _produce(conn_factory, ensure_status="existed", eval_context=drifted)
+
+
+# --- GATE-2 #1 residual closed: creation provenance decides created|existed on resume ------------
+
+
+def test_crash_after_registry_commit_before_journal_still_produces_evidence(conn_factory):
+    # THE closed window: the first invocation's ensure committed (row created, provenance tag
+    # atomic with it) but the crash beat the saga's journal write, so the resume has NO journaled
+    # ensure_status — and stale SAME-NAME breadth exists. The resume's ensure must classify
+    # "created" from the tag, and produce must therefore sweep, not take the direct-funnel skip.
+    with conn_factory() as conn:  # stale breadth under the same name (an old strategy's trials)
+        SqliteStrategyRepository(conn).record_search_trial(_STRAT, 9, json.dumps({"old": [1]}))
+    assert _ensure(conn_factory) == "created"          # first invocation's registry commit
+    resumed = _ensure(conn_factory)                    # resume: journal had nothing
+    assert resumed == "created"                        # provenance tag, not the naive "existed"
+    status, sweep, backtest = _produce(conn_factory, ensure_status=resumed)
+    assert status == "produced"
+    assert sweep.calls == 1 and backtest.calls == 1    # this attempt's evidence WAS produced
+
+
+def test_preexisting_row_without_mergeback_provenance_stays_existed(conn_factory):
+    # Genuine pre-existing rows: plain tags (or none at all) never classify as this attempt's.
+    with conn_factory() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(_STRAT, tags=["momentum", "xs"])
+        rec = repo.get(_STRAT)
+        conn.execute("UPDATE strategies SET stage='backtested' WHERE id=?", (rec.id,))
+        conn.commit()
+    assert _ensure(conn_factory) == "existed"
+
+
+def test_preexisting_row_with_null_tags_stays_existed(conn_factory):
+    with conn_factory() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(_STRAT)
+        rec = repo.get(_STRAT)
+        conn.execute("UPDATE strategies SET stage='backtested', tags=NULL WHERE id=?", (rec.id,))
+        conn.commit()
+    assert _ensure(conn_factory) == "existed"
+
+
+def test_foreign_mergeback_provenance_fails_closed(conn_factory):
+    # A backtested row created by ANOTHER attempt (different branch_tip) is an orphan whose
+    # breadth provenance cannot be guessed — never "existed", never "created".
+    assert _ensure(conn_factory, branch_tip="OTHERTIP9") == "created"
+    with pytest.raises(MergeBackIntakeError, match="FOREIGN merge-back creation provenance"):
+        _ensure(conn_factory)  # this attempt's _TIP vs the row's OTHERTIP9 tag
+
+
+def test_unreadable_tags_on_backtested_row_fail_closed(conn_factory):
+    with conn_factory() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(_STRAT)
+        rec = repo.get(_STRAT)
+        conn.execute("UPDATE strategies SET stage='backtested', tags='not-json{' WHERE id=?",
+                     (rec.id,))
+        conn.commit()
+    with pytest.raises(MergeBackIntakeError, match="unreadable"):
+        _ensure(conn_factory)
+
+
+def test_non_list_tags_on_backtested_row_fail_closed(conn_factory):
+    with conn_factory() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(_STRAT)
+        rec = repo.get(_STRAT)
+        conn.execute("UPDATE strategies SET stage='backtested', tags='{\"a\": 1}' WHERE id=?",
+                     (rec.id,))
+        conn.commit()
+    with pytest.raises(MergeBackIntakeError, match="not a tag list"):
+        _ensure(conn_factory)

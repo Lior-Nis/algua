@@ -73,6 +73,11 @@ __all__ = [
 # orphan row (merge reverted, registry row deliberately kept — reverting registry state is the
 # dangerous direction, #485 philosophy) is classifiable by gc/clustering/dashboards.
 INTAKE_TAG = "mergeback:intake"
+# The per-attempt creation-provenance tag (`mergeback:branch-tip:<sha>`), committed ATOMICALLY
+# with the row create. It is the durable created-by-THIS-attempt witness the journal cannot be
+# (a crash can always beat a journal append that follows the registry commit): on resume,
+# ensure_backtested reads it back inside the same tx to classify created|existed (GATE-2 #1).
+_BRANCH_TIP_TAG_PREFIX = "mergeback:branch-tip:"
 
 
 class MergeBackIntakeError(RuntimeError):
@@ -105,10 +110,18 @@ def ensure_backtested(
     row already at ``backtested`` is a no-op. ANY other stage fails closed — a candidate/paper/
     live/retired strategy must never be silently re-based by an autonomous merge-back.
 
-    Returns ``"created"`` iff THIS call inserted the row, else ``"existed"`` — decided inside the
-    same write transaction, so the produce_evidence skip predicate can never race a concurrent
-    writer. Actor is ``Actor.AGENT``; the transition reason + (on create) the row tags bind the
-    full merge provenance (:data:`INTAKE_TAG`, branch, branch_tip, merge_sha, base_sha).
+    Returns ``"created"`` iff THIS ATTEMPT created the row — either this call inserted it, or a
+    backtested row already carries THIS attempt's branch-tip creation tag (a crashed prior
+    invocation of the SAME attempt created it and the crash beat the saga's journal write; the
+    provenance tag is committed ATOMICALLY with the create, so it survives every crash window the
+    journal cannot cover — GATE-2 #1 residual, closed). ``"existed"`` iff the row genuinely
+    pre-existed this attempt (no merge-back creation provenance at all — the direct-authoritative-
+    funnel case, or an ``idea`` row being advanced). A backtested row carrying FOREIGN or
+    unreadable merge-back provenance fails closed (:class:`MergeBackIntakeError`) — never guess
+    whose evidence a same-name orphan's breadth belongs to. All decided inside the same write
+    transaction, so the produce_evidence skip predicate can never race a concurrent writer. Actor
+    is ``Actor.AGENT``; the transition reason + (on create) the row tags bind the full merge
+    provenance (:data:`INTAKE_TAG`, branch, branch_tip, merge_sha, base_sha).
 
     Deliberately inline SQL under one explicit transaction: the repository's ``add``/transition
     APIs each commit via ``with conn:`` (autocommit-per-call), so composing them could never yield
@@ -125,11 +138,11 @@ def ensure_backtested(
         f"merge-back intake ({INTAKE_TAG}): branch={branch} branch_tip={branch_tip} "
         f"merge_sha={merge_sha} base_sha={base_sha}"
     )
-    tags = [INTAKE_TAG, f"mergeback:branch-tip:{branch_tip}"]
+    tags = [INTAKE_TAG, f"{_BRANCH_TIP_TAG_PREFIX}{branch_tip}"]
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT id, stage FROM strategies WHERE name = ?", (strategy,)
+            "SELECT id, stage, tags FROM strategies WHERE name = ?", (strategy,)
         ).fetchone()
         if row is None:
             cur = conn.execute(
@@ -152,7 +165,12 @@ def ensure_backtested(
         else:
             stage = str(row["stage"])
             if stage == Stage.BACKTESTED.value:
-                status = "existed"  # idempotent no-op (incl. the crash-resume of THIS chokepoint)
+                # No-op — but classify WHO created the row from its creation-provenance tags
+                # (committed atomically with the create), inside this same tx. A crashed prior
+                # invocation of THIS attempt must resume as "created" (its stale same-name breadth
+                # must not satisfy the direct-funnel skip); foreign/unreadable merge-back
+                # provenance fails closed (GATE-2 #1 residual, closed).
+                status = _classify_existing_backtested(row["tags"], strategy, branch_tip)
             elif stage == Stage.IDEA.value:
                 _advance_idea_to_backtested(conn, int(row["id"]), reason, now)
                 status = "existed"
@@ -166,6 +184,44 @@ def ensure_backtested(
         conn.rollback()
         raise
     return status
+
+
+def _classify_existing_backtested(raw_tags: str | None, strategy: str, branch_tip: str) -> str:
+    """Classify a pre-found ``backtested`` row as ``created`` | ``existed`` from its provenance
+    tags — MUST run inside ensure_backtested's ``BEGIN IMMEDIATE`` (the classification is part of
+    the same race-free created|existed decision).
+
+    * THIS attempt's branch-tip tag present → ``"created"``: a crashed prior invocation of the
+      SAME attempt created the row; treating it as pre-existing would let stale SAME-NAME
+      search_trials satisfy the direct-funnel skip and carry promote without this attempt's sweep.
+    * NO merge-back provenance at all (NULL tags, or a tag list without any ``mergeback:*``
+      creation tag) → ``"existed"``: the genuine pre-existing case.
+    * FOREIGN merge-back provenance (another attempt's branch-tip tag / a bare intake tag) or an
+      unreadable/malformed tags column → fail closed. Whose evidence a same-name merge-back
+      orphan's breadth belongs to cannot be guessed.
+    """
+    if raw_tags is None:
+        return "existed"
+    try:
+        parsed = json.loads(raw_tags)
+    except (TypeError, ValueError) as exc:
+        raise MergeBackIntakeError(
+            f"strategy {strategy!r} is at backtested but its tags column is unreadable "
+            f"({raw_tags!r}); cannot classify merge-back creation provenance (fail closed)"
+        ) from exc
+    if not isinstance(parsed, list) or not all(isinstance(t, str) for t in parsed):
+        raise MergeBackIntakeError(
+            f"strategy {strategy!r} is at backtested but its tags column is not a tag list "
+            f"({raw_tags!r}); cannot classify merge-back creation provenance (fail closed)")
+    tags = {t.strip().lower() for t in parsed}
+    if f"{_BRANCH_TIP_TAG_PREFIX}{branch_tip}".lower() in tags:
+        return "created"
+    if INTAKE_TAG in tags or any(t.startswith(_BRANCH_TIP_TAG_PREFIX) for t in tags):
+        raise MergeBackIntakeError(
+            f"strategy {strategy!r} is at backtested with FOREIGN merge-back creation provenance "
+            f"(tags {sorted(tags)!r}, this attempt's branch_tip {branch_tip}); refusing to treat "
+            f"another attempt's orphan as pre-existing evidence (fail closed)")
+    return "existed"
 
 
 def _advance_idea_to_backtested(
