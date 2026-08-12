@@ -131,6 +131,28 @@ def parse_grid(params: list[str]) -> dict[str, list[Any]]:
     return grid
 
 
+def validate_sweep_grid(
+    strategy: LoadedStrategy, grid: dict[str, list[Any]]
+) -> tuple[list[dict[str, Any]], list[LoadedStrategy]]:
+    """Validate ``grid`` against ``strategy`` and return ``(combos, overridden)``.
+
+    The ONE shared grid-validation API (mergeback authoritative intake): validation used to be
+    split across ``parse_grid`` (flag shape), ``_combos`` (the ``_MAX_COMBOS`` cap), and
+    ``_override`` (signal-key existence + construction-param validity, per combo). This unifies
+    the strategy-dependent half — combo cap + every combo's key/construction validation — so a
+    caller holding an already-parsed grid (e.g. the merge-back drainer validating a transported
+    ``sweep_grid`` against the just-merged strategy module) can fail fast with the exact errors a
+    real ``sweep`` would raise, without running one. ``sweep_with_matrix`` itself calls this, so
+    the pre-check and the real run can never drift.
+
+    Raises ``BacktestError`` (grid too large) or ``ValueError`` (unknown signal key, invalid
+    construction params) — the same exceptions the sweep engine raises.
+    """
+    combos = _combos(grid)
+    overridden = [_override(strategy, combo) for combo in combos]
+    return combos, overridden
+
+
 def _rank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sort records descending by score; ties broken by ascending std_sharpe (more stable wins).
 
@@ -399,11 +421,11 @@ def sweep_with_matrix(
             f"strategy {strategy.name!r} declares needs_model; sweep/walk-forward do not support "
             f"the model lane yet (#376 follow-up) — refusing to run (fail closed)"
         )
-    combos = _combos(grid)
     # Parent pre-pass: build + validate EVERY override here so a bad signal key or invalid
     # construction param fails fast (ValueError) BEFORE any worker process spawns — exactly the
-    # parent-side behavior the sequential loop had.
-    overridden = [_override(strategy, combo) for combo in combos]
+    # parent-side behavior the sequential loop had. Shared with external pre-checks via
+    # ``validate_sweep_grid`` so the two can never drift.
+    combos, overridden = validate_sweep_grid(strategy, grid)
 
     eval_kwargs: dict[str, Any] = dict(
         provider=provider, start=start, end=end,
