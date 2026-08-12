@@ -20,6 +20,7 @@ from algua.operator.journal import (
     strict_relaxation_fingerprint,
 )
 from algua.operator.mergeback import (
+    JournalRegistryMismatchError,
     LocalMainDriftError,
     MergeContentAbsentError,
     StageDriftError,
@@ -189,18 +190,52 @@ class Promoter:
         return token in self._rows
 
 
+class Ensurer:
+    """Fake ``ensure_backtested`` seam: records call args, returns a fixed status, or raises."""
+
+    def __init__(self, *, status: str = "existed", raises: BaseException | None = None) -> None:
+        self.status = status
+        self.raises = raises
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, branch_tip: str, merge_sha: str, base_sha: str) -> str:
+        self.calls.append((branch_tip, merge_sha, base_sha))
+        if self.raises is not None:
+            raise self.raises
+        return self.status
+
+
+class Producer:
+    """Fake ``produce_evidence`` seam: records ``(ensure_status, branch_tip)``, or raises."""
+
+    def __init__(self, *, status: str = "produced", raises: BaseException | None = None) -> None:
+        self.status = status
+        self.raises = raises
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, ensure_status: str, branch_tip: str) -> str:
+        self.calls.append((ensure_status, branch_tip))
+        if self.raises is not None:
+            raise self.raises
+        return self.status
+
+
 def _stage(mapping):
     return lambda name: mapping[name]
 
 
 def _run(git, journal, *, stage, promoter=None, run_gate=True, intake=None,
-         allocated=True, audit=None, gate_exists_by_token=None):
+         allocated=True, audit=None, gate_exists_by_token=None, ensurer=None, producer=None):
     promoter = promoter if promoter is not None else Promoter()
+    ensurer = ensurer if ensurer is not None else Ensurer()
+    producer = producer if producer is not None else Producer()
     return run_merge_back(
         git=git, journal=journal, strategy="s", branch="feat/s",
         codeowners_text=_CODEOWNERS,
         stage_of=_stage(stage),
         run_gate=(lambda: run_gate) if isinstance(run_gate, bool) else run_gate,
+        ensure_backtested=ensurer,
+        produce_evidence=producer,
         promote=promoter,
         passing_gate_by_token=promoter.by_token,
         gate_exists_by_token=(gate_exists_by_token if gate_exists_by_token is not None
@@ -343,7 +378,9 @@ def test_promote_stage_drift_without_token_fails_closed_no_revert() -> None:
             git=git, journal=FakeJournal(), strategy="s", branch="feat/s",
             codeowners_text=_CODEOWNERS,
             stage_of=lambda name: next(seq),
-            run_gate=lambda: True, promote=p, passing_gate_by_token=p.by_token,
+            run_gate=lambda: True,
+            ensure_backtested=Ensurer(), produce_evidence=Producer(),
+            promote=p, passing_gate_by_token=p.by_token,
             gate_exists_by_token=p.exists,
             intake=lambda: {}, target_allocated=lambda n: True)
     assert not any(isinstance(c, tuple) and c[0] == "revert" for c in git.calls)
@@ -578,6 +615,7 @@ def test_resume_passing_token_row_converges_to_intake_no_reinvoke() -> None:
     result = run_merge_back(
         git=FakeGit(), journal=journal, strategy="s", branch="feat/s",
         codeowners_text=_CODEOWNERS, stage_of=_stage({"s": "backtested"}), run_gate=lambda: True,
+        ensure_backtested=Ensurer(), produce_evidence=Producer(),
         promote=p, passing_gate_by_token=lambda tok: 77 if tok == token else None,
         gate_exists_by_token=lambda tok: True,
         intake=lambda: {"admitted": ["s"]}, target_allocated=lambda n: True)
@@ -674,3 +712,249 @@ def test_replace_helper_sanity() -> None:
     rec = MergeBackRecord(strategy="s", branch="b", branch_tip="t")
     assert replace(rec, terminal="x").terminal == "x"
     assert rec.terminal is None
+
+
+# ---------------------------------------------------------------------------------------------
+# Authoritative-intake chokepoint (mergeback-authoritative-intake design): ensure_backtested +
+# produce_evidence ordering, the stage None (factory-fresh) paths, and the journal-vs-registry
+# corruption guards.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_chokepoint_runs_ensure_then_produce_then_promote_in_order() -> None:
+    order: list[str] = []
+
+    class OrderedEnsurer(Ensurer):
+        def __call__(self, branch_tip, merge_sha, base_sha):
+            order.append("ensure")
+            return super().__call__(branch_tip, merge_sha, base_sha)
+
+    class OrderedProducer(Producer):
+        def __call__(self, ensure_status, branch_tip):
+            order.append("produce")
+            return super().__call__(ensure_status, branch_tip)
+
+    class OrderedPromoter(Promoter):
+        def __call__(self, token):
+            order.append("promote")
+            return super().__call__(token)
+
+    git = FakeGit()
+    journal = FakeJournal()
+    ensurer = OrderedEnsurer(status="created")
+    producer = OrderedProducer(status="produced")
+    p = OrderedPromoter(commit=True)
+    result = _run(git, journal, stage={"s": None}, promoter=p, ensurer=ensurer,
+                  producer=producer)
+    assert result.status == "promoted_allocated"
+    assert order == ["ensure", "produce", "promote"]
+    # ensure receives the durable merge identity; produce receives ensure's race-free status.
+    assert ensurer.calls == [(_TIP, _MERGE, _BASE)]
+    assert producer.calls == [("created", _TIP)]
+    # The chokepoint runs strictly AFTER the merge is committed + pushed.
+    assert git.calls.index(("push", _MERGE)) < len(git.calls)
+    # The journal mirrors the evidence status (observability only).
+    assert journal.latest("s", _TIP).evidence_status == "produced"
+
+
+def test_chokepoint_never_runs_on_gate_failed() -> None:
+    ensurer, producer = Ensurer(), Producer()
+    result = _run(FakeGit(), FakeJournal(), stage={"s": "backtested"}, run_gate=False,
+                  ensurer=ensurer, producer=producer)
+    assert result.status == "gate_failed"
+    assert ensurer.calls == [] and producer.calls == []
+
+
+def test_chokepoint_never_runs_on_diff_policy_rejected() -> None:
+    git = FakeGit(entries=[DiffEntry("100644", "M", None, "algua/registry/store.py")])
+    ensurer, producer = Ensurer(), Producer()
+    result = _run(git, FakeJournal(), stage={"s": "backtested"}, ensurer=ensurer,
+                  producer=producer)
+    assert result.status == "diff_policy_rejected"
+    assert ensurer.calls == [] and producer.calls == []
+
+
+def test_chokepoint_never_runs_on_already_done_or_drift_or_terminal_replay() -> None:
+    ensurer, producer = Ensurer(), Producer()
+    # paper + no record -> already_done.
+    assert _run(FakeGit(), FakeJournal(), stage={"s": "paper"}, ensurer=ensurer,
+                producer=producer).status == "already_done"
+    # candidate drift -> StageDriftError.
+    with pytest.raises(StageDriftError):
+        _run(FakeGit(), FakeJournal(), stage={"s": "candidate"}, ensurer=ensurer,
+             producer=producer)
+    # terminal replay.
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="rejected",
+        terminal="diff_policy_rejected"))
+    assert _run(FakeGit(), journal, stage={"s": "backtested"}, ensurer=ensurer,
+                producer=producer).status == "diff_policy_rejected"
+    assert ensurer.calls == [] and producer.calls == []
+
+
+def test_chokepoint_never_runs_on_intake_resume_or_revert_completion() -> None:
+    ensurer, producer = Ensurer(), Producer()
+    # Resume into INTAKE (journal proves promote passed).
+    journal = FakeJournal()
+    token = derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", attempt_token=token,
+        promote_status="passed", promote_gate_id=42))
+    git = FakeGit(origin_main=_MERGE, local_main=_MERGE)
+    result = _run(git, journal, stage={"s": "candidate"}, ensurer=ensurer, producer=producer)
+    assert result.status == "promoted_allocated"
+    # Revert-completion resume (revert committed, push unconfirmed).
+    journal2 = FakeJournal()
+    journal2.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", promote_status="failed",
+        revert_sha="REVERT0"))
+    git2 = FakeGit(local_main="REVERT0", origin_main="REVERT0")
+    assert _run(git2, journal2, stage={"s": "backtested"}, ensurer=ensurer,
+                producer=producer).status == "promote_failed"
+    assert ensurer.calls == [] and producer.calls == []
+
+
+def test_chokepoint_never_runs_when_token_row_already_exists() -> None:
+    # HIGH-2 convergence: a gate row already bears this attempt's token — the metered promote must
+    # not be re-invoked, and neither must the intake chokepoint that precedes it.
+    ensurer, producer = Ensurer(), Producer()
+    journal = FakeJournal()
+    token = derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", attempt_token=token))
+    p = Promoter(commit=False)
+    result = run_merge_back(
+        git=FakeGit(origin_main=_MERGE, local_main=_MERGE), journal=journal, strategy="s",
+        branch="feat/s", codeowners_text=_CODEOWNERS, stage_of=_stage({"s": "backtested"}),
+        run_gate=lambda: True, ensure_backtested=ensurer, produce_evidence=producer,
+        promote=p, passing_gate_by_token=lambda tok: 77, gate_exists_by_token=lambda tok: True,
+        intake=lambda: {"admitted": ["s"]}, target_allocated=lambda n: True)
+    assert result.status == "promoted_allocated"
+    assert p.tokens == [] and ensurer.calls == [] and producer.calls == []
+
+
+def test_produce_evidence_failure_routes_through_revert_and_propagates() -> None:
+    git = FakeGit()
+    boom = RuntimeError("evidence recipe blew up")
+    p = Promoter(commit=False)
+    with pytest.raises(RuntimeError, match="evidence recipe blew up"):
+        _run(git, FakeJournal(), stage={"s": "backtested"}, promoter=p,
+             producer=Producer(raises=boom))
+    assert p.tokens == []                       # promote never ran
+    assert ("revert", _MERGE) in git.calls      # merge reverted (main untouched)
+    assert ("revert_push", "REVERT0") in git.calls
+
+
+def test_ensure_backtested_failure_routes_through_revert_and_propagates() -> None:
+    git = FakeGit()
+    boom = RuntimeError("intake refused")
+    p = Promoter(commit=False)
+    producer = Producer()
+    # stage stays None on both reads: the one-tx ensure rolled back, so no row was created.
+    with pytest.raises(RuntimeError, match="intake refused"):
+        _run(git, FakeJournal(), stage={"s": None}, promoter=p,
+             ensurer=Ensurer(raises=boom), producer=producer)
+    assert p.tokens == [] and producer.calls == []
+    assert ("revert", _MERGE) in git.calls
+
+
+def test_unregistered_strategy_is_factory_fresh_and_promotes() -> None:
+    # stage None (no registry row) is the canonical factory-fresh state: full cycle runs.
+    result = _run(FakeGit(), FakeJournal(), stage={"s": None}, ensurer=Ensurer(status="created"))
+    assert result.status == "promoted_allocated"
+
+
+@pytest.mark.parametrize("proof", [
+    {"terminal": "promoted_allocated", "intake_status": "allocated", "promote_status": "passed"},
+    {"terminal": "promoted_queued", "promote_status": "passed"},
+    {"intake_status": "allocated"},
+    {"promote_status": "passed"},
+])
+def test_missing_row_with_journal_promotion_proof_fails_closed(proof: dict) -> None:
+    # Journal replay must never manufacture success out of registry corruption: a journal that
+    # proves promotion/allocation paired with a MISSING registry row fails closed.
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed", **proof))
+    with pytest.raises(JournalRegistryMismatchError):
+        _run(FakeGit(origin_main=_MERGE, local_main=_MERGE), journal, stage={"s": None})
+
+
+def test_missing_row_without_promotion_proof_replays_benign_terminal() -> None:
+    # A gate_failed terminal with a missing row is NOT corruption (a factory branch that never
+    # passed the gate never got registered) — the terminal replays as before.
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="failed", terminal="gate_failed"))
+    result = _run(FakeGit(), journal, stage={"s": None})
+    assert result.status == "gate_failed"
+
+
+def test_crash_resume_after_evidence_before_promote_redrives_promote() -> None:
+    # Journal has the pushed merge (+ mirrored evidence status) but NO gate row bears the token:
+    # resume re-drives ensure -> produce -> promote. Skipping the re-produce is the REGISTRY
+    # marker's job (already_produced), not the journal's — the seams are still invoked.
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed",
+        evidence_status="produced"))
+    ensurer = Ensurer(status="existed")
+    producer = Producer(status="already_produced")
+    p = Promoter(commit=True)
+    git = FakeGit(origin_main=_MERGE, local_main=_MERGE)
+    result = _run(git, journal, stage={"s": "backtested"}, promoter=p, ensurer=ensurer,
+                  producer=producer)
+    assert result.status == "promoted_allocated"
+    assert ensurer.calls == [(_TIP, _MERGE, _BASE)]
+    assert producer.calls == [("existed", _TIP)]
+    assert len(p.tokens) == 1
+    assert journal.latest("s", _TIP).evidence_status == "already_produced"
+
+
+# (GATE-2 #1) ensure_status durability: the FIRST attempt's outcome is journaled before
+# produce_evidence and a resume feeds the JOURNALED value, never the fresh re-read.
+
+
+def test_fresh_ensure_outcome_is_journaled_before_produce() -> None:
+    journal = FakeJournal()
+    seen_at_produce: list[str | None] = []
+
+    class JournalPeekingProducer(Producer):
+        def __call__(self, ensure_status, branch_tip):
+            # The journal must ALREADY carry the ensure outcome when produce runs (a crash here
+            # must not lose it).
+            seen_at_produce.append(journal.latest("s", _TIP).ensure_status)
+            return super().__call__(ensure_status, branch_tip)
+
+    result = _run(FakeGit(), journal, stage={"s": None}, ensurer=Ensurer(status="created"),
+                  producer=JournalPeekingProducer())
+    assert result.status == "promoted_allocated"
+    assert seen_at_produce == ["created"]
+    assert journal.latest("s", _TIP).ensure_status == "created"
+
+
+def test_resume_feeds_journaled_ensure_status_not_the_fresh_reread() -> None:
+    # Crash AFTER the first attempt journaled ensure_status="created" (row created), BEFORE
+    # evidence/promote. The resume's fresh ensure returns "existed" (the row now exists) — and
+    # stale SAME-NAME breadth could then satisfy the direct-funnel skip. produce_evidence must
+    # receive the JOURNALED "created".
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE, diff_policy="passed",
+        gate_status="green", merge_sha=_MERGE, push_status="pushed",
+        ensure_status="created"))
+    ensurer = Ensurer(status="existed")  # the fresh re-read lies about attempt provenance
+    producer = Producer(status="produced")
+    git = FakeGit(origin_main=_MERGE, local_main=_MERGE)
+    result = _run(git, journal, stage={"s": "backtested"}, ensurer=ensurer, producer=producer)
+    assert result.status == "promoted_allocated"
+    assert ensurer.calls == [(_TIP, _MERGE, _BASE)]   # ensure still runs (idempotent)
+    assert producer.calls == [("created", _TIP)]      # ...but the JOURNALED status wins
+    assert journal.latest("s", _TIP).ensure_status == "created"

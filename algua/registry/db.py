@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 # v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
 # above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is
@@ -154,6 +154,30 @@ CREATE TABLE IF NOT EXISTS search_trials (
 );
 CREATE INDEX IF NOT EXISTS ix_search_trials_strategy ON search_trials(strategy_name);
 CREATE INDEX IF NOT EXISTS ix_search_trials_created_at ON search_trials(created_at);
+-- v38 (merge-back authoritative intake): the per-(strategy, branch_tip) evidence marker the
+-- merge-back drainer's produce_evidence uses for attempt-idempotency. search_trials/backtest_
+-- returns writers are AUTOCOMMIT single-row inserts inside the reused sweep/backtest task
+-- functions, so trial + returns + marker cannot land in one transaction; instead the marker is
+-- written 'started' (with a search_trials MAX(id) watermark — read+inserted under ONE BEGIN
+-- IMMEDIATE — and recipe_hash: a canonical hash over the FULL evidence recipe, grid AND data
+-- context, so a resume with a drifted context fails closed instead of silently reusing the
+-- marker) BEFORE the compute and flipped 'completed' AFTER both rows landed. A crash mid-compute
+-- leaves 'started': the re-run dedups the trial layer on (strategy_name, grid_json,
+-- id > watermark) — RESUME ONLY; a freshly-created marker always sweeps — duplicate trials are
+-- NOT harmless (they permanently inflate funnel/window breadth and the agent-NOVEL lifetime
+-- seed) — and a 'completed' marker blocks any re-record. UNIQUE(strategy_id, branch_tip):
+-- one evidence production per merge-back attempt identity.
+CREATE TABLE IF NOT EXISTS mergeback_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+    branch_tip TEXT NOT NULL,
+    recipe_hash TEXT NOT NULL,
+    search_trials_watermark INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('started','completed')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(strategy_id, branch_tip)
+);
 -- holdout_evaluations burns a walk-forward holdout window on use, so it can be evaluated ONCE.
 -- `research promote` carves the last holdout_frac of the period into an out-of-sample holdout and
 -- gates on it; the promotion guarantee rests on that holdout being seen once. Each row records a
@@ -924,6 +948,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_gate_evaluations_attempt_token"
         " ON gate_evaluations(strategy_id, attempt_token) WHERE attempt_token IS NOT NULL"
     )
+    # v38 (merge-back authoritative intake): mergeback_evidence is a brand-new marker table;
+    # executescript(_SCHEMA) above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns
+    # needed. Written only by algua.registry.mergeback_intake (the drainer's evidence chokepoint).
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

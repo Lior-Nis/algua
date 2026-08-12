@@ -203,7 +203,32 @@ def _validate_merge_back(mb, *, verdict, strategy_names, seen_strategies, today)
         print(f"WARNING: merge_back window start<=end<=today violated ({start}..{end} vs today "
               f"{today}) for {strategy!r}; dropping candidacy")
         return None, None
-    return {"strategy": strategy, "universe": universe, "start": start, "end": end}, strategy
+    # eval_context (mergeback authoritative intake): the RECIPE the trusted drainer replays
+    # authoritatively post-merge (data-context ids + the exact sweep grid) — required, since a
+    # candidate without it can never clear the authoritative gate. Only the producer-side checks
+    # live here: presence/shape + the strict-defaults attestation. The full canonical fail-closed
+    # validation is mergeback_queue.validate_eval_context, raised (-> logged + dropped) at enqueue.
+    ec = mb.get("eval_context")
+    if not isinstance(ec, dict):
+        print(f"WARNING: merge_back.eval_context missing/not an object for {strategy!r}; "
+              "dropping candidacy (the authoritative rerun needs the data-context + sweep-grid "
+              "recipe)")
+        return None, None
+    # The authoritative rerun pins promote_task's strict-agent defaults (windows=4,
+    # holdout_frac=0.2). A preview that deviated from them evaluated a DIFFERENT partition than
+    # the one the authoritative gate will score — REJECT, never silently re-partition. The keys
+    # are attestations only: they are stripped before enqueue (never transported).
+    ec = dict(ec)
+    declared_windows = ec.pop("windows", 4)
+    declared_holdout = ec.pop("holdout_frac", 0.2)
+    if declared_windows != 4 or declared_holdout != 0.2:
+        print(f"WARNING: merge_back.eval_context for {strategy!r} declares a preview run with "
+              f"windows={declared_windows!r} holdout_frac={declared_holdout!r} (strict-agent "
+              "defaults are 4/0.2); dropping candidacy — the authoritative run must evaluate the "
+              "same partition the preview claimed")
+        return None, None
+    return {"strategy": strategy, "universe": universe, "start": start, "end": end,
+            "eval_context": ec}, strategy
 
 
 def _parse_trailer(path: str, *, strategy_names: set) -> tuple[list, dict | None, list]:
@@ -316,10 +341,14 @@ if candidates and branch:
         spec.loader.exec_module(mergeback_queue)
         for cand in candidates:
             try:
+                # enqueue runs mergeback_queue.validate_eval_context FAIL-CLOSED: an invalid
+                # recipe raises here and the candidacy is dropped loudly — a malformed queue item
+                # is never written.
                 result = mergeback_queue.enqueue(
                     Path(queue_path), Path(queue_lock_path),
                     strategy=cand["strategy"], universe=cand["universe"],
-                    start=cand["start"], end=cand["end"], branch=branch)
+                    start=cand["start"], end=cand["end"], branch=branch,
+                    eval_context=cand["eval_context"])
                 print(f"merge-back queue: {result}")
             except Exception as exc:
                 print(f"WARNING: failed to enqueue merge-back candidate "
@@ -432,14 +461,24 @@ kb/research-runs/${STAMP}.md MUST END with a machine-readable trailer — exactl
 block as the FINAL element of the file:
 \`\`\`json
 {"hypotheses": [{"title": "<short hypothesis title>", "verdict": "discarded|candidate-preview-pass|error",
-  "merge_back": {"strategy": "<strategy_module_name>", "universe": "<universe>", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}}],
+  "merge_back": {"strategy": "<strategy_module_name>", "universe": "<universe>", "start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
+    "eval_context": {"snapshot": "<bars snapshot id>", "sweep_grid": {"<param>": [<v1>, <v2>]},
+      "rank_by": "mean_sharpe", "windows": 4, "holdout_frac": 0.2}}}],
  "preview_gate": {"passed": false, "failed_checks": ["<failed check name>"]}}
 \`\`\`
 One hypotheses[] entry per hypothesis you evaluated (title <= 120 chars, plain ASCII). Include
 "merge_back" ONLY when that hypothesis's "verdict" is "candidate-preview-pass" — name the exact
 strategy module you authored (its filename under algua/strategies/<family>/, WITHOUT the .py
 suffix — this must be a module your own commit actually adds, or the launcher drops it), the PIT
-universe you promoted against, and the promote window (start <= end <= today, YYYY-MM-DD). Omit
+universe you promoted against, and the promote window (start <= end <= today, YYYY-MM-DD).
+"eval_context" is REQUIRED on every merge_back: it is the recipe the trusted drainer replays
+AUTHORITATIVELY post-merge (your scratch evidence is never imported). Declare "snapshot" (the bars
+snapshot id you evaluated against; use "demo": true instead ONLY for a synthetic-data run — never
+both), the EXACT "sweep_grid" your 'backtest sweep' swept (JSON param: [values...] — the
+authoritative rerun records this as your measured breadth), "rank_by" (mean_sharpe|min_sharpe),
+and, when used, "fundamentals_snapshot"/"news_snapshot"/"delistings". Keep windows=4 and
+holdout_frac=0.2 (the strict-agent defaults) in your preview promote/sweep — a candidacy declaring
+any other value is DROPPED, because the authoritative gate re-evaluates the same partition. Omit
 "merge_back" (or set it to null) for "discarded"/"error" verdicts. preview_gate summarizes your
 final preview 'research promote' run ("passed": true with "failed_checks": [] on a pass); use null
 for preview_gate if no preview ran. The launcher parses this trailer into the durable run digest
@@ -627,7 +666,8 @@ echo "  cat ${WORKTREE}/kb/research-runs/${STAMP}.md"
 echo "  # Every valid 'merge_back' in the trailer above was just enqueued to ${AUTH_QUEUE}"
 echo "  # for the automated drainer (.codex/scripts/drain-mergeback-queue.sh) to run for real."
 echo "  # To force one through right now instead of waiting for the next drain cycle:"
-echo "  uv run algua paper merge-back --branch ${BRANCH} --strategy <name> --universe <u> --start D --end D"
+echo "  uv run algua paper merge-back --branch ${BRANCH} --strategy <name> --universe <u> --start D --end D \\"
+echo "    --snapshot <bars-id> --sweep-param K=v1,v2   # (or --demo; the eval-context recipe is required)"
 echo "When finished, remove the worktree:  git -C ${REPO_ROOT} worktree remove ${WORKTREE}"
 
 # Propagate a failed/timed-out codex run so the systemd unit fails (alerts / no false 'success').

@@ -11,8 +11,12 @@ Description=Algua merge-back queue drainer (trusted, unsandboxed, no LLM)
 Type=oneshot
 EnvironmentFile=/etc/algua/algua.env
 WorkingDirectory=/opt/algua
-# One merge-back attempt's worst case is dominated by the FULL quality gate (pytest+ruff+mypy+
-# lint-imports), observed ~9 minutes; this leaves generous margin. Must stay comfortably below the
-# 30-minute timer cadence so a slow cycle never overlaps its own next firing.
-TimeoutStartSec=1200
+# One merge-back attempt now stacks the FULL quality gate (pytest+ruff+mypy+lint-imports, observed
+# ~9 minutes) + the authoritative-intake evidence recipe (a <=200-combo `backtest sweep` + a
+# full-period `backtest run`) + the metered promote walk-forward/holdout — so this rose
+# 1200 -> 3600, IN LOCKSTEP with mergeback_queue.py's RESERVATION_STALE_SECONDS 1800 -> 4200
+# (stale > timeout ALWAYS: a systemd-killed attempt must already be reclaimable, never wedged).
+# The attempt may outlive the 30-minute timer cadence; that is safe by design — the queue
+# reservation + operator.lock make the next firing a no-op selection, never a concurrent drain.
+TimeoutStartSec=3600
 ExecStart=/opt/algua/.codex/scripts/drain-mergeback-queue.sh

@@ -148,9 +148,11 @@ def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
 
 
 def _invoke():
+    # --demo satisfies the fail-fast transport preflight (GATE-2 #5: exactly one of
+    # --demo/--snapshot); these tests stub promote/intake, so no real provider is touched.
     return runner.invoke(app, [
         "paper", "merge-back", "--branch", "feat/strat", "--strategy", _STRAT,
-        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31"])
+        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31", "--demo"])
 
 
 def test_green_gate_and_promote_allocates(monkeypatch):
@@ -239,3 +241,117 @@ def test_held_lock_fails_second_invocation(monkeypatch):
     payload = json.loads(result.output)
     assert payload["ok"] is False
     assert "another merge-back cycle is in progress" in payload["error"]
+
+
+# --- authoritative intake (mergeback-authoritative-intake design): CLI E2E ------------------------
+
+
+def _invoke_with_context(*extra: str):
+    return runner.invoke(app, [
+        "paper", "merge-back", "--branch", "feat/strat", "--strategy", _STRAT,
+        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31",
+        "--demo", *extra])
+
+
+def test_unregistered_strategy_full_cycle_registers_produces_evidence_and_promotes(monkeypatch):
+    # NO _register_backtested: the strategy has no authoritative row at all (the factory-fresh
+    # state). The REAL ensure_backtested + produce_evidence run (real registry DB, real demo sweep
+    # + backtest via the injected task bodies); promote/intake stay stubbed.
+    git = _FakeGit()
+    promote_calls: list = []
+    _wire(monkeypatch, gate=True, git=git, promote_calls=promote_calls)
+    # The REAL evidence sweep/backtest resolve the PIT universe — seed its membership timeline.
+    r = runner.invoke(app, ["data", "ingest-universe", "sp500",
+                            "--symbols", "AAPL,MSFT,NVDA,AMZN,GOOGL",
+                            "--effective-date", "2021-12-31"])
+    assert r.exit_code == 0, r.output
+
+    result = _invoke_with_context("--sweep-param", "lookback=20,60")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "promoted_allocated"
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        conn.row_factory = __import__("sqlite3").Row
+        repo = SqliteStrategyRepository(conn)
+        rec = repo.get(_STRAT)  # the row EXISTS now (created by ensure_backtested)
+        # Provenance-tagged registration + the idea->backtested intake transition.
+        assert "mergeback:intake" in rec.tags
+        transitions = repo.list_transitions(_STRAT)
+        assert [(t["from_stage"], t["to_stage"]) for t in transitions[:2]] == [
+            (None, "idea"), ("idea", "backtested")]
+        # Authoritative evidence landed: measured breadth (one trial, the exact grid) + returns.
+        trials = conn.execute(
+            "SELECT n_combos, grid_json FROM search_trials WHERE strategy_name=?",
+            (_STRAT,)).fetchall()
+        assert len(trials) == 1
+        assert trials[0]["n_combos"] == 2
+        assert json.loads(trials[0]["grid_json"]) == {"lookback": [20, 60]}
+        assert repo.load_backtest_returns(_STRAT) is not None
+        # The evidence marker completed for this (strategy, branch_tip).
+        marker = conn.execute(
+            "SELECT status FROM mergeback_evidence me JOIN strategies s ON s.id=me.strategy_id"
+            " WHERE s.name=? AND me.branch_tip=?", (_STRAT, "TIP")).fetchone()
+        assert marker is not None and marker["status"] == "completed"
+
+    # The promote seam received the transported eval context (strict-agent inputs otherwise).
+    assert len(promote_calls) == 1
+    assert promote_calls[0]["demo"] is True
+    assert promote_calls[0]["snapshot"] is None
+    assert promote_calls[0]["actor"] == "agent"
+
+
+def test_preregistered_strategy_with_breadth_skips_evidence_production(monkeypatch):
+    # The direct-authoritative-funnel no-op: a pre-existing backtested strategy that already
+    # carries authoritative measured breadth is NOT re-swept (no new trial, no marker).
+    _register_backtested(_STRAT)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        SqliteStrategyRepository(conn).record_search_trial(
+            _STRAT, 5, json.dumps({"lookback": [10, 20, 30, 40, 60]}))
+    git = _FakeGit()
+    promote_calls: list = []
+    _wire(monkeypatch, gate=True, git=git, promote_calls=promote_calls)
+
+    result = _invoke_with_context("--sweep-param", "lookback=20,60")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "promoted_allocated"
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        n_trials = conn.execute(
+            "SELECT COUNT(*) FROM search_trials WHERE strategy_name=?", (_STRAT,)).fetchone()[0]
+        assert n_trials == 1  # only the seeded row — the transported grid was NOT re-swept
+        n_markers = conn.execute("SELECT COUNT(*) FROM mergeback_evidence").fetchone()[0]
+        assert n_markers == 0
+    assert len(promote_calls) == 1
+
+
+# --- (GATE-2 #5) fail-fast transport preflight: a typo'd invocation dies BEFORE any git/journal --
+
+
+@pytest.mark.parametrize("extra,msg", [
+    ([], "exactly one of --demo or --snapshot"),                       # neither
+    (["--demo", "--snapshot", "bars-1"], "exactly one of --demo or --snapshot"),  # both
+    (["--demo", "--rank-by", "sharpe"], "--rank-by must be one of"),
+    (["--demo", "--sweep-param", "malformed"], "malformed --param"),
+])
+def test_bad_transport_combos_fail_before_any_git_or_journal_mutation(monkeypatch, tmp_path,
+                                                                      extra, msg):
+    _register_backtested(_STRAT)
+    git_constructed: list = []
+    monkeypatch.setattr(paper_cmd, "RealGitOps",
+                        lambda repo_root: git_constructed.append(repo_root) or _FakeGit())
+
+    result = runner.invoke(app, [
+        "paper", "merge-back", "--branch", "feat/strat", "--strategy", _STRAT,
+        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31", *extra])
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert msg in payload["error"]
+    # The saga never began: no git seam constructed, no journal file written.
+    assert git_constructed == []
+    assert list(get_settings().db_path.parent.glob("merge_back.*.journal")) == []

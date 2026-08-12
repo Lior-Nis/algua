@@ -103,6 +103,7 @@ from algua.registry.forward_promotion import forward_promotion_preflight, run_fo
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import canonical_run_context
 from algua.registry.intake import Candidate, order_candidates, slice_capital
+from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
@@ -568,6 +569,21 @@ def merge_back(
         help='max concurrent paper-lane strategies admitted into the shared book '
              '(default: settings.paper_book_capacity / ALGUA_PAPER_BOOK_CAPACITY)'),
     actor: str = typer.Option('agent', '--actor', help='human | agent (audit label)'),
+    demo: bool = typer.Option(False, '--demo',
+        help='eval context: synthetic data provider (mutually exclusive with --snapshot)'),
+    snapshot: str = typer.Option(None, '--snapshot',
+        help='eval context: ingested bars snapshot id for evidence + promote'),
+    fundamentals_snapshot: str = typer.Option(None, '--fundamentals-snapshot',
+        help='eval context: fundamentals snapshot id (needs_fundamentals strategies)'),
+    news_snapshot: str = typer.Option(None, '--news-snapshot',
+        help='eval context: news snapshot id (needs_news strategies)'),
+    delistings: str = typer.Option(None, '--delistings',
+        help='eval context: delistings snapshot handle (survivorship-free realization)'),
+    rank_by: str = typer.Option('mean_sharpe', '--rank-by',
+        help='evidence sweep ranking: mean_sharpe | min_sharpe'),
+    sweep_param: list[str] = typer.Option(None, '--sweep-param',
+        help='evidence sweep grid KEY=v1,v2,... (repeatable) — the exact grid the scratch '
+             'preview swept; re-run authoritatively post-merge to record measured breadth'),
 ) -> None:
     """Autonomous research-cycle merge-back (#485): turn a research candidate branch into an
     on-``main``, allocated paper strategy with no human merging the branch. One repo-global-locked
@@ -595,6 +611,13 @@ def merge_back(
     if max_concurrent <= 0:
         raise ValueError('--max-concurrent must be positive')
     actor_enum = Actor(actor)  # fail fast on a bad actor before any git mutation
+    # Fail-fast eval-context preflight (GATE-2 #5): a typo'd --demo/--snapshot combo, rank_by, or
+    # --sweep-param must die HERE — before the repo lock, the preview merge, and the ~9-minute
+    # quality gate — not deep inside promote after a merge that then has to revert. Validator body
+    # lives in the unprotected intake module (dynamic import, same style as the seams below).
+    importlib.import_module("algua.registry.mergeback_intake").validate_transport_inputs(
+        demo=demo, snapshot=snapshot, rank_by=rank_by,
+        sweep_params=list(sweep_param) if sweep_param else None)
     settings = get_settings()
     # The lock must be scoped to the CHECKOUT it protects, NOT to ``db_path.parent`` (HIGH-4): two
     # invocations on the SAME working tree with different ALGUA_DB_PATH would otherwise take
@@ -619,11 +642,53 @@ def merge_back(
         journal = JsonlJournal(settings.db_path.parent)
         codeowners_text = (repo_root / 'CODEOWNERS').read_text(encoding='utf-8')
 
-        def stage_of(name: str) -> str:
+        def stage_of(name: str) -> str | None:
             # Its OWN short-lived registry_conn (own tx) — the saga never holds one conn across the
-            # whole cycle. Returns the raw lifecycle stage string run_merge_back dispatches on.
+            # whole cycle. Returns the raw lifecycle stage string run_merge_back dispatches on;
+            # None = unregistered (the canonical factory-fresh state the intake chokepoint
+            # registers post-merge).
             with registry_conn() as conn:
-                return SqliteStrategyRepository(conn).get(name).stage.value
+                try:
+                    return SqliteStrategyRepository(conn).get(name).stage.value
+                except StrategyNotFound:
+                    return None
+
+        def ensure_backtested(branch_tip: str, merge_sha: str, base_sha: str) -> str:
+            # Authoritative-intake registration chokepoint (body in the unprotected
+            # algua.registry.mergeback_intake; dynamic import mirrors the promote seam's style).
+            intake_mod = importlib.import_module("algua.registry.mergeback_intake")
+            with registry_conn() as conn:
+                return intake_mod.ensure_backtested(
+                    conn, strategy=strategy, branch=branch, branch_tip=branch_tip,
+                    merge_sha=merge_sha, base_sha=base_sha)
+
+        def produce_evidence(ensure_status: str, branch_tip: str) -> str:
+            # Authoritative evidence reproduction: the REAL sweep/backtest task bodies are injected
+            # (importlib — the cli-independence contract forbids a static paper_cmd->backtest_cmd
+            # sibling edge, same rationale as the promote seam below). Strict-agent pinning:
+            # windows/holdout_frac stay the task defaults; assume_terminal_last_close stays False.
+            intake_mod = importlib.import_module("algua.registry.mergeback_intake")
+            bt = importlib.import_module("algua.cli.backtest_cmd")
+            params = list(sweep_param) if sweep_param else None
+            return intake_mod.produce_evidence(
+                strategy=strategy, branch_tip=branch_tip, ensure_status=ensure_status,
+                sweep_params=params, conn_factory=registry_conn,
+                # The FULL transported data context — bound into the marker's recipe hash so a
+                # resumed attempt with a drifted context fails closed (GATE-2 #4).
+                eval_context={
+                    "demo": demo, "snapshot": snapshot,
+                    "fundamentals_snapshot": fundamentals_snapshot,
+                    "news_snapshot": news_snapshot, "delistings": delistings,
+                    "rank_by": rank_by, "universe": universe, "start": start, "end": end},
+                sweep_fn=lambda: bt.sweep_task(
+                    strategy, start=start, end=end, demo=demo, snapshot=snapshot,
+                    universe=universe, param=params, rank_by=rank_by,
+                    fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
+                    delistings=delistings),
+                backtest_fn=lambda: bt.run_backtest_task(
+                    strategy, start=start, end=end, demo=demo, snapshot=snapshot,
+                    universe=universe, fundamentals_snapshot=fundamentals_snapshot,
+                    news_snapshot=news_snapshot, delistings=delistings))
 
         def promote(attempt_token: str) -> object:
             # Reach research_cmd.promote_task via a DYNAMIC import (importlib), not a static
@@ -638,6 +703,8 @@ def merge_back(
             promote_task = importlib.import_module("algua.cli.research_cmd").promote_task
             return promote_task(
                 name=strategy, universe=universe, start=start, end=end,
+                demo=demo, snapshot=snapshot, fundamentals_snapshot=fundamentals_snapshot,
+                news_snapshot=news_snapshot, delistings=delistings,
                 actor='agent', attempt_token=attempt_token)
 
         def passing_gate_by_token(attempt_token: str) -> int | None:
@@ -681,6 +748,7 @@ def merge_back(
             git=git, journal=journal, strategy=strategy, branch=branch,
             codeowners_text=codeowners_text,
             stage_of=stage_of, run_gate=lambda: _run_quality_gate(repo_root),
+            ensure_backtested=ensure_backtested, produce_evidence=produce_evidence,
             promote=promote, passing_gate_by_token=passing_gate_by_token,
             gate_exists_by_token=gate_exists_by_token,
             intake=intake, target_allocated=target_allocated, audit_log=audit_log)

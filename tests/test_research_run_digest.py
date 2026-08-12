@@ -78,6 +78,14 @@ def _queue_items(queue_path: Path) -> dict:
     return json.loads(queue_path.read_text(encoding="utf-8"))["items"]
 
 
+
+def _ec(**over):
+    """A minimal VALID eval_context recipe (mergeback authoritative intake) for trailer tests."""
+    ec = {"demo": True, "sweep_grid": {"lookback": [10, 20]}, "rank_by": "mean_sharpe"}
+    ec.update(over)
+    return ec
+
+
 # --- (a) basic parse: verdict + validated merge_back on a matching strategy ---------------------
 
 
@@ -86,7 +94,8 @@ def test_parses_verdict_and_validated_merge_back(tmp_path):
         "hypotheses": [{
             "title": "Momentum thing", "verdict": "candidate-preview-pass",
             "merge_back": {"strategy": "strat_a", "universe": "sp500",
-                           "start": "2024-01-01", "end": "2024-06-01"},
+                           "start": "2024-01-01", "end": "2024-06-01",
+                           "eval_context": _ec()},
         }],
         "preview_gate": {"passed": True, "failed_checks": []},
     }
@@ -98,7 +107,8 @@ def test_parses_verdict_and_validated_merge_back(tmp_path):
     assert row["hypotheses"] == [{
         "title": "Momentum thing", "verdict": "candidate-preview-pass",
         "merge_back": {"strategy": "strat_a", "universe": "sp500",
-                       "start": "2024-01-01", "end": "2024-06-01"},
+                       "start": "2024-01-01", "end": "2024-06-01",
+                       "eval_context": _ec()},
     }]
     assert row["preview_gate"] == {"passed": True, "failed_checks": []}
     assert row["trailer_parse_error"] is False
@@ -114,6 +124,9 @@ def test_parses_verdict_and_validated_merge_back(tmp_path):
     assert item["branch"] == "research-run/20260811-000000"
     assert item["status"] == "pending"
     assert item["attempts"] == 0
+    # The canonicalized recipe rides the queue item (validated fail-closed at enqueue).
+    assert item["eval_context"] == {"demo": True, "rank_by": "mean_sharpe",
+                                    "sweep_grid": {"lookback": [10, 20]}}
     assert "merge-back queue:" in proc.stdout
 
 
@@ -125,7 +138,8 @@ def test_merge_back_dropped_when_strategy_not_in_run_commit(tmp_path):
         "hypotheses": [{
             "title": "Sneaky", "verdict": "candidate-preview-pass",
             "merge_back": {"strategy": "not_my_strategy", "universe": "sp500",
-                           "start": "2024-01-01", "end": "2024-06-01"},
+                           "start": "2024-01-01", "end": "2024-06-01",
+                           "eval_context": _ec()},
         }],
         "preview_gate": None,
     }
@@ -145,9 +159,10 @@ def test_merge_back_dropped_when_strategy_not_in_run_commit(tmp_path):
 
 
 def test_duplicate_strategy_in_one_run_keeps_first(tmp_path):
-    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01"}
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01", "eval_context": _ec()}
     mb2 = {"strategy": "strat_a", "universe": "nasdaq100", "start": "2024-02-01",
-           "end": "2024-07-01"}
+           "end": "2024-07-01", "eval_context": _ec()}
     trailer = {
         "hypotheses": [
             {"title": "First", "verdict": "candidate-preview-pass", "merge_back": mb},
@@ -181,7 +196,8 @@ def test_duplicate_strategy_in_one_run_keeps_first(tmp_path):
     ],
 )
 def test_format_rejections_drop_candidacy_not_the_run(tmp_path, bad_field, bad_value):
-    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01"}
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01", "eval_context": _ec()}
     mb[bad_field] = bad_value
     trailer = {
         "hypotheses": [{"title": "Bad", "verdict": "candidate-preview-pass", "merge_back": mb}],
@@ -196,7 +212,8 @@ def test_format_rejections_drop_candidacy_not_the_run(tmp_path, bad_field, bad_v
 
 
 def test_start_after_end_rejected(tmp_path):
-    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-06-01", "end": "2024-01-01"}
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-06-01",
+          "end": "2024-01-01", "eval_context": _ec()}
     trailer = {
         "hypotheses": [
             {"title": "Backwards", "verdict": "candidate-preview-pass", "merge_back": mb}],
@@ -211,7 +228,8 @@ def test_start_after_end_rejected(tmp_path):
 
 
 def test_end_after_today_rejected(tmp_path):
-    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01", "end": "2099-01-01"}
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2099-01-01", "eval_context": _ec()}
     trailer = {
         "hypotheses": [{"title": "Future", "verdict": "candidate-preview-pass", "merge_back": mb}],
         "preview_gate": None,
@@ -228,9 +246,10 @@ def test_end_after_today_rejected(tmp_path):
 
 
 def test_one_bad_one_good_hypothesis_still_completes_and_enqueues_the_good_one(tmp_path):
-    good = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01"}
+    good = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+            "end": "2024-06-01", "eval_context": _ec()}
     bad = {"strategy": "strat_b", "universe": "bad universe", "start": "2024-01-01",
-           "end": "2024-06-01"}
+           "end": "2024-06-01", "eval_context": _ec()}
     trailer = {
         "hypotheses": [
             {"title": "Good one", "verdict": "candidate-preview-pass", "merge_back": good},
@@ -416,7 +435,8 @@ def test_git_diff_filter_a_accepts_a_truly_added_strategy_file(tmp_path):
         "hypotheses": [{
             "title": "Added strategy", "verdict": "candidate-preview-pass",
             "merge_back": {"strategy": "new_strat", "universe": "sp500",
-                           "start": "2024-01-01", "end": "2024-06-01"},
+                           "start": "2024-01-01", "end": "2024-06-01",
+                           "eval_context": _ec()},
         }],
         "preview_gate": {"passed": True, "failed_checks": []},
     }
@@ -426,6 +446,7 @@ def test_git_diff_filter_a_accepts_a_truly_added_strategy_file(tmp_path):
     row = _last_digest_row(digest_path)
     assert row["hypotheses"][0]["merge_back"] == {
         "strategy": "new_strat", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01",
+        "eval_context": _ec(),
     }
     items = _queue_items(queue_path)
     assert set(items) == {"new_strat@research-run/20260811-000000"}
@@ -491,3 +512,82 @@ def test_anti_dup_reads_both_old_bare_string_and_new_object_shaped_lines(tmp_pat
 
     assert "an old bare-string title" in titles
     assert "a new object-shaped title" in titles
+
+
+# --- (k) eval_context (mergeback authoritative intake) producer-side rules -----------------------
+
+
+def test_merge_back_without_eval_context_is_dropped(tmp_path):
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01"}
+    trailer = {
+        "hypotheses": [{"title": "No recipe", "verdict": "candidate-preview-pass",
+                        "merge_back": mb}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"][0]["merge_back"] is None
+    assert not queue_path.exists()
+    assert "eval_context missing" in proc.stdout
+
+
+@pytest.mark.parametrize("attest", [{"windows": 6}, {"holdout_frac": 0.3},
+                                    {"windows": 3, "holdout_frac": 0.2}])
+def test_non_default_preview_partition_is_rejected(tmp_path, attest):
+    # The producer REFUSES a candidate whose scratch preview deviated from the strict-agent
+    # defaults (windows=4, holdout_frac=0.2) — the authoritative run must evaluate the same
+    # partition the preview claimed.
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01", "eval_context": _ec(**attest)}
+    trailer = {
+        "hypotheses": [{"title": "Repartitioned", "verdict": "candidate-preview-pass",
+                        "merge_back": mb}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"][0]["merge_back"] is None
+    assert not queue_path.exists()
+    assert "strict-agent defaults" in proc.stdout
+
+
+def test_default_partition_attestation_is_accepted_and_stripped(tmp_path):
+    # Declaring the exact defaults is accepted — and the attestation keys are STRIPPED before
+    # enqueue (windows/holdout_frac are never transported; the drainer pins the defaults).
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01", "eval_context": _ec(windows=4, holdout_frac=0.2)}
+    trailer = {
+        "hypotheses": [{"title": "Defaults", "verdict": "candidate-preview-pass",
+                        "merge_back": mb}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    items = _queue_items(queue_path)
+    item = items["strat_a@research-run/20260811-000000"]
+    assert "windows" not in item["eval_context"]
+    assert "holdout_frac" not in item["eval_context"]
+    assert item["eval_context"]["sweep_grid"] == {"lookback": [10, 20]}
+
+
+def test_invalid_eval_context_fails_closed_at_enqueue(tmp_path):
+    # A shape-invalid recipe passes the producer's presence check but is rejected FAIL-CLOSED by
+    # mergeback_queue.validate_eval_context inside enqueue — loud warning, no queue item.
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01",
+          "eval_context": {"demo": True, "sweep_grid": {}, "rank_by": "mean_sharpe"}}
+    trailer = {
+        "hypotheses": [{"title": "Empty grid", "verdict": "candidate-preview-pass",
+                        "merge_back": mb}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    assert not queue_path.exists()
+    assert "failed to enqueue merge-back candidate" in proc.stdout

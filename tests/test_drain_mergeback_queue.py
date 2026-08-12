@@ -73,6 +73,10 @@ def _lock_path(tmp_path: Path) -> Path:
 
 
 def _seed(tmp_path: Path, **kwargs) -> None:
+    # Every queue item carries a validated eval_context recipe (mergeback authoritative intake);
+    # tests that don't care about its content get a minimal valid one.
+    kwargs.setdefault("eval_context", {
+        "demo": True, "sweep_grid": {"lookback": [10, 20]}, "rank_by": "mean_sharpe"})
     mergeback_queue.enqueue(_queue_path(tmp_path), _lock_path(tmp_path), **kwargs)
 
 
@@ -285,3 +289,57 @@ def test_overlapping_drainer_cannot_double_act_on_same_item(tmp_path):
     assert "nothing to drain" in proc.stdout
     assert not marker.exists()  # the second invocation never invoked algua at all
     assert _items(tmp_path)["s@research-run/1"]["status"] == "in_progress"  # untouched
+
+
+# --- eval_context argv transport (mergeback authoritative intake) ---------------------------------
+
+
+def test_eval_context_rides_the_invocation_argv(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1", eval_context={
+              "snapshot": "bars-9", "delistings": "delist-3",
+              "sweep_grid": {"lookback": [10, 20], "threshold": [0.5, 1.5]},
+              "rank_by": "min_sharpe",
+          })
+    argv_log = tmp_path / "argv.log"
+    stub = tmp_path / "algua-stub.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$@\" >> {shlex.quote(str(argv_log))}\n"
+        "printf '%s' '{\"ok\": true, \"status\": \"promoted_allocated\"}'\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+
+    args = argv_log.read_text(encoding="utf-8").splitlines()
+    # The transported recipe reaches the wrapped `paper merge-back` as discrete argv tokens.
+    assert "--snapshot" in args and args[args.index("--snapshot") + 1] == "bars-9"
+    assert "--delistings" in args and args[args.index("--delistings") + 1] == "delist-3"
+    assert "--rank-by" in args and args[args.index("--rank-by") + 1] == "min_sharpe"
+    sweep_values = [args[i + 1] for i, a in enumerate(args) if a == "--sweep-param"]
+    assert sweep_values == ["lookback=10,20", "threshold=0.5,1.5"]
+    assert "--demo" not in args
+    item = _items(tmp_path)["s@research-run/1"]
+    assert item["status"] == "promoted_allocated"
+
+
+def test_demo_context_emits_the_demo_flag(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")  # _seed's default context is demo: true
+    argv_log = tmp_path / "argv.log"
+    stub = tmp_path / "algua-stub.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$@\" >> {shlex.quote(str(argv_log))}\n"
+        "printf '%s' '{\"ok\": true, \"status\": \"promoted_allocated\"}'\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    args = argv_log.read_text(encoding="utf-8").splitlines()
+    assert "--demo" in args
+    assert "--snapshot" not in args
+    assert "--sweep-param" in args

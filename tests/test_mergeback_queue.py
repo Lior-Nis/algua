@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
@@ -30,9 +31,17 @@ def paths(tmp_path):
     return tmp_path / "queue.json", tmp_path / "queue.lock"
 
 
+def _ctx(**over):
+    """A minimal VALID eval_context recipe (mergeback authoritative intake)."""
+    ctx = {"demo": True, "sweep_grid": {"lookback": [10, 20]}, "rank_by": "mean_sharpe"}
+    ctx.update(over)
+    return ctx
+
+
 def _item(strategy="strat_a", branch="research-run/1", universe="sp500",
-          start="2024-01-01", end="2024-06-01"):
-    return dict(strategy=strategy, universe=universe, start=start, end=end, branch=branch)
+          start="2024-01-01", end="2024-06-01", eval_context=None):
+    return dict(strategy=strategy, universe=universe, start=start, end=end, branch=branch,
+                eval_context=eval_context if eval_context is not None else _ctx())
 
 
 # --- enqueue -------------------------------------------------------------------------------------
@@ -560,3 +569,112 @@ def test_cli_record_attempt_via_stdin(paths, capsys, monkeypatch):
     assert result["action"] == "terminal"
     item = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
     assert item["status"] == "already_done"
+
+
+# --- eval_context validation matrix (mergeback authoritative intake) ------------------------------
+
+
+def test_validate_eval_context_canonicalizes_a_valid_recipe():
+    out = mergeback_queue.validate_eval_context({
+        "snapshot": "bars-2026-08-01", "fundamentals_snapshot": "fund.1",
+        "sweep_grid": {"zeta": [1, 2], "alpha": [0.5, 1.5], "construction.top_k": [5, 10]},
+        "rank_by": "min_sharpe",
+    })
+    assert out["snapshot"] == "bars-2026-08-01"
+    assert out["fundamentals_snapshot"] == "fund.1"
+    assert out["rank_by"] == "min_sharpe"
+    # Keys are canonical-sorted; a mixed int list stays int, floats stay float.
+    assert list(out["sweep_grid"]) == ["alpha", "construction.top_k", "zeta"]
+    assert out["sweep_grid"]["zeta"] == [1, 2]
+    assert "demo" not in out
+
+
+def test_validate_eval_context_widens_mixed_numeric_lists_like_parse_grid():
+    out = mergeback_queue.validate_eval_context(
+        {"demo": True, "sweep_grid": {"k": [10, 10.5]}})
+    assert out["sweep_grid"]["k"] == [10.0, 10.5]
+    assert all(type(v) is float for v in out["sweep_grid"]["k"])
+
+
+@pytest.mark.parametrize("ctx,msg", [
+    ("nope", "must be a JSON object"),
+    ({"sweep_grid": {"k": [1]}}, "exactly one of demo"),                       # neither source
+    ({"demo": True, "snapshot": "s", "sweep_grid": {"k": [1]}}, "exactly one of demo"),
+    ({"demo": 1, "sweep_grid": {"k": [1]}}, "JSON literal true"),
+    ({"demo": True, "snapshot": None, "sweep_grid": {"k": [1]},
+      "windows": 4}, "unknown keys"),                                          # never transported
+    ({"demo": True, "sweep_grid": {"k": [1]}, "holdout_frac": 0.2}, "unknown keys"),
+    ({"snapshot": "bad id!", "sweep_grid": {"k": [1]}}, "format check"),
+    ({"demo": True, "sweep_grid": {"k": [1]}, "rank_by": "sharpe"}, "rank_by"),
+    ({"demo": True}, "sweep_grid"),
+    ({"demo": True, "sweep_grid": {}}, "sweep_grid"),
+    ({"demo": True, "sweep_grid": {"bad key!": [1]}}, "param-name format"),
+    ({"demo": True, "sweep_grid": {"k": []}}, "non-empty list"),
+    ({"demo": True, "sweep_grid": {"k": [True]}}, "bool"),
+    ({"demo": True, "sweep_grid": {"k": [float("nan")]}}, "non-finite"),
+    ({"demo": True, "sweep_grid": {"k": [float("inf")]}}, "non-finite"),
+    ({"demo": True, "sweep_grid": {"k": ["has space"]}}, "transport-safe"),
+    ({"demo": True, "sweep_grid": {"k": ["5"]}}, "transport-safe"),            # numeric-looking str
+    ({"demo": True, "sweep_grid": {"k": [{"x": 1}]}}, "not int/float/str"),
+    ({"demo": True, "sweep_grid": {"k": list(range(20)), "j": list(range(20))}}, "too large"),
+])
+def test_validate_eval_context_fails_closed(ctx, msg):
+    with pytest.raises(ValueError, match=re.escape(msg)):
+        mergeback_queue.validate_eval_context(ctx)
+
+
+def test_max_sweep_combos_mirrors_the_engine_cap():
+    # MAX_SWEEP_COMBOS is a deliberate stdlib-only mirror of the sweep engine's _MAX_COMBOS; this
+    # cross-check is the drift alarm the duplication relies on.
+    from algua.backtest.sweep import _MAX_COMBOS
+
+    assert mergeback_queue.MAX_SWEEP_COMBOS == _MAX_COMBOS
+
+
+def test_valid_rank_by_mirrors_the_engine_keys():
+    from algua.backtest.sweep import _RANK_KEYS
+
+    assert mergeback_queue.VALID_RANK_BY == frozenset(_RANK_KEYS)
+
+
+def test_enqueue_rejects_invalid_context_without_touching_the_queue(paths):
+    queue_path, lock_path = paths
+    with pytest.raises(ValueError):
+        mergeback_queue.enqueue(
+            queue_path, lock_path, **_item(eval_context={"demo": True}))  # no sweep_grid
+    assert not queue_path.exists()
+
+
+def test_cli_select_shell_format_emits_context_transport_vars(paths, capsys):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item(eval_context={
+        "snapshot": "bars-1", "delistings": "delist-1",
+        "sweep_grid": {"lookback": [10, 20], "threshold": [0.5, 1.5]},
+        "rank_by": "min_sharpe",
+    }))
+    rc = mergeback_queue.main([
+        "select-and-reserve", "--queue", str(queue_path), "--lock", str(lock_path),
+        "--format", "shell",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "MERGEBACK_DEMO=0" in out
+    assert "MERGEBACK_SNAPSHOT=bars-1" in out
+    assert "MERGEBACK_DELISTINGS=delist-1" in out
+    assert "MERGEBACK_RANK_BY=min_sharpe" in out
+    # Floats emit via repr so parse_grid round-trips them exactly; tokens are space-joined.
+    assert "MERGEBACK_SWEEP_PARAMS='lookback=10,20 threshold=0.5,1.5'" in out
+
+
+def test_cli_enqueue_takes_eval_context_json(paths, capsys):
+    queue_path, lock_path = paths
+    rc = mergeback_queue.main([
+        "enqueue", "--queue", str(queue_path), "--lock", str(lock_path),
+        "--strategy", "strat_a", "--universe", "sp500",
+        "--start", "2024-01-01", "--end", "2024-06-01", "--branch", "research-run/1",
+        "--eval-context", json.dumps({"demo": True, "sweep_grid": {"k": [1, 2]}}),
+    ])
+    assert rc == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["created"] is True
+    assert result["item"]["eval_context"]["sweep_grid"] == {"k": [1, 2]}
