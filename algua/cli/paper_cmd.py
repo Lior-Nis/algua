@@ -611,6 +611,13 @@ def merge_back(
     if max_concurrent <= 0:
         raise ValueError('--max-concurrent must be positive')
     actor_enum = Actor(actor)  # fail fast on a bad actor before any git mutation
+    # Fail-fast eval-context preflight (GATE-2 #5): a typo'd --demo/--snapshot combo, rank_by, or
+    # --sweep-param must die HERE — before the repo lock, the preview merge, and the ~9-minute
+    # quality gate — not deep inside promote after a merge that then has to revert. Validator body
+    # lives in the unprotected intake module (dynamic import, same style as the seams below).
+    importlib.import_module("algua.registry.mergeback_intake").validate_transport_inputs(
+        demo=demo, snapshot=snapshot, rank_by=rank_by,
+        sweep_params=list(sweep_param) if sweep_param else None)
     settings = get_settings()
     # The lock must be scoped to the CHECKOUT it protects, NOT to ``db_path.parent`` (HIGH-4): two
     # invocations on the SAME working tree with different ALGUA_DB_PATH would otherwise take
@@ -666,6 +673,13 @@ def merge_back(
             return intake_mod.produce_evidence(
                 strategy=strategy, branch_tip=branch_tip, ensure_status=ensure_status,
                 sweep_params=params, conn_factory=registry_conn,
+                # The FULL transported data context — bound into the marker's recipe hash so a
+                # resumed attempt with a drifted context fails closed (GATE-2 #4).
+                eval_context={
+                    "demo": demo, "snapshot": snapshot,
+                    "fundamentals_snapshot": fundamentals_snapshot,
+                    "news_snapshot": news_snapshot, "delistings": delistings,
+                    "rank_by": rank_by, "universe": universe, "start": start, "end": end},
                 sweep_fn=lambda: bt.sweep_task(
                     strategy, start=start, end=end, demo=demo, snapshot=snapshot,
                     universe=universe, param=params, rank_by=rank_by,

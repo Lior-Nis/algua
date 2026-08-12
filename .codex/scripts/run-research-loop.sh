@@ -666,7 +666,8 @@ echo "  cat ${WORKTREE}/kb/research-runs/${STAMP}.md"
 echo "  # Every valid 'merge_back' in the trailer above was just enqueued to ${AUTH_QUEUE}"
 echo "  # for the automated drainer (.codex/scripts/drain-mergeback-queue.sh) to run for real."
 echo "  # To force one through right now instead of waiting for the next drain cycle:"
-echo "  uv run algua paper merge-back --branch ${BRANCH} --strategy <name> --universe <u> --start D --end D"
+echo "  uv run algua paper merge-back --branch ${BRANCH} --strategy <name> --universe <u> --start D --end D \\"
+echo "    --snapshot <bars-id> --sweep-param K=v1,v2   # (or --demo; the eval-context recipe is required)"
 echo "When finished, remove the worktree:  git -C ${REPO_ROOT} worktree remove ${WORKTREE}"
 
 # Propagate a failed/timed-out codex run so the systemd unit fails (alerts / no false 'success').

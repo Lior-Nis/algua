@@ -148,9 +148,11 @@ def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
 
 
 def _invoke():
+    # --demo satisfies the fail-fast transport preflight (GATE-2 #5: exactly one of
+    # --demo/--snapshot); these tests stub promote/intake, so no real provider is touched.
     return runner.invoke(app, [
         "paper", "merge-back", "--branch", "feat/strat", "--strategy", _STRAT,
-        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31"])
+        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31", "--demo"])
 
 
 def test_green_gate_and_promote_allocates(monkeypatch):
@@ -325,3 +327,31 @@ def test_preregistered_strategy_with_breadth_skips_evidence_production(monkeypat
         n_markers = conn.execute("SELECT COUNT(*) FROM mergeback_evidence").fetchone()[0]
         assert n_markers == 0
     assert len(promote_calls) == 1
+
+
+# --- (GATE-2 #5) fail-fast transport preflight: a typo'd invocation dies BEFORE any git/journal --
+
+
+@pytest.mark.parametrize("extra,msg", [
+    ([], "exactly one of --demo or --snapshot"),                       # neither
+    (["--demo", "--snapshot", "bars-1"], "exactly one of --demo or --snapshot"),  # both
+    (["--demo", "--rank-by", "sharpe"], "--rank-by must be one of"),
+    (["--demo", "--sweep-param", "malformed"], "malformed --param"),
+])
+def test_bad_transport_combos_fail_before_any_git_or_journal_mutation(monkeypatch, tmp_path,
+                                                                      extra, msg):
+    _register_backtested(_STRAT)
+    git_constructed: list = []
+    monkeypatch.setattr(paper_cmd, "RealGitOps",
+                        lambda repo_root: git_constructed.append(repo_root) or _FakeGit())
+
+    result = runner.invoke(app, [
+        "paper", "merge-back", "--branch", "feat/strat", "--strategy", _STRAT,
+        "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31", *extra])
+    assert result.exit_code != 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert msg in payload["error"]
+    # The saga never began: no git seam constructed, no journal file written.
+    assert git_constructed == []
+    assert list(get_settings().db_path.parent.glob("merge_back.*.journal")) == []
