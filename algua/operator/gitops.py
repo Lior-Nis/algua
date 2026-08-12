@@ -42,7 +42,9 @@ class GitOps(Protocol):
         """``git diff --raw -M -C --find-copies-harder base tip`` parsed into :class:`DiffEntry`
         tuples (R5). ``--find-copies-harder`` makes git treat UNMODIFIED files as copy sources, so
         a branch that copies a denylisted file byte-for-byte to an allowlisted path is reported as a
-        ``C`` entry (with ``old_path`` set) and caught by the dual-path guard."""
+        ``C`` entry (with ``old_path`` set) and caught by the dual-path guard. Exception: a ``C``
+        entry whose DESTINATION blob is empty is demoted to a plain ``A`` (zero-byte content cannot
+        launder a denied source; see ``_parse_raw_z``)."""
         ...
 
     def begin_merge(self, tip: str) -> None:
