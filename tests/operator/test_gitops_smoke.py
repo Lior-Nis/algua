@@ -105,6 +105,59 @@ def test_changed_entries_detects_unmodified_copy(repo: Path) -> None:
     assert copies[0].new_path == "copy.md"
 
 
+def test_changed_entries_demotes_empty_copy_to_add(repo: Path) -> None:
+    """A zero-byte file "copies" ANY other empty file under ``--find-copies-harder``, so a fresh
+    family ``__init__.py`` was reported as ``C100`` of some pre-existing empty file (e.g.
+    ``algua/audit/__init__.py``) and the dual-path guard vetoed a perfectly allowlisted add — the
+    false positive that terminal-failed every new-family research branch. An empty DESTINATION
+    blob carries no launderable content, so the parser demotes it to a plain ``A``.
+    """
+    git = RealGitOps(repo)
+    # Pre-existing empty file on main — the copy-source git will pair the new empty file with.
+    (repo / "existing_empty.py").write_text("")
+    _git(repo, "add", "existing_empty.py")
+    _git(repo, "commit", "-q", "-m", "empty file on main")
+    _git(repo, "checkout", "-q", "-b", "newfam-branch")
+    (repo / "algua" / "strategies" / "newfam").mkdir(parents=True)
+    init = repo / "algua" / "strategies" / "newfam" / "__init__.py"
+    init.write_text("")
+    _git(repo, "add", "algua/strategies/newfam/__init__.py")
+    _git(repo, "commit", "-q", "-m", "new family init")
+    base = git.merge_base("main", "newfam-branch")
+    tip = git.resolve("newfam-branch")
+    entries = git.changed_entries(base, tip)
+    (entry,) = [e for e in entries if e.new_path == "algua/strategies/newfam/__init__.py"]
+    assert entry.change_type == "A", entries
+    assert entry.old_path is None
+    # And the policy verdict flips: the demoted add is allowlisted.
+    from algua.operator.diff_policy import evaluate_diff
+
+    result = evaluate_diff([entry], codeowners_text="/algua/registry/store.py @owner\n")
+    assert result.ok, result
+
+
+def test_changed_entries_keeps_nonempty_copy_and_empty_rename(repo: Path) -> None:
+    """The demotion is surgical: a NON-empty copy keeps its ``C`` + source path (the R5 guard's
+    real target), and a RENAME of an empty file keeps its ``R`` + source path (a rename deletes
+    its source — a denied-path deletion must stay visible)."""
+    git = RealGitOps(repo)
+    (repo / "empty_on_main.py").write_text("")
+    _git(repo, "add", "empty_on_main.py")
+    _git(repo, "commit", "-q", "-m", "empty on main")
+    _git(repo, "checkout", "-q", "-b", "mixed-branch")
+    (repo / "copy.md").write_text((repo / "README.md").read_text())  # non-empty copy
+    _git(repo, "add", "copy.md")
+    _git(repo, "mv", "empty_on_main.py", "renamed_empty.py")  # empty rename
+    _git(repo, "commit", "-q", "-m", "non-empty copy + empty rename")
+    base = git.merge_base("main", "mixed-branch")
+    tip = git.resolve("mixed-branch")
+    entries = git.changed_entries(base, tip)
+    copies = [e for e in entries if e.change_type.startswith("C")]
+    assert copies and copies[0].old_path == "README.md"
+    renames = [e for e in entries if e.change_type.startswith("R")]
+    assert renames and renames[0].old_path == "empty_on_main.py"
+
+
 def test_changed_entries_parses_symlink_mode(repo: Path) -> None:
     git = RealGitOps(repo)
     _git(repo, "checkout", "-q", "-b", "link-branch")
