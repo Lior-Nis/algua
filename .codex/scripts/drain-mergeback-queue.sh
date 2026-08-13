@@ -122,6 +122,22 @@ RESULT="$(printf '%s' "${STDOUT_TEXT}" | python3 "${QUEUE_MOD}" record-attempt \
   --max-attempts "${MAX_MERGEBACK_ATTEMPTS}" --stdin)"
 echo "queue update: ${RESULT}"
 
+# Outcome-keyed worktree reclaim (runs-worktree lifecycle, #555): after a TERMINAL classification
+# ("terminal" = a recognized success/non-retryable failure; "exhausted" = gate_failed at the
+# attempt cap) this item's branch may be fully drained — cleanup-branch checks, under the queue
+# lock, that NO item on the branch is still non-terminal, then archives the run's research-loop.log
+# to .runs/logs/ and removes the run worktree (.runs/<stamp>, or the legacy ../algua-research-
+# <stamp>). Best-effort by contract: it never raises and this step never fails the drain.
+ACTION="$(printf '%s' "${RESULT}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",""))' 2>/dev/null \
+  || true)"
+if [[ "${ACTION}" == "terminal" || "${ACTION}" == "exhausted" ]]; then
+  CLEANUP="$(python3 "${QUEUE_MOD}" cleanup-branch --queue "${QUEUE_PATH}" \
+    --lock "${QUEUE_LOCK_PATH}" --branch "${MERGEBACK_BRANCH}" --repo-root "${REPO_ROOT}" \
+    || true)"
+  echo "worktree cleanup: ${CLEANUP}"
+fi
+
 # The drainer itself always exits 0 on a completed selection/classification cycle — a
 # gate_failed/terminal_failed/lock_contention/transient_failure outcome is DIGESTED into the queue,
 # not a driver-script failure; the queue file (inspectable via the monitor/CLI) is the record of

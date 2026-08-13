@@ -343,3 +343,78 @@ def test_demo_context_emits_the_demo_flag(tmp_path):
     assert "--demo" in args
     assert "--snapshot" not in args
     assert "--sweep-param" in args
+
+
+# --- terminal outcomes trigger the outcome-keyed worktree cleanup (#555) --------------------------
+#
+# The drainer invokes `mergeback_queue.py cleanup-branch` ONLY after a "terminal" or "exhausted"
+# classification. Here the branch's worktree does not exist under this checkout, so the cleanup
+# reports a clean `worktree_absent` no-op — the removal/archival mechanics themselves are unit-
+# tested against real throwaway repos in test_mergeback_queue.py; these tests pin the WIRING
+# (when the drainer calls cleanup, and that a cleanup outcome never fails the drain).
+
+
+_CLEANUP_BRANCH = "research-run/19990101-000000"  # predates the repo: can never exist on disk
+
+
+def test_terminal_outcome_invokes_cleanup_branch(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch=_CLEANUP_BRANCH)
+    stub = _make_stub(tmp_path, response={"ok": True, "status": "promoted_allocated"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert "worktree cleanup:" in proc.stdout
+    cleanup = json.loads(proc.stdout.split("worktree cleanup: ", 1)[1].splitlines()[0])
+    assert cleanup["branch"] == _CLEANUP_BRANCH
+    assert cleanup["removed"] is False
+    assert cleanup["skipped"] == "worktree_absent"
+    # The queue update itself is unaffected by the cleanup outcome.
+    assert _items(tmp_path)[f"s@{_CLEANUP_BRANCH}"]["status"] == "promoted_allocated"
+
+
+def test_exhausted_outcome_invokes_cleanup_branch(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch=_CLEANUP_BRANCH)
+    stub = _make_stub(tmp_path, response={"ok": True, "status": "gate_failed"})
+
+    # max_attempts=1: the first gate_failed exhausts the cap -> action "exhausted" -> cleanup runs.
+    proc = _run_drainer(tmp_path, algua_bin=stub, max_attempts=1, backoff_minutes=0.0)
+    assert proc.returncode == 0, proc.stderr
+    assert _items(tmp_path)[f"s@{_CLEANUP_BRANCH}"]["status"] == "terminal_failed"
+    assert "worktree cleanup:" in proc.stdout
+
+
+def test_retryable_gate_failed_does_not_invoke_cleanup(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch=_CLEANUP_BRANCH)
+    stub = _make_stub(tmp_path, response={"ok": True, "status": "gate_failed"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub, max_attempts=3, backoff_minutes=0.0)
+    assert proc.returncode == 0, proc.stderr
+    assert _items(tmp_path)[f"s@{_CLEANUP_BRANCH}"]["status"] == "gate_failed"  # retryable
+    assert "worktree cleanup:" not in proc.stdout
+
+
+def test_lock_contention_does_not_invoke_cleanup(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch=_CLEANUP_BRANCH)
+    stub = _make_stub(tmp_path, response={"ok": True, "ran": False, "reason": "locked"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert "worktree cleanup:" not in proc.stdout
+
+
+def test_cleanup_on_a_non_run_branch_is_benign_and_never_fails_the_drain(tmp_path):
+    # Legacy/odd branch names (the pre-#555 queue's "research-run/1" style test fixtures, or any
+    # future shape) fail cleanup's branch-format gate — reported, never fatal.
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    stub = _make_stub(tmp_path, response={"ok": True, "status": "already_done"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    cleanup = json.loads(proc.stdout.split("worktree cleanup: ", 1)[1].splitlines()[0])
+    assert cleanup["skipped"] == "not_a_research_run_branch"
+    assert _items(tmp_path)["s@research-run/1"]["status"] == "already_done"

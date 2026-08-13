@@ -247,11 +247,16 @@ policy), and no research firing coincides with the 21:30-UTC paper slot.
 (timeout=124, or an auth/runtime error) so the systemd unit **fails** rather than silently reporting a
 no-op cycle as success. `TimeoutStartSec` (4200s) must stay above the driver's `TIMEOUT + SYNC_TIMEOUT`.
 
-**Worktree cleanup (automatic).** Each cycle leaves its `research-run/<stamp>` worktree in place for
-review, then a later cycle **auto-prunes** worktrees older than `RESEARCH_WORKTREE_RETENTION_DAYS`
-(default 7) at startup — reclaiming only the disposable venv + scratch; the authored code persists on
-its `research-run/<stamp>` branch after the worktree dir is removed. Lengthen the window (env file) if
-you want more review time, or reap on demand with `git worktree remove ../algua-research-<stamp>`.
+**Worktree cleanup (automatic, outcome-keyed — #555).** Run worktrees live at
+`<checkout>/.runs/<stamp>` (gitignored). A run that enqueued **zero** merge-back candidates has its
+worktree removed by the launcher at run end; a **candidate** run's worktree is kept until the
+merge-back drainer's `cleanup-branch` step removes it once every queue item on its branch is
+terminal. Post-run the branch is renamed `research-run/<stamp>--<s1>+<s2>+...` to carry the
+validated candidate names (the directory keeps the bare stamp). Before any removal the run's
+`research-loop.log` is archived to `.runs/logs/<branch>.log` (pruned after 30 days). The old mtime
+pruner (`RESEARCH_WORKTREE_RETENTION_DAYS`, default 7) remains as a **backstop** only — it also
+still scans the legacy `../algua-research-*` location during transition. Reap on demand with
+`git worktree remove .runs/<stamp>`; the authored code persists on the run branch either way.
 
 ## Auto merge-back (factory slice 3)
 
