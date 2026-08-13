@@ -76,6 +76,8 @@ import math
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -90,6 +92,8 @@ __all__ = [
     "RESERVATION_STALE_SECONDS",
     "VALID_RANK_BY",
     "QueueLockTimeout",
+    "cleanup_branch",
+    "compute_run_branch_name",
     "enqueue",
     "read_locked",
     "record_attempt",
@@ -106,6 +110,11 @@ _TERMINAL_FAILURE_STATUSES = frozenset({"diff_policy_rejected", "promote_failed"
 _RETRYABLE_STATUS = "gate_failed"
 # The reservation status `select_and_reserve` atomically stamps onto a selected item.
 _RESERVED_STATUS = "in_progress"
+# Every status a queue item can rest in once its lifecycle is OVER — success or non-retryable
+# failure. `cleanup_branch` treats anything OUTSIDE this set (pending/gate_failed/in_progress, and
+# fail-safe any unrecognized future status string) as still-in-flight and refuses to reclaim the
+# branch's research worktree.
+_TERMINAL_QUEUE_STATUSES = _SUCCESS_STATUSES | frozenset({"terminal_failed"})
 
 MAX_MERGEBACK_ATTEMPTS = 3
 _DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT = 10
@@ -695,6 +704,118 @@ def record_attempt(
     return _with_queue_lock(queue_path, lock_path, _mutate)
 
 
+# --- candidate-keyed research-worktree lifecycle (#555 follow-on) --------------------------------
+#
+# Research worktrees live at <repo_root>/.runs/<stamp> (gitignored; legacy runs at
+# ../algua-research-<stamp>). A run's branch is renamed post-run to carry its VALIDATED merge-back
+# candidate strategy names (`compute_run_branch_name`), and the worktree is reclaimed
+# OUTCOME-KEYED: the launcher removes a zero-candidate run's worktree immediately; the drainer
+# calls `cleanup_branch` (via the `cleanup-branch` CLI) once every queue item on a branch is
+# terminal. The launcher's mtime pruner remains the backstop for anything these two miss.
+
+# The final branch shape: research-run/<stamp> or research-run/<stamp>--<s1>+<s2>+... where the
+# stamp is the launcher's %Y%m%d-%H%M%S and each <sN> is an [A-Za-z0-9_]-validated strategy name.
+_RUN_BRANCH_RE = re.compile(r"^research-run/(\d{8}-\d{6})(--[A-Za-z0-9_+]+)?$")
+# Branch-suffix caps: at most this many candidate names ride the branch, and the WHOLE branch name
+# never exceeds this many chars (the LIST is truncated, never a name — one name always fits:
+# "research-run/<stamp>--" is 30 chars and a validated name is <= 64).
+_BRANCH_MAX_NAMES = 3
+_BRANCH_MAX_LENGTH = 120
+
+
+def compute_run_branch_name(stamp: str, candidates: list[str]) -> str:
+    """The FINAL branch name for one research run: ``research-run/<stamp>`` when the run produced
+    no validated merge-back candidates, else ``research-run/<stamp>--<s1>+<s2>+...`` carrying the
+    candidates' strategy names (in enqueue order) so a branch listing reads as a candidate ledger.
+
+    Caps: at most ``_BRANCH_MAX_NAMES`` names and ``_BRANCH_MAX_LENGTH`` total chars — enforced by
+    dropping names off the END of the list, never by truncating a name (a truncated name would no
+    longer match its queue item / strategy module). Pure function (the launcher's heredoc calls it,
+    then performs the actual ``git branch -m``)."""
+    base = f"research-run/{stamp}"
+    names = list(candidates)[:_BRANCH_MAX_NAMES]
+    while names:
+        candidate = f"{base}--{'+'.join(names)}"
+        if len(candidate) <= _BRANCH_MAX_LENGTH:
+            return candidate
+        names.pop()
+    return base
+
+
+def cleanup_branch(queue_path: Path, lock_path: Path, *, branch: str, repo_root: Path) -> dict:
+    """Best-effort reclaim of one research branch's worktree once its queue items are ALL terminal.
+
+    Under the queue lock, checks whether ANY queue item on ``branch`` is still non-terminal
+    (anything outside ``_TERMINAL_QUEUE_STATUSES`` — fail-safe: an unrecognized status counts as
+    non-terminal); if none, resolves the run worktree — ``<repo_root>/.runs/<stamp>`` first, then
+    the legacy ``<repo_root>/../algua-research-<stamp>`` (transition support for pre-#555 runs) —
+    archives its ``research-loop.log`` to ``<repo_root>/.runs/logs/<branch with / -> _>.log``, and
+    removes the worktree (``git worktree remove --force``, ``rm -rf`` fallback). The stamp is
+    parsed from the branch name (the ``--<names>`` suffix stripped) and format-validated, so a
+    garbage branch can never resolve to a path outside the two expected locations.
+
+    NEVER raises (the drainer must not fail on cleanup): every failure lands in the returned dict
+    (and loudly on stderr) instead. The removal itself runs OUTSIDE the queue lock — a branch whose
+    items are all terminal can never gain new items (enqueue keys are per run-stamp and the run has
+    long ended), so there is no check-to-remove race worth holding a lock over a multi-second
+    ``rm -rf`` for."""
+    result: dict = {"branch": branch, "removed": False, "log_archived": False}
+    try:
+        m = _RUN_BRANCH_RE.match(branch or "")
+        if m is None:
+            result["skipped"] = "not_a_research_run_branch"
+            return result
+        stamp = m.group(1)
+        data = read_locked(Path(queue_path), Path(lock_path))
+        non_terminal = sorted(
+            key for key, item in data["items"].items()
+            if isinstance(item, dict) and item.get("branch") == branch
+            and item.get("status") not in _TERMINAL_QUEUE_STATUSES)
+        if non_terminal:
+            result["skipped"] = "non_terminal_items"
+            result["non_terminal"] = non_terminal
+            return result
+        root = Path(repo_root)
+        worktree = next(
+            (p for p in (root / ".runs" / stamp, root.parent / f"algua-research-{stamp}")
+             if p.is_dir()),
+            None)
+        if worktree is None:
+            result["skipped"] = "worktree_absent"
+            return result
+        result["worktree"] = str(worktree)
+        # Log archival BEFORE any removal, so a drained run's codex transcript survives the reclaim.
+        log_src = worktree / "research-loop.log"
+        if log_src.is_file():
+            try:
+                log_dst = root / ".runs" / "logs" / (branch.replace("/", "_") + ".log")
+                log_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(log_src, log_dst)
+                result["log_archived"] = True
+                result["log"] = str(log_dst)
+            except OSError as exc:
+                print(f"WARNING: cleanup-branch could not archive {log_src}: {exc}",
+                      file=sys.stderr)
+        proc = subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            # Not a registered worktree (already pruned from git's list), or git refused — fall
+            # back to a plain recursive delete, then let git forget any dangling registration.
+            shutil.rmtree(worktree, ignore_errors=True)
+            subprocess.run(["git", "-C", str(root), "worktree", "prune"],
+                           capture_output=True, text=True)
+        result["removed"] = not worktree.exists()
+        if not result["removed"]:
+            result["skipped"] = "removal_failed"
+            print(f"WARNING: cleanup-branch could not remove {worktree} "
+                  f"(git: {proc.stderr.strip()!r})", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - best-effort by contract: loud, never fatal
+        result["error"] = str(exc)
+        print(f"WARNING: cleanup-branch failed for {branch!r}: {exc}", file=sys.stderr)
+    return result
+
+
 # --- CLI (invoked by drain-mergeback-queue.sh; the research driver imports this module directly) --
 
 
@@ -745,6 +866,13 @@ def _cmd_select_and_reserve(args: argparse.Namespace) -> int:
         stale_reservation_seconds=args.stale_reservation_seconds,
     )
     _print_selection(result, args.format)
+    return 0
+
+
+def _cmd_cleanup_branch(args: argparse.Namespace) -> int:
+    result = cleanup_branch(
+        Path(args.queue), Path(args.lock), branch=args.branch, repo_root=Path(args.repo_root))
+    print(json.dumps(result))
     return 0
 
 
@@ -804,6 +932,13 @@ def main(argv: list[str] | None = None) -> int:
     p_record.add_argument(
         "--stdin", action="store_true", help="read the wrapped command's stdout from stdin instead")
     p_record.set_defaults(fn=_cmd_record_attempt)
+
+    p_cleanup = sub.add_parser("cleanup-branch")
+    p_cleanup.add_argument("--queue", required=True)
+    p_cleanup.add_argument("--lock", required=True)
+    p_cleanup.add_argument("--branch", required=True)
+    p_cleanup.add_argument("--repo-root", required=True, dest="repo_root")
+    p_cleanup.set_defaults(fn=_cmd_cleanup_branch)
 
     args = parser.parse_args(argv)
     return int(args.fn(args))
