@@ -30,6 +30,7 @@ from algua.registry.store import SqliteStrategyRepository
 
 runner = CliRunner()
 _STRAT = "cross_sectional_momentum"
+_GATED_TREE = "f" * 40  # the tree sha the stubbed green gate returns (binds commit_merge)
 
 _GATE_COLS = (
     "strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos, funnel_window_days,"
@@ -75,7 +76,7 @@ class _FakeGit:
     def merge_base(self, a, b): return "MB"
     def changed_entries(self, base, tip): return self.entries
     def begin_merge(self, tip): self.calls.append(("begin", tip))
-    def commit_merge(self): self.calls.append("commit")
+    def commit_merge(self, *, expected_tree): self.calls.append(("commit", expected_tree))
     def merge_commit_of(self, tip): return "MERGE"
     def commit_second_parent(self, sha): return "TIP"
     def is_ancestor(self, sha, ref): return True
@@ -114,7 +115,9 @@ def _insert_passing_gate(conn, strategy_id, token):
 def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
           promote_commits: bool = True):
     monkeypatch.setattr(paper_cmd, "RealGitOps", lambda repo_root: git)
-    monkeypatch.setattr(paper_cmd, "_run_quality_gate", lambda repo_root: gate)
+    # The gate seam's real contract: gated tree sha on green, None on red.
+    monkeypatch.setattr(paper_cmd, "_run_quality_gate",
+                        lambda repo_root: _GATED_TREE if gate else None)
     monkeypatch.setattr(paper_cmd, "_alpaca_broker_from_settings", lambda: _FakeBroker())
 
     def _fake_promote(**kwargs):
@@ -169,8 +172,8 @@ def test_green_gate_and_promote_allocates(monkeypatch):
     assert payload["merged"] is True and payload["promoted"] is True
     assert payload["reverted"] is False
     assert payload["attempt_token"] and payload["gate_id"]
-    # Merge committed + pushed (remote CAS), never reverted.
-    assert ("begin", "TIP") in git.calls and "commit" in git.calls
+    # Merge committed (bound to the gate-blessed tree sha) + pushed (remote CAS), never reverted.
+    assert ("begin", "TIP") in git.calls and ("commit", _GATED_TREE) in git.calls
     assert ("push", "MERGE") in git.calls
     assert not any(isinstance(c, tuple) and c[0] == "revert" for c in git.calls)
     # Promote driven with strict-agent inputs + the per-attempt token (finding #5).
@@ -190,7 +193,8 @@ def test_red_gate_fails_closed_without_promote(monkeypatch):
     payload = json.loads(result.output)
     assert payload["status"] == "gate_failed"
     assert payload["merged"] is False and payload["promoted"] is False
-    assert "abort" in git.calls and "commit" not in git.calls
+    assert "abort" in git.calls
+    assert not any(isinstance(c, tuple) and c[0] == "commit" for c in git.calls)
     assert promote_calls == []
 
 

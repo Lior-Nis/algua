@@ -51,7 +51,14 @@ class GitOps(Protocol):
         """``git merge --no-ff --no-commit <tip>`` — stage a merge preview."""
         ...
 
-    def commit_merge(self) -> None: ...
+    def commit_merge(self, *, expected_tree: str) -> None:
+        """``git commit --no-edit`` the staged merge — but ONLY if the live index still writes
+        exactly ``expected_tree`` (the gate-blessed ``write-tree`` sha). The index is
+        re-snapshotted immediately before the commit; a mismatch raises ``RuntimeError`` WITHOUT
+        committing (fail closed: an external index mutation in the gate→commit window must never
+        land ungated)."""
+        ...
+
     def merge_commit_of(self, tip: str) -> str:
         """SHA of the ``--no-ff`` merge commit whose 2nd parent equals ``tip``."""
         ...
@@ -163,7 +170,16 @@ class RealGitOps:
     def begin_merge(self, tip: str) -> None:
         self._run(["merge", "--no-ff", "--no-commit", tip])
 
-    def commit_merge(self) -> None:
+    def commit_merge(self, *, expected_tree: str) -> None:
+        # Bind the commit to the GATED tree: re-snapshot the index immediately before committing.
+        # The check-then-commit is not atomic, but the residual window is process-internal plumbing
+        # (no gate subprocesses run in between), versus the original minutes-long gate window.
+        tree_now = self._run(["write-tree"]).stdout.strip()
+        if tree_now != expected_tree:
+            raise RuntimeError(
+                f"staged index writes tree {tree_now}, not the gate-blessed {expected_tree}; "
+                f"the index was mutated between gate and commit — refusing to commit an ungated "
+                f"tree")
         self._run(["commit", "--no-edit"])
 
     def merge_commit_of(self, tip: str) -> str:
