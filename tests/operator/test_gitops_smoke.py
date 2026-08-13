@@ -19,6 +19,11 @@ def _git(repo: Path, *args: str) -> str:
                           check=True, capture_output=True, text=True).stdout
 
 
+def _commit_staged_merge(git: RealGitOps, repo: Path) -> None:
+    """Commit the staged merge preview bound to its own current tree (the gate-green happy path)."""
+    git.commit_merge(expected_tree=_git(repo, "write-tree").strip())
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     """``main`` (with an initial commit, pushed to a bare origin) + a ``feature`` branch one commit
@@ -178,7 +183,7 @@ def test_merge_push_cas_and_content_check(repo: Path) -> None:
     tip = git.resolve("feature")
     base = git.remote_tip("main")
     git.begin_merge(tip)
-    git.commit_merge()
+    _commit_staged_merge(git, repo)
     merge_sha = git.merge_commit_of(tip)
     assert git.commit_second_parent(merge_sha) == tip
 
@@ -191,11 +196,33 @@ def test_merge_push_cas_and_content_check(repo: Path) -> None:
     assert git.blob_at("main", "algua/strat.py") == captured["algua/strat.py"]
 
 
+def test_commit_merge_drifted_index_raises_and_does_not_commit(repo: Path) -> None:
+    """Gated-tree binding (PR #552 review MEDIUM): the gate blesses a ``write-tree`` snapshot;
+    ``commit_merge`` must refuse to commit an index that no longer writes that tree (an external
+    ``git add`` in the gate→commit window) — raise, no commit, staged merge left intact."""
+    git = RealGitOps(repo)
+    tip = git.resolve("feature")
+    git.begin_merge(tip)
+    gated_tree = _git(repo, "write-tree").strip()
+    head_before = git.resolve("HEAD")
+    # External index mutation AFTER the gate snapshot: stage an extra (ungated) file.
+    (repo / "sneaky.py").write_text("EVIL = 1\n")
+    _git(repo, "add", "sneaky.py")
+    with pytest.raises(RuntimeError, match="gate-blessed"):
+        git.commit_merge(expected_tree=gated_tree)
+    # Fail closed, no half-commit: HEAD unchanged and the merge is still staged (MERGE_HEAD live,
+    # the preview's content still in the index) for the next cycle's abort_merge to clean up.
+    assert git.resolve("HEAD") == head_before
+    assert git.merge_in_progress() is True
+    staged = _git(repo, "diff", "--cached", "--name-only")
+    assert "algua/strat.py" in staged and "sneaky.py" in staged
+
+
 def test_push_cas_stale_base_rejects(repo: Path) -> None:
     git = RealGitOps(repo)
     tip = git.resolve("feature")
     git.begin_merge(tip)
-    git.commit_merge()
+    _commit_staged_merge(git, repo)
     merge_sha = git.merge_commit_of(tip)
     # A wrong expected_base (origin/main has not moved to it) fails the pre-push CAS.
     with pytest.raises(RemoteMovedError):
@@ -208,7 +235,7 @@ def test_is_merge_of_true_for_merge_false_otherwise(repo: Path) -> None:
     git = RealGitOps(repo)
     tip = git.resolve("feature")
     git.begin_merge(tip)
-    git.commit_merge()
+    _commit_staged_merge(git, repo)
     merge_sha = git.merge_commit_of(tip)
     assert git.is_merge_of(merge_sha, tip) is True
     assert git.is_merge_of(merge_sha, "0" * 40) is False   # wrong second parent
@@ -220,7 +247,7 @@ def test_revert_merge_returns_sha_and_undoes_code(repo: Path) -> None:
     git = RealGitOps(repo)
     tip = git.resolve("feature")
     git.begin_merge(tip)
-    git.commit_merge()
+    _commit_staged_merge(git, repo)
     merge_sha = git.merge_commit_of(tip)
     assert (repo / "algua" / "strat.py").exists()
     revert_sha = git.revert_merge(merge_sha)

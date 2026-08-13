@@ -31,6 +31,7 @@ _CODEOWNERS = "/algua/registry/store.py @x\n/algua/registry/promotion.py @x\n"
 _TIP = "BRANCHTIP"
 _BASE = "BASE0"
 _MERGE = "MERGE0"
+_GATED_TREE = "GATEDTREE0"  # the tree sha a green run_gate returns (binds commit_merge)
 _STRAT_ENTRY = DiffEntry("100644", "A", None, "algua/strategies/foo/bar.py")
 
 
@@ -51,6 +52,7 @@ class FakeGit:
     crash_after_push: bool = False
     revert_push_fail_once: bool = False
     calls: list[object] = field(default_factory=list)
+    committed_trees: list[str] = field(default_factory=list)
 
     def merge_in_progress(self) -> bool:
         return self.merge_flag
@@ -89,8 +91,9 @@ class FakeGit:
         self.calls.append(("begin", tip))
         self.merge_flag = True
 
-    def commit_merge(self) -> None:
+    def commit_merge(self, *, expected_tree: str) -> None:
         self.calls.append("commit")
+        self.committed_trees.append(expected_tree)
         self.merge_flag = False
         # Mirror real git: committing the merge advances HEAD (local `main`) to the merge commit.
         # A test that reconstructs a fresh FakeGit for a resume passes `local_main` explicitly to
@@ -233,7 +236,9 @@ def _run(git, journal, *, stage, promoter=None, run_gate=True, intake=None,
         git=git, journal=journal, strategy="s", branch="feat/s",
         codeowners_text=_CODEOWNERS,
         stage_of=_stage(stage),
-        run_gate=(lambda: run_gate) if isinstance(run_gate, bool) else run_gate,
+        # A bool run_gate maps to the seam's real contract: gated tree sha on green, None on red.
+        run_gate=((lambda: _GATED_TREE if run_gate else None)
+                  if isinstance(run_gate, bool) else run_gate),
         ensure_backtested=ensurer,
         produce_evidence=producer,
         promote=promoter,
@@ -284,6 +289,7 @@ def test_backtested_green_promote_commits_allocates() -> None:
     assert result.status == "promoted_allocated"
     assert result.merged and result.promoted and not result.reverted
     assert ("push", _MERGE) in git.calls          # remote CAS push happened (finding #2)
+    assert git.committed_trees == [_GATED_TREE]   # commit bound to the gate-blessed tree
     assert result.intake == {"admitted": ["s"]}
     # Promote was driven with the re-derivable attempt token (finding #5).
     expected = derive_attempt_token("s", _TIP, _MERGE, strict_relaxation_fingerprint())
@@ -378,7 +384,7 @@ def test_promote_stage_drift_without_token_fails_closed_no_revert() -> None:
             git=git, journal=FakeJournal(), strategy="s", branch="feat/s",
             codeowners_text=_CODEOWNERS,
             stage_of=lambda name: next(seq),
-            run_gate=lambda: True,
+            run_gate=lambda: _GATED_TREE,
             ensure_backtested=Ensurer(), produce_evidence=Producer(),
             promote=p, passing_gate_by_token=p.by_token,
             gate_exists_by_token=p.exists,
@@ -614,7 +620,8 @@ def test_resume_passing_token_row_converges_to_intake_no_reinvoke() -> None:
     p = Promoter(commit=False)  # must NOT be re-invoked
     result = run_merge_back(
         git=FakeGit(), journal=journal, strategy="s", branch="feat/s",
-        codeowners_text=_CODEOWNERS, stage_of=_stage({"s": "backtested"}), run_gate=lambda: True,
+        codeowners_text=_CODEOWNERS, stage_of=_stage({"s": "backtested"}),
+        run_gate=lambda: _GATED_TREE,
         ensure_backtested=Ensurer(), produce_evidence=Producer(),
         promote=p, passing_gate_by_token=lambda tok: 77 if tok == token else None,
         gate_exists_by_token=lambda tok: True,
@@ -682,7 +689,7 @@ def test_unadoptable_local_drift_still_fails_closed() -> None:
 def test_gate_seam_exception_is_red_gate() -> None:
     git = FakeGit()
 
-    def _boom() -> bool:
+    def _boom() -> str | None:
         raise RuntimeError("gate subprocess crashed")
 
     result = _run(git, FakeJournal(), stage={"s": "backtested"}, run_gate=_boom)
@@ -690,6 +697,17 @@ def test_gate_seam_exception_is_red_gate() -> None:
     assert result.merged is False
     assert ("begin", _TIP) in git.calls and "abort" in git.calls
     assert "commit" not in git.calls
+
+
+# (gated-tree binding) the tree sha a green run_gate returns is threaded into commit_merge, so the
+# commit is bound to the EXACT tree the gate blessed — an index mutated in the gate→commit window
+# makes the real commit_merge raise instead of landing ungated content.
+def test_gated_tree_sha_from_run_gate_reaches_commit_merge() -> None:
+    git = FakeGit()
+    result = _run(git, FakeJournal(), stage={"s": "backtested"},
+                  run_gate=lambda: "TREESHA-FROM-GATE")
+    assert result.status == "promoted_allocated"
+    assert git.committed_trees == ["TREESHA-FROM-GATE"]
 
 
 # (LOW-1) a promote_failed terminal replays with the SAME flags the fresh promote-failed path
@@ -830,7 +848,7 @@ def test_chokepoint_never_runs_when_token_row_already_exists() -> None:
     result = run_merge_back(
         git=FakeGit(origin_main=_MERGE, local_main=_MERGE), journal=journal, strategy="s",
         branch="feat/s", codeowners_text=_CODEOWNERS, stage_of=_stage({"s": "backtested"}),
-        run_gate=lambda: True, ensure_backtested=ensurer, produce_evidence=producer,
+        run_gate=lambda: _GATED_TREE, ensure_backtested=ensurer, produce_evidence=producer,
         promote=p, passing_gate_by_token=lambda tok: 77, gate_exists_by_token=lambda tok: True,
         intake=lambda: {"admitted": ["s"]}, target_allocated=lambda n: True)
     assert result.status == "promoted_allocated"

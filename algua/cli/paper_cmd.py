@@ -534,9 +534,10 @@ def allocate(
     emit(ok({'strategy': name, 'capital': capital, 'prior_capital': prior_capital}))
 
 
-def _run_quality_gate(repo_root: Path) -> bool:
-    """Run the FULL quality gate against ``repo_root``'s STAGED tree, returning True iff ALL of
-    ``pytest -q``, ``ruff check .``, ``mypy algua``, and ``lint-imports`` exit 0.
+def _run_quality_gate(repo_root: Path) -> str | None:
+    """Run the FULL quality gate against ``repo_root``'s STAGED tree, returning the gated TREE SHA
+    iff ALL of ``pytest -q``, ``ruff check .``, ``mypy algua``, and ``lint-imports`` exit 0 (else
+    None); the saga binds ``commit_merge`` to that sha.
 
     This is the ``run_gate`` seam ``run_merge_back`` invokes against the ``--no-ff --no-commit``
     merge preview before it will commit + promote: a red gate aborts the merge with ``main``
@@ -545,7 +546,8 @@ def _run_quality_gate(repo_root: Path) -> bool:
     real ``.env`` credentials, and dirty staged tree all break the suite's hermetic-environment
     assumptions when the gate runs in-place (proven by the first end-to-end factory drains)."""
     gate_runner = importlib.import_module("algua.operator.gate_runner")
-    return bool(gate_runner.run_hermetic_quality_gate(repo_root))
+    result: str | None = gate_runner.run_hermetic_quality_gate(repo_root)
+    return result
 
 
 @paper_app.command('merge-back')

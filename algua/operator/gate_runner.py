@@ -19,11 +19,19 @@ Instead the gate runs in a **throwaway worktree of the staged merge**:
    colliding with the live cycle's held lock.
 4. ``uv sync --frozen`` provisions the venv (fast — hardlinked from uv's cache; same lockfile), then
    the gate commands run there with a SCRUBBED environment (no ``ALGUA_*``/``ALPACA_*``/
-   ``VIRTUAL_ENV`` leakage from the operator service).
-5. The worktree is removed in a ``finally`` — red or green, crash included (a leaked dir is also
-   reaped by ``git worktree prune`` on the next run).
+   ``VIRTUAL_ENV``/``PYTHONPATH`` leakage from the operator service) and their stdout routed to the
+   parent's STDERR — gate noise stays visible in journald without polluting the parent CLI's
+   stdout-JSON contract.
+5. The worktree is removed in a ``finally`` — red or green, and on any exception. A hard kill
+   (SIGKILL) mid-gate can still leak: ``git worktree prune`` on the next run reaps only the stale
+   ADMIN entry once the directory is already gone; the leaked ``/tmp`` directory itself is left for
+   the OS tmp reaper.
 
-Fail-closed: ANY failure — plumbing, sync, or a gate command — is a red gate (``False``), never an
+The gate is BINDING on the exact tree it ran: a green run returns the gated ``write-tree`` sha so
+the saga can pin the merge commit to it (``commit_merge(expected_tree=...)``) — an index mutated
+between gate and commit can never land ungated.
+
+Fail-closed: ANY failure — plumbing, sync, or a gate command — is a red gate (``None``), never an
 exception the saga would misread.
 """
 
@@ -48,9 +56,18 @@ _GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
 # Environment keys that leak live-operator state into what must be a hermetic test run. ALGUA_*
 # redirects DB/data/kb paths; ALPACA_* is real broker credentials (the doctor tests assert their
 # ABSENCE in a clean env); VIRTUAL_ENV would point uv at the LIVE checkout's venv instead of the
-# gate worktree's own.
+# gate worktree's own; PYTHONPATH would shadow the gate worktree's modules with the live
+# checkout's; PYTEST_ADDOPTS would silently reshape the gate's pytest invocation.
 _SCRUB_PREFIXES = ("ALGUA_", "ALPACA_")
-_SCRUB_EXACT = frozenset({"VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"})
+_SCRUB_EXACT = frozenset(
+    {"VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONPATH", "PYTEST_ADDOPTS"})
+
+# Gate children write their stdout to THIS file descriptor — the parent's stderr — so build/test
+# noise stays visible (journald under the operator service) without polluting the parent CLI's
+# stdout-JSON contract. The literal fd 2 rather than ``sys.stderr.fileno()``: test harnesses
+# (pytest capture) replace ``sys.stderr`` with objects whose ``fileno()`` raises, while fd 2 is
+# always the process's real stderr stream.
+_STDERR_FD = 2
 
 
 def _scrubbed_env() -> dict[str, str]:
@@ -67,11 +84,19 @@ def _git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def run_hermetic_quality_gate(
     repo_root: Path, *, commands: Sequence[Sequence[str]] | None = None,
-) -> bool:
-    """Gate the STAGED tree of ``repo_root`` in a throwaway detached worktree; True iff all green.
+) -> str | None:
+    """Gate the STAGED tree of ``repo_root`` in a throwaway detached worktree; returns the gated
+    TREE SHA (the ``git write-tree`` snapshot the gate ran on) iff all green, else None.
+
+    The caller must bind the merge commit to the returned sha
+    (``commit_merge(expected_tree=...)``): the gate blesses a SNAPSHOT of the index, so committing
+    a live index that no longer writes that tree would land ungated content.
 
     Must be called while the merge preview is staged (the saga's ``run_gate`` moment). ``commands``
-    is a test seam — production always uses the full ``_GATE_COMMANDS`` gate.
+    is a test seam — production always uses the full ``_GATE_COMMANDS`` gate. Injected commands
+    also SKIP the ``uv sync`` provisioning step (they run bare in the worktree; only the real gate
+    needs the locked venv), keeping the hermetic-property tests fast and uv-free — and return the
+    gated tree sha on success exactly like the real gate.
     """
     gate_commands = _GATE_COMMANDS if commands is None else commands
     gate_dir: Path | None = None
@@ -90,15 +115,17 @@ def run_hermetic_quality_gate(
         if commands is None:
             # Provision the gate venv from the LOCKED set before any gate command runs.
             sync = subprocess.run(  # noqa: S603 — fixed argv, no shell
-                ["uv", "sync", "--frozen", "-q"], cwd=gate_dir, env=env)
+                ["uv", "sync", "--frozen", "-q"], cwd=gate_dir, env=env, stdout=_STDERR_FD)
             if sync.returncode != 0:
-                return False
+                return None
         for cmd in gate_commands:
-            if subprocess.run(list(cmd), cwd=gate_dir, env=env).returncode != 0:  # noqa: S603
-                return False
-        return True
+            proc = subprocess.run(  # noqa: S603 — fixed/injected argv, no shell
+                list(cmd), cwd=gate_dir, env=env, stdout=_STDERR_FD)
+            if proc.returncode != 0:
+                return None
+        return tree
     except (OSError, subprocess.CalledProcessError):
-        return False  # fail closed: a gate that cannot run is a red gate, never a pass
+        return None  # fail closed: a gate that cannot run is a red gate, never a pass
     finally:
         if gate_dir is not None:
             subprocess.run(  # noqa: S603 — best-effort cleanup; prune on next run is the backstop

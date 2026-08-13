@@ -139,7 +139,7 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     branch: str,
     codeowners_text: str,
     stage_of: Callable[[str], str | None],
-    run_gate: Callable[[], bool],
+    run_gate: Callable[[], str | None],
     ensure_backtested: Callable[[str, str, str], str],
     produce_evidence: Callable[[str, str], str],
     promote: Callable[[str], object],
@@ -155,7 +155,8 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     The concrete effects are injected: ``git`` (:class:`~algua.operator.gitops.GitOps`), ``journal``
     (:class:`~algua.operator.journal.Journal`), ``codeowners_text`` (for the diff-policy denylist),
     ``stage_of`` (read the lifecycle stage; ``None`` = unregistered — the canonical factory-fresh
-    state), ``run_gate`` (full quality gate on the staged tree),
+    state), ``run_gate`` (full quality gate on the staged tree — returns the gated TREE SHA on
+    green, None on red; the sha binds ``commit_merge`` to the exact tree the gate blessed),
     ``ensure_backtested`` (the authoritative-intake registration chokepoint — one-tx create-if-
     absent + CAS to ``backtested``; called with ``(branch_tip, merge_sha, base_sha)`` and returning
     ``"created" | "existed"``), ``produce_evidence`` (authoritative promote-evidence reproduction —
@@ -456,18 +457,22 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         # it) is a RED gate, exactly as the CLI doc promises ("each check is a separate subprocess
         # so a crash in one is a red gate"). A raised gate must NOT propagate with the ``--no-ff
         # --no-commit`` preview merge left staged in the working tree — abort it and take the
-        # gate_failed path, same as a clean ``False`` return.
+        # gate_failed path, same as a clean ``None`` return.
         try:
-            gate_green = run_gate()
+            gated_tree = run_gate()
         except Exception:  # noqa: BLE001 — any gate-seam failure is a red gate, never a raised saga
-            gate_green = False
-        if not gate_green:
+            gated_tree = None
+        if gated_tree is None:
             git.abort_merge()
             _write(base_sha=base_sha, diff_policy="passed", gate_status="failed",
                    terminal="gate_failed")
             return CycleResult(ok=False, status="gate_failed", merged=False, reverted=False,
                                promoted=False, intake=None, branch_tip=branch_tip)
-        git.commit_merge()
+        # Bind the commit to the tree the gate BLESSED: an external index mutation between the
+        # gate's write-tree snapshot and this commit raises (RealGitOps re-runs write-tree and
+        # refuses on mismatch — nothing is committed, MERGE_HEAD stays staged, and the raise
+        # surfaces as a failed cycle; the next run aborts the stale preview and re-gates).
+        git.commit_merge(expected_tree=gated_tree)
         merge_sha = git.merge_commit_of(branch_tip)
         _write(base_sha=base_sha, diff_policy="passed", gate_status="green", merge_sha=merge_sha)
 
