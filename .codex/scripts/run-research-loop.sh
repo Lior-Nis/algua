@@ -30,7 +30,14 @@
 # EVERY firing — completed run (success, failure, or timeout), lock-skip, or setup failure — it
 # appends ONE JSON line to the durable authority-side digest (data/research-runs.jsonl by default;
 # ALGUA_RESEARCH_DIGEST_PATH overrides), built from the run-report's machine-readable trailer. Codex output also tees to an
-# in-worktree research-loop.log for rate-limit detection (only the boolean goes durable).
+# in-worktree research-loop.log for rate-limit detection (only the boolean goes durable); the log
+# is archived to .runs/logs/<branch>.log before any worktree removal.
+#
+# Runs-worktree lifecycle (#555): worktrees live at <repo>/.runs/<stamp> (gitignored); the run
+# branch is renamed post-run to research-run/<stamp>--<candidates> when the trailer produced
+# validated merge-back candidates; reclaim is OUTCOME-KEYED (zero candidates -> removed at run end
+# here; candidates -> removed by the drainer's cleanup-branch once all queue items are terminal),
+# with the mtime pruner as backstop.
 #
 # Bounds: an OS-level `timeout` hard-kills the run; a repo-root flock serializes research cycles;
 # the codex exit code propagates (a timeout/failure fails the systemd unit, never a false success).
@@ -67,7 +74,14 @@ done
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BRANCH="research-run/${STAMP}"
-WORKTREE="${REPO_ROOT}/../algua-research-${STAMP}"
+# Research worktrees live INSIDE the checkout at .runs/<stamp> (gitignored, so merge-back's
+# clean-checkout precondition is unaffected; worktrees inside the parent working tree are legal).
+# The branch may be RENAMED post-run to carry the run's validated merge-back candidate names
+# (research-run/<stamp>--<s1>+<s2>+...) — the DIRECTORY always keeps the bare stamp. .runs/logs/
+# archives each removed worktree's research-loop.log (see the cleanup sites below and
+# mergeback_queue.cleanup_branch).
+RUNS_DIR="${REPO_ROOT}/.runs"
+WORKTREE="${RUNS_DIR}/${STAMP}"
 
 # Deterministic THESIS rotation (factory diversity minimum). When THESIS was not explicitly set,
 # pick a line from research-themes.txt by run slot:
@@ -128,21 +142,27 @@ rate_limited=0
 append_digest() {
   local outcome="$1" digest_ok=0
   mkdir -p "$(dirname "${AUTH_DIGEST}")" 2>/dev/null || true
+  # REPO_ROOT rides twice: as the module-load root AND as the git root the run branch lives in
+  # (the trailing arg; the digest tests pass an isolated throwaway git root — or empty to disable
+  # the rename — so they can never touch a real branch).
   python3 - "${AUTH_DIGEST}" "${outcome}" "${STAMP}" "${DIGEST_BRANCH}" "${THESIS}" \
     "${rc}" "${timed_out}" "${wall_s}" "${n_strategy_files}" "${rate_limited}" \
     "${DIGEST_REPORT_PATH}" "${STRATEGY_MODULE_NAMES}" "${REPO_ROOT}" \
-    "${AUTH_QUEUE}" "${AUTH_QUEUE_LOCK}" <<'PY' && digest_ok=1
+    "${AUTH_QUEUE}" "${AUTH_QUEUE_LOCK}" "${REPO_ROOT}" <<'PY' && digest_ok=1
 import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+# git_root: where the run branch actually lives (production: same as repo_root; the digest tests
+# pass an isolated throwaway repo, or "" to disable the rename entirely).
 (digest_path, outcome, stamp, branch, thesis,
  exit_code, timed_out, wall_s, n_files, rate_limited, report_path,
- strategy_names_csv, repo_root, queue_path, queue_lock_path) = sys.argv[1:16]
+ strategy_names_csv, repo_root, queue_path, queue_lock_path, git_root) = sys.argv[1:17]
 
 _VALID_VERDICTS = {"discarded", "candidate-preview-pass", "error"}
 _STRATEGY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -312,9 +332,45 @@ if outcome == "completed":
     except Exception:
         hypotheses, preview_gate, trailer_parse_error, candidates = [], None, True, []
 
+# mergeback_queue module: needed for BOTH the candidate-keyed branch rename below and the enqueue
+# at the bottom. A load failure degrades loudly to no-rename + no-enqueue (the digest row below
+# still lands).
+mergeback_queue = None
+if candidates and branch:
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "mergeback_queue", os.path.join(repo_root, ".codex", "scripts", "mergeback_queue.py"))
+        mergeback_queue = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mergeback_queue)
+    except Exception as exc:
+        mergeback_queue = None
+        print(f"WARNING: could not load mergeback_queue module from {repo_root}: {exc}")
+
+# Candidate-keyed branch rename (runs-worktree lifecycle): BEFORE the digest append + enqueue,
+# rename research-run/<stamp> -> research-run/<stamp>--<s1>+<s2>+... carrying the run's VALIDATED
+# merge-back candidate strategy names (compute_run_branch_name caps the list: <= 3 names, <= 120
+# chars total, names dropped whole — never truncated). Zero candidates => no rename. The worktree
+# DIRECTORY keeps the bare stamp; `git branch -m` from the main repo updates the worktree's HEAD
+# too. On rename failure the OLD name is kept — the digest row and every enqueue below always
+# record the branch that actually exists.
+final_branch = branch
+if candidates and branch and git_root and mergeback_queue is not None:
+    target = mergeback_queue.compute_run_branch_name(
+        stamp, [cand["strategy"] for cand in candidates])
+    if target != branch:
+        proc = subprocess.run(
+            ["git", "-C", git_root, "branch", "-m", branch, target],
+            capture_output=True, text=True)
+        if proc.returncode == 0:
+            final_branch = target
+            print(f"run branch renamed: {branch} -> {target}")
+        else:
+            print(f"WARNING: branch rename {branch} -> {target} failed "
+                  f"(rc={proc.returncode}: {proc.stderr.strip()!r}); keeping {branch}")
+
 row = {
     "stamp": stamp,
-    "branch": branch or None,
+    "branch": final_branch or None,
     "thesis": thesis,
     "outcome": outcome,
     "exit_code": int(exit_code) if exit_code else None,
@@ -325,36 +381,31 @@ row = {
     "preview_gate": preview_gate,
     "trailer_parse_error": trailer_parse_error,
     "rate_limited": rate_limited == "1",
-    "report": f"{branch}:kb/research-runs/{stamp}.md" if outcome == "completed" and branch else None,
+    "report": (f"{final_branch}:kb/research-runs/{stamp}.md"
+               if outcome == "completed" and final_branch else None),
 }
 with open(digest_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-# Enqueue every validated merge_back candidate (factory slice 3) — branch is the DRIVER's own
-# known branch, NEVER read from the trailer. One enqueue call per candidate; a failure here is
-# logged loudly but NEVER fails the digest write (already committed above) or the run.
-if candidates and branch:
-    spec = importlib.util.spec_from_file_location(
-        "mergeback_queue", os.path.join(repo_root, ".codex", "scripts", "mergeback_queue.py"))
-    try:
-        mergeback_queue = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mergeback_queue)
-        for cand in candidates:
-            try:
-                # enqueue runs mergeback_queue.validate_eval_context FAIL-CLOSED: an invalid
-                # recipe raises here and the candidacy is dropped loudly — a malformed queue item
-                # is never written.
-                result = mergeback_queue.enqueue(
-                    Path(queue_path), Path(queue_lock_path),
-                    strategy=cand["strategy"], universe=cand["universe"],
-                    start=cand["start"], end=cand["end"], branch=branch,
-                    eval_context=cand["eval_context"])
-                print(f"merge-back queue: {result}")
-            except Exception as exc:
-                print(f"WARNING: failed to enqueue merge-back candidate "
-                      f"{cand['strategy']!r}: {exc}")
-    except Exception as exc:
-        print(f"WARNING: could not load mergeback_queue module from {repo_root}: {exc}")
+# Enqueue every validated merge_back candidate (factory slice 3) — the branch is the DRIVER's own
+# known (post-rename FINAL) branch, NEVER read from the trailer. One enqueue call per candidate; a
+# failure here is logged loudly but NEVER fails the digest write (already committed above) or the
+# run.
+if candidates and final_branch and mergeback_queue is not None:
+    for cand in candidates:
+        try:
+            # enqueue runs mergeback_queue.validate_eval_context FAIL-CLOSED: an invalid
+            # recipe raises here and the candidacy is dropped loudly — a malformed queue item
+            # is never written.
+            result = mergeback_queue.enqueue(
+                Path(queue_path), Path(queue_lock_path),
+                strategy=cand["strategy"], universe=cand["universe"],
+                start=cand["start"], end=cand["end"], branch=final_branch,
+                eval_context=cand["eval_context"])
+            print(f"merge-back queue: {result}")
+        except Exception as exc:
+            print(f"WARNING: failed to enqueue merge-back candidate "
+                  f"{cand['strategy']!r}: {exc}")
 PY
   if [[ "${digest_ok}" -ne 1 ]]; then
     echo "WARNING: digest append to ${AUTH_DIGEST} failed — run outcome unaffected." >&2
@@ -544,19 +595,44 @@ if ! flock -n 9; then
   exit 0
 fi
 
-# Auto-prune stale research-run worktrees so a daily/unattended cadence doesn't fill the disk. Only
-# the disposable working dir (venv + scratch) is reclaimed — the authored code persists on its
-# research-run/<stamp> BRANCH after the worktree is removed, so nothing committed is lost. Under the
-# flock, so two cycles can't prune concurrently. Never matches the run we're about to create (mtime=now).
+# Archive one worktree's research-loop.log to .runs/logs/<branch with / -> _>.log BEFORE removing
+# the worktree (runs-worktree lifecycle: the codex transcript outlives the disposable dir; the
+# drainer-side counterpart lives in mergeback_queue.cleanup_branch). Best-effort, never fatal.
+archive_run_log() {
+  local wt="$1" branch_name="$2"
+  [[ -f "${wt}/research-loop.log" ]] || return 0
+  mkdir -p "${RUNS_DIR}/logs" 2>/dev/null || return 0
+  cp -f "${wt}/research-loop.log" "${RUNS_DIR}/logs/${branch_name//\//_}.log" 2>/dev/null || true
+}
+
+# BACKSTOP mtime pruner (issue #555: the 7-day default was calibrated for the pre-factory DAILY
+# cadence and let ~84 worktrees pile up at the 2h factory cadence). The PRIMARY reclaim is now
+# OUTCOME-KEYED — a zero-candidate run's worktree is removed at run end (below), a candidate run's
+# once its queue items all go terminal (drain-mergeback-queue.sh -> mergeback_queue
+# cleanup-branch) — so this pruner only catches what those two miss (a crashed launcher, a wedged
+# queue item). Only the disposable working dir (venv + scratch) is reclaimed — the authored code
+# persists on its research-run/<stamp>[--<candidates>] BRANCH after the worktree is removed, so
+# nothing committed is lost. Under the flock, so two cycles can't prune concurrently. Never matches
+# the run we're about to create (mtime=now). Scans .runs/<stamp> AND the legacy ../algua-research-*
+# location (transition support for pre-#555 runs); archived run logs in .runs/logs/ get their own
+# 30-day window.
 RETENTION_DAYS="${RESEARCH_WORKTREE_RETENTION_DAYS:-7}"
 git -C "${REPO_ROOT}" worktree prune 2>/dev/null || true
 while IFS= read -r stale; do
   [[ -n "${stale}" ]] || continue
   echo "pruning stale research worktree (>${RETENTION_DAYS}d): ${stale}"
+  stale_stamp="$(basename "${stale}")"; stale_stamp="${stale_stamp#algua-research-}"
+  stale_branch="$(git -C "${stale}" branch --show-current 2>/dev/null || true)"
+  archive_run_log "${stale}" "${stale_branch:-research-run/${stale_stamp}}"
   git -C "${REPO_ROOT}" worktree remove --force "${stale}" 2>/dev/null || rm -rf "${stale}"
-done < <(find "${REPO_ROOT}/.." -maxdepth 1 -type d -name 'algua-research-*' -mtime "+${RETENTION_DAYS}" 2>/dev/null)
+done < <(
+  find "${RUNS_DIR}" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -mtime "+${RETENTION_DAYS}" 2>/dev/null
+  find "${REPO_ROOT}/.." -maxdepth 1 -type d -name 'algua-research-*' -mtime "+${RETENTION_DAYS}" 2>/dev/null
+)
+find "${RUNS_DIR}/logs" -maxdepth 1 -type f -name '*.log' -mtime +30 -delete 2>/dev/null || true
 
 echo "Creating worktree ${WORKTREE} on branch ${BRANCH}..."
+mkdir -p "${RUNS_DIR}"
 git -C "${REPO_ROOT}" worktree add -b "${BRANCH}" "${WORKTREE}" >/dev/null
 DIGEST_BRANCH="${BRANCH}"
 
@@ -659,16 +735,71 @@ echo "Appending run digest to ${AUTH_DIGEST}..."
 DIGEST_REPORT_PATH="${WORKTREE}/kb/research-runs/${STAMP}.md"
 append_digest completed
 
+# The digest step may have RENAMED the branch (candidate-keyed: research-run/<stamp>--<s1>+...).
+# Re-read the ACTUAL branch from the worktree's HEAD — the rename updates it — for the enqueue
+# check and the review hints below.
+FINAL_BRANCH="$(git -C "${WORKTREE}" branch --show-current 2>/dev/null || true)"
+[[ -n "${FINAL_BRANCH}" ]] || FINAL_BRANCH="${BRANCH}"
+
+# Outcome-keyed worktree reclaim (runs-worktree lifecycle, #555): when this run enqueued ZERO
+# merge-back candidates (crashed/timed-out run, rate-limited, trailer-invalid, or all hypotheses
+# discarded) the worktree is pure disposable weight NOW — the authored code (if any) persists on
+# the run branch, the report is in the digest. Archive the codex log, then remove our own worktree.
+# The authoritative signal is the QUEUE (count items on the final branch), never a parallel flag.
+# FAIL CLOSED to "keep": the heredoc prints the real count on success and -1 on ANY failure
+# (unreadable queue, QueueLockTimeout under a concurrent drain, module-load error) — removal
+# happens ONLY on a clean literal "0", so a transiently-locked queue can never reclaim the
+# worktree of a run WITH pending candidates; anything undeterminable is left to the retention
+# pruner backstop instead. A candidate run's worktree is kept; the drainer's cleanup-branch
+# removes it once every one of its queue items goes terminal.
+N_ENQUEUED="$(python3 - "${AUTH_QUEUE}" "${AUTH_QUEUE_LOCK}" "${FINAL_BRANCH}" "${QUEUE_MOD}" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+queue_path, lock_path, branch, mod_path = sys.argv[1:5]
+count = None
+try:
+    spec = importlib.util.spec_from_file_location("mergeback_queue", mod_path)
+    mergeback_queue = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mergeback_queue)
+    data = mergeback_queue.read_locked(Path(queue_path), Path(lock_path))
+    count = sum(1 for item in data["items"].values()
+                if isinstance(item, dict) and item.get("branch") == branch)
+except Exception as exc:
+    print(f"WARNING: could not count enqueued candidates: {exc}", file=sys.stderr)
+# -1 = "could not determine" — the shell must KEEP the worktree (fail closed), never treat an
+# unreadable/locked queue as zero candidates.
+print(count if count is not None else -1)
+PY
+)" || N_ENQUEUED=""
+if [[ "${N_ENQUEUED:-}" == "0" ]]; then
+  echo "no merge-back candidates enqueued for ${FINAL_BRANCH} — reclaiming this run's worktree."
+  archive_run_log "${WORKTREE}" "${FINAL_BRANCH}"
+  case "${PWD}/" in
+    "${WORKTREE}/"*)
+      echo "cwd is inside ${WORKTREE}; leaving removal to the retention pruner." >&2 ;;
+    *)
+      git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE}" 2>/dev/null \
+        || rm -rf "${WORKTREE}" ;;
+  esac
+elif [[ "${N_ENQUEUED:-}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "kept worktree ${WORKTREE} (${N_ENQUEUED} enqueued candidate(s) on ${FINAL_BRANCH});"
+  echo "the merge-back drainer reclaims it once every queue item on the branch is terminal."
+else
+  echo "could not determine the enqueued-candidate count (got '${N_ENQUEUED:-}');" \
+       "keeping ${WORKTREE} for the retention pruner (fail closed)." >&2
+fi
+
 echo
 echo "Done. Review the run:"
-echo "  git -C ${REPO_ROOT} diff main...${BRANCH}"
-echo "  cat ${WORKTREE}/kb/research-runs/${STAMP}.md"
+echo "  git -C ${REPO_ROOT} diff main...${FINAL_BRANCH}"
+echo "  git -C ${REPO_ROOT} show ${FINAL_BRANCH}:kb/research-runs/${STAMP}.md"
 echo "  # Every valid 'merge_back' in the trailer above was just enqueued to ${AUTH_QUEUE}"
 echo "  # for the automated drainer (.codex/scripts/drain-mergeback-queue.sh) to run for real."
 echo "  # To force one through right now instead of waiting for the next drain cycle:"
-echo "  uv run algua paper merge-back --branch ${BRANCH} --strategy <name> --universe <u> --start D --end D \\"
+echo "  uv run algua paper merge-back --branch ${FINAL_BRANCH} --strategy <name> --universe <u> --start D --end D \\"
 echo "    --snapshot <bars-id> --sweep-param K=v1,v2   # (or --demo; the eval-context recipe is required)"
-echo "When finished, remove the worktree:  git -C ${REPO_ROOT} worktree remove ${WORKTREE}"
 
 # Propagate a failed/timed-out codex run so the systemd unit fails (alerts / no false 'success').
 exit "${rc}"

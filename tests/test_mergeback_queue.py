@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
@@ -678,3 +679,231 @@ def test_cli_enqueue_takes_eval_context_json(paths, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result["created"] is True
     assert result["item"]["eval_context"]["sweep_grid"] == {"k": [1, 2]}
+
+
+# --- compute_run_branch_name (candidate-keyed research-worktree lifecycle, #555) ------------------
+
+
+def test_compute_run_branch_name_no_candidates_is_stamp_only():
+    assert (mergeback_queue.compute_run_branch_name("20260814-120000", [])
+            == "research-run/20260814-120000")
+
+
+def test_compute_run_branch_name_joins_candidate_names_with_plus():
+    assert (mergeback_queue.compute_run_branch_name("20260814-120000", ["strat_a", "strat_b"])
+            == "research-run/20260814-120000--strat_a+strat_b")
+
+
+def test_compute_run_branch_name_caps_at_three_names():
+    assert (mergeback_queue.compute_run_branch_name(
+        "20260814-120000", ["s1", "s2", "s3", "s4"])
+        == "research-run/20260814-120000--s1+s2+s3")
+
+
+def test_compute_run_branch_name_drops_whole_names_never_truncates():
+    long_name = "x" * 60
+    out = mergeback_queue.compute_run_branch_name(
+        "20260814-120000", [long_name, long_name, long_name])
+    # Two 60-char names exceed the 120-char total cap -> the LIST is truncated to one name; the
+    # surviving name is intact (never itself truncated).
+    assert out == f"research-run/20260814-120000--{long_name}"
+    assert len(out) <= 120
+
+
+def test_compute_run_branch_name_single_max_length_name_always_fits():
+    name = "y" * 64  # the strategy-name validator's maximum
+    out = mergeback_queue.compute_run_branch_name("20260814-120000", [name])
+    assert out == f"research-run/20260814-120000--{name}"
+    assert len(out) <= 120
+
+
+# --- cleanup_branch (outcome-keyed worktree reclaim, #555) ----------------------------------------
+#
+# Exercised against REAL throwaway git repos + worktrees (never a mock of git), matching the
+# diff-tree tests in test_research_run_digest.py. `cleanup_branch` is best-effort BY CONTRACT: it
+# must never raise (the drainer must not fail on cleanup), so every scenario asserts on the
+# returned dict.
+
+
+_STAMP = "20260101-000000"
+
+
+def _init_cleanup_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (("init", "-q"), ("config", "user.email", "t@example.com"),
+                 ("config", "user.name", "Test")):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, check=True,
+                   capture_output=True)
+    return repo
+
+
+def _add_run_worktree(repo: Path, branch: str, worktree: Path, *, log: bool = True) -> None:
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree)],
+                   check=True, capture_output=True)
+    if log:
+        (worktree / "research-loop.log").write_text("codex transcript\n", encoding="utf-8")
+
+
+def test_cleanup_branch_all_terminal_removes_worktree_and_archives_log(paths, tmp_path):
+    queue_path, lock_path = paths
+    repo = _init_cleanup_repo(tmp_path)
+    branch = f"research-run/{_STAMP}--strat_a"  # the candidate suffix is stripped for the path
+    worktree = repo / ".runs" / _STAMP
+    _add_run_worktree(repo, branch, worktree)
+
+    mergeback_queue.enqueue(queue_path, lock_path, **_item(branch=branch))
+    mergeback_queue.record_attempt(
+        queue_path, lock_path, key=f"strat_a@{branch}",
+        stdout_text=json.dumps({"ok": True, "status": "promoted_allocated"}))
+
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)
+    assert result["removed"] is True
+    assert not worktree.exists()
+    # Log archived BEFORE removal, branch slashes -> underscores.
+    archived = repo / ".runs" / "logs" / f"research-run_{_STAMP}--strat_a.log"
+    assert result["log_archived"] is True
+    assert archived.read_text(encoding="utf-8") == "codex transcript\n"
+    # The branch itself survives the worktree removal (the authored code persists on it).
+    branches = subprocess.run(["git", "-C", str(repo), "branch", "--list", branch],
+                              capture_output=True, text=True, check=True).stdout
+    assert branch in branches
+
+
+def test_cleanup_branch_noop_while_a_sibling_item_is_non_terminal(paths, tmp_path):
+    queue_path, lock_path = paths
+    repo = _init_cleanup_repo(tmp_path)
+    branch = f"research-run/{_STAMP}--strat_a+strat_b"
+    worktree = repo / ".runs" / _STAMP
+    _add_run_worktree(repo, branch, worktree)
+
+    for strategy in ("strat_a", "strat_b"):
+        mergeback_queue.enqueue(queue_path, lock_path, **_item(strategy=strategy, branch=branch))
+    # Only strat_a reaches terminal; strat_b stays pending on the SAME branch.
+    mergeback_queue.record_attempt(
+        queue_path, lock_path, key=f"strat_a@{branch}",
+        stdout_text=json.dumps({"ok": True, "status": "promoted_allocated"}))
+
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)
+    assert result["removed"] is False
+    assert result["skipped"] == "non_terminal_items"
+    assert result["non_terminal"] == [f"strat_b@{branch}"]
+    assert worktree.is_dir()  # untouched
+
+    # Once strat_b goes terminal too, the same call reclaims the worktree.
+    mergeback_queue.record_attempt(
+        queue_path, lock_path, key=f"strat_b@{branch}",
+        stdout_text=json.dumps({"ok": True, "status": "gate_failed"}), max_attempts=1)
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)
+    assert result["removed"] is True
+    assert not worktree.exists()
+
+
+def test_cleanup_branch_in_progress_item_counts_as_non_terminal(paths, tmp_path):
+    queue_path, lock_path = paths
+    repo = _init_cleanup_repo(tmp_path)
+    branch = f"research-run/{_STAMP}"
+    worktree = repo / ".runs" / _STAMP
+    _add_run_worktree(repo, branch, worktree)
+
+    mergeback_queue.enqueue(queue_path, lock_path, **_item(branch=branch))
+    mergeback_queue.select_and_reserve(queue_path, lock_path)  # -> in_progress
+
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)
+    assert result["skipped"] == "non_terminal_items"
+    assert worktree.is_dir()
+
+
+def test_cleanup_branch_missing_worktree_is_a_clean_noop(paths, tmp_path):
+    queue_path, lock_path = paths
+    repo = _init_cleanup_repo(tmp_path)
+    branch = f"research-run/{_STAMP}"
+    mergeback_queue.enqueue(queue_path, lock_path, **_item(branch=branch))
+    mergeback_queue.record_attempt(
+        queue_path, lock_path, key=f"strat_a@{branch}",
+        stdout_text=json.dumps({"ok": True, "status": "already_done"}))
+
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)
+    assert result == {
+        "branch": branch, "removed": False, "log_archived": False,
+        "skipped": "worktree_absent",
+    }
+
+
+def test_cleanup_branch_falls_back_to_the_legacy_location(paths, tmp_path):
+    # Transition support: a pre-#555 run's worktree lives at <repo_root>/../algua-research-<stamp>.
+    queue_path, lock_path = paths
+    repo = _init_cleanup_repo(tmp_path)
+    branch = f"research-run/{_STAMP}"
+    legacy = tmp_path / f"algua-research-{_STAMP}"
+    _add_run_worktree(repo, branch, legacy)
+
+    mergeback_queue.enqueue(queue_path, lock_path, **_item(branch=branch))
+    mergeback_queue.record_attempt(
+        queue_path, lock_path, key=f"strat_a@{branch}",
+        stdout_text=json.dumps({"ok": True, "status": "promoted_queued"}))
+
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)
+    assert result["removed"] is True
+    assert not legacy.exists()
+    assert result["log_archived"] is True  # archived into <repo_root>/.runs/logs/ regardless
+    assert (repo / ".runs" / "logs" / f"research-run_{_STAMP}.log").is_file()
+
+
+def test_cleanup_branch_rm_rf_fallback_for_an_unregistered_dir(paths, tmp_path):
+    # A dir at the expected path that git does NOT know as a worktree (already pruned from git's
+    # list, dir left behind): `git worktree remove` fails, the rm -rf fallback reclaims it.
+    queue_path, lock_path = paths
+    repo = _init_cleanup_repo(tmp_path)
+    branch = f"research-run/{_STAMP}"
+    orphan = repo / ".runs" / _STAMP
+    orphan.mkdir(parents=True)
+    (orphan / "research-loop.log").write_text("orphan transcript\n", encoding="utf-8")
+
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=branch, repo_root=repo)  # empty queue: nothing non-terminal
+    assert result["removed"] is True
+    assert not orphan.exists()
+    assert result["log_archived"] is True
+
+
+@pytest.mark.parametrize("garbage", [
+    "", "junk", "research-run/../../../etc", "research-run/20260101-000000--bad name!",
+    "research-run/not-a-stamp", "main",
+])
+def test_cleanup_branch_never_raises_on_garbage_branches(paths, tmp_path, garbage):
+    queue_path, lock_path = paths
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=garbage, repo_root=tmp_path)
+    assert result["removed"] is False
+    assert result["skipped"] == "not_a_research_run_branch"
+
+
+def test_cleanup_branch_never_raises_on_a_corrupt_queue_file(paths, tmp_path):
+    queue_path, lock_path = paths
+    queue_path.write_text("this is not json", encoding="utf-8")
+    result = mergeback_queue.cleanup_branch(
+        queue_path, lock_path, branch=f"research-run/{_STAMP}", repo_root=tmp_path)
+    assert result["removed"] is False
+    assert "error" in result
+
+
+def test_cli_cleanup_branch_emits_json(paths, tmp_path, capsys):
+    queue_path, lock_path = paths
+    rc = mergeback_queue.main([
+        "cleanup-branch", "--queue", str(queue_path), "--lock", str(lock_path),
+        "--branch", f"research-run/{_STAMP}", "--repo-root", str(tmp_path),
+    ])
+    assert rc == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["branch"] == f"research-run/{_STAMP}"
+    assert result["skipped"] == "worktree_absent"

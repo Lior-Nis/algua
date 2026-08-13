@@ -10,6 +10,7 @@ of it, while still being a fast, isolated, no-codex unit test.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import re
 import subprocess
@@ -27,10 +28,12 @@ def _heredocs() -> list[str]:
     return _HEREDOC_RE.findall(LAUNCHER.read_text(encoding="utf-8"))
 
 
-# Heredoc 0 = append_digest's trailer parser + enqueue; heredoc 1 = the anti-dup reader;
-# heredoc 2 = the sqlite consistent-backup snippet (untouched by this slice, not tested here).
+# Heredoc 0 = append_digest's trailer parser + branch rename + enqueue; heredoc 1 = the anti-dup
+# reader; heredoc 2 = the sqlite consistent-backup snippet (not tested here); heredoc 3 = the
+# end-of-run enqueued-candidate counter (runs-worktree lifecycle, #555).
 _APPEND_DIGEST_SRC = _heredocs()[0]
 _ANTI_DUP_SRC = _heredocs()[1]
+_COUNT_ENQUEUED_SRC = _heredocs()[3]
 
 
 def _fence(payload: dict) -> str:
@@ -45,7 +48,14 @@ def _run_append_digest(
     branch: str = "research-run/20260811-000000",
     stamp: str = "20260811-000000",
     outcome: str = "completed",
+    git_root: Path | str = "",
 ) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    """Run the append_digest heredoc with the launcher's exact positional-argv contract.
+
+    ``git_root`` is the trailing argv: where the run branch lives for the candidate-keyed rename.
+    Tests default it to "" (rename disabled) — NEVER the real repo, whose shared ref store could
+    hold a genuine research-run branch colliding with a test stamp; rename tests pass an isolated
+    throwaway repo instead."""
     digest_path = tmp_path / "digest.jsonl"
     report_path = tmp_path / "report.md"
     queue_path = tmp_path / "queue.json"
@@ -58,7 +68,7 @@ def _run_append_digest(
         str(digest_path), outcome, stamp, branch, "a thesis",
         "0", "0", "12", "1", "0",
         str(report_path), strategy_names, str(REPO_ROOT),
-        str(queue_path), str(queue_lock_path),
+        str(queue_path), str(queue_lock_path), str(git_root),
     ]
     proc = subprocess.run(
         [sys.executable, "-", *argv_tail],
@@ -591,3 +601,210 @@ def test_invalid_eval_context_fails_closed_at_enqueue(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert not queue_path.exists()
     assert "failed to enqueue merge-back candidate" in proc.stdout
+
+
+# --- candidate-keyed branch rename (runs-worktree lifecycle, #555) --------------------------------
+#
+# The append_digest heredoc renames research-run/<stamp> -> research-run/<stamp>--<candidates>
+# BEFORE the digest row lands and the candidates enqueue, so both always record the FINAL branch.
+# Exercised against an isolated throwaway git repo passed as the heredoc's git_root argv (see
+# _run_append_digest: the default "" disables the rename so no other test can touch a real branch).
+
+
+def _rename_repo(tmp_path: Path, *, with_branch: bool = True,
+                 stamp: str = "20260811-000000") -> Path:
+    repo = _init_repo(tmp_path)
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "seed", cwd=repo)
+    if with_branch:
+        _git("branch", f"research-run/{stamp}", cwd=repo)
+    return repo
+
+
+def _branches(repo: Path) -> set[str]:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        capture_output=True, text=True, check=True).stdout
+    return set(out.splitlines())
+
+
+def test_candidates_rename_branch_and_digest_and_queue_carry_final_name(tmp_path):
+    repo = _rename_repo(tmp_path)
+    trailer = {
+        "hypotheses": [
+            {"title": "A", "verdict": "candidate-preview-pass",
+             "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                            "start": "2024-01-01", "end": "2024-06-01", "eval_context": _ec()}},
+            {"title": "B", "verdict": "candidate-preview-pass",
+             "merge_back": {"strategy": "strat_b", "universe": "sp500",
+                            "start": "2024-01-01", "end": "2024-06-01", "eval_context": _ec()}},
+        ],
+        "preview_gate": {"passed": True, "failed_checks": []},
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a,strat_b", git_root=repo)
+    assert proc.returncode == 0, proc.stderr
+
+    final = "research-run/20260811-000000--strat_a+strat_b"
+    assert f"run branch renamed: research-run/20260811-000000 -> {final}" in proc.stdout
+    # The git branch itself was renamed (old name gone).
+    assert final in _branches(repo)
+    assert "research-run/20260811-000000" not in _branches(repo)
+    # The digest row records the FINAL branch, report ref included.
+    row = _last_digest_row(digest_path)
+    assert row["branch"] == final
+    assert row["report"] == f"{final}:kb/research-runs/20260811-000000.md"
+    # Every enqueue used the FINAL branch too.
+    items = _queue_items(queue_path)
+    assert set(items) == {f"strat_a@{final}", f"strat_b@{final}"}
+    assert all(item["branch"] == final for item in items.values())
+
+
+def test_no_candidates_means_no_rename(tmp_path):
+    repo = _rename_repo(tmp_path)
+    trailer = {
+        "hypotheses": [{"title": "Nope", "verdict": "discarded", "merge_back": None}],
+        "preview_gate": {"passed": False, "failed_checks": ["holdout_sharpe_floor"]},
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a", git_root=repo)
+    assert proc.returncode == 0, proc.stderr
+    assert "run branch renamed" not in proc.stdout
+    assert "research-run/20260811-000000" in _branches(repo)  # untouched, stamp-only
+    assert _last_digest_row(digest_path)["branch"] == "research-run/20260811-000000"
+    assert not queue_path.exists()
+
+
+def test_rename_failure_keeps_old_branch_everywhere(tmp_path):
+    # The branch does NOT exist in git_root -> `git branch -m` fails -> the OLD name is kept and
+    # is what the digest row + enqueue record (they always describe the branch that exists).
+    repo = _rename_repo(tmp_path, with_branch=False)
+    trailer = {
+        "hypotheses": [{"title": "A", "verdict": "candidate-preview-pass",
+                        "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                                       "start": "2024-01-01", "end": "2024-06-01",
+                                       "eval_context": _ec()}}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a", git_root=repo)
+    assert proc.returncode == 0, proc.stderr
+    assert "WARNING: branch rename" in proc.stdout
+    row = _last_digest_row(digest_path)
+    assert row["branch"] == "research-run/20260811-000000"
+    items = _queue_items(queue_path)
+    assert set(items) == {"strat_a@research-run/20260811-000000"}
+
+
+def test_rename_respects_the_name_cap(tmp_path):
+    # 4 candidates -> only the first 3 names ride the branch (compute_run_branch_name's cap).
+    repo = _rename_repo(tmp_path)
+    names = ["strat_a", "strat_b", "strat_c", "strat_d"]
+    trailer = {
+        "hypotheses": [
+            {"title": f"H {n}", "verdict": "candidate-preview-pass",
+             "merge_back": {"strategy": n, "universe": "sp500",
+                            "start": "2024-01-01", "end": "2024-06-01", "eval_context": _ec()}}
+            for n in names
+        ],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names=",".join(names), git_root=repo)
+    assert proc.returncode == 0, proc.stderr
+    final = "research-run/20260811-000000--strat_a+strat_b+strat_c"
+    assert final in _branches(repo)
+    # ALL FOUR candidates still enqueue — the cap trims the branch NAME, never the queue.
+    items = _queue_items(queue_path)
+    assert set(items) == {f"{n}@{final}" for n in names}
+
+
+# --- end-of-run enqueued-candidate counter (heredoc 3): the zero-candidate removal signal ---------
+
+
+def _run_count_enqueued(queue_path: Path, lock_path: Path, branch: str) -> str:
+    proc = subprocess.run(
+        [sys.executable, "-", str(queue_path), str(lock_path), branch,
+         str(REPO_ROOT / ".codex" / "scripts" / "mergeback_queue.py")],
+        input=_COUNT_ENQUEUED_SRC, capture_output=True, text=True, timeout=30, check=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_count_enqueued_counts_only_items_on_the_final_branch(tmp_path):
+    trailer = {
+        "hypotheses": [{"title": "A", "verdict": "candidate-preview-pass",
+                        "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                                       "start": "2024-01-01", "end": "2024-06-01",
+                                       "eval_context": _ec()}}],
+        "preview_gate": None,
+    }
+    proc, _digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    lock_path = tmp_path / "queue.lock"
+    assert _run_count_enqueued(queue_path, lock_path, "research-run/20260811-000000") == "1"
+    assert _run_count_enqueued(queue_path, lock_path, "research-run/29990101-000000") == "0"
+
+
+def test_count_enqueued_missing_queue_file_counts_zero(tmp_path):
+    assert _run_count_enqueued(
+        tmp_path / "absent.json", tmp_path / "absent.lock", "research-run/20260811-000000") == "0"
+
+
+def test_rename_updates_a_checked_out_worktree_head(tmp_path):
+    # The PRODUCTION shape: the run branch is CHECKED OUT in the run worktree when the rename
+    # fires from the main repo — git renames the ref AND updates the per-worktree HEAD, which is
+    # exactly what the launcher's FINAL_BRANCH re-read (`git -C $WORKTREE branch --show-current`)
+    # depends on.
+    repo = _rename_repo(tmp_path, with_branch=False)
+    worktree = repo / ".runs" / "20260811-000000"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-b", "research-run/20260811-000000",
+         str(worktree)],
+        check=True, capture_output=True)
+
+    trailer = {
+        "hypotheses": [{"title": "A", "verdict": "candidate-preview-pass",
+                        "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                                       "start": "2024-01-01", "end": "2024-06-01",
+                                       "eval_context": _ec()}}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a", git_root=repo)
+    assert proc.returncode == 0, proc.stderr
+
+    final = "research-run/20260811-000000--strat_a"
+    assert f"run branch renamed: research-run/20260811-000000 -> {final}" in proc.stdout
+    head = subprocess.run(
+        ["git", "-C", str(worktree), "branch", "--show-current"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    assert head == final  # the worktree's HEAD followed the rename
+    assert _last_digest_row(digest_path)["branch"] == final
+    assert set(_queue_items(queue_path)) == {f"strat_a@{final}"}
+
+
+def test_count_enqueued_prints_minus_one_when_the_queue_lock_is_held(tmp_path):
+    # FAIL CLOSED: a QueueLockTimeout (a concurrent drain holding the queue lock) must NOT read as
+    # "zero candidates" — that would remove the worktree of a run WITH pending items. The heredoc
+    # prints -1 and the launcher's shell keeps the worktree for anything other than a literal "0".
+    trailer = {
+        "hypotheses": [{"title": "A", "verdict": "candidate-preview-pass",
+                        "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                                       "start": "2024-01-01", "end": "2024-06-01",
+                                       "eval_context": _ec()}}],
+        "preview_gate": None,
+    }
+    proc, _digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    lock_path = tmp_path / "queue.lock"
+
+    with open(lock_path, "a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)  # another process "owns" the queue for the duration
+        out = _run_count_enqueued(queue_path, lock_path, "research-run/20260811-000000")
+    assert out == "-1"
+    # And once the lock is free again, the same call reports the real (nonzero) count.
+    assert _run_count_enqueued(queue_path, lock_path, "research-run/20260811-000000") == "1"
