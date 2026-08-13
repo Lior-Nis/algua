@@ -26,6 +26,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -62,11 +63,30 @@ _STDOUT_HEAD_CAP = 500
 _DRIVER_TIMEOUT_FACTOR = 2.0
 
 
+def _resolve_driver_argv(command: list[str]) -> list[str]:
+    """Resolve a canonical ``algua ...`` driver argv to THIS venv's own ``algua`` binary.
+
+    The job templates are validated against the canonical literal ``["algua", ...]`` (the
+    command_mismatch contract), but under a systemd unit the bare name is NOT on PATH — the venv
+    lives at ``<repo>/.venv/bin``, which units never add. The operator itself always runs from
+    that venv, so the sibling of ``sys.executable`` is the right binary (same class of bug as the
+    drainer's ALGUA_BIN fix, #548 — this is the layer beneath it, masked for months by the
+    command_mismatch fail firing first). Resolution happens at SPAWN time only, AFTER template
+    validation, so the canonical argv contract is untouched; a non-``algua`` argv or a missing
+    sibling binary (a dev shell running from PATH) passes through unchanged."""
+    if command and command[0] == "algua":
+        sibling = Path(sys.executable).with_name("algua")
+        if sibling.is_file():
+            return [str(sibling), *command[1:]]
+    return command
+
+
 def _run_driver(command: list[str], timeout: float) -> subprocess.CompletedProcess:
     """Subprocess seam (monkeypatched in tests): run the driver, capturing stdout/stderr, under a
     hard ``timeout`` (seconds). A driver that overruns is killed and ``subprocess.TimeoutExpired``
     propagates to the caller."""
-    return subprocess.run(command, capture_output=True, text=True, timeout=timeout)  # noqa: S603
+    return subprocess.run(  # noqa: S603
+        _resolve_driver_argv(command), capture_output=True, text=True, timeout=timeout)
 
 
 def _resolve_git_dir() -> Path:

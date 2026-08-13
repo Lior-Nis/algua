@@ -539,3 +539,30 @@ def test_research_systemd_units_shipped_and_sandboxed():
     assert "ALGUA_ALPACA_API_SECRET" in service
     assert "OnCalendar=" in timer                        # scheduled cadence
     assert "WantedBy=timers.target" in timer
+
+
+def test_resolve_driver_argv_uses_venv_sibling(monkeypatch, tmp_path):
+    # Under a systemd unit the canonical "algua" argv head is NOT on PATH; the spawn must resolve
+    # it to the sibling of the running interpreter (the venv's own bin/algua) — #548's bug class,
+    # one layer deeper (masked for months by command_mismatch firing first).
+    bin_dir = tmp_path / "venv-bin"
+    bin_dir.mkdir()
+    (bin_dir / "algua").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(operator_cmd.sys, "executable", str(bin_dir / "python3"))
+    resolved = operator_cmd._resolve_driver_argv(["algua", "paper", "run-all"])
+    assert resolved == [str(bin_dir / "algua"), "paper", "run-all"]
+
+
+def test_resolve_driver_argv_passthrough_without_sibling(monkeypatch, tmp_path):
+    # A dev shell whose interpreter has no algua sibling keeps the bare argv (PATH resolution).
+    monkeypatch.setattr(operator_cmd.sys, "executable", str(tmp_path / "nowhere" / "python3"))
+    assert operator_cmd._resolve_driver_argv(["algua", "x"]) == ["algua", "x"]
+
+
+def test_resolve_driver_argv_ignores_non_algua_head(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "venv-bin"
+    bin_dir.mkdir()
+    (bin_dir / "algua").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(operator_cmd.sys, "executable", str(bin_dir / "python3"))
+    assert operator_cmd._resolve_driver_argv(["/abs/algua", "x"]) == ["/abs/algua", "x"]
+    assert operator_cmd._resolve_driver_argv([]) == []
