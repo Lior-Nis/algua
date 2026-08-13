@@ -755,10 +755,14 @@ def cleanup_branch(queue_path: Path, lock_path: Path, *, branch: str, repo_root:
     garbage branch can never resolve to a path outside the two expected locations.
 
     NEVER raises (the drainer must not fail on cleanup): every failure lands in the returned dict
-    (and loudly on stderr) instead. The removal itself runs OUTSIDE the queue lock — a branch whose
-    items are all terminal can never gain new items (enqueue keys are per run-stamp and the run has
-    long ended), so there is no check-to-remove race worth holding a lock over a multi-second
-    ``rm -rf`` for."""
+    (and loudly on stderr) instead. The removal itself runs OUTSIDE the queue lock, so a concurrent
+    re-enqueue on the same branch CAN race the check — a fully-terminal branch can gain a fresh
+    ``pending`` item again via the operational resurrection recipe (drop the terminal item, enqueue
+    it afresh). That race is benign for a different reason: no downstream consumer ever needs the
+    research worktree. ``paper merge-back`` consumes the BRANCH (refs survive worktree removal) and
+    the hermetic quality gate (#552) builds its own throwaway worktree, so a racy removal loses
+    only human browsability — never a merge-back input. Not worth holding the queue lock across a
+    multi-second ``rm -rf`` for."""
     result: dict = {"branch": branch, "removed": False, "log_archived": False}
     try:
         m = _RUN_BRANCH_RE.match(branch or "")

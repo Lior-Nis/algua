@@ -10,6 +10,7 @@ of it, while still being a fast, isolated, no-codex unit test.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import re
 import subprocess
@@ -750,3 +751,60 @@ def test_count_enqueued_counts_only_items_on_the_final_branch(tmp_path):
 def test_count_enqueued_missing_queue_file_counts_zero(tmp_path):
     assert _run_count_enqueued(
         tmp_path / "absent.json", tmp_path / "absent.lock", "research-run/20260811-000000") == "0"
+
+
+def test_rename_updates_a_checked_out_worktree_head(tmp_path):
+    # The PRODUCTION shape: the run branch is CHECKED OUT in the run worktree when the rename
+    # fires from the main repo — git renames the ref AND updates the per-worktree HEAD, which is
+    # exactly what the launcher's FINAL_BRANCH re-read (`git -C $WORKTREE branch --show-current`)
+    # depends on.
+    repo = _rename_repo(tmp_path, with_branch=False)
+    worktree = repo / ".runs" / "20260811-000000"
+    subprocess.run(
+        ["git", "-C", str(repo), "worktree", "add", "-b", "research-run/20260811-000000",
+         str(worktree)],
+        check=True, capture_output=True)
+
+    trailer = {
+        "hypotheses": [{"title": "A", "verdict": "candidate-preview-pass",
+                        "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                                       "start": "2024-01-01", "end": "2024-06-01",
+                                       "eval_context": _ec()}}],
+        "preview_gate": None,
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a", git_root=repo)
+    assert proc.returncode == 0, proc.stderr
+
+    final = "research-run/20260811-000000--strat_a"
+    assert f"run branch renamed: research-run/20260811-000000 -> {final}" in proc.stdout
+    head = subprocess.run(
+        ["git", "-C", str(worktree), "branch", "--show-current"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    assert head == final  # the worktree's HEAD followed the rename
+    assert _last_digest_row(digest_path)["branch"] == final
+    assert set(_queue_items(queue_path)) == {f"strat_a@{final}"}
+
+
+def test_count_enqueued_prints_minus_one_when_the_queue_lock_is_held(tmp_path):
+    # FAIL CLOSED: a QueueLockTimeout (a concurrent drain holding the queue lock) must NOT read as
+    # "zero candidates" — that would remove the worktree of a run WITH pending items. The heredoc
+    # prints -1 and the launcher's shell keeps the worktree for anything other than a literal "0".
+    trailer = {
+        "hypotheses": [{"title": "A", "verdict": "candidate-preview-pass",
+                        "merge_back": {"strategy": "strat_a", "universe": "sp500",
+                                       "start": "2024-01-01", "end": "2024-06-01",
+                                       "eval_context": _ec()}}],
+        "preview_gate": None,
+    }
+    proc, _digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    lock_path = tmp_path / "queue.lock"
+
+    with open(lock_path, "a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)  # another process "owns" the queue for the duration
+        out = _run_count_enqueued(queue_path, lock_path, "research-run/20260811-000000")
+    assert out == "-1"
+    # And once the lock is free again, the same call reports the real (nonzero) count.
+    assert _run_count_enqueued(queue_path, lock_path, "research-run/20260811-000000") == "1"

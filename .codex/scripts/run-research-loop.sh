@@ -745,17 +745,20 @@ FINAL_BRANCH="$(git -C "${WORKTREE}" branch --show-current 2>/dev/null || true)"
 # merge-back candidates (crashed/timed-out run, rate-limited, trailer-invalid, or all hypotheses
 # discarded) the worktree is pure disposable weight NOW — the authored code (if any) persists on
 # the run branch, the report is in the digest. Archive the codex log, then remove our own worktree.
-# The authoritative signal is the QUEUE (count items on the final branch), never a parallel flag —
-# so a rename failure or an unreadable queue can at worst remove a worktree whose branch still
-# holds everything merge-back needs. A candidate run's worktree is kept; the drainer's
-# cleanup-branch removes it once every one of its queue items goes terminal.
+# The authoritative signal is the QUEUE (count items on the final branch), never a parallel flag.
+# FAIL CLOSED to "keep": the heredoc prints the real count on success and -1 on ANY failure
+# (unreadable queue, QueueLockTimeout under a concurrent drain, module-load error) — removal
+# happens ONLY on a clean literal "0", so a transiently-locked queue can never reclaim the
+# worktree of a run WITH pending candidates; anything undeterminable is left to the retention
+# pruner backstop instead. A candidate run's worktree is kept; the drainer's cleanup-branch
+# removes it once every one of its queue items goes terminal.
 N_ENQUEUED="$(python3 - "${AUTH_QUEUE}" "${AUTH_QUEUE_LOCK}" "${FINAL_BRANCH}" "${QUEUE_MOD}" <<'PY'
 import importlib.util
 import sys
 from pathlib import Path
 
 queue_path, lock_path, branch, mod_path = sys.argv[1:5]
-count = 0
+count = None
 try:
     spec = importlib.util.spec_from_file_location("mergeback_queue", mod_path)
     mergeback_queue = importlib.util.module_from_spec(spec)
@@ -765,10 +768,12 @@ try:
                 if isinstance(item, dict) and item.get("branch") == branch)
 except Exception as exc:
     print(f"WARNING: could not count enqueued candidates: {exc}", file=sys.stderr)
-print(count)
+# -1 = "could not determine" — the shell must KEEP the worktree (fail closed), never treat an
+# unreadable/locked queue as zero candidates.
+print(count if count is not None else -1)
 PY
-)" || N_ENQUEUED=0
-if [[ "${N_ENQUEUED:-0}" -eq 0 ]]; then
+)" || N_ENQUEUED=""
+if [[ "${N_ENQUEUED:-}" == "0" ]]; then
   echo "no merge-back candidates enqueued for ${FINAL_BRANCH} — reclaiming this run's worktree."
   archive_run_log "${WORKTREE}" "${FINAL_BRANCH}"
   case "${PWD}/" in
@@ -778,9 +783,12 @@ if [[ "${N_ENQUEUED:-0}" -eq 0 ]]; then
       git -C "${REPO_ROOT}" worktree remove --force "${WORKTREE}" 2>/dev/null \
         || rm -rf "${WORKTREE}" ;;
   esac
-else
+elif [[ "${N_ENQUEUED:-}" =~ ^[1-9][0-9]*$ ]]; then
   echo "kept worktree ${WORKTREE} (${N_ENQUEUED} enqueued candidate(s) on ${FINAL_BRANCH});"
   echo "the merge-back drainer reclaims it once every queue item on the branch is terminal."
+else
+  echo "could not determine the enqueued-candidate count (got '${N_ENQUEUED:-}');" \
+       "keeping ${WORKTREE} for the retention pruner (fail closed)." >&2
 fi
 
 echo
