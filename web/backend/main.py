@@ -50,6 +50,11 @@ IDEA_STATS_WINDOW_DAYS = 90
 # A real PushSubscription JSON is well under 1 KiB; anything over 16 KiB is abuse.
 MAX_SUBSCRIBE_BODY_BYTES = 16 * 1024
 
+# `registry gates` returns the newest N rows PER LEDGER (its own default is 20). Passed
+# explicitly and echoed back as ``gates_limit`` so the UI can say "newest N" instead of
+# presenting a truncated ledger as the complete history.
+GATE_HISTORY_LIMIT = 50
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -126,7 +131,7 @@ def create_app() -> FastAPI:
         registry, paper, gates = await asyncio.gather(
             run_cli("registry", "show", name, ttl_s=30.0),
             run_cli("paper", "show", name, ttl_s=30.0),
-            run_cli("registry", "gates", name, ttl_s=30.0),
+            run_cli("registry", "gates", name, f"--limit={GATE_HISTORY_LIMIT}", ttl_s=30.0),
             return_exceptions=True,
         )
         if isinstance(registry, BaseException):
@@ -156,6 +161,7 @@ def create_app() -> FastAPI:
             "registry": registry["data"],
             "paper": parts["paper"],
             "gates": parts["gates"],
+            "gates_limit": GATE_HISTORY_LIMIT,
             "fetched_at": min(fetched_ats),
             "stale": stale,
         }

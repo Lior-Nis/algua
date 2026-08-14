@@ -112,7 +112,7 @@ export default function StrategyDetail() {
 
       {paper !== null && <PaperTiles paper={paper} />}
 
-      {gates !== null && <GatesSection gates={gates} />}
+      {gates !== null && <GatesSection gates={gates} limit={d.gates_limit} />}
 
       {registry && registry.transitions.length > 0 && (
         <TransitionsTimeline transitions={registry.transitions} />
@@ -147,7 +147,13 @@ function PaperTiles({ paper }: { paper: PaperRollup }) {
   )
 }
 
-function PassMark({ passed }: { passed: number | boolean | null | undefined }) {
+function PassMark({
+  passed,
+  advisory = false,
+}: {
+  passed: number | boolean | null | undefined
+  advisory?: boolean
+}) {
   // The gate projection strips malformed fields — a missing verdict is UNKNOWN data,
   // not a real failed check.
   if (passed !== true && passed !== 1 && passed !== false && passed !== 0) {
@@ -158,8 +164,17 @@ function PassMark({ passed }: { passed: number | boolean | null | undefined }) {
     )
   }
   const ok = passed === true || passed === 1
+  // An ADVISORY check has no veto power, so a failed one is a warning inside a passing
+  // gate — gold, never the red of a breached binding floor.
+  const color = advisory
+    ? ok
+      ? 'var(--text-dim)'
+      : 'var(--gold)'
+    : ok
+      ? 'var(--green)'
+      : 'var(--red)'
   return (
-    <span className="pass-mark" style={{ color: ok ? 'var(--green)' : 'var(--red)' }}>
+    <span className="pass-mark" style={{ color }}>
       {ok ? 'pass' : 'fail'}
     </span>
   )
@@ -169,9 +184,19 @@ function asNum(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
-function GatesSection({ gates }: { gates: NonNullable<StrategyDetailResponse['gates']> }) {
+function GatesSection({
+  gates,
+  limit,
+}: {
+  gates: NonNullable<StrategyDetailResponse['gates']>
+  limit: number | undefined
+}) {
   const [latest, ...older] = gates.gate_evaluations
   const forwards = gates.forward_gate_evaluations
+  // `registry gates` returns the newest N per ledger; a saturated ledger has older rows
+  // that are simply not here, so a bare count would imply a complete history.
+  const truncated = (rows: GateRow[]) =>
+    limit !== undefined && rows.length >= limit ? ` — newest ${limit}` : ''
   // The two ledgers gate DIFFERENT lifecycle edges and must be named as such: an
   // unqualified "gates: pass" on a forward_tested/live strategy reads as the forward
   // certificate when it is actually the (possibly much older) research gate.
@@ -185,7 +210,10 @@ function GatesSection({ gates }: { gates: NonNullable<StrategyDetailResponse['ga
       )}
       {older.length > 0 && (
         <details className="sub-details">
-          <summary className="micro-label">research gate history ({older.length})</summary>
+          <summary className="micro-label">
+            research gate history ({older.length}
+            {truncated(gates.gate_evaluations)})
+          </summary>
           <div className="row-list">
             {older.map((row) => (
               <CompactGateRow key={row.id} row={row} />
@@ -196,7 +224,8 @@ function GatesSection({ gates }: { gates: NonNullable<StrategyDetailResponse['ga
       {forwards.length > 0 && (
         <details className="sub-details">
           <summary className="micro-label">
-            forward gate — paper → forward_tested ({forwards.length})
+            forward gate — paper → forward_tested ({forwards.length}
+            {truncated(forwards)})
           </summary>
           <div className="row-list">
             {forwards.map((row) => (
@@ -230,6 +259,7 @@ function LatestGate({ row }: { row: GateRow }) {
         <PassMark passed={row.passed} />
         <span className="dim-note num">{utcDateTime(row.created_at)}</span>
         <span className="stage-chip">{row.actor}</span>
+        <TokenChip row={row} />
       </div>
       {decision === null ? (
         <div className="dim-note">decision unparseable: {row.decision_error ?? 'unknown'}</div>
@@ -250,17 +280,30 @@ function LatestGate({ row }: { row: GateRow }) {
                 <tbody>
                   {checks.map((c, i) => (
                     <tr key={`${c.name ?? 'check'}-${i}`}>
-                      <td>{c.name ?? '—'}</td>
+                      <td>
+                        {c.name ?? '—'}
+                        {c.advisory === true && (
+                          <span className="dim-note"> · advisory</span>
+                        )}
+                      </td>
                       <td className="dim-note">{c.op ?? '—'}</td>
                       <td className="num">{num(c.threshold, 4)}</td>
                       <td className="num">{num(c.value, 4)}</td>
                       <td>
-                        <PassMark passed={c.passed} />
+                        <PassMark passed={c.passed} advisory={c.advisory === true} />
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+          {/* Without this, a passing gate that carries failed advisory checks — the NORMAL
+              shape under the factory soft gate — reads as "promoted despite failing". */}
+          {checks.some((c) => c.advisory === true) && (
+            <div className="dim-note">
+              advisory checks are recorded but never veto — only the binding checks decide
+              the verdict
             </div>
           )}
           {scalars.length > 0 && <div className="dim-note num">{scalars.join(' · ')}</div>}
@@ -270,12 +313,27 @@ function LatestGate({ row }: { row: GateRow }) {
   )
 }
 
+/** A PASSING gate mints a single-use token; the transition SPENDS it. Whether that token
+ * is still unspent is the difference between "cleared the gate and moved" and "cleared the
+ * gate, transition never happened" — invisible until now. Only meaningful on a pass. */
+function TokenChip({ row }: { row: GateRow }) {
+  const passed = row.passed === true || row.passed === 1
+  if (!passed || row.consumed === null || row.consumed === undefined) return null
+  const spent = row.consumed === true || row.consumed === 1
+  return (
+    <span className="stage-chip" style={{ color: spent ? 'var(--text-dim)' : 'var(--cyan)' }}>
+      {spent ? 'token spent' : 'token unspent'}
+    </span>
+  )
+}
+
 function CompactGateRow({ row }: { row: GateRow }) {
   return (
     <div className="compact-gate-row">
       <PassMark passed={row.passed} />
       <span className="dim-note num">{utcDateTime(row.created_at)}</span>
       <span className="stage-chip">{row.actor}</span>
+      <TokenChip row={row} />
     </div>
   )
 }

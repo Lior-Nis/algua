@@ -59,6 +59,8 @@ export default function Ideas() {
 
   const ideas = ideaList(data)
   const counts = statusCounts(data.stats)
+  const listCounts: Record<string, number> = {}
+  for (const idea of ideas) listCounts[idea.status] = (listCounts[idea.status] ?? 0) + 1
   // "total" is an aggregate in windowed_idea_counts(), not a status — never a filter chip.
   const statusesPresent = new Set(
     [...Object.keys(counts), ...ideas.map((i) => i.status)].filter((s) => s !== 'total'),
@@ -67,6 +69,11 @@ export default function Ideas() {
     ...STATUS_ORDER.filter((s) => statusesPresent.has(s)),
     ...[...statusesPresent].filter((s) => !STATUS_ORDER.includes(s)),
   ]
+  // The windowed counts stay visible — they are the funnel-breadth signal — but on
+  // their own line, so they can never be read as part of the all-time histogram.
+  const windowed = statuses
+    .filter((s) => s in counts && counts[s] > 0)
+    .map((s) => `${s} ${counts[s]}`)
 
   const visible = statusFilter === null ? ideas : ideas.filter((i) => i.status === statusFilter)
 
@@ -74,18 +81,26 @@ export default function Ideas() {
     <>
       <StaleNotice env={data} />
       <section>
-        {/* The stats window MUST be labeled (reviewed) — counts are windowed, the list is not. */}
         <div className="micro-label" style={{ marginBottom: 6 }}>
-          idea pool — stats last {data.stats_window_days}d
+          idea pool
         </div>
+        {/* The tiles are ALL-TIME, counted off the same list rendered below and filtered
+            by the same chips. `idea stats` is a DIFFERENT denominator (trailing window),
+            so mixing it into this row made a histogram that could not add up: "in pool"
+            counted every idea ever while the status tiles counted only the last 90d. */}
         <div className="tile-row">
-          <MetricTile label="in pool" value={ideas.length} />
+          <MetricTile label="all ideas" value={ideas.length} />
           {statuses
-            .filter((s) => s in counts)
+            .filter((s) => s in listCounts)
             .map((s) => (
-              <MetricTile key={s} label={s} value={counts[s]} />
+              <MetricTile key={s} label={s} value={listCounts[s]} />
             ))}
         </div>
+        {windowed.length > 0 && (
+          <div className="dim-note num" style={{ marginTop: 6 }}>
+            last {data.stats_window_days}d: {windowed.join(' · ')}
+          </div>
+        )}
       </section>
 
       {statuses.length > 0 && (
