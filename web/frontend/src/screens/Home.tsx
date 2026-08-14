@@ -133,7 +133,7 @@ function AlertsPanel() {
       {state === 'off' && (
         <button
           type="button"
-          className="retry-btn"
+          className="action-btn"
           disabled={busy}
           onClick={() => run(enableAlerts)}
         >
@@ -145,7 +145,7 @@ function AlertsPanel() {
           alerts on{' '}
           <button
             type="button"
-            className="retry-btn"
+            className="action-btn"
             disabled={busy}
             onClick={() => run(disableAlerts)}
           >
