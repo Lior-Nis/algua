@@ -17,6 +17,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
+from tests._gate_row_helpers import seed_passing_gate
 from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
 runner = CliRunner()
@@ -76,6 +77,9 @@ def _to_paper(name="cross_sectional_momentum"):
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
                                "--actor", "agent", "--reason", "paper"]).exit_code == 0
+    # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
+    # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
+    seed_passing_gate(name)
 
 
 def test_paper_run_executes_and_reconciles():

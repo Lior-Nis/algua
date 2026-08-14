@@ -36,16 +36,18 @@ def _run_all(tmp_path, tasks):
 
 
 def _seed_bars(tmp_path):
-    """Seed ~330 calendar-day bars over AAPL/MSFT/NVDA so a 0.2 holdout clears the 63-obs floor.
+    """Seed ~330 calendar-day bars over the full 5-symbol CONFIG universe so a 0.2 holdout
+    clears the 63-obs floor (and a PIT universe can cover CONFIG for the #559 subset guard).
     Returns (bars_snapshot_id, end_iso)."""
     store = DataStore(tmp_path)
     idx = pd.date_range("2025-01-01", periods=330, freq="D", tz="UTC")
     rows = [[t, s, 10.0, 10.0, 10.0, 10.0, 10.0, 1000.0]
-            for s in ["AAPL", "MSFT", "NVDA"] for t in idx]
+            for s in ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"] for t in idx]
     bars = pd.DataFrame(rows, columns=["ts", "symbol", "open", "high", "low", "close",
                                        "adj_close", "volume"])
     end_iso = idx[-1].date().isoformat()
-    rec = store.ingest_bars(provider="t", symbols=["AAPL", "MSFT", "NVDA"], start="2025-01-01",
+    rec = store.ingest_bars(provider="t", symbols=["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"],
+                            start="2025-01-01",
                             end=end_iso, as_of="2026-01-01T00:00:00Z", source="t", frame=bars)
     return rec.snapshot_id, end_iso
 
@@ -102,7 +104,9 @@ def test_holdout_single_use_preserved_across_warm_batch(tmp_path):
     # A batch worker is AGENT-only — a human actor cannot sign a challenge inside a batch (#329), so
     # this exercises the holdout guard on the agent-legal path: MEASURED breadth (a sweep task) +
     # a PIT universe, no human-only relaxation.
-    runner.invoke(app, ["data", "ingest-universe", "csm_uni", "--symbols", "AAPL,MSFT,NVDA",
+    # #559: the gated universe must COVER the strategy CONFIG universe (agent subset guard).
+    runner.invoke(app, ["data", "ingest-universe", "csm_uni",
+                        "--symbols", "AAPL,MSFT,NVDA,AMZN,GOOGL",
                         "--effective-date", "2024-12-31"])
     assert _run_all(tmp_path, [
         {"action": "backtest", "name": "cross_sectional_momentum", "snapshot": bid,

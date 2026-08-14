@@ -471,7 +471,8 @@ def test_concurrent_research_promote_single_burn_e2e(tmp_path):
 
     from algua.data.store import DataStore as _DataStore
     store = _DataStore(tmp_path)
-    _syms = ["AAPL", "MSFT", "NVDA"]
+    # #559: the gated universe must COVER the strategy CONFIG universe (agent subset guard).
+    _syms = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"]
     _idx = _pd.date_range("2022-01-01", "2023-12-31", freq="B", tz="UTC")
     _rng = _np.random.default_rng(7)
     _rows = []

@@ -4,6 +4,7 @@ import importlib
 import json
 import sqlite3
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -105,6 +106,7 @@ from algua.registry.human_actor import canonical_run_context
 from algua.registry.intake import Candidate, order_candidates, slice_capital
 from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
     FORWARD_SHARPE_CONFIDENCE,
@@ -797,6 +799,24 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             raise ValueError(f"{name} has no paper allocation")
         allocation = float(alloc["capital"])
         identity = compute_artifact_hashes(name)
+
+        # #559: bind this tick to the GATED universe, never the module's CONFIG template. Resolved
+        # once per tick from the newest passing gate row; rebinding the strategy's config universe
+        # makes EVERY downstream consumer (run_tick's bar fetch + decision view, the sizing
+        # snapshot below) see the gate universe. A missing gate row raises LookupError -> a
+        # per-tenant StrategySetupError (an unpromoted strategy has no business ticking); a legacy
+        # pre-v39 row (universe_name NULL) falls back to CONFIG with a loud warning.
+        resolved_universe, universe_source = resolve_operational_universe(
+            conn, get_settings().data_dir, name, strategy.universe)
+        if universe_source == SOURCE_CONFIG_LEGACY:
+            log.warning("universe_binding_config_legacy", extra={"fields": {
+                "strategy": name, "lane": "paper",
+                "note": "newest passing gate row has no universe_name (pre-#559); ticking on "
+                        "CONFIG.universe — re-run research promote to bind the gate universe"}})
+        if resolved_universe != strategy.universe:
+            strategy = replace(
+                strategy,
+                config=strategy.config.model_copy(update={"universe": resolved_universe}))
 
         # coids this tick's before_submit FRESHLY inserted an intent row for (record returned True —
         # no prior run had this coid). Only such rows are safe to retract on a noop/skipped: a

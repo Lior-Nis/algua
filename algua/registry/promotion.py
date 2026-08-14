@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -334,6 +335,8 @@ def promotion_preflight(
     start: datetime,
     end: datetime,
     new_family_slug: str | None = None,   # human-only, for NOVEL verdict
+    universe_name: str | None = None,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
 ) -> BreadthContext:
     """Pre-peek phase — runs BEFORE walk_forward, so every hard refusal happens before the holdout
     is touched and before any gate row is minted: (1) relaxations-need-human; (2) stage legality
@@ -428,6 +431,26 @@ def promotion_preflight(
             f"no recorded search breadth for {name!r}; run `algua backtest sweep {name} ...` "
             f"(records breadth). Declaring via --n-combos requires --actor human."
         )
+    # Gated-universe subset guard (#559): an AGENT promote on a PIT universe fails closed — still
+    # BEFORE the holdout is touched and before any gate row is minted — when the loaded strategy's
+    # CONFIG.universe contains a symbol that was NEVER a member of the gated universe's membership
+    # timeline (the union over the same universe_by_date map the PIT walk-forward consumes). The
+    # module's universe is agent-authored and can silently diverge from the universe the evidence
+    # was produced on (e.g. a 5-symbol template incl. NVDA gated on liquid10); at deployment the
+    # tick binds to the GATE universe, so a config symbol outside it was never validated at all.
+    # Humans are exempt (exploration), mirroring the other agent-only integrity walls. Placed
+    # AFTER the structural refusals above so the established refusal precedence (stage, costs,
+    # parity, lookback, classification, breadth) is unchanged.
+    if actor is Actor.AGENT and _loaded is not None and universe_by_date:
+        gated_members: set[str] = set().union(*universe_by_date.values())
+        offending = sorted(set(_loaded.config.universe) - gated_members)
+        if offending:
+            raise ValueError(
+                f"strategy {name!r} CONFIG.universe contains symbols that were never members of "
+                f"the gated universe {universe_name!r}: {offending}. The paper deployment is "
+                f"bound to the gated universe (#559) — fix CONFIG.universe or gate on a universe "
+                f"that covers it."
+            )
     ctx = BreadthContext(effective_funnel_breadth(own, windowed_total), own, windowed_total,
                          provenance)
     ctx.family_id = classify.family_id
@@ -638,6 +661,10 @@ def run_gate(
         "dependency_hash": identity.dependency_hash,
         "data_source": data_source,
         "snapshot_id": snapshot_id,
+        # #559: the gated-universe identity, stamped on every row (pass AND fail) so a deployment
+        # can be bound to the universe its gate evidence was produced on. NULL for non-universe
+        # runs (the tick binding treats NULL as config_legacy).
+        "universe_name": universe_name,
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "holdout_frac": holdout_frac,

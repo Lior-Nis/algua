@@ -13,7 +13,7 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 
 # v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
 # above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is
@@ -272,7 +272,12 @@ CREATE TABLE IF NOT EXISTS gate_evaluations (
     -- promote-outcome attribution binds to the branch identity, not the ambient stage. NULL for
     -- every non-driver caller (backward-compatible). A partial unique index on non-null
     -- (strategy_id, attempt_token) makes a second insert of the same token a hard DB error.
-    attempt_token TEXT
+    attempt_token TEXT,
+    -- v39 (#559): the NAME of the PIT universe this evaluation was gated on (the --universe flag),
+    -- so a paper/live deployment can be BOUND to the universe identity its gate evidence was
+    -- produced on (resolve_operational_universe). NULL for legacy rows and non-universe runs;
+    -- the tick binding treats NULL as config_legacy (CONFIG.universe + a loud warning).
+    universe_name TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_gate_evaluations_strategy ON gate_evaluations(strategy_id);
 -- NOTE: the partial unique index on (strategy_id, attempt_token) is created in migrate() AFTER
@@ -951,6 +956,10 @@ def migrate(conn: sqlite3.Connection) -> None:
     # v38 (merge-back authoritative intake): mergeback_evidence is a brand-new marker table;
     # executescript(_SCHEMA) above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns
     # needed. Written only by algua.registry.mergeback_intake (the drainer's evidence chokepoint).
+    # v39 (#559): universe_name on gate_evaluations — the PIT universe the gate evidence was
+    # produced on, so paper deployment binds to the GATED universe, not the module's CONFIG.
+    # Additive nullable — legacy rows stay NULL (tick binding falls back to CONFIG with a warning).
+    _add_missing_columns(conn, "gate_evaluations", {"universe_name": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
 

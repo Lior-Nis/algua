@@ -349,7 +349,8 @@ def promote_task(  # noqa: PLR0913, PLR0915
             repo, name, actor=actor_enum, declared_combos=n_combos,
             allow_holdout_reuse=allow_holdout_reuse, allow_non_pit=allow_non_pit,
             provider=provider, start=start_dt, end=end_dt,
-            new_family_slug=new_family)
+            new_family_slug=new_family,
+            universe_name=universe, universe_by_date=universe_by_date)
         # Atomic holdout reservation (#161): claim the window under the write lock (fast SELECT +
         # INSERT a pending row), run walk_forward with NO lock held, then finalize on success /
         # release on a clean failure. The match identity is the data window and deliberately
