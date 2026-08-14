@@ -55,6 +55,24 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _hit(entry: dict[str, Any], *, stale: bool) -> dict[str, Any]:
+    """Serve a cache entry. A stale hit carries the LOUD metadata the UI banners read."""
+    served: dict[str, Any] = {
+        "ok": True,
+        "data": entry["value"],
+        "fetched_at": entry["fetched_at"],
+        "stale": stale,
+    }
+    if stale:
+        served.update(
+            cache_age_s=time.monotonic() - entry["fetched_monotonic"],
+            last_success_at=entry["fetched_at"],
+            last_error_code=entry["last_error_code"],
+            last_error_at=entry["last_error_at"],
+        )
+    return served
+
+
 def _cli_command(args: tuple[str, ...]) -> list[str]:
     """Resolve the CLI executable: direct venv exec (prod) or uv run (dev fallback)."""
     global _exec_path_logged
@@ -153,7 +171,9 @@ async def run_cli(
 
     Returns ``{"ok": True, "data": ..., "fetched_at": iso, "stale": bool, ...}``.
     On failure with a cached value, serves the cache with LOUD stale metadata;
-    on failure without one, raises :class:`CliError`.
+    on failure without one, raises :class:`CliError`. An entry whose last refresh
+    failed keeps serving stale — including on a TTL-fresh hit — until a refresh
+    succeeds, so staleness never flickers off between two failing refreshes.
 
     ``force_refresh=True`` (the background poller's mode) skips the TTL freshness
     check inside the same per-key lock — the CLI re-runs even on a fresh cache,
@@ -173,12 +193,13 @@ async def run_cli(
             age_s = time.monotonic() - entry["fetched_monotonic"]
             freshness_window_s = _FORCE_REFRESH_SKEW_S if force_refresh else ttl_s
             if age_s < freshness_window_s:
-                return {
-                    "ok": True,
-                    "data": entry["value"],
-                    "fetched_at": entry["fetched_at"],
-                    "stale": False,
-                }
+                # A refresh that FAILED since this value was fetched leaves the entry's
+                # error marker set. Serving it as `stale: False` would make the UI's
+                # stale banner (and the poller's R1 fresh-only diff gate) flap: loud for
+                # the failing request, silent for every TTL-fresh one behind it. The
+                # marker is cleared the moment a refresh succeeds, so staleness sticks
+                # exactly as long as the CLI is actually failing.
+                return _hit(entry, stale=entry["last_error_code"] is not None)
         try:
             payload = await _execute(key, timeout_s)
         except CliError as exc:
@@ -186,16 +207,7 @@ async def run_cli(
                 raise
             entry["last_error_code"] = exc.code
             entry["last_error_at"] = _utc_now_iso()
-            return {
-                "ok": True,
-                "data": entry["value"],
-                "fetched_at": entry["fetched_at"],
-                "stale": True,
-                "cache_age_s": time.monotonic() - entry["fetched_monotonic"],
-                "last_success_at": entry["fetched_at"],
-                "last_error_code": entry["last_error_code"],
-                "last_error_at": entry["last_error_at"],
-            }
+            return _hit(entry, stale=True)
         fetched_at = _utc_now_iso()
         _cache[key] = {
             "value": payload,

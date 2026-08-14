@@ -25,7 +25,8 @@ export interface KillSwitchState {
 export interface DrawdownState {
   peak_equity: number | null
   last_equity: number | null
-  /** Fraction, e.g. -0.12 = 12% below peak. */
+  /** DEPTH below peak as a POSITIVE fraction: `1 - last_equity/peak_equity`
+   * (algua/execution/fleet_health.py), so 0.12 = 12% below peak and 0 = at peak. */
   drawdown: number | null
 }
 

@@ -36,7 +36,7 @@ export function utcDateTime(ts: string | null | undefined): string {
   return `${utcDate(ts)} ${utcTime(ts)}Z`
 }
 
-/** Fraction → "-12.0%". */
+/** Fraction → "12.0%" (sign preserved: -0.03 → "-3.0%"). */
 export function pct(x: number | null | undefined): string {
   if (x === null || x === undefined || !Number.isFinite(x)) return '—'
   return `${(x * 100).toFixed(1)}%`

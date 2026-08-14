@@ -120,6 +120,51 @@ def test_non_operational_stage_never_notifies() -> None:
     assert new_state["strategies"]["momo"]["observed_health"] == "halted"
 
 
+# --- fail-closed parity with fleet_alert ---
+
+
+def test_corrupt_health_verdict_notifies_instead_of_reading_as_ok() -> None:
+    """`fleet health` FAILS CLOSED on an unknown health verdict (fleet_alert) and exits
+    non-zero — the phone must not be the one place that treats it as quiet."""
+    _, state = _diff(_fleet([_row("momo")], alerting=0), None)
+    fleet = _fleet([_row("momo", health="wat")], alerting=1)
+    notifications, _ = _diff(fleet, state)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+    assert notifications[0]["health"] == "wat"
+
+
+def test_corrupt_stage_notifies_even_though_it_is_not_an_operational_stage() -> None:
+    _, state = _diff(_fleet([_row("momo")], alerting=0), None)
+    fleet = _fleet([_row("momo", stage="zombie", health="ok")], alerting=1)
+    notifications, _ = _diff(fleet, state)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+
+
+def test_a_persistently_corrupt_row_obeys_the_24h_cooldown() -> None:
+    """The corrupt row is off-stage AND alerting: its cooldown must NOT reset every cycle."""
+    _, state = _diff(_fleet([_row("momo")], alerting=0), None)
+    fleet = _fleet([_row("momo", stage="zombie", health="wat")], alerting=1)
+    notifications, state = _diff(fleet, state)
+    assert len(notifications) == 1
+    mark_notified(state, notifications[0], NOW.isoformat())
+    for hours in (1, 6, 23):
+        later, state = _diff(fleet, state, NOW + timedelta(hours=hours))
+        assert later == [], f"corrupt row re-notified at +{hours}h"
+    renotified, _ = _diff(fleet, state, NOW + timedelta(hours=25))
+    assert [n["kind"] for n in renotified] == ["strategy"]
+
+
+def test_payload_operational_stages_override_the_local_mirror() -> None:
+    """The CLI ships the authoritative stage set; trust it over the hardcoded mirror."""
+    fleet_before = _fleet([_row("momo", stage="candidate")], alerting=0)
+    fleet_before["operational_stages"] = ["candidate", "live", "paper", "forward_tested"]
+    _, state = _diff(fleet_before, None)
+    fleet = _fleet([_row("momo", stage="candidate", health="stale")], alerting=1)
+    fleet["operational_stages"] = ["candidate", "live", "paper", "forward_tested"]
+    notifications, _ = _diff(fleet, state)
+    assert [n["kind"] for n in notifications] == ["strategy"]
+
+
 # --- cooldown + recovery reset (R3) ---
 
 

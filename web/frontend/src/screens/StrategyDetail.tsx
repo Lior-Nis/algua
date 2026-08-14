@@ -172,17 +172,20 @@ function asNum(v: unknown): number | null {
 function GatesSection({ gates }: { gates: NonNullable<StrategyDetailResponse['gates']> }) {
   const [latest, ...older] = gates.gate_evaluations
   const forwards = gates.forward_gate_evaluations
+  // The two ledgers gate DIFFERENT lifecycle edges and must be named as such: an
+  // unqualified "gates: pass" on a forward_tested/live strategy reads as the forward
+  // certificate when it is actually the (possibly much older) research gate.
   return (
     <section className="panel gates-panel">
-      <span className="micro-label">gates</span>
+      <span className="micro-label">research gate — backtested → candidate</span>
       {latest === undefined ? (
-        <div className="dim-note">no gate evaluations</div>
+        <div className="dim-note">no research gate evaluations</div>
       ) : (
         <LatestGate row={latest} />
       )}
       {older.length > 0 && (
         <details className="sub-details">
-          <summary className="micro-label">gate history ({older.length})</summary>
+          <summary className="micro-label">research gate history ({older.length})</summary>
           <div className="row-list">
             {older.map((row) => (
               <CompactGateRow key={row.id} row={row} />
@@ -192,7 +195,9 @@ function GatesSection({ gates }: { gates: NonNullable<StrategyDetailResponse['ga
       )}
       {forwards.length > 0 && (
         <details className="sub-details">
-          <summary className="micro-label">forward gates ({forwards.length})</summary>
+          <summary className="micro-label">
+            forward gate — paper → forward_tested ({forwards.length})
+          </summary>
           <div className="row-list">
             {forwards.map((row) => (
               <CompactGateRow key={row.id} row={row} />

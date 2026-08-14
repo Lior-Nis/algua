@@ -60,8 +60,13 @@ export default function EquityChart({ payload }: { payload: SeriesPayload }) {
   const data = useMemo(() => normalize(rows), [rows])
 
   const footnotes: string[] = []
+  // Truncation MUST be visible: `fleet series` keeps only the newest N per lane, so a
+  // truncated curve's left edge is a cut, not the strategy's first tick. Silently
+  // clipping it reads as "this is the whole history".
+  if (payload.truncated[activeLane] === true) footnotes.push('newest ticks only (truncated)')
   if (payload.n_legacy_excluded > 0) footnotes.push(`${payload.n_legacy_excluded} legacy excluded`)
   if (payload.n_unparseable > 0) footnotes.push(`${payload.n_unparseable} unparseable`)
+  if (payload.n_invalid_lane > 0) footnotes.push(`${payload.n_invalid_lane} invalid lane`)
 
   return (
     <section className="panel chart-panel">

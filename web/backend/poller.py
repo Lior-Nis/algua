@@ -37,11 +37,21 @@ PREWARM_TARGETS: tuple[tuple[tuple[str, ...], float], ...] = (
     (("registry", "list"), 60.0),
 )
 
-# Mirror of algua/execution/fleet_health.py::_SEVERITY — LOWER int = WORSE health.
-_SEVERITY = {"halted": 0, "drift": 1, "stale": 2, "idle": 3, "ok": 4}
-_OK_SEVERITY = _SEVERITY["ok"]
-# Mirror of algua/execution/fleet_health.py::OPERATIONAL_STAGES — only these
-# stages have an operator loop whose health is worth waking a phone for.
+# Mirror of algua/execution/fleet_health.py::_KNOWN_HEALTHS — the COMPLETE set of health
+# verdicts strategy_health can emit. Anything else on a row is a corrupt verdict.
+_KNOWN_HEALTHS = frozenset({"halted", "drift", "stale", "idle", "ok"})
+# Mirror of algua/execution/fleet_health.py::_ALERT_HEALTHS_OPERATIONAL — on an
+# operational stage each of these means a loop that is stopped, stalled, drifted,
+# or never started.
+_ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "idle", "halted"})
+# Mirror of algua/contracts/lifecycle.py::Stage — a row whose stage is outside this
+# set is corrupt, and a corrupt row must never read as quiet.
+_ALL_STAGES = frozenset(
+    {"idea", "backtested", "candidate", "paper", "forward_tested", "live", "dormant", "retired"}
+)
+# Fallback mirror of fleet_health.py::OPERATIONAL_STAGES — only these stages have an
+# operator loop whose health is worth waking a phone for. `fleet health` emits the
+# authoritative set as `operational_stages`; this is used only if that key is absent.
 _OPERATIONAL_STAGES = frozenset({"live", "paper", "forward_tested"})
 _RENOTIFY_AFTER_S = 24 * 60 * 60.0  # R3: per-strategy bad-health notification cooldown
 
@@ -65,10 +75,33 @@ def poll_seconds() -> float:
     return value
 
 
-def _severity(health: Any) -> int:
-    # Unknown health strings rank PAST "ok" (99), the same convention as
-    # fleet_health's worst-first sort — they never read as a worsening.
-    return _SEVERITY.get(str(health), 99)
+def _operational_stages(fleet: dict[str, Any]) -> frozenset[str]:
+    """The authoritative operational-stage set, straight from the `fleet health` payload.
+
+    Preferring the payload over the local mirror means the notification rule can
+    never drift from the stage set the CLI actually gates its loops on.
+    """
+    stages = fleet.get("operational_stages")
+    if isinstance(stages, list) and stages:
+        return frozenset(str(s) for s in stages)
+    return _OPERATIONAL_STAGES
+
+
+def _row_alerts(health: str, stage: str, operational_stages: frozenset[str]) -> bool:
+    """Mirror of fleet_health.py::fleet_alert's ROW rule — and it FAILS CLOSED.
+
+    A row alerts iff its health or stage is UNKNOWN (a corrupt row is never a silent
+    pass — exactly what makes `fleet health` exit non-zero on it), or its stage is
+    operational and its health is stale/drift/idle/halted.
+
+    fleet_alert's other branch — ``halted_globally`` makes EVERY row alert — is
+    deliberately NOT mirrored here: the account-wide halt fans out as one
+    ``global:halt`` notification instead of N per-strategy ones (see
+    :func:`diff_fleet`'s fan-out suppression).
+    """
+    if health not in _KNOWN_HEALTHS or stage not in _ALL_STAGES:
+        return True
+    return stage in operational_stages and health in _ALERT_HEALTHS_OPERATIONAL
 
 
 def _cooldown_active(last_bad_notified_at: Any, now: datetime) -> bool:
@@ -136,17 +169,22 @@ def diff_fleet(
     for everything, notify NOTHING. A restart with an existing file diffs
     against persisted state, so transitions during downtime DO notify.
 
-    Cooldown (R3): an operational-stage row whose health is bad (severity < ok)
-    is a candidate every cycle, gated by a per-strategy 24h cooldown
+    Candidate rule: a row is a candidate iff :func:`_row_alerts` says it alerts —
+    the SAME fail-closed predicate `fleet health` exits non-zero on, so a row the
+    watchdog screams about can never be silently un-notifiable (a corrupt health
+    verdict or stage used to rank "past ok" and notify NOTHING).
+
+    Cooldown (R3): an alerting row is a candidate every cycle, gated by a
+    per-strategy 24h cooldown
     (``last_bad_notified_at``) that is INDEPENDENT of which bad health was
     notified — so a stale<->drift flap alerts once per day, not once per cycle,
     while a persistent condition still re-alerts daily and an unACKed send
     retries (the cooldown commits only via :func:`mark_notified`). The one
     bypass: a transition INTO ``halted`` may pierce the cooldown once; after
     that accepted send the cooldown covers halted too. The cooldown (and the
-    ``notified`` debug marker) resets ONLY on recovery to ok, on the row
-    leaving the operational stages, or on the row disappearing. Old state
-    files without ``last_bad_notified_at`` read as null (no cooldown).
+    ``notified`` debug marker) resets ONLY when the row STOPS alerting (recovery
+    to ok, or leaving the operational stages) or when the row disappears. Old
+    state files without ``last_bad_notified_at`` read as null (no cooldown).
 
     Fan-out suppression: when the account-wide global halt marks a row halted
     (``row.kill_switch.global_halt`` truthy), the row is NOT a per-strategy
@@ -165,6 +203,7 @@ def diff_fleet(
     prev_halt: dict[str, Any] = {} if state is None else (state.get("global_halt") or {})
     prev_unhealthy = unhealthy if state is None else bool(state.get("unhealthy"))
 
+    operational_stages = _operational_stages(fleet)
     notifications: list[dict[str, Any]] = []
     new_strategies: dict[str, Any] = {}
     for row in rows:
@@ -172,18 +211,21 @@ def diff_fleet(
             continue
         name = str(row.get("strategy"))
         health = str(row.get("health"))
-        sev = _severity(health)
-        operational = str(row.get("stage")) in _OPERATIONAL_STAGES
+        alerts = _row_alerts(health, str(row.get("stage")), operational_stages)
         prev = prev_strategies.get(name)
-        prev_sev = _severity(prev.get("observed_health")) if isinstance(prev, dict) else None
+        seen_before = isinstance(prev, dict)
         notified = prev.get("notified") if isinstance(prev, dict) else None
         # Migration tolerance: pre-cooldown state files lack the key -> null.
         last_bad_notified_at = (
             prev.get("last_bad_notified_at") if isinstance(prev, dict) else None
         )
-        if health == "ok" or not operational:
-            # The ONLY cooldown resets: recovery to ok / leaving operational
-            # stages (disappearing rows drop out of new_strategies entirely).
+        if not alerts:
+            # The ONLY cooldown resets: the row stops alerting — recovery to ok, or
+            # leaving the operational stages (disappearing rows drop out of
+            # new_strategies entirely). Keying the reset on the ALERT verdict rather
+            # than on `health == "ok" or not operational` matters for a corrupt row:
+            # it is off-stage AND alerting, so the old rule reset its cooldown every
+            # cycle and would have re-notified forever.
             notified = None
             last_bad_notified_at = None
         # Account-wide halt fans out as health=halted on EVERY row; suppress the
@@ -191,9 +233,8 @@ def diff_fleet(
         # row tripped for its own reason has global_halt false and still fires.
         account_halted_row = bool((row.get("kill_switch") or {}).get("global_halt"))
         candidate = (
-            prev_sev is not None  # a first-ever observation is baseline, never an alert
-            and operational
-            and sev < _OK_SEVERITY
+            seen_before  # a first-ever observation is baseline, never an alert
+            and alerts
             and not account_halted_row
         )
         if candidate and (
