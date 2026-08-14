@@ -263,6 +263,71 @@ def test_preflight_passes_parity_for_faithful_bundled_strategy(tmp_path):
     assert ctx.own == 4 and ctx.provenance == "measured"
 
 
+# --- gated-universe subset guard (#559) --------------------------------------------------------
+# cross_sectional_momentum's CONFIG.universe is the 5-symbol template incl. NVDA — exactly the
+# divergence class that shipped: a module template wider than the universe the gate validated.
+
+def test_preflight_refuses_config_universe_outside_gated_universe(tmp_path):
+    """An AGENT promote on a PIT universe whose full membership timeline never contained a CONFIG
+    symbol fails closed BEFORE the holdout is touched, naming the offending symbols (#559)."""
+    repo = _repo(tmp_path)
+    rec = repo.add("cross_sectional_momentum")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    repo.record_search_trial("cross_sectional_momentum", 4, "{}")
+    gated = {date(2020, 1, 1): ["AAPL", "MSFT", "AMZN", "GOOGL"]}  # no NVDA, ever
+    with pytest.raises(ValueError, match=r"NVDA") as ei:
+        promotion_preflight(
+            repo, "cross_sectional_momentum", actor=Actor.AGENT, declared_combos=None,
+            allow_holdout_reuse=False, allow_non_pit=False,
+            provider=SyntheticProvider(seed=7), start=_START, end=_END,
+            universe_name="liquid4", universe_by_date=gated)
+    assert "liquid4" in str(ei.value)
+    # Refused in preflight => no gate row, no holdout burn.
+    assert repo._conn.execute("SELECT COUNT(*) c FROM gate_evaluations").fetchone()["c"] == 0
+    assert repo._conn.execute("SELECT COUNT(*) c FROM holdout_evaluations").fetchone()["c"] == 0
+
+
+def test_preflight_accepts_config_universe_subset_of_gated_timeline_union(tmp_path):
+    """The guard checks membership against the UNION of the gated universe's timeline — a symbol
+    that was a member at ANY effective date passes; preflight completes for a covered CONFIG."""
+    repo = _repo(tmp_path)
+    rec = repo.add("cross_sectional_momentum")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
+    repo.record_search_trial("cross_sectional_momentum", 4, "{}")
+    fam_id = repo.create_family("csm_family", actor="agent")
+    repo.assign_strategy_to_family(
+        "cross_sectional_momentum", fam_id, "agent", verdict="NOVEL", similarity_score=0.0,
+        clustering_version="v0", clustering_config_json="{}", axis_json="{}",
+    )
+    gated = {
+        date(2020, 1, 1): ["AAPL", "MSFT", "NVDA"],
+        date(2021, 1, 1): ["AAPL", "MSFT", "AMZN", "GOOGL", "TSLA"],  # NVDA dropped; union covers
+    }
+    ctx = promotion_preflight(
+        repo, "cross_sectional_momentum", actor=Actor.AGENT, declared_combos=None,
+        allow_holdout_reuse=False, allow_non_pit=False,
+        provider=SyntheticProvider(seed=7), start=_START, end=_END,
+        universe_name="liquid5", universe_by_date=gated)
+    assert ctx.own == 4 and ctx.provenance == "measured"
+
+
+def test_human_exempt_from_gated_universe_subset_guard(tmp_path):
+    """The subset guard is agent-only: a HUMAN promote with an uncovered CONFIG symbol still runs
+    preflight to completion (mirrors the other human-accepts-the-cost exemptions)."""
+    repo = _repo(tmp_path)
+    rec = repo.add("cross_sectional_momentum")
+    repo.apply_transition(rec, Stage.BACKTESTED, Actor.HUMAN, "bt")
+    repo.record_search_trial("cross_sectional_momentum", 4, "{}")
+    gated = {date(2020, 1, 1): ["AAPL", "MSFT", "AMZN", "GOOGL"]}  # no NVDA
+    ctx = promotion_preflight(
+        repo, "cross_sectional_momentum", actor=Actor.HUMAN, declared_combos=None,
+        allow_holdout_reuse=False, allow_non_pit=False,
+        provider=SyntheticProvider(seed=7), start=_START, end=_END,
+        new_family_slug="csm_family",
+        universe_name="liquid4", universe_by_date=gated)
+    assert ctx.own == 4 and ctx.provenance == "measured"
+
+
 # --- run_gate DSR binding (#211) ---------------------------------------------------------------
 # run_gate calls compute_artifact_hashes(name) -> load_strategy(name), so these tests use a real
 # bundled strategy ("cross_sectional_momentum"). The holdout Sharpe is set far above the deflated
@@ -605,6 +670,10 @@ def test_forward_gate_reads_holdout_sharpe_value_from_soft_pass_row(tmp_path):
     sid = repo.get(_GATE_NAME).id
     identity = compute_artifact_hashes(_GATE_NAME)
     assert qualified_holdout_sharpe(repo._conn, sid, identity) == pytest.approx(0.3)
+    # #559: run_gate stamps the gated-universe identity onto the gate row it mints.
+    row = repo._conn.execute(
+        "SELECT universe_name FROM gate_evaluations ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["universe_name"] == "u"
 
 
 # --- run_gate returns_available audit (#221 Slice 1) ------------------------------------------
