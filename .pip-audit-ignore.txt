@@ -39,3 +39,14 @@ PYSEC-2026-3552
 PYSEC-2026-3553
 # PYSEC-2026-3554 — name-constrained wildcard SAN escape in cert verification (fix 49.0.0)
 PYSEC-2026-3554
+
+# ---------------------------------------------------------------------------
+# mlflow 3.12.0 — GHSA-2cm6-r77w-6g96: trace API endpoints skip authorization
+# validators WHEN RUNNING `mlflow server` WITH AUTH ENABLED. algua never runs an
+# mlflow server: tracking is the local FileStore (`mlruns/`, direct writes via
+# MlflowTracker), no server process, no auth layer, no network surface — the
+# vulnerable handler is unreachable in this deployment. The only fix release is
+# 3.13.0rc0 (an RC), and bumping mlflow churns the root uv.lock =
+# dependency_hash identity (invalidates gate/live-auth artifact stamps), so the
+# upgrade waits for the next planned mlflow-tree bump. tracking: #395 — review: 2026-10
+GHSA-2cm6-r77w-6g96
