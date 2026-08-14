@@ -199,3 +199,56 @@ def test_pre_v24_gate_evaluations_gains_pit_snapshot_columns(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     migrate(conn)  # idempotent
     conn.close()
+
+
+def test_v39_gate_evaluations_gains_universe_name(tmp_path):
+    """v39 (#559): a pre-v39 gate_evaluations table gains the nullable universe_name column via
+    migrate; legacy rows stay NULL (config_legacy fallback at the tick binding); a fresh DB has
+    the column from _SCHEMA; user_version stamps to the current version; idempotent."""
+    conn = connect(tmp_path / "r.db")
+    # Minimal pre-v39 gate_evaluations: the column subset that predates universe_name.
+    conn.executescript(
+        "CREATE TABLE IF NOT EXISTS strategies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);"
+        "INSERT INTO strategies(id, name) VALUES (1, 's');"
+        "CREATE TABLE gate_evaluations ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " strategy_id INTEGER NOT NULL REFERENCES strategies(id),"
+        " passed INTEGER NOT NULL, n_funnel INTEGER NOT NULL,"
+        " own_lifetime_combos INTEGER NOT NULL, windowed_total_combos INTEGER NOT NULL,"
+        " funnel_window_days INTEGER NOT NULL, breadth_provenance TEXT NOT NULL,"
+        " pit_ok INTEGER NOT NULL, pit_override INTEGER NOT NULL DEFAULT 0,"
+        " holdout_n_bars INTEGER NOT NULL, min_holdout_observations INTEGER NOT NULL,"
+        " code_hash TEXT NOT NULL, config_hash TEXT NOT NULL, dependency_hash TEXT,"
+        " data_source TEXT NOT NULL, snapshot_id TEXT, period_start TEXT NOT NULL,"
+        " period_end TEXT NOT NULL, holdout_frac REAL NOT NULL, actor TEXT NOT NULL,"
+        " decision_json TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,"
+        " created_at TEXT NOT NULL);"
+    )
+    conn.execute("PRAGMA user_version=38")
+    conn.execute(
+        "INSERT INTO gate_evaluations"
+        "(strategy_id, passed, n_funnel, own_lifetime_combos, windowed_total_combos,"
+        " funnel_window_days, breadth_provenance, pit_ok, holdout_n_bars,"
+        " min_holdout_observations, code_hash, config_hash, data_source, period_start,"
+        " period_end, holdout_frac, actor, decision_json, created_at)"
+        " VALUES (1,1,9,9,9,90,'measured',1,100,63,'ch','cfg','demo','2022-01-01','2022-12-31',"
+        " 0.2,'agent','{}','2022-01-01T00:00:00+00:00')"
+    )
+    conn.commit()
+
+    migrate(conn)
+
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(gate_evaluations)")}
+    assert "universe_name" in cols
+    row = conn.execute("SELECT universe_name FROM gate_evaluations").fetchone()
+    assert row["universe_name"] is None
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    migrate(conn)  # idempotent
+
+    # A FRESH db also carries the column straight from _SCHEMA.
+    fresh = connect(tmp_path / "fresh.db")
+    migrate(fresh)
+    fresh_cols = {row["name"] for row in fresh.execute("PRAGMA table_info(gate_evaluations)")}
+    assert "universe_name" in fresh_cols
+    fresh.close()
+    conn.close()

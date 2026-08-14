@@ -18,12 +18,15 @@ def test_record_gate_evaluation_persists_pit_snapshots(tmp_path):
         holdout_n_bars=63, min_holdout_observations=63, code_hash="c", config_hash="cfg",
         dependency_hash="d", data_source="SyntheticProvider", snapshot_id="bars1",
         period_start="2023-01-01", period_end="2023-12-31", holdout_frac=0.2, actor="agent",
-        decision_json="{}", news_snapshot="news1", fundamentals_snapshot=None)
+        decision_json="{}", news_snapshot="news1", fundamentals_snapshot=None,
+        universe_name="liquid10")
     row = repo._conn.execute(
-        "SELECT news_snapshot, fundamentals_snapshot FROM gate_evaluations WHERE id=?",
+        "SELECT news_snapshot, fundamentals_snapshot, universe_name FROM gate_evaluations"
+        " WHERE id=?",
         (rid,)).fetchone()
     assert row["news_snapshot"] == "news1"
     assert row["fundamentals_snapshot"] is None
+    assert row["universe_name"] == "liquid10"  # #559: gated-universe identity persists
 
 
 def test_record_gate_evaluation_defaults_pit_snapshots_to_null(tmp_path):
@@ -39,7 +42,9 @@ def test_record_gate_evaluation_defaults_pit_snapshots_to_null(tmp_path):
         period_start="2023-01-01", period_end="2023-12-31", holdout_frac=0.2, actor="agent",
         decision_json="{}")
     row = repo._conn.execute(
-        "SELECT news_snapshot, fundamentals_snapshot FROM gate_evaluations WHERE id=?",
+        "SELECT news_snapshot, fundamentals_snapshot, universe_name FROM gate_evaluations"
+        " WHERE id=?",
         (rid,)).fetchone()
     assert row["news_snapshot"] is None
     assert row["fundamentals_snapshot"] is None
+    assert row["universe_name"] is None  # #559: defaults NULL for legacy callers

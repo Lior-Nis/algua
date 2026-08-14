@@ -586,11 +586,13 @@ class GateLedger(Protocol):
         news_snapshot: str | None = None,
         family_id: int | None = None,
         family_lifetime_effective: int | None = None,
+        universe_name: str | None = None,
     ) -> int:
         """Persist one gate evaluation (pass or fail) and return its row id. A passing AGENT row is
         the single-use token the shortlist transition consumes. ``family_id`` and
-        ``family_lifetime_effective`` are audit columns added by Task 5 (#222) — optional with
-        default None so all existing callers continue to work."""
+        ``family_lifetime_effective`` are audit columns added by Task 5 (#222); ``universe_name``
+        is the gated-universe identity (#559) — all optional with default None so existing callers
+        continue to work."""
         ...
 
     def find_consumable_gate_evaluation(
