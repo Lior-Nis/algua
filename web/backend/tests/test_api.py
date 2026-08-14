@@ -120,11 +120,17 @@ _PAPER_DATA = {"strategy": "momo", "health": "ok", "recent_orders": []}
 _GATES_DATA = {"strategy": "momo", "gate_evaluations": [], "forward_gate_evaluations": []}
 
 
+def _gates_argv(name: str) -> tuple[str, ...]:
+    """The gates argv the app actually issues — the limit is EXPLICIT so the composed
+    response can tell the UI a saturated ledger is truncated, not complete."""
+    return ("registry", "gates", name, f"--limit={main_mod.GATE_HISTORY_LIMIT}")
+
+
 def _strategy_routes(**overrides: Any) -> dict[tuple[str, ...], Any]:
     routes: dict[tuple[str, ...], Any] = {
         ("registry", "show", "momo"): _env(_REGISTRY_DATA, fetched_at="2026-08-09T00:00:02+00:00"),
         ("paper", "show", "momo"): _env(_PAPER_DATA, fetched_at="2026-08-09T00:00:01+00:00"),
-        ("registry", "gates", "momo"): _env(_GATES_DATA, fetched_at="2026-08-09T00:00:03+00:00"),
+        _gates_argv("momo"): _env(_GATES_DATA, fetched_at="2026-08-09T00:00:03+00:00"),
     }
     routes.update({k: v for k, v in overrides.items()})  # type: ignore[misc]
     return routes
@@ -144,6 +150,9 @@ async def test_strategy_composition_happy_path(monkeypatch: pytest.MonkeyPatch) 
     assert body["fetched_at"] == "2026-08-09T00:00:01+00:00"  # min of the parts
     assert body["stale"] is False
     assert "part_errors" not in body
+    # The UI needs the requested per-ledger limit to tell a saturated ledger from a
+    # complete history.
+    assert body["gates_limit"] == main_mod.GATE_HISTORY_LIMIT
 
 
 async def test_strategy_paper_part_error_degrades(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,7 +177,7 @@ async def test_strategy_registry_not_found_is_404(monkeypatch: pytest.MonkeyPatc
         {
             ("registry", "show", "ghost"): err,
             ("paper", "show", "ghost"): err,
-            ("registry", "gates", "ghost"): err,
+            _gates_argv("ghost"): err,
         },
     )
     async with _client() as client:
@@ -199,7 +208,7 @@ async def test_strategy_stale_part_ors_into_composed_stale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     routes = _strategy_routes()
-    routes[("registry", "gates", "momo")] = _env(_GATES_DATA, stale=True)
+    routes[_gates_argv("momo")] = _env(_GATES_DATA, stale=True)
     _route_cli(monkeypatch, routes)
     async with _client() as client:
         resp = await client.get("/api/strategy/momo")

@@ -21,6 +21,32 @@ it('renders the awaiting-tick-history placeholder for an empty series without cr
   expect(screen.getByText(/2 legacy excluded · 1 unparseable/)).toBeTruthy()
 })
 
+it('flags a truncated lane so the clipped left edge is not read as the full history', () => {
+  const payload: SeriesPayload = {
+    strategy: 'mom_breakout',
+    lane_filter: 'paper',
+    series: {
+      paper: [
+        {
+          id: 1,
+          tick_ts: '2026-08-08T20:30:00+00:00',
+          recorded_at: '2026-08-08T20:30:01+00:00',
+          equity: 100_000,
+          peak_equity: 100_000,
+          reconcile_ok: true,
+        },
+      ],
+      live: null,
+    },
+    truncated: { paper: true, live: null },
+    n_legacy_excluded: 0,
+    n_unparseable: 0,
+    n_invalid_lane: 3,
+  }
+  render(<EquityChart payload={payload} />)
+  expect(screen.getByText(/newest ticks only \(truncated\) · 3 invalid lane/)).toBeTruthy()
+})
+
 it('renders a single-point lane as the placeholder too (uPlot needs >=2 points)', () => {
   const payload: SeriesPayload = {
     strategy: 'mom_breakout',

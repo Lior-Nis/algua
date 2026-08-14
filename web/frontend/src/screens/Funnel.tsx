@@ -18,6 +18,9 @@ const STAGE_ORDER = [
   'retired',
 ]
 
+/** Used only if `fleet health` did not ship its authoritative `operational_stages`. */
+const OPERATIONAL_STAGES_FALLBACK = ['live', 'paper', 'forward_tested']
+
 export default function Funnel() {
   const strategies = useFetch<ApiEnvelope<ListPayload<StrategyRecord>>>('/api/strategies')
   // Reuses Home's /api/fleet cache entry (same URL + ttl).
@@ -53,6 +56,11 @@ export default function Funnel() {
   const records = strategies.data.data.data
   const healthByName = new Map<string, string>()
   for (const row of fleet.data?.data.rows ?? []) healthByName.set(row.strategy, row.health)
+  // Health is only an ALERT on the stages an operator loop ticks; elsewhere it is
+  // context, so the badge must not carry alarm color (see HealthBadge's `muted`).
+  const operational = new Set(
+    fleet.data?.data.operational_stages ?? OPERATIONAL_STAGES_FALLBACK,
+  )
 
   const byStage = new Map<string, StrategyRecord[]>()
   for (const rec of records) {
@@ -101,7 +109,10 @@ export default function Funnel() {
                   <div className="funnel-row-chips">
                     <span className="stage-chip">{rec.hypothesis_status}</span>
                     {healthByName.has(rec.name) && (
-                      <HealthBadge health={healthByName.get(rec.name)!} />
+                      <HealthBadge
+                        health={healthByName.get(rec.name)!}
+                        muted={!operational.has(rec.stage)}
+                      />
                     )}
                   </div>
                 </div>

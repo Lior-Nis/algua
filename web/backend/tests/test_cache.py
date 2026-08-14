@@ -131,6 +131,32 @@ async def test_force_refresh_failure_without_cache_raises(fake_cli: Any) -> None
     assert excinfo.value.code == "bad_output"
 
 
+async def test_ttl_fresh_hit_after_a_failed_refresh_still_reads_stale(fake_cli: Any) -> None:
+    """Staleness must not FLICKER: the failing request banners, and the TTL-fresh requests
+    behind it must not silently re-render the same cached payload as fresh."""
+    fake_cli(json.dumps({"ok": True, "n": 1}))
+    fresh = await run_cli("fleet", "health", ttl_s=0.0)
+    assert fresh["stale"] is False
+    fake_cli("not json at all")
+    await run_cli("fleet", "health", ttl_s=0.0)  # the refresh that fails
+    hit = await run_cli("fleet", "health", ttl_s=60.0)  # well inside the TTL
+    assert hit["stale"] is True
+    assert hit["last_error_code"] == "bad_output"
+    assert hit["data"] == {"ok": True, "n": 1}
+
+
+async def test_a_successful_refresh_clears_the_sticky_stale_marker(fake_cli: Any) -> None:
+    fake_cli(json.dumps({"ok": True, "n": 1}))
+    await run_cli("fleet", "health", ttl_s=0.0)
+    fake_cli("not json at all")
+    await run_cli("fleet", "health", ttl_s=0.0)
+    fake_cli(json.dumps({"ok": True, "n": 2}))
+    recovered = await run_cli("fleet", "health", ttl_s=0.0)
+    assert recovered["stale"] is False
+    assert "last_error_code" not in recovered
+    assert (await run_cli("fleet", "health", ttl_s=60.0))["stale"] is False
+
+
 async def test_spawn_failure_is_cli_error_and_stale_serves(
     fake_cli: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -25,7 +25,8 @@ export interface KillSwitchState {
 export interface DrawdownState {
   peak_equity: number | null
   last_equity: number | null
-  /** Fraction, e.g. -0.12 = 12% below peak. */
+  /** DEPTH below peak as a POSITIVE fraction: `1 - last_equity/peak_equity`
+   * (algua/execution/fleet_health.py), so 0.12 = 12% below peak and 0 = at peak. */
   drawdown: number | null
 }
 
@@ -52,8 +53,13 @@ export interface FleetHealth {
   global_halt: boolean
   /** Pre-sorted worst-offender-first by the CLI. */
   alerting: FleetRow[]
+  /** NOTE: `by_health` counts the ALERTING rows only, NOT the fleet — build a fleet-wide
+   * histogram from `rows` instead (algua/cli/fleet_cmd.py). */
   summary: FleetSummary
   stale_after_sessions: number | null
+  /** Stages an operator loop actually ticks — the ONLY stages on which health is an
+   * alert (fleet_health.py OPERATIONAL_STAGES). Authoritative; prefer it to any mirror. */
+  operational_stages?: string[]
   rows: FleetRow[]
 }
 
@@ -125,6 +131,11 @@ export interface GateCheck {
   threshold?: number | null
   value?: number | null
   passed?: boolean
+  /** Factory soft gate: the check was computed and RECORDED but has no veto power —
+   * `passed = all(c.passed for c in checks if not c.advisory)` (algua/research/gates.py).
+   * A failed advisory check therefore sits inside a PASSING gate and must never render
+   * like a failed binding floor. */
+  advisory?: boolean
 }
 
 /** Allowlist-projected decision_json — scalars + dicts of scalars + checks[]. */
@@ -164,6 +175,9 @@ export interface StrategyDetailResponse {
   registry: RegistryDetail
   paper: PaperRollup | null
   gates: GatesPayload | null
+  /** Rows requested PER LEDGER. A ledger holding exactly this many rows is truncated,
+   * not complete — the UI must say so rather than imply a full history. */
+  gates_limit?: number
   part_errors?: { paper?: string; gates?: string }
   fetched_at: string
   stale: boolean
