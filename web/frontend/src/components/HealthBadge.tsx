@@ -1,7 +1,7 @@
 const HEALTH_COLORS: Record<string, string> = {
   ok: 'var(--green)',
   idle: 'var(--text-dim)',
-  stale: 'var(--gold)',
+  stale: 'var(--amber)',
   drift: 'var(--violet)',
   halted: 'var(--red)',
 }

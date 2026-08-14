@@ -1,6 +1,7 @@
 import { createContext, useContext, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { formatTimestamp } from './api'
+import Logo from './components/Logo'
 
 /** Screens push the envelope's fetched_at into the header slot through this. */
 const FetchedAtContext = createContext<(iso: string | null) => void>(() => {})
@@ -38,7 +39,10 @@ export default function App() {
               ‹ back
             </button>
           ) : (
-            <span className="wordmark">algua monitor</span>
+            <span className="brand">
+              <Logo />
+              <span className="brand-descriptor">monitor</span>
+            </span>
           )}
           {fetchedAt !== null && (
             <span className="fetched-at">fetched {formatTimestamp(fetchedAt)}</span>

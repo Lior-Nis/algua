@@ -10,8 +10,8 @@ const ACTORS = ['agent', 'human', 'system'] as const
 type Actor = (typeof ACTORS)[number]
 
 const ACTOR_COLORS: Record<string, string> = {
-  agent: 'var(--cyan)',
-  human: 'var(--gold)',
+  agent: 'var(--electric)',
+  human: 'var(--amber)',
   system: 'var(--text-dim)',
 }
 

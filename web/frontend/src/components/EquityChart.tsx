@@ -113,13 +113,13 @@ function Plot({ data }: { data: Normalized }) {
   useEffect(() => {
     const el = hostRef.current
     if (!el || width < 40 || data.ts.length < 2) return
-    const text = cssColor('--text-dim', '#6c7888')
-    const line = cssColor('--line', 'rgba(255,255,255,0.075)')
+    const text = cssColor('--text-dim', '#a9b4c5')
+    const line = cssColor('--line', 'rgba(220,228,240,0.08)')
     const axis = {
       stroke: text,
       grid: { stroke: line, width: 1 },
       ticks: { stroke: line, width: 1 },
-      font: '10px "JetBrains Mono", monospace',
+      font: '10px "IBM Plex Mono", monospace',
     }
     const u = new uPlot(
       {
@@ -134,13 +134,13 @@ function Plot({ data }: { data: Normalized }) {
           {},
           {
             label: 'equity',
-            stroke: cssColor('--cyan', '#5cc8ff'),
+            stroke: cssColor('--electric', '#3982ff'),
             width: 1.5,
             points: { show: false },
           },
           {
             label: 'peak',
-            stroke: cssColor('--text-fade', '#4a5462'),
+            stroke: cssColor('--text-fade', '#5d6675'),
             width: 1,
             points: { show: false },
           },

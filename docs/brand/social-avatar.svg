@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Algua social avatar</title>
+  <desc id="desc">The Algua Sea A centered on an Obsidian square.</desc>
+  <rect width="1024" height="1024" rx="224" fill="#0B0D12"/>
+  <g transform="translate(115.2 140) scale(1.55)">
+    <path d="M190.5 299H321.5L323.6 306H188.4Z" fill="#3982FF"/>
+    <path d="M256 48L372 432H344L256 140.7L168 432H140ZM188.4 306H323.6L337.7 312H174.3Z" fill="#F7F9FC"/>
+    <path d="M176.3 312H335.7L338.4 321H173.6Z" fill="#3982FF"/>
+  </g>
+</svg>

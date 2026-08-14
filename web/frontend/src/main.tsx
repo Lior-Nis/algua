@@ -1,9 +1,10 @@
-import '@fontsource/martian-mono/400.css'
-import '@fontsource/martian-mono/600.css'
-import '@fontsource/martian-mono/700.css'
-import '@fontsource/jetbrains-mono/400.css'
-import '@fontsource/jetbrains-mono/500.css'
-import '@fontsource/jetbrains-mono/600.css'
+// Brand typography (docs/brand/README.md): Inter for product language, IBM Plex
+// Mono for code and data. Weights limited to the approved set.
+import '@fontsource/inter/300.css'
+import '@fontsource/inter/400.css'
+import '@fontsource/inter/500.css'
+import '@fontsource/ibm-plex-mono/400.css'
+import '@fontsource/ibm-plex-mono/500.css'
 import './theme.css'
 
 import { StrictMode } from 'react'

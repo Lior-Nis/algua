@@ -1,7 +1,10 @@
+![Algua — agent-first algorithmic research](docs/brand/readme-banner.svg)
+
 # Algua
 
 Agent-first algorithmic-trading research and lifecycle platform.
 See `docs/superpowers/specs/` for the architecture and `docs/agent/` for operating docs.
+Brand assets and usage guidance live in [`docs/brand/`](docs/brand/README.md).
 
 ## Quickstart
 ```

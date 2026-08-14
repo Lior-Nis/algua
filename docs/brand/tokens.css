@@ -1,0 +1,16 @@
+:root {
+  --algua-obsidian: #0b0d12;
+  --algua-electric: #1267ff;
+  --algua-electric-on-dark: #3982ff;
+  --algua-ice: #f7f9fc;
+  --algua-mist: #dce4f0;
+  --algua-slate: #5d6675;
+  --algua-fog: #a9b4c5;
+
+  --algua-font-sans: Inter, "DejaVu Sans", Arial, sans-serif;
+  --algua-font-mono: "IBM Plex Mono", "DejaVu Sans Mono", monospace;
+
+  --algua-radius-sm: 8px;
+  --algua-radius-md: 16px;
+  --algua-radius-lg: 28px;
+}
