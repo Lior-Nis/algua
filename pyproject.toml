@@ -272,6 +272,9 @@ type = "forbidden"
 source_modules = [
     "algua.backtest", "algua.features", "algua.contracts",
     "algua.strategies", "algua.live", "algua.execution",
+    # registry now legitimately imports algua.data (universe_binding, #559) — bar it from the
+    # hindsight accessor explicitly so that new edge can never widen into a decision-lane leak.
+    "algua.registry",
 ]
 forbidden_modules = ["algua.data.hindsight"]
 
