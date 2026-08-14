@@ -17,6 +17,7 @@ from algua.cli.paper_cmd import _ingest_paper_venue
 from algua.execution.alpaca_broker import AccountState, TickSnapshot
 from algua.execution.live_ledger import LedgerKind, fill_cursor, paper_believed_positions
 from algua.registry.db import migrate
+from tests._gate_row_helpers import seed_passing_gate
 
 _FAR_PAST = "1970-01-01T00:00:00Z"
 
@@ -96,6 +97,9 @@ def _to_paper(name: str = _NAME) -> None:
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
                                "--actor", "agent", "--reason", "paper"]).exit_code == 0
+    # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
+    # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
+    seed_passing_gate(name)
 
 
 class _PaperVenueTestBroker:

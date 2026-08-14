@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.execution.alpaca_broker import AccountState
+from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
 
@@ -30,6 +31,9 @@ def _to_paper() -> None:
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "paper",
                                "--actor", "agent", "--reason", "paper"]).exit_code == 0
+    # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
+    # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
+    seed_passing_gate(_NAME)
 
 
 class _CaptureHandler(logging.Handler):

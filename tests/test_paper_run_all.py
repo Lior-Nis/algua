@@ -28,6 +28,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt
 from algua.risk.limits import RiskBreach
+from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
 
@@ -89,6 +90,9 @@ def _to_paper(name: str) -> None:
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
                                "--actor", "agent", "--reason", "paper"]).exit_code == 0
+    # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
+    # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
+    seed_passing_gate(name)
 
 
 def _force_stage(name: str, stage_value: str) -> None:
@@ -788,3 +792,74 @@ def test_run_all_venue_ingest_failure_still_surfaces_skipped_unallocated(monkeyp
     assert payload["ok"] is False
     assert payload["kind"] == "venue_ingest_failed"
     assert payload["skipped_unallocated"] == [_S2]
+
+
+# ---------------------------------------------------------------------------
+# #559: the tick is bound to the GATED universe, never the module CONFIG
+# ---------------------------------------------------------------------------
+
+def test_run_all_binds_tick_to_gate_universe_not_config(monkeypatch):
+    """When CONFIG.universe diverges from the universe the newest passing gate row was produced
+    on, the tick must trade the GATE universe: the strategy handed to run_tick (bar fetch +
+    decision view + sizing snapshot all read strategy.universe) carries the resolved gate
+    membership, not the module's 5-symbol template (#559)."""
+    from algua.data.store import DataStore
+
+    _to_paper(_S1)  # seeds a legacy NULL gate row...
+    seed_passing_gate(_S1, universe_name="liquid3")  # ...superseded by this newer gate-bound row
+    _seed_allocation(_S1)
+    DataStore(get_settings().data_dir).ingest_universe(
+        universe="liquid3", symbols=["AAPL", "MSFT", "GOOGL"],
+        effective_date="2020-01-01", as_of="2020-01-01T00:00:00Z", source="test")
+
+    seen: dict[str, list[str]] = {}
+
+    def _fake_run_tick(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        seen[strategy.name] = list(strategy.universe)
+        return _success_result()
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code == 0, result.stdout
+    # CONFIG says ['AAPL','MSFT','NVDA','AMZN','GOOGL']; the gate says liquid3. NVDA (the #559
+    # incident symbol) must NOT reach the tick.
+    assert seen[_S1] == ["AAPL", "GOOGL", "MSFT"]
+
+
+def test_run_all_no_gate_row_is_isolated_setup_error(monkeypatch):
+    """A paper tenant with NO passing gate row fails closed (an unpromoted strategy has no
+    business ticking) as an isolated per-tenant setup_error; the gate-rowed sibling still
+    ticks (#559)."""
+    _to_paper(_S1)  # has a (legacy) passing gate row
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(_S2)
+        conn.execute("DELETE FROM gate_evaluations WHERE strategy_id = ?", (rec.id,))
+        conn.commit()
+
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.run_tick",
+        lambda strategy, broker, provider, start, end, hooks=None, max_drawdown=None:
+            _success_result(),
+    )
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    by_name = {s["strategy"]: s for s in payload["strategies"]}
+    assert by_name[_S1]["ok"] is True                      # gate-rowed sibling ticked
+    assert by_name[_S2]["kind"] == "setup_error"           # unpromoted tenant isolated
