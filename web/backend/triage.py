@@ -72,6 +72,8 @@ def _capital_items(book: dict[str, Any] | None) -> list[dict[str, Any]]:
         items.append({
             "kind": "capital_stranded",
             "severity": SEVERITY["capital_stranded"],
+            # Carried so the fleet pass can suppress this strategy's symptom row.
+            "strategy": str(row.get("strategy")),
             "title": f"{row.get('strategy')} holds no capital",
             "detail": (
                 f"stage {row.get('stage')}, "
@@ -84,7 +86,13 @@ def _capital_items(book: dict[str, Any] | None) -> list[dict[str, Any]]:
     return items
 
 
-def _fleet_items(fleet: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _fleet_items(
+    fleet: dict[str, Any] | None, explained: frozenset[str] = frozenset()
+) -> list[dict[str, Any]]:
+    """Per-strategy tick health, skipping any strategy whose cause is already on the list.
+
+    ``explained`` carries the strategies a higher-severity item already diagnoses.
+    """
     if not isinstance(fleet, dict):
         return []
     items: list[dict[str, Any]] = []
@@ -103,15 +111,25 @@ def _fleet_items(fleet: dict[str, Any] | None) -> list[dict[str, Any]]:
     for row in fleet.get("alerting") or []:
         if not isinstance(row, dict):
             continue
+        name = str(row.get("strategy"))
+        if name in explained:
+            # Already covered by a row that names the CAUSE. An unallocated strategy is `idle`
+            # BECAUSE it holds no slice, so listing both states the symptom under the diagnosis
+            # and doubles the apparent workload — the exact noise a triage list must not have.
+            continue
         stale = row.get("staleness_sessions")
+        health = str(row.get("health"))
         items.append({
             "kind": "strategy",
             "severity": SEVERITY["strategy"],
-            "title": f"{row.get('strategy')} {row.get('health')}",
+            "title": f"{name} {health}",
+            # Never blank: an item with no detail costs a tap to learn nothing. Fall back to the
+            # stage, which at least says whether anything is supposed to be ticking it.
             "detail": (row.get("kill_switch") or {}).get("reason")
-            or (f"{stale} sessions since last tick" if isinstance(stale, int) else None),
+            or (f"{stale} sessions since last tick" if isinstance(stale, int) else None)
+            or f"stage {row.get('stage')} — no tick evidence",
             "since": None,
-            "route": f"/s/{row.get('strategy')}",
+            "route": f"/s/{name}",
         })
     return items
 
@@ -127,7 +145,11 @@ def build_triage(
     a degraded source must never blank the whole screen. ``sources`` reports which parts were
     present so the UI can say "this list may be incomplete" instead of implying all-clear.
     """
-    items = _loop_items(ops) + _capital_items(book) + _fleet_items(fleet)
+    capital = _capital_items(book)
+    # A stranded strategy's `idle` health is a SYMPTOM of the missing slice, so the capital item
+    # suppresses the fleet item for that strategy rather than both appearing.
+    explained = frozenset(str(item["strategy"]) for item in capital)
+    items = _loop_items(ops) + capital + _fleet_items(fleet, explained)
     items.sort(key=lambda item: (item["severity"], str(item["title"])))
 
     summary = (fleet or {}).get("summary") or {}
