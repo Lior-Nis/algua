@@ -190,14 +190,34 @@ never a chart that renders a misleading zero baseline for an empty series.
 
 ## 7. Slices
 
-| # | Slice | Gate |
-|---|---|---|
-| 1 | `algua ops status` + `algua book status` — domain readers, CLI commands, tests | Root pytest, ruff, mypy, lint-imports |
-| 2 | Backend endpoints `/api/ops`, `/api/book`; triage assembly is a pure, unit-tested function | Web backend pytest |
-| 3 | Tab restructure to Now / Fleet / Money / Research; Activity and Ideas absorbed | Frontend check |
-| 4 | Visual exploration → pick → narrow → Impeccable polish | Frontend check + build |
+| # | Slice | Gate | Status |
+|---|---|---|---|
+| 1 | `algua ops status` + `algua book status` — domain readers, CLI commands, tests | Root pytest, ruff, mypy, lint-imports | **done** |
+| 2 | Backend endpoints `/api/ops`, `/api/book`; triage assembly is a pure, unit-tested function | Web backend pytest | **done** |
+| 3 | Tab restructure to Now / Fleet / Money / Research; Activity and Ideas absorbed | Frontend check | **done** |
+| 4 | Visual exploration → pick → narrow → Impeccable polish | Frontend check + build | **done** |
 
 Slice 1 is load-bearing: slices 2–4 all consume it.
+
+### Slice 4 outcome
+
+Four directions of the *Now* screen were built side by side at phone width against the real
+2026-08-15 state and reviewed as rendered pages, per the method: **A Ledger** (hairline rules, 2px
+severity stripe), **B Stack** (card per condition), **C Numeric** (count as hero), **D Band**
+(verdict sentence first). **A was chosen** — it was already what slice 3 shipped, so slice 4 became
+refinement rather than replacement.
+
+The mechanical slop detector returned zero findings before and after. Both real defects came from
+MEASURING rather than looking:
+
+1. `--text-fade` (brand Slate `#5d6675`) on Obsidian is **3.62:1** — under the 4.5:1 AA floor for
+   the small text it carried in 13 rules. The brand kit itself assigns Slate to *light* surfaces
+   and Fog to dark, so it was wrong on both counts. Repointed to `#727c8b` (4.97:1), the quietest
+   step toward Fog that clears AA, so three tiers survive instead of collapsing into two. Brand
+   Slate is retained as `--slate` for non-text, where the 3:1 graphical floor applies and it passes.
+2. There were **no focus styles at all** — every interactive element fell back to a UA outline that
+   is near-invisible on pure black. Added a `:focus-visible` ring in Electric, consistent with the
+   brand's rule that Electric marks the one active thing on screen.
 
 ## 8. Out of scope
 
