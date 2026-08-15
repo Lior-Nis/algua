@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-OBSIDIAN = "#0B0D12"
+OBSIDIAN = "#000000"
 ELECTRIC = "#1267FF"
 ELECTRIC_DARK = "#3982FF"
 ICE = "#F7F9FC"
