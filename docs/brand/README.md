@@ -32,9 +32,9 @@ use alternate water treatments.
 
 | Token | Hex | Role |
 |---|---:|---|
-| Obsidian | `#0B0D12` | Primary ink and dark background |
+| Obsidian | `#000000` | Primary ink and dark background |
 | Electric | `#1267FF` | Both sea horizons and brand signal on light backgrounds |
-| Electric Light | `#3982FF` | Both sea horizons and brand signal on Obsidian backgrounds |
+| Electric Light | `#3982FF` | Both sea horizons and brand signal on black backgrounds |
 | Ice | `#F7F9FC` | Primary light surface and reversed ink |
 | Mist | `#DCE4F0` | Dividers and quiet surfaces |
 | Slate | `#5D6675` | Secondary text on light surfaces |
@@ -67,7 +67,20 @@ Rebuild the SVG source after a deliberate master change:
 uv run python docs/brand/build_assets.py
 ```
 
-PNG files in `exports/` are delivery derivatives. The SVG files remain authoritative.
+PNG files in `exports/` are delivery derivatives. The SVG files remain authoritative. Rebuild
+them after a master change by rasterizing each SVG at its viewBox size (logo-mark at 2x), with a
+transparent page so the rounded tile corners stay cut:
+
+```sh
+render() { google-chrome --headless=new --hide-scrollbars --force-device-scale-factor=1 \
+  --default-background-color=00000000 --window-size=$2,$3 \
+  --screenshot=docs/brand/exports/$4.png "file://$PWD/docs/brand/$1.svg"; }
+render favicon 512 512 favicon-512
+render logo-mark 1024 1024 logo-mark-1024
+render logo-horizontal 1100 360 logo-horizontal
+render readme-banner 1600 480 readme-banner
+render social-avatar 1024 1024 social-avatar
+```
 
 The images in `mockups/` demonstrate material and digital applications of the same identity. They
 are presentation imagery, not additional logo variants, and must never be used to reconstruct the

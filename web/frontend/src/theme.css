@@ -1,19 +1,19 @@
 /* algua monitor — design tokens from the Algua brand kit (docs/brand/).
    Dark only (committed single look). Dense, terminal-adjacent.
 
-   Ground is true black; Obsidian lifts the panels off it so surfaces read as
-   layers rather than borders. Electric is the brand SIGNAL — it marks the one
-   active thing on a screen and nothing else. Warning/failure keep their own
-   semantic colors so blue never has to mean "problem". */
+   Everything dark is fully black — Obsidian IS #000000 in the brand kit, so
+   ground and surface share one value and a hairline Mist border is what
+   separates a panel from the page. Nothing here is allowed to be almost-black.
+   Electric is the brand SIGNAL — it marks the one active thing on a screen and
+   nothing else. Warning/failure keep their own semantic colors so blue never
+   has to mean "problem". */
 
 :root {
-  /* surfaces */
+  /* surfaces — ground and panel are the same black; the border does the work */
   --ink:       #000000;
-  --ink-2:     #05070a;
-  --panel:     #0b0d12; /* Obsidian */
-  --panel-2:   #121620;
-  --line:      rgba(220, 228, 240, 0.08); /* Mist, held back */
-  --line-2:    rgba(220, 228, 240, 0.17);
+  --panel:     #000000; /* Obsidian */
+  --line:      rgba(220, 228, 240, 0.11); /* Mist, held back */
+  --line-2:    rgba(220, 228, 240, 0.20);
 
   /* ink on dark */
   --ice:       #f7f9fc;
@@ -22,7 +22,7 @@
   --text-fade: #5d6675; /* Slate */
 
   /* brand signal */
-  --electric:      #3982ff; /* Electric Light — the on-Obsidian brand blue */
+  --electric:      #3982ff; /* Electric Light — the on-black brand blue */
   --electric-soft: #8ab0ff;
 
   /* status */
@@ -126,7 +126,7 @@ button { font: inherit; }
   display: flex;
   justify-content: center;
   border-top: 1px solid var(--line);
-  background: rgba(5, 7, 10, 0.94);
+  background: rgba(0, 0, 0, 0.94);
   backdrop-filter: blur(8px);
   padding-bottom: env(safe-area-inset-bottom);
 }
@@ -207,7 +207,6 @@ button { font: inherit; }
   text-transform: uppercase;
   letter-spacing: 0.12em;
   color: var(--text-dim);
-  background: var(--panel-2);
   border: 1px solid var(--line-2);
   border-radius: 3px;
   padding: 1px 6px;
@@ -391,7 +390,7 @@ button { font: inherit; }
 
 .skeleton-block {
   border-radius: 8px;
-  background: var(--panel-2);
+  background: rgba(220, 228, 240, 0.07);
   animation: skeleton-pulse 1.4s ease-in-out infinite;
 }
 
