@@ -104,7 +104,7 @@ it('marks a failed ADVISORY check as non-vetoing instead of rendering it like a 
   // The advisory failure must NOT wear the red of a breached binding floor.
   const marks = screen.getAllByText('fail')
   expect(marks).toHaveLength(1)
-  expect(marks[0].getAttribute('style')).toContain('var(--gold)')
+  expect(marks[0].getAttribute('style')).toContain('var(--amber)')
 })
 
 it('names the ledger by the lifecycle edge it gates', async () => {

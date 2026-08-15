@@ -169,7 +169,7 @@ function PassMark({
   const color = advisory
     ? ok
       ? 'var(--text-dim)'
-      : 'var(--gold)'
+      : 'var(--amber)'
     : ok
       ? 'var(--green)'
       : 'var(--red)'
@@ -321,7 +321,7 @@ function TokenChip({ row }: { row: GateRow }) {
   if (!passed || row.consumed === null || row.consumed === undefined) return null
   const spent = row.consumed === true || row.consumed === 1
   return (
-    <span className="stage-chip" style={{ color: spent ? 'var(--text-dim)' : 'var(--cyan)' }}>
+    <span className="stage-chip" style={{ color: spent ? 'var(--text-dim)' : 'var(--electric)' }}>
       {spent ? 'token spent' : 'token unspent'}
     </span>
   )
