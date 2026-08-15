@@ -70,8 +70,7 @@ button { font: inherit; }
   gap: 12px;
   padding: 12px 16px 10px;
   border-bottom: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.9);
-  backdrop-filter: blur(6px);
+  background: var(--ink);
 }
 
 .brand {
@@ -126,8 +125,7 @@ button { font: inherit; }
   display: flex;
   justify-content: center;
   border-top: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.94);
-  backdrop-filter: blur(8px);
+  background: var(--ink);
   padding-bottom: env(safe-area-inset-bottom);
 }
 
