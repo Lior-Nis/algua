@@ -428,6 +428,66 @@ async def test_ideas_stale_part_ors_into_composed_stale(
     assert resp.json()["stale"] is True
 
 
+# --- /api/triage (Now screen: fleet + loops + capital) ---
+
+_TRIAGE_FLEET = {"ok": True, "global_halt": False, "alerting": [],
+                 "summary": {"total": 1, "alerting": 0, "by_health": {}},
+                 "rows": [{"strategy": "a", "stage": "paper", "health": "ok"}]}
+_TRIAGE_OPS = {"ok": False, "alerting": ["research"],
+               "loops": {"research": {"health": "rate_limited", "detail": "quota"}}}
+_TRIAGE_BOOK = {"ok": True, "capacity": 64, "allocated": 1,
+                "unallocated_operational": [], "slices": []}
+
+
+def _triage_routes(**overrides: Any) -> dict[tuple[str, ...], Any]:
+    routes: dict[tuple[str, ...], Any] = {
+        ("fleet", "health"): _env(_TRIAGE_FLEET),
+        ("ops", "status"): _env(_TRIAGE_OPS),
+        ("book", "status"): _env(_TRIAGE_BOOK),
+    }
+    routes.update({k: v for k, v in overrides.items()})  # type: ignore[misc]
+    return routes
+
+
+async def test_triage_ranks_across_all_three_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    _route_cli(monkeypatch, _triage_routes())
+    async with _client() as client:
+        resp = await client.get("/api/triage")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [item["kind"] for item in body["items"]] == ["loop_down"]
+    assert body["sources"] == {"fleet": True, "ops": True, "book": True}
+    assert body["headline"]["fleet_ok"] == 1
+
+
+async def test_triage_degrades_per_part_instead_of_blanking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed source must be REPORTED, never silently rendered as all-clear."""
+    routes = _triage_routes()
+    routes[("ops", "status")] = CliError("cli_timeout", "ops status timed out")
+    _route_cli(monkeypatch, routes)
+    async with _client() as client:
+        resp = await client.get("/api/triage")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sources"]["ops"] is False
+    assert body["items"] == []  # the ops-derived item is gone, but the screen still renders
+
+
+async def test_triage_with_every_source_down_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rendering an empty 'all clear' from zero readable sources would be a lie."""
+    err = CliError("cli_timeout", "timed out")
+    _route_cli(monkeypatch, {("fleet", "health"): err, ("ops", "status"): err,
+                             ("book", "status"): err})
+    async with _client() as client:
+        resp = await client.get("/api/triage")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "triage_unavailable"
+
+
 async def test_ideas_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
     _route_cli(
         monkeypatch,

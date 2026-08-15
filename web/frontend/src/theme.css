@@ -18,8 +18,14 @@
   /* ink on dark */
   --ice:       #f7f9fc;
   --text:      #e8edf5;
-  --text-dim:  #a9b4c5; /* Fog */
-  --text-fade: #5d6675; /* Slate */
+  --text-dim:  #a9b4c5; /* Fog — the brand's secondary text on dark. 10.02:1 */
+  /* Tertiary text. NOT Slate (#5d6675): the brand kit assigns Slate to "secondary text on
+     LIGHT surfaces" and Fog to dark, and Slate on Obsidian measures 3.62:1 — below the 4.5:1
+     WCAG AA floor for the small text it was being used for (13 rules). This is the quietest
+     step along the Slate->Fog line that clears AA with headroom, so the third tier survives
+     instead of collapsing into Fog. 4.97:1 */
+  --text-fade: #727c8b;
+  --slate:     #5d6675; /* Brand Slate, for NON-TEXT only (>=3:1 covers graphical objects) */
 
   /* brand signal */
   --electric:      #3982ff; /* Electric Light — the on-black brand blue */
@@ -151,22 +157,6 @@ button { font: inherit; }
 }
 
 .tab.active { color: var(--electric); }
-
-.tab.disabled {
-  color: var(--text-fade);
-  cursor: default;
-  user-select: none;
-}
-
-.soon-tag {
-  font-size: 8px;
-  letter-spacing: 0.1em;
-  color: var(--text-fade);
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 0 4px;
-  line-height: 1.5;
-}
 
 /* ---- primitives --------------------------------------------------------- */
 
@@ -369,23 +359,6 @@ button { font: inherit; }
 .retry-btn:active { background: rgba(255, 93, 93, 0.15); }
 
 /* Ordinary affordances carry the brand signal; red stays reserved for failure. */
-.action-btn {
-  font-family: var(--sans);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--electric);
-  background: none;
-  border: 1px solid var(--electric);
-  border-radius: 6px;
-  padding: 8px 18px;
-  cursor: pointer;
-}
-
-.action-btn:active { background: rgba(57, 130, 255, 0.15); }
-
-.action-btn:disabled { opacity: 0.45; cursor: default; }
-
 .skeleton-block {
   border-radius: 8px;
   background: rgba(220, 228, 240, 0.07);
@@ -677,8 +650,6 @@ details[open] > .stage-summary::before { content: '▾'; }
 
 /* ---- activity / ideas ------------------------------------------------------ */
 
-.filter-bar { display: grid; gap: 8px; }
-
 .chip-row {
   display: flex;
   gap: 6px;
@@ -704,19 +675,6 @@ details[open] > .stage-summary::before { content: '▾'; }
   border-color: var(--electric);
   font-weight: 500;
 }
-
-.text-filter {
-  font: inherit;
-  font-size: 12px;
-  color: var(--text);
-  background: var(--panel);
-  border: 1px solid var(--line-2);
-  border-radius: 6px;
-  padding: 7px 10px;
-  width: 100%;
-}
-
-.text-filter::placeholder { color: var(--text-fade); }
 
 .date-divider {
   padding: 6px 14px 2px;
@@ -751,22 +709,6 @@ details[open] > .stage-summary::before { content: '▾'; }
 
 .activity-reason { font-family: var(--mono); font-size: 11px; }
 
-.load-more-btn {
-  font-family: var(--sans);
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  background: var(--panel);
-  border: 1px solid var(--line-2);
-  border-radius: 6px;
-  padding: 9px 0;
-  cursor: pointer;
-  width: 100%;
-}
-
-.load-more-btn:active { color: var(--electric); border-color: var(--electric); }
-
 .idea-row {
   display: grid;
   gap: 3px;
@@ -790,3 +732,105 @@ details[open] > .stage-summary::before { content: '▾'; }
 }
 
 .idea-hypothesis { font-size: 11px; }
+
+/* ---- Now screen -------------------------------------------------------- */
+
+/* The needs-you block is the reason the screen exists, so it gets the only
+   full-width emphasis on the page. Everything below it is reference. */
+.needs-you {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--panel);
+}
+
+.needs-you-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.needs-you-count {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-fade);
+  line-height: 1;
+}
+
+/* The count is the one number worth a glance from across the room, so it — and
+   nothing else on a clear screen — is allowed to carry alarm colour. */
+.needs-you-count.active { color: var(--red); }
+
+/* The all-clear case is the COMMON case and must cost nothing to read: one dim
+   line, no panel, no green celebration. */
+.all-clear-line {
+  color: var(--text-fade);
+  font-size: 13px;
+  padding: 2px 0 4px;
+}
+
+.triage-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  padding: 9px 0;
+  text-decoration: none;
+  color: inherit;
+}
+
+/* A 2px rule rather than a coloured badge: it encodes severity by POSITION and
+   weight, so the row stays readable for a colour-blind reader and the colour is
+   reinforcement rather than the only carrier. */
+.triage-rule {
+  flex: 0 0 2px;
+  border-radius: 1px;
+  align-self: stretch;
+}
+
+.triage-body { min-width: 0; flex: 1; }
+
+.triage-title {
+  font-size: 13.5px;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.headline-tile {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+/* ---- Money ------------------------------------------------------------- */
+
+.needs-capital { border-color: rgba(232, 179, 57, 0.45); }
+
+/* ---- Research ---------------------------------------------------------- */
+
+.loop-panel.down { border-color: rgba(255, 93, 93, 0.45); }
+
+.loop-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+/* ---- keyboard focus ----------------------------------------------------- */
+
+/* There were NO focus rules at all: every link, tab, chip, button and <summary>
+   fell back to the UA outline, which on a pure-black ground is close to invisible.
+   Electric is the brand signal and "the one active thing on screen" is exactly what
+   focus is, so this is the one place it earns its saturation. Offset keeps it clear
+   of the hairline borders; :focus-visible so a pointer click never paints a ring. */
+:where(a, button, summary, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--electric);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Tabs sit against the bar's own border, so they get the ring inset instead. */
+.tab:focus-visible { outline-offset: -3px; }

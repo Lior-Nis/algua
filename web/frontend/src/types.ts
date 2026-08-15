@@ -247,3 +247,84 @@ export interface IdeasResponse {
   stale: boolean
   last_error_code?: string | null
 }
+
+/** One `algua ops status` loop rollup (algua/operator/loop_health.py). */
+export interface LoopRow {
+  health: string
+  detail?: string | null
+  last_run_at?: string | null
+  last_ok_at?: string | null
+  consecutive_failures?: number | null
+  queue_depth?: number | null
+  session?: string | null
+  last_rc?: number | null
+  [key: string]: unknown
+}
+
+/** GET /api/ops — machine liveness across every autonomous loop. */
+export interface OpsPayload {
+  ok: boolean
+  checked_at: string
+  alerting: string[]
+  loops: Record<string, LoopRow>
+}
+
+/** One active capital slice (`algua book status`). */
+export interface BookSlice {
+  strategy: string
+  stage: string
+  capital: number
+  last_equity: number | null
+  effective_ts: string
+  actor: string
+  equity_error?: string | null
+}
+
+/** A strategy in an operational stage holding NO slice — the operator loop skips it forever. */
+export interface StrandedStrategy {
+  strategy: string
+  stage: string
+  since: string | null
+  ever_ticked: boolean
+}
+
+/** GET /api/book. NOTE: capital headroom is deliberately absent — it needs the account equity,
+ * which only a broker call can supply, and this view never calls the broker. */
+export interface BookPayload {
+  ok: boolean
+  capacity: number
+  allocated: number
+  count_headroom: number
+  sum_allocations: number
+  unallocated_operational: StrandedStrategy[]
+  slices: BookSlice[]
+  live_allocated: number
+}
+
+/** One ranked row of the Now screen's "needs you" list (web/backend/triage.py). */
+export interface TriageItem {
+  kind: 'loop_down' | 'global_halt' | 'capital_stranded' | 'strategy' | 'queue_wedged'
+  severity: number
+  title: string
+  detail: string | null
+  since: string | null
+  route: string
+}
+
+/** GET /api/triage — the Now screen. `sources` reports which parts loaded, so a degraded
+ * read is never rendered as an all-clear. */
+export interface TriagePayload {
+  ok: boolean
+  items: TriageItem[]
+  sources: { fleet: boolean; ops: boolean; book: boolean }
+  headline: {
+    fleet_ok: number
+    fleet_total: number | null
+    book_allocated: number | null
+    book_capacity: number | null
+    loops_alerting: number
+  }
+  fetched_at: string
+  stale: boolean
+  last_error_code?: string | null
+}

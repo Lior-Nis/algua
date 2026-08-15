@@ -12,10 +12,10 @@ import { createRoot } from 'react-dom/client'
 import { registerSW } from 'virtual:pwa-register'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import App from './App'
-import Activity from './screens/Activity'
-import Funnel from './screens/Funnel'
-import Home from './screens/Home'
-import Ideas from './screens/Ideas'
+import Fleet from './screens/Fleet'
+import Money from './screens/Money'
+import Now from './screens/Now'
+import Research from './screens/Research'
 import StrategyDetail from './screens/StrategyDetail'
 
 // PROD only — a dev service worker would fight the Vite proxy. With registerType
@@ -30,11 +30,11 @@ createRoot(document.getElementById('root')!).render(
     <BrowserRouter>
       <Routes>
         <Route element={<App />}>
-          <Route index element={<Home />} />
-          <Route path="funnel" element={<Funnel />} />
+          <Route index element={<Now />} />
+          <Route path="fleet" element={<Fleet />} />
+          <Route path="money" element={<Money />} />
+          <Route path="research" element={<Research />} />
           <Route path="s/:name" element={<StrategyDetail />} />
-          <Route path="activity" element={<Activity />} />
-          <Route path="ideas" element={<Ideas />} />
         </Route>
       </Routes>
     </BrowserRouter>

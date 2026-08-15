@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react'
-import { ApiError, formatTimestamp, useFetch } from '../api'
+import { useEffect } from 'react'
+import { Link } from 'react-router-dom'
+import { ApiError, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
 import StageChip from '../components/StageChip'
+import StaleNotice from '../components/StaleNotice'
 import { pct } from '../format'
-import { alertsState, disableAlerts, enableAlerts, type AlertsState } from '../push'
 import type { ApiEnvelope, FleetHealth, FleetRow } from '../types'
 
 /** Worst → best; orders the per-health summary tiles. */
@@ -15,8 +16,8 @@ const HEALTH_ORDER = ['halted', 'drift', 'stale', 'idle', 'ok']
  * Fleet-wide health histogram, counted from `rows` (EVERY strategy).
  *
  * NOT `summary.by_health` — `fleet health` builds that over the ALERTING rows only
- * (algua/cli/fleet_cmd.py), so rendering it beside `summary.total` silently dropped
- * every non-alerting strategy and could never show an `ok` tile at all.
+ * (algua/cli/fleet_cmd.py), so rendering it beside `summary.total` silently dropped every
+ * non-alerting strategy and could never show an `ok` tile at all.
  */
 function healthHistogram(rows: FleetRow[]): Record<string, number> {
   const counts: Record<string, number> = {}
@@ -24,7 +25,7 @@ function healthHistogram(rows: FleetRow[]): Record<string, number> {
   return counts
 }
 
-export default function Home() {
+export default function Fleet() {
   const { data, error, loading, refetch } = useFetch<ApiEnvelope<FleetHealth>>('/api/fleet', {
     ttlMs: 10_000,
   })
@@ -37,7 +38,7 @@ export default function Home() {
   }, [fetchedAt, setFetchedAt])
 
   if (data === undefined) {
-    if (loading) return <HomeSkeleton />
+    if (loading) return <FleetSkeleton />
     return (
       <section className="panel error-panel">
         <span className="micro-label">fetch failed</span>
@@ -62,15 +63,7 @@ export default function Home() {
 
   return (
     <>
-      {data.stale && (
-        <section className="banner-stale">
-          <span className="micro-label">stale data</span>
-          <div>
-            showing cached data from {formatTimestamp(data.fetched_at)}
-            {data.last_error_code != null && <>, last error {data.last_error_code}</>}
-          </div>
-        </section>
-      )}
+      <StaleNotice env={data} />
 
       {fleet.global_halt && <section className="banner-halt">global halt active</section>}
 
@@ -100,74 +93,36 @@ export default function Home() {
       ) : (
         <section className="panel all-clear">
           <span className="micro-label">all clear</span>
-          {/* NOT "{total} strategies ok": `ok` is a specific verdict (fresh, parseable
-              tick evidence) and most of the fleet — every idea/backtested/retired
-              strategy — is `idle` by design and simply not watched. */}
+          {/* NOT "{total} strategies ok": `ok` is a specific verdict (fresh, parseable tick
+              evidence) and most of the fleet — every idea/backtested/retired strategy — is
+              `idle` by design and simply not watched. */}
           no alerting strategies · {byHealth.ok ?? 0} of {fleet.summary.total} ok
         </section>
       )}
 
-      <AlertsPanel />
-    </>
-  )
-}
-
-function AlertsPanel() {
-  const [state, setState] = useState<AlertsState | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    let alive = true
-    void alertsState().then((s) => {
-      if (alive) setState(s)
-    })
-    return () => {
-      alive = false
-    }
-  }, [])
-
-  // Unknown yet or genuinely unsupported: no control at all.
-  if (state === null || state === 'unsupported') return null
-
-  const run = (action: () => Promise<AlertsState>) => {
-    if (busy) return
-    setBusy(true)
-    action()
-      .then(setState)
-      // On failure, re-derive the truth from the browser instead of guessing.
-      .catch(() => alertsState().then(setState))
-      .finally(() => setBusy(false))
-  }
-
-  return (
-    <section className="panel">
-      <span className="micro-label">push alerts</span>
-      {state === 'off' && (
-        <button
-          type="button"
-          className="action-btn"
-          disabled={busy}
-          onClick={() => run(enableAlerts)}
-        >
-          enable alerts
-        </button>
-      )}
-      {state === 'on' && (
-        <div>
-          alerts on{' '}
-          <button
-            type="button"
-            className="action-btn"
-            disabled={busy}
-            onClick={() => run(disableAlerts)}
-          >
-            disable
-          </button>
+      <section>
+        <div className="micro-label" style={{ marginBottom: 6 }}>
+          every strategy
         </div>
-      )}
-      {state === 'denied' && <div>notifications blocked — enable in browser settings</div>}
-      {state === 'needs-install' && <div>install to home screen to enable alerts</div>}
-    </section>
+        <div className="row-list">
+          {[...(fleet.rows ?? [])].map((row) => (
+            <Link
+              key={row.strategy}
+              to={`/s/${encodeURIComponent(row.strategy)}`}
+              className="funnel-row"
+            >
+              <div className="funnel-row-main">
+                <span className="row-link">{row.strategy}</span>
+              </div>
+              <div className="funnel-row-chips">
+                <StageChip stage={row.stage} />
+                <HealthBadge health={row.health} />
+              </div>
+            </Link>
+          ))}
+        </div>
+      </section>
+    </>
   )
 }
 
@@ -191,7 +146,7 @@ function AlertRow({ row }: { row: FleetRow }) {
   )
 }
 
-function HomeSkeleton() {
+function FleetSkeleton() {
   return (
     <>
       <div className="tile-row" aria-hidden="true">
