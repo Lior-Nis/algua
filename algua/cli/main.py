@@ -23,6 +23,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     monitoring_cmd,
     negative_cmd,
     operator_cmd,
+    ops_cmd,
     paper_cmd,
     registry_cmd,
     research_batch_cmd,

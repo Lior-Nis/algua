@@ -40,6 +40,7 @@ from backend.params import (
 )
 from backend.poller import poll_loop
 from backend.static import dist_dir, install_static
+from backend.triage import build_triage
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,52 @@ def create_app() -> FastAPI:
     async def fleet() -> dict[str, Any]:
         # 10s success TTL: global_halt must not lag behind the fleet view.
         return await run_cli("fleet", "health", ttl_s=10.0)
+
+    @app.get("/api/ops")
+    async def ops() -> dict[str, Any]:
+        # 30s: loop liveness moves on a timer cadence (30-60 min), not tick-by-tick.
+        return await run_cli("ops", "status", ttl_s=30.0)
+
+    @app.get("/api/book")
+    async def book() -> dict[str, Any]:
+        # 30s: allocations change only on an intake/allocate/revoke, which are rare and human-paced.
+        return await run_cli("book", "status", ttl_s=30.0)
+
+    @app.get("/api/triage")
+    async def triage() -> dict[str, Any]:
+        """The Now screen: one ranked "needs you" list across fleet + loops + capital.
+
+        Each part degrades independently — a failed part contributes nothing and is reported in
+        ``sources`` rather than blanking the screen or, worse, rendering a false all-clear.
+        """
+        fleet_r, ops_r, book_r = await asyncio.gather(
+            run_cli("fleet", "health", ttl_s=10.0),
+            run_cli("ops", "status", ttl_s=30.0),
+            run_cli("book", "status", ttl_s=30.0),
+            return_exceptions=True,
+        )
+        parts: dict[str, Any] = {}
+        fetched_ats: list[str] = []
+        stale = False
+        for name, result in (("fleet", fleet_r), ("ops", ops_r), ("book", book_r)):
+            if isinstance(result, CliError):
+                parts[name] = None
+            elif isinstance(result, BaseException):
+                raise result
+            else:
+                parts[name] = result["data"]
+                fetched_ats.append(result["fetched_at"])
+                stale = stale or bool(result["stale"])
+        if not fetched_ats:
+            # Every part failed: there is nothing to triage FROM, and rendering an empty
+            # "all clear" would be a lie. Fail loudly instead.
+            raise CliError("triage_unavailable", "no triage source could be read")
+        return {
+            "ok": True,
+            **build_triage(parts["fleet"], parts["ops"], parts["book"]),
+            "fetched_at": min(fetched_ats),
+            "stale": stale,
+        }
 
     @app.get("/api/strategies")
     async def strategies() -> dict[str, Any]:
