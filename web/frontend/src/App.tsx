@@ -10,11 +10,14 @@ export function useSetFetchedAt() {
   return useContext(FetchedAtContext)
 }
 
+// One tab per job the dashboard does, plus the fleet detail. Activity folded into Now (the
+// audit trail answers "what happened while I was asleep", which is a Now question) and Ideas
+// folded into Research. Four is the practical ceiling for a phone tab bar.
 const TABS = [
-  { to: '/', label: 'Home', end: true },
-  { to: '/funnel', label: 'Funnel', end: false },
-  { to: '/activity', label: 'Activity', end: false },
-  { to: '/ideas', label: 'Ideas', end: false },
+  { to: '/', label: 'Now', end: true },
+  { to: '/fleet', label: 'Fleet', end: false },
+  { to: '/money', label: 'Money', end: false },
+  { to: '/research', label: 'Research', end: false },
 ]
 
 export default function App() {

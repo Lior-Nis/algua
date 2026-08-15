@@ -1,0 +1,130 @@
+import { cleanup, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import { afterEach, expect, it, vi } from 'vitest'
+import Research from './Research'
+
+const strategies = {
+  ok: true,
+  fetched_at: '2026-08-15T17:04:00Z',
+  stale: false,
+  data: {
+    data: [
+      { id: 1, name: 'live_one', stage: 'paper', family: 'momentum', tags: [], author: 'agent',
+        hypothesis_status: 'untested', derived_from: null, description: null },
+      { id: 2, name: 'benched', stage: 'retired', family: null, tags: [], author: 'agent',
+        hypothesis_status: 'refuted', derived_from: null, description: null },
+    ],
+  },
+}
+
+const fleet = {
+  ok: true,
+  fetched_at: '2026-08-15T17:04:00Z',
+  stale: false,
+  data: {
+    ok: true,
+    global_halt: false,
+    alerting: [],
+    summary: { total: 2, alerting: 0, by_health: {} },
+    stale_after_sessions: 5,
+    operational_stages: ['forward_tested', 'live', 'paper'],
+    rows: [
+      { strategy: 'live_one', stage: 'paper', health: 'ok', staleness_sessions: 0,
+        last_tick_error: null, kill_switch: null, drawdown: null, positions: 0, n_orders: 0 },
+      // A retired strategy with a lingering kill-switch: fleet_alert deliberately keeps this
+      // QUIET, so the funnel must not paint it red.
+      { strategy: 'benched', stage: 'retired', health: 'halted', staleness_sessions: null,
+        last_tick_error: null, kill_switch: null, drawdown: null, positions: 0, n_orders: 0 },
+    ],
+  },
+}
+
+const ops = {
+  ok: false,
+  fetched_at: '2026-08-15T17:04:00Z',
+  stale: false,
+  data: {
+    ok: false,
+    checked_at: '2026-08-15T17:04:00Z',
+    alerting: ['research'],
+    loops: {
+      research: { health: 'rate_limited', detail: 'provider usage limit reached',
+                  last_ok_at: '2026-08-14T14:00:01+00:00', consecutive_failures: 13 },
+      mergeback: { health: 'stale', queue_depth: 23 },
+    },
+  },
+}
+
+const ideas = {
+  ok: true,
+  ideas: [
+    { id: 1, title: 'skip-month persistence', hypothesis: 'h', family: null, tags: [],
+      source_type: 'paper', source_ref: null, source_date: null, status: 'open',
+      created_at: '2026-08-10T00:00:00+00:00' },
+  ],
+  stats: { window_days: 90, counts: { open: 1, authored: 0, total: 1 } },
+  stats_window_days: 90,
+  fetched_at: '2026-08-15T17:04:00Z',
+  stale: false,
+}
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+function renderResearch() {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      const body = url.startsWith('/api/strategies')
+        ? strategies
+        : url.startsWith('/api/fleet')
+          ? fleet
+          : url.startsWith('/api/ops')
+            ? ops
+            : ideas
+      return { ok: true, status: 200, json: async () => body }
+    }) as unknown as typeof fetch,
+  )
+  render(
+    <MemoryRouter>
+      <Research />
+    </MemoryRouter>,
+  )
+}
+
+it('surfaces a stopped research loop — the difference between "no ideas" and "none ever again"', async () => {
+  renderResearch()
+  expect(await screen.findByText('research loop')).toBeTruthy()
+  expect(screen.getByText('provider usage limit reached')).toBeTruthy()
+  expect(screen.getByText(/13 consecutive failed runs/)).toBeTruthy()
+})
+
+it('reports a wedged merge-back queue', async () => {
+  renderResearch()
+  expect(await screen.findByText(/merge-back queue 23 — wedged/)).toBeTruthy()
+})
+
+it('groups the funnel by lifecycle stage', async () => {
+  renderResearch()
+  expect(await screen.findByText('paper (1)')).toBeTruthy()
+  expect(screen.getByText('retired (1)')).toBeTruthy()
+})
+
+it('mutes health on a stage no operator loop ticks', async () => {
+  renderResearch()
+  // `halted` on a retired strategy is deliberately quiet per fleet_alert — painting it red
+  // would contradict the gate.
+  const badge = (await screen.findByText('halted')).closest('span')
+  expect(badge?.getAttribute('style')).toContain('var(--text-dim)')
+  const live = screen.getByText('ok').closest('span')
+  expect(live?.getAttribute('style')).toContain('var(--green)')
+})
+
+it('absorbs the idea pool, keeping the windowed stats on their own line', async () => {
+  renderResearch()
+  expect(await screen.findByText('idea pool')).toBeTruthy()
+  expect(screen.getByText('skip-month persistence')).toBeTruthy()
+  expect(screen.getByText(/last 90d: open 1/)).toBeTruthy()
+})
