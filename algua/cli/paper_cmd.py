@@ -141,15 +141,41 @@ def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
                              base_url=s.alpaca_paper_url)
 
 
-def _candidate_entry_id(repo: SqliteStrategyRepository, name: str) -> int:
+def _stage_entry_id(repo: SqliteStrategyRepository, name: str, stage: Stage) -> int:
     """The monotonic ``stage_transitions.id`` of the row that most recently moved this strategy
-    into the ``candidate`` stage — the FIFO ordering key (#317, finding #5). ``list_transitions``
-    returns rows ordered by ``id``, so the last matching row is the current candidate episode. A
-    DB autoincrement id is a true clock-independent insertion order (see intake.Candidate);
-    defensively falls back to ``0`` if — impossibly — no candidate transition is recorded."""
-    entered = [t['id'] for t in repo.list_transitions(name)
-               if t['to_stage'] == Stage.CANDIDATE.value]
+    into ``stage`` — the FIFO ordering key (#317, finding #5). ``list_transitions`` returns rows
+    ordered by ``id``, so the last matching row is the current episode. A DB autoincrement id is a
+    true clock-independent insertion order (see intake.Candidate); defensively falls back to ``0``
+    if — impossibly — no such transition is recorded."""
+    entered = [t['id'] for t in repo.list_transitions(name) if t['to_stage'] == stage.value]
     return entered[-1] if entered else 0
+
+
+def _candidate_entry_id(repo: SqliteStrategyRepository, name: str) -> int:
+    """The FIFO key for a candidate awaiting admission."""
+    return _stage_entry_id(repo, name, Stage.CANDIDATE)
+
+
+# The book stages a strategy can hold a paper allocation at, mirroring
+# ``allocations.active_paper_lane_count``'s tenancy definition and ``paper allocate``'s lane scope.
+_BOOK_STAGES = (Stage.PAPER, Stage.FORWARD_TESTED)
+
+
+def _unallocated_book_tenants(
+    conn: sqlite3.Connection, repo: SqliteStrategyRepository,
+) -> list[Candidate]:
+    """Book-stage strategies holding NO active allocation, in FIFO order by book entry.
+
+    This state is a broken invariant, not a queue: `paper -> dormant` and `live -> paper` REVOKE
+    the allocation atomically, but the return edges (`dormant -> paper`, `live -> paper`) restore
+    only the STAGE. The strategy then sits at a book stage with no slice — `paper run-all` skips it
+    as unallocated, it never ticks, and `fleet health` alerts on it forever. Re-admitting it is the
+    intake's job because the intake is what owns capital budgeting, the count cap and the FIFO."""
+    return order_candidates(
+        Candidate(name=r.name, entry_id=_stage_entry_id(repo, r.name, stage), sid=r.id)
+        for stage in _BOOK_STAGES
+        for r in repo.list_strategies(stage)
+        if active_allocation(conn, r.id) is None)
 
 
 def _paper_broker_net(broker: PositionsBroker) -> dict[str, float]:
@@ -413,11 +439,24 @@ def _resolve_max_concurrent(explicit: int | None) -> int:
 def _run_intake(
     conn: sqlite3.Connection, *, equity: float, max_concurrent: int, actor: Actor,
 ) -> dict:
-    """The FIFO candidate→paper book-admission loop over ONE registry connection — shared by the
-    ``paper intake`` command and the ``paper merge-back`` driver (#485) so there is exactly one
-    admit path, never a dual one.
+    """The FIFO book-admission loop over ONE registry connection — shared by the ``paper intake``
+    command and the ``paper merge-back`` driver (#485) so there is exactly one admit path, never a
+    dual one.
 
-    Offers each candidate, in FIFO order (candidate-entry ``stage_transitions.id``, tie-break
+    Two populations, re-entrants first:
+
+    **RE-ADMISSION** (``readmitted``) restores the book slice of a strategy already AT a book stage
+    that holds no active allocation. That state is a broken invariant, not a queue: `paper ->
+    dormant` and `live -> paper` revoke the allocation atomically while the return edges restore
+    only the stage, leaving a strategy that `paper run-all` skips as unallocated, that never ticks,
+    and that `fleet health` alerts on forever. Re-entrants go FIRST — they were admitted before the
+    queued candidates existed — and are funded through ``allocations.allocate_in_lane``, which
+    re-reads the stage under the SAME write lock and enforces the SAME Σ ≤ equity and count-cap
+    bounds. No stage changes, and an ALREADY-allocated tenant is never touched (intake is not a
+    rebalancer).
+
+    **ADMISSION** (``admitted``) offers each candidate, in FIFO order (candidate-entry
+    ``stage_transitions.id``, tie-break
     strategy id), to the ATOMIC ``intake_candidate_to_paper`` primitive, which under ONE write lock
     re-checks the ``max_concurrent`` count cap, cap-checks + allocates an equal slice =
     floor(equity / max_concurrent to cents) (Σ allocations + slice ≤ ``equity``), and CASes
@@ -431,13 +470,45 @@ def _run_intake(
     repo = SqliteStrategyRepository(conn)
     occupied = active_paper_lane_count(conn)
     slc = slice_capital(equity, max_concurrent)
-    ordered = order_candidates(
-        Candidate(name=r.name, entry_id=_candidate_entry_id(repo, r.name), sid=r.id)
-        for r in repo.list_strategies(Stage.CANDIDATE))
     admitted: list[dict] = []
+    readmitted: list[dict] = []
     queued: list[str] = []
     skipped_stale: list[str] = []
     count = occupied
+
+    # ---- RE-ADMISSION first: restore the book slice of an already-admitted tenant that lost it.
+    # These strategies are ALREADY at a book stage — they passed the candidate gates and were
+    # admitted once; a bench/demotion round-trip revoked their allocation and the return edge
+    # restored only the stage. A newcomer must not take the slot out from under one, so they go to
+    # the front of the FIFO. No stage changes here: `allocate_in_lane` re-reads the stage under the
+    # SAME write lock and applies the SAME Σ ≤ equity and count-cap bounds intake applies.
+    for tenant in _unallocated_book_tenants(conn, repo):
+        if slc <= 0.0 or count >= max_concurrent:
+            queued.append(tenant.name)
+            continue
+        try:
+            allocations.allocate_in_lane(
+                conn, tenant.sid, capital=slc, actor=actor.value, account_equity=equity,
+                allowed_stages=frozenset(s.value for s in _BOOK_STAGES),
+                max_concurrent=max_concurrent)
+        except CountCapReached:
+            queued.append(tenant.name)
+            continue
+        except AllocationError:
+            # No capital headroom, or the tenant left the book lane between selection and the
+            # write. Either way it is not fundable now; leave it and keep going — a LATER tenant
+            # may still be (the slice is uniform, but a concurrent revoke can free headroom).
+            queued.append(tenant.name)
+            continue
+        audit_append(conn, actor=actor.value, action='paper_readmit',
+                     reason=f'slice {slc} (restored book allocation)', strategy=tenant.name)
+        readmitted.append({'strategy': tenant.name, 'capital': slc})
+        count += 1
+
+    # ---- ADMISSION: the FIFO candidate -> paper queue.
+    ordered = order_candidates(
+        Candidate(name=r.name, entry_id=_candidate_entry_id(repo, r.name), sid=r.id)
+        for r in repo.list_strategies(Stage.CANDIDATE))
     for i, cand in enumerate(ordered):
         if slc <= 0.0 or count >= max_concurrent:
             # Slice unfundable, or count cap already reached: queue the rest and stop.
@@ -460,9 +531,9 @@ def _run_intake(
                      reason=f'slice {slc}', strategy=cand.name)
         admitted.append({'strategy': cand.name, 'capital': slc})
         count += 1
-    return {'admitted': admitted, 'queued': queued, 'skipped_stale': skipped_stale,
-            'equity': equity, 'slice': slc, 'occupied_before': occupied,
-            'max_concurrent': max_concurrent}
+    return {'admitted': admitted, 'readmitted': readmitted, 'queued': queued,
+            'skipped_stale': skipped_stale, 'equity': equity, 'slice': slc,
+            'occupied_before': occupied, 'max_concurrent': max_concurrent}
 
 
 @paper_app.command('intake')
@@ -473,9 +544,19 @@ def intake(
              '(default: settings.paper_book_capacity / ALGUA_PAPER_BOOK_CAPACITY)'),
     actor: str = typer.Option('agent', '--actor', help='human | agent'),
 ) -> None:
-    """Deterministic paper-book intake: admit candidate strategies into the shared paper book up to
-    capacity. Each candidate is offered, in FIFO order (by candidate-entry stage_transitions.id,
-    tie-break strategy id), to the ATOMIC ``intake_candidate_to_paper`` primitive, which under ONE
+    """Deterministic paper-book intake: fill the shared paper book up to capacity.
+
+    RE-ADMISSION runs first (reported as ``readmitted``): a strategy already at a book stage
+    (paper/forward_tested) that holds NO active allocation gets its slice restored. That state is a
+    broken invariant, not a queue — `paper -> dormant` and `live -> paper` revoke the allocation
+    while the return edges restore only the stage, leaving a strategy `paper run-all` skips as
+    unallocated and `fleet health` alerts on forever. Re-entrants precede queued candidates (they
+    were admitted first) and are funded under the same Σ ≤ equity and count-cap bounds; an
+    already-allocated tenant is never touched (use `paper allocate` to resize).
+
+    Then ADMISSION: each candidate is offered, in FIFO order (by candidate-entry
+    stage_transitions.id, tie-break strategy id), to the ATOMIC
+    ``intake_candidate_to_paper`` primitive, which under ONE
     write lock re-checks the --max-concurrent count cap, cap-checks + allocates an equal slice =
     floor(equity / max_concurrent to cents) (Σ allocations + slice ≤ paper account equity), and
     CASes candidate→paper — commit-or-rollback together, so there is no reachable
