@@ -361,14 +361,17 @@ def test_sync_strategy_and_dependents_updates_doc_family_and_index(tmp_path):
     assert "backtested" in idx and "[[alpha]]" in idx
 
 
-def test_sync_strategy_and_dependents_absent_doc_is_noop(tmp_path):
+def test_sync_strategy_and_dependents_scaffolds_an_absent_doc(tmp_path):
+    # This path USED to no-op on an absent doc, on the assumption that `strategy new` was the only
+    # way a strategy came into existence. The factory broke that assumption — it authors a module
+    # and registers it via `paper merge-back` — so every strategy on main ended up undocumented.
     from algua.knowledge.sync import sync_strategy_and_dependents
 
     s = _settings(tmp_path)
     out = sync_strategy_and_dependents(s, "ghost", stage="backtested", metadata=None)
-    assert out == {"strategies": [], "families": []}
-    # No doc scaffolded — this path never creates one.
-    assert not strategy_doc_path(s, "ghost").exists()
+    assert out == {"strategies": ["ghost"], "families": []}
+    fm, _ = parse_doc(strategy_doc_path(s, "ghost").read_text())
+    assert fm["name"] == "ghost" and fm["stage"] == "backtested"
 
 
 def test_write_text_atomic_no_torn_file_and_replaces(tmp_path):
@@ -382,6 +385,66 @@ def test_write_text_atomic_no_torn_file_and_replaces(tmp_path):
     assert target.read_text() == "second"
     # No stray temp files left behind.
     assert not list(target.parent.glob(".sync-*"))
+
+
+# --- scaffold-on-sync -----------------------------------------------------------------------
+#
+# `strategy new` scaffolds the doc, but the autonomous factory never calls it: the research loop
+# authors a module and `paper merge-back` registers it. Every strategy on main was minted that way,
+# so ALL TEN had no kb doc and `doctor`'s REQUIRED knowledge_base check could never go green.
+
+
+def test_sync_strategy_doc_scaffolds_a_missing_doc_when_asked(tmp_path):
+    s = _settings(tmp_path)
+    assert sync_strategy_doc(
+        s, "alpha", stage="paper", metadata={"family": "momentum"}, scaffold=True) is True
+    fm, body = parse_doc(strategy_doc_path(s, "alpha").read_text())
+    assert fm["name"] == "alpha"
+    assert fm["stage"] == "paper"                 # the REGISTRY stage, not the template's "idea"
+    assert fm["family"] == "[[momentum]]"
+    assert "## Hypothesis" in body               # a real scaffold, not an empty file
+
+
+def test_sync_strategy_doc_does_not_scaffold_by_default(tmp_path):
+    s = _settings(tmp_path)
+    s.knowledge_dir.mkdir(parents=True)
+    assert sync_strategy_doc(s, "alpha", stage="idea") is False
+    assert not strategy_doc_path(s, "alpha").exists()
+
+
+def test_sync_strategy_doc_never_overwrites_an_existing_doc(tmp_path):
+    s = _settings(tmp_path)
+    _scaffold(s, "alpha")
+    doc = strategy_doc_path(s, "alpha")
+    doc.write_text(doc.read_text().replace(
+        "_What edge is claimed, and why._", "hand-written hypothesis worth keeping"))
+    sync_strategy_doc(s, "alpha", stage="paper", scaffold=True)
+    text = doc.read_text()
+    assert "hand-written hypothesis worth keeping" in text
+    assert parse_doc(text)[0]["stage"] == "paper"
+
+
+def test_sync_all_backfills_every_registered_strategy(tmp_path):
+    # `strategy doc --all` is the catch-up path: the whole registry, docs and all.
+    s = _settings(tmp_path)
+    summary = sync_all(s, {"alpha": "paper", "beta": "backtested"})
+    assert sorted(summary["strategies"]) == ["alpha", "beta"]
+    ok, detail = kb_check(s, {"alpha": "paper", "beta": "backtested"})
+    assert ok is True, detail
+
+
+def test_sync_strategy_and_dependents_scaffolds_so_the_factory_path_self_heals(tmp_path):
+    from algua.knowledge.sync import sync_strategy_and_dependents
+
+    s = _settings(tmp_path)
+    _scaffold_family(s, "momentum")
+    summary = sync_strategy_and_dependents(
+        s, "alpha", stage="paper", metadata={"family": "momentum"})
+    assert summary["strategies"] == ["alpha"]
+    assert summary["families"] == ["momentum"]
+    ok, detail = kb_check(s, {"alpha": "paper"})
+    assert ok is True, detail
+    assert "[[alpha]]" in family_doc_path(s, "momentum").read_text()
 
 
 def test_kb_sync_lock_is_reentrant_across_sequential_acquire(tmp_path):

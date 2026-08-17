@@ -202,9 +202,12 @@ def doc(
     if all_ or name is None:
         summary = sync_all(settings, stages, metadata={n: kb_metadata(r) for n, r in recs.items()})
     else:
-        meta = kb_metadata(recs[name]) if name in recs else None
-        if not sync_strategy_doc(settings, name, stage=stages.get(name), metadata=meta):
-            raise ValueError(f"no strategy doc for {name!r}; run `strategy new` first")
+        if name not in recs:
+            raise ValueError(f"{name!r} is not registered; nothing to document")
+        # scaffold=True: a registered strategy is entitled to a doc, and the factory registers
+        # strategies without ever going through `strategy new` (see sync_strategy_doc).
+        sync_strategy_doc(settings, name, stage=stages.get(name), metadata=kb_metadata(recs[name]),
+                          scaffold=True)
         # Keep the family roster consistent with this strategy's freshly-synced stage.
         family = strategy_family(settings, name)
         if family:
