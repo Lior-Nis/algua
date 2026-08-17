@@ -6,9 +6,14 @@ marker, and a git-dir-anchored run lock — whether to actually run the wrapped 
 weekend/holiday firing, a re-fire of a session already completed, or an overlap with a still-running
 sibling all no-op cleanly.
 
-- `algua-paper.{service,timer}` — the daily paper trading cycle (`--job paper`), ~30m after the US
-  close (21:30 UTC). **Daily on purpose, NOT weekdays-only**: the operator wrapper's XNYS calendar
-  gate no-ops non-session firings, so the timer never re-encodes the exchange calendar.
+- `algua-paper.{service,timer}` — the paper trading cycle (`--job paper`), fired **every 20 minutes
+  at :07/:27/:47**. It trades at most once per XNYS session — the per-session marker no-ops every
+  later firing — so the repetition exists purely to RETRY: a firing that loses `operator.lock` to a
+  merge-back drain, or a `deferred: true` reconcile cycle, is re-attempted 20 minutes later instead
+  of waiting a day (`session_gate` only ever targets the most-recent COMPLETED session, so a missed
+  session is otherwise lost outright, not deferred). The `:07` offset keeps every firing off the
+  drainer's `:00/:30` grid. **Daily on purpose, NOT weekdays-only**: the operator wrapper's XNYS
+  calendar gate no-ops non-session firings, so the timer never re-encodes the exchange calendar.
 - `algua-research.{service,timer}` — the autonomous **research producer** cycle at **factory
   cadence: every 2 hours** (12/day; see
   `docs/superpowers/specs/2026-08-10-strategy-factory-design.md`): a Codex agent ideates → authors
@@ -18,7 +23,7 @@ sibling all no-op cleanly.
   minutes, drains exactly one eligible candidate off the durable `data/mergeback-queue.json` (the
   producer enqueues into it — see "Autonomous research loop" below) and runs the REAL,
   authoritative `paper merge-back` through `algua operator lock-run`, which shares `operator.lock`
-  with the daily paper tick. Trusted plumbing, no LLM, no sandbox. See "Auto merge-back (factory
+  with the paper tick. Trusted plumbing, no LLM, no sandbox. See "Auto merge-back (factory
   slice 3)" below.
 
 ## Install
@@ -78,10 +83,12 @@ templates for longer than one re-run. Use `loginctl enable-linger <user>` so use
 inspect with `systemctl --user list-timers 'algua-*'` / `journalctl --user -u algua-research.service`.
 
 **Factory cadence (slice 1).** Research fires **every 2h** (`OnCalendar=*-*-* 00/2:00:00 UTC`,
-overlaps skip via the launcher's non-blocking flock); paper ticks **daily at 21:30 UTC**
-(post-close; the calendar gate no-ops non-sessions — do NOT make it weekdays-only); the merge-back
-drainer fires **every 30 minutes**. Enable ALL THREE so paper evidence starts accruing the moment
-the first strategy reaches the book.
+overlaps skip via the launcher's non-blocking flock); paper fires **every 20 minutes at :07/:27/:47
+UTC** and trades at most once per session (the calendar gate no-ops non-sessions and the marker
+no-ops repeats — do NOT make it weekdays-only, and do NOT collapse it back to a single daily fire:
+that is the retry budget for a lost `operator.lock` race); the merge-back drainer fires **every 30
+minutes** at `:00/:30`, deliberately disjoint from the paper grid. Enable ALL THREE so paper
+evidence starts accruing the moment the first strategy reaches the book.
 
 **Mutual exclusion around the paper tick (#316, closed by factory slice 3).** `paper merge-back`
 and `paper trade-tick`/`run-all` mutate the same shared checkout + registry. When the drainer
@@ -91,7 +98,8 @@ merge-back" below), this is **real kernel-enforced mutual exclusion**: `lock-run
 contended attempt is a benign no-op that retries next cycle, never a race. This guarantee is
 per-invocation-path, not per-command: a HUMAN running `paper merge-back` directly (bypassing
 `lock-run`) still relies on operator discipline, exactly as before — do not run a direct manual
-`paper merge-back` around the 21:30 UTC paper tick window.
+`paper merge-back` while a paper tick may fire (every 20 minutes; in practice, the hours right
+after the US close, when the session is newly complete and the tick has not yet recorded it).
 
 ## Why the wrapper, not just the timer
 
@@ -241,7 +249,8 @@ overrides rotation entirely.
 overlapping cycles (with `TIMEOUT=45m` + `SYNC_TIMEOUT=5m` under `TimeoutStartSec=4200`, each slot has
 ~50m of headroom anyway). It does **not** contend with the paper operator (research writes only
 scratch; the sole authoritative writer, `paper merge-back`, has its own `merge_back.lock` + operator
-policy), and no research firing coincides with the 21:30-UTC paper slot.
+policy), and research fires on the hour while paper fires at `:07/:27/:47`, so the two grids never
+coincide either.
 
 **Failure propagation.** The driver captures the `codex exec` exit code and propagates a non-zero
 (timeout=124, or an auth/runtime error) so the systemd unit **fails** rather than silently reporting a
