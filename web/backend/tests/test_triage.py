@@ -72,6 +72,42 @@ def test_a_wedged_queue_ranks_below_a_strategy_because_nothing_is_lost_yet() -> 
     assert [item["kind"] for item in result["items"]] == ["strategy", "queue_wedged"]
 
 
+def test_a_stranded_strategy_is_listed_once_by_its_cause_not_twice() -> None:
+    """Caught in production: `liquidity_stable` appeared as BOTH `capital_stranded` and `idle`.
+    The strategy is idle BECAUSE it holds no slice — listing both states the symptom under the
+    diagnosis and doubles the apparent workload."""
+    stranded = {"strategy": "liquidity_stable", "stage": "paper", "since": "...",
+                "ever_ticked": False}
+    result = build_triage(
+        _fleet(alerting=[_row("liquidity_stable", "idle", staleness_sessions=None)]),
+        _ops(),
+        _book([stranded]),
+    )
+    assert [item["kind"] for item in result["items"]] == ["capital_stranded"]
+
+
+def test_an_unrelated_alerting_strategy_still_appears() -> None:
+    """Suppression is per-strategy, not a blanket mute of the fleet source."""
+    stranded = {"strategy": "liquidity_stable", "stage": "paper", "since": "...",
+                "ever_ticked": False}
+    result = build_triage(
+        _fleet(alerting=[_row("liquidity_stable", "idle"), _row("momo", "stale")]),
+        _ops(),
+        _book([stranded]),
+    )
+    assert [item["kind"] for item in result["items"]] == ["capital_stranded", "strategy"]
+    assert result["items"][1]["title"] == "momo stale"
+
+
+def test_a_strategy_row_never_renders_a_blank_detail() -> None:
+    """An item with no detail costs a tap to learn nothing. Production hit this: an `idle` row
+    has no kill-switch reason and null staleness, so both detail sources were empty."""
+    result = build_triage(
+        _fleet(alerting=[_row("ghost", "idle", staleness_sessions=None)]), _ops(), _book(),
+    )
+    assert result["items"][0]["detail"] == "stage paper — no tick evidence"
+
+
 def test_every_item_carries_an_actionable_detail() -> None:
     result = build_triage(
         _fleet(),
