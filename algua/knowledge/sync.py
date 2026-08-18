@@ -13,6 +13,7 @@ from algua.config.settings import Settings
 from algua.contracts.lifecycle import Stage
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 from algua.knowledge.metrics import latest_run_metrics
+from algua.knowledge.templates import scaffold_strategy_doc
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
@@ -264,16 +265,33 @@ def sync_strategy_doc(
     *,
     stage: str | None,
     metadata: dict[str, Any] | None = None,
+    scaffold: bool = False,
 ) -> bool:
     """Rewrite the synced parts of one strategy doc. Returns False if the doc is absent.
 
     ``stage`` and ``metadata`` are read by the caller at the CLI seam so this layer never touches
     the registry. ``metadata`` carries the registry-owned organizational fields; only those keys
     (plus ``stage``/``mlflow_run``) are overwritten — any other frontmatter key is preserved.
+
+    ``scaffold=True`` CREATES the doc (and its parent directory) from the standard template when it
+    is absent, then syncs it as usual. ``strategy new`` used to be the only thing that ever created
+    a strategy doc, which silently stopped being true when the factory arrived: the research loop
+    authors a module and ``paper merge-back`` registers it, neither going near ``strategy new``. A
+    registered strategy with no doc is a curation gap the vault should close by itself, not a
+    permanent red mark on ``doctor``'s REQUIRED knowledge_base check. Scaffolding is opt-in so the
+    write stays confined to callers that mean "the vault must reflect the registry" — an existing
+    doc is NEVER overwritten, only its synced blocks are.
     """
     path = strategy_doc_path(settings, name)
     if not path.exists():
-        return False
+        if not scaffold:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_text_atomic(path, scaffold_strategy_doc(
+            name,
+            family=_unwikilink((metadata or {}).get("family")),
+            derived_from=_unwikilink((metadata or {}).get("derived_from")),
+        ))
     fm, body = parse_doc(path.read_text())
     if stage is not None:
         fm["stage"] = stage
@@ -416,11 +434,17 @@ def sync_strategy_and_dependents(
 
     The single-strategy analog of ``sync_all``, serialized under ``kb_sync_lock`` so a concurrent
     sync never interleaves the roster/index scan with another sync's writes. Returns the same
-    ``{"strategies": [...], "families": [...]}`` shape. An absent strategy doc is a no-op (empty
-    ``strategies``): this path never scaffolds a doc — that is ``strategy new``'s job.
+    ``{"strategies": [...], "families": [...]}`` shape.
+
+    An absent doc is SCAFFOLDED here rather than skipped. This is the transactional-side-effect
+    entry every stage-mutating gate command routes through, so it is the one place that sees a
+    strategy the registry gained without ``strategy new`` — which, since the factory, is every
+    strategy: the research loop authors a module and ``paper merge-back`` registers it. Skipping
+    left ALL of them undocumented and ``doctor``'s REQUIRED knowledge_base check permanently red.
     """
     with kb_sync_lock(settings):
-        synced = sync_strategy_doc(settings, name, stage=stage, metadata=metadata)
+        synced = sync_strategy_doc(
+            settings, name, stage=stage, metadata=metadata, scaffold=True)
         families: list[str] = []
         if synced:
             family = strategy_family(settings, name)
@@ -438,13 +462,17 @@ def sync_all(
     """Sync each registered strategy's doc (stage + optional metadata), every family doc, then
     indexes. ``metadata`` maps strategy name -> its registry metadata dict.
 
-    Strategy docs are synced before family docs so member rosters count freshly-synced stages.
+    Strategy docs are synced before family docs so member rosters count freshly-synced stages. A
+    missing doc is SCAFFOLDED (see :func:`sync_strategy_doc`), making this the backfill that brings
+    the whole vault in line with the registry — including strategies the factory registered without
+    ever calling ``strategy new``.
     """
     metadata = metadata or {}
     synced: list[str] = []
     with kb_sync_lock(settings):
         for name, stage in stages.items():
-            if sync_strategy_doc(settings, name, stage=stage, metadata=metadata.get(name)):
+            if sync_strategy_doc(settings, name, stage=stage, metadata=metadata.get(name),
+                                 scaffold=True):
                 synced.append(name)
         families: list[str] = []
         fam_dir = strategies_dir(settings) / "families"
