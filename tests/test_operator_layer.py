@@ -7,6 +7,7 @@ required frontmatter; and the skills are reachable via the portable symlink path
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -106,6 +107,50 @@ def test_mergeback_drain_systemd_units_present_and_shaped():
     assert "OnCalendar=" in tmr
     assert "Persistent=true" in tmr
     assert "WantedBy=timers.target" in tmr
+
+
+def _oncalendar(unit: str) -> str:
+    for line in (REPO / "deploy" / "systemd" / unit).read_text().splitlines():
+        if line.startswith("OnCalendar="):
+            return line.split("=", 1)[1].strip()
+    raise AssertionError(f"{unit} has no OnCalendar= line")
+
+
+def _fire_minutes(spec: str) -> set[int]:
+    """The minutes-past-the-hour a systemd ``OnCalendar`` spec fires at.
+
+    Supports the two shapes these units use: a repeating ``*:<start>/<step>:<sec>`` and a fixed
+    ``<hour>:<minute>:<sec>``. A fixed daily time contributes its single minute — conservative for
+    the disjointness check below (it can only ever collide at that one hour, so treating it as
+    always-colliding never lets a real collision through)."""
+    time_field = spec.split()[1] if " " in spec else spec
+    repeating = re.fullmatch(r"\*:(\d{1,2})/(\d{1,2}):\d{1,2}", time_field)
+    if repeating:
+        start, step = int(repeating.group(1)), int(repeating.group(2))
+        return set(range(start, 60, step))
+    fixed = re.fullmatch(r"[\d*/,.]+:(\d{1,2}):\d{1,2}", time_field)
+    assert fixed, f"unsupported OnCalendar time field {time_field!r}"
+    return {int(fixed.group(1))}
+
+
+def test_paper_and_mergeback_drain_timers_never_fire_on_the_same_minute():
+    # Both units take the SAME `operator.lock`, and a drain cycle holds it for many minutes (a full
+    # quality gate + an authoritative evidence sweep). A paper fire landing on a drain start loses
+    # the race and emits {"ran": false, "reason": "locked"} — and because `session_gate` always
+    # targets the most-recent COMPLETED session, the session it was going to trade is never
+    # revisited. Keeping the two firing grids disjoint is what stops that daily collision.
+    paper = _fire_minutes(_oncalendar("algua-paper.timer"))
+    drain = _fire_minutes(_oncalendar("algua-mergeback-drain.timer"))
+    assert paper and drain
+    assert not (paper & drain), (
+        f"paper fires at minutes {sorted(paper)} and the merge-back drainer at {sorted(drain)}; "
+        f"they share {sorted(paper & drain)} and contend for operator.lock")
+
+
+def test_paper_timer_fires_repeatedly_so_a_lost_lock_race_retries():
+    # A single daily fire has no retry: one lost race = one trading session silently lost. The
+    # session marker makes every extra fire a cheap `already_ran` no-op, so repetition is free.
+    assert len(_fire_minutes(_oncalendar("algua-paper.timer"))) > 1
 
 
 def test_install_user_units_includes_mergeback_drain_pair():
