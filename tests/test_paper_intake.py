@@ -392,3 +392,103 @@ def test_paper_allocate_count_cap_blocks_new_tenant_but_allows_resize(monkeypatc
     assert resized.exit_code == 0, resized.output
     assert json.loads(resized.output)["prior_capital"] == 10_000.0
     assert _capital_of(_S2) == 20_000.0
+
+
+# ---------------------------------------------------------------------------
+# Re-admission: an unallocated BOOK-STAGE tenant is a broken invariant, not a queue member.
+#
+# `paper -> dormant` (and `live -> paper`) atomically REVOKES the allocation, but coming back
+# `dormant -> paper` restores only the stage. Before this, the strategy sat at stage `paper`
+# holding no book slice: `paper run-all` skipped it as unallocated, it never ticked, and
+# `fleet health` alerted on it forever with nothing in the autonomous loop able to fix it.
+# Observed on main 2026-08-17: liquidity_stable_quality_momentum, benched 08-13, returned 08-14,
+# never ticked once.
+# ---------------------------------------------------------------------------
+
+def _bench_and_return(name: str) -> None:
+    """Take an allocated paper tenant out to `dormant` (revoking its slice) and back to `paper`,
+    the exact round-trip that leaves a book-stage strategy holding no allocation."""
+    out = runner.invoke(app, ["registry", "transition", name, "--to", "dormant",
+                              "--actor", "agent", "--reason", "benched for the test"])
+    assert out.exit_code == 0, out.output
+    back = runner.invoke(app, ["registry", "transition", name, "--to", "paper",
+                               "--actor", "agent", "--reason", "returning from bench"])
+    assert back.exit_code == 0, back.output
+
+
+def test_intake_readmits_an_unallocated_paper_tenant(monkeypatch):
+    """A strategy returned from `dormant` sits at stage paper with no slice. The next intake must
+    re-admit it — otherwise it can never trade again without a human running `paper allocate`."""
+    _to_candidate(_S1)
+    _seed_paper_allocation(_S1, capital=10_000.0)
+    _bench_and_return(_S1)
+    assert _stage_of(_S1).value == "paper"
+    assert not _has_allocation(_S1)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "5"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    # Reported separately from `admitted`: no stage changed, a book slice was restored.
+    assert [r["strategy"] for r in payload["readmitted"]] == [_S1]
+    assert payload["readmitted"][0]["capital"] == 20_000.0
+    assert payload["admitted"] == []
+    assert _has_allocation(_S1) and _capital_of(_S1) == 20_000.0
+
+
+def test_readmission_precedes_a_fresh_candidate_when_the_cap_binds(monkeypatch):
+    """At a cap of 1, the returning book tenant wins the slot: it was admitted to the book before
+    the candidate existed, and a strategy the operator explicitly returned to `paper` must not be
+    starved by a newcomer."""
+    _to_candidate(_S1)
+    _seed_paper_allocation(_S1, capital=10_000.0)
+    _bench_and_return(_S1)
+    _to_candidate(_S2)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "1"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert [r["strategy"] for r in payload["readmitted"]] == [_S1]
+    assert payload["admitted"] == []
+    assert payload["queued"] == [_S2]
+    assert _has_allocation(_S1)
+    assert _stage_of(_S2).value == "candidate" and not _has_allocation(_S2)
+
+
+def test_readmission_is_refused_when_the_book_is_already_full(monkeypatch):
+    """A full book binds re-admission exactly as it binds admission — the returning tenant is
+    reported queued, never funded past the count cap."""
+    _to_candidate(_S2)
+    _seed_paper_allocation(_S2, capital=10_000.0)      # occupies the sole slot
+    _to_candidate(_S1)
+    _seed_paper_allocation(_S1, capital=10_000.0)
+    _bench_and_return(_S1)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "1"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert payload["readmitted"] == []
+    assert payload["queued"] == [_S1]
+    assert not _has_allocation(_S1)
+
+
+def test_intake_never_resizes_an_already_allocated_tenant(monkeypatch):
+    """Re-admission targets ONLY the unallocated. An existing tenant's capital base is left exactly
+    as the operator set it — intake is not a rebalancer."""
+    _to_candidate(_S1)
+    _seed_paper_allocation(_S1, capital=10_000.0)
+
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _FakeBroker(100_000.0))
+    result = runner.invoke(app, ["paper", "intake", "--max-concurrent", "5"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["readmitted"] == []
+    assert _capital_of(_S1) == 10_000.0
