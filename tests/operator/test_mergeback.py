@@ -20,6 +20,7 @@ from algua.operator.journal import (
     strict_relaxation_fingerprint,
 )
 from algua.operator.mergeback import (
+    ALREADY_PRESENT_PREFIX,
     JournalRegistryMismatchError,
     LocalMainDriftError,
     MergeContentAbsentError,
@@ -47,6 +48,11 @@ class FakeGit:
     entries: list[DiffEntry] = field(default_factory=lambda: [_STRAT_ENTRY])
     second_parent: str | None = None
     ancestor: bool = True
+    # Is the BRANCH TIP itself already an ancestor of origin/main (a sibling strategy on the same
+    # multi-strategy research branch already merged it)? Modeled separately from ``ancestor``, which
+    # answers the same question about a MERGE COMMIT. A list is consumed one entry per call, so a
+    # test can model the tip vanishing from origin between promote and intake.
+    tip_on_origin: bool | list[bool] = False
     origin_blobs: dict[str, str] | None = None
     cas_fails: bool = False
     crash_after_push: bool = False
@@ -114,6 +120,10 @@ class FakeGit:
         return sha == self.merge_sha and second == expected_second_parent
 
     def is_ancestor(self, sha: str, ref: str) -> bool:
+        if sha == self.branch_tip:
+            if isinstance(self.tip_on_origin, list):
+                return self.tip_on_origin.pop(0) if self.tip_on_origin else False
+            return self.tip_on_origin
         return self.ancestor
 
     def push_cas(self, merge_sha: str, expected_base: str) -> None:
@@ -976,3 +986,109 @@ def test_resume_feeds_journaled_ensure_status_not_the_fresh_reread() -> None:
     assert ensurer.calls == [(_TIP, _MERGE, _BASE)]   # ensure still runs (idempotent)
     assert producer.calls == [("created", _TIP)]      # ...but the JOURNALED status wins
     assert journal.latest("s", _TIP).ensure_status == "created"
+
+
+# --- ALREADY ON MAIN: a sibling strategy on the same branch already merged it ---------------------
+#
+# A research branch can carry SEVERAL candidate strategies (the launcher names such a branch
+# `research-run/<stamp>--<s1>+<s2>`, and the queue holds one item per strategy). The FIRST item to
+# drain merges the branch; every LATER sibling then finds its branch tip already an ancestor of
+# origin/main. Before this path existed, `git merge --no-ff --no-commit` was "Already up to date"
+# (staging nothing) and `git commit --no-edit` exited 1 — an unclassifiable failure that never
+# consumed an attempt and blocked the queue head forever.
+
+
+def _gate_that_must_not_run(calls: list[str]):
+    def _gate() -> str:
+        calls.append("gate")
+        return _GATED_TREE
+    return _gate
+
+
+def test_already_on_main_promotes_without_merging() -> None:
+    git = FakeGit(tip_on_origin=True)
+    p = Promoter(commit=True)
+    journal = FakeJournal()
+    gate_calls: list[str] = []
+    result = _run(git, journal, stage={"s": None}, promoter=p,
+                  run_gate=_gate_that_must_not_run(gate_calls))
+    assert result.status == "promoted_allocated"
+    assert result.promoted and not result.merged and not result.reverted
+    # Nothing was merged, gated, committed or pushed — the code is already on origin/main.
+    assert gate_calls == []
+    assert not any(c in ("commit", "abort") or (isinstance(c, tuple) and c[0] in ("begin", "push"))
+                   for c in git.calls)
+    # The attempt token is derived from an explicit already-present marker, never a real merge sha.
+    expected = derive_attempt_token(
+        "s", _TIP, f"{ALREADY_PRESENT_PREFIX}{_TIP}", strict_relaxation_fingerprint())
+    assert p.tokens == [expected]
+    rec = journal.latest("s", _TIP)
+    assert rec.merge_mode == "already_present" and rec.terminal == "promoted_allocated"
+
+
+def test_already_on_main_promote_failure_never_reverts() -> None:
+    # The merge commit on main belongs to a SIBLING attempt whose strategy may already be live with
+    # allocated capital — reverting it here would rip that sibling out of main.
+    git = FakeGit(tip_on_origin=True)
+    p = Promoter(commit=False)
+    journal = FakeJournal()
+    result = _run(git, journal, stage={"s": None}, promoter=p)
+    assert result.status == "promote_failed"
+    assert not result.reverted and not result.merged and not result.promoted
+    assert not any(isinstance(c, tuple) and c[0] in ("revert", "revert_push") for c in git.calls)
+    assert journal.latest("s", _TIP).terminal == "promote_failed"
+
+
+def test_already_on_main_promote_raises_propagates_without_reverting() -> None:
+    git = FakeGit(tip_on_origin=True)
+    p = Promoter(commit=False, raises=RuntimeError("promote blew up"))
+    with pytest.raises(RuntimeError, match="promote blew up"):
+        _run(git, FakeJournal(), stage={"s": None}, promoter=p)
+    assert not any(isinstance(c, tuple) and c[0] == "revert" for c in git.calls)
+
+
+def test_already_on_main_rechecks_presence_before_intake() -> None:
+    # Presence is re-verified against a FRESHLY-FETCHED origin/main immediately before capital is
+    # allocated: a revert landing between promote and intake must fail closed, not allocate.
+    #   call 1 = the already-present detection, 2 = the pre-promote check, 3 = the intake re-check.
+    git = FakeGit(tip_on_origin=[True, True, False])
+    intake_calls: list[str] = []
+
+    def _intake() -> dict:
+        intake_calls.append("intake")
+        return {}
+
+    with pytest.raises(MergeContentAbsentError):
+        _run(git, FakeJournal(), stage={"s": None}, intake=_intake)
+    assert intake_calls == []
+
+
+def test_already_on_main_fails_closed_when_content_vanishes_before_promote() -> None:
+    git = FakeGit(tip_on_origin=[True, False])
+    p = Promoter()
+    with pytest.raises(MergeContentAbsentError):
+        _run(git, FakeJournal(), stage={"s": None}, promoter=p)
+    assert p.tokens == []
+
+
+def test_already_on_main_terminal_replay_reports_no_merge() -> None:
+    journal = FakeJournal()
+    journal.append(MergeBackRecord(
+        strategy="s", branch="feat/s", branch_tip=_TIP, base_sha=_BASE,
+        merge_mode="already_present", merge_sha=f"{ALREADY_PRESENT_PREFIX}{_TIP}",
+        promote_status="passed", intake_status="allocated", terminal="promoted_allocated"))
+    p = Promoter()
+    result = _run(FakeGit(tip_on_origin=True), journal, stage={"s": "paper"}, promoter=p)
+    assert result.status == "promoted_allocated"
+    assert result.promoted and not result.merged and not result.reverted
+    assert p.tokens == []  # idempotent replay never re-promotes
+
+
+def test_not_yet_on_main_still_takes_the_merging_path() -> None:
+    # Guard the discriminator itself: a branch NOT on origin/main must still merge/gate/push.
+    git = FakeGit(tip_on_origin=False)
+    result = _run(git, FakeJournal(), stage={"s": "backtested"})
+    assert result.status == "promoted_allocated"
+    assert result.merged
+    assert ("begin", _TIP) in git.calls and "commit" in git.calls
+    assert ("push", _MERGE) in git.calls

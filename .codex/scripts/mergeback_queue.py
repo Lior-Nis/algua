@@ -23,7 +23,7 @@ Queue schema (one JSON object per file):
     {"items": {"<strategy>@<branch>": {
         "strategy": str, "universe": str, "start": "YYYY-MM-DD", "end": "YYYY-MM-DD",
         "branch": str, "eval_context": dict (see validate_eval_context), "enqueued_at": ISO8601,
-        "attempts": int,
+        "attempts": int, "transient_failures": int,
         "status": "pending" | "in_progress" | "gate_failed" | "terminal_failed"
                  | "promoted_allocated" | "promoted_queued" | "already_done",
         "last_attempt_at": ISO8601 | None, "last_result": dict | None,
@@ -64,7 +64,10 @@ lock-contention no-op, never an unparseable/hard failure — see ``record_attemp
 Lock contention and hard/unparseable failures never counted as an attempt (``attempts`` /
 ``last_attempt_at`` / ``last_result`` are left untouched) — see ``record_attempt`` — and RELEASE
 the reservation immediately back to the item's pre-reservation status (never left wedged
-``in_progress`` waiting out ``RESERVATION_STALE_SECONDS``, since no real attempt happened).
+``in_progress`` waiting out ``RESERVATION_STALE_SECONDS``, since no real attempt happened). They
+are nonetheless BOUNDED: ``MAX_TRANSIENT_FAILURES`` consecutive transient outcomes terminal-fail
+the item (#549), because selection is FIFO and an item failing the same unclassifiable way every
+cycle would otherwise hold the head forever and starve the whole queue.
 """
 
 from __future__ import annotations
@@ -89,6 +92,7 @@ from typing import Any
 __all__ = [
     "MAX_MERGEBACK_ATTEMPTS",
     "MAX_SWEEP_COMBOS",
+    "MAX_TRANSIENT_FAILURES",
     "RESERVATION_STALE_SECONDS",
     "VALID_RANK_BY",
     "QueueLockTimeout",
@@ -117,6 +121,14 @@ _RESERVED_STATUS = "in_progress"
 _TERMINAL_QUEUE_STATUSES = _SUCCESS_STATUSES | frozenset({"terminal_failed"})
 
 MAX_MERGEBACK_ATTEMPTS = 3
+# How many CONSECUTIVE unclassifiable ("transient") outcomes an item may accumulate before it is
+# terminal-failed (#549). A transient outcome deliberately burns no `attempts` — it is an
+# environment problem, not a branch-content verdict — but selection is FIFO, so an item that fails
+# the SAME way every cycle otherwise sits at the head FOREVER, re-running the multi-minute quality
+# gate and starving every item behind it. At the drainer's 30-minute cadence this budget is ~2.5h
+# of continuous failure before the head is released; the retained `last_result` says why, and the
+# operational resurrection recipe (drop the item, re-enqueue) brings it back once fixed.
+MAX_TRANSIENT_FAILURES = 5
 _DEFAULT_BACKOFF_MINUTES_PER_ATTEMPT = 10
 # Generously above one full merge-back attempt's realistic worst case. The cycle now stacks the
 # FULL quality gate (~9 min observed) + a <=200-combo authoritative evidence sweep + a full-period
@@ -398,6 +410,7 @@ def enqueue(
         item = {
             "strategy": strategy, "universe": universe, "start": start, "end": end,
             "branch": branch, "eval_context": context, "enqueued_at": _now_iso(), "attempts": 0,
+            "transient_failures": 0,
             "status": "pending", "last_attempt_at": None, "last_result": None,
         }
         data["items"][key] = item
@@ -614,49 +627,71 @@ def _parse_result_json(stdout_text: str) -> dict | None:
     return None
 
 
-def classify_attempt(payload: dict | None, *, attempts: int, max_attempts: int) -> dict:
+def classify_attempt(
+    payload: dict | None, *, attempts: int, max_attempts: int, transient_failures: int = 0,
+    max_transient_failures: int = MAX_TRANSIENT_FAILURES,
+) -> dict:
     """Pure classification of one merge-back attempt's parsed result. Returns
-    ``{"action": ..., "status": str | None, "attempts": int}`` where ``action`` is one of:
+    ``{"action": ..., "status": str | None, "attempts": int, "transient_failures": int}`` where
+    ``action`` is one of:
 
-    - ``"lock_contention"`` — ``operator.lock`` was held; merge-back never ran. NOT an attempt.
+    - ``"lock_contention"`` — ``operator.lock`` was held; merge-back never ran. NOT an attempt, and
+      it does not spend the transient budget either (no work was even started, so it carries no
+      signal about the item's health).
     - ``"transient_failure"`` — unparseable stdout, OR an ``ok: false`` envelope (a raised
       fail-closed exception from ``paper merge-back`` itself, or from ``lock-run``'s own setup
       failure) that carries no recognized merge-back ``status``. Treated as an environment
-      problem, not a branch-content problem — NOT an attempt; the item is left exactly as it was.
+      problem, not a branch-content problem — NOT an attempt; only the consecutive-transient
+      counter moves.
+    - ``"transient_exhausted"`` — the ``max_transient_failures`` CONSECUTIVE-transient budget is
+      spent (#549). Still not an attempt, but terminal: selection is FIFO, so an item failing the
+      same unclassifiable way every cycle would otherwise hold the head forever and starve the
+      whole queue. Mapped to ``terminal_failed`` by the caller.
     - ``"terminal"`` — a recognized terminal ``status`` (success or non-retryable failure).
     - ``"retry"`` — ``gate_failed`` with headroom left under ``max_attempts``.
     - ``"exhausted"`` — ``gate_failed`` with no headroom left; terminal (mapped to
       ``terminal_failed`` by the caller).
 
     ``attempts`` in the returned dict is the NEW attempts count to persist (unchanged for
-    ``lock_contention``/``transient_failure``, incremented for every other action — "attempts"
-    counts REAL invocations, i.e. every time merge-back actually ran, regardless of outcome).
+    ``lock_contention``/``transient_failure``/``transient_exhausted``, incremented for every other
+    action — "attempts" counts REAL invocations, i.e. every time merge-back actually ran and
+    produced a classifiable verdict). ``transient_failures`` is the new CONSECUTIVE-transient
+    count: any real classification resets it to 0.
     """
     if payload is not None and payload.get("ran") is False and payload.get("reason") == "locked":
-        return {"action": "lock_contention", "status": None, "attempts": attempts}
+        return {"action": "lock_contention", "status": None, "attempts": attempts,
+                "transient_failures": transient_failures}
     if payload is None or payload.get("ok") is not True or "status" not in payload:
         # Either genuinely unparseable, or an ok:false envelope (a fail-closed exception out of
         # `paper merge-back` — moved remote, stage drift — or a `lock-run`-level setup failure
         # like git_dir_unresolved/lock_unavailable), or an ok:true envelope we don't recognize the
         # shape of. All three are "we cannot confidently classify this as a branch-content
-        # outcome" — transient/environmental, never counted as a burned attempt.
-        return {"action": "transient_failure", "status": None, "attempts": attempts}
+        # outcome" — transient/environmental, never counted as a burned attempt, but bounded so a
+        # permanently-broken item cannot wedge the FIFO head.
+        spent = transient_failures + 1
+        action = "transient_exhausted" if spent >= max_transient_failures else "transient_failure"
+        return {"action": action, "status": None, "attempts": attempts,
+                "transient_failures": spent}
     status = payload["status"]
     new_attempts = attempts + 1
     if status in _SUCCESS_STATUSES or status in _TERMINAL_FAILURE_STATUSES:
-        return {"action": "terminal", "status": status, "attempts": new_attempts}
+        return {"action": "terminal", "status": status, "attempts": new_attempts,
+                "transient_failures": 0}
     if status == _RETRYABLE_STATUS:
-        if new_attempts < max_attempts:
-            return {"action": "retry", "status": status, "attempts": new_attempts}
-        return {"action": "exhausted", "status": status, "attempts": new_attempts}
+        action = "retry" if new_attempts < max_attempts else "exhausted"
+        return {"action": action, "status": status, "attempts": new_attempts,
+                "transient_failures": 0}
     # An unrecognized status string (a future merge-back status this module doesn't know about
     # yet) — fail closed the same as an unparseable payload rather than silently mis-terminaling.
-    return {"action": "transient_failure", "status": None, "attempts": attempts}
+    spent = transient_failures + 1
+    action = "transient_exhausted" if spent >= max_transient_failures else "transient_failure"
+    return {"action": action, "status": None, "attempts": attempts, "transient_failures": spent}
 
 
 def record_attempt(
     queue_path: Path, lock_path: Path, *, key: str, stdout_text: str,
     max_attempts: int = MAX_MERGEBACK_ATTEMPTS,
+    max_transient_failures: int = MAX_TRANSIENT_FAILURES,
 ) -> dict:
     """Update ``key``'s queue entry after one drain attempt, under the lock.
 
@@ -671,7 +706,11 @@ def record_attempt(
     had before the reservation (not left wedged ``in_progress`` until
     ``RESERVATION_STALE_SECONDS`` elapses) so it is immediately eligible again next cycle. A caller
     that never went through :func:`select_and_reserve` (e.g. a direct call against a plain
-    ``pending``/``gate_failed`` item) sees no change at all, exactly as before reservations existed.
+    ``pending``/``gate_failed`` item) sees only its ``transient_failures`` counter move.
+
+    That counter is the head-of-line guard (#549): ``max_transient_failures`` CONSECUTIVE transient
+    outcomes terminal-fail the item (``transient_exhausted``) so a permanently-broken head cannot
+    starve the rest of the FIFO queue. Any real classification resets it to 0.
     """
     payload = _parse_result_json(stdout_text)
 
@@ -680,11 +719,24 @@ def record_attempt(
         if item is None:
             return data, {"action": "missing_key", "key": key}
         verdict = classify_attempt(
-            payload, attempts=item.get("attempts", 0), max_attempts=max_attempts)
+            payload, attempts=item.get("attempts", 0), max_attempts=max_attempts,
+            transient_failures=item.get("transient_failures", 0),
+            max_transient_failures=max_transient_failures)
+        item["transient_failures"] = verdict["transient_failures"]
         if verdict["action"] in ("lock_contention", "transient_failure"):
             if item.get("status") == _RESERVED_STATUS:
                 item["status"] = item.pop("pre_reservation_status", "pending")
                 item.pop("reserved_at", None)
+            return data, {"action": verdict["action"], "key": key, "item": dict(item)}
+        if verdict["action"] == "transient_exhausted":
+            # No real attempt ever completed, so `attempts` stays put — but the item must stop
+            # being selected (#549). Keep the last payload: it is the ONLY record of what kept
+            # failing, and an operator reads it to decide whether to re-enqueue.
+            item["status"] = "terminal_failed"
+            item["last_attempt_at"] = _now_iso()
+            item["last_result"] = payload
+            item.pop("reserved_at", None)
+            item.pop("pre_reservation_status", None)
             return data, {"action": verdict["action"], "key": key, "item": dict(item)}
         if verdict["action"] == "exhausted" or verdict["status"] in _TERMINAL_FAILURE_STATUSES:
             # gate_failed-at-cap, diff_policy_rejected, and promote_failed all land on the SAME
@@ -884,7 +936,7 @@ def _cmd_record_attempt(args: argparse.Namespace) -> int:
     stdout_text = sys.stdin.read() if args.stdin else args.stdout_text
     result = record_attempt(
         Path(args.queue), Path(args.lock), key=args.key, stdout_text=stdout_text or "",
-        max_attempts=args.max_attempts,
+        max_attempts=args.max_attempts, max_transient_failures=args.max_transient_failures,
     )
     print(json.dumps(result))
     return 0
@@ -932,6 +984,9 @@ def main(argv: list[str] | None = None) -> int:
     p_record.add_argument("--lock", required=True)
     p_record.add_argument("--key", required=True)
     p_record.add_argument("--max-attempts", type=int, default=MAX_MERGEBACK_ATTEMPTS)
+    p_record.add_argument(
+        "--max-transient-failures", type=int, default=MAX_TRANSIENT_FAILURES,
+        help="consecutive unclassifiable outcomes before the item is terminal-failed (#549)")
     p_record.add_argument("--stdout-text", default=None, help="the wrapped command's stdout")
     p_record.add_argument(
         "--stdin", action="store_true", help="read the wrapped command's stdout from stdin instead")

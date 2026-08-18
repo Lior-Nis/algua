@@ -196,37 +196,46 @@ def test_select_eligible_gate_failed_at_attempt_cap_not_eligible(paths):
 def test_classify_success_terminal(status):
     verdict = mergeback_queue.classify_attempt(
         {"ok": True, "status": status}, attempts=0, max_attempts=3)
-    assert verdict == {"action": "terminal", "status": status, "attempts": 1}
+    assert verdict == {"action": "terminal", "status": status, "attempts": 1,
+                       "transient_failures": 0}
 
 
 @pytest.mark.parametrize("status", ["diff_policy_rejected", "promote_failed"])
 def test_classify_hard_failure_terminal(status):
     verdict = mergeback_queue.classify_attempt(
         {"ok": True, "status": status}, attempts=0, max_attempts=3)
-    assert verdict == {"action": "terminal", "status": status, "attempts": 1}
+    assert verdict == {"action": "terminal", "status": status, "attempts": 1,
+                       "transient_failures": 0}
 
 
 def test_classify_gate_failed_retryable_under_cap():
     verdict = mergeback_queue.classify_attempt(
         {"ok": True, "status": "gate_failed"}, attempts=0, max_attempts=3)
-    assert verdict == {"action": "retry", "status": "gate_failed", "attempts": 1}
+    assert verdict == {"action": "retry", "status": "gate_failed", "attempts": 1,
+                       "transient_failures": 0}
 
 
 def test_classify_gate_failed_exhausted_at_cap():
     verdict = mergeback_queue.classify_attempt(
         {"ok": True, "status": "gate_failed"}, attempts=2, max_attempts=3)
-    assert verdict == {"action": "exhausted", "status": "gate_failed", "attempts": 3}
+    assert verdict == {"action": "exhausted", "status": "gate_failed", "attempts": 3,
+                       "transient_failures": 0}
 
 
 def test_classify_lock_contention_is_not_an_attempt():
     verdict = mergeback_queue.classify_attempt(
-        {"ok": True, "ran": False, "reason": "locked"}, attempts=1, max_attempts=3)
-    assert verdict == {"action": "lock_contention", "status": None, "attempts": 1}
+        {"ok": True, "ran": False, "reason": "locked"}, attempts=1, max_attempts=3,
+        transient_failures=2)
+    # Lock contention is a legitimate no-op — it neither burns an attempt nor spends the transient
+    # budget (no work was even started, so it carries no signal about the item's health).
+    assert verdict == {"action": "lock_contention", "status": None, "attempts": 1,
+                       "transient_failures": 2}
 
 
 def test_classify_unparseable_payload_is_transient_not_an_attempt():
     verdict = mergeback_queue.classify_attempt(None, attempts=1, max_attempts=3)
-    assert verdict == {"action": "transient_failure", "status": None, "attempts": 1}
+    assert verdict == {"action": "transient_failure", "status": None, "attempts": 1,
+                       "transient_failures": 1}
 
 
 def test_classify_ok_false_envelope_is_transient_not_an_attempt():
@@ -234,13 +243,43 @@ def test_classify_ok_false_envelope_is_transient_not_an_attempt():
     # lock-run setup failure (git_dir_unresolved/lock_unavailable) — neither is branch content.
     verdict = mergeback_queue.classify_attempt(
         {"ok": False, "error": "boom", "code": "internal"}, attempts=1, max_attempts=3)
-    assert verdict == {"action": "transient_failure", "status": None, "attempts": 1}
+    assert verdict == {"action": "transient_failure", "status": None, "attempts": 1,
+                       "transient_failures": 1}
 
 
 def test_classify_unrecognized_status_is_transient_not_an_attempt():
     verdict = mergeback_queue.classify_attempt(
         {"ok": True, "status": "some_future_status"}, attempts=1, max_attempts=3)
-    assert verdict == {"action": "transient_failure", "status": None, "attempts": 1}
+    assert verdict == {"action": "transient_failure", "status": None, "attempts": 1,
+                       "transient_failures": 1}
+
+
+# --- the transient-failure budget (#549: a repeating infra failure must not block the queue head) -
+
+
+def test_classify_transient_failures_accumulate_up_to_the_budget():
+    budget = mergeback_queue.MAX_TRANSIENT_FAILURES
+    verdict = mergeback_queue.classify_attempt(
+        None, attempts=0, max_attempts=3, transient_failures=budget - 2)
+    assert verdict["action"] == "transient_failure"
+    assert verdict["transient_failures"] == budget - 1
+
+
+def test_classify_transient_failures_exhaust_the_budget():
+    # The drainer selects FIFO, so an item that fails the SAME unclassifiable way every cycle would
+    # otherwise sit at the head forever, re-running the (multi-minute) quality gate and starving
+    # every item behind it. The budget makes it terminal so the queue drains past it.
+    budget = mergeback_queue.MAX_TRANSIENT_FAILURES
+    verdict = mergeback_queue.classify_attempt(
+        None, attempts=0, max_attempts=3, transient_failures=budget - 1)
+    assert verdict == {"action": "transient_exhausted", "status": None, "attempts": 0,
+                       "transient_failures": budget}
+
+
+def test_classify_a_real_outcome_resets_the_transient_streak():
+    verdict = mergeback_queue.classify_attempt(
+        {"ok": True, "status": "gate_failed"}, attempts=0, max_attempts=3, transient_failures=2)
+    assert verdict["transient_failures"] == 0
 
 
 # --- record_attempt (queue side-effects) --------------------------------------------------------
@@ -260,7 +299,7 @@ def test_record_attempt_lock_contention_leaves_item_completely_untouched(paths):
     assert after == before  # not even last_attempt_at moved
 
 
-def test_record_attempt_transient_failure_leaves_item_untouched(paths):
+def test_record_attempt_transient_failure_leaves_the_attempt_record_untouched(paths):
     queue_path, lock_path = paths
     mergeback_queue.enqueue(queue_path, lock_path, **_item())
     before = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
@@ -270,8 +309,77 @@ def test_record_attempt_transient_failure_leaves_item_untouched(paths):
     )
     assert result["action"] == "transient_failure"
     after = json.loads(queue_path.read_text())["items"]["strat_a@research-run/1"]
-    assert after == before
+    # No real merge-back attempt happened, so the attempt record is untouched — only the
+    # consecutive-transient counter (the head-of-line budget) moves.
+    assert (before["transient_failures"], after["transient_failures"]) == (0, 1)
+    assert {k: v for k, v in after.items() if k != "transient_failures"} == \
+           {k: v for k, v in before.items() if k != "transient_failures"}
     assert after["attempts"] == 0
+
+
+def test_record_attempt_transient_failures_terminal_fail_at_the_budget(paths):
+    # #549: an item whose every invocation fails the SAME unclassifiable way (exit 127, a git
+    # error, a full disk) sat at the FIFO head forever, re-running the multi-minute quality gate
+    # each cycle and starving every item behind it. The budget terminal-fails it so the queue
+    # drains past it — and the retained last_result says WHY, for the operator.
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    key = "strat_a@research-run/1"
+    payload = {"ok": False, "error": "git commit --no-edit returned 1", "code": "internal"}
+    actions = [
+        mergeback_queue.record_attempt(
+            queue_path, lock_path, key=key, stdout_text=json.dumps(payload))["action"]
+        for _ in range(mergeback_queue.MAX_TRANSIENT_FAILURES)
+    ]
+    assert actions[:-1] == ["transient_failure"] * (mergeback_queue.MAX_TRANSIENT_FAILURES - 1)
+    assert actions[-1] == "transient_exhausted"
+    item = json.loads(queue_path.read_text())["items"][key]
+    assert item["status"] == "terminal_failed"
+    assert item["last_result"] == payload
+    assert item["attempts"] == 0  # no REAL merge-back attempt ever completed
+
+
+def test_record_attempt_a_real_outcome_clears_the_transient_streak(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    key = "strat_a@research-run/1"
+    mergeback_queue.record_attempt(queue_path, lock_path, key=key, stdout_text="garbage")
+    assert json.loads(queue_path.read_text())["items"][key]["transient_failures"] == 1
+    mergeback_queue.record_attempt(
+        queue_path, lock_path, key=key,
+        stdout_text=json.dumps({"ok": True, "status": "gate_failed"}))
+    item = json.loads(queue_path.read_text())["items"][key]
+    assert item["transient_failures"] == 0
+    assert item["status"] == "gate_failed" and item["attempts"] == 1
+
+
+def test_record_attempt_lock_contention_does_not_spend_the_transient_budget(paths):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    key = "strat_a@research-run/1"
+    mergeback_queue.record_attempt(queue_path, lock_path, key=key, stdout_text="garbage")
+    for _ in range(mergeback_queue.MAX_TRANSIENT_FAILURES + 2):
+        result = mergeback_queue.record_attempt(
+            queue_path, lock_path, key=key,
+            stdout_text=json.dumps({"ok": True, "ran": False, "reason": "locked"}))
+        assert result["action"] == "lock_contention"
+    item = json.loads(queue_path.read_text())["items"][key]
+    assert item["transient_failures"] == 1
+    assert item["status"] == "pending"
+
+
+def test_transient_exhausted_releases_the_queue_head_to_the_next_item(paths):
+    # The end-to-end property the budget exists for: a permanently-failing head item must stop
+    # being selected, so the item behind it finally gets a turn.
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    mergeback_queue.enqueue(
+        queue_path, lock_path, **{**_item(), "strategy": "strat_b"})
+    head, behind = "strat_a@research-run/1", "strat_b@research-run/1"
+    for _ in range(mergeback_queue.MAX_TRANSIENT_FAILURES):
+        assert mergeback_queue.select_and_reserve(queue_path, lock_path)["key"] == head
+        mergeback_queue.record_attempt(queue_path, lock_path, key=head, stdout_text="garbage")
+    assert mergeback_queue.select_and_reserve(queue_path, lock_path)["key"] == behind
 
 
 def test_record_attempt_terminal_success_updates_status_and_result(paths):

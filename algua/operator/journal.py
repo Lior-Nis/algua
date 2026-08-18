@@ -65,10 +65,19 @@ class MergeBackRecord:
     branch: str
     branch_tip: str
     base_sha: str | None = None
-    diff_policy: str = "pending"          # pending | passed | rejected
-    gate_status: str = "pending"          # pending | green | failed
+    # How this attempt got the branch's code onto `main`. "merge" — it merged, gated and CAS-pushed
+    # the branch itself. "already_present" — the branch tip was ALREADY an ancestor of origin/main
+    # when the attempt started (a SIBLING strategy on the same multi-strategy research branch merged
+    # it first), so this attempt merges/gates/pushes nothing and must never revert: the merge commit
+    # is the sibling's, and that sibling may already be live with allocated capital.
+    merge_mode: str = "merge"             # merge | already_present
+    diff_policy: str = "pending"          # pending | passed | rejected | skipped
+    gate_status: str = "pending"          # pending | green | failed | skipped
+    # The merge commit this attempt created, or — on the ``already_present`` path, where there is no
+    # merge of its own — the ``already-present:<branch_tip>`` marker that stands in for one in the
+    # attempt-token pre-image (deterministic, and never collidable with a real commit sha).
     merge_sha: str | None = None
-    push_status: str = "pending"          # pending | pushed
+    push_status: str = "pending"          # pending | pushed | skipped
     attempt_token: str | None = None
     # The FIRST attempt's durable ensure_backtested outcome ("created" | "existed") — GATE-2 #1.
     # A crash after the ensure CREATED the row makes every resume's fresh call return "existed",

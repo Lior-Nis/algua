@@ -26,6 +26,14 @@ The hard correctness properties it encodes (each closing a specific GATE-2 findi
 * **Token-bound promote attribution (finding #5).** Promotion success is read from the registry by
   the per-attempt ``attempt_token`` stamped on the gate row, never from the ambient stage nor from
   "did the call raise".
+* **One branch, several strategies (already-present path).** A research branch can carry SEVERAL
+  candidate strategies — the launcher names such a branch ``research-run/<stamp>--<s1>+<s2>`` and
+  the queue holds one item per strategy. The FIRST item merges the branch; every LATER sibling
+  finds its branch tip already an ancestor of ``origin/main``, where ``git merge --no-ff
+  --no-commit`` stages nothing and ``git commit --no-edit`` exits 1. Those attempts take an
+  explicit ``already_present`` path: nothing to diff-policy, gate, commit or push (the sibling's
+  attempt did all of it under the same gate), straight to PROMOTE — and **never a revert**, because
+  the merge commit belongs to a sibling that may already be live with allocated capital.
 * **Authoritative intake chokepoint (mergeback-authoritative-intake).** A factory survivor has NO
   authoritative registry row (``stage_of`` -> None) and NO authoritative promote evidence; after
   the gate-green merge is durably on ``main`` and immediately before promote, the injected
@@ -53,6 +61,7 @@ from algua.operator.journal import (
 )
 
 __all__ = [
+    "ALREADY_PRESENT_PREFIX",
     "CycleResult",
     "GitOps",
     "JournalRegistryMismatchError",
@@ -66,6 +75,12 @@ __all__ = [
 ]
 
 _MAIN = "main"
+
+# Stands in for a merge sha in the attempt-token pre-image on the ALREADY-PRESENT path, where this
+# attempt creates no merge commit of its own. Deterministic (so every recovery pass re-derives the
+# same token) and unmistakable for a real commit sha (so it can never collide with the token of an
+# attempt that DID merge the same strategy at the same branch tip).
+ALREADY_PRESENT_PREFIX = "already-present:"
 
 
 class LocalMainDriftError(RuntimeError):
@@ -197,6 +212,10 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     # commit is durably recorded here as merge_sha/revert_sha. So drift is evaluated against the
     # journal, not against ``origin/main`` unconditionally.
     rec = journal.latest(strategy, branch_tip)
+    # Was the branch already on `main` when this attempt started (a sibling strategy on the same
+    # multi-strategy research branch merged it first)? Seeded from the journal so a RESUME keeps the
+    # original attempt's mode, then re-detected on the fresh path below.
+    already_present = rec is not None and rec.merge_mode == "already_present"
 
     def _write(**changes: object) -> MergeBackRecord:
         nonlocal rec
@@ -270,9 +289,40 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                 return False
         return True
 
+    def _merge_phase() -> dict[str, object]:
+        """The durable merge-phase fields every post-merge journal write re-asserts. On the
+        already-present path there was no diff policy to run, no gate to run and no push to make —
+        recording them as ``passed``/``green``/``pushed`` would claim work that never happened."""
+        if already_present:
+            return {"merge_mode": "already_present", "diff_policy": "skipped",
+                    "gate_status": "skipped", "push_status": "skipped"}
+        return {"diff_policy": "passed", "gate_status": "green", "push_status": "pushed"}
+
+    def _tip_on_origin() -> bool:
+        """Is the branch tip in the FRESHLY-FETCHED ``origin/main`` history right now?"""
+        git.fetch_remote(base_ref)
+        return git.is_ancestor(branch_tip, f"refs/remotes/origin/{base_ref}")
+
+    def _code_live(merge_sha: str) -> bool:
+        """Is the code this attempt depends on live on the freshly-fetched ``origin/main``?
+
+        The MERGING path checks the blobs its own merge introduced — ancestry alone cannot tell
+        "on main" from "merged then reverted" (finding #1). The ALREADY-PRESENT path has no merge
+        of its own to inspect, so it re-asserts the branch tip is still in ``origin/main``'s
+        history. The residual (a revert leaves ancestry intact while removing the code) is closed
+        by the promote itself: the checkout it runs against is proven byte-equal to ``origin/main``
+        by the local-main precondition above, so a reverted-away strategy module cannot be loaded
+        and the promote fails closed BEFORE any capital is allocated."""
+        if already_present:
+            return _tip_on_origin()
+        return _content_present(merge_sha)
+
     def _merge_verified(merge_sha: str) -> bool:
         """Branch-tip identity: second-parent match + ancestor of the fetched ``origin/main`` +
         content still present — NOT a bare ancestry heuristic (finding #1)."""
+        if already_present:
+            # No merge commit of our own to identify — the branch tip's own presence IS the check.
+            return _tip_on_origin()
         if git.commit_second_parent(merge_sha) != branch_tip:
             return False
         if not git.is_ancestor(merge_sha, f"refs/remotes/origin/{base_ref}"):
@@ -286,8 +336,9 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
             status=status,
             # A merge DID happen iff a merge commit was recorded; a subsequent revert does NOT unset
             # it (LOW-1: match the fresh promote_failed path — merged=True/reverted=True — so
-            # idempotent replay output equals the original result).
-            merged=record.merge_sha is not None,
+            # idempotent replay output equals the original result). The already-present path records
+            # a MARKER in ``merge_sha``, not a commit — it merged nothing.
+            merged=record.merge_sha is not None and record.merge_mode != "already_present",
             reverted=record.revert_sha is not None,
             promoted=record.promote_status == "passed",
             intake=None,
@@ -304,19 +355,20 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         """INTAKE (shared by the durable-promote resume path and the fresh promote path). Re-checks
         effective presence against ``origin/main`` before allocating, then emits a target-verified
         outcome (allocated vs still-queued behind capacity)."""
-        if not _content_present(merge_sha):
+        if not _code_live(merge_sha):
             raise MergeContentAbsentError(
                 f"merged code for {strategy!r} absent from origin/{base_ref} at intake")
         result = intake()
         tok = rec.attempt_token if rec is not None else None
         gid = rec.promote_gate_id if rec is not None else None
+        did_merge = not already_present
         if target_allocated(strategy):
             _write(intake_status="allocated", terminal="promoted_allocated")
-            return CycleResult(ok=True, status="promoted_allocated", merged=True, reverted=False,
-                               promoted=True, intake=result, branch_tip=branch_tip,
-                               attempt_token=tok, gate_id=gid)
+            return CycleResult(ok=True, status="promoted_allocated", merged=did_merge,
+                               reverted=False, promoted=True, intake=result,
+                               branch_tip=branch_tip, attempt_token=tok, gate_id=gid)
         _write(intake_status="queued", terminal="promoted_queued")
-        return CycleResult(ok=True, status="promoted_queued", merged=True, reverted=False,
+        return CycleResult(ok=True, status="promoted_queued", merged=did_merge, reverted=False,
                            promoted=True, intake=result, branch_tip=branch_tip,
                            attempt_token=tok, gate_id=gid)
 
@@ -439,6 +491,24 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                        "phase": "after", "result": "ok", "resume": True})
                 _write(base_sha=anchor_base, diff_policy="passed", gate_status="green",
                        merge_sha=merge_sha, push_status="pushed")
+    elif _tip_on_origin():
+        # ---------------------------------------------------- ALREADY ON MAIN (nothing to merge)
+        # A research branch can carry SEVERAL candidate strategies — the launcher names such a
+        # branch `research-run/<stamp>--<s1>+<s2>` and the queue holds one item per strategy. The
+        # FIRST item to drain merges the branch; every LATER sibling then finds the branch tip
+        # already an ancestor of `origin/main`. For those, `git merge --no-ff --no-commit` is
+        # "Already up to date" and stages nothing, so `git commit --no-edit` exits 1 — an
+        # unclassifiable failure that used to leave the item pending forever at the FIFO head.
+        #
+        # There is nothing to merge, gate or push: the branch's content was diff-policy-gated,
+        # quality-gated and CAS-pushed by the sibling's attempt, and the checkout this promote runs
+        # against is proven byte-equal to `origin/main` by the local-main precondition above. Go
+        # straight to PROMOTE for THIS strategy — and never revert on failure, since the merge
+        # commit belongs to a sibling that may already be live with allocated capital.
+        already_present = True
+        merge_sha = f"{ALREADY_PRESENT_PREFIX}{branch_tip}"
+        _write(base_sha=base_sha, merge_mode="already_present", diff_policy="skipped",
+               gate_status="skipped", merge_sha=merge_sha, push_status="skipped")
     else:
         # -------------------------------------------------------------- DIFF POLICY (pre-merge)
         if rec is None or rec.diff_policy != "passed":
@@ -492,12 +562,11 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
     # keep the ORIGINAL base for the journal + the ``_allow_paths`` content-check anchor.
     if rec is not None and rec.base_sha is not None:
         base_sha = rec.base_sha
-    if not _content_present(merge_sha):
+    if not _code_live(merge_sha):
         raise MergeContentAbsentError(
             f"merged code for {strategy!r} absent from origin/{base_ref} before promote")
     token = derive_attempt_token(strategy, branch_tip, merge_sha, strict_relaxation_fingerprint())
-    _write(base_sha=base_sha, diff_policy="passed", gate_status="green", merge_sha=merge_sha,
-           push_status="pushed", attempt_token=token)
+    _write(base_sha=base_sha, **_merge_phase(), merge_sha=merge_sha, attempt_token=token)
 
     # HIGH-2 crash-idempotency: a prior attempt under THIS (deterministic) token may already have
     # run the metered promote and crashed BEFORE journaling the outcome. The token is unique-indexed
@@ -531,14 +600,12 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
                 ensure_status = rec.ensure_status
             else:
                 ensure_status = fresh_ensure
-                _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
-                       merge_sha=merge_sha, push_status="pushed", attempt_token=token,
-                       ensure_status=ensure_status)
+                _write(base_sha=base_sha, **_merge_phase(), merge_sha=merge_sha,
+                       attempt_token=token, ensure_status=ensure_status)
             evidence_status = produce_evidence(ensure_status, branch_tip)
             # Journal MIRROR only (observability): recovery reads the registry's evidence marker,
             # never this field.
-            _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
-                   merge_sha=merge_sha, push_status="pushed", attempt_token=token,
+            _write(base_sha=base_sha, **_merge_phase(), merge_sha=merge_sha, attempt_token=token,
                    ensure_status=ensure_status, evidence_status=evidence_status)
             promote(token)
         except BaseException as exc:  # noqa: BLE001 — outcome read authoritatively below, not raise
@@ -550,9 +617,8 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
 
     # Success is read from AUTHORITATIVE registry state by attempt_token, never from "did it raise".
     if gate_id is not None:
-        rec = _write(base_sha=base_sha, diff_policy="passed", gate_status="green",
-                     merge_sha=merge_sha, push_status="pushed", attempt_token=token,
-                     promote_status="passed", promote_gate_id=gate_id)
+        rec = _write(base_sha=base_sha, **_merge_phase(), merge_sha=merge_sha,
+                     attempt_token=token, promote_status="passed", promote_gate_id=gate_id)
         return _do_intake(merge_sha)
 
     # No gate row bearing our token. If the stage also drifted off backtested, we cannot prove state
@@ -564,6 +630,20 @@ def run_merge_back(  # noqa: PLR0912, PLR0913, PLR0915 — a saga state machine;
         raise StageDriftError(
             f"promote left no gate row for token {token[:12]}… yet {strategy!r} is at "
             f"{stage_now!r}; cannot prove promotion state, failing closed without revert")
+
+    if already_present:
+        # Proven promote failure with NOTHING of ours to revert: this attempt merged nothing. The
+        # branch's code reached `main` under a SIBLING strategy's gated, CAS-pushed merge, and that
+        # sibling may already be live with allocated capital — reverting here would rip it out of
+        # `main` over an unrelated strategy's promote verdict. Terminate as a (non-retryable)
+        # promote failure and leave `main` untouched.
+        _write(base_sha=base_sha, **_merge_phase(), merge_sha=merge_sha, attempt_token=token,
+               promote_status="failed", terminal="promote_failed")
+        if raised is not None:
+            raise raised
+        return CycleResult(ok=False, status="promote_failed", merged=False, reverted=False,
+                           promoted=False, intake=None, branch_tip=branch_tip,
+                           attempt_token=token)
 
     # Proven non-committed promote failure: git-only revert (research-integrity ledgers are NOT
     # rolled back by design — a burned holdout survives).

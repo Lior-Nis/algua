@@ -58,9 +58,13 @@ class _FakeGit:
     """A GitOps stub implementing the new protocol: clean main, an authoritative origin, a merge
     that lands and whose blobs are present on origin/main."""
 
-    def __init__(self, entries=None):
+    def __init__(self, entries=None, tip_on_origin=False):
         self.calls: list[object] = []
         self.origin_main = "BASE"
+        # Is the BRANCH TIP itself already an ancestor of origin/main (a sibling strategy on the
+        # same multi-strategy research branch merged it first)? Default False — these tests drive
+        # the merging path; the already-present path is unit-tested in tests/operator/.
+        self.tip_on_origin = tip_on_origin
         self.entries = entries if entries is not None else [
             DiffEntry("100644", "A", None, "algua/strategies/momentum/x.py")]
 
@@ -79,7 +83,7 @@ class _FakeGit:
     def commit_merge(self, *, expected_tree): self.calls.append(("commit", expected_tree))
     def merge_commit_of(self, tip): return "MERGE"
     def commit_second_parent(self, sha): return "TIP"
-    def is_ancestor(self, sha, ref): return True
+    def is_ancestor(self, sha, ref): return self.tip_on_origin if sha == "TIP" else True
 
     def push_cas(self, merge_sha, expected_base):
         self.calls.append(("push", merge_sha))
@@ -156,6 +160,32 @@ def _invoke():
     return runner.invoke(app, [
         "paper", "merge-back", "--branch", "feat/strat", "--strategy", _STRAT,
         "--universe", "sp500", "--start", "2022-01-01", "--end", "2023-12-31", "--demo"])
+
+
+def test_branch_already_on_main_promotes_without_merging_or_gating(monkeypatch):
+    # A research branch can carry SEVERAL candidate strategies, one queue item each. The first item
+    # merges the branch; every later sibling finds the tip already on origin/main, where
+    # `git merge --no-ff --no-commit` stages nothing and `git commit --no-edit` exits 1. The cycle
+    # must promote the sibling against the code already on main instead of dying on that commit.
+    _register_backtested(_STRAT)
+    git = _FakeGit(tip_on_origin=True)
+    promote_calls: list = []
+    gate_calls: list = []
+    _wire(monkeypatch, gate=True, git=git, promote_calls=promote_calls)
+    monkeypatch.setattr(
+        paper_cmd, "_run_quality_gate",
+        lambda repo_root: gate_calls.append(repo_root) or _GATED_TREE)
+
+    result = _invoke()
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True and payload["status"] == "promoted_allocated"
+    assert payload["promoted"] is True
+    assert payload["merged"] is False and payload["reverted"] is False
+    assert len(promote_calls) == 1
+    # Nothing was gated, merged, committed, pushed or reverted — the code is already on origin/main.
+    assert gate_calls == []
+    assert git.calls == []
 
 
 def test_green_gate_and_promote_allocates(monkeypatch):
