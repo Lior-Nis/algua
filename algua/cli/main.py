@@ -20,7 +20,6 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     governance_cmd,
     idea_cmd,
     live_cmd,
-    monitoring_cmd,
     negative_cmd,
     operator_cmd,
     ops_cmd,

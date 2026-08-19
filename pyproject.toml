@@ -305,7 +305,6 @@ modules = [
     "algua.cli.governance_cmd",
     "algua.cli.idea_cmd",
     "algua.cli.live_cmd",
-    "algua.cli.monitoring_cmd",
     "algua.cli.negative_cmd",
     "algua.cli.operator_cmd",
     "algua.cli.paper_cmd",
