@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import secrets
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from algua.contracts.lifecycle import Actor
+from algua.registry.challenges import ChallengeSpec, build_payload, consume, find_pending, issue
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_signature
 
 # Human-actor authentication (#329). A bare `--actor human` CLI string is forgeable: any agent
@@ -28,7 +28,15 @@ from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_signature
 # residual is #329's DEFERRED deploy-time-anchor-immutability half, filed separately.
 
 _NAMESPACE = "algua-human-actor"
-_TTL = timedelta(minutes=10)
+
+_SPEC = ChallengeSpec(
+    table="actor_challenges",
+    namespace="algua-human-actor",
+    payload_fields=("command", "strategy", "strategy_id", "stage_from", "stage_to",
+                    "code_hash", "config_hash", "dependency_hash", "run_context"),
+    column_fields=("command", "strategy_id", "stage_from", "stage_to",
+                   "code_hash", "config_hash", "dependency_hash", "run_context"),
+)
 
 
 class HumanActorChallengeRequired(RuntimeError):
@@ -64,12 +72,11 @@ def build_actor_challenge(
     """The exact bytes the human signs. ONE definition, used to both issue and verify so the two can
     never drift. Binds the human-actor assertion to a specific command + strategy + full artifact
     identity + the canonical run_context + single-use nonce + expiry."""
-    return (
-        f"{_NAMESPACE}\ncommand={command}\nstrategy={strategy}\nstrategy_id={strategy_id}\n"
-        f"stage_from={stage_from}\nstage_to={stage_to}\n"
-        f"code_hash={code_hash}\nconfig_hash={config_hash}\ndependency_hash={dependency_hash}\n"
-        f"run_context={run_context}\nnonce={nonce}\nexpires_at={expires_at}"
-    )
+    values = {"command": command, "strategy": strategy, "strategy_id": strategy_id,
+              "stage_from": stage_from, "stage_to": stage_to, "code_hash": code_hash,
+              "config_hash": config_hash, "dependency_hash": dependency_hash,
+              "run_context": run_context}
+    return build_payload(_SPEC, values, nonce, expires_at)
 
 
 def issue_actor_challenge(
@@ -78,23 +85,11 @@ def issue_actor_challenge(
     *, now: datetime | None = None,
 ) -> dict[str, str]:
     """Create + persist a pending human-actor challenge; return {nonce, expires_at, challenge}."""
-    now = now or _now()
-    nonce = secrets.token_hex(32)
-    expires_at = (now + _TTL).isoformat()
-    conn.execute(
-        "INSERT INTO actor_challenges(nonce, command, strategy_id, stage_from, stage_to, "
-        "code_hash, config_hash, dependency_hash, run_context, issued_at, expires_at, consumed_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)",
-        (nonce, command, strategy_id, stage_from, stage_to, code_hash, config_hash,
-         dependency_hash, run_context, now.isoformat(), expires_at),
-    )
-    conn.commit()
-    return {
-        "nonce": nonce, "expires_at": expires_at,
-        "challenge": build_actor_challenge(
-            command, strategy, strategy_id, stage_from, stage_to, code_hash, config_hash,
-            dependency_hash, run_context, nonce, expires_at),
-    }
+    values = {"command": command, "strategy": strategy, "strategy_id": strategy_id,
+              "stage_from": stage_from, "stage_to": stage_to, "code_hash": code_hash,
+              "config_hash": config_hash, "dependency_hash": dependency_hash,
+              "run_context": run_context}
+    return issue(conn, _SPEC, values, now=now)
 
 
 def find_pending_actor_challenge(
@@ -104,27 +99,16 @@ def find_pending_actor_challenge(
 ) -> sqlite3.Row | None:
     """Newest unconsumed, unexpired challenge matching EVERY bound field (command + strategy +
     recomputed identity + re-canonicalized run_context + stage edge)."""
-    now = now or _now()
-    return conn.execute(
-        "SELECT * FROM actor_challenges WHERE command=? AND strategy_id=? AND stage_from=? "
-        "AND stage_to=? AND code_hash=? AND config_hash=? AND dependency_hash IS ? "
-        "AND run_context=? AND consumed_at IS NULL AND expires_at > ? "
-        "ORDER BY issued_at DESC LIMIT 1",
-        (command, strategy_id, stage_from, stage_to, code_hash, config_hash, dependency_hash,
-         run_context, now.isoformat()),
-    ).fetchone()
+    values = {"command": command, "strategy_id": strategy_id, "stage_from": stage_from,
+              "stage_to": stage_to, "code_hash": code_hash, "config_hash": config_hash,
+              "dependency_hash": dependency_hash, "run_context": run_context}
+    return find_pending(conn, _SPEC, values, now=now)
 
 
 def consume_actor_challenge(conn: sqlite3.Connection, nonce: str, *,
                             now: datetime | None = None) -> bool:
     """Mark a challenge consumed (single-use). Returns False if already consumed / missing."""
-    now = now or _now()
-    cur = conn.execute(
-        "UPDATE actor_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
-        (now.isoformat(), nonce),
-    )
-    conn.commit()
-    return cur.rowcount > 0
+    return consume(conn, _SPEC, nonce, now=now)
 
 
 def verify_actor_assertion(
