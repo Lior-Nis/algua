@@ -15,6 +15,10 @@ from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
 from algua.primitives.atomic_io import write_bytes_durable
 
 
+class SnapshotNotFound(LookupError):
+    pass
+
+
 class IdentityMixin:
     """Shared identity/parquet-publish plumbing for the dataset mixins that need it
     (universe, delistings). Declares the collaborator attributes it assumes the

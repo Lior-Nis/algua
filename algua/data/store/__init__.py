@@ -21,6 +21,7 @@ from algua.data.store.bars_streamed import BarsStreamedStoreMixin
 from algua.data.store.delistings import DelistingsStoreMixin
 from algua.data.store.fundamentals import FundamentalsStoreMixin
 from algua.data.store.identity import (
+    SnapshotNotFound,
     build_metadata,
     compute_snapshot_id,
     path_part,
@@ -32,10 +33,6 @@ from algua.data.store.news import NewsStoreMixin
 from algua.data.store.universe import UniverseStoreMixin
 from algua.data.verify import SnapshotVerifier
 from algua.primitives.atomic_io import fsync_file, fsync_parents
-
-
-class SnapshotNotFound(LookupError):
-    pass
 
 
 class DataStore(
