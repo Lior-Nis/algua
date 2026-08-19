@@ -9,13 +9,13 @@ identity, second-parent merge verification, the freshly-fetched ``origin/main`` 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Protocol
 
 from algua.operator.diff_policy import DiffEntry
+from algua.primitives.flock import LockHeld, file_lock
 
 
 class GitOps(Protocol):
@@ -302,20 +302,14 @@ def _parse_raw_z(raw: str) -> list[DiffEntry]:
 def merge_back_lock(lock_path: Path) -> Iterator[None]:
     """Repo-global exclusive ``flock`` for the whole merge-back saga.
 
-    Mirrors the staging-lease flock discipline in ``algua/data/staging.py``: a non-blocking
-    ``LOCK_EX`` on a dedicated marker file. The kernel releases the lock on the holder's death (even
-    a hard kill), so a crashed cycle never wedges the next one; a *live* concurrent cycle makes the
-    acquire fail, and we **fail closed** rather than mutating the shared checkout under a second
-    driver. The lock is always released and the fd closed in a finally.
+    Uses ``algua.primitives.flock`` — the shared lock discipline: a non-blocking ``LOCK_EX`` on a
+    dedicated marker file. The kernel releases the lock on the holder's death (even a hard kill), so
+    a crashed cycle never wedges the next one; a *live* concurrent cycle makes the acquire fail, and
+    we **fail closed** rather than mutating the shared checkout under a second driver. The lock is
+    always released and the fd closed in a finally.
     """
-    handle = open(lock_path, "a")  # noqa: SIM115 — released in the finally below
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
-        handle.close()
+        with file_lock(lock_path, blocking=False):
+            yield
+    except LockHeld as exc:
         raise RuntimeError("another merge-back cycle is in progress") from exc
-    try:
-        yield
-    finally:
-        fcntl.flock(handle, fcntl.LOCK_UN)
-        handle.close()

@@ -144,7 +144,16 @@ def test_git_dir_unresolvable_fails_closed(tmp_path, monkeypatch):
 
 
 def test_lock_file_unopenable_fails_closed(tmp_path, monkeypatch):
-    monkeypatch.setattr(operator_cmd, "_resolve_git_dir", lambda: tmp_path / "no_such_dir")
+    # `operator_run_lock` (algua.primitives.flock, #8) auto-creates any missing lock-dir via
+    # `file_lock`'s `path.parent.mkdir`, so a bare "missing dir" no longer reproduces an unopenable
+    # lock file. Force the primitive's `os.open` itself to fail instead (permission denied /
+    # read-only fs / disk full, in spirit).
+    monkeypatch.setattr(operator_cmd, "_resolve_git_dir", lambda: tmp_path)
+
+    def _open_boom(*_a, **_k):
+        raise PermissionError("EACCES")
+
+    monkeypatch.setattr("algua.primitives.flock.os.open", _open_boom)
     calls: list = []
     monkeypatch.setattr(
         operator_cmd, "_run_locked_command",

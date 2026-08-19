@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from algua.config.settings import get_settings
+from algua.primitives import flock
 
 _LEASE_DIRNAME = "sweep_leases"
 _LEASE_SUFFIX = ".lease"
@@ -165,18 +166,14 @@ def admit(overridden_count: int) -> Iterator[_Lease]:
     lease_path = lease_dir / f"{stem}{_LEASE_SUFFIX}"
     # O_CLOEXEC so any exec'd grandchild drops it; forked workers still inherit it (no exec),
     # which is why the caller closes it via the pool initializer.
-    lease_fd = os.open(tmp_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644)
+    lease_fd = flock.acquire(tmp_path, blocking=False)
     try:
-        fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         # Publish the marker under the .lease glob ONLY now that it is flock-held (atomic rename,
         # same fd + lock). A scanner can never see an unlocked future lease.
         os.rename(tmp_path, lease_path)
         # --- short-lived admission critical section ---
-        admission_fd = os.open(
-            lease_dir / _ADMISSION_LOCK_NAME, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644
-        )
+        admission_fd = flock.acquire(lease_dir / _ADMISSION_LOCK_NAME)  # blocking; freed on death
         try:
-            fcntl.flock(admission_fd, fcntl.LOCK_EX)  # blocking; freed on holder death
             used = _sum_live_grants(lease_dir, lease_path)
             grant = max(1, min(budget, budget - used))
             grant = min(grant, max(1, overridden_count))
@@ -189,7 +186,7 @@ def admit(overridden_count: int) -> Iterator[_Lease]:
                 raise OSError(f"short write recording sweep grant: {written}/{len(buf)} bytes")
             os.fsync(lease_fd)
         finally:
-            os.close(admission_fd)  # releases the admission flock
+            flock.release(admission_fd)  # releases the admission flock
         # --- admission lock released; sweep now runs under only its own lease ---
         yield _Lease(grant=grant, lease_fd=lease_fd)
     finally:

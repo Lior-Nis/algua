@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import os
 import tempfile
 from collections.abc import Iterator
@@ -14,6 +13,7 @@ from algua.contracts.lifecycle import Stage
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 from algua.knowledge.metrics import latest_run_metrics
 from algua.knowledge.templates import scaffold_strategy_doc
+from algua.primitives.flock import file_lock
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
@@ -50,21 +50,8 @@ def kb_sync_lock(settings: Settings) -> Iterator[None]:
     sync — atomic writes still prevent torn reads. The kernel frees the lock on process death.
     """
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = settings.knowledge_dir / ".sync.lock"
-    fd = None
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError:
-        if fd is not None:
-            os.close(fd)
-        fd = None
-    try:
+    with file_lock(settings.knowledge_dir / ".sync.lock", on_oserror="proceed"):
         yield
-    finally:
-        if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
 
 
 # Canonical lifecycle order for grouping rosters/axis pages by stage. Derived from the Stage enum
