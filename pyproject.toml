@@ -311,3 +311,17 @@ modules = [
     "algua.cli.research_cmd",
     "algua.cli.strategy_cmd",
 ]
+
+[[tool.importlinter.contracts]]
+# primitives is the stdlib-only leaf (spec §4): anything may import it; it imports nothing
+# from algua. This is what lets true leaves (models.registry) stop hand-duplicating helpers.
+name = "primitives is a stdlib-only leaf"
+type = "forbidden"
+source_modules = ["algua.primitives"]
+forbidden_modules = [
+    "algua.audit", "algua.backtest", "algua.calendar", "algua.cli", "algua.config",
+    "algua.contracts", "algua.data", "algua.execution", "algua.features", "algua.knowledge",
+    "algua.live", "algua.models", "algua.observability", "algua.operator", "algua.portfolio",
+    "algua.provenance", "algua.registry", "algua.research", "algua.risk", "algua.strategies",
+    "algua.tracking",
+]
