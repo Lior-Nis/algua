@@ -109,21 +109,6 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   not fully closed). NOVEL + human still creates a fresh 0-prior family in preflight (requires
   `--new-family` + `--actor human`). Family-scoped lifetime breadth feeds the 3-way
   `effective_funnel_breadth(own, windowed_total, family_lifetime_effective)` tighten-only max.
-- `uv run algua research pbo <name> --param KEY=v1,v2,... [--windows N --rank-by mean_sharpe|min_sharpe]`
-  — ADVISORY Probability-of-Backtest-Overfitting (PBO) via CSCV (#467) over the SAME grid a
-  `backtest sweep` runs. Answers a question the DSR/FDR/breadth stack never asks: does the selection
-  rule "pick the in-sample-best combo" GENERALIZE out-of-sample? Builds the trials×windows OOS-Sharpe
-  matrix (holdout excluded by construction), then reports `pbo` = the fraction of combinatorially-
-  symmetric IS/OOS splits where the IS-best combo lands below the OOS median. A HIGH pbo (≳0.5) flags
-  a sweep fitting noise. This is a REAL grid search, so — like `backtest sweep` — it RECORDS its
-  measured breadth (metered: repeated `pbo` runs self-penalize the eventual promotion Sharpe bar);
-  it burns NO holdout STATISTIC (the holdout bars are read as part of the full-period sweep fetch but
-  never scored/burned — `compute_holdout=False`), transitions nothing, and writes no gate/FDR ledger
-  row. Output is AGGREGATE-ONLY (pbo, split/trial/window/subperiod counts, rank_by, warnings, and a
-  fully-reconstructable `provenance` block: base `config_hash`, full `grid_hash`, delisting inputs) —
-  never the raw matrix, ranked combos, or per-split logits. Fails closed (`pbo: null` + warning,
-  exit 0) on <2 combos, <4 windows, or a non-finite matrix. See the `interpret-results` skill for how
-  to read it. Orthogonal to promotion: a winner can pass DSR yet have a high PBO.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
@@ -153,18 +138,6 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
   payload back from disk (full read-back) and check it against its record; emits per-snapshot
   JSON and exits non-zero if any snapshot is damaged.
-- `uv run algua factor list [--kind K]` — catalogue of known factors.
-- `uv run algua factor show <name>` — one factor's full spec.
-- `uv run algua factor eval <name> --symbols S,S --construction POLICY --demo` — evaluate ONE
-  standalone factor: PIT backtest + FDR-corrected rank IC/IR (#219 slice E). Emits an `fdr`
-  block: `breadth_benchmark_t`, `dsr_confidence`, **`significant`** (the honest verdict after
-  funnel-wide multiple-testing correction), and `n_dependents` (blast radius). Records the eval
-  in the `factor_evaluations` ledger (SCHEMA_VERSION 25) — `factor eval` is the ONLY agent path
-  to a multiple-testing-honest factor verdict. See `interpret-results` skill for how to read the
-  output. Factors are NEVER gate-tokened or live-pathed.
-- `uv run algua factor dependents <name>` — strategies that compose a factor (blast radius).
-- `uv run algua factor uses <strategy>` — factors a strategy composes.
-
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.

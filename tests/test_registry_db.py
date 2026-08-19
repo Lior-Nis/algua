@@ -6,7 +6,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 40
+    assert SCHEMA_VERSION == 41
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
@@ -589,7 +589,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 40
+    assert SCHEMA_VERSION == 41
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -613,7 +613,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 40
+    assert SCHEMA_VERSION == 41
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -647,4 +647,22 @@ def test_v40_shadow_evaluations_table_dropped(tmp_path):
     tables = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "shadow_evaluations" not in tables
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v41_factor_evaluations_table_dropped(tmp_path):
+    # simplification stage 1: the standalone factor-eval layer is deleted; a legacy DB carrying
+    # the old factor_evaluations table loses it on migrate, idempotently.
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    conn.executescript(
+        "CREATE TABLE factor_evaluations (id INTEGER PRIMARY KEY, factor_name TEXT NOT NULL);"
+    )
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "factor_evaluations" in tables
+    migrate(conn)  # idempotent re-run must not raise, and must drop the legacy table
+    tables = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "factor_evaluations" not in tables
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION

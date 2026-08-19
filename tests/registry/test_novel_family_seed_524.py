@@ -57,7 +57,7 @@ def _insert_agent_family(
 
 def test_schema_version_is_40() -> None:
     repo = _make_repo()
-    assert repo._conn.execute("PRAGMA user_version").fetchone()[0] == 40
+    assert repo._conn.execute("PRAGMA user_version").fetchone()[0] == 41
 
 
 def test_families_has_seed_and_founder_columns() -> None:

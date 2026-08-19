@@ -15,7 +15,6 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     backtest_cmd,
     data_cmd,
     eval_cmd,
-    factor_cmd,
     fleet_cmd,
     governance_cmd,
     idea_cmd,
