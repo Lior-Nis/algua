@@ -51,7 +51,7 @@ class FdrStreamState(NamedTuple):
       ``fdr_rejected=1`` (past rejections replenishing alpha-wealth WITHIN the cohort). All < ``t``.
     - ``cohort_index`` — the 0-based index of that cohort.
 
-    The remaining fields are lifetime AUDIT counters (not used by ``lord_plus_plus_level``):
+    The remaining fields are lifetime AUDIT counters (not used by LORD++ level calculation):
     - ``cohorts_completed`` — number of FULLY-filled cohorts (each == FDR_COHORT_SIZE tests).
     - ``binding_tests`` — total binding rows so far (the next test is ``binding_tests + 1``).
     - ``discoveries`` — total ``fdr_rejected=1`` rows across all cohorts.
@@ -59,7 +59,7 @@ class FdrStreamState(NamedTuple):
       rows already in the cohort the NEXT test joins (0.0 for a fresh cohort). The active-cohort
       exposure audit adds this row's own α to it.
 
-    ``t`` + ``discovery_indices`` fully determine ``lord_plus_plus_level`` for the NEXT test."""
+    ``t`` + ``discovery_indices`` fully determine the NEXT test's level input."""
 
     t: int
     discovery_indices: list[int]

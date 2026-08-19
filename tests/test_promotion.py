@@ -479,7 +479,7 @@ def test_run_gate_stream_sees_zero_binding_rows_across_promotes(tmp_path):
     assert out3.promoted is False
     n_rows = repo._conn.execute("SELECT COUNT(*) c FROM gate_evaluations").fetchone()["c"]
     assert n_rows == 3                                 # every attempt is still audited
-    # The stream reader sees an untouched (fresh) stream and the throttle count stays 0.
+    # The stream reader sees an untouched (fresh) stream.
     stream = repo.fdr_stream_state()
     assert stream is not None
     assert stream.t == 1 and stream.binding_tests == 0 and stream.discoveries == 0

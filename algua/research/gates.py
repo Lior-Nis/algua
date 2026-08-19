@@ -194,11 +194,11 @@ class GateDecision:
     fdr_test_index: int | None = None      # WITHIN-COHORT position (1..FDR_COHORT_SIZE), #324
     fdr_rejected: bool | None = None
     fdr_skip_reason: str | None = None
-    # Cohort restart + cumulative-exposure audit (#324). Populated by run_gate on binding rows.
+    # Cohort restart + cumulative-exposure audit (#324). Preserved for historical audit surface.
     # fdr_cohort: this row's 0-based cohort index. The remaining fields are AUDIT-ONLY (never
     # change pass/fail) and make the per-cohort re-scoping honest: they surface that FDR is
     # controlled per cohort of FDR_COHORT_SIZE binding tests, NOT per lifetime, and how much
-    # cumulative exposure has accrued. fdr_expected_false_discoveries = FDR_ALPHA *
+    # cumulative exposure has accrued. fdr_expected_false_discoveries = per-cohort_alpha *
     # fdr_cohorts_completed is the honest upper bound on cumulative expected false discoveries over
     # completed independent cohorts (NOT conditioned on cohorts-with-discoveries, which would be
     # post-selection and understate exposure).
@@ -208,7 +208,7 @@ class GateDecision:
     fdr_discoveries: int | None = None
     fdr_expected_false_discoveries: float | None = None
     # Windowed promotion-eligibility throttle (#529, §3.5). fdr_throttle_window_binding = count of
-    # PRIOR committed binding tests within FDR_THROTTLE_WINDOW_DAYS at decision time;
+    # PRIOR committed binding tests within a fixed lookback window at decision time;
     # fdr_throttle_tripped = the budget was already spent so promotion was blocked. Never populated
     # while stats are advisory (no binding rows are written). fdr_throttle_override was REMOVED
     # with the flag itself (no dead cruft — legacy rows keep the key in their stored JSON only).
@@ -217,7 +217,7 @@ class GateDecision:
     # Active (in-progress) cohort exposure audit (#529, §4) — surfaces partial-cohort spend that the
     # completed-only fdr_expected_false_discoveries hides at small N. Position 1..FDR_COHORT_SIZE;
     # applied_alpha = Σ stored α over the open cohort's binding rows incl. this one;
-    # ..._incl_active = FDR_ALPHA·cohorts_completed + applied_alpha.
+    # ..._incl_active = per-cohort_alpha·cohorts_completed + applied_alpha.
     fdr_active_cohort_position: int | None = None
     fdr_active_cohort_applied_alpha: float | None = None
     fdr_expected_false_discoveries_incl_active: float | None = None

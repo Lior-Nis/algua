@@ -1617,7 +1617,7 @@ def test_fdr_gate_agent_pass_is_born_consumed(repo):
     ).fetchone()
     assert row["consumed"] == 1
 
-    # Human passing row -> also consumed=0 (human rows are never consumable tokens).
+    # Human passing row -> consumed=0 (human rows are never consumable tokens).
     rec2 = _at_backtested(repo, "s2")
     repo.record_gate_with_fdr_and_maybe_promote(
         rec2, funnel=_EMPTY_FUNNEL._replace(strategy_name="s2"),
