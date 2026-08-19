@@ -109,30 +109,6 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   not fully closed). NOVEL + human still creates a fresh 0-prior family in preflight (requires
   `--new-family` + `--actor human`). Family-scoped lifetime breadth feeds the 3-way
   `effective_funnel_breadth(own, windowed_total, family_lifetime_effective)` tighten-only max.
-- `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the
-  `dormant` pool: re-runs walk-forward per dormant strategy and reports which ones' window/stability
-  metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger
-  rows, and transitions nothing. A pass is a prioritization signal for re-auditioning (`registry
-  transition --to paper`), NOT a gate and NOT a guarantee of re-promotion/forward-gate clearance.
-- `uv run algua research family-audit` — ADVISORY cross-family gaming detector. Scans the family DAG
-  for separate families that empirically behave as one thesis (deliberate-split breadth evasion #222's
-  assignment-time clustering can't see), using return-correlation as the authoritative axis; ranks
-  flagged clusters by family-term breadth dodged and recommends a human-governed consolidation
-  (member reassignment). READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation —
-  a prioritization signal, not a gate.
-- `uv run algua research gc [--retention-days N --archive --actor human --archive-dir DIR --top N]` —
-  ADVISORY reaper of dead strategy artifacts: it classifies the on-disk strategy modules
-  (`algua/strategies/<family>/*.py`) and the per-strategy report-experiments subtree
-  (`<knowledge_dir>/strategies/<name>/reports/<stamp>/…`, keyed by the `<name>` DIRECTORY) against
-  the registry and lists what is safely reapable — a strategy RETIRED for more than `--retention-days`
-  (default 90), or a report file with no registry row (orphaned) older than the window. The
-  kb-sync-OWNED top-level `<knowledge_dir>/strategies/*.md` files (the `_*` router pages AND every
-  per-strategy live synced note at `strategy_doc_path`) and the `families/` subtree are NEVER
-  scanned or reaped. READ-ONLY by default (a listing is a prioritization signal, NOT a transition).
-  Fail-safe: an untracked module, a non-terminal strategy, a retired-without-timestamp, and a
-  fresh/undatable orphan report are ALWAYS kept. `--archive --actor human` (human-only, #329 signed
-  challenge) MOVES the reapable files into a timestamped `archive/` tree via a single atomic
-  `os.replace`; it NEVER deletes and NEVER touches the immutable registry DB row.
 - `uv run algua research pbo <name> --param KEY=v1,v2,... [--windows N --rank-by mean_sharpe|min_sharpe]`
   — ADVISORY Probability-of-Backtest-Overfitting (PBO) via CSCV (#467) over the SAME grid a
   `backtest sweep` runs. Answers a question the DSR/FDR/breadth stack never asks: does the selection
