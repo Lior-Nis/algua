@@ -464,13 +464,13 @@ def test_read_universe_rejects_ambiguous_duplicate_effective_date(tmp_path):
     # hand-edited manifest, so we seed it via the low-level _ingest_parquet (bypassing the guard)
     # to prove read_universe still fails closed as defense in depth.
     from algua.data.models import Kind
-    from algua.data.store import _metadata
+    from algua.data.store.identity import build_metadata
     store = DataStore(tmp_path / "data")
     store.ingest_universe(
         universe="core", symbols=["AAPL"], effective_date="2026-01-01",
         as_of="2026-01-02T00:00:00+00:00", source="manual",
     )
-    meta = _metadata(
+    meta = build_metadata(
         dataset=Dataset.UNIVERSES, provider="local", symbols=["MSFT"],
         start="2026-01-01", end="2026-01-01", as_of="2026-01-03T00:00:00+00:00",
         source="manual", kind=Kind.UNIVERSE, universe="core",

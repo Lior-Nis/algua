@@ -161,7 +161,7 @@ def test_commit_bars_publish_fsyncs_tree_before_replace_then_parents(
 ) -> None:
     store = DataStore(tmp_path / "store")
     events: list[str] = []
-    import algua.data.store as store_mod
+    import algua.data.store.bars as store_mod
     real_replace = os.replace
     real_tree = store_mod.fsync_tree
     real_parents = store_mod.fsync_parents
@@ -234,7 +234,7 @@ def test_commit_bars_adoption_fsyncs_before_manifest_append(tmp_path: Path, monk
     manifest_path = (tmp_path / "store" / "manifest.jsonl")
     manifest_path.write_text("")  # drop the committed record, keep the payload dir
 
-    import algua.data.store as store_mod
+    import algua.data.store.bars as store_mod
     events: list[str] = []
     real_tree = store_mod.fsync_tree
     real_parents = store_mod.fsync_parents
