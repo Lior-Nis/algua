@@ -78,7 +78,7 @@ DELETE (severable; git history preserves recovery):
 | `research family-audit` (`research/family_audit.py` + CLI) | 290 | Keeps `research/clustering.py` (core NOVEL classification). |
 | `research dormant-sweep` | 110 | Advisory screen over an empty pool. |
 | `registry/family_budget.py` | 63 | Zero importers; dead. |
-| Factor eval layer: `cli/factor_cmd.py`, `backtest/factor_eval.py`, `registry/lineage.py`, `research/factor_fdr.py`, `factor_evaluations` table | 750 | KEEPS `features/catalogue.py` + `features/alphas.py`/`indicators.py` (the `@factor` decorator is load-bearing for `cross_sectional_momentum`). |
+| Factor eval layer: `cli/factor_cmd.py`, `backtest/factor_eval.py`, `research/factor_fdr.py`, `factor_evaluations` table | 750 | KEEPS `features/catalogue.py` + `features/alphas.py`/`indicators.py` (the `@factor` decorator is load-bearing for `cross_sectional_momentum`). KEEPS `registry/lineage.py` — `factors_used_by` is imported by `registry/promotion.py` and `registry/store.py` (family classification factor axis). |
 | `research pbo` (`research/cscv.py` + CLI) and collapse `sweep_with_matrix` back into `sweep()` | 380 | Rebuildable from git if the overfit signal is wanted again. |
 
 Plus each item's tests (~1,500 test LOC total).
@@ -115,7 +115,8 @@ helpers ("must stay an import leaf" — a leaf may import another leaf).
    blocking vs `LOCK_NB`, ENOLCK policy (fail-closed default; KB-sync's degrade-open
    becomes an explicit opt-in), optional JSON holder metadata in the lock body.
 2. **`primitives/atomic_io.py`** — `data/files.py`'s fsync/rename/`write_bytes_atomic`
-   + `append_if_absent` promoted here; the 4 surviving duplicates deleted
+   + `append_if_absent` stays a `SnapshotManifest` method (manifest-specific); only its
+   `_acquire_lock` migrates to the flock primitive. The 4 surviving duplicates deleted
    (`knowledge/sync.py`, `operator/schedule.py`, `models/registry.py`,
    `data/manifest.py::_repair`).
 3. **`primitives/retry.py`** — one exponential-backoff helper; unifies the two HTTP
