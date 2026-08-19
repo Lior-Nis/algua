@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import json
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
@@ -36,8 +35,6 @@ from algua.research.gates import (
     DSR_ALPHA,
     DSR_BOOTSTRAP_LOWER_QUANTILE,
     DSR_BOOTSTRAP_RESAMPLES,
-    FDR_ALPHA,
-    FDR_W0,
     FUNNEL_WINDOW_DAYS,
     MIN_CORR_OVERLAP_BARS,
     MIN_N_EFF_SIBLINGS,
@@ -47,7 +44,6 @@ from algua.research.gates import (
     dsr_sr_star_annualized,
     effective_funnel_breadth,
     evaluate_gate,
-    lord_plus_plus_level,
 )
 from algua.strategies.loader import StrategyNotFound, load_strategy
 
@@ -594,13 +590,11 @@ def run_gate(
         bootstrap_seed=boot_seed, bootstrap_b=boot_b, bootstrap_block_len=boot_block,
         market_returns=wf.market_returns,
     )
-    # Factory soft gate (2026-08-10 spec): the statistical stack is ADVISORY, so the LORD++
-    # BINDING stream is never consumed on this path — p_value is ALWAYS None, the store writes an
-    # fdr_binding=NULL row (invisible to the stream reader and the windowed throttle count), and
-    # final_passed collapses to the provisional integrity-floor verdict. dsr_confidence is still
-    # computed and recorded in the decision above (advisory telemetry); the whole LORD++/throttle
-    # ledger machinery is PRESERVED in the store for future re-tightening.
-    p_value = None
+    # Factory soft gate (2026-08-10 spec): the statistical stack is ADVISORY. The LORD++
+    # FDR-binding branch itself was deleted (simplification stage 4a — it was provably dead here,
+    # this path never supplied a real p_value); record_gate_with_fdr_and_maybe_promote's
+    # final_passed is now always the provisional integrity-floor verdict. dsr_confidence is still
+    # computed and recorded in the decision above (advisory telemetry).
     decision.fdr_binding = False
     decision.fdr_skip_reason = "stats_advisory"
 
@@ -681,11 +675,8 @@ def run_gate(
         "attempt_token": attempt_token,
     }
 
-    # Atomic FDR-test-and-maybe-promote. For non-binding rows (p_value=None), the method
-    # behaves identically to the old record_gate_evaluation + conditional transition_strategy
-    # pair, but always uses BEGIN IMMEDIATE for consistency (negligible overhead for ≤ a few
-    # thousand gate_evaluations rows).
-    level_fn = functools.partial(lord_plus_plus_level, alpha=FDR_ALPHA, w0=FDR_W0)
+    # Atomic gate-record-and-maybe-promote — always uses BEGIN IMMEDIATE for consistency
+    # (negligible overhead for ≤ a few thousand gate_evaluations rows).
     # #339 — capture the funnel-wide MUTABLE snapshot this decision was computed against, so the
     # commit can CAS-verify it under the write lock and refuse to serialize a mixed-snapshot
     # (stale-breadth / stale-variance) outcome. own/windowed are the exact values evaluate_gate
@@ -709,15 +700,14 @@ def run_gate(
         search_trials_max_id=st_max,
     )
     fdr_outcome = repo.record_gate_with_fdr_and_maybe_promote(
-        rec, gate_row=gate_row, p_value=p_value, funnel=funnel, level_fn=level_fn,
-        fdr_alpha=FDR_ALPHA, actor=actor,
+        rec, gate_row=gate_row, funnel=funnel, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
         pending_novel_family=breadth.pending_novel_family,  # #524: minted only on pass, in-tx
     )
 
-    # With p_value=None the store skipped the LORD++/throttle logic entirely, so final_passed ==
-    # provisional_passed (the integrity floor). Kept as an assignment (not an assert) so the
-    # decision always mirrors what the store committed.
+    # With the LORD++ binding branch retired (stage 4a), final_passed == provisional_passed (the
+    # integrity floor) unconditionally. Kept as an assignment (not an assert) so the decision
+    # always mirrors what the store committed.
     decision.passed = fdr_outcome.final_passed
 
     return PromotionOutcome(decision=decision, promoted=fdr_outcome.final_passed)
