@@ -553,10 +553,11 @@ surviving non-binding path, the #339 funnel-drift CAS, the stage-CAS + family-mi
 tail, and fdr_stream_state's read path are byte-for-byte unchanged. gate_evaluations' fdr_*
 columns and every historical row are untouched.
 
-19 tests deleted (exercised only the deleted branch); 17 tests fixed in place (dropped the three
-removed kwargs — their real subjects, e.g. the top-level-only guard, the #339 CAS, the
-dsr_binding-gated variance check, all survive untouched); 1 test's still-relevant human-actor
-assertion salvaged into a surviving sibling test rather than lost.
+18 tests deleted (17 exercised only the deleted branch; 1 deleted-with-salvage — see below);
+17 tests fixed in place (dropped the three removed kwargs — their real subjects, e.g. the
+top-level-only guard, the #339 CAS, the dsr_binding-gated variance check, all survive untouched);
+the deleted-with-salvage test's still-relevant human-actor assertion was folded into a surviving
+sibling test rather than lost.
 
 Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
 EOF
