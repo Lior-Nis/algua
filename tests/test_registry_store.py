@@ -1685,7 +1685,7 @@ def test_fdr_gate_concurrent_distinct_t_values(tmp_path):
 
 def _seed_cohort0(repo, n: int, *, rejected: int = 0) -> None:
     """Insert ``n`` binding rows filling cohort 0 (within-cohort positions 1..n)."""
-    from algua.research.gates import FDR_COHORT_SIZE
+    from algua.registry.db import FDR_COHORT_SIZE
     assert n <= FDR_COHORT_SIZE
     sid = repo.add("s").id
     for pos in range(1, n + 1):
@@ -1695,7 +1695,7 @@ def _seed_cohort0(repo, n: int, *, rejected: int = 0) -> None:
 
 def test_fdr_stream_cohort_seals_and_restarts_at_boundary(repo):
     """A full cohort seals: the next test opens cohort+1 at within-cohort t=1 (fresh stream)."""
-    from algua.research.gates import FDR_COHORT_SIZE
+    from algua.registry.db import FDR_COHORT_SIZE
     _seed_cohort0(repo, FDR_COHORT_SIZE)
     s = repo.fdr_stream_state()
     assert s is not None

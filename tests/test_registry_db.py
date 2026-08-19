@@ -395,7 +395,7 @@ def test_v33_backfills_legacy_binding_rows_into_cohorts(tmp_path):
     """#324: pre-existing binding rows (global lifetime fdr_test_index, NULL fdr_cohort) are packed,
     in id order, into cohorts of FDR_COHORT_SIZE — fdr_cohort=(g-1)//N, fdr_test_index=(g-1)%N+1 —
     idempotently, leaving fdr_alpha_level frozen and `passed` untouched."""
-    from algua.research.gates import FDR_COHORT_SIZE
+    from algua.registry.db import FDR_COHORT_SIZE
 
     conn = connect(tmp_path / "r.db")
     migrate(conn)
@@ -459,8 +459,8 @@ def test_529_relabels_old_cohort_size_binding_rows(tmp_path):
     index=1..10) as recorded under N=64 — are re-partitioned to the CURRENT size (N=8) so a stale
     within-cohort index > N can never wedge fdr_stream_state. Idempotent; fdr_alpha_level/passed
     frozen; the re-labeled stream reads back cleanly."""
+    from algua.registry.db import FDR_COHORT_SIZE
     from algua.registry.store import SqliteStrategyRepository
-    from algua.research.gates import FDR_COHORT_SIZE
 
     assert FDR_COHORT_SIZE == 8
     conn = connect(tmp_path / "r.db")

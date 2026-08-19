@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
-from algua.registry.db import MAX_N_COMBOS
+from algua.registry.db import FDR_COHORT_SIZE, MAX_N_COMBOS
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     AgentMintCapError,
@@ -33,7 +33,6 @@ from algua.registry.repository import (
     StrategyRecord,
 )
 from algua.research.gates import (
-    FDR_COHORT_SIZE,
     FDR_NEAR_TERM_BINDING_BUDGET,
     FDR_THROTTLE_WINDOW_DAYS,
     MIN_FUNNEL_FLOOR_STRATEGIES,
