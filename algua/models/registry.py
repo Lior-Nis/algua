@@ -22,10 +22,9 @@ Concurrency + torn-write recovery (under the per-name flock lease):
   and atomically renamed into place, then the manifest row is appended and fsynced.
 
 This module is a leaf: it imports only stdlib + `algua.contracts` + `algua.primitives` (itself a
-stdlib-only leaf, so importing it never crosses the import-linter boundary). The fsync helpers
-stay inlined (rather than importing `algua.data`) to keep the model layer a clean leaf; the flock
-lease now goes through `algua.primitives.flock` instead of hand-rolling it. Threat model is a
-single local Linux filesystem (see `algua.data.files`).
+stdlib-only leaf, so importing it never crosses the import-linter boundary). Durability (fsync)
+and lock primitives both come from `algua.primitives`, so the model layer remains a clean leaf
+under import-linter. Threat model is a single local Linux filesystem (see `algua.data.files`).
 """
 
 from __future__ import annotations
@@ -41,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from algua.contracts.model_types import ModelVersion, compute_provenance_digest
+from algua.primitives.atomic_io import fsync_dir, fsync_file
 from algua.primitives.flock import file_lock
 
 _ARTIFACT = "artifact.bin"
@@ -58,26 +58,6 @@ def default_root() -> Path:
     from algua.config.settings import get_settings
 
     return Path(get_settings().data_dir) / "models"
-
-
-# --------------------------------------------------------------------------- #
-# durability primitives (inlined — see module docstring)
-# --------------------------------------------------------------------------- #
-
-def _fsync_file(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 @contextmanager
@@ -250,11 +230,11 @@ def register(
         staging.mkdir()
         artifact_tmp = staging / _ARTIFACT
         artifact_tmp.write_bytes(artifact_bytes)
-        _fsync_file(artifact_tmp)
-        _fsync_dir(staging)
+        fsync_file(artifact_tmp)
+        fsync_dir(staging)
         version_dir = name_dir / f"v{version}"
         os.rename(staging, version_dir)
-        _fsync_dir(name_dir)
+        fsync_dir(name_dir)
 
         created_at = datetime.now(tz=UTC).isoformat()
         row = {
@@ -275,7 +255,7 @@ def register(
             fh.write(json.dumps(row, sort_keys=True) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-        _fsync_dir(name_dir)
+        fsync_dir(name_dir)
 
         return _row_to_version(name_dir, row)
 

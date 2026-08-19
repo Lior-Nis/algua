@@ -22,7 +22,6 @@ Three concerns:
 from __future__ import annotations
 
 import json
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from algua.calendar.market_calendar import MarketCalendar
+from algua.primitives.atomic_io import write_bytes_durable
 from algua.primitives.flock import LockHeld, file_lock
 
 if TYPE_CHECKING:
@@ -210,19 +210,7 @@ class SessionMarker:
                 "pid": pid,
             }
             payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
-            tmp = self._dir / f".{_MARKER_NAME}.{os.getpid()}.tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            try:
-                os.write(fd, payload)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, self._path)
-            dir_fd = os.open(self._dir, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            write_bytes_durable(payload, self._path)
 
 
 @dataclass(frozen=True)

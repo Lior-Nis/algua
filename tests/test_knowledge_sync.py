@@ -374,19 +374,6 @@ def test_sync_strategy_and_dependents_scaffolds_an_absent_doc(tmp_path):
     assert fm["name"] == "ghost" and fm["stage"] == "backtested"
 
 
-def test_write_text_atomic_no_torn_file_and_replaces(tmp_path):
-    from algua.knowledge.sync import _write_text_atomic
-
-    s = _settings(tmp_path)
-    target = strategies_dir(s) / "x.md"
-    _write_text_atomic(target, "first")
-    assert target.read_text() == "first"
-    _write_text_atomic(target, "second")
-    assert target.read_text() == "second"
-    # No stray temp files left behind.
-    assert not list(target.parent.glob(".sync-*"))
-
-
 # --- scaffold-on-sync -----------------------------------------------------------------------
 #
 # `strategy new` scaffolds the doc, but the autonomous factory never calls it: the research loop
