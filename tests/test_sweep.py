@@ -93,7 +93,7 @@ def test_evaluate_combo_returns_record_without_holdout():
     )
     # The rankable fields are present; the holdout never leaves the worker.
     assert set(rec) == {
-        "config_hash", "n_windows", "stability", "score", "window_sharpes", "meta"
+        "config_hash", "n_windows", "stability", "score", "meta"
     }
     assert "holdout_metrics" not in rec and "holdout" not in rec
     assert rec["score"] == rec["stability"]["mean_sharpe"]

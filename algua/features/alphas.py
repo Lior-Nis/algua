@@ -1,7 +1,7 @@
 """Standalone-evaluable alpha factors: signal-shaped (view, params) -> cross-sectional scores.
 
 Distinct from indicators.py (arbitrary-signature building blocks): an alpha here IS reusable as a
-strategy `signal`, and can be evaluated on its own (algua factor eval). Pure layer — pandas only.
+strategy `signal` directly (signal-shaped, no adapter needed). Pure layer — pandas only.
 """
 from __future__ import annotations
 

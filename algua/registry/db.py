@@ -782,6 +782,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     })
     # v25 (#219): factor_evaluations is a brand-new table — `executescript(_SCHEMA)` above
     # creates it via `CREATE TABLE IF NOT EXISTS`. No _add_missing_columns needed.
+    # (later dropped in v41 — see the DROP TABLE above)
     # v26 (#220): FDR accounting columns for the LORD++ alpha-wealth ledger. NULL on pre-existing
     # rows — legacy evaluations are excluded from the FDR stream by WHERE fdr_binding=1 (fail
     # closed). The partial unique index is created AFTER the columns exist (it references
@@ -880,6 +881,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     # handled above (before the index swap so the new composite index sees the rewritten indices).
     # v34 (#392): shadow_evaluations is a brand-new ADVISORY table; executescript(_SCHEMA) above
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # (later dropped in v40 — see the DROP TABLE above)
     # v35 (#329): actor_challenges is a brand-new table; executescript(_SCHEMA) above creates it
     # (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v36 (#485): attempt_token on gate_evaluations — the merge-back driver's per-attempt idem

@@ -86,8 +86,10 @@ def write_bytes_atomic(data: bytes, dest: Path) -> None:
 
 def write_text_atomic(text: str, dest: Path) -> None:
     """Write `text` to `dest` atomically via a same-dir temp + `os.replace` (#181): a reader never
-    sees a partially written file even if the process dies mid-write. No fsync — this is ephemeral
-    (a plotting input), not durable (cf. `write_bytes_durable`)."""
+    sees a partially written file even if the process dies mid-write. No fsync — not power-loss
+    durable, because the current consumer (the Obsidian knowledge-vault writer, see
+    `algua/knowledge/sync.py`) is regenerable curation, not the binding audit trail (cf.
+    `write_bytes_durable`)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=".emit-")
     try:

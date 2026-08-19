@@ -244,7 +244,6 @@ def _evaluate_combo(
     rank_by: str,
     delisting_records: Mapping[str, list[DelistingRecord]] | None,
     assume_terminal_last_close: bool,
-    compute_holdout: bool = True,
     fundamentals_provider: FundamentalsProvider | None = None,
     news_provider: NewsProvider | None = None,
 ) -> dict[str, Any]:
@@ -253,8 +252,7 @@ def _evaluate_combo(
 
     Deliberately does NOT return wf.holdout_metrics: the holdout never leaves the worker process,
     preserving sweep's single-use-holdout discipline (the holdout is revealed only in
-    `research promote`). ``compute_holdout`` is threaded straight to ``walk_forward`` (its
-    documented seam); the default ``True`` preserves the holdout STATISTIC computation.
+    `research promote`).
     """
     wf = walk_forward(
         overridden, provider, start, end,
@@ -265,14 +263,12 @@ def _evaluate_combo(
         news_provider=news_provider,
         delisting_records=delisting_records,
         assume_terminal_last_close=assume_terminal_last_close,
-        compute_holdout=compute_holdout,
     )
     return {
         "config_hash": wf.config_hash,
         "n_windows": wf.windows,
         "stability": wf.stability,
         "score": wf.stability[rank_by],
-        "window_sharpes": [w["sharpe"] for w in wf.window_metrics],
         "meta": {
             "data_source": wf.data_source,
             "snapshot_id": wf.snapshot_id,
