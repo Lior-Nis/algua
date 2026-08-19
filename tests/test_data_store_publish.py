@@ -9,12 +9,12 @@ import pytest
 from algua.data.files import (
     frame_to_parquet_bytes,
     validate_partitioned_bars_dir,
-    write_bytes_snapshot,
     write_partitioned_bars,
 )
 from algua.data.manifest import SnapshotManifest
 from algua.data.models import Dataset
 from algua.data.store import DataStore
+from algua.primitives.atomic_io import write_bytes_durable
 
 
 def _bars_canon(symbols: list[str], n: int = 2) -> pd.DataFrame:
@@ -29,17 +29,19 @@ def _bars_canon(symbols: list[str], n: int = 2) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_write_bytes_snapshot_publishes_atomically_no_temp_residue(tmp_path):
-    write_bytes_snapshot(b"payload", tmp_path, Path("snapshots/x/id1/file.bin"))
+def test_write_bytes_durable_publishes_atomically_no_temp_residue(tmp_path):
+    rel = Path("snapshots/x/id1/file.bin")
+    write_bytes_durable(b"payload", tmp_path / rel, durable_root=tmp_path)
     target_dir = tmp_path / "snapshots" / "x" / "id1"
     assert (target_dir / "file.bin").read_bytes() == b"payload"
     assert [p.name for p in target_dir.iterdir()] == ["file.bin"]  # no temp left behind
 
 
-def test_write_bytes_snapshot_replaces_existing_identical_file(tmp_path):
+def test_write_bytes_durable_replaces_existing_identical_file(tmp_path):
     rel = Path("snapshots/x/id1/file.bin")
-    write_bytes_snapshot(b"payload", tmp_path, rel)
-    write_bytes_snapshot(b"payload", tmp_path, rel)  # same id => identical bytes; benign
+    write_bytes_durable(b"payload", tmp_path / rel, durable_root=tmp_path)
+    # same id => identical bytes; benign
+    write_bytes_durable(b"payload", tmp_path / rel, durable_root=tmp_path)
     assert (tmp_path / rel).read_bytes() == b"payload"
 
 

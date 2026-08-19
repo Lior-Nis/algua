@@ -18,15 +18,11 @@ from algua.data.files import (
     compose_bars_symbol_hash,
     count_tabular_rows,
     frame_to_parquet_bytes,
-    fsync_file,
-    fsync_parents,
-    fsync_tree,
     logical_bars_hash,
     read_partitioned_bars,
     sha256_bytes,
     sha256_file,
     validate_partitioned_bars_dir,
-    write_bytes_snapshot,
     write_partitioned_bars,
 )
 from algua.data.fundamentals_schema import (
@@ -52,6 +48,12 @@ from algua.data.schema import empty_bars, to_bar_schema
 from algua.data.staging import SnapshotStagingLease
 from algua.data.timeframes import validate_timeframe
 from algua.data.verify import SnapshotVerifier
+from algua.primitives.atomic_io import (
+    fsync_file,
+    fsync_parents,
+    fsync_tree,
+    write_bytes_durable,
+)
 
 if TYPE_CHECKING:
     from algua.backtest.delisting import DelistingRecord
@@ -418,7 +420,9 @@ class DataStore:
             return existing
 
         relative_path = Path("snapshots") / metadata.dataset / snapshot_id / filename
-        write_bytes_snapshot(payload, self.data_dir, relative_path)
+        write_bytes_durable(
+            payload, self.data_dir / relative_path, durable_root=self.data_dir
+        )
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,
             metadata=metadata,
@@ -681,7 +685,11 @@ class DataStore:
         relative_path = (
             Path("snapshots") / metadata.dataset / snapshot_id / "fundamentals.parquet"
         )
-        write_bytes_snapshot(frame_to_parquet_bytes(canon), self.data_dir, relative_path)
+        write_bytes_durable(
+            frame_to_parquet_bytes(canon),
+            self.data_dir / relative_path,
+            durable_root=self.data_dir,
+        )
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,
             metadata=metadata,
@@ -765,7 +773,11 @@ class DataStore:
         if existing is not None:
             return existing
         relative_path = Path("snapshots") / metadata.dataset / snapshot_id / "news.parquet"
-        write_bytes_snapshot(frame_to_parquet_bytes(canon), self.data_dir, relative_path)
+        write_bytes_durable(
+            frame_to_parquet_bytes(canon),
+            self.data_dir / relative_path,
+            durable_root=self.data_dir,
+        )
         rec = SnapshotRecord(
             snapshot_id=snapshot_id,
             metadata=metadata,

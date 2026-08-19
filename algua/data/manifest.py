@@ -6,9 +6,9 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from algua.data.files import fsync_dir
 from algua.data.models import Dataset, SnapshotRecord
 from algua.primitives import flock
+from algua.primitives.atomic_io import fsync_dir
 
 
 class ManifestLockReplacedError(RuntimeError):

@@ -12,20 +12,21 @@ from algua.data import files
 from algua.data.manifest import SnapshotManifest
 from algua.data.models import Dataset, Kind, SnapshotMetadata, SnapshotRecord
 from algua.data.store import DataStore
+from algua.primitives import atomic_io
 
 
 def test_fsync_file_and_dir_run_on_real_paths(tmp_path: Path) -> None:
     f = tmp_path / "a.bin"
     f.write_bytes(b"hello")
-    files.fsync_file(f)  # must not raise
-    files.fsync_dir(tmp_path)  # must not raise
+    atomic_io.fsync_file(f)  # must not raise
+    atomic_io.fsync_dir(tmp_path)  # must not raise
 
 
 def test_fsync_dir_rejects_non_directory(tmp_path: Path) -> None:
     f = tmp_path / "a.bin"
     f.write_bytes(b"x")
     with pytest.raises(OSError):  # O_DIRECTORY on a file -> ENOTDIR
-        files.fsync_dir(f)
+        atomic_io.fsync_dir(f)
 
 
 def test_fsync_tree_visits_files_before_their_parent_dirs(tmp_path: Path, monkeypatch) -> None:
@@ -43,7 +44,7 @@ def test_fsync_tree_visits_files_before_their_parent_dirs(tmp_path: Path, monkey
         return fd
 
     monkeypatch.setattr(os, "open", spy_open)
-    files.fsync_tree(tmp_path)
+    atomic_io.fsync_tree(tmp_path)
 
     # root itself is fsynced last; every symbol dir fsync comes after its own part file
     assert order[-1] == (str(tmp_path), True)
@@ -71,7 +72,7 @@ def test_fsync_parents_walks_up_to_stop_at_inclusive(tmp_path: Path, monkeypatch
         return real_open(path, flags, *a, **k)
 
     monkeypatch.setattr(os, "open", spy_open)
-    files.fsync_parents(payload, stop_at=root)
+    atomic_io.fsync_parents(payload, stop_at=root)
 
     assert str(leaf) in fsynced
     assert str(root / "snapshots" / "bars") in fsynced
@@ -80,7 +81,7 @@ def test_fsync_parents_walks_up_to_stop_at_inclusive(tmp_path: Path, monkeypatch
     assert str(root.parent) not in fsynced
 
 
-def test_write_bytes_snapshot_fsyncs_temp_before_replace_then_parents(
+def test_write_bytes_durable_fsyncs_temp_before_replace_then_parents(
     tmp_path: Path, monkeypatch
 ) -> None:
     events: list[str] = []
@@ -98,7 +99,7 @@ def test_write_bytes_snapshot_fsyncs_temp_before_replace_then_parents(
     monkeypatch.setattr(os, "replace", spy_replace)
 
     rel = Path("snapshots") / "universes" / "snap1" / "universe.parquet"
-    files.write_bytes_snapshot(b"payload-bytes", tmp_path, rel)
+    atomic_io.write_bytes_durable(b"payload-bytes", tmp_path / rel, durable_root=tmp_path)
 
     assert (tmp_path / rel).read_bytes() == b"payload-bytes"
     # the temp file is fsynced BEFORE the rename; parent-chain dirs are fsynced AFTER
