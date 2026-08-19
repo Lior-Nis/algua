@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import ROUND_FLOOR, Decimal
@@ -14,6 +13,7 @@ from requests import RequestException
 from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
 from algua.execution.sizing import MIN_NOTIONAL, size_order
+from algua.primitives.retry import RetriesExhausted, call_with_backoff
 
 _TIMEOUT = 30  # seconds: per-request connect+read timeout for every Alpaca HTTP call
 # Default endpoints for the two Alpaca venues.
@@ -124,34 +124,32 @@ class _AlpacaBroker:
         client_order_id so a retried POST that already landed is de-duplicated by Alpaca rather
         than double-filling. Non-retryable statuses are returned as-is for the caller to inspect."""
         url = f"{self.base_url}{path}"
-        last_exc: RequestException | None = None
-        for attempt in range(_MAX_RETRIES):
-            try:
-                # allow_redirects=False on every verb: requests re-sends the APCA credential
-                # headers on a cross-host 3xx, which would leak them to the redirect target. A
-                # 3xx is not retryable, so it returns below and the caller's non-2xx handling
-                # (a BrokerError) rejects it — the credentials never reach the redirect host (#394).
-                if method == "GET":
-                    resp = requests.get(url, headers=self._headers(), timeout=_TIMEOUT,
-                                        allow_redirects=False)
-                elif method == "POST":
-                    resp = requests.post(url, headers=self._headers(), json=body, timeout=_TIMEOUT,
-                                         allow_redirects=False)
-                else:  # DELETE
-                    resp = requests.delete(url, headers=self._headers(), timeout=_TIMEOUT,
-                                          allow_redirects=False)
-            except RequestException as exc:
-                last_exc = exc
-            else:
-                if resp.status_code not in retryable_status or attempt == _MAX_RETRIES - 1:
-                    return resp
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_BACKOFF_BASE * (2 ** attempt))
-        # Exhausted retries on a transport error (a retryable-status response would have returned
-        # on the final attempt above).
-        raise BrokerError(
-            f"alpaca {method} {path} failed after {_MAX_RETRIES} attempts: {last_exc}"
-        )
+
+        def _send() -> requests.Response:
+            # allow_redirects=False on every verb: requests re-sends the APCA credential
+            # headers on a cross-host 3xx, which would leak them to the redirect target. A
+            # 3xx is not retryable, so it returns below and the caller's non-2xx handling
+            # (a BrokerError) rejects it — the credentials never reach the redirect host (#394).
+            if method == "GET":
+                return requests.get(url, headers=self._headers(), timeout=_TIMEOUT,
+                                    allow_redirects=False)
+            if method == "POST":
+                return requests.post(url, headers=self._headers(), json=body, timeout=_TIMEOUT,
+                                     allow_redirects=False)
+            return requests.delete(url, headers=self._headers(), timeout=_TIMEOUT,
+                                   allow_redirects=False)
+
+        try:
+            return call_with_backoff(
+                _send, attempts=_MAX_RETRIES, backoff_base=_BACKOFF_BASE,
+                retryable_exceptions=(RequestException,),
+                retry_result=lambda resp: resp.status_code in retryable_status,
+            )
+        except RetriesExhausted as exc:
+            raise BrokerError(
+                f"alpaca {method} {path} failed after {_MAX_RETRIES} attempts: "
+                f"{exc.last_exception}"
+            ) from exc
 
     def _get(self, path: str) -> requests.Response:
         return self._request("GET", path, retryable_status=_RETRYABLE_STATUS)
