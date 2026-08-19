@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import tempfile
@@ -9,6 +8,7 @@ from pathlib import Path
 
 from algua.data.files import fsync_dir
 from algua.data.models import Dataset, SnapshotRecord
+from algua.primitives import flock
 
 
 class ManifestLockReplacedError(RuntimeError):
@@ -88,36 +88,23 @@ class SnapshotManifest:
             fsync_dir(self.path.parent)
             return rec
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
+            flock.release(lock_fd)
 
     def _acquire_lock(self) -> int:
-        """Blocking LOCK_EX on the sidecar lock file via a FRESH fd per call (flock is
-        per-open-file-description: a cached/shared fd would silently self-grant). After
-        acquiring, verify the path still names the locked inode — a mismatch means something
-        replaced the lock file externally; retry bounded, then fail distinctly."""
+        """Blocking LOCK_EX on the sidecar lock file via primitives.flock — a FRESH fd per
+        call (flock is per-open-file-description: a cached/shared fd would silently
+        self-grant), with inode re-verification: the path must still name the locked inode
+        after acquiring — a mismatch means something replaced the lock file externally; retry
+        bounded, then fail distinctly (see SnapshotManifest contract: the lock file must never
+        be deleted)."""
         lock_path = self.path.with_name(self.path.name + ".lock")
-        for _ in range(_LOCK_ACQUIRE_RETRIES):
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                fd_stat = os.fstat(fd)
-                try:
-                    path_stat = os.stat(lock_path)
-                except FileNotFoundError:
-                    path_stat = None
-                if path_stat is not None and (
-                    (path_stat.st_dev, path_stat.st_ino) == (fd_stat.st_dev, fd_stat.st_ino)
-                ):
-                    return fd
-            except BaseException:
-                os.close(fd)
-                raise
-            os.close(fd)
-        raise ManifestLockReplacedError(
-            f"lock file {lock_path} was replaced externally while acquiring; it must never "
-            "be deleted (see SnapshotManifest contract)"
-        )
+        try:
+            return flock.acquire(lock_path, verify_inode=True, retries=_LOCK_ACQUIRE_RETRIES)
+        except flock.LockReplaced as exc:
+            raise ManifestLockReplacedError(
+                f"lock file {lock_path} was replaced externally while acquiring; it must never "
+                "be deleted (see SnapshotManifest contract)"
+            ) from exc
 
     def _repair(self, committed: bytes) -> None:
         """Replace the manifest with its committed prefix via temp + atomic rename. Never

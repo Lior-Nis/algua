@@ -21,14 +21,15 @@ Concurrency + torn-write recovery (under the per-name flock lease):
   are allowed; recovery is passive (no scrubber). The artifact is written into a unique temp dir
   and atomically renamed into place, then the manifest row is appended and fsynced.
 
-This module is a leaf: it imports only stdlib + `algua.contracts`. The fsync/flock helpers are
-inlined (rather than importing `algua.data`) to keep the model layer a clean leaf under the
-import-linter boundary. Threat model is a single local Linux filesystem (see `algua.data.files`).
+This module is a leaf: it imports only stdlib + `algua.contracts` + `algua.primitives` (itself a
+stdlib-only leaf, so importing it never crosses the import-linter boundary). The fsync helpers
+stay inlined (rather than importing `algua.data`) to keep the model layer a clean leaf; the flock
+lease now goes through `algua.primitives.flock` instead of hand-rolling it. Threat model is a
+single local Linux filesystem (see `algua.data.files`).
 """
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from algua.contracts.model_types import ModelVersion, compute_provenance_digest
+from algua.primitives.flock import file_lock
 
 _ARTIFACT = "artifact.bin"
 _MANIFEST = "manifest.jsonl"
@@ -82,16 +84,8 @@ def _fsync_dir(path: Path) -> None:
 def _name_lease(name_dir: Path) -> Iterator[None]:
     """Exclusive per-name flock on a sibling `<name>.lock`, serializing register()."""
     name_dir.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = name_dir.parent / f"{name_dir.name}.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    with file_lock(name_dir.parent / f"{name_dir.name}.lock"):
         yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
 
 
 # --------------------------------------------------------------------------- #
