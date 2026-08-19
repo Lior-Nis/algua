@@ -18,10 +18,6 @@ The pure-maths responsibilities that ``evaluate_gate`` composes live in cohesive
 modules (mirroring the ``backtest/bootstrap.py`` / ``backtest/neff.py`` precedent):
 
 - ``algua.research.regime``   — volatility-tertile regime robustness + CAPM idiosyncratic-alpha.
-- ``algua.research.fdr_lord``  — LORD++ online-FDR γ-sequence, cohort restarts, and α_t level
-  (recalibrated #529; the promote path now records ``fdr_binding`` NULL rows — the LORD++ ledger
-  machinery is preserved for future re-tightening but the stream is not consumed while the
-  statistical stack is advisory).
 - ``algua.research.dsr``       — DSR SR*/confidence, dispersion floor, effective funnel breadth.
 - ``algua.research.haircut``   — the deflated-Sharpe multiple-testing haircut.
 - ``algua.research._constants`` — the shared holdout-power floor (MIN_HOLDOUT_OBSERVATIONS).
@@ -58,17 +54,6 @@ from algua.research.dsr import (
     effective_funnel_breadth,
     floored_trial_var_per_period,
 )
-from algua.research.fdr_lord import (
-    _LORD_GAMMA,
-    FDR_ALPHA,
-    FDR_COHORT_SIZE,
-    FDR_NEAR_TERM_BINDING_BUDGET,
-    FDR_THROTTLE_WINDOW_DAYS,
-    FDR_W0,
-    _compute_lord_gamma,
-    fdr_cohort_position,
-    lord_plus_plus_level,
-)
 from algua.research.haircut import sharpe_haircut
 from algua.research.regime import (
     IR_MIN_APPRAISAL_RATIO,
@@ -100,11 +85,6 @@ __all__ = [
     "DOMINANCE_AUDIT_MIN_WINDOW_DAYS",
     "DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS",
     "EULER_MASCHERONI",
-    "FDR_ALPHA",
-    "FDR_COHORT_SIZE",
-    "FDR_NEAR_TERM_BINDING_BUDGET",
-    "FDR_THROTTLE_WINDOW_DAYS",
-    "FDR_W0",
     "FUNNEL_WINDOW_DAYS",
     "GATE_SPECS",
     "GateCriteria",
@@ -130,17 +110,13 @@ __all__ = [
     "RegimeSlice",
     "VOL_ROLLING_WINDOW",
     "WalkForwardResult",
-    "_LORD_GAMMA",
-    "_compute_lord_gamma",
     "dsr_confidence",
     "dsr_sr_star",
     "dsr_sr_star_annualized",
     "effective_funnel_breadth",
     "evaluate_gate",
-    "fdr_cohort_position",
     "floored_trial_var_per_period",
     "information_ratio",
-    "lord_plus_plus_level",
     "regime_robustness_check",
     "regime_splits",
     "sharpe_haircut",
