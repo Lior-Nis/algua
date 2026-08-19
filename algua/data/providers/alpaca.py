@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import pandas as pd
@@ -10,6 +9,7 @@ from algua.contracts.net import require_https_allowlisted_host
 from algua.data.contracts import BarProvider, BarRequest, ProviderBars
 from algua.data.providers.errors import ProviderError
 from algua.data.timeframes import is_intraday
+from algua.primitives.retry import RetriesExhausted, call_with_backoff
 
 # The Alpaca market-data host. Its credentials (APCA-API-KEY-ID / APCA-API-SECRET-KEY) are the
 # same account-scoped broker secrets used to place orders, so the data path enforces the SAME
@@ -92,61 +92,59 @@ class AlpacaBarProvider(BarProvider):
         ProviderError so the CLI's @json_errors renders them on stdout rather than
         letting a raw requests traceback escape the JSON contract.
         """
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            last_attempt = attempt == MAX_ATTEMPTS
-            try:
-                response = requests.get(
-                    f"{self.base_url}/stocks/bars",
-                    headers={
-                        "APCA-API-KEY-ID": self.api_key,
-                        "APCA-API-SECRET-KEY": self.api_secret,
-                    },
-                    params={
-                        "symbols": ",".join(request.symbols),
-                        "timeframe": _alpaca_timeframe(request.timeframe),
-                        "start": request.start,
-                        "end": request.end,
-                        "adjustment": adjustment,
-                    },
-                    timeout=30,
-                    # Never chase a redirect: requests re-sends the APCA credential headers on a
-                    # cross-host 3xx, which would leak them to the redirect target (#394).
-                    allow_redirects=False,
-                )
-            except requests.RequestException as exc:
-                if last_attempt:
-                    raise ProviderError(
-                        f"alpaca request failed after {MAX_ATTEMPTS} attempts: {exc}"
-                    ) from exc
-                time.sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
-                continue
 
-            status = getattr(response, "status_code", None)
-            if status is not None and 300 <= status <= 399:
-                raise ProviderError(
-                    f"alpaca returned an unexpected redirect (HTTP {status}); refusing to "
-                    "forward credentials to the redirect target"
-                )
-            if status in RETRYABLE_STATUS and not last_attempt:
-                time.sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
-                continue
+        def _send() -> requests.Response:
+            return requests.get(
+                f"{self.base_url}/stocks/bars",
+                headers={
+                    "APCA-API-KEY-ID": self.api_key,
+                    "APCA-API-SECRET-KEY": self.api_secret,
+                },
+                params={
+                    "symbols": ",".join(request.symbols),
+                    "timeframe": _alpaca_timeframe(request.timeframe),
+                    "start": request.start,
+                    "end": request.end,
+                    "adjustment": adjustment,
+                },
+                timeout=30,
+                # Never chase a redirect: requests re-sends the APCA credential headers on a
+                # cross-host 3xx, which would leak them to the redirect target (#394).
+                allow_redirects=False,
+            )
 
-            try:
-                response.raise_for_status()
-            except requests.HTTPError as exc:
-                raise ProviderError(f"alpaca returned HTTP {status}: {exc}") from exc
+        try:
+            response = call_with_backoff(
+                _send, attempts=MAX_ATTEMPTS, backoff_base=BACKOFF_BASE_SECONDS,
+                retryable_exceptions=(requests.RequestException,),
+                retry_result=lambda r: getattr(r, "status_code", None) in RETRYABLE_STATUS,
+            )
+        except RetriesExhausted as exc:
+            raise ProviderError(
+                f"alpaca request failed after {MAX_ATTEMPTS} attempts: {exc.last_exception}"
+            ) from exc
 
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise ProviderError(
-                    f"alpaca returned a malformed JSON body (HTTP {status}): {exc}"
-                ) from exc
-            if not isinstance(payload, dict):
-                raise ProviderError("provider returned a non-object response")
-            return payload
+        status = getattr(response, "status_code", None)
+        if status is not None and 300 <= status <= 399:
+            raise ProviderError(
+                f"alpaca returned an unexpected redirect (HTTP {status}); refusing to "
+                "forward credentials to the redirect target"
+            )
 
-        raise AssertionError("unreachable: retry loop always returns or raises")
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise ProviderError(f"alpaca returned HTTP {status}: {exc}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderError(
+                f"alpaca returned a malformed JSON body (HTTP {status}): {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProviderError("provider returned a non-object response")
+        return payload
 
 
 def _normalize_alpaca(payload: dict[str, Any]) -> pd.DataFrame:

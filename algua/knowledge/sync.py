@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import fcntl
-import os
-import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -14,27 +11,13 @@ from algua.contracts.lifecycle import Stage
 from algua.knowledge.frontmatter import parse_doc, render_doc, replace_block
 from algua.knowledge.metrics import latest_run_metrics
 from algua.knowledge.templates import scaffold_strategy_doc
+from algua.primitives.atomic_io import write_text_atomic
+from algua.primitives.flock import file_lock
 
-
-def _write_text_atomic(path: Path, text: str) -> None:
-    """Write `text` to `path` atomically via a same-dir temp + `os.replace`.
-
-    Every vault write goes through here so no reader — Obsidian, `doctor`'s ``kb_check``, or a
-    concurrent sync's roster/index scan — ever observes a half-written doc (mirrors
-    ``data.files.write_bytes_atomic``). Not power-loss durable: the vault is regenerable curation,
-    not the binding audit (that is the ``gate_evaluations`` row + result JSON).
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".sync-")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
+# Every vault write goes through write_text_atomic so no reader — Obsidian, `doctor`'s
+# ``kb_check``, or a concurrent sync's roster/index scan — ever observes a half-written doc. Not
+# power-loss durable: the vault is regenerable curation, not the binding audit (that is the
+# ``gate_evaluations`` row + result JSON).
 
 
 @contextmanager
@@ -50,21 +33,8 @@ def kb_sync_lock(settings: Settings) -> Iterator[None]:
     sync — atomic writes still prevent torn reads. The kernel frees the lock on process death.
     """
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = settings.knowledge_dir / ".sync.lock"
-    fd = None
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-    except OSError:
-        if fd is not None:
-            os.close(fd)
-        fd = None
-    try:
+    with file_lock(settings.knowledge_dir / ".sync.lock", on_oserror="proceed"):
         yield
-    finally:
-        if fd is not None:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
 
 
 # Canonical lifecycle order for grouping rosters/axis pages by stage. Derived from the Stage enum
@@ -287,11 +257,11 @@ def sync_strategy_doc(
         if not scaffold:
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
-        _write_text_atomic(path, scaffold_strategy_doc(
+        write_text_atomic(scaffold_strategy_doc(
             name,
             family=_unwikilink((metadata or {}).get("family")),
             derived_from=_unwikilink((metadata or {}).get("derived_from")),
-        ))
+        ), path)
     fm, body = parse_doc(path.read_text())
     if stage is not None:
         fm["stage"] = stage
@@ -301,7 +271,7 @@ def sync_strategy_doc(
     if metrics:
         fm["mlflow_run"] = metrics["run_id"][:8]
     body = replace_block(body, "RESULTS", render_results_block(metrics))
-    _write_text_atomic(path, render_doc(fm, body))
+    write_text_atomic(render_doc(fm, body), path)
     return True
 
 
@@ -322,7 +292,7 @@ def sync_family_doc(settings: Settings, name: str) -> bool:
             members.append((doc.stem, str(fm.get("stage", "?"))))
     fm, body = parse_doc(path.read_text())
     body = replace_block(body, "MEMBERS", render_members_block(members))
-    _write_text_atomic(path, render_doc(fm, body))
+    write_text_atomic(render_doc(fm, body), path)
     return True
 
 
@@ -405,12 +375,12 @@ def generate_indexes(settings: Settings) -> None:
             fm, _ = parse_doc(doc.read_text())
             n_families += 1
             fam_lines.append(f"- [[{doc.stem}]] — {fm.get('status', '?')}")
-    _write_text_atomic(
-        base / "_families.md", "# Thesis families\n\n" + "\n".join(fam_lines) + "\n"
+    write_text_atomic(
+        "# Thesis families\n\n" + "\n".join(fam_lines) + "\n", base / "_families.md"
     )
 
-    _write_text_atomic(base / "_by-stage.md", _render_by_stage(entries))
-    _write_text_atomic(base / "_by-date.md", _render_by_date(entries))
+    write_text_atomic(_render_by_stage(entries), base / "_by-stage.md")
+    write_text_atomic(_render_by_date(entries), base / "_by-date.md")
 
     router = (
         "# Strategies\n\n"
@@ -419,7 +389,7 @@ def generate_indexes(settings: Settings) -> None:
         "- [[_by-date]] — by created month (date)\n"
         "- [[_families]] — by thesis family\n"
     )
-    _write_text_atomic(base / "_index.md", router)
+    write_text_atomic(router, base / "_index.md")
 
 
 def sync_strategy_and_dependents(

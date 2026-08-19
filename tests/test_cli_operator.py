@@ -404,10 +404,15 @@ def test_git_dir_unresolvable_fails_closed(db_dir, monkeypatch):
 
 def test_lock_file_unopenable_fails_closed(db_dir, monkeypatch):
     # GATE-2 (#486): `operator_run_lock` raises a RAW OSError (not OperatorLockHeld) when it cannot
-    # open/create the lock file — permission denied, read-only fs, disk full. Point the git dir at a
-    # non-existent parent so `open(lock_path, "a+")` raises FileNotFoundError; it must alert + fail
-    # closed the same way, never silently at the un-paging catch-all.
-    monkeypatch.setattr(operator_cmd, "_resolve_git_dir", lambda: db_dir / "no_such_dir")
+    # open/create the lock file — permission denied, read-only fs, disk full. Force the shared
+    # primitive's `os.open` (algua.primitives.flock, #8) to fail: `operator_run_lock` now goes
+    # through `flock.acquire`/`file_lock`, which auto-creates any missing parent dir and would
+    # otherwise mask a bare "missing dir" simulation; it must alert + fail closed the same way,
+    # never silently at the un-paging catch-all.
+    def _open_boom(*_a, **_k):
+        raise PermissionError("EACCES")
+
+    monkeypatch.setattr("algua.primitives.flock.os.open", _open_boom)
     calls: list = []
     monkeypatch.setattr(operator_cmd, "_run_driver", lambda c, *_: calls.append(c))
     alerts = _spy_alerts(monkeypatch)

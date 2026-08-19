@@ -15,12 +15,10 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     backtest_cmd,
     data_cmd,
     eval_cmd,
-    factor_cmd,
     fleet_cmd,
     governance_cmd,
     idea_cmd,
     live_cmd,
-    monitoring_cmd,
     negative_cmd,
     operator_cmd,
     ops_cmd,
@@ -28,7 +26,6 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     registry_cmd,
     research_batch_cmd,
     research_cmd,
-    shadow_cmd,
     strategy_cmd,
 )
 from algua.cli.app import app, emit

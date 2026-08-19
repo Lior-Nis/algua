@@ -375,16 +375,23 @@ def test_sync_strategy_and_dependents_scaffolds_an_absent_doc(tmp_path):
 
 
 def test_write_text_atomic_no_torn_file_and_replaces(tmp_path):
-    from algua.knowledge.sync import _write_text_atomic
+    # Regression coverage for the vault write path (moved off the deleted module-private
+    # `_write_text_atomic` onto `algua.primitives.atomic_io.write_text_atomic` per #simplification
+    # stage 0-2 Task 10). `tests/primitives/test_atomic_io.py::test_write_text_atomic_roundtrip`
+    # covers overwrite semantics for the primitive in isolation but does not assert no-temp-residue
+    # for the TEXT variant (only `write_bytes_atomic` gets that check there) — this test closes that
+    # gap through the knowledge-sync module's own directory helpers, exercising the exact write path
+    # every vault write (Obsidian/`doctor`'s `kb_check`/concurrent sync) relies on.
+    from algua.primitives.atomic_io import write_text_atomic
 
     s = _settings(tmp_path)
     target = strategies_dir(s) / "x.md"
-    _write_text_atomic(target, "first")
+    write_text_atomic("first", target)
     assert target.read_text() == "first"
-    _write_text_atomic(target, "second")
+    write_text_atomic("second", target)
     assert target.read_text() == "second"
-    # No stray temp files left behind.
-    assert not list(target.parent.glob(".sync-*"))
+    # No stray temp files left behind (write_text_atomic's mkstemp prefix is ".emit-").
+    assert not list(target.parent.glob(".emit-*"))
 
 
 # --- scaffold-on-sync -----------------------------------------------------------------------

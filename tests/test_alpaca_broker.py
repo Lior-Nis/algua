@@ -10,6 +10,18 @@ from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
 T0 = datetime(2023, 1, 2, tzinfo=UTC)
 
 
+def _no_sleep(monkeypatch):
+    """Stub out the retry primitive's backoff sleep so retry tests run instantly. `_request` now
+    delegates to algua.primitives.retry.call_with_backoff (Task 11), which no longer reads a
+    module-level `time` off `ab` — the previous `monkeypatch.setattr(ab, "time", ...)` trick no
+    longer has anything to patch, so we inject a no-op `sleep` into the retry call instead."""
+    real = ab.call_with_backoff
+    monkeypatch.setattr(
+        ab, "call_with_backoff",
+        lambda *a, **kw: real(*a, **{**kw, "sleep": lambda _s: None}),
+    )
+
+
 class _FakeResp:
     def __init__(self, status_code, payload=None, text=""):
         self.status_code = status_code
@@ -341,7 +353,7 @@ class _FlakyRequests(_FakeRequests):
 
 
 def test_retries_transient_status_then_succeeds(monkeypatch):
-    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    _no_sleep(monkeypatch)
     fake = _FlakyRequests(fail_times=2,
                           final_payload={"id": "a", "equity": "1",
                                          "cash": "1", "buying_power": "1"})
@@ -351,7 +363,7 @@ def test_retries_transient_status_then_succeeds(monkeypatch):
 
 
 def test_retries_exhausted_raises(monkeypatch):
-    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    _no_sleep(monkeypatch)
     fake = _FlakyRequests(fail_times=99, final_payload={})  # always 503
     monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError, match="503"):
@@ -369,7 +381,7 @@ class _RetryableThenRaise(_FakeRequests):
 
 
 def test_retries_transport_error_then_raises(monkeypatch):
-    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    _no_sleep(monkeypatch)
     fake = _RetryableThenRaise()
     monkeypatch.setattr(ab, "requests", fake)
     with pytest.raises(BrokerError, match="after 3 attempts"):
@@ -402,7 +414,7 @@ def test_submit_timeout_then_retry_reuses_client_order_id(monkeypatch):
     # de-duplicates the order rather than double-filling. This unit test proves the CLIENT-SIDE
     # guarantee (identical body incl. client_order_id on the retry) + a single returned order id;
     # the actual no-double-order is Alpaca's server-side dedup on client_order_id (out of scope).
-    monkeypatch.setattr(ab, "time", type("T", (), {"sleep": staticmethod(lambda s: None)}))
+    _no_sleep(monkeypatch)
     fake = _TimeoutThenSucceedPost({"id": "order-1"})
     monkeypatch.setattr(ab, "requests", fake)
     snap = ab.TickSnapshot(equity=100000.0, market_values={"AAA": 0.0}, qtys={"AAA": 0.0})

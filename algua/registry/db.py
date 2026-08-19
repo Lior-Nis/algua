@@ -13,7 +13,9 @@ from pathlib import Path
 # accompanied by the corresponding migration step (a new table/index in _SCHEMA
 # and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
 # bump this number without the migration that earns it.
-SCHEMA_VERSION = 39
+# v40 (simplification stage 1): the advisory shadow lane is deleted; migrate() drops its table.
+# v41 (simplification stage 1): standalone factor-eval layer deleted; migrate() drops its table.
+SCHEMA_VERSION = 41
 
 # v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
 # above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is
@@ -553,45 +555,6 @@ CREATE TABLE IF NOT EXISTS forward_gate_evaluations (
 );
 CREATE INDEX IF NOT EXISTS ix_forward_gate_strategy ON forward_gate_evaluations(strategy_id);
 
--- v25 (#219): factor-evaluation ledger for funnel-FDR accounting (slice E of #140).
--- Records each `factor eval` invocation as a hypothesis test. Correction columns
--- (n_hypotheses, dsr_confidence, significant) are NULL until finalize_factor_evaluation()
--- writes them after the breadth + DSR pass — fail-closed: a NULL significant is never
--- treated as a pass. hypothesis_hash deduplicates identical reruns (same factor identity
--- + params + window), so breadth counts are honest across repeated runs.
-CREATE TABLE IF NOT EXISTS factor_evaluations (
-    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
-    factor_name               TEXT    NOT NULL,
-    import_path               TEXT    NOT NULL,
-    code_hash                 TEXT    NOT NULL,
-    hypothesis_hash           TEXT    NOT NULL,
-    period_start              TEXT    NOT NULL,
-    period_end                TEXT    NOT NULL,
-    horizon                   INTEGER NOT NULL,
-    params_json               TEXT    NOT NULL DEFAULT '{}',
-    construction              TEXT    NOT NULL,
-    construction_params_json  TEXT    NOT NULL DEFAULT '{}',
-    n_obs                     INTEGER,
-    mean_ic                   REAL,
-    ic_ir                     REAL,
-    t_stat                    REAL,
-    ic_skew                   REAL,
-    ic_kurtosis               REAL,
-    n_dependents              INTEGER NOT NULL DEFAULT 0,
-    data_source               TEXT    NOT NULL,
-    snapshot_id               TEXT,
-    actor                     TEXT    NOT NULL DEFAULT 'agent',
-    created_at                TEXT    NOT NULL,
-    n_hypotheses              INTEGER,
-    dsr_confidence            REAL,
-    significant               INTEGER
-);
-CREATE INDEX IF NOT EXISTS ix_factor_evaluations_factor
-    ON factor_evaluations (factor_name);
-CREATE INDEX IF NOT EXISTS ix_factor_evaluations_created
-    ON factor_evaluations (created_at);
-CREATE INDEX IF NOT EXISTS ix_factor_evaluations_hypothesis
-    ON factor_evaluations (hypothesis_hash, created_at);
 -- v26 (#222): backtest_returns stores daily return series for return-correlation clustering.
 CREATE TABLE IF NOT EXISTS backtest_returns (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -720,37 +683,6 @@ CREATE TABLE IF NOT EXISTS negative_results (
 CREATE INDEX IF NOT EXISTS ix_negative_results_strategy ON negative_results(strategy_name);
 CREATE INDEX IF NOT EXISTS ix_negative_results_created ON negative_results(created_at);
 CREATE INDEX IF NOT EXISTS ix_negative_results_kind ON negative_results(kind);
--- v34 (#392): shadow_evaluations is an ADVISORY champion-challenger log — the hypothetical,
--- paper-accounted (order-free) performance of a strategy replayed in SHADOW on the same
--- point-in-time data a live champion sees. It NEVER gates a promotion, NEVER mints a token, and
--- NEVER touches the live/paper order or allocation path; it is written by `algua shadow run`/
--- `compare` only. The full evaluation surface ({snapshot_id, timeframe, start, end, cash, universe}
--- + code/config identity) is recorded so a comparison can prove champion and challenger were scored
--- on IDENTICAL inputs. `champion` is a NULLABLE advisory label for the incumbent being shadowed.
-CREATE TABLE IF NOT EXISTS shadow_evaluations (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    challenger      TEXT NOT NULL,
-    champion        TEXT,
-    snapshot_id     TEXT,
-    timeframe       TEXT NOT NULL,
-    start           TEXT NOT NULL,
-    end             TEXT NOT NULL,
-    cash            REAL NOT NULL,
-    universe        TEXT NOT NULL,
-    code_hash       TEXT NOT NULL,
-    config_hash     TEXT NOT NULL,
-    final_equity    REAL NOT NULL,
-    total_return    REAL NOT NULL,
-    ann_return      REAL NOT NULL,
-    ann_volatility  REAL NOT NULL,
-    sharpe          REAL NOT NULL,
-    max_drawdown    REAL NOT NULL,
-    n_bars          INTEGER NOT NULL,
-    final_positions TEXT NOT NULL,
-    equity_curve    TEXT NOT NULL,
-    recorded_at     TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_shadow_evaluations_challenger ON shadow_evaluations(challenger);
 """
 
 
@@ -785,6 +717,12 @@ def migrate(conn: sqlite3.Connection) -> None:
     """
     _migrate_shortlisted_to_candidate(conn)
     conn.executescript(_SCHEMA)
+    # v40: advisory shadow lane deleted (simplification stage 1). Idempotent drop; the rows were
+    # advisory-only (never gate evidence), so no export is taken.
+    conn.execute("DROP TABLE IF EXISTS shadow_evaluations")
+    # v41: standalone factor-eval layer deleted (simplification stage 1). Idempotent drop; the
+    # rows were advisory-only (never gate evidence), so no export is taken.
+    conn.execute("DROP TABLE IF EXISTS factor_evaluations")
     _add_missing_columns(conn, "approvals", {"dependency_hash": "TEXT"})
     _add_missing_columns(conn, "stage_transitions", {"dependency_hash": "TEXT"})
     _add_missing_columns(
@@ -844,6 +782,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     })
     # v25 (#219): factor_evaluations is a brand-new table — `executescript(_SCHEMA)` above
     # creates it via `CREATE TABLE IF NOT EXISTS`. No _add_missing_columns needed.
+    # (later dropped in v41 — see the DROP TABLE above)
     # v26 (#220): FDR accounting columns for the LORD++ alpha-wealth ledger. NULL on pre-existing
     # rows — legacy evaluations are excluded from the FDR stream by WHERE fdr_binding=1 (fail
     # closed). The partial unique index is created AFTER the columns exist (it references
@@ -942,6 +881,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     # handled above (before the index swap so the new composite index sees the rewritten indices).
     # v34 (#392): shadow_evaluations is a brand-new ADVISORY table; executescript(_SCHEMA) above
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # (later dropped in v40 — see the DROP TABLE above)
     # v35 (#329): actor_challenges is a brand-new table; executescript(_SCHEMA) above creates it
     # (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v36 (#485): attempt_token on gate_evaluations — the merge-back driver's per-attempt idem

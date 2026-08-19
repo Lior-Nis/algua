@@ -29,8 +29,8 @@ modules (mirroring the ``backtest/bootstrap.py`` / ``backtest/neff.py`` preceden
 This module keeps the gate-orchestration surface: ``GateCriteria``, ``GateDecision``, the
 declarative ``GateSpec``/``GATE_SPECS``, the orchestration-level constants, and ``evaluate_gate``.
 It RE-EXPORTS every moved name (see ``__all__``) so ``from algua.research.gates import X`` continues
-to resolve byte-identically for all existing call sites (promotion.py, factor_fdr.py, store.py, the
-CLIs, and the test suite).
+to resolve byte-identically for all existing call sites (promotion.py, store.py, the CLIs, and the
+test suite).
 """
 from __future__ import annotations
 

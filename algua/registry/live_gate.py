@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import base64
 import binascii
-import secrets
 import sqlite3
 import subprocess
 import tempfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 from algua.contracts.types import LiveAuthorization, PendingLiveAuthorization
+from algua.registry.challenges import ChallengeSpec, build_payload, consume, find_pending, issue
 from algua.registry.repository import StrategyReader
 
 _NAMESPACE = "algua-go-live"
-_TTL = timedelta(minutes=10)
+
+_SPEC = ChallengeSpec(
+    table="live_challenges",
+    namespace="algua-go-live",
+    payload_fields=("strategy", "strategy_id", "code_hash", "config_hash", "dependency_hash"),
+    column_fields=("strategy_id", "code_hash", "config_hash", "dependency_hash"),
+)
 
 # The go-live trust anchor: enrolled approver PUBLIC keys, resolved from the INSTALLED source tree
 # (not CWD) so the gate always reads the vetted, CODEOWNERS-reviewed copy. Shared by the CLI and
@@ -30,54 +36,33 @@ def build_challenge(strategy: str, strategy_id: int, code_hash: str, config_hash
     """The exact bytes the operator signs. One definition, used to both issue and verify so the
     two can never drift. Binds the go-live to a specific strategy + full artifact identity
     (code + config + locked dependencies) + single-use nonce."""
-    return (
-        f"{_NAMESPACE}\nstrategy={strategy}\nstrategy_id={strategy_id}\n"
-        f"code_hash={code_hash}\nconfig_hash={config_hash}\ndependency_hash={dependency_hash}\n"
-        f"nonce={nonce}\nexpires_at={expires_at}"
-    )
+    values = {"strategy": strategy, "strategy_id": strategy_id, "code_hash": code_hash,
+              "config_hash": config_hash, "dependency_hash": dependency_hash}
+    return build_payload(_SPEC, values, nonce, expires_at)
 
 
 def issue_challenge(conn: sqlite3.Connection, strategy_id: int, strategy: str, code_hash: str,
                     config_hash: str, dependency_hash: str | None, *,
                     now: datetime | None = None) -> dict[str, str]:
     """Create + persist a pending go-live challenge; return {nonce, challenge, expires_at}."""
-    now = now or _now()
-    nonce = secrets.token_hex(32)
-    expires_at = (now + _TTL).isoformat()
-    conn.execute(
-        "INSERT INTO live_challenges(nonce, strategy_id, code_hash, config_hash, dependency_hash, "
-        "issued_at, expires_at, consumed_at) VALUES (?,?,?,?,?,?,?,NULL)",
-        (nonce, strategy_id, code_hash, config_hash, dependency_hash, now.isoformat(), expires_at),
-    )
-    conn.commit()
-    return {"nonce": nonce, "expires_at": expires_at,
-            "challenge": build_challenge(strategy, strategy_id, code_hash, config_hash,
-                                         dependency_hash, nonce, expires_at)}
+    values = {"strategy": strategy, "strategy_id": strategy_id, "code_hash": code_hash,
+              "config_hash": config_hash, "dependency_hash": dependency_hash}
+    return issue(conn, _SPEC, values, now=now)
 
 
 def find_pending_challenge(conn: sqlite3.Connection, strategy_id: int, code_hash: str,
                            config_hash: str, dependency_hash: str | None, *,
                            now: datetime | None = None) -> sqlite3.Row | None:
     """The newest unconsumed, unexpired challenge matching the strategy + recomputed identity."""
-    now = now or _now()
-    return conn.execute(
-        "SELECT * FROM live_challenges WHERE strategy_id=? AND code_hash=? AND config_hash=? "
-        "AND dependency_hash IS ? AND consumed_at IS NULL AND expires_at > ? "
-        "ORDER BY issued_at DESC LIMIT 1",
-        (strategy_id, code_hash, config_hash, dependency_hash, now.isoformat()),
-    ).fetchone()
+    values = {"strategy_id": strategy_id, "code_hash": code_hash, "config_hash": config_hash,
+              "dependency_hash": dependency_hash}
+    return find_pending(conn, _SPEC, values, now=now)
 
 
 def consume_challenge(conn: sqlite3.Connection, nonce: str, *,
                       now: datetime | None = None) -> bool:
     """Mark a challenge consumed (single-use). Returns False if already consumed/missing."""
-    now = now or _now()
-    cur = conn.execute(
-        "UPDATE live_challenges SET consumed_at=? WHERE nonce=? AND consumed_at IS NULL",
-        (now.isoformat(), nonce),
-    )
-    conn.commit()
-    return cur.rowcount > 0
+    return consume(conn, _SPEC, nonce, now=now)
 
 
 class SignatureError(RuntimeError):

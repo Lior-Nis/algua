@@ -21,9 +21,7 @@ Three concerns:
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -31,6 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from algua.calendar.market_calendar import MarketCalendar
+from algua.primitives.atomic_io import write_bytes_durable
+from algua.primitives.flock import LockHeld, file_lock
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -100,22 +100,6 @@ def target_session(now: datetime, calendar: MarketCalendar) -> date | None:
     return sess
 
 
-def _read_lock_holder(lock_path: Path) -> dict | None:
-    """Recover the holder metadata from the lock-file body without taking the lock (flock is
-    advisory, so a read needs no lock). Returns ``None`` on a missing/empty/garbled body."""
-    try:
-        raw = lock_path.read_text().strip()
-    except OSError:
-        return None
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
 @contextmanager
 def operator_run_lock(
     lock_path: Path, *, job: str, host: str, pid: int
@@ -129,31 +113,13 @@ def operator_run_lock(
     raised carrying the parsed holder. The body is truncated and the lock released in a ``finally``.
     The kernel releases the flock on holder death, so a hard kill never wedges the next fire.
     """
-    handle = open(lock_path, "a+")  # noqa: SIM115 — released in the finally below
+    metadata = {"pid": pid, "job": job, "started_at": datetime.now(UTC).isoformat(),
+                "host": host}
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (BlockingIOError, OSError) as exc:
-        handle.close()
-        raise OperatorLockHeld(_read_lock_holder(lock_path)) from exc
-    try:
-        body = json.dumps(
-            {"pid": pid, "job": job, "started_at": datetime.now(UTC).isoformat(), "host": host}
-        )
-        handle.seek(0)
-        handle.truncate()
-        handle.write(body)
-        handle.flush()
-        os.fsync(handle.fileno())
-        yield
-    finally:
-        try:
-            handle.seek(0)
-            handle.truncate()
-            handle.flush()
-        except OSError:
-            pass
-        fcntl.flock(handle, fcntl.LOCK_UN)
-        handle.close()
+        with file_lock(lock_path, blocking=False, metadata=metadata):
+            yield
+    except LockHeld as exc:
+        raise OperatorLockHeld(exc.holder) from exc
 
 
 class SessionMarker:
@@ -213,13 +179,8 @@ class SessionMarker:
     @contextmanager
     def _marker_lock(self) -> Iterator[None]:
         self._dir.mkdir(parents=True, exist_ok=True)
-        handle = open(self._lock_path, "a")  # noqa: SIM115 — released in the finally below
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX)  # blocking — inner, on a distinct file/fd
+        with file_lock(self._lock_path):  # blocking — inner, on a distinct file/fd
             yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-            handle.close()
 
     def record(
         self,
@@ -249,19 +210,7 @@ class SessionMarker:
                 "pid": pid,
             }
             payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
-            tmp = self._dir / f".{_MARKER_NAME}.{os.getpid()}.tmp"
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            try:
-                os.write(fd, payload)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.replace(tmp, self._path)
-            dir_fd = os.open(self._dir, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            write_bytes_durable(payload, self._path)
 
 
 @dataclass(frozen=True)

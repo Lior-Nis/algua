@@ -4,7 +4,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from algua.data.files import frame_to_parquet_bytes, write_bytes_atomic
+from algua.data.files import frame_to_parquet_bytes
+from algua.primitives.atomic_io import write_bytes_atomic
 
 
 def _frame():

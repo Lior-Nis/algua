@@ -25,9 +25,10 @@ from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
-from algua.data.files import frame_to_parquet_bytes, write_bytes_atomic
+from algua.data.files import frame_to_parquet_bytes
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
+from algua.primitives.atomic_io import write_bytes_atomic
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy

@@ -83,9 +83,8 @@ def test_walkforward_result_to_dict_matches_asdict():
 
 
 def test_sweep_result_to_dict_matches_asdict():
-    # The per-combo x per-window OOS Sharpe matrix is NOT a field on SweepResult (#467 R2-2) — it
-    # rides only as the second element of sweep_with_matrix()'s tuple — so to_dict() is a plain
-    # asdict with nothing to withhold.
+    # The OOS matrix ride-along was removed with research pbo; to_dict() is a plain scalar
+    # projection — a plain asdict with nothing to withhold.
     r = _sweep_result()
     assert r.to_dict() == dataclasses.asdict(r)
 

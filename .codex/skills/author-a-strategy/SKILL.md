@@ -146,24 +146,17 @@ wide = wide.sort_index()  # never assume the pivot is already sorted before posi
 ## Available features — reuse before you reinvent (the factor catalogue)
 
 `algua/features/` holds pure, composable **factors** (momentum, z-score, …). Before writing a
-`signal`, discover what already exists instead of re-deriving it:
-
-- `uv run algua factor list [--tag T] [--kind K]` — catalogued factors as JSON (name, summary,
-  kind, tags, `data_needs`, `import_path`, `platform_supported`).
-- `uv run algua factor show <name>` — one factor's full spec (summary, signature, `import_path`,
-  data needs, docstring).
+`signal`, discover what already exists instead of re-deriving it — read `algua/features/indicators.py`
+and `algua/features/alphas.py`, or grep the `@factor(...)` decorations for the catalogued specs
+(name, summary, kind, tags, `data_needs`, `import_path`).
 
 Prefer composing a catalogued factor over re-implementing it. Import it **at module top level via
 its `import_path`** — e.g. `from algua.features.indicators import momentum`. Do **not** import a
 factor lazily inside `signal` (a function-body or dynamic import escapes the live-gate `code_hash`
-closure **and** the `algua factor dependents` lineage, so a later factor change would silently fail
-to invalidate your strategy's backtest/live identity). A bespoke factor is fine when nothing fits —
-keep it pure (`features/` imports nothing beyond `contracts`), and consider cataloguing it with
-`@factor(...)` from `algua.features.catalogue` so the next strategy can reuse it.
-
-After authoring, `uv run algua factor uses <strategy>` shows which catalogued factors your strategy
-pulled in; `uv run algua factor dependents <factor>` shows every strategy a given factor reaches
-(blast radius).
+closure, so a later factor change would silently fail to invalidate your strategy's backtest/live
+identity). A bespoke factor is fine when nothing fits — keep it pure (`features/` imports nothing
+beyond `contracts`), and consider cataloguing it with `@factor(...)` from `algua.features.catalogue`
+so the next strategy can reuse it.
 
 ## Reuse vs. new logic
 

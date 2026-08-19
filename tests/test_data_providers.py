@@ -4,6 +4,7 @@ import requests
 
 from algua.config.settings import Settings
 from algua.data.contracts import BarRequest
+from algua.data.providers import alpaca as alpaca_provider
 from algua.data.providers import get_provider, register_provider
 from algua.data.providers.alpaca import (
     AlpacaBarProvider,
@@ -13,6 +14,19 @@ from algua.data.providers.alpaca import (
 from algua.data.providers.errors import ProviderError
 from algua.data.providers.yfinance import YFinanceBarProvider, _normalize_yfinance
 from algua.data.schema import to_bar_schema
+
+
+def _no_sleep(monkeypatch):
+    """Stub out the retry primitive's backoff sleep so retry tests run instantly. `_fetch_bars`
+    now delegates to algua.primitives.retry.call_with_backoff (Task 11), which no longer reads a
+    module-level `time` off this provider module — the previous
+    `monkeypatch.setattr("algua.data.providers.alpaca.time.sleep", ...)` trick no longer has
+    anything to patch, so we inject a no-op `sleep` into the retry call instead."""
+    real = alpaca_provider.call_with_backoff
+    monkeypatch.setattr(
+        alpaca_provider, "call_with_backoff",
+        lambda *a, **kw: real(*a, **{**kw, "sleep": lambda _s: None}),
+    )
 
 
 def test_yfinance_normalizer_handles_single_symbol_frame():
@@ -518,7 +532,7 @@ def test_alpaca_retries_on_429_then_succeeds(monkeypatch):
         return FlakyResponse(200, payload)
 
     monkeypatch.setattr("algua.data.providers.alpaca.requests.get", fake_get)
-    monkeypatch.setattr("algua.data.providers.alpaca.time.sleep", lambda _s: None)
+    _no_sleep(monkeypatch)
 
     provider = AlpacaBarProvider(api_key="key", api_secret="secret")
     bars = provider.get_bars(BarRequest(("AAPL",), "2026-01-02", "2026-01-03"))
@@ -606,7 +620,7 @@ def test_alpaca_gives_up_after_retries_on_persistent_5xx(monkeypatch):
         return ServerError()
 
     monkeypatch.setattr("algua.data.providers.alpaca.requests.get", fake_get)
-    monkeypatch.setattr("algua.data.providers.alpaca.time.sleep", lambda _s: None)
+    _no_sleep(monkeypatch)
 
     provider = AlpacaBarProvider(api_key="key", api_secret="secret")
 

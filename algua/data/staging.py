@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import fcntl
-import os
 import shutil
 import time
 import uuid
 from pathlib import Path
+
+from algua.primitives import flock
 
 
 class SnapshotStagingLease:
@@ -40,44 +40,22 @@ class SnapshotStagingLease:
                 if child.stat().st_mtime >= cutoff:
                     continue  # fresh — a just-started import may own it
                 if child.is_dir():
-                    if self._lock_held(staging / f"{child.name}.lock"):
+                    # FAIL CLOSED (#255): flock.probe_held treats anything but a genuinely
+                    # absent marker as held, so cleanup never deletes a dir it cannot prove is
+                    # abandoned — leftover residue is recoverable, a deleted live write is not.
+                    if flock.probe_held(staging / f"{child.name}.lock"):
                         continue  # in-progress import holds the lease (#255)
                     shutil.rmtree(child, ignore_errors=True)
                     (staging / f"{child.name}.lock").unlink(missing_ok=True)
                 elif child.suffix == ".lock":
                     # An orphan lease marker (its staging dir already gone): clean it unless a dir
-                    # still pairs with it (handled above) or a writer still holds it.
-                    if (staging / child.stem).is_dir() or self._lock_held(child):
+                    # still pairs with it (handled above) or a writer still holds it (#255,
+                    # fail-closed via flock.probe_held).
+                    if (staging / child.stem).is_dir() or flock.probe_held(child):
                         continue
                     child.unlink(missing_ok=True)
             except OSError:
                 continue
-
-    @staticmethod
-    def _lock_held(lock_path: Path) -> bool:
-        """True iff a live writer currently holds the exclusive `flock` on `lock_path` (an
-        in-progress staging writer). A non-blocking probe. FAIL CLOSED: only a genuinely absent
-        marker (`FileNotFoundError`) counts as not-held (sweepable); any other open/lock error
-        (ENOLCK, permission, unsupported flock, transient I/O) is treated as held, so cleanup never
-        deletes a dir it cannot prove is abandoned — leftover residue is recoverable, a deleted live
-        write is not. flock is freed by the kernel on the holder's death, so a crash is unheld."""
-        try:
-            fd = os.open(lock_path, os.O_RDWR)
-        except FileNotFoundError:
-            return False  # no lease marker — true crash residue or a pre-lease dir
-        except OSError:
-            return True  # can't even open it — refuse to sweep (fail closed)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True  # a writer holds it
-        except OSError:
-            return True  # lock probe failed — refuse to sweep (fail closed)
-        else:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            return False  # acquired freely → not held
-        finally:
-            os.close(fd)
 
     def new_leased_staging(self) -> tuple[Path, int, Path]:
         """Take an exclusive `flock` lease on a unique SIBLING `<uuid>.lock` marker, THEN create the
@@ -91,13 +69,17 @@ class SnapshotStagingLease:
         staging_root.mkdir(parents=True, exist_ok=True)
         name = uuid.uuid4().hex
         lock_path = staging_root / f"{name}.lock"
-        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        lock_fd: int | None = None
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            lock_fd = flock.acquire(lock_path)
             staging_dir = staging_root / name
             staging_dir.mkdir()
         except BaseException:
-            os.close(lock_fd)
+            # flock.acquire already closes its fd internally when IT is what raised, so
+            # lock_fd is unbound in that case — only release here if acquire succeeded but a
+            # later step (mkdir) failed, to avoid a double-close/unbound-variable reference.
+            if lock_fd is not None:
+                flock.release(lock_fd)
             lock_path.unlink(missing_ok=True)
             shutil.rmtree(staging_root / name, ignore_errors=True)
             raise
@@ -107,9 +89,6 @@ class SnapshotStagingLease:
     def release_leased_staging(staging_dir: Path, lock_fd: int, lock_path: Path) -> None:
         """Release the lease and remove the staging dir + its sibling marker (idempotent — safe
         after a successful commit moved the dir away). Pair with `new_leased_staging` in a try."""
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
+        flock.release(lock_fd)
         shutil.rmtree(staging_dir, ignore_errors=True)
         lock_path.unlink(missing_ok=True)

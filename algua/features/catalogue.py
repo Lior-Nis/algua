@@ -176,36 +176,3 @@ def get_factor(name: str) -> FactorSpec:
 def all_factors() -> list[FactorSpec]:
     _ensure_loaded()
     return [_REGISTRY[k] for k in sorted(_REGISTRY)]
-
-
-def load_factor_callable(spec: FactorSpec) -> Callable[..., Any]:
-    """Resolve a FactorSpec back to its function object via ``import_path`` ("module:qualname").
-    The catalogue scan already imported the module, so this is import-safe. Fails closed
-    (``FactorNotFound``) unless the resolved object carries a stamped spec that EXACTLY matches the
-    one passed in — guarding against a spec whose import_path drifted off its function AND against a
-    forged/stale spec (e.g. one claiming ``standalone=True`` while pointing at a non-standalone
-    helper). Because the only real spec source is the registry's own immutable stamp, callers can
-    trust a resolved callable's metadata fields (``standalone`` included) without re-checking."""
-    module_name, _, qualname = spec.import_path.partition(":")
-    obj: Any = importlib.import_module(module_name)
-    for part in qualname.split("."):
-        try:
-            obj = getattr(obj, part)
-        except AttributeError:
-            raise FactorNotFound(spec.name) from None
-    resolved = getattr(obj, _SPEC_ATTR, None)
-    if resolved is None or resolved != spec:
-        raise FactorNotFound(spec.name)
-    return obj
-
-
-def filter_factors(
-    *, tag: str | None = None, kind: FactorKind | None = None
-) -> list[FactorSpec]:
-    """Catalogue factors filtered by tag and/or kind (AND-combined)."""
-    out = all_factors()
-    if tag is not None:
-        out = [f for f in out if tag in f.tags]
-    if kind is not None:
-        out = [f for f in out if f.kind is kind]
-    return out

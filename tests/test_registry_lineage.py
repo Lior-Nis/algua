@@ -2,20 +2,8 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 import algua.strategies.momentum as _momfam
-from algua.features.catalogue import FactorNotFound
-from algua.registry.db import connect, migrate
-from algua.registry.lineage import dependents_of, factors_used_by
-from algua.registry.store import SqliteStrategyRepository
-
-
-@pytest.fixture()
-def repo(tmp_path):
-    c = connect(tmp_path / "r.db")
-    migrate(c)
-    return SqliteStrategyRepository(c)
+from algua.registry.lineage import factors_used_by
 
 
 def _write_strategy_using_momentum(stem: str) -> Path:
@@ -58,26 +46,3 @@ def test_cross_sectional_momentum_uses_composed_factor():
     assert "xs_trailing_return" in used
     # Module-granular: alphas.py imports indicators.py so both momentum + zscore are also reported.
     assert {"momentum", "zscore"} <= used
-
-
-def test_dependents_of_lists_registered_importer(repo):
-    path = _write_strategy_using_momentum("tmp_dep_strat")
-    try:
-        repo.add("tmp_dep_strat")
-        result = dependents_of(repo, "momentum")
-        assert "tmp_dep_strat" in result.dependents
-        assert result.unloadable == []
-    finally:
-        _drop("tmp_dep_strat", path)
-
-
-def test_dependents_of_buckets_unloadable_registered_strategy(repo):
-    repo.add("ghost_strategy")  # registered but no module on disk
-    result = dependents_of(repo, "momentum")
-    assert any(u["name"] == "ghost_strategy" for u in result.unloadable)
-    assert "ghost_strategy" not in result.dependents
-
-
-def test_dependents_of_unknown_factor_raises(repo):
-    with pytest.raises(FactorNotFound):
-        dependents_of(repo, "no_such_factor")

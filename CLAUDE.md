@@ -109,45 +109,6 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   not fully closed). NOVEL + human still creates a fresh 0-prior family in preflight (requires
   `--new-family` + `--actor human`). Family-scoped lifetime breadth feeds the 3-way
   `effective_funnel_breadth(own, windowed_total, family_lifetime_effective)` tighten-only max.
-- `uv run algua research dormant-sweep --start D --end D` — ADVISORY stability screen over the
-  `dormant` pool: re-runs walk-forward per dormant strategy and reports which ones' window/stability
-  metrics look healthy again, ranked. Read-only — never reads/burns the holdout, writes no ledger
-  rows, and transitions nothing. A pass is a prioritization signal for re-auditioning (`registry
-  transition --to paper`), NOT a gate and NOT a guarantee of re-promotion/forward-gate clearance.
-- `uv run algua research family-audit` — ADVISORY cross-family gaming detector. Scans the family DAG
-  for separate families that empirically behave as one thesis (deliberate-split breadth evasion #222's
-  assignment-time clustering can't see), using return-correlation as the authoritative axis; ranks
-  flagged clusters by family-term breadth dodged and recommends a human-governed consolidation
-  (member reassignment). READ-ONLY: no holdout, no ledger writes, no transitions, no graph mutation —
-  a prioritization signal, not a gate.
-- `uv run algua research gc [--retention-days N --archive --actor human --archive-dir DIR --top N]` —
-  ADVISORY reaper of dead strategy artifacts: it classifies the on-disk strategy modules
-  (`algua/strategies/<family>/*.py`) and the per-strategy report-experiments subtree
-  (`<knowledge_dir>/strategies/<name>/reports/<stamp>/…`, keyed by the `<name>` DIRECTORY) against
-  the registry and lists what is safely reapable — a strategy RETIRED for more than `--retention-days`
-  (default 90), or a report file with no registry row (orphaned) older than the window. The
-  kb-sync-OWNED top-level `<knowledge_dir>/strategies/*.md` files (the `_*` router pages AND every
-  per-strategy live synced note at `strategy_doc_path`) and the `families/` subtree are NEVER
-  scanned or reaped. READ-ONLY by default (a listing is a prioritization signal, NOT a transition).
-  Fail-safe: an untracked module, a non-terminal strategy, a retired-without-timestamp, and a
-  fresh/undatable orphan report are ALWAYS kept. `--archive --actor human` (human-only, #329 signed
-  challenge) MOVES the reapable files into a timestamped `archive/` tree via a single atomic
-  `os.replace`; it NEVER deletes and NEVER touches the immutable registry DB row.
-- `uv run algua research pbo <name> --param KEY=v1,v2,... [--windows N --rank-by mean_sharpe|min_sharpe]`
-  — ADVISORY Probability-of-Backtest-Overfitting (PBO) via CSCV (#467) over the SAME grid a
-  `backtest sweep` runs. Answers a question the DSR/FDR/breadth stack never asks: does the selection
-  rule "pick the in-sample-best combo" GENERALIZE out-of-sample? Builds the trials×windows OOS-Sharpe
-  matrix (holdout excluded by construction), then reports `pbo` = the fraction of combinatorially-
-  symmetric IS/OOS splits where the IS-best combo lands below the OOS median. A HIGH pbo (≳0.5) flags
-  a sweep fitting noise. This is a REAL grid search, so — like `backtest sweep` — it RECORDS its
-  measured breadth (metered: repeated `pbo` runs self-penalize the eventual promotion Sharpe bar);
-  it burns NO holdout STATISTIC (the holdout bars are read as part of the full-period sweep fetch but
-  never scored/burned — `compute_holdout=False`), transitions nothing, and writes no gate/FDR ledger
-  row. Output is AGGREGATE-ONLY (pbo, split/trial/window/subperiod counts, rank_by, warnings, and a
-  fully-reconstructable `provenance` block: base `config_hash`, full `grid_hash`, delisting inputs) —
-  never the raw matrix, ranked combos, or per-split logits. Fails closed (`pbo: null` + warning,
-  exit 0) on <2 combos, <4 windows, or a non-finite matrix. See the `interpret-results` skill for how
-  to read it. Orthogonal to promotion: a winner can pass DSR yet have a high PBO.
 - `uv run algua data ingest ... --from-file PATH` — register a local immutable snapshot.
 - `uv run algua data ingest-bars --provider yfinance --symbols AAPL --start D --end D` — fetch
   historical bars into a parquet snapshot.
@@ -177,18 +138,6 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
   payload back from disk (full read-back) and check it against its record; emits per-snapshot
   JSON and exits non-zero if any snapshot is damaged.
-- `uv run algua factor list [--kind K]` — catalogue of known factors.
-- `uv run algua factor show <name>` — one factor's full spec.
-- `uv run algua factor eval <name> --symbols S,S --construction POLICY --demo` — evaluate ONE
-  standalone factor: PIT backtest + FDR-corrected rank IC/IR (#219 slice E). Emits an `fdr`
-  block: `breadth_benchmark_t`, `dsr_confidence`, **`significant`** (the honest verdict after
-  funnel-wide multiple-testing correction), and `n_dependents` (blast radius). Records the eval
-  in the `factor_evaluations` ledger (SCHEMA_VERSION 25) — `factor eval` is the ONLY agent path
-  to a multiple-testing-honest factor verdict. See `interpret-results` skill for how to read the
-  output. Factors are NEVER gate-tokened or live-pathed.
-- `uv run algua factor dependents <name>` — strategies that compose a factor (blast radius).
-- `uv run algua factor uses <strategy>` — factors a strategy composes.
-
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.
