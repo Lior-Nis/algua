@@ -59,7 +59,7 @@ modules; both meet only at the bar-schema contract. Work on a branch, not direct
 - `algua/calendar/market_calendar.py` — NYSE (`XNYS`) session calendar wrapper; `next_session`/`previous_session` are **strictly** after/before the given day.
 - `algua/config/settings.py` — pydantic-settings (`ALGUA_` env prefix). `get_settings()` is intentionally uncached (test isolation).
 - `algua/registry/db.py` — SQLite connection (WAL, `foreign_keys=ON`) + idempotent `migrate()` (schema versioned via `PRAGMA user_version`). Tables: `strategies`, `stage_transitions`, `approvals`.
-- `algua/registry/store.py` — typed registry API: `add_strategy`, `get_strategy`, `list_strategies`, `list_transitions`, `transition` (**contains the live gate**).
+- `algua/registry/store/` — typed registry API: `add_strategy`, `get_strategy`, `list_strategies`, `list_transitions`, `transition` (**contains the live gate**).
 - `algua/registry/approvals.py` — `record_approval` (mints a human approval) + `has_valid_approval` (verifier).
 - `algua/cli/app.py` — Typer app + `emit()` (JSON), `version`, `doctor`.
 - `algua/cli/registry_cmd.py` — `registry` subcommands (`add`/`list`/`show`/`transition`/`approve`) + `_json_errors` decorator.
@@ -79,7 +79,7 @@ Treat these as hard constraints. If a "fix" requires violating one, **stop and f
    `code_hash` and `config_hash` provided, and a matching unrevoked row in `approvals`.
    `transition` coerces inputs to enums first so a raw string `"live"` cannot skip the gate.
    The live runner (future) must trust the *approval*, never the bare `stage` flag. Never make
-   this easier to bypass. (`algua/registry/store.py`, `algua/registry/approvals.py`)
+   this easier to bypass. (`algua/registry/store/`, `algua/registry/approvals.py`)
 2. **Module purity / boundaries.** `algua/contracts` and `algua/calendar` import no other
    `algua` modules (enforced by `lint-imports`). `contracts`/`features` stay side-effect-free.
    Don't introduce cross-layer imports to make something convenient.

@@ -100,7 +100,8 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   future sibling can never wait out the window to reset the tax). The founder itself pays family arm
   0 (a no-op, symmetric with a human fresh family). Agent minting is bounded SOLELY by an automatic
   per-window rate cap (`AGENT_NOVEL_MINT_CAP` ≈ 8 mints / 90 days, fail-closed, canonical-UTC,
-  CODEOWNERS-protected `store.py` constant — no human budget, no human top-up: zero-human autonomy).
+  CODEOWNERS-protected `algua/registry/store/family.py` constant — no human budget, no human
+  top-up: zero-human autonomy).
   The rate cap is the retained count-bound because the deferred pass-time seed alone can't stop a
   repeated-founder attack (the founder passes and escapes the tax before its family is seeded). The
   mint re-checks a still-NOVEL family-graph fingerprint CAS under the write lock (drift →
