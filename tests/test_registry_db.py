@@ -312,12 +312,12 @@ def test_v23_backfill_runs_after_the_holdout_interval_alter(tmp_path):
     """ORDERING GUARD: the holdout_evaluations ALTER must precede _backfill_holdout_intervals.
 
     Reconstructs a genuinely pre-v22/v23-shaped holdout_evaluations — committed_at/holdout_start/
-    holdout_end absent — so `CREATE TABLE IF NOT EXISTS` in _SCHEMA leaves the old shape intact and
+    holdout_end absent — so `CREATE TABLE IF NOT EXISTS` in SCHEMA leaves the old shape intact and
     the ALTER in migrate() is the only thing that adds them. If the backfill were ever reordered
     before that ALTER, migrate() raises OperationalError('no such column: holdout_start') here.
 
     Contrast test_migrate_adds_holdout_evaluations_to_legacy_db, which omits the table entirely:
-    _SCHEMA then creates it complete and the ordering is never exercised. That is why this guard
+    SCHEMA then creates it complete and the ordering is never exercised. That is why this guard
     exists separately.
     """
     conn = connect(tmp_path / "r.db")
@@ -454,7 +454,7 @@ def test_migration_adds_trial_sharpe_columns_idempotent(tmp_path):
 
 
 def test_v35_actor_challenges_table_created(tmp_path):
-    # #329: actor_challenges is a brand-new table created by executescript(_SCHEMA) on migrate.
+    # #329: actor_challenges is a brand-new table created by executescript(SCHEMA) on migrate.
     conn = connect(tmp_path / "r.db")
     migrate(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(actor_challenges)")}

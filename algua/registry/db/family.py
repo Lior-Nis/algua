@@ -97,7 +97,7 @@ CREATE TRIGGER IF NOT EXISTS trg_family_events_append_only_del BEFORE DELETE ON 
 CREATE TRIGGER IF NOT EXISTS trg_family_members_no_delete BEFORE DELETE ON family_members
   BEGIN SELECT RAISE(ABORT, 'family_members is append-only (#524)'); END;
 -- NB: trg_family_members_append_only_upd references the v37 member_code_hash/member_factors_json
--- columns, which do NOT exist on a legacy family_members table at executescript(_SCHEMA) time
+-- columns, which do NOT exist on a legacy family_members table at executescript(SCHEMA) time
 -- (they are added by ALTER in migrate() afterwards). That trigger is therefore created in
 -- migrate() AFTER the ALTER, not here -- defensively: SQLite actually resolves a trigger's column
 -- references when the trigger FIRES, not at CREATE time (verified on 3.45.1), so creating it early

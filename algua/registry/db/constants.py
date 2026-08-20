@@ -13,9 +13,10 @@ from __future__ import annotations
 # (PRAGMA table_info introspection + ALTER TABLE), so it can both add new
 # tables/indexes AND add columns to an already-populated table. Adding a column
 # is therefore the established pattern — but a SCHEMA_VERSION bump MUST be
-# accompanied by the corresponding migration step (a new table/index in _SCHEMA
-# and/or a new entry in the `_add_missing_columns` calls in `migrate()`); never
-# bump this number without the migration that earns it.
+# accompanied by the corresponding migration step (a new table/index in the relevant context
+# module's `SCHEMA` fragment, assembled into schema.py's `SCHEMA`, and/or a new entry in the
+# `_add_missing_columns` calls in `migrate()`); never bump this number without the migration
+# that earns it.
 # v40 (simplification stage 1): the advisory shadow lane is deleted; migrate() drops its table.
 # v41 (simplification stage 1): standalone factor-eval layer deleted; migrate() drops its table.
 SCHEMA_VERSION = 41

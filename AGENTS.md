@@ -58,7 +58,7 @@ modules; both meet only at the bar-schema contract. Work on a branch, not direct
 - `algua/contracts/types.py` — `ExecutionContract` (encodes the `t→t+1` anti-look-ahead rule), `OrderIntent`, and `Strategy`/`DataProvider`/`Broker` protocols. **Pure** (pandas only under `TYPE_CHECKING`).
 - `algua/calendar/market_calendar.py` — NYSE (`XNYS`) session calendar wrapper; `next_session`/`previous_session` are **strictly** after/before the given day.
 - `algua/config/settings.py` — pydantic-settings (`ALGUA_` env prefix). `get_settings()` is intentionally uncached (test isolation).
-- `algua/registry/db.py` — SQLite connection (WAL, `foreign_keys=ON`) + idempotent `migrate()` (schema versioned via `PRAGMA user_version`). Tables: `strategies`, `stage_transitions`, `approvals`.
+- `algua/registry/db/` — SQLite connection (WAL, `foreign_keys=ON`) + idempotent `migrate()` (schema versioned via `PRAGMA user_version`). Tables: `strategies`, `stage_transitions`, `approvals`.
 - `algua/registry/store/` — typed registry API: `add_strategy`, `get_strategy`, `list_strategies`, `list_transitions`, `transition` (**contains the live gate**).
 - `algua/registry/approvals.py` — `record_approval` (mints a human approval) + `has_valid_approval` (verifier).
 - `algua/cli/app.py` — Typer app + `emit()` (JSON), `version`, `doctor`.

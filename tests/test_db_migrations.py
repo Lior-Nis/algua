@@ -176,7 +176,7 @@ def test_pre_v24_gate_evaluations_gains_pit_snapshot_columns(tmp_path):
 def test_v39_gate_evaluations_gains_universe_name(tmp_path):
     """v39 (#559): a pre-v39 gate_evaluations table gains the nullable universe_name column via
     migrate; legacy rows stay NULL (config_legacy fallback at the tick binding); a fresh DB has
-    the column from _SCHEMA; user_version stamps to the current version; idempotent."""
+    the column from SCHEMA; user_version stamps to the current version; idempotent."""
     conn = connect(tmp_path / "r.db")
     # Minimal pre-v39 gate_evaluations: the column subset that predates universe_name.
     conn.executescript(
@@ -217,7 +217,7 @@ def test_v39_gate_evaluations_gains_universe_name(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     migrate(conn)  # idempotent
 
-    # A FRESH db also carries the column straight from _SCHEMA.
+    # A FRESH db also carries the column straight from SCHEMA.
     fresh = connect(tmp_path / "fresh.db")
     migrate(fresh)
     fresh_cols = {row["name"] for row in fresh.execute("PRAGMA table_info(gate_evaluations)")}

@@ -99,13 +99,13 @@ def migrate(conn: sqlite3.Connection) -> None:
         "trial_sharpe_mean": "REAL",
         "trial_sharpe_var_ann": "REAL",
     })
-    # v25 (#219): factor_evaluations is a brand-new table — `executescript(_SCHEMA)` above
+    # v25 (#219): factor_evaluations is a brand-new table — `executescript(SCHEMA)` above
     # creates it via `CREATE TABLE IF NOT EXISTS`. No _add_missing_columns needed.
     # (later dropped in v41 — see the DROP TABLE above)
     # v26 (#220): FDR accounting columns for the LORD++ alpha-wealth ledger. NULL on pre-existing
     # rows — legacy evaluations are excluded from the FDR stream by WHERE fdr_binding=1 (fail
     # closed). The partial unique index is created AFTER the columns exist (it references
-    # fdr_test_index which isn't in the base DDL), so it lives here rather than in _SCHEMA.
+    # fdr_test_index which isn't in the base DDL), so it lives here rather than in SCHEMA.
     _add_missing_columns(conn, "gate_evaluations", {
         "fdr_binding": "INTEGER",
         "fdr_p_value": "REAL",
@@ -138,7 +138,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     _relabel_fdr_cohorts_for_current_size(conn)
     # v26 (#222): backtest_returns is a brand-new table; executescript creates it.
     # v26 (#222): family registry tables (families/family_members/family_parents/family_events).
-    # All brand-new tables; executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
+    # All brand-new tables; executescript(SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
     # No _add_missing_columns needed for new tables.
     # v26 (#222): family breadth audit columns on gate_evaluations (Task 5).
     _add_missing_columns(conn, "gate_evaluations", {
@@ -152,7 +152,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     # unchanged). ALTER cannot add a CHECK, so the seeded_prior_combos>=0 invariant on legacy DBs is
     # enforced in app code (the §5.1 mint asserts seed>0 before its INSERT; the reader treats a
     # negative as corruption). The append-only TRIGGERS on the five classifier-read tables are
-    # created by the executescript(_SCHEMA) bootstrap ABOVE; but on a LEGACY DB with un-materialised
+    # created by the executescript(SCHEMA) bootstrap ABOVE; but on a LEGACY DB with un-materialised
     # member profiles, the store-layer _materialise_legacy_member_profiles() one-time NULL→value
     # backfill runs AFTER migrate() (from the store bootstrap, where module loads are legal) — the
     # family_members UPDATE trigger explicitly permits that NULL→value flip, so ordering is safe.
@@ -166,7 +166,7 @@ def migrate(conn: sqlite3.Connection) -> None:
     })
     # v37 (#524, R9-H1): the family_members BEFORE UPDATE append-only trigger references the just-
     # added member_code_hash/member_factors_json columns, so it is created HERE (after the ALTER),
-    # not in _SCHEMA (where a legacy family_members table would not yet have those columns — SQLite
+    # not in SCHEMA (where a legacy family_members table would not yet have those columns — SQLite
     # would not reject the CREATE, since it resolves trigger column references at fire time, but the
     # trigger would be unfireable until the ALTER landed). Permits exactly two one-way flips: the
     # removed_at tombstone (NULL→ts) and the one-time legacy profile materialisation (NULL→value).
@@ -186,7 +186,7 @@ def migrate(conn: sqlite3.Connection) -> None:
         " ) BEGIN SELECT RAISE(ABORT,"
         " 'family_members: only removed_at or one-time profile materialise (#524)'); END;"
     )
-    # v28 (#250): live_activity_quarantine is a brand-new dead-letter table; executescript(_SCHEMA)
+    # v28 (#250): live_activity_quarantine is a brand-new dead-letter table; executescript(SCHEMA)
     # above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v29 (#132): PIT sidecar snapshot provenance on the gate audit row. Additive nullable — legacy
     # rows stay NULL (no backfill; pre-#132 promotions had no PIT snapshot).
@@ -194,27 +194,27 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn, "gate_evaluations",
         {"fundamentals_snapshot": "TEXT", "news_snapshot": "TEXT"})
     # v30 (#249): paper_venue_* (orders/fills/activities/cursor/quarantine) are brand-new tables;
-    # executescript(_SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
-    # v32 (#332): negative_results is a brand-new advisory table; executescript(_SCHEMA) above
+    # executescript(SCHEMA) above creates them (CREATE TABLE IF NOT EXISTS).
+    # v32 (#332): negative_results is a brand-new advisory table; executescript(SCHEMA) above
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v33 (#324): fdr_cohort column + (cohort, index) composite unique index + legacy backfill
     # handled above (before the index swap so the new composite index sees the rewritten indices).
-    # v34 (#392): shadow_evaluations is a brand-new ADVISORY table; executescript(_SCHEMA) above
+    # v34 (#392): shadow_evaluations is a brand-new ADVISORY table; executescript(SCHEMA) above
     # creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # (later dropped in v40 — see the DROP TABLE above)
-    # v35 (#329): actor_challenges is a brand-new table; executescript(_SCHEMA) above creates it
+    # v35 (#329): actor_challenges is a brand-new table; executescript(SCHEMA) above creates it
     # (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
     # v36 (#485): attempt_token on gate_evaluations — the merge-back driver's per-attempt idem
     # key. Additive nullable (NULL for every existing/non-driver row). The partial unique index is
     # created AFTER the column exists (it references attempt_token, absent from an existing DB's
-    # table until _add_missing_columns runs), so it lives here rather than in _SCHEMA.
+    # table until _add_missing_columns runs), so it lives here rather than in SCHEMA.
     _add_missing_columns(conn, "gate_evaluations", {"attempt_token": "TEXT"})
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_gate_evaluations_attempt_token"
         " ON gate_evaluations(strategy_id, attempt_token) WHERE attempt_token IS NOT NULL"
     )
     # v38 (merge-back authoritative intake): mergeback_evidence is a brand-new marker table;
-    # executescript(_SCHEMA) above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns
+    # executescript(SCHEMA) above creates it (CREATE TABLE IF NOT EXISTS). No _add_missing_columns
     # needed. Written only by algua.registry.mergeback_intake (the drainer's evidence chokepoint).
     # v39 (#559): universe_name on gate_evaluations — the PIT universe the gate evidence was
     # produced on, so paper deployment binds to the GATED universe, not the module's CONFIG.

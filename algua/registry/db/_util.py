@@ -1,7 +1,8 @@
 """The one genuinely context-agnostic migration helper.
 
-``_add_missing_columns`` is parameterised by table name and is called 13 times from ``migrate()``
-across five different bounded contexts, which is exactly why it has no context of its own.
+``_add_missing_columns`` is parameterised by table name and is called 15 times from ``migrate()``
+across six different bounded contexts (core, execution, holdout, breadth, gate, family), which is
+exactly why it has no context of its own.
 """
 from __future__ import annotations
 

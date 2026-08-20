@@ -22,6 +22,6 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # rewrite masquerading as an append. Turn it ON so the append-only invariant also covers the
     # implicit-delete path. NB: this is a PER-CONNECTION pragma, not schema-resident: a raw
     # sqlite3.connect() that skips this helper does NOT inherit it (see the narrowed trigger comment
-    # in _SCHEMA). Explicit DELETE/UPDATE stay aborted through ANY connection regardless.
+    # in family.py). Explicit DELETE/UPDATE stay aborted through ANY connection regardless.
     conn.execute("PRAGMA recursive_triggers=ON;")
     return conn
