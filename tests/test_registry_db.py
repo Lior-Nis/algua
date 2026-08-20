@@ -1,12 +1,71 @@
+import hashlib
 import sqlite3
 
 from algua.registry.db import SCHEMA_VERSION, connect, migrate
 
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
 
+# Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
+# with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
+_SCHEMA_OBJECT_COUNT = 100
+_SCHEMA_DIGEST = "e6528eca33cab2a2dc67af1bde454e98d2e144bad6e94c2982a98956defaf9e9"
+
 
 def test_schema_version_is_current():
     assert SCHEMA_VERSION == 41
+
+
+def _schema_fingerprint(conn: sqlite3.Connection) -> tuple[int, str, str]:
+    """``(object_count, sha256, full_dump)`` over ``sqlite_master``.
+
+    Includes each object's stored ``sql`` text, which SQLite keeps VERBATIM as written — so this
+    detects a re-indented or reflowed statement, not merely an added or dropped one.
+    """
+    rows = conn.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    ).fetchall()
+    dump = "\n".join(
+        f"{r['type']}\t{r['name']}\t{r['tbl_name']}\t{r['sql'] or ''}" for r in rows
+    )
+    return len(rows), hashlib.sha256(dump.encode()).hexdigest(), dump
+
+
+def test_migrated_schema_matches_pinned_fingerprint(tmp_path):
+    """STANDING INVARIANT: a refactor must never change the schema a bootstrap produces.
+
+    The stage-4c carve split a 660-line ``_SCHEMA`` string across 12 context modules, and proved
+    byte-identical output by hand — a proof that evaporated the moment it was written. This pins it
+    so the property holds for every future refactor instead of one. It is the cheap guard for the
+    stages still ahead (engine/gates cuts, the paper/live tick unification), which relocate code
+    around this schema.
+
+    A failure means exactly one of two things:
+
+    * the change was UNINTENTIONAL — a refactor altered, dropped, duplicated, or re-indented DDL.
+      Fix the code, not this test.
+    * the change was INTENTIONAL — a real migration. Then bump ``SCHEMA_VERSION`` and the pinned
+      values together, in the same commit as the migration that earns them.
+
+    Deliberately fingerprints the POST-``migrate()`` state, not ``SCHEMA`` alone: it therefore also
+    covers the objects ``migrate()`` itself creates after the ``executescript`` barrier (the
+    family_members trigger and two gate indexes), which a fragments-only check would miss.
+    """
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    count, digest, dump = _schema_fingerprint(conn)
+
+    assert count == _SCHEMA_OBJECT_COUNT, (
+        f"schema object count changed: {_SCHEMA_OBJECT_COUNT} -> {count}"
+    )
+    if digest != _SCHEMA_DIGEST:
+        actual = tmp_path / "actual_schema_dump.txt"
+        actual.write_text(dump)
+        raise AssertionError(
+            f"schema digest changed ({count} objects, same count) — some object's DDL text "
+            f"differs.\n  expected {_SCHEMA_DIGEST}\n  actual   {digest}\n"
+            f"Full dump written to {actual} for diffing against git history.\n"
+            "If intentional, bump SCHEMA_VERSION and the pinned values together."
+        )
 
 
 def test_v21_adds_tick_provenance_and_forward_gate_table(tmp_path):
