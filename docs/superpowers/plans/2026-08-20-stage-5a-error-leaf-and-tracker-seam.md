@@ -467,9 +467,9 @@ Foreground, `timeout: 600000`: `uv run pytest -q 2>&1 | tail -20`, then ruff, my
 
 ```bash
 uv run algua doctor
-uv run algua backtest run momentum --demo 2>&1 | tail -5
+uv run algua backtest run cross_sectional_momentum --demo 2>&1 | tail -5
 ```
-(`backtest run` takes the strategy as a positional `name`, not a `--strategy` option.) Both should behave exactly as on `main` — in particular the backtest payload must carry **no** tracking keys without `--track`. Anything mentioning a missing import, `BrokerError`, or a tracking key on an untracked run is a real regression.
+(`backtest run` takes the strategy as a positional `name`, not a `--strategy` option — and it must be a real strategy, not a category directory: `momentum` is a directory, `cross_sectional_momentum` is a strategy.) Both should behave exactly as on `main` — in particular the backtest payload must carry **no** tracking keys without `--track`. Anything mentioning a missing import, `BrokerError`, or a tracking key on an untracked run is a real regression.
 
 - [ ] **Step 6: Commit any fixes**
 
