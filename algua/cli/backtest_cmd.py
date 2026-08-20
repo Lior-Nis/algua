@@ -32,7 +32,8 @@ from algua.primitives.atomic_io import write_bytes_atomic
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
-from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
+from algua.tracking.factory import get_tracker
+from algua.tracking.mlflow_tracker import TRACKING_SKIPPED
 
 backtest_app = typer.Typer(help="Run backtests", no_args_is_help=True)
 app.add_typer(backtest_app, name="backtest")
@@ -45,31 +46,41 @@ _WF_SUMMARY_KEYS = (
     "strategy", "data_source", "snapshot_id", "timeframe", "seed", "period", "windows",
     "holdout_frac", "stability", "code_hash", "dependency_hash", "config_hash",
     "universe_name", "universe_snapshots", "fundamentals_snapshot", "news_snapshot",
-    "mlflow_run_id", "mlflow_tracking_error",
+    "mlflow_run_id", "mlflow_tracking_error", "mlflow_tracking_skipped",
 )
 _SWEEP_SUMMARY_KEYS = (
     "strategy", "n_combos", "rank_by", "best", "trial_sharpe_count", "trial_sharpe_mean",
     "trial_sharpe_var_ann", "recorded_breadth", "code_hash", "dependency_hash", "data_source",
     "snapshot_id", "timeframe", "seed", "period", "windows", "holdout_frac", "universe_name",
     "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "mlflow_run_id",
-    "mlflow_tracking_error",
+    "mlflow_tracking_error", "mlflow_tracking_skipped",
 )
 
 
 def _record_tracking(payload: dict, call: Callable[[], str]) -> None:
-    """Best-effort MLflow logging. The backtest result already exists by the time this runs, so a
+    """Best-effort tracker logging. The backtest result already exists by the time this runs, so a
     tracker failure (flaky URI, serialization bug) must NOT discard a completed evaluation (#341).
     On success record `mlflow_run_id`; on failure record a non-fatal `mlflow_tracking_error` (with
     the exception type for triage) and warn to stderr — never raise. Keys are added ONLY when
-    tracking was requested, so the JSON distinguishes three states: not-requested (no keys),
-    succeeded (`mlflow_run_id` set, no error), failed (`mlflow_run_id` null + error)."""
+    tracking was requested, so the JSON distinguishes FOUR states: not-requested (no keys),
+    succeeded (`mlflow_run_id` set, no error), failed (`mlflow_run_id` null + error), and skipped
+    (`mlflow_run_id` null + `mlflow_tracking_skipped`, when a no-op backend was selected — distinct
+    from failed so a null run id never has to be read as "the error key went missing")."""
     try:
-        payload["mlflow_run_id"] = call()
+        run_id = call()
     except Exception as exc:  # noqa: BLE001 - tracking is a best-effort side effect
         detail = f"{type(exc).__name__}: {exc}"
         payload["mlflow_run_id"] = None
         payload["mlflow_tracking_error"] = detail
         typer.echo(f"warning: mlflow tracking failed (result preserved): {detail}", err=True)
+        return
+    if run_id == TRACKING_SKIPPED:
+        # A no-op backend was selected. Report that honestly rather than as a null run id, which
+        # would be indistinguishable from a failure whose error key went missing.
+        payload["mlflow_run_id"] = None
+        payload["mlflow_tracking_skipped"] = "tracking backend logs nothing"
+        return
+    payload["mlflow_run_id"] = run_id
 
 
 def emit_series_file(result: BacktestResult, path: Path) -> dict:
@@ -226,7 +237,7 @@ def run_backtest_task(  # noqa: PLR0913
     if emit_series:
         payload["series"] = emit_series_file(result, Path(emit_series))
     if track:
-        _record_tracking(payload, lambda: log_backtest(
+        _record_tracking(payload, lambda: get_tracker().log_backtest(
             result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
         ))
     return payload
@@ -305,7 +316,7 @@ def walk_forward_cmd(
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
-        _record_tracking(payload, lambda: log_walk_forward(
+        _record_tracking(payload, lambda: get_tracker().log_walk_forward(
             result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
         ))
     out = ok(payload)
@@ -413,6 +424,7 @@ def sweep_task(  # noqa: PLR0913
     # Recorded by strategy NAME, so even a sweep of an UNREGISTERED strategy counts.
     payload["recorded_breadth"] = recorded
     if track:
-        _record_tracking(
-            payload, lambda: log_sweep(result, tracking_uri=get_settings().mlflow_tracking_uri))
+        _record_tracking(payload, lambda: get_tracker().log_sweep(
+            result, tracking_uri=get_settings().mlflow_tracking_uri
+        ))
     return payload

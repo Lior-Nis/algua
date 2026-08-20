@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from algua.backtest.result import BacktestResult
 from algua.tracking.mlflow_tracker import (
     ExperimentTracker,
@@ -68,6 +70,25 @@ def test_experiment_tracker_protocol_is_structural():
     # Structural check: all methods present
     for method in ("log_backtest", "log_sweep", "log_walk_forward"):
         assert hasattr(Fake(), method)
+
+
+# ---------------------------------------------------------------------------
+# tracking/factory.py seam — stage 5a (PR#110 tracker-DI deferral, closes #45's dead Protocol)
+# ---------------------------------------------------------------------------
+
+def test_registered_trackers_satisfy_the_protocol():
+    """Both backends structurally satisfy ExperimentTracker (the Protocol was dead until #5a)."""
+    from algua.tracking.factory import get_tracker
+
+    for name in ("mlflow", "noop"):
+        assert isinstance(get_tracker(name), ExperimentTracker)
+
+
+def test_unknown_tracking_backend_fails_closed():
+    from algua.tracking.factory import get_tracker
+
+    with pytest.raises(ValueError, match="unknown tracking backend"):
+        get_tracker("nope")
 
 
 # ---------------------------------------------------------------------------

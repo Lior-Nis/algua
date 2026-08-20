@@ -5,7 +5,7 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -20,6 +20,7 @@ from algua.models import register
 # Protocol (#45)
 # ---------------------------------------------------------------------------
 
+@runtime_checkable
 class ExperimentTracker(Protocol):
     """Structural protocol for experiment loggers."""
 
@@ -309,3 +310,54 @@ def log_walk_forward(
         wf_dict.pop("holdout_metrics")
         mlflow.log_dict(wf_dict, "result.json")
         return run.info.run_id
+
+
+# ---------------------------------------------------------------------------
+# ExperimentTracker implementations (stage 5a: wiring the #45 Protocol / PR#110 deferral)
+# ---------------------------------------------------------------------------
+
+class MlflowTracker:
+    """The MLflow-backed :class:`ExperimentTracker`. A thin adapter over the module-level
+    ``log_*`` functions, which remain the implementation — this class exists so callers can depend
+    on the Protocol instead of on three concrete function imports."""
+
+    def log_backtest(
+        self, result: BacktestResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str:
+        return log_backtest(result, params, tracking_uri=tracking_uri)
+
+    def log_sweep(self, result: SweepResult, *, tracking_uri: str) -> str:
+        return log_sweep(result, tracking_uri=tracking_uri)
+
+    def log_walk_forward(
+        self, result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str:
+        return log_walk_forward(result, params, tracking_uri=tracking_uri)
+
+
+#: Returned by :class:`NoopTracker` in place of a run id. ``_record_tracking`` translates this into
+#: an explicit ``mlflow_tracking_skipped`` key rather than letting a null run id masquerade as a
+#: failure — the JSON contract distinguishes "backend disabled" from "backend errored".
+TRACKING_SKIPPED = "__tracking_skipped__"
+
+
+class NoopTracker:
+    """An :class:`ExperimentTracker` that logs nothing and never raises.
+
+    Selected with ``ALGUA_TRACKING_BACKEND=noop`` — for environments without an MLflow store, and
+    as the honest second implementation that proves the seam. It deliberately does NOT invent a run
+    id: fabricating one would make the payload claim a run succeeded when nothing was logged.
+    """
+
+    def log_backtest(
+        self, result: BacktestResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str:
+        return TRACKING_SKIPPED
+
+    def log_sweep(self, result: SweepResult, *, tracking_uri: str) -> str:
+        return TRACKING_SKIPPED
+
+    def log_walk_forward(
+        self, result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str:
+        return TRACKING_SKIPPED

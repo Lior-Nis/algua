@@ -7,6 +7,7 @@ walk-forward, and sweep.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -46,7 +47,9 @@ def test_run_without_track_omits_tracking_keys():
 
 
 def test_run_track_success_records_run_id(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "log_backtest", lambda *a, **k: "RUN123")
+    monkeypatch.setattr(
+        backtest_cmd, "get_tracker",
+        lambda: SimpleNamespace(log_backtest=lambda *a, **k: "RUN123"))
     p = _payload(["backtest", "run", STRAT, *DEMO, "--track"])
     assert p["mlflow_run_id"] == "RUN123" and "mlflow_tracking_error" not in p
 
@@ -56,7 +59,8 @@ def test_run_track_success_records_run_id(monkeypatch):
 
 
 def test_walk_forward_track_failure_is_non_fatal(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "log_walk_forward", _boom)
+    monkeypatch.setattr(
+        backtest_cmd, "get_tracker", lambda: SimpleNamespace(log_walk_forward=_boom))
     p = _payload(["backtest", "walk-forward", STRAT, *DEMO, "--track"])
     assert p["ok"] is True
     assert p["mlflow_run_id"] is None
@@ -64,7 +68,7 @@ def test_walk_forward_track_failure_is_non_fatal(monkeypatch):
 
 
 def test_sweep_track_failure_is_non_fatal(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "log_sweep", _boom)
+    monkeypatch.setattr(backtest_cmd, "get_tracker", lambda: SimpleNamespace(log_sweep=_boom))
     p = _payload(["backtest", "sweep", STRAT, *DEMO, "--param", "lookback=20,40", "--track"])
     assert p["ok"] is True
     assert p["mlflow_run_id"] is None
@@ -75,7 +79,8 @@ def test_sweep_track_failure_is_non_fatal(monkeypatch):
 
 
 def test_walk_forward_summary_track_failure_keeps_error(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "log_walk_forward", _boom)
+    monkeypatch.setattr(
+        backtest_cmd, "get_tracker", lambda: SimpleNamespace(log_walk_forward=_boom))
     p = _payload(["backtest", "walk-forward", STRAT, *DEMO, "--track", "--summary"])
     assert p["summary"] is True
     assert p["mlflow_run_id"] is None
@@ -83,9 +88,32 @@ def test_walk_forward_summary_track_failure_keeps_error(monkeypatch):
 
 
 def test_sweep_summary_track_failure_keeps_error(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "log_sweep", _boom)
+    monkeypatch.setattr(backtest_cmd, "get_tracker", lambda: SimpleNamespace(log_sweep=_boom))
     p = _payload(
         ["backtest", "sweep", STRAT, *DEMO, "--param", "lookback=20,40", "--track", "--summary"])
     assert p["summary"] is True
     assert p["mlflow_run_id"] is None
     assert "RuntimeError: flaky uri" in p["mlflow_tracking_error"]
+
+
+# --- no-op backend (stage 5a): honest "skipped", never a fabricated run id ---
+
+
+def test_noop_backend_reports_skipped_not_success(monkeypatch):
+    """A no-op backend must not fabricate a run id -- the payload says skipped, not succeeded."""
+    monkeypatch.setenv("ALGUA_TRACKING_BACKEND", "noop")
+    p = _payload(["backtest", "run", STRAT, *DEMO, "--track"])
+    assert p["mlflow_run_id"] is None
+    assert p["mlflow_tracking_skipped"] == "tracking backend logs nothing"
+    assert "mlflow_tracking_error" not in p
+
+
+def test_noop_backend_skipped_key_survives_summary(monkeypatch):
+    """--summary must keep mlflow_tracking_skipped, or a skipped run looks like a bare null id
+    (the exact ambiguity this fourth state exists to avoid)."""
+    monkeypatch.setenv("ALGUA_TRACKING_BACKEND", "noop")
+    p = _payload(["backtest", "walk-forward", STRAT, *DEMO, "--track", "--summary"])
+    assert p["summary"] is True
+    assert p["mlflow_run_id"] is None
+    assert p["mlflow_tracking_skipped"] == "tracking backend logs nothing"
+    assert "mlflow_tracking_error" not in p

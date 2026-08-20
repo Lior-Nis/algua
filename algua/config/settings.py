@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     alpaca_live_api_secret: str | None = None
     alpaca_live_url: str = "https://api.alpaca.markets"
     mlflow_tracking_uri: str = "mlruns"
+    # Which ExperimentTracker backend `--track` uses: "mlflow" (default) or "noop" (log nothing).
+    # See algua/tracking/factory.py. Default preserves existing behaviour exactly.
+    tracking_backend: str = "mlflow"
     # Optional operator alert command (#486). Fed the alert JSON on stdin when an always-on operator
     # run fails / halts / hits a corrupt marker / a wedged lock / a calendar-out-of-bounds anomaly.
     # Declared as a first-class field (not an ad-hoc os.environ read) so it surfaces through
