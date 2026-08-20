@@ -1,7 +1,7 @@
 """Knowledge/audit context: ``audit_log`` and ``negative_results``.
 
-The immutable actor trail (operated by ``algua/audit/log.py``; also read by
-``algua/cli/audit_cmd.py`` and ``algua/operator/mergeback.py``) and the advisory
+The immutable actor trail (operated by ``algua/audit/log.py``; appended through it by several
+CLI/risk/execution call sites and read back by ``algua/cli/audit_cmd.py``) and the advisory
 failed-hypothesis experience log (#332, operated by ``algua/registry/negative_results.py``). Both
 are deliberately keyed by strategy NAME rather than a ``strategies(id)`` FK so they survive their
 strategy -- see the denormalization rationale above ``paper_orders`` in ``execution.py``.
