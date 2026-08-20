@@ -288,7 +288,7 @@ def test_trade_tick_fails_closed_on_ingest_fetch_failure(monkeypatch, tmp_path):
     from contextlib import closing
 
     from algua.config.settings import get_settings
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
     from algua.execution.order_state import latest_tick_snapshot
     from algua.registry.db import connect, migrate
 
@@ -340,7 +340,7 @@ def test_trade_tick_survives_broker_clock_failure(monkeypatch, tmp_path):
     from datetime import UTC, datetime
 
     from algua.config.settings import get_settings
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
     from algua.execution.order_state import latest_tick_snapshot
     from algua.live.live_loop import TickResult
     from algua.registry.db import connect, migrate
@@ -451,7 +451,7 @@ def test_flatten_still_offsets_when_broker_clock_raises(monkeypatch, tmp_path):
     """
     from contextlib import closing
 
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
     from algua.registry.db import connect, migrate
 
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))

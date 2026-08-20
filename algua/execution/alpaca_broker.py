@@ -12,6 +12,7 @@ from requests import RequestException
 
 from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
+from algua.execution.errors import BrokerError
 from algua.execution.sizing import MIN_NOTIONAL, size_order
 from algua.primitives.retry import RetriesExhausted, call_with_backoff
 
@@ -56,12 +57,6 @@ def _multistatus_failures(results: list[Any]) -> list[Any]:
         r for r in results
         if not isinstance(r, dict) or _coerce_status(r.get("status", 500)) not in (200, 204)
     ]
-
-
-class BrokerError(RuntimeError):
-    """Any failure talking to the Alpaca trading API — network error, non-2xx status,
-    or a malformed/unexpected response. Callers (the CLI, the future loop) catch this so a
-    broker hiccup never escapes as a raw traceback."""
 
 
 @dataclass(frozen=True)

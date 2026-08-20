@@ -5,7 +5,8 @@ import pytest
 
 from algua.contracts.types import OrderIntent, Side
 from algua.execution import alpaca_broker as ab
-from algua.execution.alpaca_broker import AlpacaPaperBroker, BrokerError
+from algua.execution.alpaca_broker import AlpacaPaperBroker
+from algua.execution.errors import BrokerError
 
 T0 = datetime(2023, 1, 2, tzinfo=UTC)
 
@@ -831,7 +832,8 @@ def test_activities_window_encodes_tz_offset(monkeypatch):
 
 
 def test_live_readonly_broker_requires_live_https_host():
-    from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker, BrokerError
+    from algua.execution.alpaca_broker import AlpacaLiveReadOnlyBroker
+    from algua.execution.errors import BrokerError
 
     # accepts the live host with no LiveAuthorization
     b = AlpacaLiveReadOnlyBroker("k", "s", base_url="https://api.alpaca.markets")

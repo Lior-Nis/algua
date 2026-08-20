@@ -10,7 +10,8 @@ from algua.backtest._sample import SyntheticProvider
 from algua.cli._common import resolve_wall_clock_window
 from algua.cli.main import app
 from algua.config.settings import get_settings
-from algua.execution.alpaca_broker import AccountState, BrokerError
+from algua.execution.alpaca_broker import AccountState
+from algua.execution.errors import BrokerError
 from algua.execution.order_state import latest_tick_snapshot
 from algua.live.live_loop import SubmittedOrder, TickResult
 from algua.registry.db import connect, migrate

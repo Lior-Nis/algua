@@ -1459,7 +1459,7 @@ def test_live_flatten_skips_subtol(monkeypatch):
 def test_live_flatten_close_failure_stays_tripped(monkeypatch):
     # (d) Flatten strategy raises BrokerError during submit_offset; assert exit 1,
     # ok=False, and DB kill-switch STILL tripped (fail-safe, no rollback).
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
 
     name = "cross_sectional_momentum"
     _to_live(name)

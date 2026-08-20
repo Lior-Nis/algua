@@ -4,7 +4,8 @@ import pandas as pd
 import pytest
 
 from algua.contracts.types import ExecutionContract
-from algua.execution.alpaca_broker import BrokerError, TickSnapshot
+from algua.execution.alpaca_broker import TickSnapshot
+from algua.execution.errors import BrokerError
 from algua.execution.live_ledger import (
     delete_paper_venue_order,
     record_paper_venue_order,
