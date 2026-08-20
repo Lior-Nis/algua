@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -21,9 +22,8 @@ class FundamentalsStoreMixin:
     data_dir: Path
     manifest: SnapshotManifest
 
-    def get_snapshot(self, snapshot_id: str) -> SnapshotRecord:
-        # provided by the DataStore facade; stub for mypy only
-        raise NotImplementedError
+    if TYPE_CHECKING:  # provided by the DataStore facade; mypy-only declaration
+        def get_snapshot(self, snapshot_id: str) -> SnapshotRecord: ...
 
     def ingest_fundamentals(
         self,

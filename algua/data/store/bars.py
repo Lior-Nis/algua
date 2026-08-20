@@ -4,6 +4,7 @@ import errno
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -27,9 +28,8 @@ class BarsStoreMixin:
     manifest: SnapshotManifest
     _staging: SnapshotStagingLease
 
-    def get_snapshot(self, snapshot_id: str) -> SnapshotRecord:
-        # provided by the DataStore facade (store/__init__.py); stub for mypy only
-        raise NotImplementedError
+    if TYPE_CHECKING:  # provided by the DataStore facade (store/__init__.py); mypy-only declaration
+        def get_snapshot(self, snapshot_id: str) -> SnapshotRecord: ...
 
     def ingest_bars(
         self,
