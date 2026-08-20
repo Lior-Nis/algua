@@ -308,6 +308,89 @@ def test_migrate_adds_holdout_evaluations_to_legacy_db(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM holdout_evaluations").fetchone()[0] == 1
 
 
+def test_v23_backfill_runs_after_the_holdout_interval_alter(tmp_path):
+    """ORDERING GUARD: the holdout_evaluations ALTER must precede _backfill_holdout_intervals.
+
+    Reconstructs a genuinely pre-v22/v23-shaped holdout_evaluations — committed_at/holdout_start/
+    holdout_end absent — so `CREATE TABLE IF NOT EXISTS` in _SCHEMA leaves the old shape intact and
+    the ALTER in migrate() is the only thing that adds them. If the backfill were ever reordered
+    before that ALTER, migrate() raises OperationalError('no such column: holdout_start') here.
+
+    Contrast test_migrate_adds_holdout_evaluations_to_legacy_db, which omits the table entirely:
+    _SCHEMA then creates it complete and the ordering is never exercised. That is why this guard
+    exists separately.
+    """
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE holdout_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL REFERENCES strategies(id),
+            data_source TEXT NOT NULL,
+            snapshot_id TEXT,
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            holdout_frac REAL NOT NULL,
+            config_hash TEXT NOT NULL,
+            reused INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO strategies(name, stage, created_at, updated_at)
+            VALUES ('s', 'idea', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+        INSERT INTO holdout_evaluations(strategy_id, data_source, snapshot_id, period_start,
+                                        period_end, holdout_frac, config_hash, reused, created_at)
+            VALUES (1, 'SyntheticProvider', NULL, '2022-01-01', '2023-12-31', 0.2, 'cfg', 0,
+                    '2026-01-02T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    # The precondition this guard depends on: the legacy row really is missing the v23 columns.
+    assert "holdout_start" not in {
+        r["name"] for r in conn.execute("PRAGMA table_info(holdout_evaluations)")
+    }
+
+    migrate(conn)
+
+    row = conn.execute(
+        "SELECT holdout_start, holdout_end FROM holdout_evaluations"
+    ).fetchone()
+    assert (row["holdout_start"], row["holdout_end"]) == ("2022-01-01", "2023-12-31")
+
+
+def test_v36_attempt_token_index_created_after_its_column(tmp_path):
+    """ORDERING GUARD: the gate_evaluations attempt_token ALTER must precede the
+    ux_gate_evaluations_attempt_token index creation.
+
+    Reconstructs a pre-v36-shaped gate_evaluations by removing the column (and its index) from a
+    fully-migrated DB — the same "undo the new state to re-expose the old one" technique the GATE-2
+    guard uses. If the CREATE UNIQUE INDEX were ever reordered before the ALTER, migrate() raises
+    OperationalError('no such column: attempt_token') here.
+    """
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    # DROP COLUMN refuses while the column is indexed, so the index goes first.
+    conn.execute("DROP INDEX IF EXISTS ux_gate_evaluations_attempt_token")
+    conn.execute("ALTER TABLE gate_evaluations DROP COLUMN attempt_token")
+    conn.commit()
+    assert "attempt_token" not in {
+        r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)")
+    }
+
+    migrate(conn)
+
+    assert "attempt_token" in {
+        r["name"] for r in conn.execute("PRAGMA table_info(gate_evaluations)")
+    }
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index'"
+        " AND name='ux_gate_evaluations_attempt_token'"
+    ).fetchone() is not None
+
+
 def test_bootstrap_runs_even_when_version_already_current(tmp_path):
     """migrate() is an idempotent bootstrap, not a version-gated migrator.
 
