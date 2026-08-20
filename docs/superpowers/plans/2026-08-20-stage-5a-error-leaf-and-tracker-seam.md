@@ -22,7 +22,7 @@ Ordering is forced at one point: **5a's error leaf must land before 5b**, becaus
 
 ### Decisions the plan's author made (recorded for a reviewer to check, not to re-derive)
 
-1. **No re-export shim.** Every importer of `BrokerError` is re-pointed at the new leaf and `alpaca_broker.py` does **not** re-export it. Leaving a re-export would create exactly the dual import path this program exists to remove; there are only 6 importers (4 production, 2 test), so re-pointing is cheap and total.
+1. **No re-export shim.** Every importer of `BrokerError` is re-pointed at the new leaf and `alpaca_broker.py` does **not** re-export it. Leaving a re-export would create exactly the dual import path this program exists to remove; there are 18 import statements across 14 files (5 production, 9 test), so re-pointing is cheap and total.
 2. **The no-op tracker gets its own explicit JSON state.** `_record_tracking`'s docstring pins a **three-state contract** — not-requested (no keys) / succeeded (`mlflow_run_id` set) / failed (`mlflow_run_id` null + `mlflow_tracking_error`). A no-op returning a fake run id would fabricate "succeeded"; returning `None` silently would create an ambiguous fourth state indistinguishable from a failure that forgot its error key. So the no-op records `mlflow_run_id: null` **plus a distinct `mlflow_tracking_skipped` key**. This key can only ever appear when a non-default backend is selected, so all three existing states and every existing test are untouched.
 3. **`tracking_uri` stays a per-call keyword.** The Protocol's three methods each take `*, tracking_uri: str`. Binding it at construction instead would be tidier, but it changes the Protocol surface *and* all three call sites for no behavior gain, and this slice's whole value is being provably inert. Left as-is; revisit only if a real second backend wants it.
 
@@ -51,7 +51,7 @@ Ordering is forced at one point: **5a's error leaf must land before 5b**, becaus
 - Produces: `algua.execution.errors.BrokerError` — the same class, same base (`RuntimeError`), same docstring, importable from a module that depends on nothing.
 - Consumes: nothing.
 
-**Why this is first:** it is the lowest-risk, highest-clarity change in Stage 5 — one 4-line exception class moves to a new leaf and six importers are re-pointed — and 5b's broker factory depends on it.
+**Why this is first:** it is the lowest-risk, highest-clarity change in Stage 5 — one 4-line exception class moves to a new leaf and 18 import statements across 14 files are re-pointed — and 5b's broker factory depends on it.
 
 - [ ] **Step 1: Confirm the current shape**
 
@@ -62,7 +62,7 @@ Then enumerate every importer yourself rather than trusting this plan's list:
 ```bash
 grep -rn "BrokerError" algua/ tests/ --include='*.py'
 ```
-As of writing: 4 production importers (`execution/tick_clock.py`, `cli/errors.py`, `cli/live_cmd.py`, `cli/paper_cmd.py`) and 2 test importers (`tests/test_cli_live.py`, `tests/test_alpaca_broker.py`). Some hits are prose mentions in comments/docstrings (`execution/flatten.py`, `primitives/retry.py`) — those reference the *concept* and need no change; do not edit them.
+As of writing: 18 import statements across 14 files — 5 production (`execution/tick_clock.py`, `execution/alpaca_broker.py` itself as a consumer, `cli/errors.py`, `cli/live_cmd.py`, `cli/paper_cmd.py`) and 9 test files (`tests/test_alpaca_broker.py`, `tests/test_cli_live.py`, `tests/test_cli_paper.py`, `tests/test_lane_exit.py`, `tests/test_live_book_breaker.py`, `tests/test_live_loop.py`, `tests/test_observability_wiring.py`, `tests/test_paper_venue_reconcile.py`, `tests/test_tick_clock.py`). Some hits are prose mentions in comments/docstrings (`execution/flatten.py`, `primitives/retry.py`) — those reference the *concept* and need no change; do not edit them.
 
 - [ ] **Step 2: Create `algua/execution/errors.py`**
 
@@ -98,7 +98,7 @@ Delete the `class BrokerError(RuntimeError):` block from `algua/execution/alpaca
 
 **Do not re-export it** (no `__all__` entry, no `BrokerError = BrokerError` alias). A re-export would leave two valid import paths for one class, which is the dual-path cruft this program removes; Step 4 re-points every importer instead.
 
-- [ ] **Step 4: Re-point all six importers**
+- [ ] **Step 4: Re-point all importers (18 import statements across 14 files)**
 
 For each, change the import source from `algua.execution.alpaca_broker` to `algua.execution.errors`, leaving everything else untouched:
 
@@ -153,9 +153,9 @@ exceptions leaf is deferred -- YAGNI"); this closes that deferral, and the comme
 rather than left as a false statement.
 
 Moves the class verbatim to algua/execution/errors.py -- a true leaf importing nothing -- mirroring
-algua/data/providers/errors.py, which already plays this role for the data-provider seam. All six
-importers (4 production, 2 test) are re-pointed; alpaca_broker deliberately does NOT re-export it,
-so exactly one import path exists rather than two.
+algua/data/providers/errors.py, which already plays this role for the data-provider seam. All 18
+import statements across 14 files (5 production, 9 test) are re-pointed; alpaca_broker deliberately
+does NOT re-export it, so exactly one import path exists rather than two.
 
 Zero behavior change: same class, same RuntimeError base, same docstring, same identity (verified:
 tick_clock resolves the same object), so every existing `except BrokerError` is unaffected.
@@ -368,15 +368,15 @@ def test_unknown_tracking_backend_fails_closed():
 def test_noop_backend_reports_skipped_not_success(tmp_path, monkeypatch):
     """A no-op backend must not fabricate a run id -- the payload says skipped, not succeeded."""
     monkeypatch.setenv("ALGUA_TRACKING_BACKEND", "noop")
-    ...  # invoke `backtest run --demo ... --track` via the CliRunner used elsewhere in this file
+    ...  # invoke `backtest run --demo ... --track` via the CliRunner used in tests/test_cli_backtest_tracking.py
     assert payload["mlflow_run_id"] is None
     assert "mlflow_tracking_skipped" in payload
     assert "mlflow_tracking_error" not in payload
 ```
 
-`ExperimentTracker` is **not** currently `@runtime_checkable` (verified: `mlflow_tracker.py` imports only `Protocol` from `typing`), so the `isinstance` check above will fail until you add the decorator. Add it — it is purely additive, changes neither the Protocol's shape nor any static behaviour, and is what lets a test assert the seam is real rather than assert three method *names* exist. Import `runtime_checkable` alongside `Protocol`.
+`ExperimentTracker` is **not** currently `@runtime_checkable` (verified: `mlflow_tracker.py` imports only `Protocol` from `typing`), so the `isinstance` check above will fail until you add the decorator. Add it — it is purely additive, changes neither the Protocol's shape nor any static behaviour, and is what lets a cheap runtime presence smoke-check exist (`isinstance` against a `@runtime_checkable` Protocol checks only that the three method *names* are present and callable, not their signatures — it does not assert the seam is real). Static conformance is proven separately, by mypy against the `_REGISTRY: dict[str, Callable[[], ExperimentTracker]]` annotation in `factory.py`. Import `runtime_checkable` alongside `Protocol`.
 
-For the third test, follow whatever invocation pattern the file's existing tests use for `backtest run` — read them first and match, rather than inventing a new harness. Assert the **default** backend still produces the old shape too (no `mlflow_tracking_skipped` key), so the fourth state is proven inert by default.
+For the third test, follow the CliRunner invocation pattern `tests/test_cli_backtest_tracking.py` uses for `backtest run` — that is where this test belongs (`test_tracking_backtest.py` has no CLI invocation of any kind) — read it first and match, rather than inventing a new harness. Assert the **default** backend still produces the old shape too (no `mlflow_tracking_skipped` key), so the fourth state is proven inert by default.
 
 - [ ] **Step 8: Full quality gate**
 

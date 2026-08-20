@@ -32,8 +32,8 @@ from algua.primitives.atomic_io import write_bytes_atomic
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+from algua.tracking.base import TRACKING_SKIPPED
 from algua.tracking.factory import get_tracker
-from algua.tracking.mlflow_tracker import TRACKING_SKIPPED
 
 backtest_app = typer.Typer(help="Run backtests", no_args_is_help=True)
 app.add_typer(backtest_app, name="backtest")

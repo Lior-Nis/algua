@@ -12,7 +12,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from algua.config.settings import get_settings
-from algua.tracking.mlflow_tracker import ExperimentTracker, MlflowTracker, NoopTracker
+from algua.tracking.base import ExperimentTracker, NoopTracker
+from algua.tracking.mlflow_tracker import MlflowTracker
 
 _REGISTRY: dict[str, Callable[[], ExperimentTracker]] = {
     "mlflow": MlflowTracker,

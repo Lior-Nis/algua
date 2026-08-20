@@ -40,7 +40,9 @@ def _boom(*_a, **_k):
 
 def test_run_without_track_omits_tracking_keys():
     p = _payload(["backtest", "run", STRAT, *DEMO])
-    assert "mlflow_run_id" not in p and "mlflow_tracking_error" not in p
+    assert "mlflow_run_id" not in p
+    assert "mlflow_tracking_error" not in p
+    assert "mlflow_tracking_skipped" not in p
 
 
 # --- requested + succeeds: run id recorded, no error ---
