@@ -1,11 +1,15 @@
 """The single ordered schema-bootstrap sequence.
 
 ``migrate()`` is deliberately kept as ONE unsplit function. Not because its ordering constraints
-cross bounded contexts -- they do not. All four hard constraints are INTRA-context: the
-family_members UPDATE trigger after that table's ALTER; the holdout interval backfill after the
-holdout_evaluations ALTER; the legacy FDR index DROP before the cohort backfill (and the composite
-index after it); the attempt_token index after its column. The only cross-context coupling is the
-single ``executescript(SCHEMA)`` barrier that every later step depends on.
+cross bounded contexts -- they do not. Three hard constraints are INTRA-context: the holdout
+interval backfill after the holdout_evaluations ALTER; the legacy FDR index DROP before the cohort
+backfill (and the composite index after it); the attempt_token index after its column. There is
+also one defensive (not hard) ordering: the family_members UPDATE trigger after that table's
+ALTER -- reversing it is provably benign (byte-identical schema, full registry/migration/family
+test set passes, a legacy-shaped table migrates cleanly, and the trigger still fires correctly),
+but the ALTER-then-trigger order is kept anyway as the more conservative default; see the
+rationale in family.py. The only cross-context coupling is the single ``executescript(SCHEMA)``
+barrier that every later step depends on.
 
 It stays whole for a stronger reason: it is the single auditable place where the whole ordered
 sequence is visible at once. The one historical production ordering bug -- the GATE-2 finding

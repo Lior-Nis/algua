@@ -102,5 +102,10 @@ CREATE TRIGGER IF NOT EXISTS trg_family_members_no_delete BEFORE DELETE ON famil
 -- migrate() AFTER the ALTER, not here -- defensively: SQLite actually resolves a trigger's column
 -- references when the trigger FIRES, not at CREATE time (verified on 3.45.1), so creating it early
 -- would not raise here, but it would leave a window in which the trigger is unfireable. Keeping
--- creation after the ALTER keeps the guarantee unconditional.
+-- creation after the ALTER keeps the guarantee unconditional once migrate() returns. (Within
+-- migrate() itself, each DDL statement autocommits individually, so a crash between the ALTER and
+-- this CREATE TRIGGER leaves the columns present with no UPDATE trigger yet -- fail-open, not
+-- fail-closed, for that narrow window; the reversed order would instead leave an unfireable
+-- trigger, i.e. fail-closed. This ordering was kept as-is; see migrate.py for why it is defensive
+-- rather than a hard constraint.)
 """

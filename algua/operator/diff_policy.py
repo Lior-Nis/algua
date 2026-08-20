@@ -110,7 +110,7 @@ def _canonicalize(path: str) -> str | None:
 def parse_codeowners_denylist(codeowners_text: str) -> tuple[str, ...]:
     """Derive canonical deny prefixes from the CODEOWNERS file text.
 
-    Each non-comment CODEOWNERS line's first token is a path pattern (``/algua/registry/store.py``,
+    Each non-comment CODEOWNERS line's first token is a path pattern (``/algua/registry/store/``,
     ``/approvers/``). We strip the leading slash and canonicalize it into a deny prefix. Raises
     ``ValueError`` if the text yields no owned paths at all (a CODEOWNERS that failed to parse must
     fail closed, never silently allow protected writes).

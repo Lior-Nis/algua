@@ -9,7 +9,8 @@ not relational children of the registry.
 from __future__ import annotations
 
 SCHEMA = """
--- paper_orders / paper_fills / audit_log / kill_switches are DELIBERATELY
+-- paper_orders / paper_fills / audit_log (now in knowledge.py, which
+-- back-references this rationale) / kill_switches are DELIBERATELY
 -- denormalized: they reference a strategy by its free-text NAME and carry no
 -- foreign key into strategies(id). These are operational/audit snapshots, not
 -- relational children of the registry. audit_log in particular is an immutable
