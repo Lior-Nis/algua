@@ -9,6 +9,7 @@
 # branch-protection settings for the default branch (a one-time repo setting).
 
 /algua/registry/store/        @Lior-Nis   # the paper->live wall + approvals
+/algua/registry/db/           @Lior-Nis   # schema + migrate(): single-use gate-token DDL, #524 append-only triggers, AGENT_NOVEL_MINT_CAP, SCHEMA_VERSION
 /algua/contracts/lifecycle.py   @Lior-Nis   # lifecycle stages + allowed transitions
 /algua/backtest/engine.py       @Lior-Nis   # anti-look-ahead t->t+1 enforcement
 /algua/research/gates.py        @Lior-Nis   # promotion-gate criteria
