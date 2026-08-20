@@ -9,7 +9,7 @@ Stages: `idea -> backtested -> candidate -> paper -> forward_tested -> live -> r
 (allowed edges live in `algua/contracts/lifecycle.py`). An agent may operate the lifecycle
 **up to and including `forward_tested`**. The `forward_tested -> live` transition is a hard wall —
 it requires a human actor, a verified approval, AND a fresh forward-test certificate, enforced in
-`algua/registry/store.py` and `algua/registry/transitions.py`.
+`algua/registry/store/` and `algua/registry/transitions.py`.
 
 The examples use `--demo` (the synthetic provider) so the whole loop runs offline. Swap in real
 bars with `--snapshot <id>` from `data ingest-bars` once you want real data.

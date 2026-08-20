@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -20,6 +21,19 @@ from algua.registry.repository import (
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.research.clustering import clustering_version
+
+
+def test_no_mixin_shadows_another() -> None:
+    """Every composed method must be defined by exactly one mixin. A collision would
+    silently resolve by MRO order (see gate.py's TYPE_CHECKING note)."""
+    owners = collections.defaultdict(list)
+    for cls in SqliteStrategyRepository.__mro__:
+        if cls in (SqliteStrategyRepository, object):
+            continue
+        for n, v in vars(cls).items():
+            if callable(v) or isinstance(v, (property, staticmethod, classmethod)):
+                owners[n].append(cls.__name__)
+    assert {n: o for n, o in owners.items() if len(o) > 1} == {}
 
 
 def test_record_exposes_metadata_defaults(tmp_path):
