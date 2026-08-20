@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol
 
@@ -51,7 +51,7 @@ class FdrStreamState(NamedTuple):
       ``fdr_rejected=1`` (past rejections replenishing alpha-wealth WITHIN the cohort). All < ``t``.
     - ``cohort_index`` — the 0-based index of that cohort.
 
-    The remaining fields are lifetime AUDIT counters (not used by ``lord_plus_plus_level``):
+    The remaining fields are lifetime AUDIT counters (not used by LORD++ level calculation):
     - ``cohorts_completed`` — number of FULLY-filled cohorts (each == FDR_COHORT_SIZE tests).
     - ``binding_tests`` — total binding rows so far (the next test is ``binding_tests + 1``).
     - ``discoveries`` — total ``fdr_rejected=1`` rows across all cohorts.
@@ -59,7 +59,7 @@ class FdrStreamState(NamedTuple):
       rows already in the cohort the NEXT test joins (0.0 for a fresh cohort). The active-cohort
       exposure audit adds this row's own α to it.
 
-    ``t`` + ``discovery_indices`` fully determine ``lord_plus_plus_level`` for the NEXT test."""
+    ``t`` + ``discovery_indices`` fully determine the NEXT test's level input."""
 
     t: int
     discovery_indices: list[int]
@@ -630,41 +630,28 @@ class GateLedger(Protocol):
         rec: StrategyRecord,
         *,
         gate_row: dict[str, Any],
-        p_value: float | None,
         funnel: FunnelSnapshot,
-        level_fn: Callable[[int, list[int]], float],
-        fdr_alpha: float,
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
     ) -> FdrGateOutcome:
-        """Record a gate evaluation WITH LORD++ FDR accounting and optionally promote to
-        ``candidate`` — all under a single **BEGIN IMMEDIATE** transaction (write lock held from
-        the stream-state SELECT through the INSERT + stage CAS).
+        """Record a gate evaluation and optionally promote to ``candidate`` — all under a single
+        **BEGIN IMMEDIATE** transaction (write lock held from the funnel-snapshot CAS through the
+        INSERT + stage CAS).
 
         ``gate_row`` carries ``record_gate_evaluation``'s keyword arguments (including the
-        provisional ``passed`` flag). ``None`` ``p_value`` means non-binding and FDR is skipped
-        entirely for this row — since the factory soft gate this is the ONLY value the promote
-        path supplies (``fdr_skip_reason="stats_advisory"``): the row commits with
-        ``fdr_binding`` NULL, invisible to the stream reader and the windowed throttle count.
-        The binding branch below is the PRESERVED LORD++ ledger machinery (future re-tightening).
-
-        When binding: reads the prior stream state UNDER the write lock — SCOPED to the cohort the
-        next test joins (#324) — computes ``α_t = level_fn(prior.t, prior.discovery_indices)`` where
-        ``prior.t`` is the within-cohort position (1..FDR_COHORT_SIZE), ``fdr_rejected =
-        (p_value ≤ α_t)``, and ``final_passed = provisional_passed AND fdr_rejected``. The row is
-        inserted with ``fdr_cohort = prior.cohort_index``, ``fdr_test_index = prior.t``, and
-        ``passed = final_passed`` (never the provisional value — ``find_consumable_gate_evaluation``
-        reads this column). If ``final_passed`` is True, ``rec`` is atomically advanced to
-        ``candidate``. ``fdr_alpha`` (the scalar FDR level, injected from ``promotion.py`` to keep
-        ``algua/registry`` free of ``algua/research`` imports) feeds the AUDIT-ONLY exposure block
-        (``fdr_expected_false_discoveries = fdr_alpha × cohorts_completed``); it never changes the
-        pass/fail decision.
+        provisional ``passed`` flag). The LORD++ FDR-binding branch (simplification stage 4a) was
+        deleted — it was provably dead in production (``promotion.py``'s ``run_gate`` has always
+        hardcoded ``p_value=None``, so the branch's guard condition was always False). Every row
+        now commits with ``fdr_binding`` NULL (invisible to ``fdr_stream_state``'s read path) and
+        ``final_passed`` is always the provisional integrity-floor verdict. The FDR ledger
+        machinery this branch used to write is preserved (``fdr_stream_state``'s read path, the
+        ``gate_evaluations`` ``fdr_*`` columns) for future re-tightening.
 
         ``funnel`` is the funnel-wide snapshot the (lock-free) decision was computed against
-        (#339). Under the write lock, BEFORE the stream read, every mutable field is RE-READ and
-        CAS-verified; on any drift the whole transaction rolls back and raises ``FunnelDriftError``,
-        so a committed decision is provably a pure function of ONE funnel snapshot (serializable).
+        (#339). Under the write lock every mutable field is RE-READ and CAS-verified; on any drift
+        the whole transaction rolls back and raises ``FunnelDriftError``, so a committed decision
+        is provably a pure function of ONE funnel snapshot (serializable).
 
         ``pending_novel_family`` (#524): when set AND ``final_passed`` is True, the seeded agent
         NOVEL family is created and the founder assigned in the SAME transaction, gated by: a

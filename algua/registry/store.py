@@ -4,7 +4,7 @@ import json
 import math
 import sqlite3
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import ExitLaneGuard, PendingLiveAuthorization
-from algua.registry.db import MAX_N_COMBOS
+from algua.registry.db import FDR_COHORT_SIZE, MAX_N_COMBOS
 from algua.registry.metadata import canonicalize_tags, dump_tags, load_tags
 from algua.registry.repository import (
     AgentMintCapError,
@@ -32,12 +32,7 @@ from algua.registry.repository import (
     StrategyNotFound,
     StrategyRecord,
 )
-from algua.research.gates import (
-    FDR_COHORT_SIZE,
-    FDR_NEAR_TERM_BINDING_BUDGET,
-    FDR_THROTTLE_WINDOW_DAYS,
-    MIN_FUNNEL_FLOOR_STRATEGIES,
-)
+from algua.research.gates import MIN_FUNNEL_FLOOR_STRATEGIES
 
 # --- #524 agent-NOVEL mint governance constants (R9-M1) --------------------------------------
 # CODEOWNERS-protected: these live in algua/registry/store.py as module constants — NOT a CLI flag,
@@ -1380,26 +1375,6 @@ class SqliteStrategyRepository:
             cohorts_completed=cohorts_completed, binding_tests=binding_tests,
             discoveries=discoveries, current_cohort_applied_alpha=next_applied_alpha)
 
-    def _windowed_binding_test_count(self, window_days: int) -> int:
-        """#529 §3.5 — count PRIOR committed binding FDR tests whose ``created_at`` is within the
-        trailing ``window_days``. Drives the windowed PROMOTION-ELIGIBILITY throttle: once this
-        count reaches ``FDR_NEAR_TERM_BINDING_BUDGET`` a further binding test is not promotable
-        (it still commits its binding row and advances the stream — only ``final_passed`` is forced
-        False). MUST run inside the ``BEGIN IMMEDIATE`` in
-        ``record_gate_with_fdr_and_maybe_promote`` and BEFORE this row's INSERT, so it counts PRIOR
-        rows only — a per-decision cap on the count
-        of prior in-window binding rows, not a retrospective property of an arbitrary window.
-
-        ``created_at`` is a canonical UTC ISO-8601 string (``_now()``), so lexicographic ``>=`` on
-        the cutoff is chronologically correct (identical +00:00 offset, zero-padded fields)."""
-        cutoff = (datetime.now(UTC) - timedelta(days=window_days)).isoformat()
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM gate_evaluations"
-            " WHERE fdr_binding=1 AND created_at >= ?",
-            (cutoff,),
-        ).fetchone()
-        return int(row["n"])
-
     @staticmethod
     def _cas_funnel(name: str, expected: object, actual: object) -> None:
         """Fail-closed exact-equality check for one funnel-snapshot field (#339). Float fields are
@@ -1461,10 +1436,7 @@ class SqliteStrategyRepository:
         rec: StrategyRecord,
         *,
         gate_row: dict[str, Any],
-        p_value: float | None,
         funnel: FunnelSnapshot,
-        level_fn: Callable[[int, list[int]], float],
-        fdr_alpha: float,
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
@@ -1505,29 +1477,10 @@ class SqliteStrategyRepository:
                 f"{rec.name!r}; the funnel CAS must verify the strategy being promoted")
 
         provisional_passed = bool(gate_row.get("passed"))
-        fdr_binding = p_value is not None and math.isfinite(p_value)
-
-        t_next: int | None = None          # WITHIN-COHORT position (1..FDR_COHORT_SIZE), #324
-        cohort_index: int | None = None    # this test's 0-based cohort (#324)
-        alpha_t: float | None = None
-        fdr_rejected: bool | None = None
-        # Lifetime AUDIT counters surfaced in the exposure block (binding rows only).
-        cohorts_completed: int | None = None
-        binding_tests_after: int | None = None
-        discoveries_after: int | None = None
-        expected_false_discoveries: float | None = None
-        # #529 windowed throttle + active-cohort exposure audit (binding rows only).
-        throttle_window_binding: int | None = None
-        throttle_tripped: bool | None = None
-        promotion_eligible: bool | None = None
-        active_cohort_position: int | None = None
-        active_cohort_applied_alpha: float | None = None
-        expected_false_discoveries_incl_active: float | None = None
         final_passed: bool
 
-        # BEGIN IMMEDIATE takes the write lock up front so the stream-state SELECT, the gate row
-        # INSERT, and the optional stage CAS are one atomic critical section — two concurrent
-        # binding evaluations can't both read t=0 and both write fdr_test_index=1.
+        # BEGIN IMMEDIATE takes the write lock up front so the gate row INSERT and the optional
+        # stage CAS are one atomic critical section.
         # BaseException (not Exception) so KeyboardInterrupt/SystemExit still rolls back.
         try:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1550,108 +1503,22 @@ class SqliteStrategyRepository:
                         "promote", axis="graph_fingerprint")
             # #339 — serializability CAS: re-read the funnel-wide MUTABLE state the (lock-free)
             # decision was computed against and abort if any of it drifted, so a committed decision
-            # is provably a pure function of ONE funnel snapshot. Runs BEFORE the FDR stream read
-            # (which is INTENTIONALLY live — the online stream must reflect all prior commits) and
-            # BEFORE the INSERT/stage-CAS, all inside this one write-locked critical section.
+            # is provably a pure function of ONE funnel snapshot. Runs BEFORE the INSERT/stage-CAS,
+            # inside this one write-locked critical section.
             self._verify_funnel_snapshot(funnel)
-            if fdr_binding:
-                stream = self.fdr_stream_state()
-                if stream is None:
-                    raise RuntimeError("FDR stream integrity failure — cannot compute alpha_t")
-                # #324 — the stream state already resolves the cohort THIS test joins and its
-                # within-cohort position/discoveries (no global +1). α_t is computed from the
-                # in-cohort LORD++ position, so a fresh cohort restarts at α_1 = γ_1·W0.
-                t_next = stream.t
-                cohort_index = stream.cohort_index
-                alpha_t = level_fn(t_next, stream.discovery_indices)
-                assert p_value is not None
-                # #529 (c) — HARD per-cohort LORD++ FDR check. fdr_rejected = p ≤ α_t stays the
-                # PURE LORD++ verdict (unchanged meaning) and is ANDed into final_passed alongside
-                # (a)+(b) via provisional_passed. The recalibration (N=8 + γ over the restart) lifts
-                # α_1 to ≈0.00764 so a genuinely strong strategy can clear it.
-                fdr_rejected = p_value <= alpha_t
-                # #529 §3.5 — hard windowed PROMOTION-ELIGIBILITY throttle. Count PRIOR committed
-                # in-window binding tests (this row not yet inserted); once the near-term budget is
-                # spent, this test is promotion-INELIGIBLE (--fdr-throttle-override was REMOVED
-                # with the factory soft gate — the promote path no longer writes binding rows).
-                # The throttled row STILL commits a binding row and STILL advances the LORD++ stream
-                # below (a real FDR test ran) — only final_passed is forced False. This is a
-                # per-decision cap on prior in-window rows, not a retrospective-window property.
-                throttle_window_binding = self._windowed_binding_test_count(
-                    FDR_THROTTLE_WINDOW_DAYS)
-                promotion_eligible = (
-                    throttle_window_binding < FDR_NEAR_TERM_BINDING_BUDGET)
-                throttle_tripped = not promotion_eligible
-                # final_passed AND-chains (a)+(b)+floors (provisional) with (c) fdr_rejected AND the
-                # throttle eligibility — restoring the hard AND (#529 is NOT advisory).
-                final_passed = provisional_passed and fdr_rejected and promotion_eligible
-                # AUDIT-ONLY cumulative exposure (never changes the decision). This test adds one
-                # binding row and, if it rejects, one discovery. Completed cohorts fill AFTER this
-                # test only if it lands at the last position of its cohort.
-                binding_tests_after = stream.binding_tests + 1
-                discoveries_after = stream.discoveries + (1 if fdr_rejected else 0)
-                cohorts_completed = stream.cohorts_completed + (
-                    1 if t_next == FDR_COHORT_SIZE else 0)
-                # Honest upper bound on cumulative expected false discoveries over K completed
-                # independent cohorts each controlled at FDR ≤ fdr_alpha (NOT conditioned on
-                # cohorts-with-discoveries — that would be post-selection and understate exposure).
-                expected_false_discoveries = fdr_alpha * cohorts_completed
-                # #529 §4 — active (in-progress) cohort exposure so partial-cohort spend at small
-                # N is never hidden by the completed-only field. Position = this row's within-cohort
-                # ordinal; applied_alpha = Σ stored α over the open cohort INCLUDING this row. The
-                # incl_active total uses cohorts_completed BEFORE this test (stream value)
-                # + the actual applied α of the active cohort, so a cohort-sealing row is never
-                # double-counted (once as fdr_alpha, once as its applied α).
-                active_cohort_position = t_next
-                active_cohort_applied_alpha = (
-                    stream.current_cohort_applied_alpha + alpha_t)
-                expected_false_discoveries_incl_active = (
-                    fdr_alpha * stream.cohorts_completed + active_cohort_applied_alpha)
-            else:
-                final_passed = provisional_passed
+            # Factory soft gate (#529): the LORD++ FDR-binding branch itself was deleted
+            # (simplification stage 4a) — it was provably dead in production (run_gate never
+            # supplied a real p_value). final_passed is now always the provisional integrity-floor
+            # verdict. The FDR ledger machinery this branch used to write — fdr_stream_state's read
+            # path, the gate_evaluations fdr_* columns, db.py's cohort backfills — is preserved for
+            # future re-tightening; only the write path (this branch) and its LORD++ math
+            # (research/fdr_lord.py) are gone.
+            final_passed = provisional_passed
 
-            # Patch decision_json so the stored audit record reflects final_passed and the FDR
-            # gate outcome — both are only known after the stream read inside this transaction.
-            # The promote path never reaches the binding branch (run_gate forces p_value=None,
-            # skip reason "stats_advisory"); this branch is the preserved ledger machinery for
-            # future re-tightening, and its audit invariant MUST hold: a binding row vetoed by
-            # FDR/throttle carries the failing check in decision_json (Gate-2 finding — a veto
-            # with no failed check would be an unexplainable audit record).
+            # Patch decision_json so the stored audit record reflects final_passed — only known
+            # after this transaction's checks run.
             raw_decision = json.loads(gate_row.get("decision_json") or "{}")
             raw_decision["passed"] = final_passed
-            if fdr_binding:
-                fdr_checks = raw_decision.get("checks")
-                if not isinstance(fdr_checks, list):
-                    fdr_checks = []
-                    raw_decision["checks"] = fdr_checks
-                fdr_checks.append({
-                    "name": "fdr_evidence", "value": p_value, "threshold": alpha_t,
-                    "op": "<=", "passed": bool(fdr_rejected),
-                })
-                fdr_checks.append({
-                    "name": "fdr_throttle", "value": throttle_window_binding,
-                    "threshold": FDR_NEAR_TERM_BINDING_BUDGET, "op": "<",
-                    "passed": bool(promotion_eligible),
-                })
-                raw_decision["fdr_binding"] = True
-                raw_decision["fdr_p_value"] = p_value
-                raw_decision["fdr_alpha_level"] = alpha_t
-                raw_decision["fdr_rejected"] = bool(fdr_rejected)
-                raw_decision["fdr_test_index"] = t_next
-                # #324 cohort restart + cumulative-exposure audit (fdr_cohort is a real column;
-                # the rest are audit-only fields that surface per-cohort re-scoping honesty).
-                raw_decision["fdr_cohort"] = cohort_index
-                raw_decision["fdr_cohorts_completed"] = cohorts_completed
-                raw_decision["fdr_binding_tests"] = binding_tests_after
-                raw_decision["fdr_discoveries"] = discoveries_after
-                raw_decision["fdr_expected_false_discoveries"] = expected_false_discoveries
-                # #529 §3.5 throttle state + §4 active-cohort exposure (audit fields).
-                raw_decision["fdr_throttle_window_binding"] = throttle_window_binding
-                raw_decision["fdr_throttle_tripped"] = bool(throttle_tripped)
-                raw_decision["fdr_active_cohort_position"] = active_cohort_position
-                raw_decision["fdr_active_cohort_applied_alpha"] = active_cohort_applied_alpha
-                raw_decision["fdr_expected_false_discoveries_incl_active"] = (
-                    expected_false_discoveries_incl_active)
             decision_json = json.dumps(raw_decision)
 
             cur = self._conn.execute(
@@ -1681,12 +1548,13 @@ class SqliteStrategyRepository:
                  gate_row["period_start"], gate_row["period_end"], gate_row["holdout_frac"],
                  actor.value, decision_json,
                  int(actor is Actor.AGENT and final_passed), _now(),
-                 1 if fdr_binding else None,
-                 p_value if fdr_binding else None,
-                 alpha_t if fdr_binding else None,
-                 int(fdr_rejected) if fdr_rejected is not None else None,
-                 t_next if fdr_binding else None,
-                 cohort_index if fdr_binding else None,
+                 # fdr_binding, fdr_p_value, fdr_alpha_level, fdr_rejected, fdr_test_index,
+                 # fdr_cohort: the binding-write path is retired (stage 4a) — every binding row
+                 # is NULL going forward. Historical binding rows (written before this change)
+                 # keep their real values; fdr_stream_state's WHERE fdr_binding=1 filter already
+                 # excludes NULL rows, so it continues to see only genuine historical binding
+                 # evidence.
+                 None, None, None, None, None, None,
                  gate_row.get("family_id"), gate_row.get("family_lifetime_effective"),
                  gate_row.get("fundamentals_snapshot"), gate_row.get("news_snapshot"),
                  gate_row.get("attempt_token"), gate_row.get("universe_name")),
@@ -1727,23 +1595,23 @@ class SqliteStrategyRepository:
 
         return FdrGateOutcome(
             gate_id=gate_id,
-            fdr_binding=fdr_binding,
-            fdr_test_index=t_next,
-            fdr_p_value=p_value if fdr_binding else None,
-            fdr_alpha_level=alpha_t,
-            fdr_rejected=fdr_rejected,
+            fdr_binding=False,
+            fdr_test_index=None,
+            fdr_p_value=None,
+            fdr_alpha_level=None,
+            fdr_rejected=None,
             final_passed=final_passed,
             updated_rec=updated_rec,
-            fdr_cohort=cohort_index,
-            fdr_cohorts_completed=cohorts_completed,
-            fdr_binding_tests=binding_tests_after,
-            fdr_discoveries=discoveries_after,
-            fdr_expected_false_discoveries=expected_false_discoveries,
-            fdr_throttle_window_binding=throttle_window_binding,
-            fdr_throttle_tripped=throttle_tripped,
-            fdr_active_cohort_position=active_cohort_position,
-            fdr_active_cohort_applied_alpha=active_cohort_applied_alpha,
-            fdr_expected_false_discoveries_incl_active=expected_false_discoveries_incl_active,
+            fdr_cohort=None,
+            fdr_cohorts_completed=None,
+            fdr_binding_tests=None,
+            fdr_discoveries=None,
+            fdr_expected_false_discoveries=None,
+            fdr_throttle_window_binding=None,
+            fdr_throttle_tripped=None,
+            fdr_active_cohort_position=None,
+            fdr_active_cohort_applied_alpha=None,
+            fdr_expected_false_discoveries_incl_active=None,
         )
 
     def passing_gate_by_token(self, strategy: str, attempt_token: str) -> int | None:

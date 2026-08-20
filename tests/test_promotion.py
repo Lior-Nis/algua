@@ -461,11 +461,9 @@ def test_run_gate_measured_promote_writes_no_binding_row(tmp_path):
                for c in stored.get("checks", []))
 
 
-def test_run_gate_stream_and_throttle_see_zero_binding_rows_across_promotes(tmp_path):
-    """N promotes (pass and fail) advance NEITHER the LORD++ stream nor the windowed
-    promotion-throttle count — the ledger stays frozen while stats are advisory."""
-    from algua.research.gates import FDR_THROTTLE_WINDOW_DAYS
-
+def test_run_gate_stream_sees_zero_binding_rows_across_promotes(tmp_path):
+    """N promotes (pass and fail) advance NEITHER the LORD++ stream nor the (now-deleted)
+    windowed promotion-throttle count — the ledger stays frozen while stats are advisory."""
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
                              trial_sharpe_mean=0.5, trial_sharpe_var_ann=0.04)
@@ -481,11 +479,10 @@ def test_run_gate_stream_and_throttle_see_zero_binding_rows_across_promotes(tmp_
     assert out3.promoted is False
     n_rows = repo._conn.execute("SELECT COUNT(*) c FROM gate_evaluations").fetchone()["c"]
     assert n_rows == 3                                 # every attempt is still audited
-    # The stream reader sees an untouched (fresh) stream and the throttle count stays 0.
+    # The stream reader sees an untouched (fresh) stream.
     stream = repo.fdr_stream_state()
     assert stream is not None
     assert stream.t == 1 and stream.binding_tests == 0 and stream.discoveries == 0
-    assert repo._windowed_binding_test_count(FDR_THROTTLE_WINDOW_DAYS) == 0
 
 
 def test_run_gate_final_passed_equals_provisional(tmp_path):

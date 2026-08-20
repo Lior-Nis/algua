@@ -24,6 +24,28 @@ SCHEMA_VERSION = 41
 # mint seed SUM (which all use this exact bound).
 MAX_N_COMBOS = 1_000_000_000
 
+# Count-triggered cohort restarts (#324) + budget-derived recalibration (#529), relocated from
+# research/fdr_lord.py (simplification stage 4a — this is registry-owned state: the FDR ledger's
+# cohort partitioning is consumed by this module's own migrate()-invoked backfills below, not by
+# any research-layer code). The LORD++ stream is partitioned into consecutive, non-overlapping
+# COHORTS of exactly FDR_COHORT_SIZE binding tests, assigned by ARRIVAL ORDER. Protected constant —
+# changing it re-scopes every historical cohort boundary; see _relabel_fdr_cohorts_for_current_size
+# below for what a change requires.
+FDR_COHORT_SIZE = 8
+
+
+def fdr_cohort_position(k: int) -> tuple[int, int]:
+    """Map a 1-based GLOBAL binding-test ordinal ``k`` to its ``(cohort_index, within_cohort_t)``.
+
+    ``cohort_index = (k − 1) // FDR_COHORT_SIZE`` (0-based); ``within_cohort_t`` runs 1..
+    FDR_COHORT_SIZE and is the position fed to the LORD++ level function for that cohort's
+    independent stream. Fails closed (``ValueError``) on ``k < 1`` — a binding ordinal is
+    always ≥ 1 by construction, so a non-positive value is a caller bug, not a silent-0 default.
+    """
+    if k < 1:
+        raise ValueError(f"binding-test ordinal k must be >= 1, got {k}")
+    return (k - 1) // FDR_COHORT_SIZE, (k - 1) % FDR_COHORT_SIZE + 1
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS strategies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -983,8 +1005,6 @@ def _backfill_fdr_cohorts(conn: sqlite3.Connection) -> None:
     the new (cohort, index) invariant and composite unique index hold over history. Rows imported
     from the migration MUST use the SAME FDR_COHORT_SIZE the reader/writer use — imported here.
     """
-    from algua.research.gates import fdr_cohort_position
-
     binding_ids = [
         row["id"]
         for row in conn.execute(
@@ -1022,8 +1042,6 @@ def _relabel_fdr_cohorts_for_current_size(conn: sqlite3.Connection) -> None:
     move; no past verdict changes. The composite unique index is dropped BEFORE and recreated AFTER
     the rewrite so a row-by-row re-label can never hit a transient ``(cohort, index)`` collision.
     """
-    from algua.research.gates import fdr_cohort_position
-
     rows = conn.execute(
         "SELECT id, fdr_cohort, fdr_test_index FROM gate_evaluations"
         " WHERE fdr_binding=1 ORDER BY id"
