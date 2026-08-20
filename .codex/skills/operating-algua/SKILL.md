@@ -17,7 +17,7 @@ stdout**. You drive research; the system enforces the safety boundary.
    **never** put a strategy `live`. The `forward_tested → live` transition requires a verified
    human approval, a human actor, AND a fresh forward-test certificate; the system enforces this
    and you must not attempt to route around it.
-3. **Do not weaken safety or integrity code.** Never edit `algua/registry/store.py`,
+3. **Do not weaken safety or integrity code.** Never edit `algua/registry/store/`,
    `algua/contracts/lifecycle.py`, `algua/backtest/engine.py`, or `algua/research/gates.py` to make
    something pass. These are human-owned (CODEOWNERS); changing them is out of scope for a run.
 4. **Keep the quality gate green** after any code you add:
