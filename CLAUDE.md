@@ -156,3 +156,14 @@ run that mints an identity-matched, single-use gate token, not a raw `registry t
 When a change touches `web/` (the monitor PWA — a STANDALONE uv project; NEVER add web deps to
 the root project, the root `uv.lock` is dependency_hash identity), also run:
 `uv run --project web pytest web/backend/tests -q` and `cd web/frontend && npm run check && npm run build`.
+
+## Company context
+
+Business context for this project — what Nix is, who the client is, what the
+current bet is — lives in the company knowledgebase at `~/Projects/nix`.
+
+- Venture note: `ventures/Algua.md`
+- Company: `company/Nix.md`, `company/Current Bet.md`
+
+Do not duplicate that context here, and do not write project research there —
+see `~/Projects/nix/_meta/project-kb-boundary.md`.
