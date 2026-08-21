@@ -19,8 +19,10 @@ from algua.execution.alpaca_broker import (
 from algua.execution.broker_factory import (
     _REGISTRY,
     BrokerKind,
+    BrokerSpec,
     build_broker,
     maybe_broker,
+    register_broker,
 )
 from algua.execution.errors import BrokerError
 
@@ -202,3 +204,38 @@ def test_build_live_broker_omitted_authorization_fails(monkeypatch):
     # should be) and must still fail outright, never silently construct a broker.
     with pytest.raises(TypeError):
         build_broker(BrokerKind.ALPACA_LIVE)
+
+
+# -- isolation proof: the autouse registry fixture (tests/conftest.py) must restore this registry
+# between tests, not just for this file's own local save/restore in test_no_default_for_
+# unregistered_kind above. This is an ORDERED PAIR by construction -- pytest runs tests within a
+# file in source order, so the first test corrupts BrokerKind.ALPACA_PAPER's spec and the second
+# proves it came back clean. A fixture that silently did nothing would let the corruption leak
+# forward and the second test would build the FAKE class instead of the real one. -----------------
+
+
+class _FakeSpecBroker:
+    """A deliberately wrong broker class. If a spec built from this ever leaks into a later test,
+    that test is constructing the wrong thing across the paper/live boundary."""
+
+
+def test_isolation_proof_step1_corrupts_the_paper_registry_entry(monkeypatch):
+    _set_paper(monkeypatch)
+    fake_spec = BrokerSpec(
+        key_field="alpaca_api_key",
+        secret_field="alpaca_api_secret",
+        url_field="alpaca_paper_url",
+        construct=lambda *args, **kwargs: _FakeSpecBroker(),
+        missing_credentials=_PAPER_MSG,
+    )
+    register_broker(BrokerKind.ALPACA_PAPER, fake_spec)
+    # Confirm the corruption actually took: this test alone proves nothing about isolation.
+    assert isinstance(build_broker(BrokerKind.ALPACA_PAPER), _FakeSpecBroker)
+
+
+def test_isolation_proof_step2_next_test_sees_the_real_spec_restored(monkeypatch):
+    _set_paper(monkeypatch)
+    # If the autouse registry-isolation fixture did not restore _REGISTRY after the previous test,
+    # this would build _FakeSpecBroker instead -- and this assertion would fail.
+    broker = build_broker(BrokerKind.ALPACA_PAPER)
+    assert isinstance(broker, AlpacaPaperBroker)
