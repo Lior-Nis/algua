@@ -1,6 +1,6 @@
 import pandas as pd
 
-from algua.execution.alpaca_broker import BrokerError
+from algua.execution.errors import BrokerError
 from algua.execution.tick_clock import tick_clock
 
 

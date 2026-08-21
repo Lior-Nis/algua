@@ -2,7 +2,8 @@
 
 import pytest
 
-from algua.execution.alpaca_broker import AlpacaLiveDrainBroker, BrokerError
+from algua.execution.alpaca_broker import AlpacaLiveDrainBroker
+from algua.execution.errors import BrokerError
 from algua.execution.lane_exit import LiveExitGuard, build_live_drain_broker
 from algua.execution.live_ledger import (
     LedgerKind,

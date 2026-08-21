@@ -29,6 +29,9 @@ def test_run_track_logs_a_run(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["mlflow_run_id"]
     assert len(_runs(tmp_path)) == 1
+    # Default backend (tracking_backend="mlflow"): the fourth-state key must never appear here —
+    # this is the proof the no-op seam (stage 5a) changed nothing on the default path.
+    assert "mlflow_tracking_skipped" not in payload
 
 
 def test_run_without_track_logs_nothing(tmp_path):
@@ -52,12 +55,14 @@ def test_sweep_track_logs_parent_and_children(tmp_path):
 def test_track_failure_is_non_fatal(tmp_path, monkeypatch):
     """A tracker failure must NOT discard a completed backtest (#341): the command still exits 0
     with the full result, surfacing the failure as a non-fatal `mlflow_tracking_error`."""
+    from types import SimpleNamespace
+
     import algua.cli.backtest_cmd as bt
 
     def boom(*a, **k):
         raise RuntimeError("mlflow down")
 
-    monkeypatch.setattr(bt, "log_backtest", boom)
+    monkeypatch.setattr(bt, "get_tracker", lambda: SimpleNamespace(log_backtest=boom))
     result = runner.invoke(app, ["backtest", "run", "cross_sectional_momentum", "--demo",
                                  "--start", "2022-01-01", "--end", "2023-12-31", "--track"])
     assert result.exit_code == 0, result.stdout

@@ -25,7 +25,8 @@ from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.execution import live_reconcile
-from algua.execution.alpaca_broker import AlpacaLiveBroker, BrokerError
+from algua.execution.alpaca_broker import AlpacaLiveBroker
+from algua.execution.errors import BrokerError
 from algua.execution.flatten import flatten_strategy
 from algua.execution.lane_exit import build_live_broker
 from algua.execution.live_ledger import (

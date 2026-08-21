@@ -30,7 +30,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     from algua.data.manifest import ManifestLockReplacedError
     from algua.data.providers.errors import ProviderError
     from algua.data.store import SnapshotNotFound
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
     from algua.execution.live_sizing import LiveSizingError
     from algua.live.live_loop import TickHalted
     from algua.portfolio.construction import ConstructionError

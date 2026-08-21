@@ -5,7 +5,7 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 
@@ -15,24 +15,6 @@ from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.model_types import ModelVersion
 from algua.data.files import frame_to_parquet_bytes
 from algua.models import register
-
-# ---------------------------------------------------------------------------
-# Protocol (#45)
-# ---------------------------------------------------------------------------
-
-class ExperimentTracker(Protocol):
-    """Structural protocol for experiment loggers."""
-
-    def log_backtest(
-        self, result: BacktestResult, params: dict[str, Any], *, tracking_uri: str
-    ) -> str: ...
-
-    def log_sweep(self, result: SweepResult, *, tracking_uri: str) -> str: ...
-
-    def log_walk_forward(
-        self, result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
-    ) -> str: ...
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -309,3 +291,26 @@ def log_walk_forward(
         wf_dict.pop("holdout_metrics")
         mlflow.log_dict(wf_dict, "result.json")
         return run.info.run_id
+
+
+# ---------------------------------------------------------------------------
+# ExperimentTracker implementation (stage 5a: wiring the #45 Protocol / PR#110 deferral)
+# ---------------------------------------------------------------------------
+
+class MlflowTracker:
+    """The MLflow-backed :class:`~algua.tracking.base.ExperimentTracker`. A thin adapter over the
+    module-level ``log_*`` functions, which remain the implementation — this class exists so
+    callers can depend on the Protocol instead of on three concrete function imports."""
+
+    def log_backtest(
+        self, result: BacktestResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str:
+        return log_backtest(result, params, tracking_uri=tracking_uri)
+
+    def log_sweep(self, result: SweepResult, *, tracking_uri: str) -> str:
+        return log_sweep(result, tracking_uri=tracking_uri)
+
+    def log_walk_forward(
+        self, result: WalkForwardResult, params: dict[str, Any], *, tracking_uri: str
+    ) -> str:
+        return log_walk_forward(result, params, tracking_uri=tracking_uri)

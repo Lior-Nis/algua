@@ -87,7 +87,7 @@ def test_unusable_baseline_fails_closed(tmp_path):
 def test_broker_account_read_failure_fails_closed(tmp_path):
     # A BrokerError reading/parsing the account must become a fail-closed breach (GATE-2), NOT fall
     # through to a retryable JSON error — an unvaluable book must engage the persistent halt.
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
 
     conn = _conn(tmp_path)
 

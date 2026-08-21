@@ -118,7 +118,7 @@ def test_clean_breach_tick_emits_golden_signals_and_correlation(monkeypatch, tmp
 def test_ingest_failure_still_flushes_golden_signals(monkeypatch, tmp_path, capture):
     """Crash-safety: the cycle fails on venue ingest yet golden_signals still flushes (finally),
     and a venue_ingest_failed ERROR carries the exception."""
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
 
     handler = capture
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
@@ -160,7 +160,7 @@ def test_logger_writes_nothing_to_stdout(monkeypatch, tmp_path):
     This click/typer version keeps stdout and stderr separate; stdout must parse as exactly the
     command envelope (one JSON document), never interleaved with log lines.
     """
-    from algua.execution.alpaca_broker import BrokerError
+    from algua.execution.errors import BrokerError
 
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))

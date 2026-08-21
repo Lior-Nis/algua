@@ -41,9 +41,9 @@ from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import (
     AlpacaLiveReadOnlyBroker,
     AlpacaPaperBroker,
-    BrokerError,
     posted_notional,
 )
+from algua.execution.errors import BrokerError
 from algua.execution.flatten import flatten_strategy
 from algua.execution.fleet_health import strategy_health
 from algua.execution.live_ledger import (

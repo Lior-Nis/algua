@@ -1,8 +1,10 @@
 import math
 
+import pytest
+
 from algua.backtest.result import BacktestResult
+from algua.tracking.base import ExperimentTracker
 from algua.tracking.mlflow_tracker import (
-    ExperimentTracker,
     _flatten,
     _numeric_metrics,
     log_backtest,
@@ -68,6 +70,33 @@ def test_experiment_tracker_protocol_is_structural():
     # Structural check: all methods present
     for method in ("log_backtest", "log_sweep", "log_walk_forward"):
         assert hasattr(Fake(), method)
+
+
+# ---------------------------------------------------------------------------
+# tracking/factory.py seam — stage 5a (PR#110 tracker-DI deferral, closes #45's dead Protocol)
+# ---------------------------------------------------------------------------
+
+def test_registered_trackers_satisfy_the_protocol():
+    """Presence smoke-check only: ``isinstance`` against a ``@runtime_checkable`` Protocol checks
+    that the three method NAMES exist and are callable — it does not check signatures, so it cannot
+    prove real conformance (a class whose three "methods" are plain ints would still pass a bare
+    attribute-presence check). Static conformance is proven by mypy against the
+    ``_REGISTRY: dict[str, Callable[[], ExperimentTracker]]`` annotation in ``factory.py``, which
+    type-checks every registered factory's return value against the full Protocol signature."""
+    from algua.tracking.factory import get_tracker
+
+    for name in ("mlflow", "noop"):
+        tracker = get_tracker(name)
+        assert isinstance(tracker, ExperimentTracker)
+        for method in ("log_backtest", "log_sweep", "log_walk_forward"):
+            assert callable(getattr(tracker, method))
+
+
+def test_unknown_tracking_backend_fails_closed():
+    from algua.tracking.factory import get_tracker
+
+    with pytest.raises(ValueError, match="unknown tracking backend"):
+        get_tracker("nope")
 
 
 # ---------------------------------------------------------------------------
