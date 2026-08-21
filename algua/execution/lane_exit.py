@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import sqlite3
 
-from algua.config.settings import get_settings
 from algua.contracts.types import ExitDrainBroker, LiveAuthorization
 from algua.execution.alpaca_broker import AlpacaLiveBroker, AlpacaLiveDrainBroker
+from algua.execution.broker_factory import BrokerKind, build_broker, maybe_broker
 from algua.execution.live_ledger import (
     LedgerKind,
     fill_cursor,
@@ -24,13 +24,7 @@ def build_live_broker(authorization: LiveAuthorization) -> AlpacaLiveBroker:
     """Construct the Alpaca LIVE broker from the settings-configured credentials, bound to a
     verified ``LiveAuthorization``. Single-sourced so ``live_cmd`` and the book-exit drain agree on
     how the real-money broker is built (no drift, no dual path)."""
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        raise ValueError(
-            "Alpaca LIVE credentials not configured; set ALGUA_ALPACA_LIVE_API_KEY "
-            "and ALGUA_ALPACA_LIVE_API_SECRET")
-    return AlpacaLiveBroker(authorization, s.alpaca_live_api_key, s.alpaca_live_api_secret,
-                            base_url=s.alpaca_live_url)
+    return build_broker(BrokerKind.ALPACA_LIVE, authorization)
 
 
 def build_live_drain_broker() -> AlpacaLiveDrainBroker | None:
@@ -43,11 +37,7 @@ def build_live_drain_broker() -> AlpacaLiveDrainBroker | None:
 
     Returns ``None`` when the live credentials are not configured, so the caller can FAIL CLOSED
     (block the exit) rather than fall open to a positions-only check that ignores resting orders."""
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        return None
-    return AlpacaLiveDrainBroker(s.alpaca_live_api_key, s.alpaca_live_api_secret,
-                                 base_url=s.alpaca_live_url)
+    return maybe_broker(BrokerKind.ALPACA_LIVE_DRAIN)
 
 
 class LiveExitGuard:
