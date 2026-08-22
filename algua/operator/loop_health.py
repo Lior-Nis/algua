@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
+
+from algua.contracts.types import SessionSpanCalendar
 
 __all__ = [
     "LOOPS",
@@ -50,10 +52,6 @@ LOOPS = ("research", "paper", "mergeback")
 # Worst-first, mirroring fleet_health's severity convention (LOWER int = WORSE).
 _SEVERITY = {"failing": 0, "rate_limited": 1, "stale": 2, "unknown": 3, "idle": 4, "ok": 5}
 _ALERTING = frozenset({"failing", "rate_limited", "stale", "unknown"})
-
-
-class _Calendar(Protocol):
-    def sessions_between_instants(self, a: datetime, b: datetime) -> int: ...
 
 
 def _parse_utc(value: Any) -> datetime | None:
@@ -209,7 +207,7 @@ def _research_health(data_dir: Path, now: datetime, digest_limit: int) -> dict[s
     }
 
 
-def _paper_health(data_dir: Path, now: datetime, calendar: _Calendar) -> dict[str, Any]:
+def _paper_health(data_dir: Path, now: datetime, calendar: SessionSpanCalendar) -> dict[str, Any]:
     """The session-gated paper operator, from the session marker it writes after each cycle.
 
     Staleness is COMPLETED SESSIONS, not wall-clock: the loop is supposed to be silent on a
@@ -298,7 +296,7 @@ def _mergeback_health(data_dir: Path, now: datetime) -> dict[str, Any]:
 
 
 def loop_status(
-    data_dir: Path, calendar: _Calendar, *, now: datetime, digest_limit: int = 50
+    data_dir: Path, calendar: SessionSpanCalendar, *, now: datetime, digest_limit: int = 50
 ) -> dict[str, Any]:
     """Every autonomous loop's liveness, worst-first, with an overall ``ok`` verdict.
 
