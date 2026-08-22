@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
+from typing import Protocol
 
 from algua.contracts.lifecycle import Stage
-from algua.contracts.types import SessionSpanCalendar
 from algua.execution.live_ledger import (
     LedgerKind,
     believed_positions,
@@ -71,6 +71,10 @@ OPERATIONAL_STAGES = frozenset({Stage.LIVE.value, Stage.PAPER.value, Stage.FORWA
 # NON-operational stage ``idle`` is correctly quiet (see :func:`fleet_alert`). ``halted`` alerts
 # because a stopped, unmonitored operational loop is exactly the silent failure #399 targets.
 _ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "idle", "halted"})
+
+
+class _Calendar(Protocol):
+    def sessions_between_instants(self, a: datetime, b: datetime) -> int: ...
 
 
 def fleet_alert(
@@ -146,7 +150,7 @@ def _parse_utc(value: object) -> datetime | None:
 def strategy_health(
     conn: sqlite3.Connection,
     rec: StrategyRecord,
-    calendar: SessionSpanCalendar,
+    calendar: _Calendar,
     *,
     halted_globally: bool,
     now: datetime,
@@ -240,7 +244,7 @@ def strategy_health(
 
 
 def fleet_status(
-    conn: sqlite3.Connection, calendar: SessionSpanCalendar, *, now: datetime,
+    conn: sqlite3.Connection, calendar: _Calendar, *, now: datetime,
     halted_globally: bool | None = None,
 ) -> list[dict]:
     """Every strategy's health rollup, ranked worst-offender-first.
