@@ -347,12 +347,7 @@ def test_register_provider_is_open_for_extension():
     """A new provider plugs in via the registry without touching the CLI or get_provider."""
     sentinel = object()
     register_provider("dummy", lambda _settings: sentinel)
-    try:
-        assert get_provider("dummy", Settings()) is sentinel
-    finally:
-        from algua.data.providers import _REGISTRY
-
-        del _REGISTRY["dummy"]
+    assert get_provider("dummy", Settings()) is sentinel
 
 
 # --- #58: yfinance normalizer must not silently drop columns/symbols ---

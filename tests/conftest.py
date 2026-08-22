@@ -48,3 +48,39 @@ def _isolated_knowledge_dir(monkeypatch, tmp_path):
 def _no_repo_dotenv(monkeypatch):
     """Stop pydantic-settings reading the developer's real ``.env`` (see module docstring)."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_registries():
+    """Snapshot four of the five name->factory registries in ``algua/`` and restore them wholesale
+    after each test: ``algua.data.importers``, ``algua.data.providers``, ``algua.execution.broker_
+    factory``, and ``algua.tracking.factory``.
+
+    Restore, not delete: the manual ``del _REGISTRY["dummy"]`` pattern this replaces reverts an
+    ADDITION but silently keeps an OVERWRITE, and leaks entirely if the test errors first. For the
+    broker registry that is a safety concern rather than tidiness -- a fake left registered under a
+    live kind changes what a LATER test constructs across the paper/live boundary.
+
+    Four registries, not the three the brief for this task named: ``algua.data.importers`` (local
+    vendor-file importers, e.g. FirstRate/Databento) is a *separate* registry from
+    ``algua.data.providers`` (network bar providers, e.g. yfinance/Alpaca) -- the manual cleanup in
+    ``tests/test_data_ingest_streamed.py`` was on the importers registry, not providers. Both get
+    the same fragile ``del``-in-``finally`` treatment today, so both are covered here.
+
+    The fifth, ``algua.features.catalogue._REGISTRY``, is deliberately EXCLUDED: ``load_all_
+    factors`` REBINDS the module global (``global _REGISTRY; ...; _REGISTRY = fresh``) rather than
+    mutating it in place, so snapshotting it by reference here would go stale the moment a test
+    called ``load_all_factors`` -- restoring the OLD dict object at teardown would not undo the
+    rebind. It already has its own reset hook, ``catalogue._reset_registry()``, that its own tests
+    call directly.
+    """
+    from algua.data.importers import _REGISTRY as importers
+    from algua.data.providers import _REGISTRY as providers
+    from algua.execution.broker_factory import _REGISTRY as brokers
+    from algua.tracking.factory import _REGISTRY as trackers
+
+    snapshots = [(r, dict(r)) for r in (importers, providers, brokers, trackers)]
+    yield
+    for registry, snapshot in snapshots:
+        registry.clear()
+        registry.update(snapshot)

@@ -43,6 +43,7 @@ from algua.execution.alpaca_broker import (
     AlpacaPaperBroker,
     posted_notional,
 )
+from algua.execution.broker_factory import BrokerKind, build_broker, maybe_broker
 from algua.execution.errors import BrokerError
 from algua.execution.flatten import flatten_strategy
 from algua.execution.fleet_health import strategy_health
@@ -131,14 +132,7 @@ log = get_logger(__name__)
 
 
 def _alpaca_broker_from_settings() -> AlpacaPaperBroker:
-    s = get_settings()
-    if not s.alpaca_api_key or not s.alpaca_api_secret:
-        raise ValueError(
-            "Alpaca paper credentials not configured; set ALGUA_ALPACA_API_KEY "
-            "and ALGUA_ALPACA_API_SECRET"
-        )
-    return AlpacaPaperBroker(api_key=s.alpaca_api_key, api_secret=s.alpaca_api_secret,
-                             base_url=s.alpaca_paper_url)
+    return build_broker(BrokerKind.ALPACA_PAPER)
 
 
 def _stage_entry_id(repo: SqliteStrategyRepository, name: str, stage: Stage) -> int:
@@ -233,24 +227,13 @@ def _ingest_paper_venue(
 
 
 def _alpaca_live_readonly_from_settings() -> AlpacaLiveReadOnlyBroker:
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        raise ValueError(
-            "Alpaca LIVE credentials not configured; cannot confirm the strategy is flat at the "
-            "broker — set ALGUA_ALPACA_LIVE_API_KEY and ALGUA_ALPACA_LIVE_API_SECRET"
-        )
-    return AlpacaLiveReadOnlyBroker(s.alpaca_live_api_key, s.alpaca_live_api_secret,
-                                    base_url=s.alpaca_live_url)
+    return build_broker(BrokerKind.ALPACA_LIVE_READONLY)
 
 
 def _maybe_live_readonly() -> AlpacaLiveReadOnlyBroker | None:
     """A read-only live client if live creds are configured, else None (resume-all stays lenient:
     with no creds it just computes not_flat from the current belief)."""
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        return None
-    return AlpacaLiveReadOnlyBroker(s.alpaca_live_api_key, s.alpaca_live_api_secret,
-                                    base_url=s.alpaca_live_url)
+    return maybe_broker(BrokerKind.ALPACA_LIVE_READONLY)
 
 
 def _live_strategy_flat(
