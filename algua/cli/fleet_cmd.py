@@ -91,7 +91,8 @@ def health() -> None:
     DOMAIN read-only (like ``fleet status``): no broker call, no order/kill-switch/allocation
     mutation. It opens the DB via ``registry_conn()``, whose idempotent ``migrate()`` may run
     schema DDL on a stale DB — so it is not byte-literally read-only, only trading-state
-    read-only. Cadence is measured in COMPLETED NYSE sessions since the last tick (via
+    read-only. Cadence is measured in COMPLETED sessions of the CONFIGURED exchange
+    (``ALGUA_EXCHANGE``, default XNYS) since the last tick (via
     ``strategy_health``), never wall-clock, so a weekend/holiday gap does not false-alarm. Emits a
     stable summary object AND exits 0 (healthy) / 1 (alerting); ``@json_errors`` turns even a
     status-engine crash into ``{ok:false}`` + exit 1 (fail closed)."""

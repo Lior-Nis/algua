@@ -22,12 +22,6 @@ def test_honours_settings_exchange(monkeypatch):
     assert calendar.code == "XLON"
 
 
-def test_explicit_code_overrides_settings(monkeypatch):
-    monkeypatch.setenv("ALGUA_EXCHANGE", "XLON")
-    calendar = factory.get_calendar("XNYS")
-    assert calendar.code == "XNYS"
-
-
 def test_settings_read_per_call_not_at_import(monkeypatch):
     # Regression guard for the Stage 5b failure mode: importing the factory must not bind
     # settings.exchange before a test's monkeypatch.setenv can take effect.

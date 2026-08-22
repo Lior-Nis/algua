@@ -20,11 +20,15 @@ from algua.calendar.market_calendar import MarketCalendar
 from algua.config.settings import get_settings
 
 
-def get_calendar(code: str | None = None) -> MarketCalendar:
-    """The configured trading calendar. ``code`` overrides ``settings.exchange`` (for tests).
+def get_calendar() -> MarketCalendar:
+    """The configured trading calendar.
 
     Reads settings per call, never at import -- an import-time read would bind the value before a
     test's ``monkeypatch.setenv`` could take effect, which is exactly how Stage 5b silently disarmed
     a go-live guard.
+
+    No ``code`` override parameter: tests configure the exchange the same way an operator does, via
+    ``ALGUA_EXCHANGE``. A parameter whose only caller is the test that tests the parameter is
+    speculative generality, which is what this program exists to remove.
     """
-    return MarketCalendar(code if code is not None else get_settings().exchange)
+    return MarketCalendar(get_settings().exchange)
