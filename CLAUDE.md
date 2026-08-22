@@ -32,7 +32,8 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   `OnFailure=`, cron, k8s liveness): same rollup as `fleet status` but EXITS NON-ZERO iff an
   operator loop is dead/stalled/drifted/never-started (an operational strategy —
   live/paper/forward_tested — that is `stale`/`drift`/`idle`/`halted`), the account is globally
-  halted, or a fleet row is corrupt. Cadence is COMPLETED NYSE sessions since the last tick (never
+  halted, or a fleet row is corrupt. Cadence is COMPLETED sessions of the CONFIGURED exchange
+  (`ALGUA_EXCHANGE`, default XNYS) since the last tick (never
   wall-clock), so a weekend/holiday gap never false-alarms; a benched/retired strategy's ancient
   tick never wedges it red.
 - `uv run algua registry add <name>` — register a strategy (stage `idea`).

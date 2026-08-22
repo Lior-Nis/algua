@@ -1,6 +1,7 @@
 """Autonomous-operator CLI wrapper: the single-shot driver the systemd timers fire (#486).
 
-The timers fire this command on a wall-clock cadence; the XNYS *calendar gate* + per-session
+The timers fire this command on a wall-clock cadence; the *calendar gate* (configured exchange)
++ per-session
 *idempotency marker* + a git-dir-anchored *run lock* (all from :mod:`algua.operator.schedule`)
 decide whether the wrapped driver command actually runs. A weekend/holiday firing, a re-fire of a
 session, or an overlap with a still-running sibling all no-op cleanly.
@@ -32,7 +33,7 @@ from pathlib import Path
 
 import typer
 
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -191,7 +192,8 @@ def run(
         help="ISO instant override (default utcnow); for manual bring-up/tests",
     ),
 ) -> None:
-    """Session-gate ``job`` and run its wrapped driver command exactly once per XNYS session.
+    """Session-gate ``job`` and run its wrapped driver command exactly once per session of the
+    configured exchange.
 
     Emits a JSON envelope describing the decision. On a due, positively-completed run the session
     marker is recorded; on a due, failed run the marker is NOT recorded (a re-fire re-attempts), the
@@ -409,7 +411,7 @@ def _run_session(
 ) -> None:
     """Gate → (run → record), all inside the held run lock."""
     marker = SessionMarker(get_settings().db_path.parent)
-    decision = session_gate(job, now_dt, MarketCalendar(), marker)
+    decision = session_gate(job, now_dt, get_calendar(), marker)
     sess_iso = decision.session.isoformat() if decision.session else None
 
     if decision.reason == "calendar_out_of_bounds":

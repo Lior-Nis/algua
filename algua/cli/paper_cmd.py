@@ -11,7 +11,7 @@ from pathlib import Path
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.cli._common import (
     SYSTEMIC_SETUP_EXCEPTIONS,
     StrategySetupError,
@@ -326,7 +326,7 @@ def show(name: str) -> None:
     with registry_conn() as conn:
         rec = SqliteStrategyRepository(conn).get(name)  # unknown name -> LookupError -> {ok:false}
         halted_globally = global_halt.is_engaged(conn)
-        rollup = strategy_health(conn, rec, MarketCalendar(),
+        rollup = strategy_health(conn, rec, get_calendar(),
                                  halted_globally=halted_globally, now=datetime.now(UTC))
         if rec.stage is Stage.LIVE:
             orders = recent_orders(conn, name, 10)
@@ -1421,7 +1421,7 @@ def promote(
         broker = _alpaca_broker_from_settings()
         outcome = run_forward_gate(
             repo, conn, name=name, actor=actor_enum, criteria=criteria,
-            calendar=MarketCalendar(), now=datetime.now(UTC),
+            calendar=get_calendar(), now=datetime.now(UTC),
             activities_fetch=broker.account_activities_window)
         audit_append(conn, actor=actor, action="paper_promote",
                      reason="pass" if outcome.decision.passed else "fail", strategy=name)

@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
 from algua.live.paper_loop import decide
@@ -85,7 +85,7 @@ def assert_marks_usable(
             f"held/consumed symbols have a non-positive / non-finite mark: {unvaluable} — "
             f"refusing to value/size the book off an unvaluable feed",
         )
-    cal = MarketCalendar()
+    cal = get_calendar()
     stale_by_symbol: dict[str, float] = {}
     for s in symbols:
         ts = latest_ts.get(s)

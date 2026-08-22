@@ -209,7 +209,7 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
     def verify(
         repo: StrategyRepository, name: str, strategy_id: int, identity: ArtifactIdentity,
     ) -> dict[str, Any]:
-        from algua.calendar.market_calendar import MarketCalendar
+        from algua.calendar.factory import get_calendar
         from algua.execution.broker_factory import (
             BrokerKind,
             MissingBrokerCredentials,
@@ -237,7 +237,7 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
                 "paper credentials; set ALGUA_ALPACA_API_KEY and ALGUA_ALPACA_API_SECRET") from exc
         return verify_forward_certificate(
             repo, conn, name=name, strategy_id=strategy_id, identity=identity,
-            calendar=MarketCalendar(), now=datetime.now(UTC),
+            calendar=get_calendar(), now=datetime.now(UTC),
             activities_fetch=broker.account_activities_window,
             # Account continuity: the certificate's account_id must equal the account these
             # credentials resolve to NOW, or the since-certification hygiene re-check would

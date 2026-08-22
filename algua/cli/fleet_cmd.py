@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import typer
 
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -44,7 +44,7 @@ def status() -> None:
     # registry list, data inspect): its migrate() is idempotent and touches no strategy/trading
     # state, so "read-only" holds at the domain level (no order/kill-switch/allocation mutation).
     with registry_conn() as conn:
-        rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC))
+        rows = fleet_status(conn, get_calendar(), now=datetime.now(UTC))
     emit(rows)
 
 
@@ -91,7 +91,8 @@ def health() -> None:
     DOMAIN read-only (like ``fleet status``): no broker call, no order/kill-switch/allocation
     mutation. It opens the DB via ``registry_conn()``, whose idempotent ``migrate()`` may run
     schema DDL on a stale DB — so it is not byte-literally read-only, only trading-state
-    read-only. Cadence is measured in COMPLETED NYSE sessions since the last tick (via
+    read-only. Cadence is measured in COMPLETED sessions of the CONFIGURED exchange
+    (``ALGUA_EXCHANGE``, default XNYS) since the last tick (via
     ``strategy_health``), never wall-clock, so a weekend/holiday gap does not false-alarm. Emits a
     stable summary object AND exits 0 (healthy) / 1 (alerting); ``@json_errors`` turns even a
     status-engine crash into ``{ok:false}`` + exit 1 (fail closed)."""
@@ -100,7 +101,7 @@ def health() -> None:
         # rollup and the alert decision, so an engage/clear landing between two reads can't produce
         # an inconsistent verdict (rows say ok while the gate says halted, or vice-versa).
         halted_globally = global_halt.is_engaged(conn)
-        rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC),
+        rows = fleet_status(conn, get_calendar(), now=datetime.now(UTC),
                             halted_globally=halted_globally)
     alerting = fleet_alert(rows, halted_globally=halted_globally)
     by_health: dict[str, int] = {}

@@ -6,7 +6,8 @@ lock is resolved by the CLI and passed in, so this module never shells out).
 
 Three concerns:
 
-* :func:`target_session` — which COMPLETED XNYS session an operator run should act on as of ``now``.
+* :func:`target_session` — which COMPLETED session of the configured exchange an operator run
+  should act on as of ``now``.
   A past-the-horizon instant (the calendar has RUN OUT) raises :class:`CalendarOutOfBounds` — a real
   operational anomaly the operator must be told about, NOT a silent no-op; a genuine
   before-first-session instant still returns ``None`` (benign bring-up).
@@ -72,7 +73,7 @@ class OperatorLockHeld(Exception):
 
 
 def target_session(now: datetime, calendar: MarketCalendar) -> date | None:
-    """The most-recent COMPLETED XNYS session as of ``now``.
+    """The most-recent COMPLETED session of the configured exchange as of ``now``.
 
     A naive ``now`` is treated as UTC. If ``now`` falls before the close of its own session, that
     session has not completed yet, so the prior session is the target.

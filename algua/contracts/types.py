@@ -381,6 +381,18 @@ class LiveReconcileBroker(PositionsBroker, AccountActivityBroker, OrderLookupBro
     feed + per-coid order lookup (the last via the stranded-order recovery it forwards into)."""
 
 
+class SessionSpanCalendar(Protocol):
+    """Counts completed exchange sessions between two instants.
+
+    The narrow slice of a trading calendar that liveness/staleness checks need — deliberately one
+    method, matching this module's convention of narrow role Protocols (see the Broker split above)
+    rather than one fat calendar interface. ``registry/forward_promotion.SessionCalendar`` is a
+    different, non-overlapping slice and stays where it is.
+    """
+
+    def sessions_between_instants(self, a: datetime, b: datetime) -> int: ...
+
+
 @dataclass(frozen=True)
 class LiveAuthorization:
     """A token representing a human go-live authorization, returned by
