@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 import typer
 
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -41,7 +41,7 @@ def ops_status() -> None:
     ``ok: false`` in the payload carries the verdict.
     """
     settings = get_settings()
-    emit(ok(loop_status(settings.data_dir, MarketCalendar(), now=datetime.now(UTC))))
+    emit(ok(loop_status(settings.data_dir, get_calendar(), now=datetime.now(UTC))))
 
 
 @book_app.command("status")

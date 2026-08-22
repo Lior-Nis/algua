@@ -1415,7 +1415,7 @@ def _wire_promote(monkeypatch):
     monkeypatch.setattr(
         "algua.registry.forward_promotion.compute_artifact_hashes", lambda name: ident)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: ident)
-    monkeypatch.setattr("algua.cli.paper_cmd.MarketCalendar", FakeCalendar)
+    monkeypatch.setattr("algua.cli.paper_cmd.get_calendar", lambda: FakeCalendar())
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _PromoteBroker)
 
 

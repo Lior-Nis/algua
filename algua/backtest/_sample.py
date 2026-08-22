@@ -41,6 +41,10 @@ class SyntheticProvider:
             return empty
         # Daily bars are timestamped at the session date (tz-aware UTC midnight), per the bar
         # schema and what real daily sources provide. Calendar-based so holidays are skipped.
+        # NOT settings-derived on purpose: these session dates feed SyntheticProvider.reproducible
+        # (#205) -- a burned holdout must reproduce on a re-run. Honouring settings.exchange here
+        # would make the generated bar index depend on an environment variable, so a holdout
+        # burned under one ALGUA_EXCHANGE would not reproduce under another. Keep the literal.
         session_dates = MarketCalendar("XNYS").sessions_in_range(start.date(), end.date())
         sessions = pd.DatetimeIndex(
             [pd.Timestamp(d, tz="UTC") for d in session_dates], name="timestamp"

@@ -10,7 +10,7 @@ from typing import Any
 import typer
 
 from algua import __version__
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.config.settings import get_settings
 
 app = typer.Typer(
@@ -68,7 +68,7 @@ def _registry_db_detail() -> str:
 
 def _calendar_detail() -> str:
     settings = get_settings()
-    MarketCalendar(settings.exchange)
+    get_calendar()
     return settings.exchange
 
 

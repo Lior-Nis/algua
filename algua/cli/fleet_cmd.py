@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import typer
 
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.cli._common import ok, registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -44,7 +44,7 @@ def status() -> None:
     # registry list, data inspect): its migrate() is idempotent and touches no strategy/trading
     # state, so "read-only" holds at the domain level (no order/kill-switch/allocation mutation).
     with registry_conn() as conn:
-        rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC))
+        rows = fleet_status(conn, get_calendar(), now=datetime.now(UTC))
     emit(rows)
 
 
@@ -100,7 +100,7 @@ def health() -> None:
         # rollup and the alert decision, so an engage/clear landing between two reads can't produce
         # an inconsistent verdict (rows say ok while the gate says halted, or vice-versa).
         halted_globally = global_halt.is_engaged(conn)
-        rows = fleet_status(conn, MarketCalendar(), now=datetime.now(UTC),
+        rows = fleet_status(conn, get_calendar(), now=datetime.now(UTC),
                             halted_globally=halted_globally)
     alerting = fleet_alert(rows, halted_globally=halted_globally)
     by_health: dict[str, int] = {}

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import typer
 
-from algua.calendar.market_calendar import MarketCalendar
+from algua.calendar.factory import get_calendar
 from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -409,7 +409,7 @@ def _run_session(
 ) -> None:
     """Gate → (run → record), all inside the held run lock."""
     marker = SessionMarker(get_settings().db_path.parent)
-    decision = session_gate(job, now_dt, MarketCalendar(), marker)
+    decision = session_gate(job, now_dt, get_calendar(), marker)
     sess_iso = decision.session.isoformat() if decision.session else None
 
     if decision.reason == "calendar_out_of_bounds":
