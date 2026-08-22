@@ -25,6 +25,7 @@ from algua.registry.db.holdout import SCHEMA as HOLDOUT_SCHEMA
 from algua.registry.db.ideas import SCHEMA as IDEAS_SCHEMA
 from algua.registry.db.knowledge import SCHEMA as KNOWLEDGE_SCHEMA
 from algua.registry.db.mergeback import SCHEMA as MERGEBACK_SCHEMA
+from algua.registry.db.runs import SCHEMA as RUNS_SCHEMA
 
 SCHEMA = "\n".join([
     CORE_SCHEMA,
@@ -34,6 +35,7 @@ SCHEMA = "\n".join([
     FORWARD_GATE_SCHEMA,
     FAMILY_SCHEMA,
     BACKTEST_RETURNS_SCHEMA,
+    RUNS_SCHEMA,
     AUTHZ_SCHEMA,
     IDEAS_SCHEMA,
     MERGEBACK_SCHEMA,

@@ -19,7 +19,8 @@ from __future__ import annotations
 # that earns it.
 # v40 (simplification stage 1): the advisory shadow lane is deleted; migrate() drops its table.
 # v41 (simplification stage 1): standalone factor-eval layer deleted; migrate() drops its table.
-SCHEMA_VERSION = 41
+# v42 (strategy run tracking): runs + run_metrics — the economic-layer evaluation ledger.
+SCHEMA_VERSION = 42
 
 # v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
 # above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is
@@ -31,3 +32,16 @@ SCHEMA_VERSION = 41
 # two live in different files, which makes the duplication easy to miss: changing this value means
 # changing that literal too.
 MAX_N_COMBOS = 1_000_000_000
+
+# The generation of the FIXED metric vocabulary in `runs`. Stamped into every row so the
+# vocabulary can evolve without silently changing what an existing chart means: a chart that
+# needs v1 semantics filters on it rather than assuming. Bumping this means adding or
+# re-defining a metric COLUMN, and therefore a SCHEMA_VERSION bump too.
+METRIC_SCHEMA_VERSION = 1
+
+# Per-sweep upper bound on PERSISTED sweep_trial rows. MAX_N_COMBOS above is a 1e9 overflow guard,
+# not a realistic grid size; harmless while a trial was a scalar, but once each trial is a row it
+# becomes a row-count bomb. Beyond this cap the writer keeps the search_trials aggregate (which
+# still governs breadth) and stamps `trials_truncated_at` on the parent sweep run, so a reader can
+# never mistake a truncated trial set for a complete one.
+MAX_PERSISTED_TRIALS = 10_000

@@ -19,6 +19,12 @@ from algua.registry.db.constants import (
     MAX_N_COMBOS as MAX_N_COMBOS,
 )
 from algua.registry.db.constants import (
+    MAX_PERSISTED_TRIALS as MAX_PERSISTED_TRIALS,
+)
+from algua.registry.db.constants import (
+    METRIC_SCHEMA_VERSION as METRIC_SCHEMA_VERSION,
+)
+from algua.registry.db.constants import (
     SCHEMA_VERSION as SCHEMA_VERSION,
 )
 from algua.registry.db.gate import (
@@ -32,6 +38,8 @@ from algua.registry.db.migrate import migrate as migrate
 __all__ = [
     "FDR_COHORT_SIZE",
     "MAX_N_COMBOS",
+    "MAX_PERSISTED_TRIALS",
+    "METRIC_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "connect",
     "fdr_cohort_position",
