@@ -29,6 +29,7 @@ from algua.data.files import frame_to_parquet_bytes
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.primitives.atomic_io import write_bytes_atomic
+from algua.registry.runs import record_backtest_run
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -201,6 +202,13 @@ def run_backtest_task(  # noqa: PLR0913
         delisting_snapshot=delisting_snapshot_id,
         assume_terminal_last_close=assume_terminal_last_close,
     )
+
+    # Record the evaluation as a first-class run row. UNCONDITIONAL — including for a
+    # not-yet-registered strategy, the same rationale record_search_breadth documents: keying by
+    # name means pre-registration evidence still counts. Own transaction, like the sibling writes.
+    with registry_conn() as conn:
+        record_backtest_run(
+            SqliteStrategyRepository(conn), name, result, params=strategy.config.params)
 
     if register:
         with registry_conn() as conn:
