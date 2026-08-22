@@ -52,7 +52,9 @@ def _no_repo_dotenv(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolated_registries():
-    """Snapshot every name->factory registry and restore it wholesale after each test.
+    """Snapshot four of the five name->factory registries in ``algua/`` and restore them wholesale
+    after each test: ``algua.data.importers``, ``algua.data.providers``, ``algua.execution.broker_
+    factory``, and ``algua.tracking.factory``.
 
     Restore, not delete: the manual ``del _REGISTRY["dummy"]`` pattern this replaces reverts an
     ADDITION but silently keeps an OVERWRITE, and leaks entirely if the test errors first. For the
@@ -64,6 +66,13 @@ def _isolated_registries():
     ``algua.data.providers`` (network bar providers, e.g. yfinance/Alpaca) -- the manual cleanup in
     ``tests/test_data_ingest_streamed.py`` was on the importers registry, not providers. Both get
     the same fragile ``del``-in-``finally`` treatment today, so both are covered here.
+
+    The fifth, ``algua.features.catalogue._REGISTRY``, is deliberately EXCLUDED: ``load_all_
+    factors`` REBINDS the module global (``global _REGISTRY; ...; _REGISTRY = fresh``) rather than
+    mutating it in place, so snapshotting it by reference here would go stale the moment a test
+    called ``load_all_factors`` -- restoring the OLD dict object at teardown would not undo the
+    rebind. It already has its own reset hook, ``catalogue._reset_registry()``, that its own tests
+    call directly.
     """
     from algua.data.importers import _REGISTRY as importers
     from algua.data.providers import _REGISTRY as providers

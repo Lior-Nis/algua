@@ -414,12 +414,10 @@ def test_default_verifier_requires_sqlite_repo_or_injection():
 
 
 def test_default_verifier_missing_paper_creds_refuses(repo, conn, monkeypatch):
-    from algua.config import settings as settings_mod
     from algua.registry.transitions import _default_forward_certificate_verifier
 
-    stripped = settings_mod.get_settings().model_copy(
-        update={"alpaca_api_key": None, "alpaca_api_secret": None})
-    monkeypatch.setattr(settings_mod, "get_settings", lambda: stripped)
+    monkeypatch.delenv("ALGUA_ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALGUA_ALPACA_API_SECRET", raising=False)
     with pytest.raises(TransitionError, match="(?s)account hygiene.*ALGUA_ALPACA_API_KEY"):
         _default_forward_certificate_verifier()(repo, "s", 1, IDENT)
 
