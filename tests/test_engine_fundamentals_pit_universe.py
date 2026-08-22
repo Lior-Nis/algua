@@ -3,9 +3,9 @@ from datetime import datetime
 import pandas as pd
 
 from algua.backtest.engine import run
-from algua.cli._common import resolve_universe_inputs
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedProvider
 from algua.data.store import DataStore
+from algua.evaluation.inputs import resolve_universe_inputs
 from algua.strategies.loader import load_strategy
 
 

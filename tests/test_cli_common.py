@@ -6,9 +6,11 @@ import pytest
 from algua.cli._common import (
     now_iso,
     registry_conn,
+    utc,
+)
+from algua.evaluation.inputs import (
     resolve_eval_inputs,
     select_provider,
-    utc,
 )
 
 

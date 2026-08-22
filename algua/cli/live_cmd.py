@@ -16,14 +16,14 @@ from algua.cli._common import (
     resolve_wall_clock_window,
     utc,
 )
-from algua.cli._common import (
-    select_provider as _select_provider,
-)
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
+from algua.evaluation.inputs import (
+    select_provider as _select_provider,
+)
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker
 from algua.execution.errors import BrokerError

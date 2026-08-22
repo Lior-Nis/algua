@@ -16,9 +16,6 @@ from algua.cli._common import (
     ok,
     project,
     registry_conn,
-    resolve_delisting_inputs,
-    resolve_eval_inputs,
-    resolve_universe_inputs,
     sync_kb_doc,
 )
 from algua.cli.app import app, emit
@@ -28,6 +25,11 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.data.files import frame_to_parquet_bytes
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
+from algua.evaluation.inputs import (
+    resolve_delisting_inputs,
+    resolve_eval_inputs,
+    resolve_universe_inputs,
+)
 from algua.primitives.atomic_io import write_bytes_atomic
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository

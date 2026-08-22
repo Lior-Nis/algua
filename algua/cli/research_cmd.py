@@ -12,9 +12,6 @@ from algua.cli._common import (
     ok,
     project,
     registry_conn,
-    resolve_delisting_inputs,
-    resolve_eval_inputs,
-    resolve_universe_inputs,
     sync_kb_doc,
 )
 from algua.cli.app import app, emit
@@ -24,6 +21,11 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.data.models import Dataset
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
+from algua.evaluation.inputs import (
+    resolve_delisting_inputs,
+    resolve_eval_inputs,
+    resolve_universe_inputs,
+)
 from algua.knowledge.experience import write_experience_note
 from algua.observability.log import get_logger
 from algua.registry.human_actor import canonical_run_context

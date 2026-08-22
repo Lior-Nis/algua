@@ -24,7 +24,6 @@ from algua.cli._common import (
     sync_kb_doc,
     utc,
 )
-from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -37,6 +36,7 @@ from algua.contracts.types import (
     PositionsBroker,
     ScopedCancelBroker,
 )
+from algua.evaluation.inputs import select_provider as _select_provider
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import (
     AlpacaLiveReadOnlyBroker,
