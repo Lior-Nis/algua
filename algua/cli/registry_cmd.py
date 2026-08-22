@@ -23,12 +23,11 @@ from algua.execution.lane_exit import (
     build_live_broker,
     build_live_drain_broker,
 )
-from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
 from algua.registry.gate_history import strategy_gate_history
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, LiveAuthorizationError
-from algua.registry.repository import StrategyRecord, kb_metadata
+from algua.registry.repository import StrategyRecord
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 
@@ -298,9 +297,13 @@ def set_(
             a = a.value
         if b != a:
             changed[f] = {"before": b, "after": a}
-    # Re-sync the kb doc so frontmatter reflects the new registry truth.
-    # Best-effort: absent doc is ok (sync_strategy_doc returns False).
-    sync_strategy_doc(get_settings(), name, stage=after.stage.value, metadata=kb_metadata(after))
+    # Re-sync the kb doc so frontmatter reflects the new registry truth. Routed through the
+    # guarded #331 seam (NOT a bare sync_strategy_doc) for three reasons, all of which this call
+    # site used to get wrong: the write above has ALREADY COMMITTED, so a vault failure must not
+    # make the command report failure for a write that succeeded; `--family` moves the strategy
+    # between family rosters, which only the dependents sync updates; and an absent doc is
+    # scaffolded rather than skipped, the same as every other stage-mutating command.
+    sync_kb_doc(name)
     emit(ok({**_record_json(after), "changed": changed}))
 
 
