@@ -210,8 +210,7 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
         repo: StrategyRepository, name: str, strategy_id: int, identity: ArtifactIdentity,
     ) -> dict[str, Any]:
         from algua.calendar.market_calendar import MarketCalendar
-        from algua.config.settings import get_settings
-        from algua.execution.alpaca_broker import AlpacaPaperBroker
+        from algua.execution.broker_factory import BrokerKind, build_broker
         from algua.registry.forward_promotion import verify_forward_certificate
 
         # The Protocol stays I/O-agnostic; only the sqlite store exposes `connection`.
@@ -220,14 +219,15 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
             raise TransitionError(
                 "forward-certificate verification needs a sqlite-backed repository or an "
                 "injected verifier")
-        settings = get_settings()
-        if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+        try:
+            broker = build_broker(BrokerKind.ALPACA_PAPER)
+        except ValueError as exc:
+            # The factory's ValueError is generic credential wording; the registry layer's error
+            # vocabulary is TransitionError, and go-live's refusal carries its own account-hygiene
+            # framing that callers (and tests) depend on verbatim.
             raise TransitionError(
                 "go-live re-verifies account hygiene since certification and needs Alpaca "
-                "paper credentials; set ALGUA_ALPACA_API_KEY and ALGUA_ALPACA_API_SECRET")
-        broker = AlpacaPaperBroker(api_key=settings.alpaca_api_key,
-                                   api_secret=settings.alpaca_api_secret,
-                                   base_url=settings.alpaca_paper_url)
+                "paper credentials; set ALGUA_ALPACA_API_KEY and ALGUA_ALPACA_API_SECRET") from exc
         return verify_forward_certificate(
             repo, conn, name=name, strategy_id=strategy_id, identity=identity,
             calendar=MarketCalendar(), now=datetime.now(UTC),
