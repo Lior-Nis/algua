@@ -173,6 +173,13 @@ class RunLedgerMixin:
             )
         return len(kept), truncated_at
 
+    def stamp_trials_truncated(self, run_id: int, truncated_at: int) -> None:
+        """Mark a `sweep` parent whose trial set was capped. Never inferred by a reader — a
+        truncated distribution must announce itself."""
+        with self._conn:
+            self._conn.execute(
+                "UPDATE runs SET trials_truncated_at=? WHERE id=?", (truncated_at, run_id))
+
     def get_run(self, run_id: int) -> sqlite3.Row | None:
         return self._conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
 
