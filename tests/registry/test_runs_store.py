@@ -117,3 +117,15 @@ def test_list_runs_rejects_a_non_vocabulary_sort_key(repo: SqliteStrategyReposit
     """The sort key is interpolated into SQL, so it MUST be allow-listed."""
     with pytest.raises(ValueError, match="not a sortable metric"):
         repo.list_runs(sort="1; DROP TABLE runs")
+
+
+def test_sweep_trial_rejects_a_metric_outside_the_trial_vocabulary(
+    repo: SqliteStrategyRepository,
+) -> None:
+    """A trial has no out-of-sample segment: a full-vocabulary-but-not-trial-scoped key like
+    `sharpe_is` must raise, not silently vanish."""
+    parent = repo.record_run("sweep", "alpha")
+    trials = [{"config": {"lookback": 60}, "metrics": {"sharpe_is": 1.2}}]
+    with pytest.raises(ValueError, match="not a sweep-trial metric"):
+        repo.record_sweep_trials(parent, "alpha", trials)
+    assert repo.list_runs(kind="sweep_trial", strategy_name="alpha") == []

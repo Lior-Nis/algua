@@ -27,6 +27,15 @@ METRIC_COLUMNS: tuple[str, ...] = (
     "mean_window_sharpe", "std_window_sharpe", "min_window_sharpe", "pct_positive_windows",
 )
 
+#: The metrics a sweep TRIAL can carry. A trial is one grid point evaluated across the
+#: walk-forward windows — it has no holdout segment (the holdout is withheld until the gate),
+#: so the _oos and full-period _is metrics are not merely unstored here, they are undefined.
+#: Validating trials against the FULL vocabulary would let a recognised-but-unpersisted key
+#: pass validation and then vanish.
+SWEEP_TRIAL_METRIC_COLUMNS: tuple[str, ...] = (
+    "mean_window_sharpe", "std_window_sharpe", "min_window_sharpe", "pct_positive_windows",
+)
+
 #: Provenance columns a caller may set. Kept explicit (not `**kwargs` into SQL) so a typo is a
 #: ValueError rather than a silently-dropped field.
 PROVENANCE_COLUMNS: tuple[str, ...] = (
@@ -141,9 +150,10 @@ class RunLedgerMixin:
         for trial in kept:
             mets = dict(trial.get("metrics") or {})
             for key in mets:
-                if key not in METRIC_COLUMNS:
+                if key not in SWEEP_TRIAL_METRIC_COLUMNS:
                     raise ValueError(
-                        f"{key!r} is not in the fixed metric vocabulary (sweep trial)")
+                        f"{key!r} is not a sweep-trial metric; "
+                        f"expected one of {sorted(SWEEP_TRIAL_METRIC_COLUMNS)}")
             rows.append((
                 strategy_name, now, lineage,
                 json.dumps(trial.get("config") or {}, sort_keys=True, default=str),
