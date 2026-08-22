@@ -14,7 +14,6 @@ from algua.cli._common import (
     registry_conn,
     resolve_drawdown_breaker,
     resolve_wall_clock_window,
-    utc,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -68,6 +67,7 @@ from algua.observability import (
     correlation_context,
     get_logger,
 )
+from algua.primitives.timeparse import utc
 from algua.registry import allocations
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes

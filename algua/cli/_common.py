@@ -221,11 +221,6 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def utc(date_str: str) -> datetime:
-    """Parse an ISO date/datetime string and stamp it UTC."""
-    return datetime.fromisoformat(date_str).replace(tzinfo=UTC)
-
-
 def sync_kb_doc(name: str) -> None:
     """Best-effort: re-sync ``name``'s kb doc + family roster + indexes to current registry truth.
 

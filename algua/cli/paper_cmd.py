@@ -22,7 +22,6 @@ from algua.cli._common import (
     resolve_drawdown_breaker,
     resolve_wall_clock_window,
     sync_kb_doc,
-    utc,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -93,6 +92,7 @@ from algua.observability import (
 )
 from algua.operator.journal import JsonlJournal
 from algua.operator.mergeback import RealGitOps, merge_back_lock, run_merge_back
+from algua.primitives.timeparse import utc
 from algua.registry import allocations
 from algua.registry.allocations import (
     AllocationError,

@@ -8,31 +8,25 @@ code cannot reach them where they were. Moving them here lets both ``cli`` and `
 them without either importing the other.
 
 ``resolve_eval_inputs`` used ``algua.cli._common.utc`` to parse its ``start``/``end`` strings; that
-helper stays in ``_common`` (it's genuine shared CLI infrastructure used well beyond these four
-functions), so importing it here would pull ``algua.cli`` — and, transitively, ``algua.registry``,
-since ``_common`` itself imports ``algua.registry.db`` — right back into this package, defeating the
-reason it was split out. ``_utc`` below is a private, byte-identical duplicate of that one two-line
-parse used only internally by ``resolve_eval_inputs``.
+The ISO-parse helper these functions need lives in ``algua.primitives.timeparse`` — the
+stdlib-only leaf — rather than in ``cli/_common``, because ``_common`` imports
+``algua.registry.db`` and pulling it in here would drag ``cli`` and transitively ``registry`` back
+into this package, defeating the reason it was split out.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 
 from algua.backtest._sample import SyntheticProvider
 from algua.config.settings import get_settings
 from algua.contracts.types import DataProvider
 from algua.data.serve import StoreBackedProvider
 from algua.data.store import DataStore
+from algua.primitives.timeparse import utc
 from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_strategy
-
-
-def _utc(date_str: str) -> datetime:
-    """Parse an ISO date/datetime string and stamp it UTC (private duplicate of
-    ``algua.cli._common.utc`` — see module docstring for why this isn't imported instead)."""
-    return datetime.fromisoformat(date_str).replace(tzinfo=UTC)
 
 
 def select_provider(demo: bool, snapshot: str | None) -> DataProvider:
@@ -57,7 +51,7 @@ def resolve_eval_inputs(
     strategy's own module-level state from one task into the next."""
     strategy = load_strategy(name, reload=reload)
     provider = select_provider(demo, snapshot)
-    return strategy, provider, _utc(start), _utc(end)
+    return strategy, provider, utc(start), utc(end)
 
 
 def resolve_delisting_inputs(
