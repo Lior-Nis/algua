@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from algua.registry.db import registry_conn
 from algua.evaluation.backtest_run import run_backtest_task
+from algua.registry.db import registry_conn
 from algua.registry.store import SqliteStrategyRepository
 
 STRATEGY = "cross_sectional_momentum"
