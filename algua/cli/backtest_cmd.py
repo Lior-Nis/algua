@@ -29,7 +29,7 @@ from algua.data.files import frame_to_parquet_bytes
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.primitives.atomic_io import write_bytes_atomic
-from algua.registry.runs import record_backtest_run, record_walk_forward_run
+from algua.registry.runs import record_backtest_run, record_sweep_run, record_walk_forward_run
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -426,13 +426,21 @@ def sweep_task(  # noqa: PLR0913
                    delisting_records=delisting_records,
                    assume_terminal_last_close=assume_terminal_last_close)
     with registry_conn() as conn:
-        recorded = record_search_breadth(SqliteStrategyRepository(conn), name, result)
+        repo = SqliteStrategyRepository(conn)
+        recorded = record_search_breadth(repo, name, result)
+        # The per-combo rows behind `recorded["n_combos"]`. Written in ONE batched transaction at
+        # the END of the sweep — sweep() fans combos out across processes, so concurrent
+        # per-combo writers against the governance DB would be the wrong shape.
+        recorded_runs = record_sweep_run(repo, name, result)
     payload = result.to_dict()
     payload["ranked"] = payload["ranked"][:top]
     # Surface the MEASURED breadth this sweep contributed (this sweep's n_combos) and the
     # cumulative family total now on record, so the operator sees what promotion will read back.
     # Recorded by strategy NAME, so even a sweep of an UNREGISTERED strategy counts.
     payload["recorded_breadth"] = recorded
+    # Surface the run rows too, so a truncated trial set is visible in the command's own output
+    # rather than only discoverable by querying.
+    payload["recorded_runs"] = recorded_runs
     if track:
         _record_tracking(payload, lambda: get_tracker().log_sweep(
             result, tracking_uri=get_settings().mlflow_tracking_uri

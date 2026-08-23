@@ -51,3 +51,38 @@ def test_walk_forward_records_oos_and_window_metrics() -> None:
     assert row["mean_window_sharpe"] is not None
     # A walk-forward measures no full-period in-sample figure; it must not invent one.
     assert row["sharpe_is"] is None
+
+
+def _run_sweep() -> None:
+    from typer.testing import CliRunner
+
+    from algua.cli.main import app
+
+    res = CliRunner().invoke(
+        app, ["backtest", "sweep", STRATEGY, "--demo", "--param", "lookback=20,40,60"])
+    assert res.exit_code == 0, res.output
+
+
+def test_sweep_records_a_parent_and_one_child_per_combo() -> None:
+    import json
+
+    _run_sweep()
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        parents = repo.list_runs(kind="sweep")
+        children = repo.list_runs(kind="sweep_trial")
+    assert len(parents) == 1
+    assert len(children) == 3
+    assert parents[0]["trials_truncated_at"] is None
+    assert all(json.loads(c["derived_from"]) == [parents[0]["id"]] for c in children)
+    assert all(c["mean_window_sharpe"] is not None for c in children)
+
+
+def test_sweep_trial_count_matches_the_recorded_breadth() -> None:
+    """The point of the slice: n_combos stops being an assertion and becomes a countable set."""
+    _run_sweep()
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        n_children = len(repo.list_runs(kind="sweep_trial"))
+        declared = repo.total_search_combos(STRATEGY)
+    assert n_children == declared
