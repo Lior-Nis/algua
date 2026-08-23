@@ -49,8 +49,8 @@ from algua.cli._common import ok
 from algua.cli.app import emit
 from algua.cli.backtest_cmd import run_backtest_task, sweep_task
 from algua.cli.errors import error_code, json_errors
-from algua.cli.research_cmd import promote_task
 from algua.portfolio import construction
+from algua.registry.promote_run import promote_task
 
 run_all_app = typer.Typer(help="Research batch worker", no_args_is_help=True)
 

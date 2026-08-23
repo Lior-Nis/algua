@@ -16,3 +16,8 @@ from datetime import UTC, datetime
 def utc(date_str: str) -> datetime:
     """Parse an ISO date/datetime string and stamp it UTC."""
     return datetime.fromisoformat(date_str).replace(tzinfo=UTC)
+
+
+def now_iso() -> str:
+    """Current UTC instant as an ISO-8601 string — the shared 'now' for persisted timestamps."""
+    return datetime.now(UTC).isoformat()

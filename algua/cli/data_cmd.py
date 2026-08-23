@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import typer
 
-from algua.cli._common import now_iso, ok
+from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -25,6 +25,7 @@ from algua.data.importers import get_importer
 from algua.data.models import Dataset
 from algua.data.providers import get_provider
 from algua.data.store import DataStore, normalize_symbols
+from algua.primitives.timeparse import now_iso
 
 data_app = typer.Typer(help="Point-in-time data snapshots", no_args_is_help=True)
 app.add_typer(data_app, name="data")

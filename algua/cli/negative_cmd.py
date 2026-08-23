@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import typer
 
-from algua.cli._common import now_iso, ok
+from algua.cli._common import ok
 from algua.cli.app import emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor
 from algua.knowledge.experience import write_experience_note
-from algua.primitives.timeparse import utc
+from algua.primitives.timeparse import now_iso, utc
 from algua.registry.db import registry_conn
 from algua.registry.negative_results import (
     list_negative_results,

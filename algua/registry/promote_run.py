@@ -15,7 +15,6 @@ duplicated here.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from algua.backtest.engine import holdout_window
@@ -32,6 +31,7 @@ from algua.evaluation.inputs import (
 )
 from algua.knowledge.experience import write_experience_note
 from algua.observability.log import get_logger
+from algua.primitives.timeparse import now_iso
 from algua.registry.db import registry_conn
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.kb_sync import sync_kb_doc
@@ -74,10 +74,7 @@ def capture_gate_fail_experience(
     ledger: dict[str, Any] = {"status": "skipped", "id": None, "error": None}
     note: dict[str, Any] = {"status": "skipped", "path": None, "error": None}
     # Current UTC instant as an ISO-8601 string — the shared 'now' for persisted timestamps.
-    # (Inlined rather than importing ``cli._common.now_iso``: that helper stays cli-owned since
-    # other cli command modules still use it, and duplicating a NAMED helper is what the standing
-    # "pure move" rule on this stage forbids — using the two stdlib calls directly is not that.)
-    created_at = datetime.now(UTC).isoformat()
+    created_at = now_iso()
     record = build_gate_fail_record(
         name, decision.to_dict(), actor=actor.value,
         period_start=period_start, period_end=period_end, holdout=holdout, stability=stability)
