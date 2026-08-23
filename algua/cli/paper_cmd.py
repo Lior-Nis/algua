@@ -36,6 +36,7 @@ from algua.contracts.types import (
     ScopedCancelBroker,
 )
 from algua.evaluation.inputs import select_provider as _select_provider
+from algua.evaluation.sweep_run import sweep_task
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import (
     AlpacaLiveReadOnlyBroker,
@@ -724,10 +725,13 @@ def merge_back(
                     merge_sha=merge_sha, base_sha=base_sha)
 
         def produce_evidence(ensure_status: str, branch_tip: str) -> str:
-            # Authoritative evidence reproduction: the REAL sweep/backtest task bodies are injected
-            # (importlib — the cli-independence contract forbids a static paper_cmd->backtest_cmd
-            # sibling edge, same rationale as the promote seam below). Strict-agent pinning:
-            # windows/holdout_frac stay the task defaults; assume_terminal_last_close stays False.
+            # Authoritative evidence reproduction: the REAL sweep/backtest task bodies are injected.
+            # sweep_task now lives in algua.evaluation.sweep_run (not a cli sibling), so it arrives
+            # via a legal static import; run_backtest_task is still in algua.cli.backtest_cmd, so it
+            # still arrives via importlib (the cli-independence contract forbids a static
+            # paper_cmd->backtest_cmd sibling edge, same rationale as the promote seam below).
+            # Strict-agent pinning: windows/holdout_frac stay the task defaults;
+            # assume_terminal_last_close stays False.
             intake_mod = importlib.import_module("algua.registry.mergeback_intake")
             bt = importlib.import_module("algua.cli.backtest_cmd")
             params = list(sweep_param) if sweep_param else None
@@ -741,7 +745,7 @@ def merge_back(
                     "fundamentals_snapshot": fundamentals_snapshot,
                     "news_snapshot": news_snapshot, "delistings": delistings,
                     "rank_by": rank_by, "universe": universe, "start": start, "end": end},
-                sweep_fn=lambda: bt.sweep_task(
+                sweep_fn=lambda: sweep_task(
                     strategy, start=start, end=end, demo=demo, snapshot=snapshot,
                     universe=universe, param=params, rank_by=rank_by,
                     fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
