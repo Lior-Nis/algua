@@ -11,6 +11,12 @@ one-way (leaves -> schema -> migrate -> here), which is what keeps the package i
 """
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from algua.config.settings import get_settings
+
 # Compatibility re-export, NOT public API (hence its absence from __all__):
 # tests/test_db_migrations.py imports _add_missing_columns from this path directly.
 from algua.registry.db._util import _add_missing_columns as _add_missing_columns
@@ -45,3 +51,25 @@ __all__ = [
     "fdr_cohort_position",
     "migrate",
 ]
+
+
+@contextmanager
+def registry_conn() -> Iterator[sqlite3.Connection]:
+    """Yield a migrated registry connection, closed on exit.
+
+    The single idiom for opening the registry DB: connect + migrate + auto-close. Replaces the
+    two competing forms (a bare ``_conn()`` and inline ``closing(connect(...))`` + ``migrate``).
+
+    Lives on the facade rather than in ``connection.py`` because it pairs ``connect`` with
+    ``migrate``, and this package's dependency graph is deliberately one-way
+    (leaves -> schema -> migrate -> here); a leaf reaching up to ``migrate`` would invert it.
+    It lives here rather than in ``cli/_common`` so non-CLI lanes (``algua.evaluation``) can open
+    the registry without importing ``algua.cli`` -- hand-duplicating the four-line idiom to dodge
+    that edge is exactly what this placement prevents.
+    """
+    conn = connect(get_settings().db_path)
+    try:
+        migrate(conn)
+        yield conn
+    finally:
+        conn.close()

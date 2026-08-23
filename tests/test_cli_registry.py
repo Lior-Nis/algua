@@ -212,9 +212,9 @@ def test_duplicate_add_emits_json_error():
 
 
 def test_registry_command_closes_connection(monkeypatch, tmp_path):
-    # The connect+migrate+close lifecycle now lives in cli._common.registry_conn (the single
+    # The connect+migrate+close lifecycle now lives in algua.registry.db.registry_conn (the single
     # shared idiom), so the connection factory is patched there.
-    from algua.cli import _common
+    from algua.registry import db as _db
 
     closed = []
 
@@ -228,7 +228,7 @@ def test_registry_command_closes_connection(monkeypatch, tmp_path):
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(_common, "connect", connect_tracking)
+    monkeypatch.setattr(_db, "connect", connect_tracking)
 
     result = runner.invoke(app, ["registry", "add", "alpha"])
 
@@ -398,6 +398,52 @@ def test_set_changes_metadata_and_reports_before_after(monkeypatch, tmp_path):
     rec = _json(runner.invoke(app, ["registry", "show", "a"]))
     assert rec["hypothesis_status"] == "supported"
     assert rec["tags"] == ["carry"]
+
+
+def test_set_survives_a_failing_kb_sync(monkeypatch, tmp_path):
+    """`registry set` commits its metadata write BEFORE the vault sync, so a vault failure must
+    not report the command as failed — the write already happened, and telling the caller it did
+    not is how an agent ends up retrying or believing the metadata was never set.
+
+    Regression guard: this call site used to invoke ``sync_strategy_doc`` directly, unguarded,
+    under a comment that claimed it was best-effort.
+    """
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(tmp_path / "vault"))
+    runner.invoke(app, ["registry", "add", "a", "--hypothesis-status", "untested"])
+
+    def _boom(*_a, **_k):
+        raise OSError("vault is read-only")
+
+    # Patch the LEAF both paths traverse: sync_strategy_and_dependents calls sync_strategy_doc,
+    # so this fails the guarded seam and a bare per-strategy sync alike. Patching the wrapper
+    # instead would leave the unguarded path untouched and the test would pass against the bug.
+    monkeypatch.setattr("algua.knowledge.sync.sync_strategy_doc", _boom)
+    result = runner.invoke(app, ["registry", "set", "a", "--hypothesis-status", "supported"])
+
+    assert result.exit_code == 0, result.stdout
+    out = json.loads(result.stdout)
+    assert out["changed"]["hypothesis_status"] == {"before": "untested", "after": "supported"}
+    # and the write is genuinely durable, not just reported
+    assert _json(runner.invoke(app, ["registry", "show", "a"]))["hypothesis_status"] == "supported"
+
+
+def test_set_family_change_resyncs_the_family_roster(monkeypatch, tmp_path):
+    """`--family` moves a strategy between rosters, so the dependents sync (not just the strategy
+    doc) has to run — a bare per-strategy sync leaves the old and new family rosters stale."""
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("ALGUA_KNOWLEDGE_DIR", str(vault))
+    seen: list[str] = []
+    import algua.knowledge.sync as sync_mod
+
+    real = sync_mod.sync_strategy_and_dependents
+    monkeypatch.setattr(
+        sync_mod, "sync_strategy_and_dependents",
+        lambda *a, **k: (seen.append(a[1] if len(a) > 1 else k.get("name")), real(*a, **k))[1],
+    )
+    runner.invoke(app, ["registry", "add", "a", "--family", "momentum"])
+    seen.clear()
+    runner.invoke(app, ["registry", "set", "a", "--family", "mean-reversion"])
+    assert seen == ["a"], "family change must route through the dependents sync"
 
 
 def test_list_filters_compose():
@@ -740,7 +786,10 @@ def test_transition_survives_kb_sync_failure(tmp_path, monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr("algua.knowledge.sync.sync_strategy_and_dependents", _boom)
+    # Patch the LEAF both paths traverse: sync_strategy_and_dependents calls sync_strategy_doc,
+    # so this fails the guarded seam and a bare per-strategy sync alike. Patching the wrapper
+    # instead would leave the unguarded path untouched and the test would pass against the bug.
+    monkeypatch.setattr("algua.knowledge.sync.sync_strategy_doc", _boom)
     result = runner.invoke(
         app, ["registry", "transition", "beta", "--to", "backtested",
               "--actor", "agent", "--reason", "r"])

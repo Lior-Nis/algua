@@ -291,6 +291,18 @@ source_modules = ["algua.live", "algua.execution"]
 forbidden_modules = ["algua.data"]
 
 [[tool.importlinter.contracts]]
+# The evaluation lane holds the shared task bodies (backtest/sweep) and their input resolution, so
+# BOTH cli and registry import it. It must therefore import neither back. Without this contract the
+# stage-6a extraction is convention, not enforcement: re-adding
+# `import algua.cli.backtest_cmd` to evaluation/sweep_run.py would otherwise still report all green,
+# which is exactly the failure mode 6a existed to remove (a contract that passed while the edge
+# lived at runtime behind importlib).
+name = "evaluation lane stays off the cli layer"
+type = "forbidden"
+source_modules = ["algua.evaluation"]
+forbidden_modules = ["algua.cli"]
+
+[[tool.importlinter.contracts]]
 # The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
 # the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
 # gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is

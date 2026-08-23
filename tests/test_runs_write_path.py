@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from algua.cli._common import registry_conn
-from algua.cli.backtest_cmd import run_backtest_task
+from algua.registry.db import registry_conn
+from algua.evaluation.backtest_run import run_backtest_task
 from algua.registry.store import SqliteStrategyRepository
 
 STRATEGY = "cross_sectional_momentum"
@@ -155,16 +155,19 @@ def _promote(*, expect_pass: bool) -> None:
     `expect_pass=False` is exercised by this module; a caller asking for a pass would need the
     human-actor signed-challenge dance (tests/_human_actor_helpers.py) this helper does not do.
 
-    The final promote step calls `research_cmd.promote_task` DIRECTLY rather than through the CLI
+    The final promote step calls `promote_run.promote_task` DIRECTLY rather than through the CLI
     (`typer`'s `research promote` command): that command is wrapped in `@json_errors`, a catch-all
     that turns ANY exception into a JSON error + exit(1) rather than letting it propagate. The
     rollback test needs a real exception to reach `pytest.raises`, and `promote_task` — the plain
     function `@json_errors` calls into — has no such wrapper of its own.
+
+    Imported from `algua.registry.promote_run`, its canonical home since the stage-6a extraction
+    (#591); `algua.cli.research_cmd` merely re-exports it.
     """
     from typer.testing import CliRunner
 
     from algua.cli.main import app
-    from algua.cli.research_cmd import promote_task
+    from algua.registry.promote_run import promote_task
 
     if expect_pass:
         raise NotImplementedError(

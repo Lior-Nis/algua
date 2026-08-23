@@ -178,3 +178,64 @@ def resolve_effective_actor(
             "A bare --actor human does not unlock human-only paths."
         )
     return Actor.HUMAN
+
+
+def authenticate_actor(
+    conn: sqlite3.Connection, *, command: str, name: str, rec: object, stage_to: str,
+    declared_actor: Actor, actor_signature: str | None, run_context: str,
+) -> Actor:
+    """Turn a declared ``--actor`` + optional ``--actor-signature`` into the EFFECTIVE actor the
+    downstream human-only guards may trust (#329). The single shared chokepoint for the gated
+    promote paths (``research promote``'s ``promote_task`` and ``paper promote``'s command body),
+    so the authentication is wired identically in one place.
+
+    - declared agent/system -> returned unchanged (agents never sign).
+    - declared human, NO signature -> a fresh single-use challenge is issued+persisted and PRINTED
+      as JSON (mirrors the go-live challenge print), then the command EXITS 0 having run nothing.
+    - declared human + signature -> the SSH signature is verified (namespace algua-human-actor) over
+      the REBUILT payload bound to this command + strategy + RECOMPUTED artifact identity + the full
+      ``run_context``; on success the effective actor is HUMAN, else a ValueError is raised
+      (fail closed — a forged/replayed/expired/cross-run signature is refused).
+
+    ``rec`` is the strategy record (used for ``rec.id`` + ``rec.stage``). Lives here (not
+    ``algua.cli._common``) because ``promote_task`` — the ``backtested -> candidate`` gate body —
+    calls it directly and must not import the CLI layer (cli composes registry, never the reverse;
+    the same reasoning that moved ``registry_conn``/``sync_kb_doc`` out of ``cli._common`` earlier
+    in this stage).
+
+    KNOWN LAYERING DEBT (issue filed): the challenge branch below still reaches UP into the CLI —
+    it lazily imports ``typer`` and ``algua.cli.app.emit`` to print the challenge envelope and exit.
+    That is a real ``registry -> cli`` edge, and it is the ONLY one: a
+    ``forbidden: algua.registry -> algua.cli`` contract fails on exactly this line and nothing else.
+    It is deliberately NOT hidden — the lazy import is for load-time weight, not to dodge the
+    linter,
+    and the contract is left unwritten rather than written-with-an-exemption so the debt stays
+    visible. The fix is to let ``HumanActorChallengeRequired`` propagate and have the CLI catch and
+    print it (which is what that exception's own docstring already anticipates: "the CLI prints
+    it"); that changes error-propagation semantics on the #329 human-actor auth path, so it wants
+    its own change and its own tests, not a tail-end edit to a refactor."""
+    import typer
+
+    from algua.cli.app import emit
+    from algua.registry.approvals import compute_artifact_hashes
+
+    if declared_actor is not Actor.HUMAN:
+        return declared_actor
+    identity = compute_artifact_hashes(name)
+    signature = Path(actor_signature).read_bytes() if actor_signature else None
+    try:
+        return resolve_effective_actor(
+            conn, command=command, strategy=name, strategy_id=rec.id,  # type: ignore[attr-defined]
+            stage_from=rec.stage.value, stage_to=stage_to,  # type: ignore[attr-defined]
+            code_hash=identity.code_hash, config_hash=identity.config_hash,
+            dependency_hash=identity.dependency_hash, declared_actor=declared_actor,
+            run_context=run_context, signature=signature)
+    except HumanActorChallengeRequired as exc:
+        emit({"ok": True, "action": "human_actor_challenge", "strategy": name, "command": command,
+              **exc.challenge,
+              "instructions": (
+                  "sign the 'challenge' value with your enrolled algua-human-actor key: "
+                  "ssh-keygen -Y sign -n algua-human-actor -f <key> <file>; "
+                  "then re-run this command with --actor-signature <file>.sig"),
+              })
+        raise typer.Exit() from None

@@ -186,7 +186,10 @@ def test_run_gate_failure_after_burn_releases_noop_and_audits(tmp_path, monkeypa
     burn (e.g. its own post-peek pre-lock pending-NOVEL drift re-check), the CLI must (a) apply the
     same release-on-failure discipline as walk_forward (a post-burn no-op — the burn survives) and
     (b) emit an explicit WARNING audit record so the race is monitored, never silently 'closed'."""
-    import algua.cli.research_cmd as research_cmd
+    # promote_task (and the run_gate/get_logger names its body reads) lives in
+    # algua.registry.promote_run, not algua.cli.research_cmd (Stage 6a Task 3: research_cmd is now
+    # a thin CLI wrapper that imports promote_task from the registry module).
+    import algua.registry.promote_run as promote_run
 
     bid, nid, _fid = _seed(tmp_path)
     assert _backtest_to_backtested(
@@ -201,8 +204,8 @@ def test_run_gate_failure_after_burn_releases_noop_and_audits(tmp_path, monkeypa
         def warning(self, event, extra=None):
             warnings.append((event, (extra or {}).get("fields", {})))
 
-    monkeypatch.setattr(research_cmd, "run_gate", _boom)
-    monkeypatch.setattr(research_cmd, "get_logger", lambda _n: _Rec())
+    monkeypatch.setattr(promote_run, "run_gate", _boom)
+    monkeypatch.setattr(promote_run, "get_logger", lambda _n: _Rec())
 
     r = _promote(["research", "promote", "news_coverage_tilt",
                   "--snapshot", bid, "--news-snapshot", nid, *_WINDOW, *_RELAX,

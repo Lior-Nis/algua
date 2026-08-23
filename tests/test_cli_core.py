@@ -102,7 +102,7 @@ def test_doctor_clean_env_safety_rows(monkeypatch, tmp_path):
 
 def test_doctor_flags_engaged_global_halt(monkeypatch, tmp_path):
     # An engaged global halt is a trading-readiness failure that GATES: exit 1, ok:false.
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
     from algua.risk import global_halt
 
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
@@ -118,7 +118,7 @@ def test_doctor_flags_engaged_global_halt(monkeypatch, tmp_path):
 
 
 def test_doctor_flags_tripped_kill_switch(monkeypatch, tmp_path):
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
     from algua.risk import kill_switch
 
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))
@@ -164,7 +164,7 @@ def test_doctor_live_flag_no_live_strategies_ready(monkeypatch, tmp_path):
 def test_doctor_live_flag_gates_on_unverifiable_live_strategy(monkeypatch, tmp_path):
     # A Stage.LIVE strategy with no re-verifiable authorization -> live_authorizations red; under
     # --live it is required, so doctor exits 1 (the strict all-must-verify rule).
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
     from algua.registry.store import SqliteStrategyRepository
 
     monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "r.db"))

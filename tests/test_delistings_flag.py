@@ -160,16 +160,19 @@ def test_promote_signed_run_context_no_longer_contains_fdr_throttle_override(mon
     """The #329 canonical run_context (the exact input set a human signature binds) no longer
     carries the removed fdr_throttle_override key — old signatures are nonce-bound and die
     naturally; no compat key is kept."""
-    import algua.cli.research_cmd as rc
+    # promote_task's body calls canonical_run_context via algua.registry.promote_run's own module
+    # globals (Stage 6a Task 3: promote_task moved out of algua.cli.research_cmd into the
+    # registry), so that is the binding to patch.
+    import algua.registry.promote_run as promote_run
 
     captured: dict = {}
-    orig = rc.canonical_run_context
+    orig = promote_run.canonical_run_context
 
     def _capture(d):
         captured.update(d)
         return orig(d)
 
-    monkeypatch.setattr(rc, "canonical_run_context", _capture)
+    monkeypatch.setattr(promote_run, "canonical_run_context", _capture)
     add = runner.invoke(app, ["registry", "add", STRATEGY])
     assert add.exit_code == 0, add.output
     # Fails later (stage is idea, not backtested) — but AFTER the run_context was built.

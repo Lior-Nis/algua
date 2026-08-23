@@ -13,12 +13,13 @@ from datetime import UTC, datetime
 import typer
 
 from algua.calendar.factory import get_calendar
-from algua.cli._common import ok, registry_conn
+from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.execution.book import book_status
 from algua.operator.loop_health import loop_status
+from algua.registry.db import registry_conn
 
 ops_app = typer.Typer(help="Machine liveness: are the autonomous loops still running?",
                       no_args_is_help=True)
