@@ -145,6 +145,3 @@ def resolve_wall_clock_window(start: str | None, end: str | None) -> tuple[str, 
     return start_iso, end_iso
 
 
-def now_iso() -> str:
-    """Current UTC instant as an ISO-8601 string — the shared 'now' for persisted timestamps."""
-    return datetime.now(UTC).isoformat()

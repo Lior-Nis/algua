@@ -3,12 +3,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from algua.cli._common import now_iso
 from algua.evaluation.inputs import (
     resolve_eval_inputs,
     select_provider,
 )
-from algua.primitives.timeparse import utc
+from algua.primitives.timeparse import now_iso, utc
 from algua.registry.db import registry_conn
 
 
