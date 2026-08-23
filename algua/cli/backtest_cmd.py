@@ -1,38 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 
-import numpy as np
-import pyarrow as pa
 import typer
 
-from algua.backtest.engine import BacktestError
-from algua.backtest.engine import run as run_backtest
-from algua.backtest.result import BacktestResult, series_frame
 from algua.backtest.walkforward import walk_forward
-from algua.cli._common import (
-    ok,
-    project,
-    registry_conn,
-    sync_kb_doc,
-)
+from algua.cli._common import ok, project
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
-from algua.contracts.lifecycle import Actor, Stage
-from algua.data.files import frame_to_parquet_bytes
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
+from algua.evaluation.backtest_run import run_backtest_task
 from algua.evaluation.inputs import (
     resolve_delisting_inputs,
     resolve_eval_inputs,
     resolve_universe_inputs,
 )
 from algua.evaluation.sweep_run import sweep_task
-from algua.primitives.atomic_io import write_bytes_atomic
-from algua.registry.store import SqliteStrategyRepository
-from algua.registry.transitions import transition_strategy
 from algua.tracking.base import TRACKING_SKIPPED
 from algua.tracking.factory import get_tracker
 
@@ -84,37 +69,6 @@ def _record_tracking(payload: dict, call: Callable[[], str]) -> None:
     payload["mlflow_run_id"] = run_id
 
 
-def emit_series_file(result: BacktestResult, path: Path) -> dict:
-    """Write the backtest's daily return series to a deterministic, provenance-stamped parquet at
-    `path` and return the stdout `series` descriptor. Fail closed (#181): a `None`, empty, or
-    non-finite series raises BacktestError — never a partial/empty file."""
-    if (
-        result.returns is None
-        or len(result.returns) == 0
-        or not np.isfinite(result.returns.to_numpy(dtype=float)).all()
-    ):
-        raise BacktestError("backtest produced no finite return series; nothing to emit")
-    frame, metadata = series_frame(result)
-    try:
-        write_bytes_atomic(frame_to_parquet_bytes(frame, metadata), path)
-    except (OSError, pa.ArrowInvalid, Exception) as exc:
-        if isinstance(exc, BacktestError):
-            raise
-        raise BacktestError(f"failed to write series to {path}: {exc}") from exc
-    return {
-        "path": str(path), "n": int(len(frame)),
-        "code_hash": result.code_hash, "dependency_hash": result.dependency_hash,
-        "config_hash": result.config_hash, "snapshot_id": result.snapshot_id,
-        "seed": result.seed, "data_source": result.data_source,
-        "start": result.period["start"], "end": result.period["end"],
-        "timeframe": result.timeframe,
-        "universe_name": result.universe_name,
-        "fundamentals_snapshot": result.fundamentals_snapshot,
-        "news_snapshot": result.news_snapshot,
-        "delisting_snapshot": result.delisting_snapshot,
-    }
-
-
 @backtest_app.command("run")
 @json_errors
 def run(
@@ -151,97 +105,6 @@ def run(
         delistings=delistings, assume_terminal_last_close=assume_terminal_last_close,
         register=register, emit_series=emit_series, track=track,
     )))
-
-
-def run_backtest_task(  # noqa: PLR0913
-    name: str, *, start: str = "2023-01-01", end: str = "2023-12-31", demo: bool = False,
-    snapshot: str | None = None, universe: str | None = None,
-    fundamentals_snapshot: str | None = None, news_snapshot: str | None = None,
-    delistings: str | None = None, assume_terminal_last_close: bool = False,
-    register: bool = False, emit_series: str | None = None, track: bool = False,
-    reload: bool = False,
-) -> dict:
-    """Backtest a strategy and return the result payload dict (the body of ``backtest run``).
-
-    Shared by the ``backtest run`` typer command and the ``research run-all`` batch worker (#326)
-    so there is exactly ONE backtest code path. Opens+closes its own ``registry_conn()`` and takes
-    NO caller-owned connection (each call is a self-contained unit — the batch worker never wraps
-    the loop in one connection, so per-task transaction contracts stay intact). ``track`` runs the
-    best-effort MLflow log in-place (the batch worker never passes it, so a warm run-all never
-    leaks an active MLflow run). ``reload`` force-reloads the strategy module (warm-worker state
-    hygiene, #326)."""
-    strategy, provider, start_dt, end_dt = resolve_eval_inputs(
-        name, demo, snapshot, start, end, reload=reload)
-    universe_by_date, universe_prov = resolve_universe_inputs(universe, start_dt, end_dt)
-    delisting_records, delisting_snapshot_id = resolve_delisting_inputs(delistings, end_dt)
-    if fundamentals_snapshot and not strategy.config.needs_fundamentals:
-        raise ValueError(
-            "--fundamentals-snapshot was given but the strategy does not declare needs_fundamentals"
-        )
-    if news_snapshot and not strategy.config.needs_news:
-        raise ValueError(
-            "--news-snapshot was given but the strategy does not declare needs_news"
-        )
-    fundamentals_provider = (
-        StoreBackedFundamentalsProvider(DataStore(get_settings().data_dir), fundamentals_snapshot)
-        if fundamentals_snapshot
-        else None
-    )
-    news_provider = (
-        StoreBackedNewsProvider(DataStore(get_settings().data_dir), news_snapshot)
-        if news_snapshot
-        else None
-    )
-    result = run_backtest(
-        strategy, provider, start_dt, end_dt,
-        universe_by_date=universe_by_date,
-        universe_name=universe, universe_snapshots=universe_prov,
-        fundamentals_provider=fundamentals_provider,
-        news_provider=news_provider,
-        delisting_records=delisting_records,
-        delisting_snapshot=delisting_snapshot_id,
-        assume_terminal_last_close=assume_terminal_last_close,
-    )
-
-    if register:
-        with registry_conn() as conn:
-            repo = SqliteStrategyRepository(conn)
-            existing = {s.name for s in repo.list_strategies()}
-            if name not in existing:
-                repo.add(name)
-            reason = (
-                f"backtest sharpe={result.metrics['sharpe']:.2f} "
-                f"ret={result.metrics['total_return']:.2%}"
-            )
-            transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT, reason)
-        # Re-sync the kb doc to the new `backtested` stage (#331): best-effort, out-of-transaction.
-        sync_kb_doc(name)
-
-    # Persist return series for the return-correlation clustering axis (#222, Task 7).
-    # Only persists for registered strategies; silently skips otherwise.
-    if result.returns is not None:
-        with registry_conn() as conn:
-            repo = SqliteStrategyRepository(conn)
-            try:
-                repo.get(name)
-            except Exception:  # noqa: BLE001 — strategy not yet registered, skip
-                pass
-            else:
-                repo.persist_backtest_returns(
-                    name,
-                    start_dt.date().isoformat(),
-                    end_dt.date().isoformat(),
-                    result.returns,
-                )
-
-    payload = result.to_dict()
-    if emit_series:
-        payload["series"] = emit_series_file(result, Path(emit_series))
-    if track:
-        _record_tracking(payload, lambda: get_tracker().log_backtest(
-            result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
-        ))
-    return payload
 
 
 @backtest_app.command("walk-forward")

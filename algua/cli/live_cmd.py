@@ -11,7 +11,6 @@ from algua.cli._common import (
     StrategySetupError,
     breach_payload,
     ok,
-    registry_conn,
     resolve_drawdown_breaker,
     resolve_wall_clock_window,
 )
@@ -71,6 +70,7 @@ from algua.primitives.timeparse import utc
 from algua.registry import allocations
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.db import registry_conn
 from algua.registry.live_gate import (
     ALLOWED_SIGNERS_PATH,
     LiveAuthorizationError,

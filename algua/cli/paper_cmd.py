@@ -18,10 +18,8 @@ from algua.cli._common import (
     authenticate_actor,
     breach_payload,
     ok,
-    registry_conn,
     resolve_drawdown_breaker,
     resolve_wall_clock_window,
-    sync_kb_doc,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -35,6 +33,7 @@ from algua.contracts.types import (
     PositionsBroker,
     ScopedCancelBroker,
 )
+from algua.evaluation.backtest_run import run_backtest_task
 from algua.evaluation.inputs import select_provider as _select_provider
 from algua.evaluation.sweep_run import sweep_task
 from algua.execution import paper_reconcile
@@ -102,10 +101,12 @@ from algua.registry.allocations import (
     active_paper_lane_count,
 )
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.db import registry_conn
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import canonical_run_context
 from algua.registry.intake import Candidate, order_candidates, slice_capital
+from algua.registry.kb_sync import sync_kb_doc
 from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
@@ -726,14 +727,12 @@ def merge_back(
 
         def produce_evidence(ensure_status: str, branch_tip: str) -> str:
             # Authoritative evidence reproduction: the REAL sweep/backtest task bodies are injected.
-            # sweep_task now lives in algua.evaluation.sweep_run (not a cli sibling), so it arrives
-            # via a legal static import; run_backtest_task is still in algua.cli.backtest_cmd, so it
-            # still arrives via importlib (the cli-independence contract forbids a static
-            # paper_cmd->backtest_cmd sibling edge, same rationale as the promote seam below).
+            # sweep_task lives in algua.evaluation.sweep_run and run_backtest_task lives in
+            # algua.evaluation.backtest_run (neither is a cli sibling), so both arrive via a legal
+            # static import.
             # Strict-agent pinning: windows/holdout_frac stay the task defaults;
             # assume_terminal_last_close stays False.
             intake_mod = importlib.import_module("algua.registry.mergeback_intake")
-            bt = importlib.import_module("algua.cli.backtest_cmd")
             params = list(sweep_param) if sweep_param else None
             return intake_mod.produce_evidence(
                 strategy=strategy, branch_tip=branch_tip, ensure_status=ensure_status,
@@ -750,7 +749,7 @@ def merge_back(
                     universe=universe, param=params, rank_by=rank_by,
                     fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
                     delistings=delistings),
-                backtest_fn=lambda: bt.run_backtest_task(
+                backtest_fn=lambda: run_backtest_task(
                     strategy, start=start, end=end, demo=demo, snapshot=snapshot,
                     universe=universe, fundamentals_snapshot=fundamentals_snapshot,
                     news_snapshot=news_snapshot, delistings=delistings))

@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from algua.cli import backtest_cmd
 from algua.cli.main import app
-from algua.evaluation import sweep_run
+from algua.evaluation import backtest_run, sweep_run
 
 runner = CliRunner()
 STRAT = "cross_sectional_momentum"
@@ -50,8 +50,10 @@ def test_run_without_track_omits_tracking_keys():
 
 
 def test_run_track_success_records_run_id(monkeypatch):
+    # run_backtest_task now lives in algua.evaluation.backtest_run; it resolves its own
+    # get_tracker() from that module, not from backtest_cmd.
     monkeypatch.setattr(
-        backtest_cmd, "get_tracker",
+        backtest_run, "get_tracker",
         lambda: SimpleNamespace(log_backtest=lambda *a, **k: "RUN123"))
     p = _payload(["backtest", "run", STRAT, *DEMO, "--track"])
     assert p["mlflow_run_id"] == "RUN123" and "mlflow_tracking_error" not in p

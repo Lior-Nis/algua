@@ -9,15 +9,12 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
-import sys
-from collections.abc import Collection, Iterator
-from contextlib import contextmanager
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor
-from algua.registry.db import connect, migrate
 
 # Exception types that signal a SYSTEMIC / book-wide condition rather than one tenant's setup fault
 # (#374 GATE-2 fix): a locked/unavailable shared SQLite connection during one strategy's setup read
@@ -150,21 +147,6 @@ def resolve_wall_clock_window(start: str | None, end: str | None) -> tuple[str, 
     return start_iso, end_iso
 
 
-@contextmanager
-def registry_conn() -> Iterator[sqlite3.Connection]:
-    """Yield a migrated registry connection, closed on exit.
-
-    The single idiom for opening the registry DB: connect + migrate + auto-close. Replaces the
-    two competing forms (a bare ``_conn()`` and inline ``closing(connect(...))`` + ``migrate``).
-    """
-    conn = connect(get_settings().db_path)
-    try:
-        migrate(conn)
-        yield conn
-    finally:
-        conn.close()
-
-
 def authenticate_actor(
     conn: sqlite3.Connection, *, command: str, name: str, rec: object, stage_to: str,
     declared_actor: Actor, actor_signature: str | None, run_context: str,
@@ -219,33 +201,3 @@ def authenticate_actor(
 def now_iso() -> str:
     """Current UTC instant as an ISO-8601 string — the shared 'now' for persisted timestamps."""
     return datetime.now(UTC).isoformat()
-
-
-def sync_kb_doc(name: str) -> None:
-    """Best-effort: re-sync ``name``'s kb doc + family roster + indexes to current registry truth.
-
-    The transactional side effect (#331) wired into every stage-mutating gate command (research
-    promote, paper promote, backtest --register, registry transition) so the Obsidian vault is
-    never stale-by-default. Two invariants make it safe:
-
-    * OUT OF TRANSACTION — it opens its OWN short registry connection, which callers invoke only
-      AFTER their write transaction has committed and closed, so vault file I/O never runs while a
-      registry write lock is held.
-    * NON-FATAL — any failure is swallowed (with a one-line stderr warning); a stale vault is a
-      curation gap, never a reason to break or roll back a real promotion. The binding audit (the
-      ``gate_evaluations`` row + result JSON) is always-on and reproducible-by-hash regardless.
-
-    Lazy imports keep the mlflow-importing knowledge layer off the hot path of unrelated commands.
-    """
-    try:
-        from algua.knowledge.sync import sync_strategy_and_dependents
-        from algua.registry.repository import kb_metadata
-        from algua.registry.store import SqliteStrategyRepository
-
-        with registry_conn() as conn:
-            rec = SqliteStrategyRepository(conn).get(name)
-        sync_strategy_and_dependents(
-            get_settings(), name, stage=rec.stage.value, metadata=kb_metadata(rec)
-        )
-    except Exception as exc:  # noqa: BLE001 — vault curation must never break a promotion
-        print(f"warning: kb doc sync for {name!r} failed: {exc}", file=sys.stderr)

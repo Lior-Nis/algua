@@ -4,11 +4,12 @@ import re
 
 import typer
 
-from algua.cli._common import ok, registry_conn
+from algua.cli._common import ok
 from algua.cli.app import emit
 from algua.cli.errors import json_errors
 from algua.contracts.idea import DataCapability, IdeaStatus, SourceType
 from algua.data.capabilities import supported_capabilities
+from algua.registry.db import registry_conn
 from algua.registry.ideas import Collision, IdeaRepository
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.ideas import classify_status

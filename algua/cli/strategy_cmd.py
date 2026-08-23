@@ -6,7 +6,7 @@ from pathlib import Path
 
 import typer
 
-from algua.cli._common import ok, registry_conn
+from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -21,6 +21,7 @@ from algua.knowledge.sync import (
     sync_strategy_doc,
 )
 from algua.knowledge.templates import scaffold_family_doc, scaffold_strategy_doc
+from algua.registry.db import registry_conn
 from algua.registry.repository import StrategyNotFound, kb_metadata
 from algua.registry.store import SqliteStrategyRepository
 from algua.strategies.loader import list_strategies

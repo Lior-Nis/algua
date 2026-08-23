@@ -7,11 +7,7 @@ from pathlib import Path
 import typer
 
 from algua.audit.log import append as audit_append
-from algua.cli._common import (
-    ok,
-    registry_conn,
-    sync_kb_doc,
-)
+from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -26,7 +22,9 @@ from algua.execution.lane_exit import (
 from algua.knowledge.sync import sync_strategy_doc
 from algua.registry import live_gate, transitions
 from algua.registry.approvals import compute_artifact_hashes, record_approval
+from algua.registry.db import registry_conn
 from algua.registry.gate_history import strategy_gate_history
+from algua.registry.kb_sync import sync_kb_doc
 from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, LiveAuthorizationError
 from algua.registry.repository import StrategyRecord, kb_metadata
 from algua.registry.store import SqliteStrategyRepository

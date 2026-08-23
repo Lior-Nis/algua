@@ -11,8 +11,6 @@ from algua.cli._common import (
     now_iso,
     ok,
     project,
-    registry_conn,
-    sync_kb_doc,
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -28,7 +26,9 @@ from algua.evaluation.inputs import (
 )
 from algua.knowledge.experience import write_experience_note
 from algua.observability.log import get_logger
+from algua.registry.db import registry_conn
 from algua.registry.human_actor import canonical_run_context
+from algua.registry.kb_sync import sync_kb_doc
 from algua.registry.negative_results import (
     build_gate_fail_record,
     record_negative_result,

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import typer
 
 from algua.calendar.factory import get_calendar
-from algua.cli._common import ok, registry_conn
+from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.execution.fleet_health import (
@@ -15,6 +15,7 @@ from algua.execution.fleet_health import (
     fleet_status,
 )
 from algua.execution.order_state import tick_snapshot_series
+from algua.registry.db import registry_conn
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt
 
