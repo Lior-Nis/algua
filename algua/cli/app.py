@@ -59,7 +59,7 @@ def _skip_row(name: str, detail: str) -> dict[str, Any]:
 
 
 def _registry_db_detail() -> str:
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
 
     with registry_conn():
         pass
@@ -76,8 +76,8 @@ def _knowledge_base_detail() -> str:
     """Knowledge-base drift probe: registry stage is read at the seam and passed in, so the
     knowledge layer stays registry-free. Drift (a missing doc or a stale synced stage) raises,
     so ``_check`` renders it as a failed check with the drift detail."""
-    from algua.cli._common import registry_conn
     from algua.knowledge.sync import kb_check
+    from algua.registry.db import registry_conn
     from algua.registry.store import SqliteStrategyRepository
 
     with registry_conn() as conn:
@@ -116,7 +116,7 @@ def _global_halt_detail() -> str:
     """Required safety-state probe (gates in EVERY mode): is the account-wide halt engaged? A green
     pre-flight while a global halt is live would hide that no trading tick can start — every tick
     raises on its next call — so an engaged halt raises here and flips ``doctor`` red."""
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
     from algua.risk import global_halt
 
     with registry_conn() as conn:
@@ -132,7 +132,7 @@ def _global_halt_detail() -> str:
 def _kill_switches_detail() -> str:
     """Advisory safety-state probe: are any per-strategy kill switches tripped? A tripped switch
     blocks that strategy from trading; surface it rather than reporting all-green."""
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
     from algua.risk import kill_switch
 
     with registry_conn() as conn:
@@ -156,8 +156,8 @@ def _live_authorizations_detail() -> str:
     ``doctor`` is deliberately stricter than ``live run-all`` (which skips a revoked strategy and
     trades the rest): the pre-flight's job is to make the operator notice the bad one before a
     cycle starts. Authorization ONLY — not allocation/kill-switch/candidate presence (#400)."""
-    from algua.cli._common import registry_conn
     from algua.contracts.lifecycle import Stage
+    from algua.registry.db import registry_conn
     from algua.registry.live_gate import ALLOWED_SIGNERS_PATH, verify_live_authorization
     from algua.registry.store import SqliteStrategyRepository
 

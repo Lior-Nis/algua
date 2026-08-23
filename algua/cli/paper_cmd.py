@@ -15,16 +15,11 @@ from algua.calendar.factory import get_calendar
 from algua.cli._common import (
     SYSTEMIC_SETUP_EXCEPTIONS,
     StrategySetupError,
-    authenticate_actor,
     breach_payload,
     ok,
-    registry_conn,
     resolve_drawdown_breaker,
     resolve_wall_clock_window,
-    sync_kb_doc,
-    utc,
 )
-from algua.cli._common import select_provider as _select_provider
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
@@ -37,6 +32,9 @@ from algua.contracts.types import (
     PositionsBroker,
     ScopedCancelBroker,
 )
+from algua.evaluation.backtest_run import run_backtest_task
+from algua.evaluation.inputs import select_provider as _select_provider
+from algua.evaluation.sweep_run import sweep_task
 from algua.execution import paper_reconcile
 from algua.execution.alpaca_broker import (
     AlpacaLiveReadOnlyBroker,
@@ -93,6 +91,7 @@ from algua.observability import (
 )
 from algua.operator.journal import JsonlJournal
 from algua.operator.mergeback import RealGitOps, merge_back_lock, run_merge_back
+from algua.primitives.timeparse import utc
 from algua.registry import allocations
 from algua.registry.allocations import (
     AllocationError,
@@ -101,10 +100,13 @@ from algua.registry.allocations import (
     active_paper_lane_count,
 )
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.db import registry_conn
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
-from algua.registry.human_actor import canonical_run_context
+from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import Candidate, order_candidates, slice_capital
+from algua.registry.kb_sync import sync_kb_doc
+from algua.registry.promote_run import promote_task
 from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
@@ -724,12 +726,13 @@ def merge_back(
                     merge_sha=merge_sha, base_sha=base_sha)
 
         def produce_evidence(ensure_status: str, branch_tip: str) -> str:
-            # Authoritative evidence reproduction: the REAL sweep/backtest task bodies are injected
-            # (importlib — the cli-independence contract forbids a static paper_cmd->backtest_cmd
-            # sibling edge, same rationale as the promote seam below). Strict-agent pinning:
-            # windows/holdout_frac stay the task defaults; assume_terminal_last_close stays False.
+            # Authoritative evidence reproduction: the REAL sweep/backtest task bodies are injected.
+            # sweep_task lives in algua.evaluation.sweep_run and run_backtest_task lives in
+            # algua.evaluation.backtest_run (neither is a cli sibling), so both arrive via a legal
+            # static import.
+            # Strict-agent pinning: windows/holdout_frac stay the task defaults;
+            # assume_terminal_last_close stays False.
             intake_mod = importlib.import_module("algua.registry.mergeback_intake")
-            bt = importlib.import_module("algua.cli.backtest_cmd")
             params = list(sweep_param) if sweep_param else None
             return intake_mod.produce_evidence(
                 strategy=strategy, branch_tip=branch_tip, ensure_status=ensure_status,
@@ -741,27 +744,26 @@ def merge_back(
                     "fundamentals_snapshot": fundamentals_snapshot,
                     "news_snapshot": news_snapshot, "delistings": delistings,
                     "rank_by": rank_by, "universe": universe, "start": start, "end": end},
-                sweep_fn=lambda: bt.sweep_task(
+                sweep_fn=lambda: sweep_task(
                     strategy, start=start, end=end, demo=demo, snapshot=snapshot,
                     universe=universe, param=params, rank_by=rank_by,
                     fundamentals_snapshot=fundamentals_snapshot, news_snapshot=news_snapshot,
                     delistings=delistings),
-                backtest_fn=lambda: bt.run_backtest_task(
+                backtest_fn=lambda: run_backtest_task(
                     strategy, start=start, end=end, demo=demo, snapshot=snapshot,
                     universe=universe, fundamentals_snapshot=fundamentals_snapshot,
                     news_snapshot=news_snapshot, delistings=delistings))
 
         def promote(attempt_token: str) -> object:
-            # Reach research_cmd.promote_task via a DYNAMIC import (importlib), not a static
-            # `from algua.cli.research_cmd import ...` — the cli-independence import-linter contract
-            # forbids a paper_cmd->research_cmd sibling edge (#165), and it traces static imports
-            # even inside a function; a dynamic import keeps the two command modules structurally
-            # independent while still driving the promote at runtime. Strict-agent inputs ONLY — no
+            # promote_task lives in algua.registry.promote_run (not a cli sibling), so it arrives
+            # via a legal static `from algua.registry.promote_run import promote_task` at module
+            # scope — the cli-independence import-linter contract (#165) forbids a
+            # paper_cmd<->research_cmd sibling edge, but neither command module imports the other
+            # here; both import the same shared registry module. Strict-agent inputs ONLY — no
             # relaxation flags reach the seam, so a human-only relaxation is impossible by
             # construction. The per-attempt ``attempt_token`` is stamped on the gate row so the
             # driver reads the outcome authoritatively (finding #5). promote_task opens+closes its
             # OWN registry_conn (per its contract).
-            promote_task = importlib.import_module("algua.cli.research_cmd").promote_task
             return promote_task(
                 name=strategy, universe=universe, start=start, end=end,
                 demo=demo, snapshot=snapshot, fundamentals_snapshot=fundamentals_snapshot,

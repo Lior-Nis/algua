@@ -212,9 +212,9 @@ def test_duplicate_add_emits_json_error():
 
 
 def test_registry_command_closes_connection(monkeypatch, tmp_path):
-    # The connect+migrate+close lifecycle now lives in cli._common.registry_conn (the single
+    # The connect+migrate+close lifecycle now lives in algua.registry.db.registry_conn (the single
     # shared idiom), so the connection factory is patched there.
-    from algua.cli import _common
+    from algua.registry import db as _db
 
     closed = []
 
@@ -228,7 +228,7 @@ def test_registry_command_closes_connection(monkeypatch, tmp_path):
         conn.row_factory = sqlite3.Row
         return conn
 
-    monkeypatch.setattr(_common, "connect", connect_tracking)
+    monkeypatch.setattr(_db, "connect", connect_tracking)
 
     result = runner.invoke(app, ["registry", "add", "alpha"])
 

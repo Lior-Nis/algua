@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from algua.cli import backtest_cmd
 from algua.cli.main import app
+from algua.evaluation import backtest_run, sweep_run
 
 runner = CliRunner()
 STRAT = "cross_sectional_momentum"
@@ -49,8 +50,10 @@ def test_run_without_track_omits_tracking_keys():
 
 
 def test_run_track_success_records_run_id(monkeypatch):
+    # run_backtest_task now lives in algua.evaluation.backtest_run; it resolves its own
+    # get_tracker() from that module, not from backtest_cmd.
     monkeypatch.setattr(
-        backtest_cmd, "get_tracker",
+        backtest_run, "get_tracker",
         lambda: SimpleNamespace(log_backtest=lambda *a, **k: "RUN123"))
     p = _payload(["backtest", "run", STRAT, *DEMO, "--track"])
     assert p["mlflow_run_id"] == "RUN123" and "mlflow_tracking_error" not in p
@@ -70,7 +73,9 @@ def test_walk_forward_track_failure_is_non_fatal(monkeypatch):
 
 
 def test_sweep_track_failure_is_non_fatal(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "get_tracker", lambda: SimpleNamespace(log_sweep=_boom))
+    # sweep_task now lives in algua.evaluation.sweep_run; it resolves its own get_tracker() from
+    # that module, not from backtest_cmd.
+    monkeypatch.setattr(sweep_run, "get_tracker", lambda: SimpleNamespace(log_sweep=_boom))
     p = _payload(["backtest", "sweep", STRAT, *DEMO, "--param", "lookback=20,40", "--track"])
     assert p["ok"] is True
     assert p["mlflow_run_id"] is None
@@ -90,7 +95,7 @@ def test_walk_forward_summary_track_failure_keeps_error(monkeypatch):
 
 
 def test_sweep_summary_track_failure_keeps_error(monkeypatch):
-    monkeypatch.setattr(backtest_cmd, "get_tracker", lambda: SimpleNamespace(log_sweep=_boom))
+    monkeypatch.setattr(sweep_run, "get_tracker", lambda: SimpleNamespace(log_sweep=_boom))
     p = _payload(
         ["backtest", "sweep", STRAT, *DEMO, "--param", "lookback=20,40", "--track", "--summary"])
     assert p["summary"] is True

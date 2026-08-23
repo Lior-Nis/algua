@@ -57,7 +57,7 @@ def test_track_failure_is_non_fatal(tmp_path, monkeypatch):
     with the full result, surfacing the failure as a non-fatal `mlflow_tracking_error`."""
     from types import SimpleNamespace
 
-    import algua.cli.backtest_cmd as bt
+    import algua.evaluation.backtest_run as bt
 
     def boom(*a, **k):
         raise RuntimeError("mlflow down")

@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 import typer
 
 from algua.audit import log as audit_log
-from algua.cli._common import registry_conn
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.registry.db import registry_conn
 
 audit_app = typer.Typer(help="Operational audit trail (read-only)", no_args_is_help=True)
 app.add_typer(audit_app, name="audit")

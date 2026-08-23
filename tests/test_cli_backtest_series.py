@@ -10,8 +10,8 @@ from typer.testing import CliRunner
 
 from algua.backtest.engine import BacktestError
 from algua.backtest.result import BacktestResult
-from algua.cli.backtest_cmd import emit_series_file
 from algua.cli.main import app
+from algua.evaluation.series import emit_series_file
 
 runner = CliRunner()
 

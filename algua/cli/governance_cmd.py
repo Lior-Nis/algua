@@ -17,12 +17,13 @@ from datetime import UTC, date, datetime
 
 import typer
 
-from algua.cli._common import ok, registry_conn
+from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
 from algua.knowledge import governance
 from algua.knowledge.sync import strategy_doc_path
+from algua.registry.db import registry_conn
 from algua.registry.store import SqliteStrategyRepository
 
 governance_app = typer.Typer(

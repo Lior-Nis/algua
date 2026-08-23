@@ -2042,7 +2042,7 @@ def test_run_paper_strategy_tick_breach_uses_scoped_cancel(monkeypatch, tmp_path
     # A caller-supplied scoped cancel (run-all passes a per-strategy one) must be used on a breach
     # flatten — NOT the broker's account-wide cancel, which would nuke a sibling's resting orders.
     from algua.cli import paper_cmd
-    from algua.cli._common import registry_conn
+    from algua.registry.db import registry_conn
     from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
@@ -2079,7 +2079,8 @@ def test_tick_breach_handler_failure_propagates_not_setup_error(monkeypatch, tmp
     # marker — it must PROPAGATE RAW so run-all fails closed while the breach's side effects are
     # uncertain (siblings ticking on with an ambiguous breach is worse than stopping).
     from algua.cli import paper_cmd
-    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.cli._common import StrategySetupError
+    from algua.registry.db import registry_conn
     from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
@@ -2110,7 +2111,8 @@ def test_tick_post_submission_ledger_failure_propagates_not_setup_error(monkeypa
     # the venue — must PROPAGATE (abort) rather than be swallowed as a setup_error: a live order
     # with missing ledger attribution is worse than stopping.
     from algua.cli import paper_cmd
-    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.cli._common import StrategySetupError
+    from algua.registry.db import registry_conn
     from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
@@ -2146,7 +2148,8 @@ def test_tick_reserve_buy_lambda_crash_propagates_not_setup_error(monkeypatch, t
     # part of live sizing) must PROPAGATE, not be demoted to a setup_error — the reserve pool state
     # is ambiguous, so fail closed.
     from algua.cli import paper_cmd
-    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.cli._common import StrategySetupError
+    from algua.registry.db import registry_conn
     from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
@@ -2178,7 +2181,8 @@ def test_tick_missing_allocation_is_setup_error(monkeypatch, tmp_path):
     # #374 GATE-2 (1): a PRE-side-effect fault — here a missing allocation, discovered before any
     # broker/ledger side effect — IS a StrategySetupError (isolatable by run-all).
     from algua.cli import paper_cmd
-    from algua.cli._common import StrategySetupError, registry_conn
+    from algua.cli._common import StrategySetupError
+    from algua.registry.db import registry_conn
     from algua.registry.gating import load_gated_strategy
 
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
