@@ -199,12 +199,21 @@ def authenticate_actor(
 
     ``rec`` is the strategy record (used for ``rec.id`` + ``rec.stage``). Lives here (not
     ``algua.cli._common``) because ``promote_task`` — the ``backtested -> candidate`` gate body —
-    calls it directly and must not import the CLI layer (registry composes cli, never the reverse;
+    calls it directly and must not import the CLI layer (cli composes registry, never the reverse;
     the same reasoning that moved ``registry_conn``/``sync_kb_doc`` out of ``cli._common`` earlier
-    in this stage). Imports ``typer``, ``algua.cli.app.emit``, and ``algua.registry.approvals``
-    lazily so this module stays free of a heavy/cli import at load time — this function is the one
-    place in ``algua.registry`` that legitimately prints a CLI JSON envelope, mirroring how
-    ``HumanActorChallengeRequired``'s own docstring already anticipates "the CLI prints it"."""
+    in this stage).
+
+    KNOWN LAYERING DEBT (issue filed): the challenge branch below still reaches UP into the CLI —
+    it lazily imports ``typer`` and ``algua.cli.app.emit`` to print the challenge envelope and exit.
+    That is a real ``registry -> cli`` edge, and it is the ONLY one: a
+    ``forbidden: algua.registry -> algua.cli`` contract fails on exactly this line and nothing else.
+    It is deliberately NOT hidden — the lazy import is for load-time weight, not to dodge the
+    linter,
+    and the contract is left unwritten rather than written-with-an-exemption so the debt stays
+    visible. The fix is to let ``HumanActorChallengeRequired`` propagate and have the CLI catch and
+    print it (which is what that exception's own docstring already anticipates: "the CLI prints
+    it"); that changes error-propagation semantics on the #329 human-actor auth path, so it wants
+    its own change and its own tests, not a tail-end edit to a refactor."""
     import typer
 
     from algua.cli.app import emit

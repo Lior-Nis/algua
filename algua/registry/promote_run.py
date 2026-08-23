@@ -5,7 +5,7 @@ seam (#485) — see ``algua.cli.paper_cmd``'s merge-back saga.
 Moved out of ``algua.cli.research_cmd`` so ``paper_cmd``'s merge-back saga can reach the REAL
 promote body via a legal static import instead of a dynamic ``importlib`` dodge around the
 cli-independence contract (issue #165) — the last cli->cli escape on this seam. This package is
-importable by both ``cli`` and ``research_batch_cmd`` without ``algua.registry`` importing
+importable by both ``cli`` and ``registry`` without ``algua.registry`` importing
 ``algua.cli`` itself. ``promote_task`` opens+closes its own registry connection, re-syncs the kb
 doc, and records the advisory negative-result capture exactly as it did in ``research_cmd``, via the
 shared ``algua.registry.db.registry_conn``, ``algua.registry.kb_sync.sync_kb_doc``, and
@@ -73,7 +73,6 @@ def capture_gate_fail_experience(
     """
     ledger: dict[str, Any] = {"status": "skipped", "id": None, "error": None}
     note: dict[str, Any] = {"status": "skipped", "path": None, "error": None}
-    # Current UTC instant as an ISO-8601 string — the shared 'now' for persisted timestamps.
     created_at = now_iso()
     record = build_gate_fail_record(
         name, decision.to_dict(), actor=actor.value,

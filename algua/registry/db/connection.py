@@ -1,6 +1,7 @@
 """``connect()`` -- the sqlite handle every registry caller opens, and its pragma posture.
 
-Deliberately does NOT call ``migrate()``: callers pair the two (see ``algua/cli/_common.py``).
+Deliberately does NOT call ``migrate()``: callers pair the two (see ``registry_conn`` in this
+package's ``__init__.py``).
 """
 from __future__ import annotations
 

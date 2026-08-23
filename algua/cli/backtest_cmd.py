@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import typer
 
 from algua.backtest.walkforward import walk_forward
@@ -18,8 +16,8 @@ from algua.evaluation.inputs import (
     resolve_universe_inputs,
 )
 from algua.evaluation.sweep_run import sweep_task
-from algua.tracking.base import TRACKING_SKIPPED
 from algua.tracking.factory import get_tracker
+from algua.tracking.record import record_tracking
 
 backtest_app = typer.Typer(help="Run backtests", no_args_is_help=True)
 app.add_typer(backtest_app, name="backtest")
@@ -41,32 +39,6 @@ _SWEEP_SUMMARY_KEYS = (
     "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "mlflow_run_id",
     "mlflow_tracking_error", "mlflow_tracking_skipped",
 )
-
-
-def _record_tracking(payload: dict, call: Callable[[], str]) -> None:
-    """Best-effort tracker logging. The backtest result already exists by the time this runs, so a
-    tracker failure (flaky URI, serialization bug) must NOT discard a completed evaluation (#341).
-    On success record `mlflow_run_id`; on failure record a non-fatal `mlflow_tracking_error` (with
-    the exception type for triage) and warn to stderr — never raise. Keys are added ONLY when
-    tracking was requested, so the JSON distinguishes FOUR states: not-requested (no keys),
-    succeeded (`mlflow_run_id` set, no error), failed (`mlflow_run_id` null + error), and skipped
-    (`mlflow_run_id` null + `mlflow_tracking_skipped`, when a no-op backend was selected — distinct
-    from failed so a null run id never has to be read as "the error key went missing")."""
-    try:
-        run_id = call()
-    except Exception as exc:  # noqa: BLE001 - tracking is a best-effort side effect
-        detail = f"{type(exc).__name__}: {exc}"
-        payload["mlflow_run_id"] = None
-        payload["mlflow_tracking_error"] = detail
-        typer.echo(f"warning: mlflow tracking failed (result preserved): {detail}", err=True)
-        return
-    if run_id == TRACKING_SKIPPED:
-        # A no-op backend was selected. Report that honestly rather than as a null run id, which
-        # would be indistinguishable from a failure whose error key went missing.
-        payload["mlflow_run_id"] = None
-        payload["mlflow_tracking_skipped"] = "tracking backend logs nothing"
-        return
-    payload["mlflow_run_id"] = run_id
 
 
 @backtest_app.command("run")
@@ -180,7 +152,7 @@ def walk_forward_cmd(
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
-        _record_tracking(payload, lambda: get_tracker().log_walk_forward(
+        record_tracking(payload, lambda: get_tracker().log_walk_forward(
             result, strategy.config.params, tracking_uri=get_settings().mlflow_tracking_uri
         ))
     out = ok(payload)

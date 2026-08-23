@@ -7,7 +7,6 @@ These four functions (``select_provider``, ``resolve_eval_inputs``, ``resolve_de
 code cannot reach them where they were. Moving them here lets both ``cli`` and ``registry`` import
 them without either importing the other.
 
-``resolve_eval_inputs`` used ``algua.cli._common.utc`` to parse its ``start``/``end`` strings; that
 The ISO-parse helper these functions need lives in ``algua.primitives.timeparse`` — the
 stdlib-only leaf — rather than in ``cli/_common``, because ``_common`` imports
 ``algua.registry.db`` and pulling it in here would drag ``cli`` and transitively ``registry`` back

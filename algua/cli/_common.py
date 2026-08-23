@@ -1,4 +1,4 @@
-"""Shared CLI helpers — the one place command modules reach for connection and time boilerplate.
+"""Shared CLI helpers — the JSON-envelope and flag-resolution surface command modules reach for.
 
 This exists so command modules stop importing each other's private helpers (a cross-module
 private-import smell): the public names here are the sanctioned shared surface.

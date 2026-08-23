@@ -138,7 +138,8 @@ def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
 
     # paper_cmd's merge-back closure calls the bare `promote_task` name, which resolves via its
     # OWN module globals (`from algua.registry.promote_run import promote_task`) — patch the
-    # binding paper_cmd actually reads, not research_cmd's (a separate, now-unrelated re-export).
+    # binding paper_cmd actually reads. research_cmd imports promote_task too, but that is its own
+    # typer command's genuine use, not a re-export, and patching it would not affect this path.
     monkeypatch.setattr(paper_cmd, "promote_task", _fake_promote)
 
     def _fake_intake(conn, *, equity, max_concurrent, actor):

@@ -28,9 +28,9 @@ class ExperimentTracker(Protocol):
 
     A backend returns a real MLflow-style run id on success, or ``TRACKING_SKIPPED`` to signal it
     logged nothing (e.g. a no-op backend). It must never fabricate a plausible-looking run id on a
-    skip or a failure: ``algua.cli.backtest_cmd._record_tracking`` maps a real id to the payload's
+    skip or a failure: ``algua.tracking.record.record_tracking`` maps a real id to the payload's
     "succeeded" state, so an invented id would be indistinguishable from an actual logged run. See
-    ``_record_tracking`` for the full four-state contract (not-requested / succeeded / failed /
+    ``record_tracking`` for the full four-state contract (not-requested / succeeded / failed /
     skipped).
     """
 
@@ -49,7 +49,7 @@ class ExperimentTracker(Protocol):
 # NoopTracker (stage 5a: wiring the #45 Protocol / PR#110 deferral)
 # ---------------------------------------------------------------------------
 
-#: Returned by :class:`NoopTracker` in place of a run id. ``_record_tracking`` translates this into
+#: Returned by :class:`NoopTracker` in place of a run id. ``record_tracking`` translates this into
 #: an explicit ``mlflow_tracking_skipped`` key rather than letting a null run id masquerade as a
 #: failure — the JSON contract distinguishes "backend disabled" from "backend errored".
 TRACKING_SKIPPED = "__tracking_skipped__"
