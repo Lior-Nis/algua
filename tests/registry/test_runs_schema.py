@@ -9,8 +9,13 @@ from algua.registry.db.migrate import migrate
 # Every metric column must name its sample class. Spec §3.1: a bare `sharpe` column would let the
 # UI sort the most overfit number in the system to the top.
 _SAMPLE_SUFFIXES = ("_is", "_oos", "_realized", "_window_sharpe", "_positive_windows")
+# Includes mean_/std_/min_/pct_ (the window-dispersion columns) — an earlier version of this list
+# omitted them, so the loop below silently never checked mean_window_sharpe/std_window_sharpe/
+# min_window_sharpe/pct_positive_windows at all (their names never start with any of the other
+# prefixes). See tests/registry/test_runs_store.py::test_metric_and_provenance_columns_are_bound_
+# to_the_ddl, which independently subsumes this check against the full vocabulary.
 _METRIC_PREFIXES = ("sharpe", "sortino", "total_return", "max_drawdown", "ann_vol",
-                    "cagr", "calmar", "n_obs")
+                    "cagr", "calmar", "n_obs", "mean_", "std_", "min_", "pct_")
 
 
 def _fresh() -> sqlite3.Connection:
@@ -28,10 +33,10 @@ def test_runs_tables_exist() -> None:
     assert "run_metrics" in names
 
 
-def test_schema_version_is_42() -> None:
+def test_schema_version_is_43() -> None:
     conn = _fresh()
-    assert SCHEMA_VERSION == 42
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 42
+    assert SCHEMA_VERSION == 43
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
 
 
 def test_no_bare_sharpe_column() -> None:
@@ -58,7 +63,7 @@ def test_migrate_is_idempotent() -> None:
     conn = _fresh()
     migrate(conn)
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 42
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
 
 
 def test_migrates_a_legacy_db_lacking_runs() -> None:

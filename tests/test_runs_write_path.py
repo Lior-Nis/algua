@@ -78,6 +78,21 @@ def test_sweep_records_a_parent_and_one_child_per_combo() -> None:
     assert all(c["mean_window_sharpe"] is not None for c in children)
 
 
+def test_sweep_parent_does_not_conflate_trial_and_window_sharpe() -> None:
+    """FIX 2: `mean_window_sharpe` on a sweep_trial/walk_forward row is the mean ACROSS
+    WALK-FORWARD WINDOWS of ONE evaluation; the sweep parent's own cross-COMBO mean (`SweepResult
+    .trial_sharpe_mean`) is a different statistic and must never share that column (spec §3.1 —
+    a single sortable column must be comparable within itself)."""
+    _run_sweep()
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        parent = repo.list_runs(kind="sweep")[0]
+        extra = {r["key"]: r["value"] for r in conn.execute(
+            "SELECT key, value FROM run_metrics WHERE run_id=?", (parent["id"],))}
+    assert parent["mean_window_sharpe"] is None
+    assert extra["mean_trial_sharpe"] is not None
+
+
 def test_sweep_trial_count_matches_the_recorded_breadth() -> None:
     """The point of the slice: n_combos stops being an assertion and becomes a countable set."""
     _run_sweep()
@@ -192,6 +207,21 @@ def test_gate_run_links_to_its_walk_forward_run() -> None:
         gate = repo.list_runs(kind="gate")[0]
         wf = repo.list_runs(kind="walk_forward")[0]
     assert json.loads(gate["derived_from"]) == [wf["id"]]
+
+
+def test_gate_run_names_its_own_gate_evaluations_row() -> None:
+    """FIX 1: a `gate` run must be able to NAME its own gate_evaluations row — the join
+    `runs show` / the gate bullet card (spec §5, §6 view 5) need to reach decision_json (the 11
+    gate checks, per-regime Sharpes) that the run row's own fixed scalar columns deliberately do
+    not carry. Exercised on the FAILING path (like the sibling test above) — a failing gate still
+    writes both rows in the same transaction."""
+    _promote(expect_pass=False)
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        gate_run = repo.list_runs(kind="gate")[0]
+        ge = conn.execute("SELECT id FROM gate_evaluations").fetchone()
+    assert ge is not None
+    assert gate_run["gate_id"] == ge["id"]
 
 
 def test_a_rolled_back_gate_leaves_no_phantom_run() -> None:

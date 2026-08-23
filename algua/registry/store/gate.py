@@ -428,8 +428,12 @@ class GateLedgerMixin(TransitionMixin):
                 # though final_passed == provisional_passed unconditionally today (the LORD++
                 # binding-rewrite branch is retired, stage 4a), a run row whose `passed` disagrees
                 # with its own gate row would be a corrupt audit trail if that ever changes back.
+                # (run_row's own "passed" key, if any, is dead — always overwritten here.)
                 row = dict(run_row)
                 row["passed"] = final_passed
+                # Name the gate_evaluations row THIS run derives from — minted one line above, in
+                # the SAME BEGIN IMMEDIATE, so the two ids can never mismatch or drift apart.
+                row["gate_id"] = gate_id
                 self._insert_run_locked("gate", rec.name, **row)
 
             updated_rec: StrategyRecord | None = None

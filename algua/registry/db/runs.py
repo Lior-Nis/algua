@@ -84,6 +84,12 @@ CREATE TABLE IF NOT EXISTS runs (
 
     -- Gate outcome (NULL for non-gate kinds).
     passed INTEGER,
+    -- The gate_evaluations row THIS run derives from. NULL for every non-`gate` kind. The join to
+    -- gate_evaluations.decision_json — the per-check table (the 11 gate checks, binding vs
+    -- advisory) and the per-regime Sharpes that this row's own fixed scalar columns deliberately
+    -- do not carry. A `gate` run's gate_id is set at the SAME BEGIN IMMEDIATE that writes the
+    -- gate_evaluations row it names, so the two ids are never mismatched (v43).
+    gate_id INTEGER,
     -- Set on a `sweep` parent when its trial rows were capped at MAX_PERSISTED_TRIALS. NULL means
     -- the trial set is COMPLETE. A silently truncated set would make the funnel-wide distribution
     -- lie about the breadth it depicts, so a reader must be able to tell.

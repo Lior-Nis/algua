@@ -120,7 +120,7 @@ Each resolved one at a time, with a recommendation, in the grilling session.
 | Q1 | Subject | **Research** performance (backtest / holdout), not realized equity. Realized equity stays a thin, honest strip that is empty until it is not. |
 | Q2 | What is a run | **Any evaluation**: `backtest`, `walk_forward`, `gate`, **and every `sweep_trial`** as a child run of a parent sweep. |
 | Q3 | Metric representation | **Fixed, versioned vocabulary**, sample-suffixed. Free-form config JSON. Overflow key-value for the long tail. |
-| Q4 | Store location | **Registry DB**, schema v42. Trials batched into the sweep's own transaction. |
+| Q4 | Store location | **Registry DB**, schema v42. Trial rows batched into ONE `executemany`, in its own transaction on the sweep's connection (not inside `search_trials`'s own transaction — see §4.4's known follow-up). |
 | Q5 | Views | Ranked run list, IS-vs-OOS scatter, funnel-wide trial distribution, return-series overlay, gate bullet card. Defer parallel coordinates, Sankey funnel, correlation heatmap. |
 | Q6 | Read surface | Three pure reads: `runs list` / `runs show` / `runs series`. Runs carry `derived_from` and `components[]`. |
 | Q7 | Placement | **Research becomes the runs surface.** Idea pool demoted. Tab count stays four. |
@@ -199,11 +199,20 @@ future model-bearing run wants. Queryable, but explicitly **not** part of the fi
 `search_trials` today records `n_combos`, `grid_json`, and aggregate `trial_sharpe_mean` /
 `trial_sharpe_var_ann` — the per-trial results are discarded. Under Q2 each trial becomes a run.
 
-**Write pattern:** one batched insert of all trial rows *inside the same transaction* that writes
-the `search_trials` row. `sweep()` is parallelised across processes; 70 concurrent writers against
-the governance DB is the wrong shape. One writer, one transaction, at the end. This is also an
-integrity gain: `n_combos` stops being an unverifiable assertion and becomes a count you can
-`SELECT`.
+**Write pattern, as actually implemented:** one batched `executemany` insert of all trial rows, in
+its OWN transaction, on the SAME connection that writes the `search_trials` row — NOT inside that
+row's transaction. `sweep()` is parallelised across processes; 70 concurrent writers against the
+governance DB is the wrong shape, so the trial-row batch is still one writer, one transaction, at
+the end (this part holds). This is also an integrity gain: `n_combos` stops being an unverifiable
+assertion and becomes a count you can `SELECT`.
+
+**Known follow-up, deliberately not taken in this slice:** the trial-row batch and the
+`search_trials` aggregate are two separate commits on one connection, not one atomic unit — a crash
+between them can commit one without the other. Folding them into a single transaction would change
+`record_search_trial`'s transaction semantics, and that function is a CODEOWNERS-protected
+governance writer feeding the promotion gate's multiple-testing defense (the LORD++/FDR ledger).
+That is not a tail-of-slice change, so it is left as a documented residual rather than silently
+implied by an "inside the same transaction" claim this spec no longer makes.
 
 **Bound:** `MAX_N_COMBOS = 1_000_000_000` exists for `SUM` overflow-safety in the family-lifetime
 breadth seed, not as a realistic grid size. Harmless while a trial is a scalar; once trials are

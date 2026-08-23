@@ -925,10 +925,12 @@ class RunLedger(Protocol):
         extra_metrics: dict[str, float | None] | None = None,
         passed: bool | None = None,
         trials_truncated_at: int | None = None,
+        gate_id: int | None = None,
     ) -> int:
         """Insert one run row (and its overflow metrics), in its own transaction, and return its
         id. ``metrics`` keys MUST come from the fixed vocabulary (``METRIC_COLUMNS`` in
-        ``algua/registry/store/runs.py``); anything else raises."""
+        ``algua/registry/store/runs.py``); anything else raises. ``gate_id`` is the
+        ``gate_evaluations.id`` a `gate` run derives from — NULL for every other kind."""
         ...
 
 

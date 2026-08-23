@@ -8,6 +8,7 @@ import pytest
 
 from algua.registry.db.migrate import migrate
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.store.runs import METRIC_COLUMNS, PROVENANCE_COLUMNS
 
 
 @pytest.fixture()
@@ -129,3 +130,39 @@ def test_sweep_trial_rejects_a_metric_outside_the_trial_vocabulary(
     with pytest.raises(ValueError, match="not a sweep-trial metric"):
         repo.record_sweep_trials(parent, "alpha", trials)
     assert repo.list_runs(kind="sweep_trial", strategy_name="alpha") == []
+
+
+def test_metric_and_provenance_columns_are_bound_to_the_ddl() -> None:
+    """Nothing else ties METRIC_COLUMNS / PROVENANCE_COLUMNS to the actual `runs` DDL — a column
+    renamed or dropped in algua/registry/db/runs.py without a matching update here would silently
+    desync the fixed vocabulary from what SQLite actually stores.
+
+    Also SUBSUMES an earlier deferred finding: tests/registry/test_runs_schema.py's
+    `test_no_bare_sharpe_column` checks column naming via a `_METRIC_PREFIXES` allowlist that did
+    not include `mean_`/`std_`/`min_`/`pct_`, so it silently never checked
+    mean_window_sharpe/std_window_sharpe/min_window_sharpe/pct_positive_windows at all. This test
+    instead partitions every real `runs` column into "known non-metric" (identity/lineage/
+    administrative) + PROVENANCE_COLUMNS + METRIC_COLUMNS and asserts nothing is left over — so a
+    column that is metric-shaped but NOT in METRIC_COLUMNS (whatever its name) fails loudly.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    migrate(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+
+    for name in METRIC_COLUMNS:
+        assert name in cols, f"{name!r} in METRIC_COLUMNS is not a real `runs` column"
+    for name in PROVENANCE_COLUMNS:
+        assert name in cols, f"{name!r} in PROVENANCE_COLUMNS is not a real `runs` column"
+
+    # Identity, lineage, and administrative columns — everything in the DDL that is neither
+    # provenance nor a measurement.
+    _NON_METRIC = {
+        "id", "kind", "strategy_name", "strategy_id", "created_at", "metric_schema_version",
+        "derived_from", "components", "config_json", "passed", "trials_truncated_at", "gate_id",
+    } | set(PROVENANCE_COLUMNS)
+    metric_shaped = cols - _NON_METRIC
+    assert metric_shaped == set(METRIC_COLUMNS), (
+        "a `runs` column exists that is neither a known non-metric column nor in the fixed "
+        f"metric vocabulary: {metric_shaped - set(METRIC_COLUMNS)}"
+    )

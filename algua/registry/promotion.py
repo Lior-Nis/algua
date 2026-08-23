@@ -20,7 +20,7 @@ from algua.registry.repository import (
     PendingNovelFamily,
     StrategyRepository,
 )
-from algua.registry.runs import provenance_of, walk_forward_metrics
+from algua.registry.runs import provenance_of, record_walk_forward_run, walk_forward_metrics
 from algua.research.clustering import (
     _RETURN_STANDALONE_ESCALATION,
     MERGE_THRESHOLD,
@@ -641,13 +641,10 @@ def run_gate(
 
     # The walk-forward this decision was computed on, as its own run row. Recorded here rather
     # than by the CLI because `research promote` runs the walk-forward internally — this is the
-    # only place its result exists.
-    wf_run_id = repo.record_run(
-        "walk_forward", rec.name,
-        strategy_id=rec.id,
-        provenance=provenance_of(wf),
-        metrics=walk_forward_metrics(wf),
-    )
+    # only place its result exists. Routed through the shared recorder (not an inline
+    # repo.record_run call) so a `walk_forward` row has ONE shape regardless of which command
+    # produced it.
+    wf_run_id = record_walk_forward_run(repo, rec.name, wf, strategy_id=rec.id)
 
     # Build gate_row (all record_gate_evaluation kwargs, including provisional passed flag).
     gate_row = {
@@ -719,18 +716,23 @@ def run_gate(
         run_row={
             "strategy_id": rec.id,
             "derived_from": [wf_run_id],
-            "passed": decision.passed,
-            "provenance": {
+            # NOTE: no "passed" key here — record_gate_with_fdr_and_maybe_promote (store/gate.py)
+            # unconditionally overwrites it with final_passed, the only value known once this
+            # transaction's checks have run. Setting it here would be dead and misleading.
+            #
+            # Base provenance off the SIBLING walk-forward run's own provenance_of(wf), not a
+            # hand-copied field list: the two rows describe the SAME evaluation and must not drift
+            # (a hand-copy here had already dropped seed/timeframe, silently). Override only the
+            # fields that are GENUINELY different for the gate: code_hash/config_hash/
+            # dependency_hash come from `identity`, recomputed via compute_artifact_hashes(name) —
+            # deliberately NOT wf's own git-HEAD-based hashes (see run_gate's docstring); the
+            # gate's data_source/snapshot_id/universe_name/period_start/period_end are read from
+            # the SAME local variables that were passed into walk_forward(), so they are already
+            # identical to wf's — provenance_of(wf) carries them without an override.
+            "provenance": provenance_of(wf) | {
                 "code_hash": identity.code_hash,
                 "config_hash": identity.config_hash,
                 "dependency_hash": identity.dependency_hash,
-                "data_source": data_source,
-                "snapshot_id": snapshot_id,
-                "universe_name": universe_name,
-                "fundamentals_snapshot": wf.fundamentals_snapshot,
-                "news_snapshot": wf.news_snapshot,
-                "period_start": period_start.isoformat(),
-                "period_end": period_end.isoformat(),
             },
             "metrics": walk_forward_metrics(wf),
             # The ~40 DSR / IR / regime diagnostics: queryable, but deliberately outside the fixed

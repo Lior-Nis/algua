@@ -10,10 +10,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from algua.registry.db import MAX_PERSISTED_TRIALS
+
 if TYPE_CHECKING:
     from algua.backtest.result import BacktestResult
     from algua.backtest.sweep import SweepResult
     from algua.backtest.walkforward import WalkForwardResult
+    from algua.registry.repository import RunLedger
     from algua.registry.store import SqliteStrategyRepository
 
 # Provenance attributes shared by BacktestResult / WalkForwardResult / SweepResult. Read with
@@ -121,11 +124,25 @@ def record_backtest_run(
 
 
 def record_walk_forward_run(
-    repo: SqliteStrategyRepository, name: str, result: WalkForwardResult,
+    repo: SqliteStrategyRepository | RunLedger, name: str, result: WalkForwardResult,
+    *, strategy_id: int | None = None,
 ) -> int:
-    """Record one `walk_forward` run."""
+    """Record one `walk_forward` run.
+
+    `repo` is typed against `RunLedger` (not the concrete `SqliteStrategyRepository`) as well,
+    because this helper calls only `record_run` — the narrow Protocol slice
+    `algua/registry/repository.py` carves out precisely so a Protocol-typed caller
+    (`promotion.py`'s `run_gate`, which only ever sees `StrategyRepository`) can record the
+    walk-forward run without depending on the concrete class.
+
+    `strategy_id` is optional (the CLI `backtest walk-forward` path runs against a possibly
+    unregistered strategy) but `research promote` — the other caller, which always has a
+    resolved `StrategyRecord` — passes its own id, so a `walk_forward` run has ONE shape
+    regardless of which command produced it.
+    """
     return repo.record_run(
         "walk_forward", name,
+        strategy_id=strategy_id,
         provenance=provenance_of(result),
         metrics=walk_forward_metrics(result),
         components=list(_components_of(result)),
@@ -139,14 +156,35 @@ def record_sweep_run(
 
     `SweepResult.ranked` already carries every combo's `{params, config_hash, stability, score}`,
     so no re-computation is needed. The children are written in ONE batched transaction (see
-    `record_sweep_trials`), and a truncated trial set is stamped back onto the parent.
+    `record_sweep_trials`).
+
+    TRUNCATION is computed BEFORE the parent is created, and stamped onto the parent's own INSERT
+    — never as a later UPDATE. Creating the parent, then writing trials, then UPDATE-stamping
+    truncation as three separate transactions leaves a crash window between the last two that
+    commits a full MAX_PERSISTED_TRIALS-row trial set with `trials_truncated_at` still NULL —
+    exactly the "silently truncated set [that] would make the funnel-wide distribution lie about
+    the breadth it depicts" the column's own DDL comment (algua/registry/db/runs.py) forbids.
     """
+    # `result.trial_sharpe_mean` (algua/backtest/sweep.py `_trial_sharpe_stats`) is the mean
+    # ACROSS COMBOS of each combo's own mean-window Sharpe — a different statistic from
+    # `mean_window_sharpe` on a `sweep_trial` or `walk_forward` row, which is the mean ACROSS
+    # WALK-FORWARD WINDOWS within one evaluation. The two are not comparable and must never share
+    # a sortable column (spec §3.1: a single sortable column must be comparable within itself) —
+    # so the sweep PARENT's own `mean_window_sharpe` stays NULL and this cross-combo statistic is
+    # recorded under its own name in the overflow tail instead.
+    extra_metrics: dict[str, float | None] | None = (
+        {"mean_trial_sharpe": result.trial_sharpe_mean}
+        if result.trial_sharpe_mean is not None else None
+    )
+    n_ranked = len(result.ranked)
+    trials_truncated_at = MAX_PERSISTED_TRIALS if n_ranked > MAX_PERSISTED_TRIALS else None
     parent = repo.record_run(
         "sweep", name,
         provenance=provenance_of(result),
         config={"grid": result.grid, "rank_by": result.rank_by,
                 "windows": result.windows, "holdout_frac": result.holdout_frac},
-        metrics={"mean_window_sharpe": result.trial_sharpe_mean},
+        extra_metrics=extra_metrics,
+        trials_truncated_at=trials_truncated_at,
     )
     trials = [
         {
@@ -162,8 +200,6 @@ def record_sweep_run(
         for record in result.ranked
     ]
     n_written, truncated_at = repo.record_sweep_trials(parent, name, trials)
-    if truncated_at is not None:
-        repo.stamp_trials_truncated(parent, truncated_at)
     return {"run_id": parent, "trials_written": n_written, "trials_truncated_at": truncated_at}
 
 

@@ -68,3 +68,10 @@ def test_sweep_summary_projects():
     assert summ["summary"] is True
     assert summ["best"] == full["best"]
     assert "recorded_breadth" in summ  # breadth is stateful/cumulative, so just assert it survives
+    # recorded_runs carries trials_truncated_at — must survive --summary so a truncated trial set
+    # is visible in the command's own output, not only discoverable by querying (see backtest_cmd).
+    # `full` and `summ` are separate sweep invocations (each mints its own run_id), so compare the
+    # trials_truncated_at value rather than the whole dict.
+    assert "recorded_runs" in summ
+    assert (summ["recorded_runs"]["trials_truncated_at"]
+            == full["recorded_runs"]["trials_truncated_at"])
