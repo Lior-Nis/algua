@@ -15,7 +15,6 @@ from algua.calendar.factory import get_calendar
 from algua.cli._common import (
     SYSTEMIC_SETUP_EXCEPTIONS,
     StrategySetupError,
-    authenticate_actor,
     breach_payload,
     ok,
     resolve_drawdown_breaker,
@@ -104,9 +103,10 @@ from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
 from algua.registry.gating import load_gated_strategy
-from algua.registry.human_actor import canonical_run_context
+from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import Candidate, order_candidates, slice_capital
 from algua.registry.kb_sync import sync_kb_doc
+from algua.registry.promote_run import promote_task
 from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
@@ -755,16 +755,15 @@ def merge_back(
                     news_snapshot=news_snapshot, delistings=delistings))
 
         def promote(attempt_token: str) -> object:
-            # Reach research_cmd.promote_task via a DYNAMIC import (importlib), not a static
-            # `from algua.cli.research_cmd import ...` — the cli-independence import-linter contract
-            # forbids a paper_cmd->research_cmd sibling edge (#165), and it traces static imports
-            # even inside a function; a dynamic import keeps the two command modules structurally
-            # independent while still driving the promote at runtime. Strict-agent inputs ONLY — no
+            # promote_task lives in algua.registry.promote_run (not a cli sibling), so it arrives
+            # via a legal static `from algua.registry.promote_run import promote_task` at module
+            # scope — the cli-independence import-linter contract (#165) forbids a
+            # paper_cmd<->research_cmd sibling edge, but neither command module imports the other
+            # here; both import the same shared registry module. Strict-agent inputs ONLY — no
             # relaxation flags reach the seam, so a human-only relaxation is impossible by
             # construction. The per-attempt ``attempt_token`` is stamped on the gate row so the
             # driver reads the outcome authoritatively (finding #5). promote_task opens+closes its
             # OWN registry_conn (per its contract).
-            promote_task = importlib.import_module("algua.cli.research_cmd").promote_task
             return promote_task(
                 name=strategy, universe=universe, start=start, end=end,
                 demo=demo, snapshot=snapshot, fundamentals_snapshot=fundamentals_snapshot,

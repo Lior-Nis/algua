@@ -18,7 +18,6 @@ import pytest
 from typer.testing import CliRunner
 
 import algua.cli.paper_cmd as paper_cmd
-import algua.cli.research_cmd as research_cmd
 from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState
@@ -137,7 +136,10 @@ def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
                 conn.commit()
         return {"promoted": promote_commits}
 
-    monkeypatch.setattr(research_cmd, "promote_task", _fake_promote)
+    # paper_cmd's merge-back closure calls the bare `promote_task` name, which resolves via its
+    # OWN module globals (`from algua.registry.promote_run import promote_task`) — patch the
+    # binding paper_cmd actually reads, not research_cmd's (a separate, now-unrelated re-export).
+    monkeypatch.setattr(paper_cmd, "promote_task", _fake_promote)
 
     def _fake_intake(conn, *, equity, max_concurrent, actor):
         # Stand in for the FIFO admit: move THIS strategy to paper + seed an allocation so the
