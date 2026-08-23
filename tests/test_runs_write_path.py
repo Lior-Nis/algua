@@ -33,3 +33,21 @@ def test_backtest_records_a_run_for_an_unregistered_strategy() -> None:
         repo = SqliteStrategyRepository(conn)
         assert STRATEGY not in {s.name for s in repo.list_strategies()}
         assert len(repo.list_runs(kind="backtest")) == 1
+
+
+def test_walk_forward_records_oos_and_window_metrics() -> None:
+    from typer.testing import CliRunner
+
+    from algua.cli.main import app
+
+    res = CliRunner().invoke(app, ["backtest", "walk-forward", STRATEGY, "--demo"])
+    assert res.exit_code == 0, res.output
+    with registry_conn() as conn:
+        rows = SqliteStrategyRepository(conn).list_runs(kind="walk_forward")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["sharpe_oos"] is not None
+    assert row["n_obs_oos"] is not None
+    assert row["mean_window_sharpe"] is not None
+    # A walk-forward measures no full-period in-sample figure; it must not invent one.
+    assert row["sharpe_is"] is None

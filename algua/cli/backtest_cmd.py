@@ -29,7 +29,7 @@ from algua.data.files import frame_to_parquet_bytes
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore
 from algua.primitives.atomic_io import write_bytes_atomic
-from algua.registry.runs import record_backtest_run
+from algua.registry.runs import record_backtest_run, record_walk_forward_run
 from algua.registry.search_breadth import record_search_breadth
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
@@ -321,6 +321,8 @@ def walk_forward_cmd(
                           news_provider=news_provider,
                           delisting_records=delisting_records,
                           assume_terminal_last_close=assume_terminal_last_close)
+    with registry_conn() as conn:
+        record_walk_forward_run(SqliteStrategyRepository(conn), name, result)
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:
