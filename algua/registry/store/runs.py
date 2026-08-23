@@ -74,11 +74,49 @@ class RunLedgerMixin:
         passed: bool | None = None,
         trials_truncated_at: int | None = None,
     ) -> int:
-        """Insert one run row (and its overflow metrics) and return its id.
+        """Insert one run row (and its overflow metrics) and return its id, in its OWN transaction.
 
         `metrics` keys MUST come from `METRIC_COLUMNS`; anything else raises. `extra_metrics` is
-        the free-form overflow tail and accepts any key.
+        the free-form overflow tail and accepts any key. This is `_insert_run_locked` plus
+        `with self._conn:` — the public entry point for a caller with no transaction of its own.
         """
+        with self._conn:
+            return self._insert_run_locked(
+                kind, strategy_name,
+                strategy_id=strategy_id, derived_from=derived_from, components=components,
+                provenance=provenance, config=config, metrics=metrics,
+                extra_metrics=extra_metrics, passed=passed,
+                trials_truncated_at=trials_truncated_at,
+            )
+
+    def _insert_run_locked(self, kind: str, strategy_name: str, **kwargs: Any) -> int:
+        """The `record_run` INSERT with NO transaction of its own — for callers that already hold
+        one (the gate's `BEGIN IMMEDIATE` block; see `GateLedgerMixin
+        .record_gate_with_fdr_and_maybe_promote`). `record_run` is this plus `with self._conn:`.
+
+        Takes `**kwargs` (only the store itself calls this — never CLI/research code), but still
+        validates every key against `record_run`'s own keyword set: an unexpected key would
+        otherwise silently vanish into an unused dict entry instead of raising, and a typo in a
+        gate's `run_row` dict must not pass silently.
+        """
+        allowed = {
+            "strategy_id", "derived_from", "components", "provenance", "config",
+            "metrics", "extra_metrics", "passed", "trials_truncated_at",
+        }
+        unknown = set(kwargs) - allowed
+        if unknown:
+            raise ValueError(
+                f"_insert_run_locked() got unexpected keyword argument(s): {sorted(unknown)}")
+        strategy_id: int | None = kwargs.get("strategy_id")
+        derived_from: list[int] | None = kwargs.get("derived_from")
+        components: list[dict[str, Any]] | None = kwargs.get("components")
+        provenance: dict[str, Any] | None = kwargs.get("provenance")
+        config: dict[str, Any] | None = kwargs.get("config")
+        metrics: dict[str, float | int | None] | None = kwargs.get("metrics")
+        extra_metrics: dict[str, float | None] | None = kwargs.get("extra_metrics")
+        passed: bool | None = kwargs.get("passed")
+        trials_truncated_at: int | None = kwargs.get("trials_truncated_at")
+
         if kind not in _KINDS:
             raise ValueError(f"unknown run kind {kind!r}; expected one of {sorted(_KINDS)}")
         prov = dict(provenance or {})
@@ -117,16 +155,15 @@ class RunLedgerMixin:
                     else _finite_or_none(raw)
                 )
         placeholders = ",".join("?" for _ in columns)
-        with self._conn:
-            cur = self._conn.execute(
-                f"INSERT INTO runs({','.join(columns)}) VALUES ({placeholders})", values)
-            rowid = cur.lastrowid
-            assert rowid is not None  # a successful INSERT always sets lastrowid
-            if extra_metrics:
-                self._conn.executemany(
-                    "INSERT OR REPLACE INTO run_metrics(run_id, key, value) VALUES (?,?,?)",
-                    [(rowid, k, _finite_or_none(v)) for k, v in extra_metrics.items()],
-                )
+        cur = self._conn.execute(
+            f"INSERT INTO runs({','.join(columns)}) VALUES ({placeholders})", values)
+        rowid = cur.lastrowid
+        assert rowid is not None  # a successful INSERT always sets lastrowid
+        if extra_metrics:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO run_metrics(run_id, key, value) VALUES (?,?,?)",
+                [(rowid, k, _finite_or_none(v)) for k, v in extra_metrics.items()],
+            )
         return rowid
 
     def record_sweep_trials(

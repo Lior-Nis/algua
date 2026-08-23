@@ -634,6 +634,7 @@ class GateLedger(Protocol):
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
+        run_row: dict[str, Any] | None = None,
     ) -> FdrGateOutcome:
         """Record a gate evaluation and optionally promote to ``candidate`` — all under a single
         **BEGIN IMMEDIATE** transaction (write lock held from the funnel-snapshot CAS through the
@@ -667,6 +668,12 @@ class GateLedger(Protocol):
         ``reserve_holdout``). Crash semantics: a process crash before commit rolls back both
         the FDR row and the stage CAS — no orphaned stream position, no half-promoted strategy,
         no orphan family/membership.
+
+        ``run_row`` (Task 7, spec 2026-08-23 §4.1) is the economic-layer ``runs`` payload for THIS
+        decision, when the caller wants one recorded — inserted inside this same transaction
+        (immediately after the ``gate_evaluations`` INSERT) so it shares the gate row's commit/
+        rollback fate. Its ``passed`` is overwritten with this call's own ``final_passed`` so the
+        run row can never disagree with the gate row it derives from.
         """
         ...
 
@@ -896,6 +903,35 @@ class BacktestReturnsLedger(Protocol):
         ...
 
 
+class RunLedger(Protocol):
+    """The economic-layer evaluation ledger (``runs`` + ``run_metrics``; Task 7, spec
+    2026-08-23). Narrow on purpose: only ``record_run`` is exposed through this Protocol slice —
+    every other ``RunLedgerMixin`` entry point (``record_sweep_trials``, ``list_runs``, ...) is
+    called through the concrete ``SqliteStrategyRepository``, the established pattern from Tasks
+    2-6. This slice exists so a Protocol-typed caller (``promotion.py``'s ``run_gate``) can record
+    the walk-forward run without depending on the concrete class."""
+
+    def record_run(  # noqa: PLR0913 — mirrors RunLedgerMixin.record_run exactly
+        self,
+        kind: str,
+        strategy_name: str,
+        *,
+        strategy_id: int | None = None,
+        derived_from: list[int] | None = None,
+        components: list[dict[str, Any]] | None = None,
+        provenance: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        metrics: dict[str, float | int | None] | None = None,
+        extra_metrics: dict[str, float | None] | None = None,
+        passed: bool | None = None,
+        trials_truncated_at: int | None = None,
+    ) -> int:
+        """Insert one run row (and its overflow metrics), in its own transaction, and return its
+        id. ``metrics`` keys MUST come from the fixed vocabulary (``METRIC_COLUMNS`` in
+        ``algua/registry/store/runs.py``); anything else raises."""
+        ...
+
+
 class StrategyRepository(
     StrategyStore,
     ApprovalLedger,
@@ -905,6 +941,7 @@ class StrategyRepository(
     ForwardGateLedger,
     FamilyGraph,
     BacktestReturnsLedger,
+    RunLedger,
     Protocol,
 ):
     """Persistence seam for the registry — the structural union of all role protocols above.
