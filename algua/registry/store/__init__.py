@@ -1,9 +1,9 @@
 """sqlite-backed registry store, carved by Protocol (spec §8). Each Protocol's implementation
 lives in its own module (crud.py, approvals.py, search_breadth.py, holdout.py, gate.py,
-forward_gate.py, family.py, backtest_returns.py); a shared base.py holds the one helper genuinely
-called from more than one domain (_apply_transition_locked); SqliteStrategyRepository composes
-them via mixins and keeps only the truly Protocol-agnostic members (__init__, connection) on
-itself directly."""
+forward_gate.py, family.py, backtest_returns.py, runs.py); a shared base.py holds the one helper
+genuinely called from more than one domain (_apply_transition_locked); SqliteStrategyRepository
+composes them via mixins and keeps only the truly Protocol-agnostic members (__init__, connection)
+on itself directly."""
 from __future__ import annotations
 
 import sqlite3
@@ -31,6 +31,7 @@ from algua.registry.store.family import FamilyGraphMixin
 from algua.registry.store.forward_gate import ForwardGateMixin
 from algua.registry.store.gate import GateLedgerMixin
 from algua.registry.store.holdout import HoldoutLedgerMixin
+from algua.registry.store.runs import RunLedgerMixin
 from algua.registry.store.search_breadth import SearchBreadthLedgerMixin
 
 __all__ = [
@@ -51,6 +52,7 @@ class SqliteStrategyRepository(
     ForwardGateMixin,
     FamilyGraphMixin,
     BacktestReturnsLedgerMixin,
+    RunLedgerMixin,
 ):
     """sqlite-backed ``StrategyRepository``: the only module that embeds registry SQL."""
 

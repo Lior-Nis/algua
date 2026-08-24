@@ -6,7 +6,13 @@ from pydantic import ValidationError
 from algua.config.settings import Settings, get_settings
 
 
-def test_defaults():
+def test_defaults(monkeypatch):
+    # This test asserts the COMPILED-IN default, which the conftest-level
+    # `_isolated_db_path` autouse fixture deliberately redirects for every other test (so a
+    # test that forgets to set ALGUA_DB_PATH can never silently write into the developer's real
+    # registry). Opt back out of that redirection here — this is the one test that wants to see
+    # the true unset default.
+    monkeypatch.delenv("ALGUA_DB_PATH", raising=False)
     s = Settings()
     assert s.exchange == "XNYS"
     assert s.db_path == Path("data/algua.db")

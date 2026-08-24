@@ -20,6 +20,7 @@ from algua.registry.repository import (
     PendingNovelFamily,
     StrategyRepository,
 )
+from algua.registry.runs import provenance_of, record_walk_forward_run, walk_forward_metrics
 from algua.research.clustering import (
     _RETURN_STANDALONE_ESCALATION,
     MERGE_THRESHOLD,
@@ -638,6 +639,13 @@ def run_gate(
         returns_available = True
     decision.returns_available = returns_available
 
+    # The walk-forward this decision was computed on, as its own run row. Recorded here rather
+    # than by the CLI because `research promote` runs the walk-forward internally — this is the
+    # only place its result exists. Routed through the shared recorder (not an inline
+    # repo.record_run call) so a `walk_forward` row has ONE shape regardless of which command
+    # produced it.
+    wf_run_id = record_walk_forward_run(repo, rec.name, wf, strategy_id=rec.id)
+
     # Build gate_row (all record_gate_evaluation kwargs, including provisional passed flag).
     gate_row = {
         "passed": decision.passed,
@@ -703,6 +711,38 @@ def run_gate(
         rec, gate_row=gate_row, funnel=funnel, actor=actor,
         reason=(_gate_reason(decision) + reason_suffix) if decision.passed else None,
         pending_novel_family=breadth.pending_novel_family,  # #524: minted only on pass, in-tx
+        # The same decision as an economic-layer run row. PASS AND FAIL — the rejections are the
+        # dataset the IS-vs-OOS scatter is mostly made of.
+        run_row={
+            "strategy_id": rec.id,
+            "derived_from": [wf_run_id],
+            # NOTE: no "passed" key here — record_gate_with_fdr_and_maybe_promote (store/gate.py)
+            # unconditionally overwrites it with final_passed, the only value known once this
+            # transaction's checks have run. Setting it here would be dead and misleading.
+            #
+            # Base provenance off the SIBLING walk-forward run's own provenance_of(wf), not a
+            # hand-copied field list: the two rows describe the SAME evaluation and must not drift
+            # (a hand-copy here had already dropped seed/timeframe, silently). Override only the
+            # fields that are GENUINELY different for the gate: code_hash/config_hash/
+            # dependency_hash come from `identity`, recomputed via compute_artifact_hashes(name) —
+            # deliberately NOT wf's own git-HEAD-based hashes (see run_gate's docstring); the
+            # gate's data_source/snapshot_id/universe_name/period_start/period_end are read from
+            # the SAME local variables that were passed into walk_forward(), so they are already
+            # identical to wf's — provenance_of(wf) carries them without an override.
+            "provenance": provenance_of(wf) | {
+                "code_hash": identity.code_hash,
+                "config_hash": identity.config_hash,
+                "dependency_hash": identity.dependency_hash,
+            },
+            "metrics": walk_forward_metrics(wf),
+            # The ~40 DSR / IR / regime diagnostics: queryable, but deliberately outside the fixed
+            # vocabulary. Finite scalars only — decision.to_dict() also carries strings, lists and
+            # bools, and `bool` is an `int` subclass so it must be excluded explicitly.
+            "extra_metrics": {
+                k: float(v) for k, v in decision.to_dict().items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+            },
+        },
     )
 
     # With the LORD++ binding branch retired (stage 4a), final_passed == provisional_passed (the

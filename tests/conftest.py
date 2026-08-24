@@ -1,7 +1,7 @@
 """Suite-wide isolation for developer-environment surfaces a test must never inherit.
 
-Two leaks, both caused by ``Settings`` resolving defaults relative to the repo root when pytest
-runs from there.
+Three leaks, all caused by a test resolving a real, developer-machine surface by default when
+pytest runs from the repo root.
 
 **1. The knowledge vault (write leak).** ``Settings.knowledge_dir`` defaults to the RELATIVE path
 ``kb`` — the developer's actual Obsidian vault. The gate commands sync the vault as a side effect
@@ -48,6 +48,27 @@ def _isolated_knowledge_dir(monkeypatch, tmp_path):
 def _no_repo_dotenv(monkeypatch):
     """Stop pydantic-settings reading the developer's real ``.env`` (see module docstring)."""
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db_path(monkeypatch, tmp_path):
+    """**3. The registry DB (write leak).** ``Settings.db_path`` defaults to the RELATIVE path
+    ``data/algua.db`` — the developer's real, 1.8 MB registry DB. Before the strategy-run-tracking
+    branch, an un-``--register``ed ``backtest run`` never touched the DB at all; that branch made
+    ``run_backtest_task`` open ``registry_conn()`` UNCONDITIONALLY (to record the run row), so any
+    test that exercises a backtest/walk-forward/sweep/gate path without setting
+    ``ALGUA_DB_PATH`` itself now silently writes into the real registry the moment it runs on a
+    developer machine (every CURRENT test happens to set it, by the established
+    ``monkeypatch.setenv("ALGUA_DB_PATH", ...)`` idiom — but nothing enforces that a FUTURE test
+    author remembers to). Same rationale as ``_isolated_knowledge_dir`` / ``_no_repo_dotenv``
+    above: a silent, machine-dependent failure mode must not depend on each future test author
+    remembering the idiom, so it is redirected suite-wide instead.
+
+    Only the DEFAULT is redirected: a test that sets ``ALGUA_DB_PATH`` itself still wins, because
+    its own ``monkeypatch.setenv`` runs AFTER this conftest-level fixture and simply overwrites the
+    value this fixture set.
+    """
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "_default_isolated_registry.db"))
 
 
 @pytest.fixture(autouse=True)

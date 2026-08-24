@@ -44,6 +44,9 @@ class GateLedgerMixin(TransitionMixin):
         def family_graph_fingerprint(self) -> tuple[int, ...]: ...
         def agent_novel_mint_seed(self) -> int: ...
         def check_agent_novel_mint_bounds(self) -> None: ...
+        # runs.py (RunLedgerMixin) — not a repository.py Protocol method (it is store-internal:
+        # only the gate's own BEGIN IMMEDIATE calls it, never CLI/research code).
+        def _insert_run_locked(self, kind: str, strategy_name: str, **kwargs: Any) -> int: ...
 
     def record_gate_evaluation(
         self,
@@ -292,6 +295,12 @@ class GateLedgerMixin(TransitionMixin):
         actor: Actor,
         reason: str | None = None,
         pending_novel_family: PendingNovelFamily | None = None,
+        # ``run_row`` is the economic-layer run payload for THIS decision (spec 2026-08-23 §4.1),
+        # inserted inside this method's BEGIN IMMEDIATE so it shares the gate row's fate. It cannot
+        # be written by the caller: this method refuses to run inside an open transaction, so a
+        # caller-side write would either land in a separate transaction (a run row that survives a
+        # rolled-back gate — a phantom evaluation) or trip the top-level guard above.
+        run_row: dict[str, Any] | None = None,
     ) -> FdrGateOutcome:
         # #524: coerce the actor BEFORE the pending-mint boundary guard (callers may pass a raw
         # string; an identity test against an un-coerced string would mis-evaluate).
@@ -413,6 +422,19 @@ class GateLedgerMixin(TransitionMixin):
             )
             gate_id = cur.lastrowid
             assert gate_id is not None
+
+            if run_row is not None:
+                # Keep the run row's `passed` in lockstep with the gate row it derives from — even
+                # though final_passed == provisional_passed unconditionally today (the LORD++
+                # binding-rewrite branch is retired, stage 4a), a run row whose `passed` disagrees
+                # with its own gate row would be a corrupt audit trail if that ever changes back.
+                # (run_row's own "passed" key, if any, is dead — always overwritten here.)
+                row = dict(run_row)
+                row["passed"] = final_passed
+                # Name the gate_evaluations row THIS run derives from — minted one line above, in
+                # the SAME BEGIN IMMEDIATE, so the two ids can never mismatch or drift apart.
+                row["gate_id"] = gate_id
+                self._insert_run_locked("gate", rec.name, **row)
 
             updated_rec: StrategyRecord | None = None
             if final_passed:

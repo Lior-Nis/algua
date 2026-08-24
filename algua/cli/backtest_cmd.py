@@ -16,6 +16,9 @@ from algua.evaluation.inputs import (
     resolve_universe_inputs,
 )
 from algua.evaluation.sweep_run import sweep_task
+from algua.registry.db import registry_conn
+from algua.registry.runs import record_walk_forward_run
+from algua.registry.store import SqliteStrategyRepository
 from algua.tracking.factory import get_tracker
 from algua.tracking.record import record_tracking
 
@@ -34,7 +37,8 @@ _WF_SUMMARY_KEYS = (
 )
 _SWEEP_SUMMARY_KEYS = (
     "strategy", "n_combos", "rank_by", "best", "trial_sharpe_count", "trial_sharpe_mean",
-    "trial_sharpe_var_ann", "recorded_breadth", "code_hash", "dependency_hash", "data_source",
+    "trial_sharpe_var_ann", "recorded_breadth", "recorded_runs",
+    "code_hash", "dependency_hash", "data_source",
     "snapshot_id", "timeframe", "seed", "period", "windows", "holdout_frac", "universe_name",
     "universe_snapshots", "fundamentals_snapshot", "news_snapshot", "mlflow_run_id",
     "mlflow_tracking_error", "mlflow_tracking_skipped",
@@ -149,6 +153,8 @@ def walk_forward_cmd(
                           news_provider=news_provider,
                           delisting_records=delisting_records,
                           assume_terminal_last_close=assume_terminal_last_close)
+    with registry_conn() as conn:
+        record_walk_forward_run(SqliteStrategyRepository(conn), name, result)
     payload = result.to_dict()
     payload.pop("holdout_metrics")  # withhold the holdout (reserved for `research promote`)
     if track:

@@ -224,5 +224,12 @@ def migrate(conn: sqlite3.Connection) -> None:
     # produced on, so paper deployment binds to the GATED universe, not the module's CONFIG.
     # Additive nullable — legacy rows stay NULL (tick binding falls back to CONFIG with a warning).
     _add_missing_columns(conn, "gate_evaluations", {"universe_name": "TEXT"})
+    # v42 (strategy run tracking): runs + run_metrics are brand-new tables; executescript(SCHEMA)
+    # above creates them (CREATE TABLE IF NOT EXISTS). No _add_missing_columns needed.
+    # v43 (strategy run tracking, fix wave): runs.gate_id — the join a `gate` run needs back to
+    # its own gate_evaluations row. The bootstrap CREATE TABLE cannot add a column to an
+    # already-created v42 `runs` table, so a v42 DB needs the explicit ALTER. Additive nullable —
+    # every non-`gate` row (and every pre-v43 `gate` row) stays NULL by design.
+    _add_missing_columns(conn, "runs", {"gate_id": "INTEGER"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
