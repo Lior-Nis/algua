@@ -500,3 +500,202 @@ async def test_ideas_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
         resp = await client.get("/api/ideas")
     assert resp.status_code == 502
     assert resp.json()["code"] == "cli_timeout"
+
+
+# --- /api/runs (slice 2, task 7) ---
+
+
+async def test_runs_list_default_passes_bare_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    envelope = _env({"runs": [], "count": 0})
+    seen = _route_cli(monkeypatch, {("runs", "list", "--limit=100"): envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs")
+    assert resp.status_code == 200
+    assert resp.json() == envelope
+    assert seen == [("runs", "list", "--limit=100")]
+
+
+async def test_runs_list_query_params_mirror_cli_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    envelope = _env({"runs": [{"id": 1, "kind": "gate"}], "count": 1})
+    expected_argv = (
+        "runs",
+        "list",
+        "--limit=25",
+        "--kind=gate",
+        "--strategy=momo",
+        "--family=trend-1",
+        "--sort=sharpe_oos",
+    )
+    seen = _route_cli(monkeypatch, {expected_argv: envelope})
+    async with _client() as client:
+        resp = await client.get(
+            "/api/runs",
+            params={
+                "kind": "gate",
+                "strategy": "momo",
+                "family": "trend-1",
+                "sort": "sharpe_oos",
+                "limit": 25,
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json() == envelope
+    assert seen == [expected_argv]
+
+
+async def test_runs_list_bad_strategy_name_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs", params={"strategy": "-momo"})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == "invalid_param"
+
+
+async def test_runs_list_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    _route_cli(
+        monkeypatch,
+        {("runs", "list", "--limit=100"): CliError("cli_timeout", "runs list timed out")},
+    )
+    async with _client() as client:
+        resp = await client.get("/api/runs")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "cli_timeout"
+
+
+# --- /api/runs/{run_id} ---
+
+
+async def test_run_detail_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    envelope = _env({"id": 42, "kind": "gate", "extra_metrics": {}})
+    seen = _route_cli(monkeypatch, {("runs", "show", "42"): envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs/42")
+    assert resp.status_code == 200
+    assert resp.json() == envelope
+    assert seen == [("runs", "show", "42")]
+
+
+async def test_run_detail_non_int_id_is_422() -> None:
+    async with _client() as client:
+        resp = await client.get("/api/runs/not-a-number")
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == "invalid_param"
+
+
+async def test_run_detail_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    _route_cli(
+        monkeypatch,
+        {("runs", "show", "99"): CliError("invalid_input", "no run 99")},
+    )
+    async with _client() as client:
+        resp = await client.get("/api/runs/99")
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "invalid_input"
+
+
+# --- /api/runs/series ---
+
+
+async def test_runs_series_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    envelope = _env({"series": {"1": None, "2": {"kind": "backtest"}}})
+    expected_argv = ("runs", "series", "1", "--run-id=2")
+    seen = _route_cli(monkeypatch, {expected_argv: envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "1,2"})
+    assert resp.status_code == 200
+    assert resp.json() == envelope
+    assert seen == [expected_argv]
+
+
+async def test_runs_series_single_id_no_extra_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    envelope = _env({"series": {"7": None}})
+    seen = _route_cli(monkeypatch, {("runs", "series", "7"): envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "7"})
+    assert resp.status_code == 200
+    assert seen == [("runs", "series", "7")]
+
+
+async def test_runs_series_dedupes_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    envelope = _env({"series": {"1": None, "2": None}})
+    expected_argv = ("runs", "series", "1", "--run-id=2")
+    seen = _route_cli(monkeypatch, {expected_argv: envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "1,2,1"})
+    assert resp.status_code == 200
+    assert seen == [expected_argv]
+
+
+async def test_runs_series_missing_ids_is_422() -> None:
+    async with _client() as client:
+        resp = await client.get("/api/runs/series")
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        "",  # empty
+        "1,,2",  # empty element
+        "1,abc",  # non-integer element
+        "1, 2.5",  # float, not int
+    ],
+)
+async def test_runs_series_malformed_ids_is_422(
+    monkeypatch: pytest.MonkeyPatch, ids: str
+) -> None:
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": ids})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == "invalid_param"
+
+
+async def test_runs_series_over_cap_is_422_before_shelling_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    ids = ",".join(str(i) for i in range(1, 18))  # 17 unique ids > 16 cap
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": ids})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["code"] == "invalid_param"
+
+
+async def test_runs_series_route_precedes_run_id_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    # "/api/runs/series" must not be shadowed by the "/api/runs/{run_id}" route (an int
+    # path converter would reject "series" as a run id before this route ever matched).
+    envelope = _env({"series": {"1": None}})
+    seen = _route_cli(monkeypatch, {("runs", "series", "1"): envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "1"})
+    assert resp.status_code == 200
+    assert seen == [("runs", "series", "1")]
+
+
+async def test_runs_series_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
+    _route_cli(
+        monkeypatch,
+        {("runs", "series", "1"): CliError("cli_timeout", "runs series timed out")},
+    )
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "1"})
+    assert resp.status_code == 502
+    assert resp.json()["code"] == "cli_timeout"

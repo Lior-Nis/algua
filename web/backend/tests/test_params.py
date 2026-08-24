@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import pytest
 from backend.params import (
+    MAX_SERIES_RUN_IDS,
     InvalidParam,
     validate_action,
     validate_actor,
     validate_lane,
+    validate_run_ids,
     validate_since,
     validate_strategy_name,
 )
@@ -96,3 +98,57 @@ def test_valid_lanes(lane: str) -> None:
 def test_bad_lanes_raise(lane: str) -> None:
     with pytest.raises(InvalidParam):
         validate_lane(lane)
+
+
+# --- run ids ---
+
+
+def test_valid_run_ids_parsed_in_order() -> None:
+    assert validate_run_ids("3,1,2") == [3, 1, 2]
+
+
+def test_valid_single_run_id() -> None:
+    assert validate_run_ids("7") == [7]
+
+
+def test_run_ids_deduped_order_preserving() -> None:
+    assert validate_run_ids("1,2,1,3,2") == [1, 2, 3]
+
+
+def test_run_ids_tolerates_surrounding_whitespace() -> None:
+    assert validate_run_ids(" 1 , 2 ") == [1, 2]
+
+
+def test_run_ids_at_cap_passes() -> None:
+    ids = ",".join(str(i) for i in range(1, MAX_SERIES_RUN_IDS + 1))
+    assert validate_run_ids(ids) == list(range(1, MAX_SERIES_RUN_IDS + 1))
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [
+        "",  # empty
+        "1,,2",  # empty element
+        "1,abc",  # non-integer element
+        "1, 2.5",  # float, not int
+        ",",  # only a separator
+    ],
+)
+def test_malformed_run_ids_raise(ids: str) -> None:
+    with pytest.raises(InvalidParam):
+        validate_run_ids(ids)
+
+
+def test_run_ids_over_cap_raises() -> None:
+    ids = ",".join(str(i) for i in range(1, MAX_SERIES_RUN_IDS + 2))  # one over the cap
+    with pytest.raises(InvalidParam):
+        validate_run_ids(ids)
+
+
+def test_run_ids_over_cap_after_dedup_still_raises() -> None:
+    # Duplicates that would dedup UNDER the cap must not sneak an oversized raw list through:
+    # the cap is enforced on the de-duplicated set, but a caller sending 20 distinct ids is
+    # still over cap even though the CLI itself would dedup first too.
+    ids = ",".join(str(i) for i in range(1, MAX_SERIES_RUN_IDS + 3))
+    with pytest.raises(InvalidParam):
+        validate_run_ids(ids)
