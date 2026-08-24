@@ -50,3 +50,30 @@ PYSEC-2026-3554
 # dependency_hash identity (invalidates gate/live-auth artifact stamps), so the
 # upgrade waits for the next planned mlflow-tree bump. tracking: #395 — review: 2026-10
 GHSA-2cm6-r77w-6g96
+# PYSEC-2026-3686 — the PYSEC ALIAS of the GHSA directly above: same trace-authz hole, same
+# 3.13.0rc0 fix line, same unreachability. Listed separately because pip-audit suppresses by
+# the ID STRING, not by the underlying advisory — so an advisory already reviewed and
+# allowlisted under one ID silently re-appears (and re-reds CI) the day OSV publishes its
+# alias. It did: this entry was added 2026-08-24, after a CI run the previous day reported
+# only the GHSA. When reviewing this list, check aliases, not just IDs.
+PYSEC-2026-3686
+
+# ---------------------------------------------------------------------------
+# mlflow 3.12.0 — UNREACHABLE. PYSEC-2026-3687 is an unauthenticated full-read SSRF in the
+# mlflow TRACKING SERVER's model-registry webhooks API (`mlflow server`, default no-auth): the
+# `_validate_webhook_url` guard resolves and rejects non-public IPs but pins nothing, so a
+# public endpoint returning `302 Location: http://169.254.169.254/...` is followed and reflected.
+# Algua NEVER starts an mlflow server and never registers a webhook: the only tracking surface is
+# the FileStore adapter behind the `ExperimentTracker` seam (`algua/tracking/mlflow_tracker.py`),
+# driven by `settings.mlflow_tracking_uri = "mlruns"` — a local directory, no HTTP listener, no
+# webhook registry. Same reasoning and same reachability boundary as the already-allowlisted
+# GHSA-2cm6-r77w-6g96 (mlflow server trace-authz hole, #561).
+#
+# NOT fixed by a lockfile bump for a NON-obvious reason worth recording: the fix line (3.15.0+)
+# hard-deprecates the filesystem backend — mlflow 3.15.1 raises
+# "The filesystem tracking backend (e.g., './mlruns') is in maintenance mode" unless
+# MLFLOW_ALLOW_FILE_STORE=true. Measured: bumping to 3.15.1 turns 52 tracking tests red. Taking
+# the fix therefore means either opting out of the deprecation or migrating the store to a sqlite
+# backend — a design decision about the component-tracking layer, not a dependency bump.
+# tracking: #395 — review: 2026-10
+PYSEC-2026-3687
