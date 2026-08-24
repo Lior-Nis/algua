@@ -51,31 +51,25 @@ def run_list_payload(
     for it (raises `ValueError` on a non-vocabulary value) — this function adds no second, looser
     check of its own.
 
+    `family` is resolved to its member strategy names FIRST (via `repo.list_strategies(family=...)`
+    — the same accessor `registry list --family` uses, so the semantics match exactly) and passed
+    into `list_runs` as a parameterized `strategy_name IN (...)` clause, so the SQL-side LIMIT
+    applies to the already-family-filtered set. Filtering post-hoc in Python over rows `list_runs`
+    already truncated to `limit` would invert `--sort`'s semantics: it would return the globally
+    best N runs that happen to be in the family, which for a small family is systematically empty
+    rather than merely truncated. A run for a strategy with no `strategies` row at all (exploration
+    precedes registration) has no family and is correctly excluded by any family filter, since it
+    can never appear in `list_strategies(family=...)`'s result.
+
     NEVER returns a series: each row is the run's scalar columns plus its three JSON-TEXT columns
     parsed (`derived_from`/`components`/`config_json`) — the `runs series` payload-size contract
     (#349) that a subprocess-JSON CLI seam depends on.
     """
+    strategy_names = (
+        [rec.name for rec in repo.list_strategies(family=family)] if family is not None else None
+    )
     rows = [_parsed_row(row) for row in repo.list_runs(
-        kind=kind, strategy_name=strategy, sort=sort, limit=limit)]
-    if family is not None:
-        # `list_runs` has no `family` parameter and deliberately stays that way: `runs` is keyed
-        # by free-text strategy_name with a NULLABLE strategy_id (exploration precedes
-        # registration — see algua/registry/db/runs.py), so there is no FK to join `family` off
-        # inside list_runs's own query without complicating the one thing it must stay the single
-        # gate for (`sort`). `registry list --family` resolves family via a plain
-        # `strategies.family = ?` filter (algua/registry/store/crud.py `list_strategies`); reused
-        # here as ONE cheap SELECT for the strategy names in that family, then filtered in Python
-        # over the rows `list_runs` already returned. Honest tradeoff: this filter runs AFTER
-        # list_runs's own LIMIT, so a narrow `--limit` combined with a rare family can under-return
-        # relative to a true server-side join — acceptable for a display cap, not a pagination
-        # guarantee. A run for a strategy with no `strategies` row at all (also exploration-before-
-        # registration) has no family and is correctly excluded by any family filter.
-        names = {
-            r["name"] for r in repo.connection.execute(
-                "SELECT name FROM strategies WHERE family = ?", (family,)
-            ).fetchall()
-        }
-        rows = [r for r in rows if r["strategy_name"] in names]
+        kind=kind, strategy_name=strategy, strategy_names=strategy_names, sort=sort, limit=limit)]
     return {"runs": rows, "count": len(rows)}
 
 

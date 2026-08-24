@@ -1,5 +1,5 @@
-"""`algua runs list` — the read surface over the run ledger (spec:
-2026-08-24-strategy-run-tracking-slice-2).
+"""`algua runs list` / `algua runs show` / `algua runs series` — the read surface over the run
+ledger (spec: 2026-08-24-strategy-run-tracking-slice-2).
 
 Pure read: no broker call, no writes, no locks. Thin command body — the shaping logic lives in
 ``algua.registry.run_views`` so it is unit-testable without a CLI, matching the domain-extraction

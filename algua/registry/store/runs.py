@@ -235,15 +235,28 @@ class RunLedgerMixin:
 
     def list_runs(
         self, *, kind: str | None = None, strategy_name: str | None = None,
+        strategy_names: list[str] | None = None,
         sort: str | None = None, limit: int = 100,
     ) -> list[sqlite3.Row]:
         """Scalar run rows, newest first (or best-first when ``sort`` names a metric).
 
         ``sort`` is interpolated into the SQL — it MUST be allow-listed against the fixed
-        vocabulary, never taken from caller input unchecked.
+        vocabulary, never taken from caller input unchecked. This is the SINGLE gate for ``sort``;
+        callers must route every filter through here (not filter post-hoc in Python) so ``limit``
+        applies to the already-filtered set, not the other way around.
+
+        ``strategy_names`` (e.g. a resolved family membership) adds a parameterized
+        ``strategy_name IN (...)`` clause — placeholders are built from the list length, never
+        names interpolated into the SQL string. An explicitly empty list means "no strategy
+        matches" and short-circuits to `[]` without touching the DB (an empty ``IN ()`` is invalid
+        SQL). ``None`` means "no such filter" and is distinct from `[]`. Composable with
+        ``strategy_name`` (ANDed) — a caller filtering by both a single name and a family gets the
+        intersection.
         """
         if sort is not None and sort not in METRIC_COLUMNS:
             raise ValueError(f"{sort!r} is not a sortable metric")
+        if strategy_names is not None and not strategy_names:
+            return []
         clauses: list[str] = []
         params: list[Any] = []
         if kind is not None:
@@ -252,6 +265,10 @@ class RunLedgerMixin:
         if strategy_name is not None:
             clauses.append("strategy_name=?")
             params.append(strategy_name)
+        if strategy_names is not None:
+            placeholders = ",".join("?" for _ in strategy_names)
+            clauses.append(f"strategy_name IN ({placeholders})")
+            params.extend(strategy_names)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         # NULLS LAST: a run with no measurement must never outrank one with a real number.
         order = (f" ORDER BY {sort} IS NULL, {sort} DESC, id DESC"

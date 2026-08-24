@@ -34,9 +34,12 @@ from backend.params import (
     InvalidParam,
     validate_action,
     validate_actor,
+    validate_family,
     validate_lane,
     validate_run_ids,
+    validate_run_kind,
     validate_since,
+    validate_sort,
     validate_strategy_name,
 )
 from backend.poller import poll_loop
@@ -270,21 +273,20 @@ def create_app() -> FastAPI:
         strategy: str | None = None,
         family: str | None = None,
         sort: str | None = None,
-        limit: Annotated[int, Query(ge=1)] = 100,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
     ) -> dict[str, Any]:
-        # `sort` is forwarded verbatim as a single argv element: the store's METRIC_COLUMNS
-        # allow-list (algua/registry/store/runs.py) is the one gate for it, same as the CLI's
-        # own caller. `kind`/`family` are likewise passed through — the store binds them as
-        # parameterized SQL, not string-interpolated.
+        # `kind` is checked against RUN_KINDS; `family`/`sort` get a syntactic shape guard only —
+        # `sort`'s semantic vocabulary (METRIC_COLUMNS) stays the store's allow-list
+        # (algua/registry/store/runs.py), same as the CLI's own caller (see params.py docstring).
         args = ["runs", "list", f"--limit={limit}"]
         if kind is not None:
-            args.append(f"--kind={kind}")
+            args.append(f"--kind={validate_run_kind(kind)}")
         if strategy is not None:
             args.append(f"--strategy={validate_strategy_name(strategy)}")
         if family is not None:
-            args.append(f"--family={family}")
+            args.append(f"--family={validate_family(family)}")
         if sort is not None:
-            args.append(f"--sort={sort}")
+            args.append(f"--sort={validate_sort(sort)}")
         return await run_cli(*args, ttl_s=60.0)
 
     @app.get("/api/runs/series")

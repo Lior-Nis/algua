@@ -60,6 +60,26 @@ def test_list_payload_filters_by_family(repo: SqliteStrategyRepository) -> None:
     assert payload["count"] == 1
 
 
+def test_list_payload_family_filter_applies_before_limit(repo: SqliteStrategyRepository) -> None:
+    """FIX 1 regression: `--family` must be resolved to strategy names and pushed into
+    `list_runs`'s own SQL filter BEFORE the LIMIT, not applied in Python over rows `list_runs`
+    already truncated. With `sort` set, a post-hoc Python filter inverts the semantics: it returns
+    the globally best N runs that happen to be in the family, which is systematically EMPTY for a
+    small family ranked below the top `limit` runs — not merely truncated. This test plants exactly
+    that shape (one low-`sharpe_oos` run in `trend`, `limit` runs with a higher `sharpe_oos` in a
+    different family) and must fail against the pre-fix code."""
+    repo.add("lonely", family="trend")
+    repo.record_run("backtest", "lonely", metrics={"sharpe_oos": -1.0})
+    repo.add("crowd", family="other")
+    for i in range(20):
+        repo.record_run("backtest", "crowd", metrics={"sharpe_oos": float(i)})
+    payload = run_list_payload(
+        repo, kind=None, strategy=None, family="trend", sort="sharpe_oos", limit=20)
+    names = {row["strategy_name"] for row in payload["runs"]}
+    assert names == {"lonely"}
+    assert payload["count"] == 1
+
+
 def test_list_payload_family_excludes_unregistered_runs(repo: SqliteStrategyRepository) -> None:
     """A run for a strategy with no `strategies` row (exploration precedes registration) has no
     family, so it must not slip through a family filter."""

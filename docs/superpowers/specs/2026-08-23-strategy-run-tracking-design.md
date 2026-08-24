@@ -258,6 +258,14 @@ the overlay wants narrow-and-deep (one run x hundreds of floats). One command re
 up a payload that crosses a subprocess-and-JSON-parse seam — the lesson `--summary` (#349) already
 encodes.
 
+**Caveat carried forward from the slice-2 review:** `runs list --sort sharpe_oos` is the **first
+cross-strategy OOS leaderboard** in this system (`registry gates` is per-strategy history only).
+That is judged safe today because every gate attempt is already priced by the funnel-breadth/DSR
+accounting and holdouts stay single-use, but ONLY on the condition that `runs list` remains a
+**display** surface and never becomes an input to a promotion decision — a future slice must not
+wire it into `research promote`, family classification, or any other selection path without
+re-litigating that condition.
+
 Backend, following the existing `run_cli(..., ttl_s=)` convention exactly:
 `/api/runs` (60 s), `/api/runs/{id}` (30 s), `/api/runs/series?ids=` (60 s).
 

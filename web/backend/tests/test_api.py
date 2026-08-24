@@ -556,6 +556,56 @@ async def test_runs_list_bad_strategy_name_is_422(monkeypatch: pytest.MonkeyPatc
     assert body["code"] == "invalid_param"
 
 
+async def test_runs_list_over_cap_limit_is_422_before_shelling_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX 2: `/api/runs`'s `limit` must be capped like `/api/activity`'s (`le=500`)."""
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs", params={"limit": 501})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "invalid_param"
+
+
+async def test_runs_list_bad_kind_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FIX 2: `kind` must be validated against RUN_KINDS before it reaches argv."""
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs", params={"kind": "not-a-real-kind"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "invalid_param"
+
+
+async def test_runs_list_bad_family_leading_dash_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FIX 2: a `family` starting with '-' must be rejected before it becomes an argv element."""
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs", params={"family": "-trend"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "invalid_param"
+
+
+async def test_runs_list_bad_sort_leading_dash_is_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FIX 2: a `sort` starting with '-' must be rejected before it becomes an argv element."""
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs", params={"sort": "--limit=1"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "invalid_param"
+
+
 async def test_runs_list_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
     _route_cli(
         monkeypatch,
@@ -661,6 +711,35 @@ async def test_runs_series_malformed_ids_is_422(
     body = resp.json()
     assert body["ok"] is False
     assert body["code"] == "invalid_param"
+
+
+async def test_runs_series_ids_are_sorted_regardless_of_input_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX 2: `validate_run_ids` sorts the de-duplicated ids so "2,1" and "1,2" produce the SAME
+    argv tuple (and therefore the same `algua_cli._cache`/`_locks` key, not two)."""
+    envelope = _env({"series": {"1": None, "2": None}})
+    expected_argv = ("runs", "series", "1", "--run-id=2")
+    seen = _route_cli(monkeypatch, {expected_argv: envelope})
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "2,1"})
+    assert resp.status_code == 200
+    assert seen == [expected_argv]
+
+
+async def test_runs_series_zero_or_negative_id_is_422(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX 2: a run id must be >= 1 — a negative id would also become a leading bare argv token
+    (the same hazard `validate_strategy_name`'s no-leading-dash rule exists to prevent)."""
+    async def fail_run_cli(*args: str, ttl_s: float, timeout_s: float = 60.0) -> dict[str, Any]:
+        raise AssertionError(f"run_cli must not be reached, got argv {args!r}")
+
+    monkeypatch.setattr(main_mod, "run_cli", fail_run_cli)
+    async with _client() as client:
+        resp = await client.get("/api/runs/series", params={"ids": "-1,2"})
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "invalid_param"
 
 
 async def test_runs_series_over_cap_is_422_before_shelling_out(
