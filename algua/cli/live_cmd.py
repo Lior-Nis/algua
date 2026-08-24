@@ -85,10 +85,12 @@ def _live_account_equity() -> float:
     """Read the live account equity (read-only; no go-live authorization needed — not trading).
 
     Delegates to the read-only live broker rather than issuing its own HTTP call: that class already
-    owns this endpoint (`account()` -> `/v2/account`), declares the `_ALLOWED_HOSTS` allowlist, and
-    carries the bounded-backoff + `allow_redirects=False` posture (#394) that a hand-rolled request
-    here had to restate. Kept as a module-level function so the existing monkeypatch pins on
-    `algua.cli.live_cmd._live_account_equity` keep resolving.
+    owns this endpoint (`account()` -> `/v2/account`) and declares the `_ALLOWED_HOSTS` allowlist.
+    The hand-rolled version restated the `allow_redirects=False` posture (#394) but had NO retry, so
+    the delegate also GAINS bounded exponential backoff and the stricter `account()` parse (which
+    fails closed on a malformed id/cash/buying_power, not just equity). Kept as a module-level
+    function so the existing monkeypatch pins on `algua.cli.live_cmd._live_account_equity` keep
+    resolving.
     """
     return build_broker(BrokerKind.ALPACA_LIVE_READONLY).account().equity
 

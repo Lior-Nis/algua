@@ -35,8 +35,8 @@ _LIVE_MSG = (
     "and ALGUA_ALPACA_LIVE_API_SECRET"
 )
 _LIVE_READONLY_MSG = (
-    "Alpaca LIVE credentials not configured; cannot confirm the strategy is flat at the "
-    "broker — set ALGUA_ALPACA_LIVE_API_KEY and ALGUA_ALPACA_LIVE_API_SECRET"
+    "Alpaca LIVE credentials not configured; the read-only live broker is unavailable — "
+    "set ALGUA_ALPACA_LIVE_API_KEY and ALGUA_ALPACA_LIVE_API_SECRET"
 )
 
 
