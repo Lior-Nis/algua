@@ -61,10 +61,6 @@ from algua.execution.live_ledger import (
 from algua.execution.live_reconcile import attributed_live_net
 from algua.execution.live_sizing import LiveSizingError, build_paper_sizing_snapshot
 from algua.execution.order_state import (
-    clear_all_nav_peaks,
-    clear_all_peaks,
-    clear_nav_peak,
-    clear_peak_equity,
     client_order_id,
     get_peak_equity,
     persist_run,
@@ -122,9 +118,9 @@ from algua.research.forward_gates import (
     ForwardGateCriteria,
 )
 from algua.risk import global_halt, kill_switch
-from algua.risk.book_equity import clear_book_peak
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
+from algua.risk.peaks import rebase_all_peaks, rebase_strategy_peak
 from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
@@ -386,13 +382,10 @@ def resume(name: str) -> None:
             # kill-switch LAST so the actual un-halt is the final write: any earlier failure leaves
             # the strategy safely halted and resume is retryable. Without the rebase, a drawdown
             # trip -> flatten-to-cash re-trips every tick against the stale pre-loss peak (#27).
-            # A live strategy's drawdown breaker uses the NAV peak (live_nav_peaks), not the paper
-            # peak — clear the right one per stage, else a resumed live strategy re-trips on a stale
-            # pre-breach NAV peak (codex C1 review).
-            if rec.stage is Stage.LIVE:
-                clear_nav_peak(conn, name)
-            else:
-                clear_peak_equity(conn, name)
+            # Which table depends on the stage (a LIVE breaker reads the NAV peak, not the paper
+            # peak) — that choice is the `rebase_strategy_peak` policy, named once in
+            # algua.risk.peaks.
+            rebase_strategy_peak(conn, name, rec.stage)
             kill_switch.reset(conn, name)
     emit(ok({"strategy": name, "kill_switch": "reset" if was_tripped else "not_tripped"}))
 
@@ -1545,14 +1538,9 @@ def resume_all(
             audit_append(conn, actor=actor_enum.value, action="resume_all",
                          reason="clear global halt; re-base all drawdown peaks", strategy=None)
             # Re-base peaks first, clear the halt LAST so the un-halt is the final write (#109).
-            # Clear BOTH the paper (account-equity) and live (NAV) peak tables so resumed strategies
-            # re-base on their next tick rather than re-tripping a stale peak (codex C1 review).
-            clear_all_peaks(conn)
-            clear_all_nav_peaks(conn)
-            # Also re-base the ACCOUNT-WIDE book high-water mark (#390): after a flatten-to-cash the
-            # book breaker must not re-trip against the pre-loss peak. The daily-loss baseline
-            # auto-re-bases next session via the broker's prior-session close.
-            clear_book_peak(conn)
+            # Every table a resumed account can re-trip through — paper, live NAV, and the
+            # account-wide book peak — is the `rebase_all_peaks` policy in algua.risk.peaks.
+            rebase_all_peaks(conn)
             global_halt.clear(conn)
     result: dict = {"global_halt": "reset" if was_set else "not_set"}
     if not_flat:
