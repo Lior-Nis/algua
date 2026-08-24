@@ -13,7 +13,6 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.evaluation.inputs import (
@@ -21,6 +20,7 @@ from algua.evaluation.inputs import (
 )
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker
+from algua.execution.broker_factory import BrokerKind, build_broker
 from algua.execution.flatten import flatten_strategy
 from algua.execution.lane_exit import build_live_broker
 from algua.execution.live_ledger import (
@@ -82,28 +82,15 @@ log = get_logger(__name__)
 
 
 def _live_account_equity() -> float:
-    """Read the live account equity (read-only; no go-live authorization needed — not trading)."""
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        raise ValueError("Alpaca LIVE credentials not configured")
-    import requests
-    from requests import RequestException
-    try:
-        resp = requests.get(
-            f"{s.alpaca_live_url.rstrip('/')}/v2/account",
-            # Host is pinned https by the alpaca_live_url settings validator; refuse to chase a
-            # redirect so the APCA credential headers can never reach a foreign target (#394). A
-            # 3xx then fails the status!=200 check below.
-            allow_redirects=False,
-            headers={"APCA-API-KEY-ID": s.alpaca_live_api_key,
-                     "APCA-API-SECRET-KEY": s.alpaca_live_api_secret},
-            timeout=30,
-        )
-    except RequestException as exc:
-        raise ValueError(f"alpaca account equity request failed: {exc}") from exc
-    if resp.status_code != 200:
-        raise ValueError(f"alpaca {resp.status_code} reading account equity")
-    return float(resp.json()["equity"])
+    """Read the live account equity (read-only; no go-live authorization needed — not trading).
+
+    Delegates to the read-only live broker rather than issuing its own HTTP call: that class already
+    owns this endpoint (`account()` -> `/v2/account`), declares the `_ALLOWED_HOSTS` allowlist, and
+    carries the bounded-backoff + `allow_redirects=False` posture (#394) that a hand-rolled request
+    here had to restate. Kept as a module-level function so the existing monkeypatch pins on
+    `algua.cli.live_cmd._live_account_equity` keep resolving.
+    """
+    return build_broker(BrokerKind.ALPACA_LIVE_READONLY).account().equity
 
 
 @live_app.command("allocate")
