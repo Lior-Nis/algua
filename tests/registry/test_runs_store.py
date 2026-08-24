@@ -160,6 +160,7 @@ def test_metric_and_provenance_columns_are_bound_to_the_ddl() -> None:
     _NON_METRIC = {
         "id", "kind", "strategy_name", "strategy_id", "created_at", "metric_schema_version",
         "derived_from", "components", "config_json", "passed", "trials_truncated_at", "gate_id",
+        "series_backtest_id", "series_holdout_id",
     } | set(PROVENANCE_COLUMNS)
     metric_shaped = cols - _NON_METRIC
     assert metric_shaped == set(METRIC_COLUMNS), (

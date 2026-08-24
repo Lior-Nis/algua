@@ -22,7 +22,8 @@ from __future__ import annotations
 # v42 (strategy run tracking): runs + run_metrics — the economic-layer evaluation ledger.
 # v43 (strategy run tracking, fix wave): runs.gate_id — the join a `gate` run needs to name its
 # own gate_evaluations row (decision_json, the per-check table, per-regime Sharpes).
-SCHEMA_VERSION = 43
+# v44 (run tracking slice 2): series pointers on `runs` so `runs series <id>` can resolve.
+SCHEMA_VERSION = 44
 
 # v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
 # above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is
