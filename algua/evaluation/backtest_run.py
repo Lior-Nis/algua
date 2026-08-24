@@ -87,13 +87,6 @@ def run_backtest_task(  # noqa: PLR0913
         assume_terminal_last_close=assume_terminal_last_close,
     )
 
-    # Record the evaluation as a first-class run row. UNCONDITIONAL — including for a
-    # not-yet-registered strategy, the same rationale record_search_breadth documents: keying by
-    # name means pre-registration evidence still counts. Own transaction, like the sibling writes.
-    with registry_conn() as conn:
-        record_backtest_run(
-            SqliteStrategyRepository(conn), name, result, params=strategy.config.params)
-
     if register:
         with registry_conn() as conn:
             repo = SqliteStrategyRepository(conn)
@@ -109,7 +102,10 @@ def run_backtest_task(  # noqa: PLR0913
         sync_kb_doc(name)
 
     # Persist return series for the return-correlation clustering axis (#222, Task 7).
-    # Only persists for registered strategies; silently skips otherwise.
+    # Only persists for registered strategies (pre-existing or just-registered above); silently
+    # skips otherwise. Persisted BEFORE the run row so the run row can point at it
+    # (series_backtest_id, v44) — a not-yet-registered strategy still gets series_id=None.
+    series_id: int | None = None
     if result.returns is not None:
         with registry_conn() as conn:
             repo = SqliteStrategyRepository(conn)
@@ -118,12 +114,20 @@ def run_backtest_task(  # noqa: PLR0913
             except Exception:  # noqa: BLE001 — strategy not yet registered, skip
                 pass
             else:
-                repo.persist_backtest_returns(
+                series_id = repo.persist_backtest_returns(
                     name,
                     start_dt.date().isoformat(),
                     end_dt.date().isoformat(),
                     result.returns,
                 )
+
+    # Record the evaluation as a first-class run row. UNCONDITIONAL — including for a
+    # not-yet-registered strategy, the same rationale record_search_breadth documents: keying by
+    # name means pre-registration evidence still counts. Own transaction, like the sibling writes.
+    with registry_conn() as conn:
+        record_backtest_run(
+            SqliteStrategyRepository(conn), name, result, params=strategy.config.params,
+            series_backtest_id=series_id)
 
     payload = result.to_dict()
     if emit_series:

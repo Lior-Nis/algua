@@ -74,6 +74,8 @@ class RunLedgerMixin:
         passed: bool | None = None,
         trials_truncated_at: int | None = None,
         gate_id: int | None = None,
+        series_backtest_id: int | None = None,
+        series_holdout_id: int | None = None,
     ) -> int:
         """Insert one run row (and its overflow metrics) and return its id, in its OWN transaction.
 
@@ -84,6 +86,10 @@ class RunLedgerMixin:
         `gate_id` is the `gate_evaluations.id` this run derives from — set ONLY by a `gate` run,
         always NULL otherwise. It is the join to `gate_evaluations.decision_json` (the per-check
         table `runs show` and the gate bullet card need).
+
+        `series_backtest_id`/`series_holdout_id` point at the `backtest_returns`/`holdout_returns`
+        row this run's series was persisted to (Task 2, v44) — NULL when no series exists (e.g. an
+        unregistered strategy's backtest, or a pre-Slice-1 holdout).
         """
         with self._conn:
             return self._insert_run_locked(
@@ -92,6 +98,7 @@ class RunLedgerMixin:
                 provenance=provenance, config=config, metrics=metrics,
                 extra_metrics=extra_metrics, passed=passed,
                 trials_truncated_at=trials_truncated_at, gate_id=gate_id,
+                series_backtest_id=series_backtest_id, series_holdout_id=series_holdout_id,
             )
 
     def _insert_run_locked(self, kind: str, strategy_name: str, **kwargs: Any) -> int:
@@ -107,6 +114,7 @@ class RunLedgerMixin:
         allowed = {
             "strategy_id", "derived_from", "components", "provenance", "config",
             "metrics", "extra_metrics", "passed", "trials_truncated_at", "gate_id",
+            "series_backtest_id", "series_holdout_id",
         }
         unknown = set(kwargs) - allowed
         if unknown:
@@ -122,6 +130,8 @@ class RunLedgerMixin:
         passed: bool | None = kwargs.get("passed")
         trials_truncated_at: int | None = kwargs.get("trials_truncated_at")
         gate_id: int | None = kwargs.get("gate_id")
+        series_backtest_id: int | None = kwargs.get("series_backtest_id")
+        series_holdout_id: int | None = kwargs.get("series_holdout_id")
 
         if kind not in _KINDS:
             raise ValueError(f"unknown run kind {kind!r}; expected one of {sorted(_KINDS)}")
@@ -138,7 +148,8 @@ class RunLedgerMixin:
 
         columns = ["kind", "strategy_name", "strategy_id", "created_at",
                    "metric_schema_version", "derived_from", "components", "config_json",
-                   "passed", "trials_truncated_at", "gate_id"]
+                   "passed", "trials_truncated_at", "gate_id",
+                   "series_backtest_id", "series_holdout_id"]
         values: list[Any] = [
             kind, strategy_name, strategy_id, _now(), METRIC_SCHEMA_VERSION,
             json.dumps(list(derived_from or [])),
@@ -147,6 +158,8 @@ class RunLedgerMixin:
             None if passed is None else int(passed),
             trials_truncated_at,
             gate_id,
+            series_backtest_id,
+            series_holdout_id,
         ]
         for key in PROVENANCE_COLUMNS:
             if key in prov:

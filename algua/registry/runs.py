@@ -106,6 +106,7 @@ def record_backtest_run(
     result: BacktestResult,
     *,
     params: dict[str, Any] | None = None,
+    series_backtest_id: int | None = None,
 ) -> int:
     """Record one `backtest` run. Recorded UNCONDITIONALLY — even for a not-yet-registered
     strategy, for the same reason `record_search_breadth` is: exploration precedes registration
@@ -113,6 +114,9 @@ def record_backtest_run(
 
     `params` is the strategy's config params, passed EXPLICITLY: `BacktestResult` carries
     `config_hash` but not the config itself, so there is nothing to read off the result.
+
+    `series_backtest_id` is the `backtest_returns` row id this run's series was persisted to
+    (NULL for an unregistered strategy — no series is written for one).
     """
     return repo.record_run(
         "backtest", name,
@@ -120,6 +124,7 @@ def record_backtest_run(
         config=dict(params or {}),
         metrics=backtest_metrics(result),
         components=list(_components_of(result)),
+        series_backtest_id=series_backtest_id,
     )
 
 

@@ -269,3 +269,42 @@ def test_a_rolled_back_gate_leaves_no_phantom_run() -> None:
         assert repo.list_runs(kind="gate") == []
         gate_evaluations = conn.execute("SELECT * FROM gate_evaluations").fetchall()
         assert gate_evaluations == []
+
+
+def test_backtest_run_points_at_its_series() -> None:
+    """A REGISTERED strategy's backtest run resolves to the backtest_returns row it wrote."""
+    from algua.contracts.lifecycle import Actor, Stage
+    from algua.registry.transitions import transition_strategy
+
+    with registry_conn() as conn:
+        repo = SqliteStrategyRepository(conn)
+        repo.add(STRATEGY)
+        transition_strategy(repo, STRATEGY, Stage.BACKTESTED, Actor.AGENT, "seed")
+    run_backtest_task(STRATEGY, demo=True)
+    with registry_conn() as conn:
+        row = SqliteStrategyRepository(conn).list_runs(kind="backtest")[0]
+        assert row["series_backtest_id"] is not None
+        series = conn.execute(
+            "SELECT strategy_name FROM backtest_returns WHERE id=?",
+            (row["series_backtest_id"],)).fetchone()
+    assert series["strategy_name"] == STRATEGY
+
+
+def test_unregistered_backtest_run_has_no_series_pointer() -> None:
+    """NULL is the honest answer: no backtest_returns row is written for an unregistered
+    strategy, and the run is still recorded."""
+    run_backtest_task(STRATEGY, demo=True, register=False)
+    with registry_conn() as conn:
+        row = SqliteStrategyRepository(conn).list_runs(kind="backtest")[0]
+    assert row["series_backtest_id"] is None
+
+
+def test_gate_run_points_at_its_holdout_series() -> None:
+    _promote(expect_pass=False)
+    with registry_conn() as conn:
+        row = SqliteStrategyRepository(conn).list_runs(kind="gate")[0]
+        assert row["series_holdout_id"] is not None
+        n = conn.execute(
+            "SELECT n_bars FROM holdout_returns WHERE id=?",
+            (row["series_holdout_id"],)).fetchone()["n_bars"]
+    assert n > 0
