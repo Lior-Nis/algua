@@ -139,7 +139,7 @@ This is the branch a codex review already caught once. Confirm both directions a
 ```bash
 grep -rn "resume" tests/test_cli_paper.py | grep -i "live\|nav_peak" 
 ```
-If no test distinguishes LIVE from non-LIVE on resume, **add one** — a policy whose whole point is picking the right table per stage needs a test that fails when the branch is inverted. Verify it does fail when inverted.
+Measured on `main`@`9ca8cb4`: **8 matching lines**, so coverage very likely already exists — confirm it actually asserts the TABLE choice, not merely that resume succeeded. If nothing pins the branch, **add a test** — a policy whose whole point is picking the right table per stage needs a test that fails when the branch is inverted. Verify it does fail when inverted.
 
 - [ ] **Step 5: Full gate, then commit.**
 
@@ -154,7 +154,7 @@ If no test distinguishes LIVE from non-LIVE on resume, **add one** — a policy 
 
 `algua/execution/alpaca_broker.py` — note how `_ALLOWED_HOSTS` is declared per subclass and validated in the base via `require_https_allowlisted_host` (`:104`), and how existing methods issue requests. The new method must follow that idiom, not import `requests` independently.
 
-`AlpacaLiveReadOnlyBroker` (`:451` region) is the natural host: reading account equity is a read-only live operation and its `_ALLOWED_HOSTS` is already `{"api.alpaca.markets"}`.
+`AlpacaLiveReadOnlyBroker` (`:483`) is the natural host: reading account equity is a read-only live operation, and that class exists for exactly this shape of call — its docstring says *"constructed WITHOUT a LiveAuthorization because it never places an order — both endpoints are GETs"* — with `_ALLOWED_HOSTS = {"api.alpaca.markets"}` at `:490`.
 
 - [ ] **Step 2: Move the body**
 
