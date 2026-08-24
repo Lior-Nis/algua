@@ -11,9 +11,17 @@ Every validator here is SYNTACTIC (shape only), not semantic. The one deliberate
 (``algua/registry/store/runs.py``) — that list is long and churns, and ``web/`` deliberately cannot
 import ``algua``, so the store stays the single semantic gate for it (a syntactically-valid but
 unknown ``sort`` reaches the CLI and is rejected there, surfacing as a 502 ``CliError`` rather than
-a 422). A path-typed ``int`` param (e.g. ``run_id`` on ``/api/runs/{run_id}``) is constrained by
-Starlette's own route converter (digits only, so a negative id 404s before reaching a handler)
-before this module is ever consulted.
+a 422).
+
+KNOWN GAP, stated rather than glossed: a path-typed ``int`` param — today only ``run_id`` on
+``/api/runs/{run_id}`` — is NOT validated here and NOT constrained by the route converter. The
+default Starlette converter is ``[^/]+``, so ``/api/runs/-5`` reaches the handler and ``-5``
+becomes a BARE POSITIONAL argv token (measured: HTTP 200, argv ``('runs','show','-5')``). It is
+not exploitable — ``run_cli`` uses ``create_subprocess_exec`` with no shell, and click rejects the
+unknown option — so it surfaces as a 502 rather than the 422 this module's other guards produce.
+Closing it means declaring the param ``Annotated[int, Path(ge=1)]``, which is a behaviour change
+(422 instead of 502) and is deliberately left to a reviewed change rather than smuggled into a
+docstring edit. Do not restore a claim that the converter handles this; it does not.
 """
 
 from __future__ import annotations

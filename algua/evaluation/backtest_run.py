@@ -129,13 +129,15 @@ def run_backtest_task(  # noqa: PLR0913
     # Record the evaluation as a first-class run row for every path that reaches this point —
     # including a not-yet-registered strategy, the same rationale record_search_breadth documents:
     # keying by name means pre-registration evidence still counts. NOT truly unconditional, though:
-    # with `register=True` against a strategy already past `idea` (e.g. already `backtested`),
-    # `transition_strategy` above raises (self-transition / advancing-onto-an-already-past stage is
-    # not in ALLOWED_TRANSITIONS), which aborts the whole call before this line is ever reached and
-    # the run row is lost. That is the one exception to "unconditional" — reordering the two blocks
-    # would trade it for the fresh-strategy series bug the current order fixes (see the comment on
-    # `if register:` above), so it is accepted rather than worked around. Own transaction, like the
-    # sibling writes.
+    # with `register=True`, `transition_strategy` above raises whenever `-> BACKTESTED` is not in
+    # that strategy's allowed set, aborting the call before this line and losing the run row. Per
+    # `_LIVE_TRANSITIONS` that means stage `backtested` itself (a self-transition) and `paper` /
+    # `forward_tested` / `live` / `dormant` / `retired`. It does NOT mean "anything past idea":
+    # `candidate` allows `-> BACKTESTED` (a legal back-step), so a candidate strategy transitions
+    # fine and DOES record its run row. That narrow set is the exception to "unconditional" —
+    # reordering the two blocks would trade it for the fresh-strategy series bug the current order
+    # fixes (see the comment on `if register:` above), so it is accepted rather than worked around.
+    # Own transaction, like the sibling writes.
     with registry_conn() as conn:
         record_backtest_run(
             SqliteStrategyRepository(conn), name, result, params=strategy.config.params,
