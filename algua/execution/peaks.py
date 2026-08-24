@@ -18,13 +18,15 @@ the strategy safely halted and the operation stays retryable (#109). A function 
 order of a write it does not perform, so that ordering stays at the call sites and is commented
 there. Do not assume calling these covers it.
 
-LAYERING NOTE: the per-strategy peak tables are accessed through `algua.execution.order_state`
-while the book peak lives in `algua.risk.book_equity`, so this policy spans both packages. That
-makes `risk -> execution` an edge, and `algua/execution/fleet_health.py` already imports
-`algua.risk` — so the two packages are mutually dependent at package granularity and no layering
-contract can be written between them. This module follows the spec's placement (it is a risk
-policy, and the tables it clears are an implementation detail of where the rows happen to live),
-but the coupling is real and is filed rather than hidden.
+WHY THIS LIVES IN `execution` AND NOT `risk` (the spec said `risk/peaks.py`): the per-strategy
+peak tables it clears live in `algua.execution.order_state`, and that module imports
+`algua.live.paper_loop`. Placed under `risk/`, this policy therefore made
+`risk -> execution -> live` reachable — measured with a real import-linter probe, not guessed —
+which inverts the layering the rest of this stage went to some trouble to preserve (`risk` sits
+BELOW `live`; see `algua/risk/book_cycle.py` for the body that stayed in `risk` precisely because
+it needed nothing from the live lane). Sitting beside the state it mutates costs no new edge
+direction: `algua.execution` already imports `algua.risk` (`fleet_health.py`), so the single
+`risk.book_equity` import below runs with the existing grain rather than against it.
 """
 
 from __future__ import annotations

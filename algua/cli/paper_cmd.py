@@ -69,6 +69,7 @@ from algua.execution.order_state import (
     record_tick_snapshot,
     update_peak_equity,
 )
+from algua.execution.peaks import rebase_all_peaks, rebase_strategy_peak
 from algua.execution.sim_broker import SimBroker
 from algua.execution.tick_clock import tick_clock
 from algua.live.live_loop import (
@@ -120,7 +121,6 @@ from algua.research.forward_gates import (
 from algua.risk import global_halt, kill_switch
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
-from algua.risk.peaks import rebase_all_peaks, rebase_strategy_peak
 from algua.strategies.loader import load_strategy
 
 paper_app = typer.Typer(help="Paper trading: run a paper-stage strategy", no_args_is_help=True)
