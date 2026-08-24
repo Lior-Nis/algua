@@ -151,7 +151,15 @@ def test_series_payload_returns_a_backtest_series(repo: SqliteStrategyRepository
     assert entry["returns"][1][1] == pytest.approx(-0.02)
 
 
-def test_series_payload_returns_a_holdout_series(repo: SqliteStrategyRepository) -> None:
+def test_series_payload_returns_holdout_interval_context_without_per_bar_values(
+    repo: SqliteStrategyRepository,
+) -> None:
+    """SENSITIVE: holdout_returns.returns_blob is a single-use OOS vector — see the DDL comment
+    in algua/registry/db/holdout.py and the "ONLY method that reads returns_blob" docstring on
+    overlapping_holdout_return_streams in algua/registry/store/holdout.py. run_series_payload must
+    NEVER hand back a strategy's own per-bar OOS vector (that would re-open the single-use
+    best-of-N surface sweep()'s holdout burn exists to prevent); it may only return the
+    non-sensitive interval/n_bars scalars, enough to shade a chart's OOS region."""
     rec = repo.add("alpha")
     reservation_id, _reused = repo.reserve_holdout(
         rec.id, data_source="synthetic", snapshot_id=None,
@@ -168,8 +176,16 @@ def test_series_payload_returns_a_holdout_series(repo: SqliteStrategyRepository)
     payload = run_series_payload(repo, [run_id])
     entry = payload["series"][str(run_id)]
     assert entry["kind"] == "holdout"
-    assert entry["returns"] == [["2024-05-01", pytest.approx(0.01)],
-                                 ["2024-05-02", pytest.approx(-0.02)]]
+    assert entry["holdout_start"] == "2024-05-01"
+    assert entry["holdout_end"] == "2024-05-03"
+    assert entry["n_bars"] == 2
+    # Structural guard, not a substring check: no per-bar-derived value anywhere in the payload.
+    # This is the regression test — it fails the moment someone re-adds a "returns" key here.
+    assert "returns" not in entry
+    assert "bar_dates" not in entry
+    for value in entry.values():
+        assert not isinstance(value, (list, tuple)), (
+            f"holdout series entry leaked a per-bar sequence: {entry!r}")
 
 
 def test_series_payload_missing_run_is_an_error(repo: SqliteStrategyRepository) -> None:

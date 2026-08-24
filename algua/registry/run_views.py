@@ -19,8 +19,6 @@ import json
 import sqlite3
 from typing import Any
 
-import numpy as np
-
 from algua.registry.gate_history import GATE_DECISION_ALLOWLIST, _project_decision
 from algua.registry.store import SqliteStrategyRepository
 
@@ -114,13 +112,22 @@ def run_detail_payload(repo: SqliteStrategyRepository, run_id: int) -> dict[str,
 
 
 def run_series_payload(repo: SqliteStrategyRepository, run_ids: list[int]) -> dict[str, Any]:
-    """`runs series` — the ONLY one of the three that returns a return series.
+    """`runs series` — the ONLY one of the three that returns a per-bar return series, and only
+    for the IN-SAMPLE backtest leg.
 
     Resolves each run's `series_backtest_id`/`series_holdout_id` pointer. A run with NO pointer
     maps to `None`, not an empty list — the two mean different things ("this run has no series"
     vs "this run's series is empty"). A run id that does not exist at all is a caller bug, not a
     legitimately-absent series, so it raises the same `ValueError(f"no run {run_id}")` shape
     `run_detail_payload` does.
+
+    A `series_holdout_id` pointer does NOT yield a per-bar vector: `holdout_returns.returns_blob`
+    is SENSITIVE (see the DDL comment in `algua/registry/db/holdout.py` and the "ONLY method that
+    reads returns_blob" docstring on `overlapping_holdout_return_streams` in
+    `algua/registry/store/holdout.py`) — exposing a strategy's own OOS vector would re-open the
+    single-use best-of-N surface `sweep()`'s holdout burn exists to prevent. So the holdout branch
+    returns only the interval and `n_bars` (safe to shade a chart's OOS region with); the scalar
+    OOS metrics already live on the gate run row (`run_detail_payload`).
     """
     series: dict[str, Any] = {}
     for run_id in run_ids:
@@ -146,19 +153,25 @@ def _series_entry(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any] 
             "returns": json.loads(br["returns_json"]),
         }
     if row["series_holdout_id"] is not None:
+        # SENSITIVE per algua/registry/db/holdout.py's holdout_returns DDL comment: "no CLI
+        # accessor and no 'get my own vector' API may read returns_blob — sibling-only
+        # cross-strategy." algua/registry/store/holdout.py's overlapping_holdout_return_streams
+        # is documented as "the ONLY method that reads returns_blob" and must stay that way — a
+        # per-bar OOS vector is single-use selection surface (the thing sweep()'s holdout burn
+        # exists to protect); a scalar sharpe_oos leaks far less than the full vector. So this
+        # branch returns ONLY the interval/count context (safe to shade a chart's OOS region
+        # with), never returns_blob or bar_dates_blob. The scalar OOS metrics (sharpe_oos,
+        # total_return_oos, n_obs_oos) already live on the gate run row — see run_detail_payload.
         hr = conn.execute(
-            "SELECT holdout_start, holdout_end, n_bars, returns_blob, bar_dates_blob"
-            " FROM holdout_returns WHERE id = ?",
+            "SELECT holdout_start, holdout_end, n_bars FROM holdout_returns WHERE id = ?",
             (row["series_holdout_id"],),
         ).fetchone()
         if hr is None:
             return None
-        vec = np.frombuffer(hr["returns_blob"], dtype="<f8")
-        dates = hr["bar_dates_blob"].decode("utf-8").split("\n")
         return {
             "kind": "holdout",
             "holdout_start": hr["holdout_start"],
             "holdout_end": hr["holdout_end"],
-            "returns": [[d, float(v)] for d, v in zip(dates, vec, strict=True)],
+            "n_bars": hr["n_bars"],
         }
     return None
