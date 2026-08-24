@@ -73,8 +73,8 @@ def runs_show(
 @json_errors
 def runs_series(
     run_id: int = typer.Argument(..., help="A run id to fetch the series pointer for."),
-    extra_run_ids: list[int] = typer.Option(  # noqa: B008 — typer's documented Option-as-default
-        [], "--run-id", help="Additional run ids (repeatable)."),
+    extra_run_ids: list[int] = typer.Option(
+        None, "--run-id", help="Additional run ids (repeatable)."),
 ) -> None:
     """Resolve each run's series pointer (backtest returns or holdout interval context).
 
@@ -84,7 +84,7 @@ def runs_series(
     through a subprocess pipe that gets JSON-parsed, so an unbounded id list is a payload-size
     footgun (#349), not just a slow query.
     """
-    ids = list(dict.fromkeys([run_id, *extra_run_ids]))
+    ids = list(dict.fromkeys([run_id, *(extra_run_ids or [])]))
     if len(ids) > MAX_SERIES_RUN_IDS:
         raise ValueError(
             f"too many run ids: got {len(ids)}, max {MAX_SERIES_RUN_IDS} per call")
