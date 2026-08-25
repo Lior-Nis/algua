@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import typer
 
 from algua.audit.log import append as audit_append
@@ -13,6 +15,7 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.evaluation.inputs import (
@@ -68,6 +71,7 @@ from algua.registry.live_gate import (
     verify_live_authorization,
 )
 from algua.registry.store import SqliteStrategyRepository
+from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
 from algua.risk import global_halt, kill_switch
 from algua.risk.book_cycle import evaluate_book_loss_breaker as _evaluate_book_loss_breaker
 from algua.risk.breach import trip_for_breach
@@ -167,6 +171,31 @@ def _run_strategy_tick(  # noqa: PLR0913
             raise ValueError(f"{name} has no live allocation")
         allocation = float(alloc["capital"])
         identity = compute_artifact_hashes(name)
+
+        # #559/#601: bind this tick to the GATED universe, never the module's CONFIG template —
+        # the SAME wall paper enforces. A strategy is promoted on evidence gathered over the gate's
+        # universe; letting live trade a config list that has since drifted means trading symbols
+        # the promotion evidence never covered. Rebinding the strategy's config universe makes
+        # EVERY downstream consumer (run_tick's bar fetch + decision view, the sizing snapshot
+        # below) see the gate universe. A missing gate row raises LookupError -> the caller's
+        # per-tenant setup handling (an unpromoted strategy has no business ticking); a legacy
+        # pre-v39 row (universe_name NULL) falls back to CONFIG with a loud warning.
+        #
+        # This landed in paper first (#559) and NOT in live, so for a period the rehearsal lane
+        # had a STRICTER universe wall than the real-money lane (#601). Both lanes now share it;
+        # `tests/test_lane_parity.py` asserts neither can lose it again.
+        resolved_universe, universe_source = resolve_operational_universe(
+            conn, get_settings().data_dir, name, strategy.universe)
+        if universe_source == SOURCE_CONFIG_LEGACY:
+            log.warning("universe_binding_config_legacy", extra={"fields": {
+                "strategy": name, "lane": "live",
+                "note": "newest passing gate row has no universe_name (pre-#559); ticking on "
+                        "CONFIG.universe — re-run research promote to bind the gate universe"}})
+        if resolved_universe != strategy.universe:
+            strategy = replace(
+                strategy,
+                config=strategy.config.model_copy(update={"universe": resolved_universe}))
+
         # No buying-power preflight here: min(allocation, NAV) sizing already de-risks toward what
         # the account can fund, and a coarse allocation-vs-BP check would falsely refuse a
         # fully-invested strategy that only rebalances. Per-order BP reservation is C2 (codex C1).
