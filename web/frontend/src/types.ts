@@ -328,3 +328,28 @@ export interface TriagePayload {
   stale: boolean
   last_error_code?: string | null
 }
+
+/** One `runs list` row — the full `runs` table row, JSON-TEXT columns parsed
+ * (algua/registry/run_views.py `_parsed_row`). A run row carries many provenance/metric
+ * columns (see METRIC_COLUMNS in algua/registry/store/runs.py); only the fields the run-ledger
+ * views read today are typed explicitly, and the rest ride the index signature so a later view
+ * can read a new column without a type change here. `mean_window_sharpe`/`sharpe_oos` are
+ * genuinely nullable — NOT every run kind carries walk-forward/holdout evidence, and a NULL
+ * metric must never be treated as 0. */
+export interface RunRow {
+  id: number
+  kind: 'backtest' | 'walk_forward' | 'sweep' | 'sweep_trial' | 'gate'
+  strategy_name: string
+  strategy_id: number | null
+  created_at: string
+  passed: number | boolean | null
+  mean_window_sharpe: number | null
+  sharpe_oos: number | null
+  [key: string]: unknown
+}
+
+/** GET /api/runs — `runs list` payload (algua/registry/run_views.py run_list_payload). */
+export interface RunsListPayload {
+  runs: RunRow[]
+  count: number
+}

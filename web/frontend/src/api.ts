@@ -32,6 +32,28 @@ export async function getJSON<T>(url: string): Promise<T> {
   return (await res.json()) as T
 }
 
+export interface RunsQuery {
+  kind?: string
+  strategy?: string
+  family?: string
+  sort?: string
+  limit?: number
+}
+
+/** Builds the `/api/runs` query string. Centralizes the encoding so every run-ledger view (the
+ * IS-vs-OOS scatter here; the ranked run list and trial distribution in later tasks) constructs
+ * the same URL shape instead of each hand-rolling its own `encodeURIComponent` calls. */
+export function runsUrl(query: RunsQuery = {}): string {
+  const params = new URLSearchParams()
+  if (query.kind) params.set('kind', query.kind)
+  if (query.strategy) params.set('strategy', query.strategy)
+  if (query.family) params.set('family', query.family)
+  if (query.sort) params.set('sort', query.sort)
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  const qs = params.toString()
+  return qs ? `/api/runs?${qs}` : '/api/runs'
+}
+
 /** Format an ISO timestamp as a local HH:MM:SS for the header / banners. */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso)
