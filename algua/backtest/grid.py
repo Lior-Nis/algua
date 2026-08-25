@@ -1,13 +1,15 @@
 """The simulation price grid: the (timestamp x symbol) pivot every backtest path is built on.
 
 `adj_grid` imports nothing from algua — a leaf, same pattern as `algua.backtest.errors`. It is
-needed by both `algua.backtest.engine` (which still owns `adj_open_grid`, `holdout_window`, and
-`simulate`, all built on this grid) and `algua.backtest.decision_path` (whose
-`verify_signal_panel_parity` builds its own grid from freshly fetched bars). Defining it in either
-of those modules would force the other to import it back — engine.py already imports
-`decision_path` for the dual-path selector, so decision_path importing `adj_grid` from engine.py
-would be a real import cycle, not just a style objection. A leaf breaks it the same way
-`errors.BacktestError` does. Moved verbatim out of `algua.backtest.engine` (stage 7, task 2).
+needed by `algua.backtest.engine` (which still owns `adj_open_grid` and `simulate`, both built on
+this grid), `algua.backtest.walkforward` (whose `holdout_window` reproduces this grid's index to
+find the exact OOS boundary WITHOUT running the strategy — the #192 single-use holdout identity),
+and `algua.backtest.decision_path` (whose `verify_signal_panel_parity` builds its own grid from
+freshly fetched bars). Defining it in any one of those modules would force the others to import it
+back — engine.py already imports `decision_path` for the dual-path selector, so decision_path
+importing `adj_grid` from engine.py would be a real import cycle, not just a style objection. A
+leaf breaks it the same way `errors.BacktestError` does. Moved verbatim out of
+`algua.backtest.engine` (stage 7, task 2).
 """
 from __future__ import annotations
 
