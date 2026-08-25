@@ -8,9 +8,9 @@ import pandas as pd
 import vectorbt as vbt
 
 from algua.backtest.delisting import DelistingExitError, DelistingRecord, apply_delisting_exits
+from algua.backtest.errors import BacktestError
 from algua.backtest.metrics import portfolio_metrics
 from algua.backtest.pit_view import (
-    BacktestError,
     _assert_fundamentals_shape,
     _assert_news_shape,
     _fundamentals_as_of,

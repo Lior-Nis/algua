@@ -7,10 +7,9 @@ of `algua.backtest.engine` (which stays the CODEOWNERS-protected consumer); this
 independently CODEOWNERS-protected for the same reason (see `INTEGRITY_CRITICAL_MODULES` in
 `tests/test_repo_hygiene.py`).
 
-`BacktestError` is defined here (not in `engine.py`) because these masking functions raise it
-directly and `engine.py` imports from this module — defining it in `engine.py` would create an
-import cycle. `engine.py` re-exports it, so `from algua.backtest.engine import BacktestError`
-(the existing public surface) is unaffected.
+`BacktestError` lives in `algua.backtest.errors` — the lane's error leaf — because it is raised
+and caught across five packages; see that module for why it is not defined in a module that also
+does work.
 """
 from __future__ import annotations
 
@@ -19,6 +18,7 @@ from datetime import date
 
 import pandas as pd
 
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import (
     FUNDAMENTALS_AS_OF_KEY,
     FUNDAMENTALS_COLUMNS,
@@ -29,10 +29,6 @@ from algua.contracts.types import (
     NEWS_RETRACTED,
 )
 from algua.strategies.base import LoadedStrategy
-
-
-class BacktestError(RuntimeError):
-    pass
 
 
 def members_as_of(
