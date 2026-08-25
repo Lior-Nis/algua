@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from algua.backtest.engine import _decision_weights
+from algua.backtest.decision_path import _decision_weights
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 

@@ -5,7 +5,8 @@ import pandas as pd
 import pytest
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import BacktestError, run
+from algua.backtest.engine import run
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
@@ -254,7 +255,7 @@ def test_decision_weights_masks_symbol_before_effective_date():
     PRESENT on/after it. A spy strategy records the symbols it sees per bar."""
     from datetime import date
 
-    from algua.backtest.engine import _decision_weights
+    from algua.backtest.decision_path import _decision_weights
 
     provider = SyntheticProvider(seed=0)
     bars = provider.get_bars(["AAA", "BBB"], START, END, "1d")
@@ -296,7 +297,7 @@ def test_decision_weights_masks_symbol_before_effective_date():
 def test_decision_weights_flat_before_earliest_membership():
     """Bars whose date precedes the earliest effective date have empty membership -> flat,
     and the strategy is never even called for them."""
-    from algua.backtest.engine import _decision_weights
+    from algua.backtest.decision_path import _decision_weights
 
     provider = SyntheticProvider(seed=0)
     bars = provider.get_bars(["AAA"], START, END, "1d")
@@ -325,7 +326,7 @@ def test_decision_weights_flat_before_earliest_membership():
 def test_decision_weights_rejects_non_member_weight():
     """A weight returned for a symbol that is NOT an as-of member is a strategy bug -> BacktestError
     naming the offending symbol."""
-    from algua.backtest.engine import _decision_weights
+    from algua.backtest.decision_path import _decision_weights
 
     provider = SyntheticProvider(seed=0)
     bars = provider.get_bars(["AAA", "BBB"], START, END, "1d")
@@ -347,7 +348,7 @@ def test_decision_weights_rejects_non_member_weight():
 
 def test_decision_weights_none_is_unchanged_static_behavior():
     """No PIT map (None) => identical behavior to before: the full panel is visible every bar."""
-    from algua.backtest.engine import _decision_weights
+    from algua.backtest.decision_path import _decision_weights
 
     provider = SyntheticProvider(seed=0)
     bars = provider.get_bars(["AAA", "BBB"], START, END, "1d")

@@ -12,7 +12,7 @@ from algua.backtest.bootstrap import (
     stable_bootstrap_seed,
     stationary_bootstrap_dsr,
 )
-from algua.research.gates import dsr_confidence, dsr_sr_star
+from algua.research.dsr import dsr_confidence, dsr_sr_star
 
 
 def _white(n: int, seed: int = 0) -> list[float]:

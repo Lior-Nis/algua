@@ -10,7 +10,8 @@ import pandas as pd
 import pytest
 
 from algua.backtest.delisting import DelistingRecord
-from algua.backtest.engine import BacktestError, simulate
+from algua.backtest.engine import simulate
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 

@@ -329,6 +329,26 @@ source_modules = ["algua.registry"]
 forbidden_modules = ["algua.live"]
 
 [[tool.importlinter.contracts]]
+# The backtest lane is a pure evaluator: it simulates and scores, and knows nothing about the
+# registry that decides what to do with the result. Probed and added in stage 7, when engine.py was
+# carved into pit_view/decision_path/errors/grid — five new modules is five new chances for an
+# evaluator to reach for a lifecycle table, and this makes that a gate failure rather than a review
+# catch. (`research -> backtest` is deliberately NOT contracted: it fails on two REAL pre-existing
+# dependencies, `research.dsr -> backtest._constants` and `research.eval_harness -> backtest._sample`,
+# both present before this stage. A contract with an exemption would hide them; leaving it unwritten
+# keeps them visible.)
+#
+# Sized properly (the linter prints CHAINS, not edges, so an earlier note here said "two"): there
+# are NINE direct edges across SIX modules -- research/{dsr,haircut,forward_gates,gates,regime}
+# -> backtest._constants (all five just for `ANN`), gates -> backtest.walkforward
+# (WalkForwardResult), eval_harness -> backtest.{_sample,walkforward}. Whoever closes this boundary
+# should know that most of it is one shared constant, not deep coupling.
+name = "backtest lane stays off the registry"
+type = "forbidden"
+source_modules = ["algua.backtest"]
+forbidden_modules = ["algua.registry"]
+
+[[tool.importlinter.contracts]]
 # The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
 # the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
 # gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is

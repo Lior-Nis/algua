@@ -14,7 +14,8 @@ import pandas as pd
 import pytest
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import adj_grid, adj_open_grid, simulate
+from algua.backtest.engine import adj_open_grid, simulate
+from algua.backtest.grid import adj_grid
 from algua.contracts.types import ExecutionContract, fill_reference_column
 from algua.execution.sim_broker import SimBroker
 from algua.live.paper_loop import run_paper

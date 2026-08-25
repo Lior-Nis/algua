@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 from typer.testing import CliRunner
 
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.backtest.result import BacktestResult
 from algua.cli.main import app
 from algua.evaluation.series import emit_series_file

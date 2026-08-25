@@ -16,16 +16,16 @@ import pytest
 
 import algua.strategies.momentum as momentum_pkg
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import (
-    BacktestError,
+from algua.backtest.decision_path import (
     _assert_parity,
     _decision_weights,
     _decision_weights_fast_or_loop,
     _fast_weights,
     _parity_sample_positions,
-    simulate,
     verify_signal_panel_parity,
 )
+from algua.backtest.engine import simulate
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
 from algua.risk.limits import WEIGHT_TOL, RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig

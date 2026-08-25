@@ -10,11 +10,8 @@ import datetime
 import math
 
 from algua.backtest.walkforward import WalkForwardResult
-from algua.research.gates import (
-    GateCriteria,
-    evaluate_gate,
-    sharpe_haircut,
-)
+from algua.research.gates import GateCriteria, evaluate_gate
+from algua.research.haircut import sharpe_haircut
 
 # ---------------------------------------------------------------------------
 # Helpers

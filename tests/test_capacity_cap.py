@@ -265,7 +265,7 @@ def test_backtest_loop_and_fast_path_apply_cap_identically():
     from datetime import UTC, datetime
 
     from algua.backtest._sample import SyntheticProvider
-    from algua.backtest.engine import _decision_weights, _fast_weights
+    from algua.backtest.decision_path import _decision_weights, _fast_weights
 
     start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 4, 1, tzinfo=UTC)
     # reference_aum huge vs synthetic dollar-ADV (~100*1e6=1e8) so the 100%-AAA target caps.

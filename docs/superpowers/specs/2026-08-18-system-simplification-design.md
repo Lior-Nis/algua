@@ -219,10 +219,29 @@ End-state rule: every `*_cmd.py` is thin — parse options → call one domain f
    `verify_signal_panel_parity`), `backtest/execution_model.py` (costs/fill-price);
    `simulate`+`run` remain a ~200-line orchestrator. `holdout_window` moves to a
    windowing home alongside walk-forward.
+   **LANDED (stage 7), with two deviations:** (a) **`execution_model.py` was NOT created — there is
+   nothing to put in it.** `fees`/`slippage` are two kwargs on the `from_orders` call and
+   `fill_price` is a one-line grid selection; the substantial artifact there is a COMMENT explaining
+   why charging costs on already-`t->t+1`-shifted weights introduces no look-ahead (#325), and that
+   comment must stay attached to the call it explains. (b) Two extra LEAVES were needed that the
+   spec did not anticipate — `backtest/errors.py` (`BacktestError`) and `backtest/grid.py`
+   (`adj_grid`) — because `decision_path` and `engine` both need them and each would otherwise have
+   to import the other. Result: engine.py 837 -> 322.
 7. **`research/gates.py`** — `GateDecision.to_dict` → `research/gate_serialization.py`;
    the four advisory-check builders move onto the declarative `GateSpec` pattern the
    binding checks already use; the post-#335 re-export shim in `gates.py` is removed
    once call sites are updated (no compat cruft).
+   **LANDED (stage 7), except the middle clause, which is DELIBERATELY NOT DONE.** `to_dict` moved
+   and the shim is gone (`__all__` 43 -> 10, ZERO re-exports, 23 import sites re-pointed at real
+   owners; gates.py 668 -> 544). But the four advisory checks (DSR, bootstrap, regime, IR) do **not**
+   fit `GateSpec`, which is declarative — `(section, metric_key, criteria_field, operator)` — and
+   works because a threshold check is a pure lookup-and-compare. The advisory four COMPUTE from the
+   returns series, append only when preconditions hold, and record skip reasons
+   (`no_dispersion`, `no_measured_dispersion`). Forcing them onto `GateSpec` means giving it a
+   compute callback, a precondition predicate and a skip-reason field — at which point it is a
+   function table with extra indirection, not a declarative spec, and the five genuinely-declarative
+   checks get harder to read to accommodate four that are not. Recorded rather than silently
+   dropped; reopen it only if the advisory checks ever become pure threshold comparisons.
 
 ## 7. Enforcement and validation
 

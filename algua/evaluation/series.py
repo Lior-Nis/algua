@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.backtest.result import BacktestResult, series_frame
 from algua.data.files import frame_to_parquet_bytes
 from algua.primitives.atomic_io import write_bytes_atomic

@@ -5,17 +5,16 @@ from scipy.stats import norm
 
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
-from algua.research.gates import (
+from algua.research.dsr import (
     DSR_BOOTSTRAP_LOWER_QUANTILE,
     DSR_BOOTSTRAP_RESAMPLES,
     MAX_BOOTSTRAP_BLOCK_LEN_FRACTION,
-    GateCriteria,
     dsr_confidence,
     dsr_sr_star,
     dsr_sr_star_annualized,
-    evaluate_gate,
     floored_trial_var_per_period,
 )
+from algua.research.gates import GateCriteria, evaluate_gate
 
 
 def test_constants():

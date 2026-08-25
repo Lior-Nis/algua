@@ -17,8 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from algua.backtest.engine import holdout_window
-from algua.backtest.walkforward import walk_forward
+from algua.backtest.walkforward import holdout_window, walk_forward
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.data.models import Dataset

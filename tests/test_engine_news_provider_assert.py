@@ -4,7 +4,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from algua.backtest.engine import BacktestError, _assert_news_shape
+from algua.backtest.errors import BacktestError
+from algua.backtest.pit_view import _assert_news_shape
 from algua.data.news_schema import explode_news_symbols, to_news_schema
 
 

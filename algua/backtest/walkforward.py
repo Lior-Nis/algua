@@ -11,13 +11,13 @@ import pandas as pd
 
 from algua.backtest.delisting import DelistingRecord
 from algua.backtest.engine import (
-    BacktestError,
     adj_grid,
     build_portfolio,
     fetch_symbols,
-    members_as_of,
 )
+from algua.backtest.errors import BacktestError
 from algua.backtest.metrics import metrics_from_returns
+from algua.backtest.pit_view import members_as_of
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
@@ -75,6 +75,41 @@ def _segment_bounds(
     assert bounds[-1][1] == usable_train
     assert train_n - bounds[-1][1] == embargo
     return bounds, (train_n, n)
+
+
+def holdout_window(
+    strategy: LoadedStrategy,
+    provider: DataProvider,
+    start: datetime,
+    end: datetime,
+    *,
+    holdout_frac: float,
+    universe_by_date: Mapping[date, Collection[str]] | None = None,
+) -> tuple[str, str]:
+    """The exact OOS holdout interval [start, end] (ISO dates) `walk_forward` would carve as the
+    last `holdout_frac` of the simulation grid — computed from the bar date-index WITHOUT running
+    the strategy. Reproduces `build_portfolio`'s grid (identical `n`), so the boundary is identical
+    to `walk_forward`'s `holdout_metrics`. Computed at reserve time so the single-use guard can
+    match on the bars that will actually be burned (issue #192).
+
+    Degenerate inputs (no bars, or holdout rounds to <1 bar) return the conservative full
+    grid/period: the subsequent `walk_forward` raises and the reservation is released, so the value
+    is immaterial but stays fail-closed (a superset of any real tail)."""
+    if not 0.0 < holdout_frac < 1.0:
+        raise BacktestError(f"holdout_frac must be in (0, 1), got {holdout_frac}")
+    try:
+        bars = provider.get_bars(fetch_symbols(strategy, universe_by_date), start, end, "1d")
+    except Exception as exc:
+        raise BacktestError(f"provider error: {exc}") from exc
+    if bars.empty:
+        return start.date().isoformat(), end.date().isoformat()
+    idx = adj_grid(bars).index
+    n = len(idx)
+    holdout_n = int(n * holdout_frac)
+    if holdout_n < 1:
+        return idx[0].date().isoformat(), idx[-1].date().isoformat()
+    train_n = n - holdout_n
+    return idx[train_n].date().isoformat(), idx[-1].date().isoformat()
 
 
 @dataclass
@@ -148,7 +183,8 @@ def _market_return_series(
             # so the benchmark never includes symbols before their effective-date join.
             # Non-members at date t are set to NaN so pandas .mean(axis=1) skips them,
             # correctly averaging only the as-of members at each bar. Reuses members_as_of
-            # (the engine's public as-of helper) — no reinvention of the masking logic.
+            # (the shared public as-of helper in `algua.backtest.pit_view`) — no reinvention
+            # of the masking logic.
             masked = daily.copy()
             for ts in daily.index:
                 members = members_as_of(universe_by_date, ts)

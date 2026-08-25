@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import random
 
-from algua.research.gates import effective_funnel_breadth
+from algua.research.dsr import effective_funnel_breadth
 
 
 def test_effective_funnel_breadth_3way_max() -> None:

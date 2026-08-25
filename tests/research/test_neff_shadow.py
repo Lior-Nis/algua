@@ -1,9 +1,5 @@
-from algua.research.gates import (
-    MIN_CORR_OVERLAP_BARS,
-    MIN_N_EFF_SIBLINGS,
-    RHO_BAR_SHRINKAGE_K,
-    GateDecision,
-)
+from algua.research.dsr import MIN_CORR_OVERLAP_BARS, MIN_N_EFF_SIBLINGS, RHO_BAR_SHRINKAGE_K
+from algua.research.gates import GateDecision
 
 
 def test_constants():

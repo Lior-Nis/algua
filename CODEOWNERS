@@ -13,6 +13,7 @@
 /algua/contracts/lifecycle.py   @Lior-Nis   # lifecycle stages + allowed transitions
 /algua/backtest/engine.py       @Lior-Nis   # anti-look-ahead t->t+1 enforcement
 /algua/research/gates.py        @Lior-Nis   # promotion-gate criteria
+/algua/research/gate_serialization.py @Lior-Nis   # GateDecision.to_dict(): what reaches the persisted decision_json (stage 7 task 4)
 /algua/research/clustering.py   @Lior-Nis   # clustering thresholds + family similarity (#222)
 /approvers/                     @Lior-Nis   # go-live approver public keys (the signature trust anchor)
 /algua/registry/live_gate.py    @Lior-Nis   # the signed paper->live gate
@@ -35,5 +36,10 @@
 /algua/cli/_common.py                  @Lior-Nis   # shared CLI JSON-envelope + flag-resolution surface (authenticate_actor moved to registry/human_actor.py in 6a)
 /algua/cli/research_cmd.py             @Lior-Nis   # research-promote command surface (the #329 enforcement call moved to registry/promote_run.py in 6a)
 /algua/cli/paper_cmd.py                @Lior-Nis   # paper-promote enforcement call site (#329)
+/algua/backtest/pit_view.py            @Lior-Nis   # as-of masking IS the anti-look-ahead enforcement (was engine.py, stage 7)
+/algua/backtest/decision_path.py       @Lior-Nis   # canonical/fast dual path + parity guard licensing the fast path (was engine.py, stage 7)
+/algua/backtest/grid.py                @Lior-Nis   # adj_grid: the sim date-index, single source of truth for build_portfolio AND holdout_window (#192 holdout identity)
+/algua/backtest/errors.py              @Lior-Nis   # BacktestError: the fail-closed signal every backtest wall raises (was engine.py, stage 7)
+/algua/backtest/walkforward.py         @Lior-Nis   # holdout_window: the #192 single-use-holdout identity source (was engine.py, stage 7)
 /.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners

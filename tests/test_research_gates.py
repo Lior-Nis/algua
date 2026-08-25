@@ -5,18 +5,10 @@ import pytest
 
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
-from algua.research.gates import (
-    DSR_ALPHA,
-    EULER_MASCHERONI,
-    FUNNEL_WINDOW_DAYS,
-    MIN_HOLDOUT_OBSERVATIONS,
-    GateCriteria,
-    GateDecision,
-    dsr_confidence,
-    effective_funnel_breadth,
-    evaluate_gate,
-    sharpe_haircut,
-)
+from algua.research._constants import MIN_HOLDOUT_OBSERVATIONS
+from algua.research.dsr import DSR_ALPHA, EULER_MASCHERONI, dsr_confidence, effective_funnel_breadth
+from algua.research.gates import FUNNEL_WINDOW_DAYS, GateCriteria, GateDecision, evaluate_gate
+from algua.research.haircut import sharpe_haircut
 
 
 def _wf(holdout_sharpe=0.8, holdout_return=0.05, pct_positive=0.75, min_sharpe=0.1, n_bars=100):

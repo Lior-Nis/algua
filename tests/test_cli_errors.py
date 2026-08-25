@@ -7,7 +7,7 @@ import sys
 import pytest
 import typer
 
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.cli.app import emit
 from algua.cli.errors import error_code, is_retryable, json_errors
 from algua.cli.main import main
