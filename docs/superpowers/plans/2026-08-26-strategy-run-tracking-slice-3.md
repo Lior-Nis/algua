@@ -6,7 +6,25 @@
 
 **Goal:** Turn the run ledger into the five preset views the spec promises, so the monitor answers "is any of this real?" at a glance instead of in paragraphs.
 
-**Architecture:** Five presets, no axis pickers. `algua/registry` and the CLI are untouched — slice 2 already ships `runs list` / `runs show` / `runs series` and `/api/runs*`. All work is in `web/frontend/` plus one dev-only seeding script. Charts use the `uplot` already in `package.json`; bullet bars and sparklines are SVG/CSS.
+**Architecture:** Five presets, no axis pickers. `algua/registry` and the CLI are untouched — slice 2 already ships `runs list` / `runs show` / `runs series` and `/api/runs*`. All work is in `web/frontend/` plus one dev-only seeding script.
+
+### Renderer split — decided before execution, and it decides what the tests can assert
+
+**uPlot renders to `<canvas>`.** jsdom cannot inspect canvas contents, which is why the existing `EquityChart.test.tsx` asserts only on placeholders and footnote text — never on marks. Any test in this plan of the form "the diagonal is present" or "this point is above the line" is **unwritable against a canvas renderer**.
+
+So:
+
+| View | Renderer | Why |
+|---|---|---|
+| 2 IS-vs-OOS scatter | **inline SVG** | ~10–70 points. No library needed, marks are real DOM nodes, direct labels are trivial, and the geometry is assertable. |
+| 3 Trial distribution | **inline SVG** | ~70 points + one threshold rule + one marker. Same reasoning. |
+| 5 Gate bullet card | **SVG/CSS** | 11 rows of value-vs-threshold. Never needed a library. |
+| 1 Sparkline | **inline SVG** | one tiny series per row. |
+| 4 Return overlay | **uPlot** | a real multi-point time series — this is what uPlot is for, and the only place it earns its weight. |
+
+**Consequence for Task 7 (the only canvas view):** follow `EquityChart.test.tsx`'s established pattern — assert on the empty/placeholder states, the labels, the small-multiples *structure* (panel count), and the prepared data handed to uPlot. Do **not** attempt to assert rendered marks.
+
+**Do not add a charting dependency.** uPlot is already present; everything else here is hand-written SVG, which is less code than a library wrapper at these data sizes.
 
 **Tech Stack:** React 19, TypeScript, uPlot 1.6, Vite, vitest. Standalone `web/` uv project for the backend.
 
@@ -222,7 +240,7 @@ This renders the argument that kills most strategies — holdout Sharpe **0.025*
 
 **THE HARD RULE — do not undo a fix that took an integrity review to find.** `runs series` returns the holdout **interval and `n_bars` only**, never a per-bar OOS vector. `holdout_returns.returns_blob` is SENSITIVE (`algua/registry/db/holdout.py`): exposing a strategy's own OOS vector re-opens the single-use best-of-N surface the promotion gate depends on. **Region + scalar label is the honest ceiling.** If this view seems to want a plotted OOS curve, that is the feeling the rule exists to override — stop and report.
 
-- [ ] **Step 1: Failing tests** — two runs render focus + context with both end-labels; three runs render small multiples, not three overlaid lines; the OOS leg renders as a **region**, and no per-bar OOS series exists in the DOM.
+- [ ] **Step 1: Failing tests** — this is the **canvas** view, so assert the way `EquityChart.test.tsx` does: on placeholders, labels and structure, never on rendered marks. Cover: two runs produce two prepared series and both end-labels; three runs produce **three panels** (small multiples), not one chart with three series; the OOS leg is prepared as a region (interval), and **no array of per-bar OOS values reaches the component at all** — assert on the prepared data, which is stronger than a DOM check would have been.
 - [ ] **Step 2: Watch them fail. Step 3: Implement. Step 4: Tests pass.**
 - [ ] **Step 5: LOOK AT IT** — confirm the focus line reads as the active one and the context line recedes. Report what you saw.
 - [ ] **Step 6: `npm run check && npm run build`. Step 7: Commit** — `feat(web): return overlay — focus plus context`
