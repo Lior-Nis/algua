@@ -87,8 +87,8 @@ OPERATOR_JOBS: dict[str, OperatorJob] = {
     ),
 }
 # Merge-back does NOT get an OPERATOR_JOBS entry (factory slice 3). `algua operator run --job X` is
-# SESSION-GATED (`_run_session` calls `session_gate` unconditionally, once per session of the
-# configured exchange) — but
+# SESSION-GATED (`algua.operator.session_runner.run_session` calls `session_gate` unconditionally,
+# once per session of the configured exchange) — but
 # merge-back must fire repeatedly through the day (once per drain cycle), so reusing this wrapper
 # would silently cap it at once per session. The candidate-selection gap this comment used to note
 # (WHICH branch/strategy/universe/window to merge back) is closed by a durable queue

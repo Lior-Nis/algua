@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 import algua.cli.operator_cmd as operator_cmd
+import algua.operator.session_runner as session_runner
 from algua.cli.main import app
 from algua.operator.schedule import SessionMarker
 
@@ -54,7 +55,13 @@ def _spy_alerts(monkeypatch) -> list[tuple[str, dict]]:
         alerts.append((kind, detail))
         return False
 
+    # `operator_cmd.emit_alert` covers alerts fired by `run()` itself (unknown_job,
+    # command_mismatch) and by `_emit_lock_held`/`_emit_setup_failed`; `session_runner.emit_alert`
+    # covers alerts fired from inside the moved decision tree (stage 6d task 3) — it is a distinct
+    # module-level binding there (an ordinary import, not the injected `emit`/`ok` seam), so both
+    # must be patched to catch every alert regardless of which layer raised it.
     monkeypatch.setattr(operator_cmd, "emit_alert", _rec)
+    monkeypatch.setattr(session_runner, "emit_alert", _rec)
     return alerts
 
 
