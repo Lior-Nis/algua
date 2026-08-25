@@ -67,7 +67,11 @@
 
 - [ ] **Step 1: Measure before moving**
 
-Measured on `main`@`cf2a20c`: `members_as_of` (`:47`, 18), `_assert_fundamentals_shape` (`:65`, 21), `_fundamentals_as_of` (`:86`, 16), `_assert_news_shape` (`:102`, 22), `_news_as_of` (`:124`, 16), `_static_operating_view` (`:541`, 25) — **~118 lines**. Re-verify, and regenerate every caller list untruncated (`members_as_of` is public and may have external consumers).
+Measured on `main`@`cf2a20c`: `members_as_of` (`:47`, 18), `_assert_fundamentals_shape` (`:65`, 21), `_fundamentals_as_of` (`:86`, 16), `_assert_news_shape` (`:102`, 22), `_news_as_of` (`:124`, 16), `_static_operating_view` (`:541`, 25) — **~118 lines**. Re-verify, and regenerate every caller list untruncated.
+
+**Known cross-task hazard:** `members_as_of` is imported by `backtest/walkforward.py:18` and called
+at `:154` — and Task 3 also edits `walkforward.py`. Re-point that import in THIS task; Task 3 must
+not assume it still reads from `engine`.
 
 - [ ] **Step 2: Move verbatim**
 
@@ -92,7 +96,19 @@ These functions implement the anti-look-ahead PIT contract — an as-of mask is 
 
 - [ ] **Step 1: Measure**
 
-Measured: `_decision_weights` (`:140`, 90), `_canonical_row` (`:230`, 24), `_fast_weights` (`:254`, 55), `_decision_weights_fast` (`:309`, 14), `_parity_sample_positions` (`:323`, 15), `_assert_parity` (`:338`, 40), `_decision_weights_fast_or_loop` (`:378`, 34), `verify_signal_panel_parity` (`:412`, 67) — **~339 lines**, the largest single cut in this stage. Re-verify and regenerate caller lists untruncated. `verify_signal_panel_parity` is public and IS called from outside `engine.py` — find every caller.
+Measured: `_decision_weights` (`:140`, 90), `_canonical_row` (`:230`, 24), `_fast_weights` (`:254`, 55), `_decision_weights_fast` (`:309`, 14), `_parity_sample_positions` (`:323`, 15), `_assert_parity` (`:338`, 40), `_decision_weights_fast_or_loop` (`:378`, 34), `verify_signal_panel_parity` (`:412`, 67) — **~339 lines**, the largest single cut in this stage. Re-verify and regenerate caller lists untruncated.
+
+**`verify_signal_panel_parity` carries a PATCH TARGET — the shape that silently disarms coverage.**
+Measured consumers: `registry/promotion.py:9` (import) + `:162` (the promotion gate's exhaustive
+parity check), `tests/test_fast_path.py` (6 call sites), `tests/test_static_observation_parity.py`
+(2), and critically **`tests/registry/test_family_creation_guard.py:94`**, which does
+`patch("algua.registry.promotion.verify_signal_panel_parity")`.
+
+That patch targets the name as bound in `promotion.py`, so it survives IF `promotion.py` still binds
+the name and only the import SOURCE changes. **Prove it, do not assume it:** point the patch at a
+nonexistent attribute, confirm the tests error, restore, confirm they pass — with
+`PYTHONDONTWRITEBYTECODE=1` and `__pycache__` cleared. Report counts. This is exactly how a go-live
+guard was silently disarmed in stage 5b.
 
 - [ ] **Step 2: Move verbatim**
 
