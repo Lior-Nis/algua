@@ -154,7 +154,7 @@ def _wire(monkeypatch, *, gate: bool, git: _FakeGit, promote_calls: list,
         conn.commit()
         return {"admitted": [{"strategy": _STRAT, "capital": 20_000.0}], "queued": []}
 
-    monkeypatch.setattr(paper_cmd, "_run_intake", _fake_intake)
+    monkeypatch.setattr(paper_cmd, "run_intake", _fake_intake)
 
 
 def _invoke():
