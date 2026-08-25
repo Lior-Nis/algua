@@ -314,5 +314,6 @@ running the wrapped command. It **deliberately bypasses `session_gate`/`SessionM
 merge-back has no notion of "once per trading session" (it fires many times a day), so reusing the
 session-gated `operator run` wrapper would silently cap it at once per session. Merge-back therefore
 gets **no `OPERATOR_JOBS` manifest entry** — `lock-run` is a parallel, purpose-built command, not a
-new job key. Zero lines of `_run_session`/`session_gate`/the existing `run` command are touched by
+new job key. Zero lines of `run_session` (`algua/operator/session_runner.py`)/`session_gate`/the
+existing `run` command are touched by
 its existence.

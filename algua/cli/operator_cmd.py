@@ -23,7 +23,6 @@ contract): it reaches only the shared CLI infra (``app``, ``_common``, ``errors`
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
@@ -33,7 +32,6 @@ from pathlib import Path
 
 import typer
 
-from algua.calendar.factory import get_calendar
 from algua.cli._common import ok
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
@@ -41,27 +39,14 @@ from algua.config.settings import get_settings
 from algua.observability import configure_logging, correlation_context
 from algua.operator.alerts import emit_alert
 from algua.operator.jobs import OPERATOR_JOBS, CommandMismatch, OperatorJob
-from algua.operator.schedule import (
-    OperatorLockHeld,
-    SessionMarker,
-    operator_run_lock,
-    session_gate,
-)
+from algua.operator.schedule import OperatorLockHeld, operator_run_lock
+from algua.operator.session_runner import run_session
 
 operator_app = typer.Typer(
     help="Autonomous operator clock: session-gated single-shot driver runs",
     no_args_is_help=True,
 )
 app.add_typer(operator_app, name="operator")
-
-_STDOUT_HEAD_CAP = 500
-# Hard wall-clock cap on a single driver subprocess, as a multiple of the job's stuck-lock grace
-# (`expected_duration_seconds`). A driver hung on a broker/network stall is KILLED at this cap so it
-# can never hold `operator.lock` indefinitely and silently stop the fleet from ever trading again.
-# The kill leaves the session marker unwritten, so the next timer fire re-attempts (run-all
-# reconciles-before-trading, so a retry never blind-double-trades). systemd `TimeoutStartSec` is a
-# further backstop set ABOVE this app-level cap.
-_DRIVER_TIMEOUT_FACTOR = 2.0
 
 
 def _resolve_driver_argv(command: list[str]) -> list[str]:
@@ -106,77 +91,6 @@ def _resolve_git_dir() -> Path:
         check=True,
     )
     return Path(out.stdout.strip())
-
-
-def _last_top_level_object(text: str) -> str | None:
-    """Locate the last balanced top-level ``{...}`` in ``text`` via brace-depth counting.
-
-    Scans from the END: finds the final ``}``, then walks backwards tracking brace depth (ignoring
-    braces inside JSON string literals) until depth returns to zero, yielding the matching ``{``.
-    Returns the substring, or ``None`` if no balanced object is found.
-    """
-    end = text.rfind("}")
-    if end == -1:
-        return None
-    depth = 0
-    in_string = False
-    i = end
-    while i >= 0:
-        ch = text[i]
-        if in_string:
-            if ch == '"':
-                backslashes = 0
-                j = i - 1
-                while j >= 0 and text[j] == "\\":
-                    backslashes += 1
-                    j -= 1
-                if backslashes % 2 == 0:
-                    in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch == "}":
-            depth += 1
-        elif ch == "{":
-            depth -= 1
-            if depth == 0:
-                return text[i : end + 1]
-        i -= 1
-    return None
-
-
-def _parse_driver_payload(stdout: str) -> dict | None:
-    """Best-effort recover the driver's JSON envelope from its stdout, or ``None`` if none parses.
-
-    A driver's single ``emit()`` call round-trips as one ``json.dumps(..., indent=2)`` document, so
-    the FULL stdout parses cleanly in the common case. If the driver interleaved extra output, fall
-    back to the last balanced top-level ``{...}``. Returns ``None`` (NOT ``{}``) when nothing parses
-    to a dict, so the caller can tell "the driver did not emit parseable JSON" (a completion it
-    cannot confirm) from "the driver emitted a valid but non-deferred envelope".
-    """
-    text = stdout.strip()
-    if not text:
-        return None
-    for candidate in (text, _last_top_level_object(text)):
-        if candidate is None:
-            continue
-        try:
-            parsed = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
-
-
-def _classify_failure(payload: dict | None) -> str:
-    """Best-effort alert label for an rc!=0 outcome (never load-bearing — the alert fires and
-    carries rc+stdout_head regardless). ``halted`` → global_halt, ``ok:false`` → breach, else
-    job_failed (also the parse-failure fallback)."""
-    if payload is not None and payload.get("halted"):
-        return "global_halt"
-    if payload is not None and payload.get("ok") is False:
-        return "breach"
-    return "job_failed"
 
 
 @operator_app.command("run")
@@ -247,12 +161,25 @@ def run(
         _emit_setup_failed(job, "git_dir_unresolved", exc, alert_cmd)
         raise typer.Exit(1) from None
 
+    session_ok = True
     with correlation_context():
         try:
             with operator_run_lock(lock_path, job=job, host=host, pid=pid):
-                _run_session(job, op_job, command, now_dt, alert_cmd, host, pid)
+                session_ok = run_session(
+                    job,
+                    op_job,
+                    command,
+                    now_dt,
+                    alert_cmd,
+                    host,
+                    pid,
+                    emit=emit,
+                    ok=ok,
+                    run_driver=_run_driver,
+                )
         except OperatorLockHeld as held:
             _emit_lock_held(job, op_job, held.holder, now_dt, alert_cmd)
+            return
         except OSError as exc:
             # `operator_run_lock` raises a RAW OSError if it cannot open/create the lock file
             # (permission denied, read-only fs, disk full) — this happens BEFORE it converts flock
@@ -260,6 +187,12 @@ def run(
             # fail-closed-with-a-page invariant: never let it die at the un-paging catch-all (#486).
             _emit_setup_failed(job, "lock_unavailable", exc, alert_cmd)
             raise typer.Exit(1) from None
+    if not session_ok:
+        # `run_session` returns False for exactly the branches that used to `raise typer.Exit(1)`
+        # itself (all five shared the same exit code — see `algua/operator/session_runner.py`). By
+        # the time we get here the function has already returned normally (it never raises for its
+        # own failure paths), so there is no live exception context to leak into this raise.
+        raise typer.Exit(1)
 
 
 def _run_locked_command(command: list[str]) -> subprocess.CompletedProcess:
@@ -285,12 +218,13 @@ def lock_run(
 
     Purely additive (#486/#534 factory slice 3): merge-back has no notion of "once per trading
     session" (it fires once per drain cycle, many times a day), so it cannot reuse ``operator run``
-    — that wrapper is SESSION-GATED (``_run_session`` calls ``session_gate`` unconditionally), and
-    forcing a many-times-a-day job through a once-per-session gate would silently cap it at one run
-    per session. This command deliberately bypasses ``session_gate``/``SessionMarker`` entirely —
-    zero lines of ``_run_session`` are touched by this command's existence or its tests — while
-    still sharing ``operator.lock`` with the paper job, turning "don't run a paper tick concurrently
-    with a merge-back" from operator discipline into real kernel-enforced mutual exclusion.
+    — that wrapper is SESSION-GATED (``algua.operator.session_runner.run_session`` calls
+    ``session_gate`` unconditionally), and forcing a many-times-a-day job through a once-per-session
+    gate would silently cap it at one run per session. This command deliberately bypasses
+    ``session_gate``/``SessionMarker`` entirely — zero lines of ``run_session`` are touched by this
+    command's existence or its tests — while still sharing ``operator.lock`` with the paper job,
+    turning "don't run a paper tick concurrently with a merge-back" from operator discipline into
+    real kernel-enforced mutual exclusion.
 
     TRANSPARENT PASSTHROUGH: on a run, stdout/stderr are inherited untouched and the wrapped
     command's real exit code becomes this process's own exit code — no wrapper envelope is ever
@@ -398,214 +332,3 @@ def _emit_setup_failed(job: str, reason: str, exc: BaseException, alert_cmd: str
             "alerted": True,
         }
     )
-
-
-def _run_session(
-    job: str,
-    op_job: OperatorJob,
-    command: list[str],
-    now_dt: datetime,
-    alert_cmd: str | None,
-    host: str,
-    pid: int,
-) -> None:
-    """Gate → (run → record), all inside the held run lock."""
-    marker = SessionMarker(get_settings().db_path.parent)
-    decision = session_gate(job, now_dt, get_calendar(), marker)
-    sess_iso = decision.session.isoformat() if decision.session else None
-
-    if decision.reason == "calendar_out_of_bounds":
-        emit_alert(
-            "calendar_out_of_bounds", {"job": job, "now": now_dt.isoformat()}, alert_cmd=alert_cmd
-        )
-        emit(
-            {
-                "ok": False,
-                "job": job,
-                "ran": False,
-                "reason": "calendar_out_of_bounds",
-                "alerted": True,
-            }
-        )
-        raise typer.Exit(1)
-
-    if decision.reason == "marker_corrupt":
-        emit_alert("marker_corrupt", {"job": job, "session": sess_iso}, alert_cmd=alert_cmd)
-        emit(
-            {
-                "ok": False,
-                "job": job,
-                "ran": False,
-                "reason": "marker_corrupt",
-                "session": sess_iso,
-                "alerted": True,
-            }
-        )
-        raise typer.Exit(1)
-
-    if not decision.due:
-        emit(ok({"job": job, "ran": False, "reason": decision.reason, "session": sess_iso}))
-        return
-
-    assert decision.session is not None
-
-    if decision.skipped_sessions > 0:
-        last_recorded = marker.last_session(job)  # not corrupt on the due path
-        emit_alert(
-            "session_gap",
-            {
-                "job": job,
-                "last_recorded": last_recorded.isoformat() if last_recorded else None,
-                "target": sess_iso,
-                "skipped_sessions": decision.skipped_sessions,
-            },
-            alert_cmd=alert_cmd,
-        )
-
-    driver_timeout = op_job.expected_duration_seconds * _DRIVER_TIMEOUT_FACTOR
-    try:
-        proc = _run_driver(command, driver_timeout)
-    except subprocess.TimeoutExpired:
-        # A hung driver (broker/network stall) would otherwise hold operator.lock until a human
-        # intervenes and silently stop the fleet from trading. It is KILLED at the wall-clock cap;
-        # the marker is left unwritten so the next fire re-attempts (run-all reconciles-before-
-        # trading, so a retry never blind-double-trades), and the timeout is alerted.
-        emit_alert(
-            "driver_timeout",
-            {"job": job, "session": sess_iso, "timeout_seconds": driver_timeout},
-            alert_cmd=alert_cmd,
-        )
-        emit(
-            {
-                "ok": False,
-                "job": job,
-                "ran": True,
-                "recorded": False,
-                "reason": "driver_timeout",
-                "session": sess_iso,
-                "timeout_seconds": driver_timeout,
-                "alerted": True,
-            }
-        )
-        raise typer.Exit(1) from None
-    except OSError as exc:
-        # The driver could not even be SPAWNED (binary not on PATH, permission denied, …) — this is
-        # not a driver failure, it is an operator-config failure. Without this catch it would
-        # propagate past the run lock's `finally` (releasing the lock correctly) straight to the
-        # generic `@json_errors` catch-all, which renders a JSON error envelope but — critically —
-        # never calls `emit_alert`: the operator would then fail EVERY fire, forever, with zero
-        # paging (GATE-2 finding, #486). Alert explicitly and leave the marker unwritten.
-        emit_alert(
-            "driver_spawn_failed",
-            {"job": job, "session": sess_iso, "error": str(exc)},
-            alert_cmd=alert_cmd,
-        )
-        emit(
-            {
-                "ok": False,
-                "job": job,
-                "ran": False,
-                "recorded": False,
-                "reason": "driver_spawn_failed",
-                "session": sess_iso,
-                "error": str(exc),
-                "alerted": True,
-            }
-        )
-        raise typer.Exit(1) from None
-    payload = _parse_driver_payload(proc.stdout)
-    rc = proc.returncode
-    stdout_head = (proc.stdout or "")[:_STDOUT_HEAD_CAP]
-
-    if rc == 0:
-        # rc==0 does NOT by itself prove the session completed. Check the anomaly cases FIRST — an
-        # unparseable envelope is a completion we cannot confirm, and a `deferred` cycle chose not
-        # to trade — before applying the job's positive-completion predicate (which, for `paper`,
-        # would otherwise treat a bare rc0 with no `deferred` flag as complete, §D4).
-        if payload is None:
-            # The drivers always emit JSON; unparseable stdout is an anomaly. Refuse to assert a
-            # completion we can't verify: do NOT record, alert, and let the next fire retry.
-            emit_alert(
-                "completion_unconfirmed",
-                {"job": job, "rc": rc, "stdout_head": stdout_head},
-                alert_cmd=alert_cmd,
-            )
-            emit(
-                ok(
-                    {
-                        "job": job,
-                        "ran": True,
-                        "recorded": False,
-                        "reason": "completion_unconfirmed",
-                        "session": sess_iso,
-                        "rc": 0,
-                    }
-                )
-            )
-            return
-        if not op_job.is_completed(rc, payload):
-            if payload.get("deferred") is True:
-                # A benign deferral (the driver deliberately chose NOT to trade this cycle — a
-                # transient reconcile condition): NOT completed, so the marker is left unwritten and
-                # the next fire retries. Expected operation, not a failure — no alert.
-                emit(
-                    ok(
-                        {
-                            "job": job,
-                            "ran": True,
-                            "recorded": False,
-                            "reason": "deferred",
-                            "session": sess_iso,
-                            "rc": 0,
-                        }
-                    )
-                )
-                return
-            # rc==0 but the driver neither asserted success (`ok:true`) NOR deferred — e.g.
-            # `ok:false`, or an `ok`-less envelope at rc0. We cannot confirm the session completed,
-            # so — exactly like the unparseable case above — refuse to record, ALERT, and let the
-            # next fire retry. Without this, a broken-but-rc0 driver would be silently misfiled as a
-            # benign deferral and retried FOREVER with zero paging (GATE-2 finding, #486).
-            emit_alert(
-                "completion_unconfirmed",
-                {"job": job, "rc": rc, "stdout_head": stdout_head},
-                alert_cmd=alert_cmd,
-            )
-            emit(
-                ok(
-                    {
-                        "job": job,
-                        "ran": True,
-                        "recorded": False,
-                        "reason": "completion_unconfirmed",
-                        "session": sess_iso,
-                        "rc": 0,
-                    }
-                )
-            )
-            return
-        marker.record(job, decision.session, command=list(command), rc=rc, host=host, pid=pid)
-        emit(ok({"job": job, "ran": True, "recorded": True, "session": sess_iso, "rc": rc}))
-        return
-
-    # rc != 0 — a failure. The alert ALWAYS fires and ALWAYS carries rc + stdout_head;
-    # classification is a best-effort label only. Marker NOT recorded — the next fire re-attempts.
-    kind = _classify_failure(payload)
-    emit_alert(
-        kind,
-        {"job": job, "session": sess_iso, "rc": rc, "stdout_head": stdout_head},
-        alert_cmd=alert_cmd,
-    )
-    emit(
-        {
-            "ok": False,
-            "job": job,
-            "ran": True,
-            "recorded": False,
-            "session": sess_iso,
-            "rc": rc,
-            "alerted": True,
-            "alert_kind": kind,
-        }
-    )
-    raise typer.Exit(1)

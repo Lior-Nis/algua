@@ -556,7 +556,7 @@ def _last_top_level_object(text: str) -> str | None:
     braces inside JSON string literals) until depth returns to zero, yielding the matching ``{``.
     Returns the substring, or ``None`` if no balanced object is found.
 
-    This is the SAME algorithm as ``algua/cli/operator_cmd.py``'s ``_last_top_level_object``
+    This is the SAME algorithm as ``algua/operator/driver_payload.py``'s ``last_top_level_object``
     (ported here, not imported, because this module is stdlib-only / no ``algua`` import — see the
     module docstring), reused deliberately rather than inventing a second way to solve the same
     "extract the JSON envelope from a subprocess's mixed stdout" problem."""
@@ -607,8 +607,9 @@ def _parse_result_json(stdout_text: str) -> dict | None:
     Tries the whole trimmed stdout as JSON first (the common case for a benign lock-contention
     envelope, and for tests that stub a bare JSON payload); if that fails, falls back to the LAST
     balanced top-level ``{...}`` object in the text (see :func:`_last_top_level_object`) — the SAME
-    algorithm ``algua/cli/operator_cmd.py``'s ``_parse_driver_payload`` already uses to solve this
-    exact problem for the ``paper`` operator job path, reused here rather than reinvented.
+    algorithm ``algua/operator/driver_payload.py``'s ``parse_driver_payload`` already uses to
+    solve this exact problem for the ``paper`` operator job path, reused here rather than
+    reinvented.
 
     Returns ``None`` (not ``{}``) when nothing parses, so the caller can tell an unparseable/absent
     result from a real-but-atypical envelope."""

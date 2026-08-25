@@ -363,3 +363,16 @@ forbidden_modules = [
     "algua.provenance", "algua.registry", "algua.research", "algua.risk", "algua.strategies",
     "algua.tracking",
 ]
+
+[[tool.importlinter.contracts]]
+# algua/operator/ is clean of algua.cli today (stage 6d, #592-adjacent). Lock that in BEFORE the
+# session decision tree lands here: its original body called algua.cli.app.emit ten times, so
+# without this contract a lazy import could silently recreate the same registry->cli edge stage 6a
+# left behind in human_actor.py (#592) -- an edge that, once merged, cannot be contracted without
+# an exemption. With this contract in place first, that CLI surface must be injected into the
+# operator lane rather than imported, and an accidental import fails the gate instead of slipping
+# past review.
+name = "operator lane stays off the cli layer"
+type = "forbidden"
+source_modules = ["algua.operator"]
+forbidden_modules = ["algua.cli"]
