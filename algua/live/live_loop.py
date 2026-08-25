@@ -72,7 +72,7 @@ def assert_marks_usable(
     <= 0 AND +inf / NaN), or future-dated (bar maps to a session after `now`). Establishing NAV /
     drawdown / gross exposure / the sizing denominator off any such mark is impossible, so the risk
     state cannot be trusted (#452). Exported (no leading underscore) so #389's
-    `_build_book_exposure` reuses the SAME wall over the account book. Raises
+    `build_book_exposure` reuses the SAME wall over the account book. Raises
     `RiskBreach('unvaluable_marks' | 'stale_marks')` which the per-lane handlers route to
     HALT-WITHOUT-FLATTEN (a dark bar feed, broker still alive)."""
     unvaluable = sorted(
