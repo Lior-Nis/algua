@@ -54,6 +54,12 @@ export function runsUrl(query: RunsQuery = {}): string {
   return qs ? `/api/runs?${qs}` : '/api/runs'
 }
 
+/** Builds the `/api/runs/{id}` URL — `runs show` (one run's full detail, including the
+ * allow-list-projected `gate_decision` for a `gate` run). Never returns a return series. */
+export function runDetailUrl(id: number): string {
+  return `/api/runs/${id}`
+}
+
 /** Format an ISO timestamp as a local HH:MM:SS for the header / banners. */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso)
@@ -92,15 +98,20 @@ export interface UseFetchResult<T> {
  * - Serves the cached payload immediately, revalidating in the background when
  *   the entry is older than ttlMs.
  * - Refetches when the tab becomes visible again (the phone-unlock case).
+ * - `url: null` SKIPS the fetch entirely (no network call, `data` stays `undefined`,
+ *   `loading` is `false`) — for a second-stage lookup whose id isn't known yet (e.g. the gate
+ *   bullet card's list-then-detail waterfall). Never pass an empty string as a "skip" sentinel:
+ *   that would actually fetch the current page.
  */
-export function useFetch<T>(url: string, opts: { ttlMs?: number } = {}): UseFetchResult<T> {
+export function useFetch<T>(url: string | null, opts: { ttlMs?: number } = {}): UseFetchResult<T> {
   const ttlMs = opts.ttlMs ?? 30_000
-  const initial = cache.get(url)
+  const initial = url !== null ? cache.get(url) : undefined
   const [data, setData] = useState<T | undefined>(initial ? (initial.data as T) : undefined)
   const [error, setError] = useState<Error | null>(null)
-  const [loading, setLoading] = useState(!initial)
+  const [loading, setLoading] = useState(url !== null && !initial)
 
   const load = useCallback(async () => {
+    if (url === null) return
     if (!cache.has(url)) setLoading(true)
     try {
       const fresh = await fetchShared<T>(url)
@@ -115,6 +126,12 @@ export function useFetch<T>(url: string, opts: { ttlMs?: number } = {}): UseFetc
   }, [url])
 
   useEffect(() => {
+    if (url === null) {
+      setData(undefined)
+      setError(null)
+      setLoading(false)
+      return
+    }
     const hit = cache.get(url)
     if (hit) {
       setData(hit.data as T)

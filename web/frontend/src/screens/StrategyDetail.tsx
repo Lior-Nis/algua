@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom'
 import { ApiError, formatTimestamp, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import EquityChart from '../components/EquityChart'
+import GateBulletCard from '../components/GateBulletCard'
 import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
 import PassMark from '../components/PassMark'
@@ -113,7 +114,7 @@ export default function StrategyDetail() {
 
       {paper !== null && <PaperTiles paper={paper} />}
 
-      {gates !== null && <GatesSection gates={gates} limit={d.gates_limit} />}
+      {gates !== null && <GatesSection gates={gates} limit={d.gates_limit} strategy={d.strategy} />}
 
       {registry && registry.transitions.length > 0 && (
         <TransitionsTimeline transitions={registry.transitions} />
@@ -155,9 +156,11 @@ function asNum(v: unknown): number | null {
 function GatesSection({
   gates,
   limit,
+  strategy,
 }: {
   gates: NonNullable<StrategyDetailResponse['gates']>
   limit: number | undefined
+  strategy: string
 }) {
   const [latest, ...older] = gates.gate_evaluations
   const forwards = gates.forward_gate_evaluations
@@ -174,7 +177,7 @@ function GatesSection({
       {latest === undefined ? (
         <div className="dim-note">no research gate evaluations</div>
       ) : (
-        <LatestGate row={latest} />
+        <LatestGate row={latest} strategy={strategy} />
       )}
       {older.length > 0 && (
         <details className="sub-details">
@@ -206,9 +209,8 @@ function GatesSection({
   )
 }
 
-function LatestGate({ row }: { row: GateRow }) {
+function LatestGate({ row, strategy }: { row: GateRow; strategy: string }) {
   const decision = row.decision
-  const checks = decision?.checks ?? []
   // fdr_* live as ledger columns; dsr_confidence / appraisal_ratio only inside decision.
   const fdrP = asNum(row.fdr_p_value)
   const fdrAlpha = asNum(row.fdr_alpha_level)
@@ -233,47 +235,7 @@ function LatestGate({ row }: { row: GateRow }) {
         <div className="dim-note">decision unparseable: {row.decision_error ?? 'unknown'}</div>
       ) : (
         <>
-          {checks.length > 0 && (
-            <div className="table-scroll">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>check</th>
-                    <th>op</th>
-                    <th>threshold</th>
-                    <th>value</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {checks.map((c, i) => (
-                    <tr key={`${c.name ?? 'check'}-${i}`}>
-                      <td>
-                        {c.name ?? '—'}
-                        {c.advisory === true && (
-                          <span className="dim-note"> · advisory</span>
-                        )}
-                      </td>
-                      <td className="dim-note">{c.op ?? '—'}</td>
-                      <td className="num">{num(c.threshold, 4)}</td>
-                      <td className="num">{num(c.value, 4)}</td>
-                      <td>
-                        <PassMark passed={c.passed} advisory={c.advisory === true} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {/* Without this, a passing gate that carries failed advisory checks — the NORMAL
-              shape under the factory soft gate — reads as "promoted despite failing". */}
-          {checks.some((c) => c.advisory === true) && (
-            <div className="dim-note">
-              advisory checks are recorded but never veto — only the binding checks decide
-              the verdict
-            </div>
-          )}
+          <GateBulletCard strategy={strategy} />
           {scalars.length > 0 && <div className="dim-note num">{scalars.join(' · ')}</div>}
         </>
       )}

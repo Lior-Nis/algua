@@ -1,7 +1,13 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { ApiEnvelope, SeriesPayload, StrategyDetailResponse } from '../types'
+import type {
+  ApiEnvelope,
+  RunDetail,
+  RunsListPayload,
+  SeriesPayload,
+  StrategyDetailResponse,
+} from '../types'
 import StrategyDetail from './StrategyDetail'
 
 const detail: StrategyDetailResponse = {
@@ -72,6 +78,56 @@ const seriesEnvelope: ApiEnvelope<SeriesPayload> = {
   },
 }
 
+// The gate bullet card (task 5) sources its checks from `/api/runs/{id}`, NOT from
+// `detail.gates` above — a SEPARATE two-call waterfall (`/api/runs?...&kind=gate&limit=1` to
+// find the latest gate run's id, then `/api/runs/{id}` for its checks). Same `holdout_sharpe`
+// binding-fail check as `detail.gates.gate_evaluations[0].decision`, so this exercises the same
+// scenario the old inline text-dump table used to.
+const runsListEnvelope: ApiEnvelope<RunsListPayload> = {
+  ok: true,
+  fetched_at: '2026-08-09T14:30:00Z',
+  stale: false,
+  data: {
+    count: 1,
+    runs: [
+      {
+        id: 70,
+        kind: 'gate',
+        strategy_name: 'mom_breakout',
+        strategy_id: 1,
+        created_at: '2026-08-02T15:00:00+00:00',
+        passed: 0,
+        mean_window_sharpe: null,
+        sharpe_oos: null,
+      },
+    ],
+  },
+}
+
+const runDetailEnvelope: ApiEnvelope<RunDetail> = {
+  ok: true,
+  fetched_at: '2026-08-09T14:30:00Z',
+  stale: false,
+  data: {
+    id: 70,
+    kind: 'gate',
+    strategy_name: 'mom_breakout',
+    strategy_id: 1,
+    created_at: '2026-08-02T15:00:00+00:00',
+    passed: 0,
+    mean_window_sharpe: null,
+    sharpe_oos: null,
+    extra_metrics: {},
+    gate_decision: {
+      passed: false,
+      dsr_confidence: 0.91,
+      checks: [
+        { name: 'holdout_sharpe', op: '>=', threshold: 0.62, value: 0.31, passed: false },
+      ],
+    },
+  },
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -83,7 +139,12 @@ it('renders the degraded paper banner and the rest of the page when paper is nul
     vi.fn(async (url: string) => ({
       ok: true,
       status: 200,
-      json: async () => (url.endsWith('/series') ? seriesEnvelope : detail),
+      json: async () => {
+        if (url.endsWith('/series')) return seriesEnvelope
+        if (/^\/api\/runs\/\d+$/.test(url)) return runDetailEnvelope
+        if (url.startsWith('/api/runs?')) return runsListEnvelope
+        return detail
+      },
     })) as unknown as typeof fetch,
   )
 
@@ -101,7 +162,10 @@ it('renders the degraded paper banner and the rest of the page when paper is nul
   expect(screen.getByText('mom_breakout')).toBeTruthy()
   expect(screen.getByText('breakout over rolling high')).toBeTruthy()
   expect(screen.getByText('idea → backtested')).toBeTruthy()
-  expect(screen.getByText('holdout_sharpe')).toBeTruthy()
+  // The gate bullet card's checks land via its OWN two-step fetch (`/api/runs?...` then
+  // `/api/runs/{id}`), a beat after the composite `/api/strategy/{name}` response above — wait
+  // for it rather than asserting synchronously.
+  expect(await screen.findByText('holdout_sharpe')).toBeTruthy()
   expect(screen.getAllByText('fail').length).toBeGreaterThanOrEqual(2) // verdict + check row
   // empty series -> chart placeholder, no crash
   expect(screen.getByText(/awaiting tick history/i)).toBeTruthy()

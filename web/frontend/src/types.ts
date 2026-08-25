@@ -353,3 +353,16 @@ export interface RunsListPayload {
   runs: RunRow[]
   count: number
 }
+
+/** GET /api/runs/{id} — `runs show` payload (algua/registry/run_views.py run_detail_payload):
+ * one run row plus its `run_metrics` overflow tail and — for a `gate` run with a `gate_id` — the
+ * allow-list-projected gate decision. `gate_decision` carries the SAME shape `GateRow.decision`
+ * does (both go through `gate_history._project_decision`), but is sourced from the `runs` ledger
+ * rather than the `registry gates` ledger — the gate bullet card's contract (task 5) is to read
+ * checks from HERE, never from `StrategyDetailResponse.gates`. Never a return series. */
+export interface RunDetail extends RunRow {
+  extra_metrics: Record<string, unknown>
+  gate_decision?: GateDecision | null
+  gate_decision_dropped_keys?: string[]
+  gate_decision_error?: string
+}

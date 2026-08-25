@@ -564,6 +564,81 @@ button { font: inherit; }
   border-radius: 6px;
 }
 
+/* ---- gate bullet card ------------------------------------------------------ */
+
+.bullet-card { display: grid; gap: 14px; height: 100%; overflow-y: auto; }
+
+.bullet-group { display: grid; gap: 2px; }
+
+.bullet-row {
+  display: grid;
+  gap: 3px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.bullet-group .bullet-row:last-child { border-bottom: none; }
+
+.bullet-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bullet-check-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* The explicit non-color label — binding vs advisory survives with color stripped entirely. */
+.bullet-check-kind {
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-fade);
+}
+
+/* Stacked, not side-by-side: at 390px a bar-plus-two-numbers row has no spare width for a
+   second column, so the value/threshold line runs the FULL row width underneath the bar. */
+.bullet-bar-row { display: grid; gap: 4px; }
+
+.bullet-svg { width: 100%; height: 20px; }
+
+.bullet-track { fill: var(--line); }
+
+/* Status color is REINFORCEMENT only — the binding/advisory distinction itself is carried by
+   the group, the "binding"/"advisory" label, and the bar's height (see GateBulletCard.tsx). */
+.bullet-fill-pass { fill: var(--green); }
+.bullet-fill-fail { fill: var(--red); }
+.bullet-fill-advisory-pass { fill: var(--text-dim); }
+.bullet-fill-advisory-fail { fill: var(--amber); }
+.bullet-fill-unknown { fill: var(--text-dim); }
+
+.bullet-threshold { stroke: var(--line-2); stroke-width: 1.5; }
+
+.bullet-values {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.bullet-values span:last-child { color: var(--text); }
+
+.bullet-not-evaluated {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-fade);
+}
+
 /* ---- equity chart -------------------------------------------------------- */
 
 .chart-panel { display: grid; gap: 8px; }
