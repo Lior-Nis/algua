@@ -196,7 +196,8 @@ class PendingNovelFamily(NamedTuple):
 
 
 class ClassifyResult(NamedTuple):
-    """The result of ``_classify_and_assign_family`` (#524, R9): either a resolved ``family_id``
+    """The result of ``classify_and_assign_family`` (#524, R9) in
+    ``algua.registry.family_assignment``: either a resolved ``family_id``
     (MERGE / PARENTAGE / human-NOVEL / already-assigned) OR a deferred ``pending_novel_family`` spec
     (agent NOVEL — no family created yet). Exactly one is non-None for the agent-NOVEL case
     (``family_id is None`` + ``pending_novel_family`` set); all other cases set ``family_id``."""

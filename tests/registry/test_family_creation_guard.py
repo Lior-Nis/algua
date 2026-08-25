@@ -88,12 +88,12 @@ def _call_preflight(
     with (
         patch("algua.registry.promotion.load_strategy", return_value=None),
         patch(
-            "algua.registry.promotion.compute_artifact_hashes",
+            "algua.registry.family_assignment.compute_artifact_hashes",
             return_value=_FAKE_IDENTITY,
         ),
         patch("algua.registry.promotion.verify_signal_panel_parity"),
         patch(
-            "algua.registry.promotion.factors_used_by",
+            "algua.registry.family_assignment.factors_used_by",
             return_value=[],
         ),
     ):
@@ -340,10 +340,10 @@ def test_agent_merge_assigns_to_matched_family() -> None:
     # Patch family_similarity to return MERGE directly (MERGE_THRESHOLD is 0.85, unreachable
     # without the return-correlation axis which is stubbed to 0 until Task 7).
     with patch(
-        "algua.registry.promotion.family_similarity",
+        "algua.registry.family_assignment.family_similarity",
         return_value=(SimVerdict.MERGE, 0.9),
     ), patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [{"code_hash": _FAKE_IDENTITY.code_hash, "factors": set()}])],
     ):
         ctx = _call_preflight(repo, "strat_merge_agent", actor=Actor.AGENT)
@@ -359,10 +359,10 @@ def test_human_merge_assigns_to_matched_family() -> None:
     _add_backtested_strategy(repo, "strat_merge_human")
 
     with patch(
-        "algua.registry.promotion.family_similarity",
+        "algua.registry.family_assignment.family_similarity",
         return_value=(SimVerdict.MERGE, 0.9),
     ), patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [{"code_hash": _FAKE_IDENTITY.code_hash, "factors": set()}])],
     ):
         ctx = _call_preflight(repo, "strat_merge_human", actor=Actor.HUMAN)
@@ -378,10 +378,10 @@ def test_merge_family_events_has_clustering_version() -> None:
     _add_backtested_strategy(repo, "strat_cv_check")
 
     with patch(
-        "algua.registry.promotion.family_similarity",
+        "algua.registry.family_assignment.family_similarity",
         return_value=(SimVerdict.MERGE, 0.9),
     ), patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [{"code_hash": _FAKE_IDENTITY.code_hash, "factors": set()}])],
     ):
         _call_preflight(repo, "strat_cv_check", actor=Actor.AGENT)
@@ -435,7 +435,7 @@ def test_agent_parentage_resolves_to_parent_family() -> None:
 
     member_profile = _parentage_member_profile()
     with patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [member_profile])],
     ):
         ctx = _call_preflight(repo, "strat_parentage_agent", actor=Actor.AGENT)
@@ -457,7 +457,7 @@ def test_human_parentage_creates_child_with_parent_edge() -> None:
 
     member_profile = _parentage_member_profile()
     with patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [member_profile])],
     ):
         ctx = _call_preflight(
@@ -485,7 +485,7 @@ def test_human_parentage_child_family_uses_slug() -> None:
 
     member_profile = _parentage_member_profile()
     with patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [member_profile])],
     ):
         _call_preflight(
@@ -510,7 +510,7 @@ def test_human_parentage_no_slug_uses_default_name() -> None:
 
     member_profile = _parentage_member_profile()
     with patch(
-        "algua.registry.promotion._get_all_family_members_for_clustering",
+        "algua.registry.family_assignment.get_all_family_members_for_clustering",
         return_value=[(fam_id, [member_profile])],
     ):
         _call_preflight(
@@ -539,7 +539,7 @@ def test_already_assigned_strategy_skips_reclassification() -> None:
     _assign_to_family(repo, "strat_preassigned", fam_id)
 
     cluster_mock = MagicMock(return_value=(SimVerdict.NOVEL, 0.0))
-    with patch("algua.registry.promotion.family_similarity", cluster_mock):
+    with patch("algua.registry.family_assignment.family_similarity", cluster_mock):
         ctx = _call_preflight(repo, "strat_preassigned", actor=Actor.AGENT)
 
     # family_similarity must NOT have been called — already assigned
@@ -606,7 +606,7 @@ def test_family_events_row_has_clustering_version_after_novel_create() -> None:
 
 import pandas as pd  # noqa: E402
 
-from algua.registry.promotion import _classify_and_assign_family  # noqa: E402
+from algua.registry.family_assignment import classify_and_assign_family  # noqa: E402
 
 
 def _corr_series(scale: float = 1.0, n: int = 70) -> pd.Series:
@@ -615,7 +615,7 @@ def _corr_series(scale: float = 1.0, n: int = 70) -> pd.Series:
 
 
 def _fake_repo_two_families(strategy_returns, member_returns_by_name):
-    """MagicMock repo exposing exactly what _classify_and_assign_family needs."""
+    """MagicMock repo exposing exactly what classify_and_assign_family needs."""
     repo = MagicMock()
     repo.strategy_family.return_value = None  # not yet assigned
 
@@ -647,11 +647,11 @@ def test_return_match_does_not_displace_blend_match_338():
     factor = MagicMock()
     factor.name = "fa"
     with (
-        patch("algua.registry.promotion.compute_artifact_hashes",
+        patch("algua.registry.family_assignment.compute_artifact_hashes",
               return_value=MagicMock(code_hash="CODE_A")),
-        patch("algua.registry.promotion.factors_used_by", return_value=[factor]),
+        patch("algua.registry.family_assignment.factors_used_by", return_value=[factor]),
     ):
-        assigned = _classify_and_assign_family(
+        assigned = classify_and_assign_family(
             repo, "cand", actor=Actor.AGENT, new_family_slug=None)
 
     assert assigned.family_id == fam_a_id  # stayed in the broad code/factor family, not to B
@@ -677,11 +677,11 @@ def test_return_only_clone_is_rescued_from_novel_338():
     factor = MagicMock()
     factor.name = "xx"  # disjoint from b_mem's {"fb"}
     with (
-        patch("algua.registry.promotion.compute_artifact_hashes",
+        patch("algua.registry.family_assignment.compute_artifact_hashes",
               return_value=MagicMock(code_hash="REWRITTEN")),  # no code match
-        patch("algua.registry.promotion.factors_used_by", return_value=[factor]),
+        patch("algua.registry.family_assignment.factors_used_by", return_value=[factor]),
     ):
-        assigned = _classify_and_assign_family(
+        assigned = classify_and_assign_family(
             repo, "cand", actor=Actor.AGENT, new_family_slug=None)
 
     assert assigned.family_id == fam_b_id  # rescued into B instead of escaping to a fresh family
