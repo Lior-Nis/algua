@@ -10,14 +10,13 @@ from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.db import connect, migrate
 from algua.registry.promotion import BreadthContext, run_gate
 from algua.registry.store import SqliteStrategyRepository
-from algua.research import gates
-from algua.research.gates import (
-    FUNNEL_WINDOW_DAYS,
+from algua.research.dsr import (
+    DSR_ALPHA,
     MIN_FUNNEL_FLOOR_STRATEGIES,
-    GateCriteria,
     dsr_confidence,
     effective_funnel_breadth,
 )
+from algua.research.gates import FUNNEL_WINDOW_DAYS, GateCriteria, evaluate_gate
 
 # ---------------------------------------------------------------------------
 # Helpers (mirror tests/test_promotion.py; intentionally local to this module
@@ -99,7 +98,7 @@ def test_floor_none_is_phase1_behavior():
 
 def test_tighten_only_property_over_grid():
     # For every (own_var, floor_var): the floored confidence is <= the un-floored one (never up).
-    thresh = 1.0 - gates.DSR_ALPHA
+    thresh = 1.0 - DSR_ALPHA
     for own in [0.0, 0.005, 0.01, 0.04, 0.09, 0.16]:
         for floor in [None, 0.0, 0.005, 0.04, 0.09, 0.25]:
             base = dict(sr_obs_per_period=0.12, t=90, skew=-0.2, raw_kurtosis=4.0,
@@ -300,7 +299,7 @@ def test_evaluate_gate_degenerate_own_var_negative_with_positive_floor_fails_clo
     respects the fail-closed invariant end-to-end.
     """
     wf = _gate_wf(sharpe=7.0)
-    decision = gates.evaluate_gate(
+    decision = evaluate_gate(
         wf,
         GateCriteria(),
         n_combos=50,

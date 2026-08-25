@@ -13,6 +13,7 @@
 /algua/contracts/lifecycle.py   @Lior-Nis   # lifecycle stages + allowed transitions
 /algua/backtest/engine.py       @Lior-Nis   # anti-look-ahead t->t+1 enforcement
 /algua/research/gates.py        @Lior-Nis   # promotion-gate criteria
+/algua/research/gate_serialization.py @Lior-Nis   # GateDecision.to_dict(): what reaches the persisted decision_json (stage 7 task 4)
 /algua/research/clustering.py   @Lior-Nis   # clustering thresholds + family similarity (#222)
 /approvers/                     @Lior-Nis   # go-live approver public keys (the signature trust anchor)
 /algua/registry/live_gate.py    @Lior-Nis   # the signed paper->live gate

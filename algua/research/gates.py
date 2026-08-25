@@ -24,9 +24,12 @@ modules (mirroring the ``backtest/bootstrap.py`` / ``backtest/neff.py`` preceden
 
 This module keeps the gate-orchestration surface: ``GateCriteria``, ``GateDecision``, the
 declarative ``GateSpec``/``GATE_SPECS``, the orchestration-level constants, and ``evaluate_gate``.
-It RE-EXPORTS every moved name (see ``__all__``) so ``from algua.research.gates import X`` continues
-to resolve byte-identically for all existing call sites (promotion.py, store.py, the CLIs, and the
-test suite).
+The re-export shim left behind by the #335 extraction was removed in stage 7 task 4: every
+importer of a moved name (promotion.py, store.py, the CLIs, the test suite) now imports it
+directly from its real owner (``algua.research.dsr`` / ``.regime`` / ``.haircut`` /
+``._constants``, or ``algua.backtest.walkforward``/``._constants``). ``__all__`` below lists only
+what this module actually defines. ``GateDecision.to_dict()`` delegates to
+``algua.research.gate_serialization.gate_decision_to_dict`` (also carved out in task 4).
 """
 from __future__ import annotations
 
@@ -38,88 +41,33 @@ from typing import Any
 from algua.backtest._constants import ANN
 from algua.backtest.walkforward import WalkForwardResult
 from algua.research._constants import MIN_HOLDOUT_OBSERVATIONS
-from algua.research.dsr import (
-    DSR_ALPHA,
-    DSR_BOOTSTRAP_LOWER_QUANTILE,
-    DSR_BOOTSTRAP_RESAMPLES,
-    EULER_MASCHERONI,
-    MAX_BOOTSTRAP_BLOCK_LEN_FRACTION,
-    MIN_CORR_OVERLAP_BARS,
-    MIN_FUNNEL_FLOOR_STRATEGIES,
-    MIN_N_EFF_SIBLINGS,
-    RHO_BAR_SHRINKAGE_K,
-    dsr_confidence,
-    dsr_sr_star,
-    dsr_sr_star_annualized,
-    effective_funnel_breadth,
-    floored_trial_var_per_period,
-)
+from algua.research.dsr import DSR_ALPHA, dsr_confidence
+from algua.research.gate_serialization import gate_decision_to_dict
 from algua.research.haircut import sharpe_haircut
 from algua.research.regime import (
     IR_MIN_APPRAISAL_RATIO,
     IR_MIN_OVERLAP_BARS,
-    IR_MIN_VOL,
     MIN_REGIME_OBSERVATIONS,
     MIN_REGIME_OVERLAP_BARS,
     MIN_REGIME_SHARPE,
-    MIN_REGIME_VOL,
     N_REGIMES,
     VOL_ROLLING_WINDOW,
-    InformationRatioResult,
-    RegimeRobustnessResult,
-    RegimeSlice,
     information_ratio,
     regime_robustness_check,
     regime_splits,
 )
 
-# Re-export surface: every name below was previously defined in this module and is imported directly
-# from ``algua.research.gates`` by production code and tests. Listing them in ``__all__`` keeps the
-# import compatibility explicit and silences the "imported but unused" lint on the re-exports.
 __all__ = [
-    "ANN",
-    "DSR_ALPHA",
-    "DSR_BOOTSTRAP_LOWER_QUANTILE",
-    "DSR_BOOTSTRAP_RESAMPLES",
     "DOMINANCE_AUDIT_MIN_PROMOTIONS",
     "DOMINANCE_AUDIT_MIN_WINDOW_DAYS",
     "DOMINANCE_AUDIT_ZERO_HAIRCUT_EXCEPTIONS",
-    "EULER_MASCHERONI",
     "FUNNEL_WINDOW_DAYS",
     "GATE_SPECS",
     "GateCriteria",
     "GateDecision",
     "GateSpec",
-    "InformationRatioResult",
-    "IR_MIN_APPRAISAL_RATIO",
-    "IR_MIN_OVERLAP_BARS",
-    "IR_MIN_VOL",
-    "MAX_BOOTSTRAP_BLOCK_LEN_FRACTION",
-    "MIN_CORR_OVERLAP_BARS",
-    "MIN_FUNNEL_FLOOR_STRATEGIES",
-    "MIN_HOLDOUT_OBSERVATIONS",
-    "MIN_N_EFF_SIBLINGS",
-    "MIN_REGIME_OBSERVATIONS",
-    "MIN_REGIME_OVERLAP_BARS",
-    "MIN_REGIME_SHARPE",
-    "MIN_REGIME_VOL",
-    "N_REGIMES",
     "PHASE3_COMPONENT_MASK",
-    "RHO_BAR_SHRINKAGE_K",
-    "RegimeRobustnessResult",
-    "RegimeSlice",
-    "VOL_ROLLING_WINDOW",
-    "WalkForwardResult",
-    "dsr_confidence",
-    "dsr_sr_star",
-    "dsr_sr_star_annualized",
-    "effective_funnel_breadth",
     "evaluate_gate",
-    "floored_trial_var_per_period",
-    "information_ratio",
-    "regime_robustness_check",
-    "regime_splits",
-    "sharpe_haircut",
 ]
 
 # Funnel-level multiple-testing window (Wall A). Protected constant, not an agent-tunable knob
@@ -273,79 +221,7 @@ class GateDecision:
     phase3_component_mask: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        # A degenerate holdout drives the effective bar to inf (fail-closed); null it so the
-        # payload stays JSON-clean, mirroring how non-finite check values are nulled.
-        eff = self.effective_min_holdout_sharpe
-
-        def _f(x: float | None) -> float | None:
-            return x if x is None or math.isfinite(x) else None
-
-        return {
-            "passed": self.passed,
-            "checks": self.checks,
-            "n_combos": self.n_combos,
-            "breadth_provenance": self.breadth_provenance,
-            "base_min_holdout_sharpe": self.base_min_holdout_sharpe,
-            "effective_min_holdout_sharpe": (
-                eff if eff is None or math.isfinite(eff) else None
-            ),
-            "own_lifetime_combos": self.own_lifetime_combos,
-            "windowed_total_combos": self.windowed_total_combos,
-            "funnel_window_days": self.funnel_window_days,
-            "pit_ok": self.pit_ok,
-            "pit_override": self.pit_override,
-            "dsr_binding": self.dsr_binding,
-            "dsr_confidence": _f(self.dsr_confidence),
-            "dsr_skip_reason": self.dsr_skip_reason,
-            "dsr_n_trials": self.dsr_n_trials,
-            "dsr_trial_sr_var_ann": _f(self.dsr_trial_sr_var_ann),
-            "dsr_t": self.dsr_t,
-            "dsr_skew": _f(self.dsr_skew),
-            "dsr_raw_kurtosis": _f(self.dsr_raw_kurtosis),
-            "dsr_funnel_floor_var_ann": _f(self.dsr_funnel_floor_var_ann),
-            "dsr_funnel_floor_n_strategies": self.dsr_funnel_floor_n_strategies,
-            "dsr_funnel_floor_n_total_rows": self.dsr_funnel_floor_n_total_rows,
-            "fdr_binding": self.fdr_binding,
-            "fdr_p_value": _f(self.fdr_p_value),
-            "fdr_alpha_level": _f(self.fdr_alpha_level),
-            "fdr_test_index": self.fdr_test_index,
-            "fdr_rejected": self.fdr_rejected,
-            "fdr_skip_reason": self.fdr_skip_reason,
-            "fdr_cohort": self.fdr_cohort,
-            "fdr_cohorts_completed": self.fdr_cohorts_completed,
-            "fdr_binding_tests": self.fdr_binding_tests,
-            "fdr_discoveries": self.fdr_discoveries,
-            "fdr_expected_false_discoveries": _f(self.fdr_expected_false_discoveries),
-            "returns_available": self.returns_available,
-            "dsr_bootstrap_binding": self.dsr_bootstrap_binding,
-            "dsr_bootstrap_lower": _f(self.dsr_bootstrap_lower),
-            "dsr_bootstrap_seed": self.dsr_bootstrap_seed,
-            "dsr_bootstrap_b": self.dsr_bootstrap_b,
-            "dsr_bootstrap_block_len": self.dsr_bootstrap_block_len,
-            "dsr_n_eff": self.dsr_n_eff,
-            "dsr_rho_bar": _f(self.dsr_rho_bar),
-            "dsr_n_siblings": self.dsr_n_siblings,
-            "regime_method": self.regime_method,
-            "n_regimes_attempted": self.n_regimes_attempted,
-            "n_regimes_surviving": self.n_regimes_surviving,
-            "per_regime_sharpes": (
-                [None if (x is None or not math.isfinite(x)) else x
-                 for x in self.per_regime_sharpes]
-                if self.per_regime_sharpes is not None else None
-            ),
-            "regime_robustness_binding": self.regime_robustness_binding,
-            # Market-beta / idiosyncratic-alpha screen (#328)
-            "ir_method": self.ir_method,
-            "ir_binding": self.ir_binding,
-            "ir_overlap_n": self.ir_overlap_n,
-            "market_beta": _f(self.market_beta),
-            "ir_alpha_ann": _f(self.ir_alpha_ann),
-            "ir_residual_vol_ann": _f(self.ir_residual_vol_ann),
-            "appraisal_ratio": _f(self.appraisal_ratio),
-            # Dominance-audit shadow fields (#221 Slice 4)
-            "haircut_would_have_blocked": self.haircut_would_have_blocked,
-            "phase3_component_mask": self.phase3_component_mask,
-        }
+        return gate_decision_to_dict(self)
 
 
 _OPS: dict[str, Callable[[float, float], bool]] = {

@@ -15,14 +15,13 @@ import pandas as pd
 
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.walkforward import WalkForwardResult
-from algua.research.gates import (
+from algua.research._constants import MIN_HOLDOUT_OBSERVATIONS
+from algua.research.gates import GateCriteria, evaluate_gate
+from algua.research.regime import (
     IR_MIN_APPRAISAL_RATIO,
     IR_MIN_OVERLAP_BARS,
     IR_MIN_VOL,
-    MIN_HOLDOUT_OBSERVATIONS,
     MIN_REGIME_VOL,
-    GateCriteria,
-    evaluate_gate,
     information_ratio,
 )
 

@@ -20,20 +20,17 @@ from algua.registry.repository import (
     StrategyRepository,
 )
 from algua.registry.runs import provenance_of, record_walk_forward_run, walk_forward_metrics
-from algua.research.gates import (
+from algua.research.dsr import (
     DSR_ALPHA,
     DSR_BOOTSTRAP_LOWER_QUANTILE,
     DSR_BOOTSTRAP_RESAMPLES,
-    FUNNEL_WINDOW_DAYS,
     MIN_CORR_OVERLAP_BARS,
     MIN_N_EFF_SIBLINGS,
     RHO_BAR_SHRINKAGE_K,
-    GateCriteria,
-    GateDecision,
     dsr_sr_star_annualized,
     effective_funnel_breadth,
-    evaluate_gate,
 )
+from algua.research.gates import FUNNEL_WINDOW_DAYS, GateCriteria, GateDecision, evaluate_gate
 from algua.strategies.loader import StrategyNotFound, load_strategy
 
 

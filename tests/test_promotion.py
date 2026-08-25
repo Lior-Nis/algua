@@ -16,11 +16,8 @@ from algua.registry.promotion import (
     run_gate,
 )
 from algua.registry.store import SqliteStrategyRepository
-from algua.research.gates import (
-    FUNNEL_WINDOW_DAYS,
-    GateCriteria,
-    effective_funnel_breadth,
-)
+from algua.research.dsr import effective_funnel_breadth
+from algua.research.gates import FUNNEL_WINDOW_DAYS, GateCriteria
 
 _START = datetime(2024, 1, 1, tzinfo=UTC)
 _END = datetime(2024, 6, 1, tzinfo=UTC)
@@ -993,7 +990,7 @@ def test_n_eff_populated_with_sufficient_siblings(tmp_path):
     in the persisted decision_json."""
     import json as _json  # noqa: PLC0415
 
-    from algua.research.gates import MIN_N_EFF_SIBLINGS
+    from algua.research.dsr import MIN_N_EFF_SIBLINGS
 
     repo = _gate_repo_with_stats(tmp_path)
     rid = _reserve_holdout(repo)
@@ -1033,7 +1030,7 @@ def test_n_eff_shadow_invariant(tmp_path):
     - the SAME dsr_evidence check value
     - dsr_n_trials == raw n_funnel in both cases (binding DSR used raw N, not N_eff)
     """
-    from algua.research.gates import MIN_N_EFF_SIBLINGS
+    from algua.research.dsr import MIN_N_EFF_SIBLINGS
 
     # --- Run WITH siblings ---
     repo_with = _gate_repo_with_stats(tmp_path / "with")
@@ -1078,7 +1075,7 @@ def test_n_eff_shadow_invariant(tmp_path):
 def test_n_eff_none_with_insufficient_siblings(tmp_path):
     """Measured promote with FEWER than MIN_N_EFF_SIBLINGS overlapping siblings:
     dsr_n_eff is None, dsr_n_siblings < MIN_N_EFF_SIBLINGS, gate outcome unchanged."""
-    from algua.research.gates import MIN_N_EFF_SIBLINGS
+    from algua.research.dsr import MIN_N_EFF_SIBLINGS
 
     repo = _gate_repo_with_stats(tmp_path)
     rid = _reserve_holdout(repo)

@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 from algua.registry import db
 from algua.registry.store import SqliteStrategyRepository
-from algua.research.gates import effective_funnel_breadth
+from algua.research.dsr import effective_funnel_breadth
 
 
 def _make_repo() -> SqliteStrategyRepository:

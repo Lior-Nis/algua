@@ -7,14 +7,13 @@ import math
 import numpy as np
 
 from algua.backtest.walkforward import WalkForwardResult
-from algua.research.gates import (
+from algua.research.gates import GateCriteria, evaluate_gate
+from algua.research.regime import (
     MIN_REGIME_OBSERVATIONS,
     MIN_REGIME_SHARPE,
     MIN_REGIME_VOL,
     N_REGIMES,
-    GateCriteria,
     RegimeSlice,
-    evaluate_gate,
     regime_robustness_check,
     regime_splits,
 )

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from algua.registry.db import MAX_N_COMBOS
 from algua.registry.repository import FunnelFloor
 from algua.registry.store._util import _now
-from algua.research.gates import MIN_FUNNEL_FLOOR_STRATEGIES
+from algua.research.dsr import MIN_FUNNEL_FLOOR_STRATEGIES
 
 
 def _pool_trial_sharpe_var(triples: list[tuple[int, float, float]]) -> float | None:
