@@ -8,6 +8,8 @@ the projection whenever a decision dataclass grows a field.
 
 import dataclasses
 import json
+import types
+import typing
 from contextlib import closing
 
 from typer.testing import CliRunner
@@ -227,6 +229,39 @@ def test_golden_drift_allowlists_cover_dataclass_fields():
     forward_fields = {f.name for f in dataclasses.fields(ForwardGateDecision)}
     assert forward_fields == FORWARD_DECISION_ALLOWLIST | FORWARD_DECISION_EXCLUDED
     assert not FORWARD_DECISION_ALLOWLIST & FORWARD_DECISION_EXCLUDED
+
+
+def _is_scalar_annotation(tp: object) -> bool:
+    """True iff `tp` (a resolved type hint, `X | None` unwrapped) is scalar-shaped — the same
+    scalar/non-scalar split `run_backtest_task`'s finite-scalar `extra_metrics` filter
+    (algua/registry/promotion.py) makes via `isinstance(v, (int, float))`. Recurses through
+    `Optional`/`X | None` so `float | None` and `bool` both read as scalar, while `list[float |
+    None] | None` (e.g. `per_regime_sharpes`) reads as non-scalar."""
+    origin = typing.get_origin(tp)
+    if origin in (typing.Union, types.UnionType):
+        args = [a for a in typing.get_args(tp) if a is not type(None)]
+        return all(_is_scalar_annotation(a) for a in args)
+    return tp in (bool, int, float, str)
+
+
+def test_gate_decision_excluded_fields_are_never_scalar_typed():
+    """GOLDEN DRIFT COMPANION (Q_review FIX 3): `GATE_DECISION_ALLOWLIST` is the fail-closed exit
+    for `decision_json` (`runs show`'s `gate_decision`), but `extra_metrics` on a `gate` run is
+    populated straight from `decision.to_dict()`'s finite-non-bool-scalar fields
+    (algua/registry/promotion.py) with NO allowlist of its own — it relies structurally on every
+    field EXCLUDED from `GATE_DECISION_ALLOWLIST` being non-scalar (so the scalar filter can never
+    pick it up). There is no leak today: `GATE_DECISION_EXCLUDED` holds only `per_regime_sharpes`,
+    a list. This test is the guardrail for tomorrow — the day a future field is excluded from the
+    allowlist AND happens to be scalar, `extra_metrics` would carry it through unguarded, and this
+    must go red so that gets a conscious review (exactly what the allowlist's own docstring says it
+    exists to force)."""
+    hints = typing.get_type_hints(GateDecision)
+    for name in GATE_DECISION_EXCLUDED:
+        assert not _is_scalar_annotation(hints[name]), (
+            f"{name!r} is excluded from GATE_DECISION_ALLOWLIST but is scalar-typed: "
+            "extra_metrics (algua/registry/promotion.py) would carry it through runs show/list "
+            "unguarded. Either project it through the allowlist or keep it non-scalar."
+        )
 
 
 def test_vector_smuggled_as_dict_under_allowlisted_key_dropped(monkeypatch, tmp_path):

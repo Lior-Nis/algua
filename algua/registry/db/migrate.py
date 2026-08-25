@@ -231,5 +231,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     # already-created v42 `runs` table, so a v42 DB needs the explicit ALTER. Additive nullable —
     # every non-`gate` row (and every pre-v43 `gate` row) stays NULL by design.
     _add_missing_columns(conn, "runs", {"gate_id": "INTEGER"})
+    # v44 (slice 2): series pointers on runs. Additive nullable; every pre-v44 row stays NULL
+    # (no backfill — provenance matching is non-unique across re-runs).
+    _add_missing_columns(
+        conn, "runs", {"series_backtest_id": "INTEGER", "series_holdout_id": "INTEGER"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()

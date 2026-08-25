@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS runs (
     -- do not carry. A `gate` run's gate_id is set at the SAME BEGIN IMMEDIATE that writes the
     -- gate_evaluations row it names, so the two ids are never mismatched (v43).
     gate_id INTEGER,
+    -- Series pointers (slice 2, D1). The run row points AT its series rather than the series
+    -- tables carrying a run_id: `record_holdout_returns` is idempotent on exact content and sits
+    -- on the promote path, so widening its identity key is delicate, and this keeps the migration
+    -- on the one table this feature owns. NULL is honest and common: an unregistered strategy's
+    -- backtest records a run but no `backtest_returns` row, and rows written before v44 have no
+    -- pointer at all (spec Q8 — no backfill; `runs series` reports "no series" rather than
+    -- guessing by provenance, which is non-unique across re-runs).
+    series_backtest_id INTEGER,
+    series_holdout_id INTEGER,
     -- Set on a `sweep` parent when its trial rows were capped at MAX_PERSISTED_TRIALS. NULL means
     -- the trial set is COMPLETE. A silently truncated set would make the funnel-wide distribution
     -- lie about the breadth it depicts, so a reader must be able to tell.

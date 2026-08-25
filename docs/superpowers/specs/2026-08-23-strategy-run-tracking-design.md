@@ -242,12 +242,29 @@ algua runs show  <run_id>
 algua runs series <run_id> [--run-id ...]
     -> return series for the named runs only. Feeds the overlay.
        NEVER returned by `list`.
+       IN-SAMPLE backtest series only (per-bar, from `backtest_returns`). For a run with a
+       holdout leg, returns the OOS interval (`holdout_start`/`holdout_end`) and `n_bars`
+       ONLY — never a per-bar holdout vector. `holdout_returns.returns_blob` is SENSITIVE
+       (see `algua/registry/db/holdout.py`'s DDL comment): the ONLY method allowed to read it
+       is the sibling-only `overlapping_holdout_return_streams`, which explicitly never
+       returns the requesting strategy's own vector. Handing a strategy its own per-bar OOS
+       vector through a "get my own series" endpoint would re-open exactly the single-use
+       best-of-N surface `sweep()`'s holdout burn exists to prevent — a scalar (`sharpe_oos`
+       etc., already on the gate run row via `runs show`) leaks far less than the full vector.
 ```
 
 The split is not stylistic. The ranked list and scatter want wide-and-shallow (N runs x M scalars);
 the overlay wants narrow-and-deep (one run x hundreds of floats). One command returning both blows
 up a payload that crosses a subprocess-and-JSON-parse seam — the lesson `--summary` (#349) already
 encodes.
+
+**Caveat carried forward from the slice-2 review:** `runs list --sort sharpe_oos` is the **first
+cross-strategy OOS leaderboard** in this system (`registry gates` is per-strategy history only).
+That is judged safe today because every gate attempt is already priced by the funnel-breadth/DSR
+accounting and holdouts stay single-use, but ONLY on the condition that `runs list` remains a
+**display** surface and never becomes an input to a promotion decision — a future slice must not
+wire it into `research promote`, family classification, or any other selection path without
+re-litigating that condition.
 
 Backend, following the existing `run_cli(..., ttl_s=)` convention exactly:
 `/api/runs` (60 s), `/api/runs/{id}` (30 s), `/api/runs/series?ids=` (60 s).
@@ -271,8 +288,14 @@ Five ship. Each is preset — no axis pickers, no configuration.
    0.025 against a deflated bar of 2.677 — as something inspectable rather than asserted. Nothing
    in a general-purpose tracker does this, because none of them have a concept of breadth
    deflation.
-4. **Return-series overlay.** Backtest curve with the holdout segment shaded; up to ~4 runs
-   overlaid.
+4. **Return-series overlay.** In-sample backtest curve, up to ~4 runs overlaid; a run with a
+   holdout leg gets its OOS interval drawn as a **shaded region** (start/end from `runs series`)
+   labelled with its scalar OOS metrics (`sharpe_oos` etc., from `runs show`) — not a plotted
+   per-bar OOS curve. `holdout_returns.returns_blob` is a SENSITIVE single-use out-of-sample
+   vector (`algua/registry/db/holdout.py`); no "get my own vector" read is allowed to exist,
+   including this view's, because it would re-open the single-use best-of-N surface `sweep()`'s
+   holdout burn exists to prevent. Region + scalar label is the honest ceiling here — do not
+   "restore" a per-bar OOS plot.
 5. **Gate bullet card.** The 11 checks as horizontal bullet bars, value against threshold, binding
    and advisory visually separated. Replaces the densest text dump in the application.
 

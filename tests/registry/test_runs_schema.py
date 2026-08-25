@@ -33,10 +33,10 @@ def test_runs_tables_exist() -> None:
     assert "run_metrics" in names
 
 
-def test_schema_version_is_43() -> None:
+def test_schema_version_is_44() -> None:
     conn = _fresh()
-    assert SCHEMA_VERSION == 43
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
+    assert SCHEMA_VERSION == 44
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
 
 
 def test_no_bare_sharpe_column() -> None:
@@ -63,7 +63,7 @@ def test_migrate_is_idempotent() -> None:
     conn = _fresh()
     migrate(conn)
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 43
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
 
 
 def test_migrates_a_legacy_db_lacking_runs() -> None:
@@ -78,3 +78,29 @@ def test_migrates_a_legacy_db_lacking_runs() -> None:
     names = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"runs", "run_metrics"} <= names
+
+
+def test_runs_has_series_pointer_columns() -> None:
+    conn = _fresh()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert {"series_backtest_id", "series_holdout_id"} <= cols
+
+
+def test_v43_db_gains_series_pointer_columns(tmp_path) -> None:  # noqa: ANN001
+    """A populated v43 DB must ALTER cleanly — the bootstrap cannot add a column."""
+    import sqlite3 as _sq
+
+    conn = _sq.connect(tmp_path / "legacy.db")
+    conn.row_factory = _sq.Row
+    migrate(conn)
+    conn.execute("ALTER TABLE runs DROP COLUMN series_backtest_id")
+    conn.execute("ALTER TABLE runs DROP COLUMN series_holdout_id")
+    conn.execute(
+        "INSERT INTO runs(kind, strategy_name, created_at, metric_schema_version,"
+        " derived_from, components, config_json) VALUES ('backtest','a','t',1,'[]','[]','{}')")
+    conn.execute("PRAGMA user_version=43")
+    conn.commit()
+    migrate(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert {"series_backtest_id", "series_holdout_id"} <= cols
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1

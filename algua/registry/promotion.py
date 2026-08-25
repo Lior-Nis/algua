@@ -626,13 +626,14 @@ def run_gate(
     # inconsistency (UNIQUE guards a re-run). returns_available feeds Slices 2-4
     # (omit-not-fail for pre-Slice-1 promotions).
     returns_available = False
+    holdout_returns_id: int | None = None
     if holdout_evaluation_id is not None and wf.holdout_returns is not None:
         rets, bar_dates = wf.holdout_returns
         if not (len(rets) == len(bar_dates) == holdout_n_bars):
             raise ValueError(
                 f"holdout_returns length {len(rets)}/{len(bar_dates)}"
                 f" != holdout n_bars {holdout_n_bars}")
-        repo.record_holdout_returns(
+        holdout_returns_id = repo.record_holdout_returns(
             holdout_evaluation_id, rec.id,
             holdout_start=wf.holdout_metrics["start"], holdout_end=wf.holdout_metrics["end"],
             returns=rets, bar_dates=bar_dates)
@@ -742,6 +743,9 @@ def run_gate(
                 k: float(v) for k, v in decision.to_dict().items()
                 if isinstance(v, (int, float)) and not isinstance(v, bool)
             },
+            # v44: the holdout_returns row this burn's OOS vector was written to above (NULL for a
+            # pre-Slice-1 promotion with no returns_available) — resolves `runs series` to it.
+            "series_holdout_id": holdout_returns_id,
         },
     )
 

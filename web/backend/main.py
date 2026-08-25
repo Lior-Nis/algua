@@ -34,8 +34,12 @@ from backend.params import (
     InvalidParam,
     validate_action,
     validate_actor,
+    validate_family,
     validate_lane,
+    validate_run_ids,
+    validate_run_kind,
     validate_since,
+    validate_sort,
     validate_strategy_name,
 )
 from backend.poller import poll_loop
@@ -262,6 +266,45 @@ def create_app() -> FastAPI:
             "fetched_at": min(idea_list["fetched_at"], idea_stats["fetched_at"]),
             "stale": bool(idea_list["stale"]) or bool(idea_stats["stale"]),
         }
+
+    @app.get("/api/runs")
+    async def runs_list(
+        kind: str | None = None,
+        strategy: str | None = None,
+        family: str | None = None,
+        sort: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        # `kind` is checked against RUN_KINDS; `family`/`sort` get a syntactic shape guard only —
+        # `sort`'s semantic vocabulary (METRIC_COLUMNS) stays the store's allow-list
+        # (algua/registry/store/runs.py), same as the CLI's own caller (see params.py docstring).
+        args = ["runs", "list", f"--limit={limit}"]
+        if kind is not None:
+            args.append(f"--kind={validate_run_kind(kind)}")
+        if strategy is not None:
+            args.append(f"--strategy={validate_strategy_name(strategy)}")
+        if family is not None:
+            args.append(f"--family={validate_family(family)}")
+        if sort is not None:
+            args.append(f"--sort={validate_sort(sort)}")
+        return await run_cli(*args, ttl_s=60.0)
+
+    @app.get("/api/runs/series")
+    async def runs_series(ids: str) -> dict[str, Any]:
+        """Registered BEFORE `/api/runs/{run_id}` so the literal path segment "series" is never
+        swallowed by that route's `{run_id}` matcher.
+
+        `ids` (comma-separated run ids) is validated and capped BEFORE shelling out — see
+        `validate_run_ids`.
+        """
+        unique_ids = validate_run_ids(ids)
+        args = ["runs", "series", str(unique_ids[0])]
+        args.extend(f"--run-id={run_id}" for run_id in unique_ids[1:])
+        return await run_cli(*args, ttl_s=60.0)
+
+    @app.get("/api/runs/{run_id}")
+    async def run_detail(run_id: int) -> dict[str, Any]:
+        return await run_cli("runs", "show", str(run_id), ttl_s=30.0)
 
     @app.get("/api/push/key")
     async def push_key() -> dict[str, Any]:

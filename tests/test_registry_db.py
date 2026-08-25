@@ -8,11 +8,11 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 # Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
 # with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
 _SCHEMA_OBJECT_COUNT = 106
-_SCHEMA_DIGEST = "18efc8acce99bac7f3319359b15a08052c5404278587e1d5dc3606af3d3cd161"
+_SCHEMA_DIGEST = "f71a8a469cd027767721b9e2893ca83325a77ad1e16c3d7c51fc3aa25fd573c2"
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 43
+    assert SCHEMA_VERSION == 44
 
 
 def _schema_fingerprint(conn: sqlite3.Connection) -> tuple[int, str, str]:
@@ -269,6 +269,111 @@ def test_migrate_adds_dependency_hash_column_to_legacy_stage_transitions(tmp_pat
     migrate(conn)  # re-running the ALTER path must stay idempotent
     cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(stage_transitions)")}
     assert "dependency_hash" in cols_again
+
+
+def _legacy_runs_table(conn):
+    """A hand-built v42-shaped `runs` table — the full fixed-vocabulary shape, but pre-dates the
+    v43 gate_id ALTER and the v44 series-pointer ALTER — with one row already in it, so the
+    migration's ALTER path (not the CREATE TABLE IF NOT EXISTS bootstrap) is the thing under
+    test. Needs the real column set: `executescript(SCHEMA)` also (re)creates the indexes that
+    reference the metric columns, so a table missing them would fail the bootstrap itself, not
+    exercise the ALTER path this test targets."""
+    conn.executescript(
+        """
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL CHECK (kind IN
+                ('backtest', 'walk_forward', 'sweep', 'sweep_trial', 'gate')),
+            strategy_name TEXT NOT NULL,
+            strategy_id INTEGER,
+            created_at TEXT NOT NULL,
+            metric_schema_version INTEGER NOT NULL,
+            derived_from TEXT NOT NULL DEFAULT '[]',
+            components TEXT NOT NULL DEFAULT '[]',
+            code_hash TEXT,
+            config_hash TEXT,
+            dependency_hash TEXT,
+            data_source TEXT,
+            snapshot_id TEXT,
+            universe_name TEXT,
+            fundamentals_snapshot TEXT,
+            news_snapshot TEXT,
+            delisting_snapshot TEXT,
+            seed INTEGER,
+            timeframe TEXT,
+            period_start TEXT,
+            period_end TEXT,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            sharpe_is REAL,
+            sharpe_oos REAL,
+            sharpe_realized REAL,
+            sortino_is REAL,
+            sortino_oos REAL,
+            total_return_is REAL,
+            total_return_oos REAL,
+            max_drawdown_is REAL,
+            max_drawdown_oos REAL,
+            ann_vol_is REAL,
+            ann_vol_oos REAL,
+            cagr_is REAL,
+            calmar_is REAL,
+            n_obs_is INTEGER,
+            n_obs_oos INTEGER,
+            mean_window_sharpe REAL,
+            std_window_sharpe REAL,
+            min_window_sharpe REAL,
+            pct_positive_windows REAL,
+            passed INTEGER,
+            trials_truncated_at INTEGER
+        );
+        INSERT INTO runs(kind, strategy_name, created_at, metric_schema_version,
+            derived_from, components, config_json)
+            VALUES ('backtest', 's', '2026-01-01T00:00:00+00:00', 1, '[]', '[]', '{}');
+        """
+    )
+    conn.commit()
+
+
+def test_migrate_adds_gate_id_column_to_legacy_runs(tmp_path):
+    """Slice 1's v43 gate_id ALTER shipped without this coverage: deleting the
+    `_add_missing_columns(conn, "runs", {"gate_id": ...})` line in migrate() left the whole suite
+    green while a pre-v43 `runs` table would silently never gain the column."""
+    conn = connect(tmp_path / "r.db")
+    _legacy_runs_table(conn)
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert "gate_id" in cols
+    legacy = conn.execute("SELECT gate_id FROM runs WHERE id=1").fetchone()
+    assert legacy["gate_id"] is None  # existing row is honestly NULL, not backfilled
+
+    migrate(conn)  # re-running the ALTER path must stay idempotent
+    cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert "gate_id" in cols_again
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+def test_migrate_adds_series_pointer_columns_to_legacy_runs(tmp_path):
+    """v44's series pointers must reach a pre-v44 `runs` table via ALTER, not just the
+    CREATE TABLE IF NOT EXISTS bootstrap — the same hazard the gate_id ALTER above closes."""
+    conn = connect(tmp_path / "r.db")
+    _legacy_runs_table(conn)
+
+    migrate(conn)
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert {"series_backtest_id", "series_holdout_id"} <= cols
+    legacy = conn.execute(
+        "SELECT series_backtest_id, series_holdout_id FROM runs WHERE id=1"
+    ).fetchone()
+    assert legacy["series_backtest_id"] is None  # existing row is honestly NULL, not backfilled
+    assert legacy["series_holdout_id"] is None
+
+    migrate(conn)  # re-running the ALTER path must stay idempotent
+    cols_again = {r["name"] for r in conn.execute("PRAGMA table_info(runs)")}
+    assert {"series_backtest_id", "series_holdout_id"} <= cols_again
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
 
 
 def test_migrate_creates_search_trials_table(tmp_path):
@@ -731,7 +836,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 43
+    assert SCHEMA_VERSION == 44
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -755,7 +860,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 43
+    assert SCHEMA_VERSION == 44
 
 
 def test_v32_negative_results_table_created(tmp_path):

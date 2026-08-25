@@ -87,13 +87,11 @@ def run_backtest_task(  # noqa: PLR0913
         assume_terminal_last_close=assume_terminal_last_close,
     )
 
-    # Record the evaluation as a first-class run row. UNCONDITIONAL — including for a
-    # not-yet-registered strategy, the same rationale record_search_breadth documents: keying by
-    # name means pre-registration evidence still counts. Own transaction, like the sibling writes.
-    with registry_conn() as conn:
-        record_backtest_run(
-            SqliteStrategyRepository(conn), name, result, params=strategy.config.params)
-
+    # LOAD-BEARING ORDER: this block must run BEFORE the persist-series guard below. Registering a
+    # not-yet-registered strategy here is what makes `repo.get(name)` (below) succeed on the SAME
+    # call, so a fresh strategy's very first backtest still gets a `series_backtest_id` instead of
+    # silently landing NULL. Moving this block after the persist guard reopens the fresh-strategy
+    # series bug that ordering it here was written to fix — do not reorder.
     if register:
         with registry_conn() as conn:
             repo = SqliteStrategyRepository(conn)
@@ -109,7 +107,10 @@ def run_backtest_task(  # noqa: PLR0913
         sync_kb_doc(name)
 
     # Persist return series for the return-correlation clustering axis (#222, Task 7).
-    # Only persists for registered strategies; silently skips otherwise.
+    # Only persists for registered strategies (pre-existing or just-registered above); silently
+    # skips otherwise. Persisted BEFORE the run row so the run row can point at it
+    # (series_backtest_id, v44) — a not-yet-registered strategy still gets series_id=None.
+    series_id: int | None = None
     if result.returns is not None:
         with registry_conn() as conn:
             repo = SqliteStrategyRepository(conn)
@@ -118,12 +119,29 @@ def run_backtest_task(  # noqa: PLR0913
             except Exception:  # noqa: BLE001 — strategy not yet registered, skip
                 pass
             else:
-                repo.persist_backtest_returns(
+                series_id = repo.persist_backtest_returns(
                     name,
                     start_dt.date().isoformat(),
                     end_dt.date().isoformat(),
                     result.returns,
                 )
+
+    # Record the evaluation as a first-class run row for every path that reaches this point —
+    # including a not-yet-registered strategy, the same rationale record_search_breadth documents:
+    # keying by name means pre-registration evidence still counts. NOT truly unconditional, though:
+    # with `register=True`, `transition_strategy` above raises whenever `-> BACKTESTED` is not in
+    # that strategy's allowed set, aborting the call before this line and losing the run row. Per
+    # `_LIVE_TRANSITIONS` that means stage `backtested` itself (a self-transition) and `paper` /
+    # `forward_tested` / `live` / `dormant` / `retired`. It does NOT mean "anything past idea":
+    # `candidate` allows `-> BACKTESTED` (a legal back-step), so a candidate strategy transitions
+    # fine and DOES record its run row. That narrow set is the exception to "unconditional" —
+    # reordering the two blocks would trade it for the fresh-strategy series bug the current order
+    # fixes (see the comment on `if register:` above), so it is accepted rather than worked around.
+    # Own transaction, like the sibling writes.
+    with registry_conn() as conn:
+        record_backtest_run(
+            SqliteStrategyRepository(conn), name, result, params=strategy.config.params,
+            series_backtest_id=series_id)
 
     payload = result.to_dict()
     if emit_series:
