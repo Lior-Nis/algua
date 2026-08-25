@@ -2,10 +2,11 @@
 
 The paper-side analog of ``algua.research.gates`` — judges whether a strategy's PAPER-lane
 forward-test window earns the ``paper -> forward_tested`` transition. This module is the pure
-criteria evaluator ONLY: it receives an already-assembled ``ForwardEvidence`` (built by the
-protected orchestrator in ``algua/registry/forward_promotion.py`` from tick rows, the broker's
-activities endpoint, and the qualified backtest gate row) and returns a JSON-clean
-``ForwardGateDecision``. No I/O, no SQL, no broker calls.
+criteria evaluator ONLY: it receives an already-assembled ``ForwardEvidence`` (built by
+``algua/registry/forward_evidence.py``, the evidence-assembly half of the protected
+``algua/registry/forward_promotion.py`` orchestration, from tick rows, the broker's activities
+endpoint, and the qualified backtest gate row) and returns a JSON-clean ``ForwardGateDecision``.
+No I/O, no SQL, no broker calls.
 
 CODEOWNERS-protected: the module-level threshold constants are walls, not knobs. Relaxing any of
 them is human-only at the CLI (exactly like ``--allow-non-pit``); an agent may only TIGHTEN a
@@ -92,7 +93,8 @@ FORWARD_RELOOK_HORIZON_SESSIONS = 10
 FORWARD_TOKEN_TTL_DAYS = 7
 
 # Live-wall certificate freshness: forward_tested -> live demands a passing evaluation at most
-# this many sessions old (checked by forward_promotion.py). Protected — NOT an agent-tunable knob.
+# this many sessions old (checked by algua/registry/live_certificate.py). Protected — NOT an
+# agent-tunable knob.
 CERTIFICATE_FRESH_SESSIONS = 10
 
 
@@ -114,8 +116,9 @@ class ForwardGateCriteria:
 
 @dataclass(frozen=True)
 class ForwardEvidence:
-    """Assembled forward-test evidence for one strategy's window. Built by the protected
-    orchestrator (``forward_promotion.py``); this module only judges it.
+    """Assembled forward-test evidence for one strategy's window. Built by
+    ``algua/registry/forward_evidence.py`` (the evidence-assembly half of the protected
+    ``forward_promotion.py`` orchestration); this module only judges it.
 
     ``holdout_sharpe`` is the RAW measured holdout Sharpe from the newest qualified
     ``gate_evaluations`` row (passed, PIT, no override, identity-matched) — ``None`` means no
@@ -127,7 +130,8 @@ class ForwardEvidence:
     strategies forward-testing concurrently in the window) drive the multiple-testing Sharpe
     penalty raising the performance bar (#431). The look count is deliberately scoped to an EXACT
     identity match (code+config+dependency hash) — a v1 narrower than a family/lineage scope; see
-    the assembly note in ``forward_promotion.py`` for the scope and its known residual gaps.
+    the assembly note in ``algua/registry/forward_evidence.py`` for the scope and its known
+    residual gaps.
     """
 
     n_return_observations: int

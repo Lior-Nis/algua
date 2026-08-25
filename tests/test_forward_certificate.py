@@ -12,7 +12,7 @@ import pytest
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry.db import connect, migrate
-from algua.registry.forward_promotion import verify_forward_certificate
+from algua.registry.live_certificate import verify_forward_certificate
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy

@@ -648,7 +648,7 @@ def test_forward_gate_reads_holdout_sharpe_value_from_soft_pass_row(tmp_path):
     VALUE by name from a soft-pass row written via the REAL run_gate path — the 0.5×holdout
     forward-bar parameterization survives the advisory flip byte-identically."""
     from algua.registry.approvals import compute_artifact_hashes
-    from algua.registry.forward_promotion import qualified_holdout_sharpe
+    from algua.registry.forward_evidence import qualified_holdout_sharpe
 
     repo = _gate_repo(tmp_path)
     repo.record_search_trial(_GATE_NAME, 5, "{}", trial_sharpe_count=5,
