@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { runsUrl, useFetch } from '../api'
 import { num } from '../format'
 import type { ApiEnvelope, RunRow, RunsListPayload } from '../types'
+import PassMark from './PassMark'
 import Sparkline from './Sparkline'
 
 // A bounded leaderboard page, not a ledger dump — the ranked list answers "who's winning",
@@ -27,6 +28,15 @@ export const SORT_OPTIONS: SortOption[] = [
 
 export const DEFAULT_SORT = SORT_OPTIONS[0].key
 
+// Named ONCE, at the list header — a 56x20px row mark has no room for it. Also handed to each
+// row's `Sparkline` as its `aria-label`, so a screen-reader user gets the same honest
+// description a sighted user reads once at the top, rather than the generic (and here actively
+// wrong) default. See `Sparkline.tsx`'s docstring: this is a three-point DEGRADATION PROFILE
+// (worst window -> mean window -> holdout), not a time series — the two read very differently,
+// and a sparkline is an idiom that connotes the latter.
+export const SPARKLINE_CAPTION =
+  'sparkline: worst walk-forward window → mean window → holdout result, against zero'
+
 /** `RunRow`'s index signature types every column outside the explicit few as `unknown` (see its
  * doc comment) — `min_window_sharpe` is one of those, so a direct property read needs this
  * narrowing the same way the explicitly-typed `mean_window_sharpe`/`sharpe_oos` fields don't. */
@@ -36,22 +46,6 @@ function asNullableNumber(v: unknown): number | null {
 
 function metricValue(run: RunRow, sort: string): number | null {
   return asNullableNumber(run[sort])
-}
-
-function PassMark({ passed }: { passed: number | boolean | null | undefined }) {
-  if (passed !== true && passed !== 1 && passed !== false && passed !== 0) {
-    return (
-      <span className="pass-mark" style={{ color: 'var(--text-dim)' }}>
-        unknown
-      </span>
-    )
-  }
-  const ok = passed === true || passed === 1
-  return (
-    <span className="pass-mark" style={{ color: ok ? 'var(--green)' : 'var(--red)' }}>
-      {ok ? 'pass' : 'fail'}
-    </span>
-  )
 }
 
 /**
@@ -97,6 +91,9 @@ export default function RunList() {
         </section>
       ) : (
         <>
+          <div className="dim-note" style={{ marginBottom: 8 }}>
+            {SPARKLINE_CAPTION}
+          </div>
           <div className="chip-row" style={{ marginBottom: 8 }}>
             {SORT_OPTIONS.map((opt) => (
               <button
@@ -131,6 +128,7 @@ export default function RunList() {
                       run.mean_window_sharpe,
                       run.sharpe_oos,
                     ]}
+                    label={SPARKLINE_CAPTION}
                   />
                   <PassMark passed={run.passed} />
                 </div>

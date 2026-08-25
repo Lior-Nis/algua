@@ -5,6 +5,7 @@ import { useSetFetchedAt } from '../App'
 import EquityChart from '../components/EquityChart'
 import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
+import PassMark from '../components/PassMark'
 import StageChip from '../components/StageChip'
 import { num, pct, utcDateTime } from '../format'
 import type {
@@ -144,39 +145,6 @@ function PaperTiles({ paper }: { paper: PaperRollup }) {
         />
       )}
     </section>
-  )
-}
-
-function PassMark({
-  passed,
-  advisory = false,
-}: {
-  passed: number | boolean | null | undefined
-  advisory?: boolean
-}) {
-  // The gate projection strips malformed fields — a missing verdict is UNKNOWN data,
-  // not a real failed check.
-  if (passed !== true && passed !== 1 && passed !== false && passed !== 0) {
-    return (
-      <span className="pass-mark" style={{ color: 'var(--text-dim)' }}>
-        unknown
-      </span>
-    )
-  }
-  const ok = passed === true || passed === 1
-  // An ADVISORY check has no veto power, so a failed one is a warning inside a passing
-  // gate — gold, never the red of a breached binding floor.
-  const color = advisory
-    ? ok
-      ? 'var(--text-dim)'
-      : 'var(--amber)'
-    : ok
-      ? 'var(--green)'
-      : 'var(--red)'
-  return (
-    <span className="pass-mark" style={{ color }}>
-      {ok ? 'pass' : 'fail'}
-    </span>
   )
 }
 

@@ -147,3 +147,19 @@ it('renders a pass/fail mark from the row, never fabricating a verdict for the N
   const unknown = rows.find((r) => r.getAttribute('data-strategy') === 'vol_carry_v2')!
   expect(within(unknown).getByText('unknown')).toBeTruthy()
 })
+
+it('captions what the sparkline plots once at the header, and never lets a row claim "trend"', async () => {
+  stubRunsFetch()
+  renderRunList()
+  const rows = await screen.findAllByTestId('run-row')
+  // Named once, at the header — not per row (no room in a 56x20px mark).
+  const captions = screen.getAllByText(/worst walk-forward window.*mean window.*holdout result/i)
+  expect(captions.length).toBe(1)
+  // Every row's sparkline gets an honest, specific aria-label — never the generic "trend",
+  // which would assert exactly the time-series reading this mark is not.
+  for (const r of rows) {
+    const svg = within(r).getByTestId('sparkline')
+    const ariaLabel = svg.getAttribute('aria-label')
+    expect(ariaLabel).not.toMatch(/^trend$/i)
+  }
+})

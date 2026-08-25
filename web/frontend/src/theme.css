@@ -543,6 +543,14 @@ button { font: inherit; }
   stroke-linejoin: round;
 }
 
+/* The zero baseline — chrome, not a series (mirrors `.scatter-diagonal`'s reasoning: a reference
+   the marks are judged against). Sharpe crossing zero is the threshold that actually matters, so
+   this is what makes "ends below zero" visually real once the domain is anchored to include it. */
+.sparkline-baseline {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
 .chart-frame-empty {
   height: 100%;
   display: grid;

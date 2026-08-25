@@ -36,4 +36,6 @@ it('renders the honest empty state and NO table chrome when the ledger has no ru
   expect(container.querySelector('.chip-row')).toBeNull()
   expect(container.querySelectorAll('[data-testid="run-row"]').length).toBe(0)
   expect(container.querySelector('a')).toBeNull()
+  // No sparkline caption either — it describes a mark that isn't shown in this state.
+  expect(screen.queryByText(/worst walk-forward window/i)).toBeNull()
 })
