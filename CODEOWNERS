@@ -35,5 +35,6 @@
 /algua/cli/_common.py                  @Lior-Nis   # shared CLI JSON-envelope + flag-resolution surface (authenticate_actor moved to registry/human_actor.py in 6a)
 /algua/cli/research_cmd.py             @Lior-Nis   # research-promote command surface (the #329 enforcement call moved to registry/promote_run.py in 6a)
 /algua/cli/paper_cmd.py                @Lior-Nis   # paper-promote enforcement call site (#329)
+/algua/backtest/pit_view.py            @Lior-Nis   # as-of masking IS the anti-look-ahead enforcement (was engine.py, stage 7)
 /.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners

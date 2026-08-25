@@ -15,9 +15,9 @@ from algua.backtest.engine import (
     adj_grid,
     build_portfolio,
     fetch_symbols,
-    members_as_of,
 )
 from algua.backtest.metrics import metrics_from_returns
+from algua.backtest.pit_view import members_as_of
 from algua.backtest.result import config_hash, provenance
 from algua.backtest.stamps import runtime_stamps
 from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
