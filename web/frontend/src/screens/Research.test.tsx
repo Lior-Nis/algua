@@ -17,26 +17,11 @@ const strategies = {
   },
 }
 
-const fleet = {
+const runs = {
   ok: true,
   fetched_at: '2026-08-15T17:04:00Z',
   stale: false,
-  data: {
-    ok: true,
-    global_halt: false,
-    alerting: [],
-    summary: { total: 2, alerting: 0, by_health: {} },
-    stale_after_sessions: 5,
-    operational_stages: ['forward_tested', 'live', 'paper'],
-    rows: [
-      { strategy: 'live_one', stage: 'paper', health: 'ok', staleness_sessions: 0,
-        last_tick_error: null, kill_switch: null, drawdown: null, positions: 0, n_orders: 0 },
-      // A retired strategy with a lingering kill-switch: fleet_alert deliberately keeps this
-      // QUIET, so the funnel must not paint it red.
-      { strategy: 'benched', stage: 'retired', health: 'halted', staleness_sessions: null,
-        last_tick_error: null, kill_switch: null, drawdown: null, positions: 0, n_orders: 0 },
-    ],
-  },
+  data: { count: 0, runs: [] },
 }
 
 const ops = {
@@ -79,8 +64,8 @@ function renderResearch() {
     vi.fn(async (url: string) => {
       const body = url.startsWith('/api/strategies')
         ? strategies
-        : url.startsWith('/api/fleet')
-          ? fleet
+        : url.startsWith('/api/runs')
+          ? runs
           : url.startsWith('/api/ops')
             ? ops
             : ideas
@@ -106,20 +91,42 @@ it('reports a wedged merge-back queue', async () => {
   expect(await screen.findByText(/merge-back queue 23 — wedged/)).toBeTruthy()
 })
 
-it('groups the funnel by lifecycle stage', async () => {
-  renderResearch()
+it('summarizes the funnel as a one-line count strip, not per-strategy detail', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      const body = url.startsWith('/api/strategies')
+        ? strategies
+        : url.startsWith('/api/runs')
+          ? runs
+          : url.startsWith('/api/ops')
+            ? ops
+            : ideas
+      return { ok: true, status: 200, json: async () => body }
+    }) as unknown as typeof fetch,
+  )
+  const { container } = render(
+    <MemoryRouter>
+      <Research />
+    </MemoryRouter>,
+  )
   expect(await screen.findByText('paper (1)')).toBeTruthy()
   expect(screen.getByText('retired (1)')).toBeTruthy()
+  // Per-strategy names/links used to render here (`<details>` per stage) — that is now Fleet's
+  // job. The funnel section is chips only: no strategy name, no link, no per-row health badge.
+  expect(screen.queryByText('live_one')).toBeNull()
+  expect(screen.queryByText('benched')).toBeNull()
+  expect(container.querySelector('.funnel-row')).toBeNull()
+  expect(container.querySelector('details')).toBeNull()
 })
 
-it('mutes health on a stage no operator loop ticks', async () => {
+it('wires in the IS-vs-OOS scatter and the ranked run list as the run-ledger surface', async () => {
   renderResearch()
-  // `halted` on a retired strategy is deliberately quiet per fleet_alert — painting it red
-  // would contradict the gate.
-  const badge = (await screen.findByText('halted')).closest('span')
-  expect(badge?.getAttribute('style')).toContain('var(--text-dim)')
-  const live = screen.getByText('ok').closest('span')
-  expect(live?.getAttribute('style')).toContain('var(--green)')
+  expect(await screen.findByText('is vs oos')).toBeTruthy()
+  expect(screen.getByText('ranked runs')).toBeTruthy()
+  expect(
+    screen.getByText(/no runs recorded yet — the ledger fills when the operator loop runs/i),
+  ).toBeTruthy()
 })
 
 it('absorbs the idea pool, keeping the windowed stats on their own line', async () => {

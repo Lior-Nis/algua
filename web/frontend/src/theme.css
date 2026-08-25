@@ -517,6 +517,32 @@ button { font: inherit; }
   fill: var(--text);
 }
 
+/* ---- ranked run list ------------------------------------------------------- */
+
+.run-row-metric {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 34px;
+  text-align: right;
+}
+
+/* ---- sparkline (ranked run list) ------------------------------------------ */
+
+/* One series per row: never a categorical hue. `--series-context` (the neutral series token) —
+   not Electric, which is reserved for the ONE active thing on a screen; with one sparkline per
+   row, none of them is uniquely that. */
+.sparkline { flex: none; }
+
+.sparkline-line {
+  fill: none;
+  stroke: var(--series-context);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .chart-frame-empty {
   height: 100%;
   display: grid;
