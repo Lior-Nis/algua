@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import math
-from datetime import UTC, datetime
-
 import typer
 
 from algua.audit.log import append as audit_append
@@ -16,7 +13,6 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
-from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import LiveAuthorization, ScopedCancelBroker
 from algua.evaluation.inputs import (
@@ -24,7 +20,7 @@ from algua.evaluation.inputs import (
 )
 from algua.execution import live_reconcile
 from algua.execution.alpaca_broker import AlpacaLiveBroker
-from algua.execution.errors import BrokerError
+from algua.execution.broker_factory import BrokerKind, build_broker
 from algua.execution.flatten import flatten_strategy
 from algua.execution.lane_exit import build_live_broker
 from algua.execution.live_ledger import (
@@ -47,18 +43,12 @@ from algua.execution.order_state import (
 )
 from algua.execution.sizing import MIN_NOTIONAL
 from algua.execution.tick_clock import tick_clock
+from algua.live.book_exposure import build_book_exposure as _build_book_exposure
 from algua.live.live_loop import (
     SubmittedOrder,
     TickHalted,
     TickHooks,
-    assert_marks_usable,
     run_tick,
-)
-from algua.live.live_loop import (
-    _latest_bar_ts as _book_latest_bar_ts,
-)
-from algua.live.live_loop import (
-    _latest_marks as _book_latest_marks,
 )
 from algua.observability import (
     CycleCounters,
@@ -79,9 +69,7 @@ from algua.registry.live_gate import (
 )
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
-from algua.risk.book_breaker import BookBreach, BookBreakerLimits, evaluate_book_breaker
-from algua.risk.book_equity import update_book_peak
-from algua.risk.book_limits import BookExposure, BookRiskLimits
+from algua.risk.book_cycle import evaluate_book_loss_breaker as _evaluate_book_loss_breaker
 from algua.risk.breach import trip_for_breach
 from algua.risk.limits import RiskBreach
 from algua.strategies.loader import load_tradable_strategy
@@ -94,28 +82,17 @@ log = get_logger(__name__)
 
 
 def _live_account_equity() -> float:
-    """Read the live account equity (read-only; no go-live authorization needed — not trading)."""
-    s = get_settings()
-    if not s.alpaca_live_api_key or not s.alpaca_live_api_secret:
-        raise ValueError("Alpaca LIVE credentials not configured")
-    import requests
-    from requests import RequestException
-    try:
-        resp = requests.get(
-            f"{s.alpaca_live_url.rstrip('/')}/v2/account",
-            # Host is pinned https by the alpaca_live_url settings validator; refuse to chase a
-            # redirect so the APCA credential headers can never reach a foreign target (#394). A
-            # 3xx then fails the status!=200 check below.
-            allow_redirects=False,
-            headers={"APCA-API-KEY-ID": s.alpaca_live_api_key,
-                     "APCA-API-SECRET-KEY": s.alpaca_live_api_secret},
-            timeout=30,
-        )
-    except RequestException as exc:
-        raise ValueError(f"alpaca account equity request failed: {exc}") from exc
-    if resp.status_code != 200:
-        raise ValueError(f"alpaca {resp.status_code} reading account equity")
-    return float(resp.json()["equity"])
+    """Read the live account equity (read-only; no go-live authorization needed — not trading).
+
+    Delegates to the read-only live broker rather than issuing its own HTTP call: that class already
+    owns this endpoint (`account()` -> `/v2/account`) and declares the `_ALLOWED_HOSTS` allowlist.
+    The hand-rolled version restated the `allow_redirects=False` posture (#394) but had NO retry, so
+    the delegate also GAINS bounded exponential backoff and the stricter `account()` parse (which
+    fails closed on a malformed id/cash/buying_power, not just equity). Kept as a module-level
+    function so the existing monkeypatch pins on `algua.cli.live_cmd._live_account_equity` keep
+    resolving.
+    """
+    return build_broker(BrokerKind.ALPACA_LIVE_READONLY).account().equity
 
 
 @live_app.command("allocate")
@@ -338,100 +315,6 @@ def _broker_net_positions(broker) -> dict:
 
 def _broker_buying_power(broker) -> float:
     return float(broker.account().buying_power)
-
-
-def _evaluate_book_loss_breaker(conn, broker):
-    """Evaluate the book-level loss/drawdown circuit breaker (#390) for the whole account.
-
-    Reads ONE ``broker.account()`` snapshot (equity + prior-session close). Returns a ``BookBreach``
-    to halt+flatten, or None to proceed. Equity is validated BEFORE the high-water mark is ratcheted
-    so a non-finite/non-positive read can never corrupt the peak (GATE-1): an unusable equity
-    short-circuits to a breach without touching the peak. Otherwise the peak ratchets to include
-    this cycle (a fresh all-time high => zero drawdown), and the daily-loss baseline is the broker's
-    prior trading-session close (``account.last_equity``).
-
-    A BrokerError reading / parsing the account (missing or malformed equity / last_equity) is
-    itself a fail-closed breach: without a trustworthy account snapshot the book is unvaluable, so
-    it must engage the persistent halt rather than fall through to a retryable JSON error (GATE-2).
-    """
-    try:
-        account = broker.account()
-        equity = float(account.equity)
-        last_equity = float(account.last_equity)
-    except BrokerError as exc:
-        return BookBreach(
-            "book_account_read_failed",
-            f"could not read a trustworthy account snapshot for the book breaker ({exc}) — "
-            "refusing to trade the shared book blind",
-        )
-    limits = BookBreakerLimits(
-        max_drawdown=get_settings().book_max_drawdown,
-        max_daily_loss=get_settings().book_max_daily_loss,
-    )
-    if not math.isfinite(equity) or equity <= 0.0:
-        # Do NOT ratchet the peak on an unusable read; evaluate_book_breaker returns the
-        # book_equity_unusable breach (peak value is irrelevant on this branch).
-        return evaluate_book_breaker(equity, 0.0, last_equity, limits)
-    peak = update_book_peak(conn, equity)
-    return evaluate_book_breaker(equity, peak, last_equity, limits)
-
-
-def _build_book_exposure(
-    broker, provider, net_positions: dict[str, float], start: str, end: str,
-    now: datetime | None = None,
-) -> tuple[BookExposure | None, str | None]:
-    """Build the account-level book-exposure accumulator (#389) that caps aggregate gross / net /
-    single-name concentration across ALL strategies sharing the live account. Seeds from the
-    RECONCILED broker net positions (whole-account truth, incl. non-ticked/dormant/orphan
-    residuals) valued at latest closed-bar marks, against ACCOUNT equity (not a subaccount).
-
-    Data-integrity failures (a stale / absent / future-dated / non-finite mark on a held name) go
-    through the SHARED mark-freshness wall (`assert_marks_usable`, #452 HIGH#2) so the account book
-    and the per-strategy valuation apply the EXACT SAME staleness math + thresholds. That wall
-    raises `RiskBreach('stale_marks' | 'unvaluable_marks')`, which the run-all caller routes to a
-    HALT-WITHOUT-FLATTEN (a dark feed, broker still alive) — NOT a benign defer.
-
-    Returns (BookExposure, None) on success, or (None, reason) to BENIGNLY DEFER (caller skips
-    trading this cycle) only for policy/economic states — NOT data failures:
-      - any reconciled nonzero position with qty < 0 (a short — long-only precondition);
-      - an account book that ALREADY breaches a book-level cap at reconcile time.
-    `now` is injected (default `datetime.now(UTC)`) so the freshness wall is testable."""
-    now = now or datetime.now(UTC)
-    nonzero = {s: float(q) for s, q in net_positions.items() if float(q) != 0.0}
-    shorts = sorted(s for s, q in nonzero.items() if q < 0.0)
-    if shorts:
-        return None, f"account holds short position(s) {shorts} — book-risk precondition is " \
-                     "long-only; refusing to trade this cycle"
-    # Marks for EVERY held symbol (the book is valued on the reconciled account positions; a
-    # strategy's not-yet-held universe symbols carry no book notional, so they need no mark here).
-    fetch = sorted(nonzero)
-    bars = (provider.get_bars(fetch, utc(start), utc(end), "1d").sort_index()
-            if fetch else None)
-    # Null-preserving latest-row selection so the wall and the valuation read the SAME atomic row
-    # and a NaN-latest close is not masked (shared with the per-strategy loop, #452).
-    latest_ts = _book_latest_bar_ts(bars) if bars is not None else {}
-    latest_close = _book_latest_marks(bars) if bars is not None else {}
-    # Data-integrity wall BEFORE building notionals: a stale / absent / future-dated / non-finite
-    # mark raises RiskBreach (dark feed) — the caller HALTS, never flattens.
-    assert_marks_usable(sorted(nonzero), latest_ts, latest_close, now)
-    book_notionals = {sym: qty * latest_close[sym] for sym, qty in nonzero.items()}
-    equity = float(broker.account().equity)
-    s = get_settings()
-    limits = BookRiskLimits(
-        max_gross=s.book_max_gross,
-        max_net=s.book_max_net,
-        max_symbol_concentration=s.book_max_symbol_concentration,
-        max_symbol_notional=s.book_max_symbol_notional,
-    )
-    book = BookExposure(equity, book_notionals, limits)
-    # An account book that ALREADY breaches a cap at reconcile time is an anomaly: the per-buy
-    # monotone headroom guarantees no-worse but cannot heal an already-over OTHER symbol via a buy,
-    # so trading through it is unsound (Codex #389 GATE-2). Fail closed — skip the whole cycle.
-    breaches = book.seed_breaches()
-    if breaches:
-        return None, f"account book already breaches book-level cap(s) {breaches} at reconcile " \
-                     "— refusing to trade this cycle"
-    return book, None
 
 
 @live_app.command("run-all")

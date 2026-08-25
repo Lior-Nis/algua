@@ -461,7 +461,8 @@ class AlpacaLiveBroker(_AlpacaBroker):
 class AlpacaLiveDrainBroker(_AlpacaBroker):
     """CANCEL-ONLY view of the Alpaca LIVE venue used to DRAIN a strategy's resting orders on a
     book-exit when the per-strategy go-live authorization is revoked/absent (#497 H1). Constructed
-    WITHOUT a LiveAuthorization — mirroring `_live_account_equity` / `AlpacaLiveReadOnlyBroker`,
+    WITHOUT a LiveAuthorization — mirroring `AlpacaLiveReadOnlyBroker` (and the
+    `cli/live_cmd._live_account_equity` delegate that now uses it),
     which already reach the live account with raw APCA credentials because the authorization is only
     a construction tollbooth on the TRADING broker and is never used for REST. This broker permits
     GET (`list_open_orders`, `account_activities`) and DELETE (`cancel_order`) so a de-authorized
@@ -485,7 +486,8 @@ class AlpacaLiveReadOnlyBroker(_AlpacaBroker):
     constructed WITHOUT a LiveAuthorization because it never places an order — both endpoints are
     GETs. Reuses the base host allowlist (live host + https only), so it cannot be pointed at a
     wrong endpoint. Used by `resume`/`resume-all` to confirm a live strategy is flat at the broker
-    before clearing the kill-switch. The live API keys remain the real wall (trusted env only)."""
+    before clearing the kill-switch, and by `live allocate` to read account
+    equity. The live API keys remain the real wall (trusted env only)."""
 
     _ALLOWED_HOSTS = frozenset({"api.alpaca.markets"})
 

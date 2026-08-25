@@ -303,6 +303,19 @@ source_modules = ["algua.evaluation"]
 forbidden_modules = ["algua.cli"]
 
 [[tool.importlinter.contracts]]
+# risk sits BELOW live: algua/live/* imports algua.risk.limits, and nothing in algua.risk reaches
+# back. Stage 6b relied on that to decide where two account-level book bodies could live
+# (`risk/book_cycle.py` for the one needing nothing from the live lane, `live/book_exposure.py` for
+# the one needing the shared marks wall), so the direction is now enforced instead of assumed.
+# It catches TRANSITIVE inversions too, which is the point: `execution/peaks.py` was first written
+# under `risk/`, and this contract is what showed that `risk -> execution.order_state -> live`
+# made it an inversion.
+name = "risk stays off the live lane"
+type = "forbidden"
+source_modules = ["algua.risk"]
+forbidden_modules = ["algua.live"]
+
+[[tool.importlinter.contracts]]
 # The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
 # the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
 # gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is

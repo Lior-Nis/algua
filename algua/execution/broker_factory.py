@@ -197,8 +197,10 @@ register_broker(BrokerKind.ALPACA_LIVE_READONLY, BrokerSpec(
     url_field="alpaca_live_url",
     construct=AlpacaLiveReadOnlyBroker,
     missing_credentials=(
-        "Alpaca LIVE credentials not configured; cannot confirm the strategy is flat at the "
-        "broker — set ALGUA_ALPACA_LIVE_API_KEY and ALGUA_ALPACA_LIVE_API_SECRET"
+        # Caller-neutral: this broker now serves the resume/resume-all flatness probe AND
+        # `live allocate`'s equity read, so the message must not assert which one was asked for.
+        "Alpaca LIVE credentials not configured; the read-only live broker is unavailable — "
+        "set ALGUA_ALPACA_LIVE_API_KEY and ALGUA_ALPACA_LIVE_API_SECRET"
     ),
 ))
 

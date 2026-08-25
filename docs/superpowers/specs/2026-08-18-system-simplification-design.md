@@ -189,8 +189,18 @@ End-state rule: every `*_cmd.py` is thin — parse options → call one domain f
    - `paper_cmd._run_intake` → `registry/intake.py` (joins its own pure helpers).
    - `live_cmd._evaluate_book_loss_breaker` + `_build_book_exposure` →
      `risk/book_cycle.py` (joins `book_breaker`/`book_equity`/`book_limits`).
+     **LANDED (stage 6b) AS TWO HOMES, on measurement:** `evaluate_book_loss_breaker` →
+     `risk/book_cycle.py` as written, but `build_book_exposure` → `live/book_exposure.py`, because it
+     needs `assert_marks_usable` / `_latest_bar_ts` / `_latest_marks` from `live/live_loop.py` and
+     `risk` sits BELOW `live` (now enforced by the `risk stays off the live lane` contract).
    - kill/resume + resume-all peak-rebase policy → `risk/peaks.py`.
+     **LANDED (stage 6b) AS `execution/peaks.py`:** the peak tables live in
+     `execution/order_state.py`, which imports `live/paper_loop.py`, so `risk/peaks.py` made
+     `risk → execution → live` reachable. Found by probing the contract, not by reading imports.
    - `live_cmd._live_account_equity` raw HTTP → `execution/alpaca_broker.py`.
+     **LANDED (stage 6b) AS A DELETION:** the base broker already had `account()` on `/v2/account`,
+     so the CLI was duplicating a capability, not an idiom. `live_cmd._live_account_equity` is now a
+     one-line delegate to `build_broker(BrokerKind.ALPACA_LIVE_READONLY).account().equity`.
    - `promotion.py` family classification (≈lines 106–325) →
      `registry/family_assignment.py`.
    - `forward_promotion.py`: tick admissibility/evidence → `registry/forward_evidence.py`;
