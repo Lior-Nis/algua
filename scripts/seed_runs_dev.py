@@ -13,9 +13,12 @@ the schema when the schema next changes.
 SAFETY (hard requirement): this script must be INCAPABLE of writing to the operator's real
 registry (`data/algua.db`, relative to the repository root — 10 strategies, 9 gate evaluations,
 the holdout burn ledger live there). `--db PATH` is required; the path is resolved (not
-string-compared) and the script refuses if it resolves to the real registry. `--yes` is required
-to proceed. Both checks run BEFORE anything touches disk — `connect()` (which creates the file)
-is called only after both checks pass.
+string-compared) and the script refuses if it resolves to the real registry. A second, INODE-level
+check (`os.path.samefile`) catches a hardlink sharing the real registry's inode under a different
+path — `Path.resolve()` alone dereferences symlinks but says nothing about hardlinks, since a
+hardlink IS a distinct path to the same file, not a link to resolve. `--yes` is required to
+proceed. All checks run BEFORE anything touches disk — `connect()` (which creates the file) is
+called only after every check passes.
 
 Usage:
     uv run python scripts/seed_runs_dev.py --db /tmp/slice3-dev.db --yes
@@ -25,15 +28,20 @@ Then, to look at it:
 
 Frontend against the seeded DB — the backend (a standalone uv project under web/) shells out to
 the CLI, so it needs ALGUA_DB_PATH in ITS OWN environment:
-    ALGUA_DB_PATH=/tmp/slice3-dev.db uv run --project web uvicorn web.backend.main:app --reload
+    ALGUA_DB_PATH=/tmp/slice3-dev.db uv run --project web python -m backend.main
     cd web/frontend && npm run dev
-(run the two in separate terminals; the frontend dev server proxies to the backend).
+(run the two in separate terminals; the frontend dev server proxies /api to 127.0.0.1:8787).
+CONSTRAINT: if a deployed `algua-web` service is already bound to 127.0.0.1:8787 on this host
+(e.g. a systemd user unit), the backend command above will fail with "address already in use" —
+stop that service for the session, or run the backend on another port and point the frontend's
+dev proxy at it instead.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import random
 import sys
 from dataclasses import dataclass
@@ -76,7 +84,7 @@ def _gauss_returns(rng: random.Random, n: int, mu: float, sigma: float) -> list[
     return [rng.gauss(mu, sigma) for _ in range(n)]
 
 
-def _series_metrics(returns: list[float]) -> dict[str, float | int]:
+def _series_metrics(returns: list[float]) -> dict[str, float | int | None]:
     """Plausible full-period IS stats from a generated return series. Not a reimplementation of
     `algua.backtest`'s real metrics math — this is seed data, not a fixture for testing that
     math — just internally consistent numbers for the equity-curve view."""
@@ -197,31 +205,50 @@ def _gate_checks(
     (`min_holdout_observations`, `holdout_sharpe_floor`, `pit_required`) plus advisory
     statistical checks (`holdout_sharpe`, `holdout_return`, `pct_positive_windows`,
     `min_window_sharpe`). A NULL metric fails closed (never a pass), matching the real gate's
-    non-finite-value handling."""
-    has_evidence = mean_ws is not None and sharpe_oos is not None
-    floor_passed = has_evidence and sharpe_oos > 0.0
+    non-finite-value handling.
+
+    Evidence presence is checked ONCE, as an explicit `is not None` guard, so `mean_ws`/
+    `sharpe_oos` are narrowed to `float` (not `float | None`) everywhere they're used below —
+    a separately-computed bool (the earlier `has_evidence` pattern) doesn't narrow anything for
+    a type checker, since it can't prove the bool tracks the Optionals' nullness.
+    """
     obs_passed = n_bars >= min_bars
     pit_passed = True
-    checks = [
+    holdout_return_value: float | None
+    pct_pos_value: float | None
+    min_ws_value: float | None
+    if mean_ws is not None and sharpe_oos is not None:
+        floor_passed = sharpe_oos > 0.0
+        holdout_sharpe_passed = sharpe_oos >= effective_floor
+        holdout_return_value = round(sharpe_oos * 0.1, 4)
+        holdout_return_passed = sharpe_oos > 0.0
+        pct_pos_value = round(min(0.95, max(0.05, 0.5 + mean_ws * 0.25)), 4)
+        pct_pos_passed = mean_ws >= 0.0
+        min_ws_value = round(mean_ws - 0.3, 4)
+        min_ws_passed = (mean_ws - 0.3) >= -0.5
+    else:
+        floor_passed = False
+        holdout_sharpe_passed = False
+        holdout_return_value = None
+        holdout_return_passed = False
+        pct_pos_value = None
+        pct_pos_passed = False
+        min_ws_value = None
+        min_ws_passed = False
+    checks: list[dict[str, Any]] = [
         {"name": "min_holdout_observations", "value": n_bars, "threshold": min_bars, "op": ">=",
          "passed": obs_passed},
         {"name": "holdout_sharpe_floor", "value": sharpe_oos, "threshold": 0.0, "op": ">",
          "passed": floor_passed},
         {"name": "pit_required", "passed": pit_passed},
         {"name": "holdout_sharpe", "value": sharpe_oos, "threshold": effective_floor, "op": ">=",
-         "passed": has_evidence and sharpe_oos >= effective_floor, "advisory": True},
-        {"name": "holdout_return", "value": (
-            round(sharpe_oos * 0.1, 4) if has_evidence else None),
-         "threshold": 0.0, "op": ">",
-         "passed": has_evidence and sharpe_oos > 0.0, "advisory": True},
-        {"name": "pct_positive_windows", "value": (
-            round(min(0.95, max(0.05, 0.5 + mean_ws * 0.25)), 4) if has_evidence else None),
-         "threshold": 0.5, "op": ">=",
-         "passed": has_evidence and mean_ws >= 0.0, "advisory": True},
-        {"name": "min_window_sharpe", "value": (
-            round(mean_ws - 0.3, 4) if has_evidence else None),
-         "threshold": -0.5, "op": ">=",
-         "passed": has_evidence and (mean_ws - 0.3) >= -0.5, "advisory": True},
+         "passed": holdout_sharpe_passed, "advisory": True},
+        {"name": "holdout_return", "value": holdout_return_value, "threshold": 0.0, "op": ">",
+         "passed": holdout_return_passed, "advisory": True},
+        {"name": "pct_positive_windows", "value": pct_pos_value, "threshold": 0.5, "op": ">=",
+         "passed": pct_pos_passed, "advisory": True},
+        {"name": "min_window_sharpe", "value": min_ws_value, "threshold": -0.5, "op": ">=",
+         "passed": min_ws_passed, "advisory": True},
     ]
     return checks
 
@@ -420,6 +447,18 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"REFUSING: --db resolves to the operator's real registry ({real_db}). "
             "This script may only write to a scratch path. Nothing was written.",
+            file=sys.stderr,
+        )
+        return 1
+    # Inode-level check: a hardlink at `target` sharing the real registry's inode resolves to a
+    # DIFFERENT path (samefile, not the same string), so the check above alone would miss it and
+    # `connect()` would open the real registry's actual bytes under a scratch-looking name. Only
+    # meaningful when both paths already exist (a hardlink target must pre-exist) — `samefile`
+    # raises on a missing path, and a fresh scratch DB not existing yet is the normal case.
+    if real_db.exists() and target.exists() and os.path.samefile(target, real_db):
+        print(
+            f"REFUSING: --db ({target}) is a hardlink to the operator's real registry "
+            f"({real_db}) — same file, different path. Nothing was written.",
             file=sys.stderr,
         )
         return 1
