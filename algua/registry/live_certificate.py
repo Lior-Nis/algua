@@ -16,17 +16,19 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from algua.contracts.lifecycle import TransitionError
-from algua.registry.forward_evidence import ActivitiesFetch, _classify_activities, _parse_dt
+from algua.registry.forward_evidence import (
+    ActivitiesFetch,
+    SessionCalendar,
+    _classify_activities,
+    _parse_dt,
+)
 from algua.registry.repository import ArtifactIdentity, StrategyRepository
 from algua.research.forward_gates import CERTIFICATE_FRESH_SESSIONS
 from algua.risk.global_halt import is_engaged
 from algua.risk.kill_switch import is_tripped
-
-if TYPE_CHECKING:
-    from algua.registry.forward_promotion import SessionCalendar
 
 
 def verify_forward_certificate(

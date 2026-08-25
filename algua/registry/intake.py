@@ -5,8 +5,13 @@ The admission DECISION is NOT made here — it is made transactionally, one cand
 ``StrategyRepository.intake_candidate_to_paper`` (which re-checks the count cap and the Σ≤equity
 capital bound UNDER the write lock). This module computes the fixed slice and the stable order in
 which candidates are offered to that primitive, then drives ``run_intake``'s loop over them one at
-a time — it never does its own bounds-check, so there is no second one to drift from the
-authoritative in-transaction one.
+a time.
+
+``run_intake`` DOES pre-check the same bounds (``slc <= 0.0 or count >= max_concurrent``) before
+offering each candidate, against a locally-incremented count. That is a fail-SAFE filter, not a
+second authority: it can only stop early, never admit something the in-transaction re-check would
+refuse. The authoritative decision stays under the write lock, so a drift between the two can cost
+an admission that would have succeeded — never one that should have failed.
 """
 from __future__ import annotations
 

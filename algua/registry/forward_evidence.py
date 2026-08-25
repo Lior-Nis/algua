@@ -23,7 +23,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 import pandas as pd
 
@@ -33,8 +33,15 @@ from algua.research.forward_gates import FORWARD_RELOOK_HORIZON_SESSIONS, Forwar
 from algua.risk.global_halt import is_engaged
 from algua.risk.kill_switch import is_tripped
 
-if TYPE_CHECKING:
-    from algua.registry.forward_promotion import SessionCalendar
+
+class SessionCalendar(Protocol):
+    """The session arithmetic the assembly needs (satisfied by ``MarketCalendar``)."""
+
+    def session_on_or_before(self, day: date) -> date: ...
+    def sessions_between(self, a: date, b: date) -> int: ...
+    def sessions_in_range(self, start: date, end: date) -> list[date]: ...
+    def previous_session(self, day: date) -> date: ...
+
 
 # Alpaca account-activity types that move EXTERNAL capital in/out of the account (deposits,
 # withdrawals, transfers, journals, ACATS). Any of these inside the evidence window invalidates

@@ -20,14 +20,15 @@ import json
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any, Protocol
+from datetime import datetime
+from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.forward_evidence import (
     ActivitiesFetch,
     AssembledEvidence,
+    SessionCalendar,
     assemble_forward_evidence,
 )
 from algua.registry.repository import StrategyRecord, StrategyRepository
@@ -36,15 +37,6 @@ from algua.research.forward_gates import (
     ForwardGateDecision,
     evaluate_forward_gate,
 )
-
-
-class SessionCalendar(Protocol):
-    """The session arithmetic the assembly needs (satisfied by ``MarketCalendar``)."""
-
-    def session_on_or_before(self, day: date) -> date: ...
-    def sessions_between(self, a: date, b: date) -> int: ...
-    def sessions_in_range(self, start: date, end: date) -> list[date]: ...
-    def previous_session(self, day: date) -> date: ...
 
 
 def guard_forward_relaxations(actor: Actor, criteria: ForwardGateCriteria) -> None:

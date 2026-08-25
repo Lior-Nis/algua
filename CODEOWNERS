@@ -19,7 +19,7 @@
 /algua/registry/transitions.py  @Lior-Nis   # live-gate enforcement
 /algua/registry/promotion.py    @Lior-Nis   # promotion policy (breadth/PIT/floor + shortlist gate)
 /algua/research/forward_gates.py      @Lior-Nis   # forward-test gate criteria (#124)
-/algua/registry/forward_promotion.py  @Lior-Nis   # forward-test evidence assembly + live certificate
+/algua/registry/forward_promotion.py  @Lior-Nis   # forward-gate scaffolding: guard + preflight + run_gate (evidence -> forward_evidence.py, certificate -> live_certificate.py)
 /algua/registry/human_actor.py        @Lior-Nis   # authenticated --actor human gate (#329)
 
 # --- Modules carved OUT of the files above by the simplification program (stages 6a-6c).
@@ -31,8 +31,9 @@
 /algua/registry/forward_evidence.py   @Lior-Nis   # forward-test tick admissibility + evidence assembly (was forward_promotion.py)
 /algua/registry/live_certificate.py   @Lior-Nis   # forward-certificate verification, the go-live freshness bound (was forward_promotion.py)
 /algua/registry/intake.py             @Lior-Nis   # candidate->paper book admission: capital slice, FIFO order, the atomic intake loop
-/algua/cli/_common.py                  @Lior-Nis   # authenticate_actor chokepoint — the enforcement call (#329)
-/algua/cli/research_cmd.py             @Lior-Nis   # research-promote enforcement call site (#329)
+/algua/registry/challenges.py         @Lior-Nis   # single-use signed-challenge lifecycle: nonce issuance + consumption for BOTH the algua-go-live and algua-human-actor namespaces (was live_gate.py + human_actor.py, spec §4.4)
+/algua/cli/_common.py                  @Lior-Nis   # shared CLI JSON-envelope + flag-resolution surface (authenticate_actor moved to registry/human_actor.py in 6a)
+/algua/cli/research_cmd.py             @Lior-Nis   # research-promote command surface (the #329 enforcement call moved to registry/promote_run.py in 6a)
 /algua/cli/paper_cmd.py                @Lior-Nis   # paper-promote enforcement call site (#329)
 /.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners
