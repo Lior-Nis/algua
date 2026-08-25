@@ -150,7 +150,7 @@ def test_run_combos_pool_preserves_order(monkeypatch, tmp_path):
 
 
 def test_run_combos_non_picklable_strategy_raises_backtest_error(monkeypatch, tmp_path):
-    from algua.backtest.engine import BacktestError
+    from algua.backtest.errors import BacktestError
     from algua.backtest.sweep import _override, _run_combos
     from algua.portfolio.construction import get_construction_policy
 
@@ -178,7 +178,7 @@ def test_run_combos_non_picklable_strategy_raises_backtest_error(monkeypatch, tm
 
 
 def test_sweep_combo_error_surfaces_as_backtest_error(monkeypatch, tmp_path):
-    from algua.backtest.engine import BacktestError
+    from algua.backtest.errors import BacktestError
 
     _force_pool(monkeypatch, tmp_path)
     # >1 combo through the pool; `windows` far too large for the period forces walk_forward to raise

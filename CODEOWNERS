@@ -39,6 +39,7 @@
 /algua/backtest/pit_view.py            @Lior-Nis   # as-of masking IS the anti-look-ahead enforcement (was engine.py, stage 7)
 /algua/backtest/decision_path.py       @Lior-Nis   # canonical/fast dual path + parity guard licensing the fast path (was engine.py, stage 7)
 /algua/backtest/grid.py                @Lior-Nis   # adj_grid: the sim date-index, single source of truth for build_portfolio AND holdout_window (#192 holdout identity)
+/algua/backtest/errors.py              @Lior-Nis   # BacktestError: the fail-closed signal every backtest wall raises (was engine.py, stage 7)
 /algua/backtest/walkforward.py         @Lior-Nis   # holdout_window: the #192 single-use-holdout identity source (was engine.py, stage 7)
 /.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners

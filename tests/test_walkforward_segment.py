@@ -1,6 +1,6 @@
 import pytest
 
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.backtest.walkforward import _segment_bounds
 
 

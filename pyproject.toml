@@ -337,6 +337,12 @@ forbidden_modules = ["algua.live"]
 # dependencies, `research.dsr -> backtest._constants` and `research.eval_harness -> backtest._sample`,
 # both present before this stage. A contract with an exemption would hide them; leaving it unwritten
 # keeps them visible.)
+#
+# Sized properly (the linter prints CHAINS, not edges, so an earlier note here said "two"): there
+# are NINE direct edges across SIX modules -- research/{dsr,haircut,forward_gates,gates,regime}
+# -> backtest._constants (all five just for `ANN`), gates -> backtest.walkforward
+# (WalkForwardResult), eval_harness -> backtest.{_sample,walkforward}. Whoever closes this boundary
+# should know that most of it is one shared constant, not deep coupling.
 name = "backtest lane stays off the registry"
 type = "forbidden"
 source_modules = ["algua.backtest"]

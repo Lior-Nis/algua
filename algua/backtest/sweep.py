@@ -17,7 +17,7 @@ from threadpoolctl import threadpool_limits
 
 from algua.backtest.core_budget import admit, close_lease_fd_in_worker, cpu_budget
 from algua.backtest.delisting import DelistingRecord
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.backtest.walkforward import walk_forward
 from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
 from algua.portfolio.construction import ConstructionError, validate_construction_params

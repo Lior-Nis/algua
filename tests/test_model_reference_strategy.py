@@ -8,8 +8,8 @@ from datetime import datetime
 import pytest
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import BacktestError
 from algua.backtest.engine import run as run_backtest
+from algua.backtest.errors import BacktestError
 from algua.backtest.sweep import sweep
 from algua.backtest.walkforward import walk_forward
 from algua.models import register

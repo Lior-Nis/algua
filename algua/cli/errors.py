@@ -25,7 +25,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     """
     import sqlite3
 
-    from algua.backtest.engine import BacktestError
+    from algua.backtest.errors import BacktestError
     from algua.contracts.lifecycle import TransitionError
     from algua.data.manifest import ManifestLockReplacedError
     from algua.data.providers.errors import ProviderError

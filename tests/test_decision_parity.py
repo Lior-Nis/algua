@@ -14,7 +14,8 @@ import pytest
 
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.decision_path import _decision_weights
-from algua.backtest.engine import BacktestError, run, simulate
+from algua.backtest.engine import run, simulate
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
 from algua.execution.sim_broker import SimBroker
 from algua.live.paper_loop import run_paper

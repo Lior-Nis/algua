@@ -11,11 +11,11 @@ import pandas as pd
 
 from algua.backtest.delisting import DelistingRecord
 from algua.backtest.engine import (
-    BacktestError,
     adj_grid,
     build_portfolio,
     fetch_symbols,
 )
+from algua.backtest.errors import BacktestError
 from algua.backtest.metrics import metrics_from_returns
 from algua.backtest.pit_view import members_as_of
 from algua.backtest.result import config_hash, provenance
@@ -183,7 +183,8 @@ def _market_return_series(
             # so the benchmark never includes symbols before their effective-date join.
             # Non-members at date t are set to NaN so pandas .mean(axis=1) skips them,
             # correctly averaging only the as-of members at each bar. Reuses members_as_of
-            # (the engine's public as-of helper) — no reinvention of the masking logic.
+            # (the shared public as-of helper in `algua.backtest.pit_view`) — no reinvention
+            # of the masking logic.
             masked = daily.copy()
             for ts in daily.index:
                 members = members_as_of(universe_by_date, ts)

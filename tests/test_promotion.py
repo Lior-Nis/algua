@@ -5,7 +5,7 @@ import pytest
 
 import algua.strategies.momentum as momentum_pkg
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.contracts.lifecycle import Actor, Stage, TransitionError
 from algua.registry.db import connect, migrate
 from algua.registry.promotion import (

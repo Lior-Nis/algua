@@ -5,7 +5,8 @@ package root instead of reaching into private engine internals (#38).
 """
 from __future__ import annotations
 
-from algua.backtest.engine import BacktestError, build_portfolio, run, simulate
+from algua.backtest.engine import build_portfolio, run, simulate
+from algua.backtest.errors import BacktestError
 from algua.backtest.metrics import (
     avg_gross_exposure,
     metrics_from_returns,

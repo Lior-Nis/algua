@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import BacktestError
+from algua.backtest.errors import BacktestError
 from algua.backtest.walkforward import walk_forward
 from algua.contracts.types import ExecutionContract
 from algua.data.serve import StoreBackedNewsProvider

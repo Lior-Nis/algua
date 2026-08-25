@@ -24,7 +24,8 @@ from algua.backtest.decision_path import (
     _parity_sample_positions,
     verify_signal_panel_parity,
 )
-from algua.backtest.engine import BacktestError, simulate
+from algua.backtest.engine import simulate
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
 from algua.risk.limits import WEIGHT_TOL, RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig

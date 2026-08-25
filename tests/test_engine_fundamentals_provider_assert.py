@@ -6,7 +6,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from algua.backtest.engine import BacktestError, run
+from algua.backtest.engine import run
+from algua.backtest.errors import BacktestError
 from algua.data.serve import StoreBackedProvider
 from algua.data.store import DataStore
 from algua.strategies.loader import load_strategy

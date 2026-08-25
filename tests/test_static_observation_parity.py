@@ -12,7 +12,8 @@ import pytest
 
 from algua.backtest._sample import SyntheticProvider
 from algua.backtest.decision_path import verify_signal_panel_parity
-from algua.backtest.engine import BacktestError, run, simulate
+from algua.backtest.engine import run, simulate
+from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
 from algua.data.fundamentals_schema import to_fundamentals_schema
 from algua.data.news_schema import to_news_schema
