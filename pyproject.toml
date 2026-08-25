@@ -316,6 +316,19 @@ source_modules = ["algua.risk"]
 forbidden_modules = ["algua.live"]
 
 [[tool.importlinter.contracts]]
+# The registry owns the lifecycle and its gates; the live/paper trading lanes sit ABOVE it and
+# import it, never the reverse. Probed and added in stage 6c, when the forward-gate module was split
+# into forward_evidence.py + live_certificate.py: those files reason about live trading evidence, so
+# the direction is worth enforcing rather than trusting. (`registry -> cli` is NOT contracted: it has
+# exactly one violating edge, human_actor.py's challenge print, tracked in #592 and left visible
+# rather than blessed by an exemption. `registry -> backtest` is NOT contracted either: it is a real,
+# pre-existing dependency -- forward_evidence needs backtest.metrics to score the evidence.)
+name = "registry stays off the live lane"
+type = "forbidden"
+source_modules = ["algua.registry"]
+forbidden_modules = ["algua.live"]
+
+[[tool.importlinter.contracts]]
 # The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
 # the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
 # gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is

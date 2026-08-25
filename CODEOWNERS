@@ -21,6 +21,16 @@
 /algua/research/forward_gates.py      @Lior-Nis   # forward-test gate criteria (#124)
 /algua/registry/forward_promotion.py  @Lior-Nis   # forward-test evidence assembly + live certificate
 /algua/registry/human_actor.py        @Lior-Nis   # authenticated --actor human gate (#329)
+
+# --- Modules carved OUT of the files above by the simplification program (stages 6a-6c).
+# The code did not become less integrity-critical by moving; without these lines the carve
+# silently removed the guard, which is exactly the "quietly weaken the wall" case this file exists
+# to prevent. Added on discovery during stage 6c.
+/algua/registry/promote_run.py        @Lior-Nis   # backtested->candidate gate body (was research_cmd.py, #6a)
+/algua/registry/family_assignment.py  @Lior-Nis   # #222/#524 family classification + deferred agent mint (was promotion.py)
+/algua/registry/forward_evidence.py   @Lior-Nis   # forward-test tick admissibility + evidence assembly (was forward_promotion.py)
+/algua/registry/live_certificate.py   @Lior-Nis   # forward-certificate verification, the go-live freshness bound (was forward_promotion.py)
+/algua/registry/intake.py             @Lior-Nis   # candidate->paper book admission: capital slice, FIFO order, the atomic intake loop
 /algua/cli/_common.py                  @Lior-Nis   # authenticate_actor chokepoint — the enforcement call (#329)
 /algua/cli/research_cmd.py             @Lior-Nis   # research-promote enforcement call site (#329)
 /algua/cli/paper_cmd.py                @Lior-Nis   # paper-promote enforcement call site (#329)
