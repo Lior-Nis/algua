@@ -14,9 +14,12 @@ raising — ``True`` means the CLI wrapper should exit 0, ``False`` means it mus
 exit code, so one boolean is enough to preserve the exact exit-code contract. Two of the five
 originally used ``... from None`` to suppress exception chaining onto an already-emitted JSON
 envelope; converting each into a plain ``return False`` from inside its ``except`` block achieves
-the same suppression for free — the function returns normally, so no exception context is live by
-the time the CLI wrapper (``algua/cli/operator_cmd.py::run``) does its own
-``raise typer.Exit(1) from None``.
+the same suppression for free: ``return`` from inside an ``except`` block exits the handler and
+Python restores the ambient exception state, so by the time the CLI wrapper
+(``algua/cli/operator_cmd.py::run``) reaches its ``raise typer.Exit(1)`` — outside every ``try`` —
+``sys.exc_info()`` is empty and there is nothing to chain. The wrapper therefore needs no
+``from None`` of its own, and adding one would only hide that the suppression is already
+structural.
 """
 
 from __future__ import annotations
