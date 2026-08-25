@@ -31,6 +31,17 @@
   --electric:      #3982ff; /* Electric Light — the on-black brand blue */
   --electric-soft: #8ab0ff;
 
+  /* series (dataviz skill validator, run against these tokens on this true-black
+     surface — do NOT "improve" without re-running it): a 4-step neutral ramp
+     FAILS (#5d6675 vs #727c8b is dE 7.5 for normal vision, floor 15). This pair
+     PASSES lightness band, CVD separation (dE 17.6 protan / 11.1 tritan), the
+     normal-vision floor (dE 18.0), and >=3:1 contrast on black. Its one FAIL is
+     the chroma floor ("reads gray") — that's the INTENT: the chroma check governs
+     categorical peer slots, not a figure/ground pair. Two tokens only — a third
+     series hue is the small-multiples case, not this one. */
+  --series-focus:   #3982ff; /* Electric — the ONE active series */
+  --series-context: #727c8b; /* neutral context line; reads gray BY DESIGN */
+
   /* status */
   --green:  #5fd38d;
   --red:    #ff5d5d;
@@ -447,6 +458,32 @@ button { font: inherit; }
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.14em;
+}
+
+/* ---- chart frame --------------------------------------------------------- */
+
+.chart-frame { display: grid; gap: 8px; }
+
+.chart-frame-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-frame-body { width: 100%; }
+
+.chart-frame-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-fade);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px dashed var(--line-2);
+  border-radius: 6px;
 }
 
 /* ---- equity chart -------------------------------------------------------- */
