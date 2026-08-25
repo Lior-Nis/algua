@@ -3,7 +3,8 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from algua.backtest.engine import BacktestError, _fundamentals_as_of, run
+from algua.backtest.engine import BacktestError, run
+from algua.backtest.pit_view import _fundamentals_as_of
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedProvider
 from algua.data.store import DataStore
 from algua.strategies.loader import load_strategy

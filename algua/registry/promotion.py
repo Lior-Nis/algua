@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from algua.backtest.bootstrap import stable_bootstrap_seed, stationary_bootstrap_dsr
-from algua.backtest.engine import verify_signal_panel_parity
+from algua.backtest.decision_path import verify_signal_panel_parity
 from algua.backtest.neff import estimate_n_eff
 from algua.backtest.walkforward import WalkForwardResult
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition

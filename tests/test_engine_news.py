@@ -4,7 +4,8 @@ from typing import Any
 import pandas as pd
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import _news_as_of, run
+from algua.backtest.engine import run
+from algua.backtest.pit_view import _news_as_of
 from algua.contracts.types import ExecutionContract
 from algua.data.news_schema import explode_news_symbols, to_news_schema
 from algua.data.serve import StoreBackedNewsProvider

@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pandas as pd
 
 from algua.backtest._sample import SyntheticProvider
-from algua.backtest.engine import _decision_weights
+from algua.backtest.decision_path import _decision_weights
 from algua.contracts.types import ExecutionContract
 from algua.execution.alpaca_broker import TickSnapshot
 from algua.execution.sim_broker import SimBroker
