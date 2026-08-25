@@ -132,8 +132,8 @@ def _parse_utc(value: object) -> datetime | None:
     """ISO-8601 -> aware-UTC datetime, or ``None`` on anything unparseable — INCLUDING a tz-naive
     string. Every legitimate tick writer stamps an explicit offset, so a naive/garbage value can
     only be a raw-write fabrication and is rejected fail-closed (a non-idle strategy with such a
-    tick surfaces as ``stale``, never ``ok``). Mirrors ``forward_promotion._parse_dt`` without
-    importing that CODEOWNERS-protected module."""
+    tick surfaces as ``stale``, never ``ok``). Mirrors ``forward_evidence._parse_dt`` without
+    importing that module (part of the protected ``forward_promotion.py`` orchestration)."""
     if not isinstance(value, str):
         return None
     try:

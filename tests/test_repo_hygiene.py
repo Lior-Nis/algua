@@ -199,3 +199,64 @@ def test_strategies_placement_and_provenance() -> None:
             f"missing provenance: {path} must carry a module-level GENERATED_BY provenance "
             f"stamp (additions-only discipline, issue #509)."
         )
+
+
+# Every module that enforces a wall an autonomous agent must not be able to weaken alone. This is
+# NOT a style list: `algua/operator/diff_policy.parse_codeowners_denylist` derives the autonomous
+# merge-back's RUNTIME denylist from CODEOWNERS, so a module missing here is one the merge-back
+# driver will merge to main with no human in the loop.
+#
+# Why this test exists: the simplification program repeatedly carved integrity-critical bodies OUT
+# of protected files into new modules, and protection did not follow. Nothing failed — a CODEOWNERS
+# rule that stops matching anything is silent. `promote_task` (the backtested->candidate gate body)
+# sat unprotected from stage 6a until stage 6c; `challenges.py` (go-live + human-actor nonce
+# issuance and single-use consumption) sat unprotected from stage 2 until stage 6c.
+#
+# Adding a line here is a deliberate act. If a refactor moves one of these bodies again, this test
+# fails loudly at the moment of the move instead of silently disarming a wall.
+INTEGRITY_CRITICAL_MODULES = frozenset(
+    {
+        "algua/contracts/lifecycle.py",
+        "algua/backtest/engine.py",
+        "algua/research/gates.py",
+        "algua/research/forward_gates.py",
+        "algua/research/clustering.py",
+        "algua/registry/live_gate.py",
+        "algua/registry/challenges.py",
+        "algua/registry/human_actor.py",
+        "algua/registry/transitions.py",
+        "algua/registry/promotion.py",
+        "algua/registry/family_assignment.py",
+        "algua/registry/promote_run.py",
+        "algua/registry/forward_promotion.py",
+        "algua/registry/forward_evidence.py",
+        "algua/registry/live_certificate.py",
+        "algua/registry/intake.py",
+    }
+)
+
+
+def test_integrity_critical_modules_are_codeowner_protected():
+    """Each wall-enforcing module must be denied to the autonomous merge-back.
+
+    Asserted through the REAL parser the merge-back uses, not by grepping CODEOWNERS text, so the
+    test fails if the file stops parsing as well as if a rule stops matching.
+    """
+    from algua.operator.diff_policy import parse_codeowners_denylist
+
+    denied = parse_codeowners_denylist((REPO / "CODEOWNERS").read_text())
+    unprotected = sorted(
+        m for m in INTEGRITY_CRITICAL_MODULES
+        if not any(m.startswith(prefix) for prefix in denied)
+    )
+    assert not unprotected, (
+        "integrity-critical modules are NOT CODEOWNERS-protected, so the autonomous merge-back "
+        f"would merge changes to them with no human review: {unprotected}"
+    )
+
+
+def test_integrity_critical_modules_still_exist():
+    """A module renamed or deleted without updating the set above would make the protection test
+    vacuously pass — it would assert coverage of a path nothing lives at any more."""
+    missing = sorted(m for m in INTEGRITY_CRITICAL_MODULES if not (REPO / m).is_file())
+    assert not missing, f"listed as integrity-critical but absent from the tree: {missing}"

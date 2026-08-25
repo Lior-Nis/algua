@@ -21,13 +21,15 @@ from algua.execution.live_ledger import (
 )
 from algua.execution.order_state import record_tick_snapshot
 from algua.registry.db import connect, migrate
-from algua.registry.forward_promotion import (
+from algua.registry.forward_evidence import (
     EXTERNAL_CAPITAL_TYPES,
     AssembledEvidence,
     assemble_forward_evidence,
+    qualified_holdout_sharpe,
+)
+from algua.registry.forward_promotion import (
     forward_promotion_preflight,
     guard_forward_relaxations,
-    qualified_holdout_sharpe,
     run_forward_gate,
 )
 from algua.registry.repository import ArtifactIdentity
@@ -976,7 +978,7 @@ def test_mixed_account_evidence_fails_single_account(conn):
 def test_classify_activities_attributes_fill_to_any_paper_order(tmp_path):
     from algua.execution.live_ledger import record_paper_venue_order
     from algua.registry.db import connect, migrate
-    from algua.registry.forward_promotion import _classify_activities
+    from algua.registry.forward_evidence import _classify_activities
 
     conn = connect(tmp_path / "r.db")
     migrate(conn)

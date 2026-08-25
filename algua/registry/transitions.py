@@ -215,7 +215,7 @@ def _default_forward_certificate_verifier() -> ForwardCertificateVerifier:
             MissingBrokerCredentials,
             build_broker,
         )
-        from algua.registry.forward_promotion import verify_forward_certificate
+        from algua.registry.live_certificate import verify_forward_certificate
 
         # The Protocol stays I/O-agnostic; only the sqlite store exposes `connection`.
         conn = getattr(repo, "connection", None)
