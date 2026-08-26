@@ -87,30 +87,49 @@ def test_both_lanes_trip_and_halt_on_a_risk_breach():
         )
 
 
-def test_both_lanes_treat_the_same_kinds_as_dark_feed():
-    """The dark-feed kind set must be identical in both lanes.
+def test_neither_lane_defines_its_own_dark_feed_kind_set():
+    """The dark-feed kind set must exist exactly ONCE, in `algua.risk.limits`.
 
-    If one lane treats `unvaluable_marks` as economic (trip + flatten) while the other treats it as
-    a dark feed (halt, preserve), the same market condition liquidates the book in one lane and
-    preserves it in the other.
+    Originally both lanes wrote the literal `{"stale_marks", "unvaluable_marks"}` inline, and this
+    test asserted the two literals matched. That only caught divergence AFTER someone edited one —
+    so stage 8 moved the set to `DARK_FEED_KINDS` beside the exception that carries `.kind`, and
+    both lanes now route on `exc.is_dark_feed`.
+
+    This assertion is the stronger form: a lane cannot disagree about the policy because a lane no
+    longer states the policy. If one re-introduces a local set, the same market condition would
+    liquidate the book in one lane and preserve it in the other.
     """
-    sets = {}
+    from algua.risk.limits import DARK_FEED_KINDS, RiskBreach
+
+    assert DARK_FEED_KINDS == frozenset({"stale_marks", "unvaluable_marks"})
+    assert RiskBreach("stale_marks", "d").is_dark_feed is True
+    assert RiskBreach("unvaluable_marks", "d").is_dark_feed is True
+    assert RiskBreach("drawdown", "d").is_dark_feed is False, (
+        "an economic breach must NOT be treated as a dark feed — it trips and flattens"
+    )
+
+    offenders = []
     for lane in LANES:
         src = _tick_source(lane)
-        tree = ast.parse("if 1:\n" + "\n".join("    " + ln for ln in src.splitlines()))
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Compare) and isinstance(n.ops[0], ast.In):
-                cmp = n.comparators[0]
-                if isinstance(cmp, ast.Set):
-                    vals = {e.value for e in cmp.elts if isinstance(e, ast.Constant)}
-                    if "stale_marks" in vals:
-                        sets[lane] = frozenset(vals)
-    assert len(sets) == len(LANES), (
-        f"could not find the dark-feed kind set in every lane (found: {sorted(sets)}). If the "
-        f"routing moved into a shared helper, point this test at that helper rather than "
-        f"removing it."
+        for literal in ('"stale_marks"', "'stale_marks'"):
+            if literal in src:
+                offenders.append(lane)
+                break
+    assert not offenders, (
+        f"these lanes hardcode a dark-feed kind instead of using `exc.is_dark_feed`: {offenders}. "
+        f"The policy lives in `algua.risk.limits.DARK_FEED_KINDS` so the two lanes cannot "
+        f"drift apart on whether a dead bar feed preserves the book or liquidates it."
     )
-    assert len(set(sets.values())) == 1, (
-        f"lanes disagree on which breach kinds are a DARK FEED: {dict(sets)}. The same market "
-        f"condition would preserve the book in one lane and liquidate it in the other."
+
+
+def test_both_lanes_route_dark_feed_through_the_shared_predicate():
+    """Both ticks must consult `is_dark_feed` — the branch must still EXIST in each lane.
+
+    Complements the test above: that one proves no lane defines the policy, this one proves no lane
+    silently DROPPED the branch (which would send a dark feed down the trip-and-flatten path).
+    """
+    missing = [lane for lane in LANES if "is_dark_feed" not in _tick_source(lane)]
+    assert not missing, (
+        f"these lanes no longer branch on `is_dark_feed`: {missing}. A dark bar feed would fall "
+        f"through to trip-and-flatten and dump the book at unknown prices (#452 HIGH#3)."
     )

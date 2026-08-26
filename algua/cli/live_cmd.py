@@ -249,7 +249,7 @@ def _run_strategy_tick(  # noqa: PLR0913
         trip_for_breach(conn, name, exc)
         log.error("breach", extra={"fields": {"strategy": name, "lane": "live",
                                               "kind": exc.kind}}, exc_info=True)
-        if exc.kind in {"stale_marks", "unvaluable_marks"}:
+        if exc.is_dark_feed:
             # DARK BAR FEED, broker still alive (#452 HIGH#3): a stale / unvaluable mark means the
             # risk state cannot be TRUSTED, not that the position is losing money. Flattening blind
             # off a dead feed would dump the book at unknown prices — exactly the wrong move. A dark
