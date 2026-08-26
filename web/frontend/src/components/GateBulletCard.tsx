@@ -13,9 +13,13 @@ const PLOT = { width: 280, height: 20, left: 2, right: 2 }
 const BINDING_BAR_HEIGHT = 12
 const ADVISORY_BAR_HEIGHT = 7
 
-const ROW_HEIGHT = 54
-const GROUP_HEADER_HEIGHT = 24
-const MIN_HEIGHT = 120
+// The frame's height is a FIXED constant, not derived from `checks.length` — a list-shaped
+// card has no natural plot area to size a fixed height from (see `ChartFrame`'s
+// `variableHeight` doc), and computing one from the payload would only recreate the very
+// layout-shift the fixed-height contract exists to prevent (empty state can never know the
+// future populated row count). This sizes the honest-empty box only; once populated,
+// `ChartFrame`'s `variableHeight` leaves the body unconstrained and it grows with content.
+const FRAME_HEIGHT = 120
 
 export interface BulletGeometry {
   /** Zero-anchored bar span (see the sparkline/scatter precedent in this slice: the domain
@@ -69,6 +73,28 @@ export function buildBulletGeometry(check: GateCheck): BulletGeometry | null {
 
 function isAdvisory(check: GateCheck): boolean {
   return check.advisory === true
+}
+
+export interface SplitChecks {
+  binding: GateCheck[]
+  advisory: GateCheck[]
+}
+
+/** Pure grouping: partitions checks into binding (decides pass/fail) vs advisory (recorded,
+ * never vetoes) — order-preserving within each group. The card's POSITION encoding (two
+ * separate groups, binding first) reduces to this one partition; kept here, beside
+ * `buildBulletGeometry`, as an isolated + unit-tested piece rather than inline `.filter` calls
+ * in the component, so any future change to the split (or to how it interacts with layout) is
+ * caught by a test rather than reaching review — the height-derivation defect this replaced
+ * would have surfaced immediately had the equivalent arithmetic been isolated like this from
+ * the start. */
+export function splitChecks(checks: GateCheck[]): SplitChecks {
+  const binding: GateCheck[] = []
+  const advisory: GateCheck[] = []
+  for (const c of checks) {
+    ;(isAdvisory(c) ? advisory : binding).push(c)
+  }
+  return { binding, advisory }
 }
 
 function CheckRow({ check, index }: { check: GateCheck; index: number }) {
@@ -175,21 +201,16 @@ export default function GateBulletCard({ strategy }: { strategy: string }) {
   const detail = useFetch<ApiEnvelope<RunDetail>>(runId !== null ? runDetailUrl(runId) : null)
 
   const checks = detail.data?.data?.gate_decision?.checks ?? []
-  const binding = checks.filter((c) => !isAdvisory(c))
-  const advisoryChecks = checks.filter(isAdvisory)
+  const { binding, advisory: advisoryChecks } = splitChecks(checks)
   const isEmpty = checks.length === 0
-
-  const groupCount = (binding.length > 0 ? 1 : 0) + (advisoryChecks.length > 0 ? 1 : 0)
-  const height = isEmpty
-    ? MIN_HEIGHT
-    : Math.max(MIN_HEIGHT, checks.length * ROW_HEIGHT + groupCount * GROUP_HEADER_HEIGHT + 16)
 
   return (
     <ChartFrame
       title="gate checks"
       isEmpty={isEmpty}
       emptyLabel="no gate checks recorded yet — the ledger fills once a gate run exists"
-      height={height}
+      height={FRAME_HEIGHT}
+      variableHeight
     >
       <div className="bullet-card">
         {binding.length > 0 && (

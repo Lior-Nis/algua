@@ -1,7 +1,7 @@
 import { cleanup, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, GateCheck, RunDetail, RunRow, RunsListPayload } from '../types'
-import GateBulletCard, { buildBulletGeometry } from './GateBulletCard'
+import GateBulletCard, { buildBulletGeometry, splitChecks } from './GateBulletCard'
 
 function listEnvelope(runs: RunRow[]): ApiEnvelope<RunsListPayload> {
   return { ok: true, fetched_at: '2026-08-26T00:00:00Z', stale: false, data: { count: runs.length, runs } }
@@ -139,6 +139,26 @@ it('a NULL-value check reads "not evaluated", never 0', async () => {
   expect(within(row).queryByText('0')).toBeNull()
 })
 
+it('a FAILED verdict and a NULL value are independent: both the fail mark and "not evaluated" render together', async () => {
+  // Regression: a check that never ran (NULL value) can still carry a real `false` verdict —
+  // e.g. "returns not available" auto-fails a check with nothing to compare. The fail mark
+  // must not disappear just because there is no bar to draw, and "not evaluated" must not
+  // disappear just because the verdict is a real fail. If PassMark were ever moved inside the
+  // `geometry === null` branch (coupling the two), this test catches it.
+  stubGateFetch('gate_probe_failed_null', 103, [
+    { name: 'holdout_sharpe_floor', op: '>', threshold: 0.0, value: null, passed: false },
+  ])
+
+  render(<GateBulletCard strategy="gate_probe_failed_null" />)
+  const row = (await screen.findByText('holdout_sharpe_floor')).closest(
+    '[data-testid="gate-check-row"]',
+  ) as HTMLElement
+
+  expect(within(row).getByText('fail')).toBeTruthy()
+  expect(within(row).getByText('not evaluated')).toBeTruthy()
+  expect(within(row).queryByTestId('bullet-fill')).toBeNull()
+})
+
 it('mounts inside ChartFrame — an honest empty state when the strategy has no gate run yet', async () => {
   stubNoGateRuns()
   render(<GateBulletCard strategy="never_gated" />)
@@ -161,4 +181,20 @@ it('buildBulletGeometry spans from zero to the value, oriented correctly for sig
   expect(neg.barX1).toBeGreaterThan(neg.barX0)
   expect(neg.domainMin).toBeLessThanOrEqual(-1)
   expect(neg.domainMax).toBeGreaterThanOrEqual(0)
+})
+
+it('splitChecks partitions binding vs advisory, preserving order within each group', () => {
+  const checks: GateCheck[] = [
+    { name: 'a', passed: true },
+    { name: 'b', passed: false, advisory: true },
+    { name: 'c', passed: true },
+    { name: 'd', passed: false, advisory: true },
+  ]
+  const { binding, advisory } = splitChecks(checks)
+  expect(binding.map((c) => c.name)).toEqual(['a', 'c'])
+  expect(advisory.map((c) => c.name)).toEqual(['b', 'd'])
+})
+
+it('splitChecks handles an empty list without throwing', () => {
+  expect(splitChecks([])).toEqual({ binding: [], advisory: [] })
 })

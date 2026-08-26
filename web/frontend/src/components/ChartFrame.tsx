@@ -11,27 +11,41 @@ import type { ReactNode } from 'react'
  *   rendered while `isEmpty` is true, so a chart can't bypass the rule by drawing
  *   its own placeholder.
  * - No layout shift: the body is a fixed `height` whether empty or populated, so
- *   the page never jumps when data arrives.
+ *   the page never jumps when data arrives. This is the DEFAULT for every consumer —
+ *   `variableHeight` is opt-in, so existing charts keep the guarantee with no edit.
+ *
+ * `variableHeight` (default `false`): a genuine PLOT has a natural fixed plot area, but a
+ * LIST-shaped chart (e.g. the gate bullet card: one row per check, count varies with the gate)
+ * does not — forcing a fixed height on it either clips rows or nests a scroll region inside a
+ * page that already scrolls, which hides content behind an affordance the reader has to
+ * discover. A list-shaped consumer opts out explicitly instead of quietly computing a height
+ * from its payload (which defeats the no-layout-shift contract by construction: the empty state
+ * can never know the future populated row count). When `variableHeight` is true, `height` sets
+ * ONLY the empty state's height (so the honest-empty box has a stable, non-collapsing size);
+ * once populated, the body is left unconstrained and sizes to its content naturally.
  */
 export default function ChartFrame({
   title,
   isEmpty,
   emptyLabel,
   height,
+  variableHeight = false,
   children,
 }: {
   title: string
   isEmpty: boolean
   emptyLabel: string
   height: number
+  variableHeight?: boolean
   children: ReactNode
 }) {
+  const bodyStyle = variableHeight && !isEmpty ? undefined : { height }
   return (
     <section className="panel chart-frame">
       <div className="chart-frame-head">
         <span className="micro-label">{title}</span>
       </div>
-      <div className="chart-frame-body" style={{ height }}>
+      <div className="chart-frame-body" style={bodyStyle}>
         {isEmpty ? <div className="chart-frame-empty">{emptyLabel}</div> : children}
       </div>
     </section>
