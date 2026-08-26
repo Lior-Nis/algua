@@ -214,6 +214,25 @@ End-state rule: every `*_cmd.py` is thin — parse options → call one domain f
    (`tick.py`, `cycle.py`) parameterized by lane, with ONE shared breach-routing
    table (dark-feed → halt-no-flatten vs economic → trip+flatten). Deliberately
    different lane details become explicit parameters, not copies.
+   **RESCOPED (stage 8) — the "near-duplicate" premise was measured and does not hold.**
+   Lane-normalised structural similarity: tick **38%**, `run_all` **38%**, and even the breach block
+   only **39%**. The obvious hypothesis — that the divergence is parallel-pair NAMING
+   (`record_live_order`/`record_paper_venue_order`, `get_nav_peak`/`get_peak_equity`, five more,
+   five of which already share a file) — was tested by normalising all seven pairs: similarity moved
+   **+2% / +0%**. The lanes differ ESSENTIALLY (live reconciles broker activities, scoped-cancels,
+   checks go-live authorization, backfills venue order ids; paper records simulated venue orders and
+   retracts noops), so merging 834 lines would produce a lane-conditional maze on the paper→live
+   wall — where an inverted conditional is the worst available bug.
+   **What WAS duplicated was the spec's own "ONE shared breach-routing table":** the dark-feed kind
+   set, written as a literal in both ticks. It now lives once as
+   `risk/limits.DARK_FEED_KINDS` + `RiskBreach.is_dark_feed`, and `tests/test_lane_parity.py`
+   asserts neither lane can state the policy locally again. Two lanes cannot disagree about a policy
+   neither states.
+   **The durable win is the parity guard, not the merge.** The lanes' divergence is what let the
+   #559 gated-universe fix reach paper and never reach live (#601) — a defect where the REHEARSAL
+   lane was safer than the REAL-MONEY lane, invisible because nothing fails when a fix reaches one
+   lane only. Structural parity tests make that absence loud; merging the orchestrators would not
+   have.
 6. **`backtest/engine.py`** → `backtest/pit_view.py` (sidecar shape + as-of masking),
    `backtest/decision_path.py` (canonical/fast dual path + parity guard incl.
    `verify_signal_panel_parity`), `backtest/execution_model.py` (costs/fill-price);
