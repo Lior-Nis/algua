@@ -8,6 +8,7 @@ import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
 import PassMark from '../components/PassMark'
 import StageChip from '../components/StageChip'
+import TrialDistribution from '../components/TrialDistribution'
 import { num, pct, utcDateTime } from '../format'
 import type {
   ApiEnvelope,
@@ -237,6 +238,7 @@ function LatestGate({ row, strategy }: { row: GateRow; strategy: string }) {
         <>
           <GateBulletCard strategy={strategy} />
           {scalars.length > 0 && <div className="dim-note num">{scalars.join(' · ')}</div>}
+          <TrialDistribution strategy={strategy} />
         </>
       )}
     </div>
