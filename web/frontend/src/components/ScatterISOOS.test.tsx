@@ -117,6 +117,41 @@ describe('buildScatterGeometry (pure layout)', () => {
     expect(geo.points).toEqual([])
     expect(geo.excludedCount).toBe(0)
   })
+
+  // Fix round 3 (review FIX G): `outlier` used to be assigned from the label set, which is capped
+  // at MAX_OUTLIER_LABELS = 3 — so a 4th run genuinely past the gap threshold was painted in the
+  // neutral CONTEXT colour. The chart said "unremarkable" about a run that had cleared the very
+  // threshold the colour exists to mark. Predicate and label budget are now separate.
+  it('a 4th run past the gap threshold is still coloured as an outlier — the cap governs ' +
+    'LABELS only', () => {
+    const runs = [
+      // Anchors: fix the domain so the gap threshold is a stable fraction of a known range.
+      row({ id: 90, strategy_name: 'anchor_low', mean_window_sharpe: 0, sharpe_oos: 0 }),
+      row({ id: 91, strategy_name: 'anchor_high', mean_window_sharpe: 2, sharpe_oos: 2 }),
+      // Four runs, all far above the diagonal, in descending gap order.
+      row({ id: 1, strategy_name: 'mined_a', mean_window_sharpe: 0.0, sharpe_oos: 1.9 }),
+      row({ id: 2, strategy_name: 'mined_b', mean_window_sharpe: 0.0, sharpe_oos: 1.8 }),
+      row({ id: 3, strategy_name: 'mined_c', mean_window_sharpe: 0.0, sharpe_oos: 1.7 }),
+      row({ id: 4, strategy_name: 'mined_d', mean_window_sharpe: 0.0, sharpe_oos: 1.6 }),
+    ]
+    const geo = buildScatterGeometry(runs)
+    const mined = geo.points.filter((p) => p.strategy.startsWith('mined_'))
+    expect(mined).toHaveLength(4)
+
+    // Every one of them cleared the threshold, so every one of them is an outlier.
+    expect(mined.every((p) => p.outlier)).toBe(true)
+    // But only three carry a direct text label — labels collide, fills do not.
+    expect(mined.filter((p) => p.labelled)).toHaveLength(3)
+    // The three labelled ones are the widest gaps, not an arbitrary three.
+    expect(mined.filter((p) => p.labelled).map((p) => p.strategy).sort()).toEqual([
+      'mined_a',
+      'mined_b',
+      'mined_c',
+    ])
+    // And the anchors, which sit exactly on the diagonal, are neither.
+    const anchors = geo.points.filter((p) => p.strategy.startsWith('anchor_'))
+    expect(anchors.every((p) => !p.outlier && !p.labelled)).toBe(true)
+  })
 })
 
 const runsEnvelope: ApiEnvelope<RunsListPayload> = {

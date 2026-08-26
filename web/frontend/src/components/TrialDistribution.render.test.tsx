@@ -102,9 +102,15 @@ it('renders both independently-scaled marks: the trial cloud (own mean_window_sh
   // "must never render like a failed binding floor") — the fail diamond must carry the word
   // "advisory" in its direct label, since colour/shape alone would read exactly like one.
   expect(screen.getByTestId('own-marker-label').textContent).toMatch(/advisory/i)
-  // The marker fails (0.025 < 2.677): rendered with the fail status token, not the neutral
-  // trial-point fill.
-  expect(marker.getAttribute('class')).toContain('fail')
+  // Fix round 3: colour follows the ENTITY. The diamond itself carries this strategy's identity
+  // class — the SAME one its marker in the trial cloud carries — never a verdict class, so
+  // Electric cannot mean "this strategy" in one mark and something else in the other.
+  expect(marker.getAttribute('class')).toBe('trial-dist-own-strip-marker')
+  expect(screen.getByTestId('own-cloud-marker').getAttribute('class')).toBe(
+    'trial-dist-own-cloud-marker',
+  )
+  // The advisory verdict (0.025 < 2.677) survives on the LABEL, in words plus a status tint.
+  expect(screen.getByTestId('own-marker-label').getAttribute('class')).toContain('fail')
 
   // The two marks are genuinely SEPARATE SVGs (independent coordinate spaces), not one shared
   // axis split by CSS.

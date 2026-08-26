@@ -2,10 +2,14 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, RunDetail, RunRow, RunSeriesEntry, RunSeriesPayload, RunsListPayload } from '../types'
 import ReturnOverlay, {
+  FAMILY_CAPTION_HEIGHT,
+  HEIGHT,
   MAX_CURVES,
+  SMALL_MULTIPLES_PLOT_BUDGET,
   SMALL_MULT_X_AXIS_SIZE,
   SMALL_MULT_Y_AXIS_SIZE,
   buildAlignedData,
+  buildFamilyCaption,
   buildReturnOverlayGeometry,
   computeSmallMultiplesPanelHeight,
 } from './ReturnOverlay'
@@ -371,8 +375,8 @@ it('a gate run with a holdout leg renders the OOS region and its scalar label, n
   expect(screen.getAllByTestId('overlay-end-label')).toHaveLength(1)
 })
 
-it("in OVERLAY mode with a sibling curve, the OOS band names the VIEWED strategy — it cannot " +
-  'be read as applying to the sibling sharing the same plot (fix round 2)', async () => {
+it('in OVERLAY mode with a sibling curve, the band is attributed in the CAPTION and its own ' +
+  'label stays scalars-only (fix round 3)', async () => {
   const runs = [
     backtestRun(1, 'band_focus', '2026-08-20T00:00:00+00:00'),
     backtestRun(2, 'band_sibling', '2026-08-01T00:00:00+00:00'),
@@ -390,11 +394,65 @@ it("in OVERLAY mode with a sibling curve, the OOS band names the VIEWED strategy
   })
   render(<ReturnOverlay strategy="band_focus" family="band_family" />)
   const region = await screen.findByTestId('overlay-region-label')
-  expect(region.textContent).toMatch(/band_focus/)
+  // Fix round 2 put the strategy name INSIDE this label; inside a narrow band in a `nowrap`
+  // span it filled the whole band and clipped the scalars — the only thing the label is for —
+  // off the card at 390/414px. The scalars are back, and the name is gone.
+  expect(region.textContent).toMatch(/63 bars/)
+  expect(region.textContent).toMatch(/0\.3/)
+  expect(region.textContent).not.toMatch(/band_focus/)
   expect(region.textContent).not.toMatch(/band_sibling/)
-  // Both curves really do share this one plot — the band's strategy name is the only thing
-  // distinguishing which curve it belongs to.
+  // The disambiguation the name was carrying now lives where there is width for it.
+  const caption = screen.getByTestId('overlay-family-caption')
+  expect(caption.textContent).toMatch(/band_focus/)
+  expect(caption.textContent).toMatch(/shaded band/i)
+  // Both curves really do share this one plot.
   expect(screen.getAllByTestId('overlay-end-label')).toHaveLength(2)
+})
+
+// Fix round 3 (review FIX F): the caption's inputs must come from what is PLOTTED. These are
+// direct unit tests of the builder, so the "viewed strategy has no persisted series" case — hard
+// to stage through the fetch stub without also changing what the rest of the suite asserts — is
+// covered head-on rather than left to a reviewer to notice.
+it('the family caption counts the siblings actually plotted and names the band it attributes', () => {
+  expect(buildFamilyCaption('trend', 2, 'brk_v1', true, true)).toBe(
+    'trend family · 2 sibling curves alongside brk_v1 · shaded band = its holdout',
+  )
+  expect(buildFamilyCaption('trend', 1, 'brk_v1', true, false)).toBe(
+    'trend family · 1 sibling curve alongside brk_v1',
+  )
+})
+
+it('the family caption never claims a focus curve that is not plotted, and never undercounts ' +
+  'the siblings when there is none', () => {
+  // The viewed strategy's backtest has no persisted series while both siblings' do: two curves
+  // are plotted and NONE of them is the focus. The old caption said "1 sibling curve alongside
+  // brk_v1's own" — wrong count AND a curve that is not on the plot.
+  const caption = buildFamilyCaption('trend', 2, 'brk_v1', false, false)
+  expect(caption).toBe('trend family · 2 sibling curves; brk_v1 has no plotted curve')
+  expect(caption).not.toMatch(/alongside/)
+  expect(caption).not.toMatch(/shaded band/)
+})
+
+it('geometry reports zero focus curves when the viewed strategy has no persisted series', () => {
+  // The source of the caption's `focusPlotted`/`siblingCount`, proven at the seam.
+  const geometry = buildReturnOverlayGeometry(
+    [
+      backtestRun(1, 'sib_a', '2026-08-20T00:00:00+00:00'),
+      backtestRun(2, 'sib_b', '2026-08-19T00:00:00+00:00'),
+      backtestRun(3, 'viewed', '2026-08-18T00:00:00+00:00'),
+    ],
+    {
+      '1': backtestSeries('2024-01-02', '2024-12-30', 10),
+      '2': backtestSeries('2023-01-02', '2023-12-29', 8),
+      // run 3 (the viewed strategy) has NO series entry — excluded, never plotted.
+    },
+    null,
+    null,
+    'viewed',
+  )
+  expect(geometry.curves.filter((c) => c.role === 'focus')).toHaveLength(0)
+  expect(geometry.curves.filter((c) => c.role === 'context')).toHaveLength(2)
+  expect(geometry.excludedCurveCount).toBe(1)
 })
 
 it('fetches runs/series in ONE batched request, never one call per run id', async () => {
@@ -427,9 +485,17 @@ it('fetches runs/series in ONE batched request, never one call per run id', asyn
 // blind spot is exactly how the small-multiples zero/negative plot-area bug at MAX_CURVES shipped
 // unnoticed (the preview artifact papered over it with a stretched SVG polyline standing in for
 // the canvas). This is plain arithmetic instead: no canvas needed.
+// Fix round 3 (review FIX E): this used to call `computeSmallMultiplesPanelHeight(MAX_CURVES)`
+// and take the function's 220 default — a budget PRODUCTION NEVER PASSES. 4 curves implies 2+
+// siblings implies the family caption, so the real budget is always
+// `HEIGHT - FAMILY_CAPTION_HEIGHT`, and against that the old numbers left an 8px sliver: the test
+// asserting the fix was passing on arithmetic the code never ran. The default is gone and the
+// budget is now the exported production constant.
 it('small multiples leaves positive, usable plot area at the MAX_CURVES cap for every panel', () => {
-  const panelHeight = computeSmallMultiplesPanelHeight(MAX_CURVES)
-  // A hidden x-axis (all but the last panel) reserves ONLY the y-axis's space.
+  const panelHeight = computeSmallMultiplesPanelHeight(MAX_CURVES, SMALL_MULTIPLES_PLOT_BUDGET)
+  // Both axis sizes are charged against HEIGHT here. That is deliberately CONSERVATIVE — uPlot
+  // spends a y-axis's `size` on width, not height — so clearing the bar under this model
+  // guarantees clearing it under the real one.
   const plotHeightHiddenXAxis = panelHeight - SMALL_MULT_Y_AXIS_SIZE
   // The last panel shows both axes.
   const plotHeightLastPanel = panelHeight - SMALL_MULT_Y_AXIS_SIZE - SMALL_MULT_X_AXIS_SIZE
@@ -440,10 +506,21 @@ it('small multiples leaves positive, usable plot area at the MAX_CURVES cap for 
   expect(plotHeightLastPanel).toBeGreaterThanOrEqual(10)
 })
 
+it('the small-multiples budget is the caption-reduced one, not the full frame height', () => {
+  expect(SMALL_MULTIPLES_PLOT_BUDGET).toBe(HEIGHT - FAMILY_CAPTION_HEIGHT)
+  // The trap this replaces: measured against the FULL frame height the arithmetic "passed" while
+  // the real, caption-reduced budget left an 8px sliver. The real budget is strictly smaller —
+  // and it is the one that now has to clear the usability bar.
+  const onFullHeight = computeSmallMultiplesPanelHeight(MAX_CURVES, HEIGHT)
+  const onRealBudget = computeSmallMultiplesPanelHeight(MAX_CURVES, SMALL_MULTIPLES_PLOT_BUDGET)
+  expect(onRealBudget).toBeLessThan(onFullHeight)
+  expect(onRealBudget - SMALL_MULT_Y_AXIS_SIZE - SMALL_MULT_X_AXIS_SIZE).toBeGreaterThanOrEqual(10)
+})
+
 it("uPlot's own default axis size (50px, unset) would have gone negative at the cap — the " +
   'regression this fix closes', () => {
   const UPLOT_DEFAULT_AXIS_SIZE = 50
-  const panelHeight = computeSmallMultiplesPanelHeight(MAX_CURVES)
+  const panelHeight = computeSmallMultiplesPanelHeight(MAX_CURVES, SMALL_MULTIPLES_PLOT_BUDGET)
   const plotHeightWithBothDefaultAxes = panelHeight - UPLOT_DEFAULT_AXIS_SIZE - UPLOT_DEFAULT_AXIS_SIZE
   expect(plotHeightWithBothDefaultAxes).toBeLessThanOrEqual(0)
 })

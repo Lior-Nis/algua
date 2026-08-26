@@ -18,7 +18,16 @@ import ChartFrame from './ChartFrame'
 // small multiples divides this same budget across panels rather than growing the frame, so the
 // page never jumps regardless of how many runs a strategy happens to have (see ChartFrame's
 // no-layout-shift contract; this is a PLOT, so `variableHeight` is not an option here).
-const HEIGHT = 220
+// Raised from 220 in fix round 3 (review FIX E). At the `MAX_CURVES = 4` cap the old budget left
+// each panel 46px, and 46 minus the two explicit axis sizes is 8px of plot — a sliver, below the
+// "usable" floor the small-multiples test asserts. Fixing the test to exercise the PRODUCTION
+// budget (`SMALL_MULTIPLES_PLOT_BUDGET`, not the 220 default it used to pass) made that
+// arithmetic fail honestly, so the budget itself had to grow. 260 leaves 53px panels and 15px of
+// plot area on the one panel carrying both axes. Deliberately ONE height for every mode —
+// empty, overlay and small multiples alike — because mode is only known after the fetch
+// resolves, so a mode-dependent frame height would reintroduce exactly the layout shift
+// `ChartFrame`'s fixed-height contract exists to prevent.
+export const HEIGHT = 260
 const PANEL_GAP = 6
 // Spec: "up to ~4 runs overlaid" (2026-08-23 design doc §6). 1-2 render as focus+context on one
 // plot; 3+ render as small multiples, capped here so the panel budget never shrinks past
@@ -41,13 +50,19 @@ export const SMALL_MULT_X_AXIS_SIZE = 16
 // has plenty of budget and always shows its own x-axis.
 const OVERLAY_Y_AXIS_SIZE = 44
 
-// Fix round 2 (review FIX 7): a fixed strip carved out of the SAME `HEIGHT` budget (never added
-// on top of it — the frame's fixed height, and therefore "no layout shift", is unaffected) for
-// the caption naming these curves as family siblings. Only reserved when a sibling curve is
-// actually plotted (`hasSiblings` below) — this is a per-mount-static condition (a strategy's
-// family doesn't change while its detail page is open), not a value that flips after first
-// render, so it never reintroduces the shift the fixed `HEIGHT` guards against.
-const FAMILY_CAPTION_HEIGHT = 16
+// A fixed strip carved out of the SAME `HEIGHT` budget (never added on top of it — the frame's
+// fixed height, and therefore "no layout shift", is unaffected) for the caption naming these
+// curves as family siblings and attributing the shaded holdout band. Only reserved when a
+// sibling curve is actually plotted — a per-mount-static condition (a strategy's family doesn't
+// change while its detail page is open), not a value that flips after first render.
+//
+// TWO LINES, and CSS ENFORCES IT (fix round 3, review FIX F). This was 16px — one line — and
+// nothing in `theme.css` backed that number: the caption was free-flowing text that wrapped to
+// two lines at 414px, pushing the panels past the fixed `HEIGHT` and breaking the very
+// no-layout-shift contract the arithmetic was written to honour. `.overlay-family-caption` now
+// carries `height: 30px; line-height: 15px` with a 2-line clamp, so the rendered height and this
+// constant are the same number by construction rather than by hope. KEEP THE TWO IN SYNC.
+export const FAMILY_CAPTION_HEIGHT = 30
 
 function toEpochSeconds(iso: string): number | null {
   const d = parseUtc(iso)
@@ -144,16 +159,16 @@ function buildCurve(
  * label. Returns `null` (no region drawn) when there is no gate run, no holdout leg, or the
  * interval does not parse.
  *
- * `viewedStrategy` is named IN the label (fix round 2) — the region always belongs to the page's
- * own strategy (its gate run is fetched via `?strategy=&kind=gate`), but in overlay mode the band
- * is drawn full-width across a plot that ALSO contains a family sibling's curve. A bare metrics
- * string ("63 bars OOS · sharpe 0.5") reads as if it could apply to either line; naming the
- * strategy closes that. */
+ * THE LABEL IS SCALARS ONLY. Fix round 2 prefixed it with the viewed strategy's name to stop the
+ * band reading as if it covered a sibling's curve; fix round 3 takes that back out, because the
+ * label lives inside a NARROW band in a `nowrap` span — at 390/414px "trend_breakout_v1" filled
+ * the whole band and clipped at the card edge, so "63 bars OOS · sharpe …" — the numbers the
+ * label exists to show — became invisible. The band is attributed in `.overlay-family-caption`
+ * instead ("shaded band = its holdout"), which has the full card width to say it in. */
 function buildRegion(
   gateRun: RunRow | null,
   entry: RunSeriesEntry | undefined,
   detail: RunDetail | null,
-  viewedStrategy: string,
 ): OverlayRegion | null {
   if (gateRun === null || entry === null || entry === undefined || entry.kind !== 'holdout') {
     return null
@@ -168,7 +183,7 @@ function buildRegion(
   if (sharpeOos !== null) bits.push(`sharpe ${num(sharpeOos, 3)}`)
   if (totalReturnOos !== null) bits.push(`return ${pct(totalReturnOos)}`)
 
-  return { runId: gateRun.id, startTs, endTs, label: `${viewedStrategy} holdout: ${bits.join(' · ')}` }
+  return { runId: gateRun.id, startTs, endTs, label: bits.join(' · ') }
 }
 
 /**
@@ -201,7 +216,6 @@ export function buildReturnOverlayGeometry(
     gateRun,
     gateRun !== null ? seriesById[String(gateRun.id)] : undefined,
     gateDetail,
-    viewedStrategy,
   )
 
   if (curves.length === 0) {
@@ -231,14 +245,56 @@ function fracOf(v: number, min: number, max: number): number {
   return max === min ? 0.5 : (v - min) / (max - min)
 }
 
+/** THE budget small multiples actually runs on, and the only one it ever runs on.
+ *
+ * Small multiples needs 3+ curves, and at most one curve can be the focus — so 3+ curves ALWAYS
+ * means 2+ siblings, which always means the family caption is shown, which always means the
+ * caption's strip is carved out of `HEIGHT`. Exported so the panel-arithmetic test consumes the
+ * production number rather than inventing its own. */
+export const SMALL_MULTIPLES_PLOT_BUDGET = HEIGHT - FAMILY_CAPTION_HEIGHT
+
 /** Pure arithmetic (fix round 2): the small-multiples per-panel height, given `n` curves and the
- * plot budget available (defaults to the full `HEIGHT` — the value every existing call site and
- * test uses; `ReturnOverlay` passes a slightly smaller budget when the family caption is shown,
- * see its docstring) — isolated from `ReturnOverlay` so the "does the axis budget still leave
- * usable plot area at the cap" question is directly unit-testable without a canvas (uPlot
- * doesn't render in jsdom). */
-export function computeSmallMultiplesPanelHeight(n: number, budget: number = HEIGHT): number {
+ * plot budget available — isolated from `ReturnOverlay` so the "does the axis budget still leave
+ * usable plot area at the cap" question is directly unit-testable without a canvas (uPlot doesn't
+ * render in jsdom).
+ *
+ * `budget` is REQUIRED (fix round 3, review FIX E). It used to default to the full `HEIGHT`, a
+ * value production never passes here — and the test that was supposed to prove the axis
+ * arithmetic leaves usable plot area at `MAX_CURVES` took the default, so it passed against a
+ * budget 40px larger than the real one while the real one left an 8px sliver. A default nobody
+ * uses is a trap that makes a test agree with itself; there is now no default to take. */
+export function computeSmallMultiplesPanelHeight(n: number, budget: number): number {
   return Math.max(40, Math.floor((budget - PANEL_GAP * (n - 1)) / Math.max(n, 1)))
+}
+
+/** The caption naming these curves as family siblings and attributing the shaded holdout band.
+ *
+ * EVERY INPUT IS DERIVED FROM WHAT IS ACTUALLY PLOTTED (fix round 3, review FIX F), never from
+ * the fetched run list. `focusPlotted` and `siblingCount` used to be `curves.length - 1` and a
+ * bare `family !== null`, both of which quietly assume the viewed strategy contributed a curve.
+ * When its backtest has no persisted series while its siblings' do, it contributes none — and
+ * the old caption then claimed the siblings ran "alongside {strategy}'s own" curve that is not
+ * on the plot, and undercounted the siblings by one. Same for the band: it is only drawn in
+ * small-multiples mode when there IS a focus panel to draw it on, so the caption must not
+ * promise it otherwise. */
+export function buildFamilyCaption(
+  family: string,
+  siblingCount: number,
+  viewedStrategy: string,
+  focusPlotted: boolean,
+  bandDrawn: boolean,
+): string {
+  const curveWord = `${siblingCount} sibling curve${siblingCount === 1 ? '' : 's'}`
+  const parts = [
+    `${family} family`,
+    focusPlotted
+      ? `${curveWord} alongside ${viewedStrategy}`
+      : `${curveWord}; ${viewedStrategy} has no plotted curve`,
+  ]
+  // "its" — the viewed strategy was just named in the preceding clause either way. Naming it a
+  // second time is what pushed this caption past two lines.
+  if (bandDrawn) parts.push('shaded band = its holdout')
+  return parts.join(' · ')
 }
 
 /** One plot: 1-2 curves (the overlay case) or exactly 1 curve (one small-multiples panel).
@@ -304,7 +360,21 @@ function Panel({
             width: `${(fracOf(region.endTs, xMin, xMax) - fracOf(region.startTs, xMin, xMax)) * 100}%`,
           }}
         >
-          <span className="overlay-region-label" data-testid="overlay-region-label">
+          {/* A holdout band is by construction the TAIL of the period, so it sits at the right of
+              the plot — and a `nowrap` label pinned to the band's left edge then grows straight
+              off the card. It hangs off the band either way (the band is far narrower than the
+              label), so the only question is WHICH way: past the right edge into nothing, or
+              leftward across the plot the reader is already looking at. Anchored to whichever
+              side leaves room. */}
+          <span
+            className="overlay-region-label"
+            data-testid="overlay-region-label"
+            style={
+              fracOf(region.endTs, xMin, xMax) > 0.5
+                ? { left: 'auto', right: 4 }
+                : undefined
+            }
+          >
             {region.label}
           </span>
         </div>
@@ -487,23 +557,32 @@ export default function ReturnOverlay({
 
   // Fix round 2: nothing on screen said these were FAMILY SIBLINGS, not this strategy's own
   // history — the title just says "return overlay" and the only signal was a strategy name at
-  // each line end. `hasSiblings` is a real 'context'-role curve, not just `family !== null`
-  // (a lone strategy in its family still renders with zero siblings plotted).
-  const hasSiblings = geometry.curves.some((c) => c.role === 'context')
-  const plotBudget = hasSiblings ? HEIGHT - FAMILY_CAPTION_HEIGHT : HEIGHT
+  // each line end. Fix round 3: every one of these is read off the PLOTTED curves, never off the
+  // fetched run list — see `buildFamilyCaption`.
+  const focusPlotted = geometry.curves.some((c) => c.role === 'focus')
+  const siblingCount = geometry.curves.filter((c) => c.role === 'context').length
+  const showCaption = family !== null && siblingCount > 0
+  // In overlay mode the band spans the whole plot; in small multiples it is handed only to the
+  // focus panel, so with no focus curve plotted it is never drawn at all.
+  const bandDrawn =
+    geometry.region !== null && (geometry.mode === 'overlay' || focusPlotted)
 
   const n = geometry.curves.length
-  const panelHeight = computeSmallMultiplesPanelHeight(n, plotBudget)
+  const overlayBudget = showCaption ? HEIGHT - FAMILY_CAPTION_HEIGHT : HEIGHT
+  // 3+ curves implies 2+ siblings implies the caption is shown, so this IS `overlayBudget` in
+  // small-multiples mode — spelled as the exported constant so production and the panel-
+  // arithmetic test provably consume the same number.
+  const panelHeight = computeSmallMultiplesPanelHeight(n, SMALL_MULTIPLES_PLOT_BUDGET)
 
   return (
     <ChartFrame title="return overlay" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
-      {hasSiblings && (
+      {showCaption && (
         <div className="overlay-family-caption" data-testid="overlay-family-caption">
-          {family} family — {n - 1} sibling curve{n - 1 === 1 ? '' : 's'} alongside {strategy}&apos;s own
+          {buildFamilyCaption(family, siblingCount, strategy, focusPlotted, bandDrawn)}
         </div>
       )}
       {geometry.mode === 'overlay' ? (
-        <Panel curves={geometry.curves} region={geometry.region} height={plotBudget} />
+        <Panel curves={geometry.curves} region={geometry.region} height={overlayBudget} />
       ) : (
         <div className="overlay-small-multiples">
           {geometry.curves.map((c, i) => (

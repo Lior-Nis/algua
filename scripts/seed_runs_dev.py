@@ -11,21 +11,32 @@ so seeded rows obey exactly the validation real rows do, and the seed cannot sil
 the schema when the schema next changes.
 
 SAFETY (hard requirement): this script must be INCAPABLE of writing to the operator's real
-registry. This repo's dominant workflow is git WORKTREES, and every worktree carries its own copy
-of this file — a guard computed only from `__file__`'s location protects that one worktree's own
-`data/algua.db` and is INERT against a different checkout's registry (including the operator's
-real one, e.g. `~/Projects/algua/data/algua.db`) passed in as an absolute `--db` path: it does not
-equal the script-relative path as a string, and it is not a hardlink of it, so a pure
-`__file__`-relative check lets it through. The refusal therefore checks `--db` (resolved, never
-string-compared) against EVERY plausible real-registry path: the script-relative path, the
-CURRENT WORKING DIRECTORY's `data/algua.db` (whatever shell the invoker happens to run from), and
-`Settings.db_path` (which honours `ALGUA_DB_PATH`/`.env`, exactly the knob this script's own usage
-instructions tell you to set) — so an operator-configured path is covered too. A second,
-INODE-level check (`os.path.samefile`) catches a hardlink sharing any candidate's inode under a
-different path — `Path.resolve()` alone dereferences symlinks but says nothing about hardlinks,
-since a hardlink IS a distinct path to the same file, not a link to resolve. `--yes` is required to
-proceed. All checks run BEFORE anything touches disk — `connect()` (which creates the file) is
-called only after every check passes.
+registry, and the guard that enforces that is a POSITIVE rule, not a denylist:
+
+    THE TARGET MUST NOT RESOLVE INSIDE ANY GIT WORKING TREE.
+
+`_enclosing_git_root` walks up from the resolved target's parent looking for a `.git` entry —
+a DIRECTORY (an ordinary checkout) or a FILE (a linked worktree's `.git` is a file holding
+`gitdir: ...`) — and any hit refuses the run, naming the repo root it found. A dev scratch
+database has no business inside a git repo at all, and this rule holds regardless of which
+worktree the invoker happens to be standing in, what the cwd is, and whether a `.env` exists.
+
+The previous shape of this guard was a DENYLIST of cwd-derived guesses — the script-relative
+`data/algua.db`, `Path.cwd()/'data'/'algua.db'`, and `Settings.db_path` — and it did not work.
+`Settings.db_path` defaults to the RELATIVE `data/algua.db`, which resolves against the cwd; the
+operator's `.env` sets only Alpaca keys (no `ALGUA_DB_PATH`); and a worktree has no `.env` at
+all. Run from a worktree, all three candidates collapse onto `<worktree>/data/algua.db` while
+`--db ~/Projects/algua/data/algua.db` — the operator's real single-use holdout ledger — matched
+none of them and sailed through to `reserve_holdout`/`record_holdout_returns`. A denylist of
+guesses about where the real registry might be cannot be made to work; "not inside a repo" can.
+
+Those three candidates are retained as a cheap belt-and-braces layer AFTER the git rule (a
+registry configured outside any checkout is still caught), together with an INODE-level check
+(`os.path.samefile`) for a hardlink sharing a candidate's inode under a different path —
+`Path.resolve()` dereferences symlinks but says nothing about hardlinks, since a hardlink IS a
+distinct path to the same file, not a link to resolve. `--yes` is required to proceed. All checks
+run BEFORE anything touches disk — `connect()` (which creates the file) is called only after
+every check passes. `tests/test_seed_runs_dev_guard.py` covers all of this.
 
 Usage:
     uv run python scripts/seed_runs_dev.py --db /tmp/slice3-dev.db --yes
@@ -66,12 +77,30 @@ DEFAULT_SEED = 20260826  # today's date, at authorship time — fixed, not "what
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _enclosing_git_root(path: Path) -> Path | None:
+    """The nearest ancestor of `path` (inclusive) that holds a `.git` entry, or `None`.
+
+    THE guard (see the module docstring's SAFETY section). `.git` is matched as either a
+    DIRECTORY (an ordinary checkout) or a FILE (a linked worktree's `.git` is a file containing
+    `gitdir: <path>`) — checking only for a directory would wave every worktree straight through,
+    and worktrees are this repo's dominant workflow.
+
+    Unlike the candidate denylist below, this decides nothing from the cwd, from `__file__`, or
+    from `Settings`: it asks one cwd-independent question of the TARGET itself. Every real algua
+    registry lives inside a checkout, and a dev scratch database never should."""
+    for ancestor in [path, *path.parents]:
+        if (ancestor / ".git").exists():
+            return ancestor
+    return None
+
+
 def _real_registry_candidates() -> list[Path]:
-    """Every path that could plausibly BE (or alias) the operator's real registry, resolved.
-    See the module docstring's SAFETY section for why a single `__file__`-relative check is not
-    enough: this repo is worked from git worktrees, each carrying its own copy of this script, so
-    the guard must also cover the invoking shell's cwd and whatever `Settings.db_path` resolves to
-    (which honours `ALGUA_DB_PATH`/`.env`) — not just this copy's own worktree-relative guess."""
+    """Belt-and-braces only — the git-working-tree rule above is what actually holds.
+
+    These three paths catch the residual case the git rule cannot see: a registry configured to
+    live OUTSIDE any checkout. They are NOT a sufficient guard on their own — run from a
+    worktree, all three collapse onto that worktree's own `data/algua.db` (see the module
+    docstring), which is exactly how a real-registry path slipped past two review rounds."""
     candidates = [REPO_ROOT / "data" / "algua.db", Path.cwd() / "data" / "algua.db"]
     try:
         candidates.append(get_settings().db_path)
@@ -458,10 +487,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     target = Path(args.db).resolve()
-    real_candidates = _real_registry_candidates()
     print(f"seed target (resolved): {target}", file=sys.stderr)
 
-    for real_db in real_candidates:
+    # THE guard, first and cwd-independent: a scratch DB must not live inside any git working
+    # tree. Started at the target's PARENT — the target itself is a database file that need not
+    # exist yet, and `Path.parents` on a not-yet-created file still walks real directories.
+    git_root = _enclosing_git_root(target.parent)
+    if git_root is not None:
+        print(
+            f"REFUSING: --db ({target}) resolves inside a git working tree ({git_root}). "
+            "A dev scratch database must live outside every checkout — an algua registry inside "
+            "a repo may be the operator's real single-use holdout ledger. Use e.g. "
+            "--db /tmp/slice3-dev.db. Nothing was written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    for real_db in _real_registry_candidates():
         if target == real_db:
             print(
                 f"REFUSING: --db resolves to a real-registry candidate ({real_db}). "

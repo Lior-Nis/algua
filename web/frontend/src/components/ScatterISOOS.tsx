@@ -9,10 +9,12 @@ const HEIGHT = 240 // ChartFrame body height — fixed whether empty or populate
 const PLOT = { width: 340, height: 200, left: 34, right: 12, top: 14, bottom: 24 }
 const POINT_RADIUS = 6 // >=8px rendered diameter (mobile tap-target sizing, even though tap does nothing here)
 
-// A point counts as an "outlier" worth direct-labelling only once its OOS Sharpe clears the
-// walk-forward figure by at least this fraction of the plotted (padded) value range — a hair
-// above the diagonal is still honest; direct labels are reserved for the runs that matter.
+// A point counts as an "outlier" once its OOS Sharpe clears the walk-forward figure by at least
+// this fraction of the plotted (padded) value range — a hair above the diagonal is still honest.
+// This is the COLOUR predicate, and it is uncapped.
 const OUTLIER_GAP_FRACTION = 0.2
+// A pure legibility budget on direct TEXT labels (they collide; fills do not) — never a cap on
+// what counts as an outlier. See `buildScatterGeometry`.
 const MAX_OUTLIER_LABELS = 3
 
 function isFiniteMetric(v: unknown): v is number {
@@ -28,7 +30,12 @@ export interface ScatterPoint {
   cy: number
   gap: number
   above: boolean
+  /** Cleared the gap THRESHOLD — decides the mark's colour. Uncapped: every point past the
+   * threshold is one, so the fill never lies about whether a run is remarkable. */
   outlier: boolean
+  /** Gets a direct text label — the top `MAX_OUTLIER_LABELS` outliers by gap. Capped because
+   * labels collide with each other; fills do not. */
+  labelled: boolean
 }
 
 export interface ScatterGeometry {
@@ -96,14 +103,25 @@ export function buildScatterGeometry(runs: RunRow[]): ScatterGeometry {
     }
   })
 
+  // IS-AN-OUTLIER and IS-LABELLED are two different questions (fix round 3), and conflating them
+  // let the cap silently un-outlier real data: with 4+ points past the threshold, the 4th got the
+  // neutral CONTEXT fill, so the chart said "this run is unremarkable" about a run that had
+  // cleared the very threshold the fill exists to mark. The predicate is now the threshold alone
+  // — every point that clears it is coloured as an outlier, however many there are. The CAP is
+  // purely a legibility budget on direct TEXT LABELS (which collide; fills do not), applied to
+  // the widest gaps first.
   const threshold = range * OUTLIER_GAP_FRACTION
-  const outlierIds = new Set<number>()
+  const labelledIds = new Set<number>()
   for (const p of [...raw].sort((a, b) => b.gap - a.gap)) {
-    if (outlierIds.size >= MAX_OUTLIER_LABELS) break
-    if (p.gap >= threshold) outlierIds.add(p.id)
+    if (labelledIds.size >= MAX_OUTLIER_LABELS) break
+    if (p.gap >= threshold) labelledIds.add(p.id)
   }
 
-  const points: ScatterPoint[] = raw.map((p) => ({ ...p, outlier: outlierIds.has(p.id) }))
+  const points: ScatterPoint[] = raw.map((p) => ({
+    ...p,
+    outlier: p.gap >= threshold,
+    labelled: labelledIds.has(p.id),
+  }))
   const diagonal = {
     x1: scaleX(domainMin),
     y1: scaleY(domainMin),
@@ -193,7 +211,7 @@ export default function ScatterISOOS() {
                 cy={p.cy}
                 r={POINT_RADIUS}
               />
-              {p.outlier && (
+              {p.labelled && (
                 <text
                   className="scatter-point-label"
                   x={p.cx + POINT_RADIUS + 3}

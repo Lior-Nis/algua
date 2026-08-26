@@ -1,8 +1,14 @@
 import { runDetailUrl, runsUrl, useFetch } from '../api'
+import { num } from '../format'
 import type { ApiEnvelope, RunDetail, RunRow, RunsListPayload } from '../types'
 import ChartFrame from './ChartFrame'
 
-const HEIGHT = 220 // ChartFrame body height — fixed whether empty or populated.
+// ChartFrame body height — fixed whether empty or populated. Raised from 220 in fix round 3:
+// both viewBoxes grew taller to unstack the axis ticks from the axis captions, and since each
+// SVG is `width: 100%` inside a flex row of the body's fixed height, a taller viewBox at the
+// same body height renders NARROWER (it letterboxes to fit). 240 restores the plotted width the
+// card had before the spacing fix rather than paying for legibility with ink density.
+const HEIGHT = 240
 
 // The API's own max page size (see the docstring below) — `runs.length === TRIAL_LIMIT` is the
 // only honest truncation signal available: the payload's `count` is just the returned row count,
@@ -13,21 +19,28 @@ const TRIAL_LIMIT = 500
 // 2: a `sweep_trial` row never carries an OOS metric, so `mean_window_sharpe` (the trial cloud)
 // and holdout-class Sharpe (the deflation strip) cannot share one axis; see this file's top
 // docstring).
-const CLOUD_PLOT = { width: 340, height: 130, left: 16, right: 16 }
+// Vertical budget, both marks (fix round 3): the axis ticks and the axis caption used to sit 8px
+// (cloud) and 2px (strip) apart at an 8px font size — they crowded in the cloud and genuinely
+// OVERLAPPED in the strip, saved only by the caption being centred while the ticks sit at the
+// ends. Each viewBox is taller now so the tick row and the caption row are ~7px clear of each
+// other's ink. The captions are also shorter, so a wide caption can never reach an end tick.
+const CLOUD_PLOT = { width: 340, height: 142, left: 16, right: 16 }
 const CLOUD_SWARM_TOP = 12
 const CLOUD_SWARM_HEIGHT = 46
 const CLOUD_OWN_ROW_Y = 80 // this strategy's own marker — a dedicated row, not blended into the jittered cloud
-const CLOUD_AXIS_Y = 98
-const CLOUD_CAPTION_Y = 118
+const CLOUD_AXIS_Y = 104
+const CLOUD_TICK_Y = CLOUD_AXIS_Y + 10
+const CLOUD_CAPTION_Y = 130
 const CLOUD_POINT_RADIUS = 3.5 // trial dots — small, honest, individually plotted (N~70, not binned)
 const CLOUD_OWN_RADIUS = 6 // visibly larger than a trial dot
 
-const STRIP_PLOT = { width: 340, height: 84, left: 16, right: 16 }
+const STRIP_PLOT = { width: 340, height: 96, left: 16, right: 16 }
 const STRIP_ROW_Y = 36
 const STRIP_BAR_LABEL_Y = 14
 const STRIP_OWN_LABEL_Y = 58
-const STRIP_AXIS_Y = 70
-const STRIP_CAPTION_Y = 82
+const STRIP_AXIS_Y = 72
+const STRIP_TICK_Y = STRIP_AXIS_Y + 10
+const STRIP_CAPTION_Y = 94
 const STRIP_MARKER_RADIUS = 7
 
 function isFiniteMetric(v: unknown): v is number {
@@ -135,8 +148,17 @@ export interface HoldoutStripGeometry {
 /** Pure layout, mark 2 of 2 — a two-value strip: the deflated holdout-Sharpe bar
  * (`effective_min_holdout_sharpe`) against this strategy's own holdout Sharpe. BOTH values are
  * holdout-class (never mixed with the trial cloud's `mean_window_sharpe`), so this is the ONE
- * legitimate place to ask "did I clear it?" Scales to whichever of the two values is present —
- * never stretched to also contain the trial cloud. */
+ * legitimate place to ask "did I clear it?" Never stretched to also contain the trial cloud.
+ *
+ * ZERO-ANCHORED (fix round 3), exactly like `GateBulletCard`'s `buildBulletGeometry` and the
+ * sparkline's baseline. A two-value strip scaled to just those two values turns ANY margin,
+ * however tiny, into the FULL plot width: on real seeded data the bar was 0.6118 and the holdout
+ * 0.61, and the auto-scaled strip rendered that 0.0018 miss as a chasm spanning the whole card —
+ * a card whose entire job is answering "did I clear it, and by how much" answering it with a
+ * gaping visual gap between two numbers that are all but identical. Including 0 in the domain
+ * puts both marks on a scale with real magnitude, so a hair's-breadth miss renders as a hair and
+ * a genuine miss renders as a gap. The margin itself is stated as a NUMBER in the prose summary
+ * (`buildSummary`) rather than left to be eyeballed off two labels. */
 export function buildHoldoutStripGeometry(
   effectiveMinHoldoutSharpe: number | null | undefined,
   ownHoldout: { value: number | null | undefined; passed: boolean | null | undefined } | null,
@@ -149,7 +171,7 @@ export function buildHoldoutStripGeometry(
     return { bar: null, own: null, domain: null }
   }
 
-  const values = [barValue, ownValue].filter((v): v is number => v !== null)
+  const values = [0, barValue, ownValue].filter((v): v is number => v !== null)
   let domainMin = Math.min(...values)
   let domainMax = Math.max(...values)
   if (domainMin === domainMax) {
@@ -178,8 +200,32 @@ export function buildHoldoutStripGeometry(
   return { bar, own, domain: { min: domainMin, max: domainMax } }
 }
 
+/** AXIS CHROME only — the two end ticks bounding each mark's domain. Two decimals is right for a
+ * domain read at a glance; the DATA labels use `fmtHoldout` below. */
 function fmt(v: number): string {
   return v.toFixed(2)
+}
+
+/** Every holdout-class NUMBER the strip and its prose print — the bar, this strategy's result,
+ * and the margin between them. `num(v, 4)` is character-for-character what `GateBulletCard`
+ * prints for the very same `holdout_sharpe` check (`num(check.value, 4)`), so the two views on
+ * one screen can no longer disagree. At `toFixed(2)` they did: a 0.6118 bar and a 0.61 holdout
+ * BOTH printed "0.61" here while the bullet card printed "0.6118" and "0.61" one card away. */
+function fmtHoldout(v: number): string {
+  return num(v, 4)
+}
+
+/** Below this, a margin ROUNDS AWAY at the 4-decimal display precision — printing "missed by 0"
+ * would be worse than saying the two are level. */
+const MARGIN_EPSILON = 0.00005
+
+/** "cleared by 0.05" / "missed by 0.0018" — the difference is the number the reader actually
+ * wants, and deriving it from two rounded labels is exactly what failed in review round 2 (both
+ * labels read "0.61"). Stated as a number rather than left to the eye. */
+export function marginPhrase(ownValue: number, barValue: number): string {
+  const margin = ownValue - barValue
+  if (Math.abs(margin) < MARGIN_EPSILON) return 'level with the bar'
+  return `${margin > 0 ? 'cleared' : 'missed'} by ${fmtHoldout(Math.abs(margin))}`
 }
 
 /** The one sentence tying the two marks together (fix round 2): the causal story — breadth
@@ -189,9 +235,12 @@ function fmt(v: number): string {
 function buildSummary(nTrials: number, strip: HoldoutStripGeometry): string | null {
   if (strip.bar === null) return null
   const trialWord = nTrials === 1 ? 'trial' : 'trials'
-  const lead = `${nTrials} ${trialWord} of search raised the bar to ${fmt(strip.bar.value)}`
+  const lead = `${nTrials} ${trialWord} of search raised the bar to ${fmtHoldout(strip.bar.value)}`
   if (strip.own === null) return `${lead}.`
-  return `${lead}; your holdout was ${fmt(strip.own.value)}.`
+  return (
+    `${lead}; your holdout was ${fmtHoldout(strip.own.value)} — ` +
+    `${marginPhrase(strip.own.value, strip.bar.value)}.`
+  )
 }
 
 /**
@@ -233,11 +282,22 @@ function buildSummary(nTrials: number, strip: HoldoutStripGeometry): string | nu
  * rather than imposing bins. Trial dots get a deterministic vertical jitter (`hashUnit`) purely
  * to keep same-valued trials legible — the y position carries no meaning.
  *
- * The deflation strip's marker uses the STATUS palette (pass=green, fail=amber — see
- * `theme.css`'s `.trial-dist-marker-fail` comment: the underlying `holdout_sharpe` check is
- * ALWAYS advisory, so a fail here can never be a breached binding floor and must never render in
- * the red reserved for that), shaped as a diamond so it can never be mistaken for a trial dot.
- * Both marks carry direct text labels — there is no hover on mobile to fall back on.
+ * COLOUR FOLLOWS THE ENTITY, NEVER ITS ROLE (fix round 3 — the dataviz non-negotiable). This
+ * strategy is Electric in BOTH marks: the identity diamond in the cloud and the holdout diamond
+ * in the strip. Previously the strip painted the strategy's own diamond from the status palette
+ * while Electric went to the deflated BAR — so one card apart, Electric meant "this strategy"
+ * and then "the threshold", and this strategy was amber. The bar is a REFERENCE the marks are
+ * judged against, not data about a strategy, so it now wears the `--slate` chrome token (the
+ * same reasoning that puts `.scatter-diagonal` and `.sparkline-baseline` there).
+ *
+ * The advisory pass/fail semantics survive on the marker's LABEL, which is verdict-tinted
+ * (pass=green, fail=amber, unknown=dim — see `theme.css`'s `.trial-dist-marker-fail` comment:
+ * the underlying `holdout_sharpe` check is ALWAYS advisory, so a fail here can never be a
+ * breached binding floor and must never render in the red reserved for that). Status ink on a
+ * status WORD, identity colour on the mark. The verdict's primary carrier is not colour at all:
+ * it is the diamond's position relative to the bar on a zero-anchored scale, plus the margin
+ * spelled out as a number in the prose summary. Both marks carry direct text labels — there is
+ * no hover on mobile to fall back on.
  *
  * Source for the holdout evidence: this strategy's own latest research-gate run
  * (`/api/runs?strategy=&kind=gate&limit=1` -> `/api/runs/{id}`, the SAME two-step waterfall
@@ -301,12 +361,23 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
     cloud.own !== null && cloud.own.cx > cloudRightEdge - 100 ? 'end' : 'start'
 
   const stripRightEdge = STRIP_PLOT.width - STRIP_PLOT.right
-  // Anchor buffers are sized to each label's OWN text ("deflated bar N.NN" vs the longer
-  // "this strategy N.NN · advisory" qualifier) so a label near the right edge flips to
-  // right-anchored instead of running off the viewBox.
-  const barLabelAnchor = strip.bar !== null && strip.bar.cx > stripRightEdge - 85 ? 'end' : 'start'
+  // Anchor buffers are sized to each label's OWN text ("deflated bar N.NNNN" vs the longer
+  // "this strategy N.NNNN · advisory" qualifier) so a label near the right edge flips to
+  // right-anchored instead of running off the viewBox. Widened in fix round 3 to cover the two
+  // extra decimals `fmtHoldout` now prints.
+  const barLabelAnchor = strip.bar !== null && strip.bar.cx > stripRightEdge - 105 ? 'end' : 'start'
   const ownStripLabelAnchor =
-    strip.own !== null && strip.own.cx > stripRightEdge - 140 ? 'end' : 'start'
+    strip.own !== null && strip.own.cx > stripRightEdge - 165 ? 'end' : 'start'
+  // Push each label a few pixels clear of the mark it names, in whichever direction it runs.
+  // Zero-anchoring puts the bar and a near-miss diamond almost on top of each other, so a label
+  // starting exactly at `cx` butts straight into the other mark's ink.
+  const LABEL_GAP = 5
+  const barLabelX =
+    strip.bar !== null ? strip.bar.cx + (barLabelAnchor === 'end' ? -LABEL_GAP : LABEL_GAP) : 0
+  const ownStripLabelX =
+    strip.own !== null
+      ? strip.own.cx + (ownStripLabelAnchor === 'end' ? -LABEL_GAP : LABEL_GAP)
+      : 0
 
   return (
     <ChartFrame title="funnel trial distribution" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
@@ -370,13 +441,13 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
               </text>
             </>
           )}
-          <text className="trial-dist-tick" x={CLOUD_PLOT.left} y={CLOUD_AXIS_Y + 12}>
+          <text className="trial-dist-tick" x={CLOUD_PLOT.left} y={CLOUD_TICK_Y}>
             {fmt(cloud.domain.min)}
           </text>
           <text
             className="trial-dist-tick"
             x={cloudRightEdge}
-            y={CLOUD_AXIS_Y + 12}
+            y={CLOUD_TICK_Y}
             textAnchor="end"
           >
             {fmt(cloud.domain.max)}
@@ -387,7 +458,7 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
             y={CLOUD_CAPTION_Y}
             textAnchor="middle"
           >
-            mean window sharpe — trial cloud (search population)
+            mean window sharpe · search population
           </text>
         </svg>
         {showStrip && (
@@ -397,10 +468,15 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
             viewBox={`0 0 ${STRIP_PLOT.width} ${STRIP_PLOT.height}`}
             role="img"
             aria-label={
-              (strip.bar !== null ? `deflated bar ${fmt(strip.bar.value)}` : 'no deflated bar recorded') +
+              (strip.bar !== null
+                ? `deflated bar ${fmtHoldout(strip.bar.value)}`
+                : 'no deflated bar recorded') +
               (strip.own !== null
-                ? `; this strategy's holdout result ${fmt(strip.own.value)}, ` +
+                ? `; this strategy's holdout result ${fmtHoldout(strip.own.value)}, ` +
                   `${strip.own.passed === true ? 'clears the deflated bar' : strip.own.passed === false ? 'below the deflated bar' : 'verdict unknown'}` +
+                  // The margin, spoken: a screen-reader listener has even less chance than a
+                  // sighted one of subtracting two read-aloud numbers in their head.
+                  (strip.bar !== null ? `, ${marginPhrase(strip.own.value, strip.bar.value)}` : '') +
                   ' (advisory check, does not veto the gate)'
                 : '')
             }
@@ -425,11 +501,11 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
                 <text
                   data-testid="bar-label"
                   className="trial-dist-threshold-label"
-                  x={strip.bar.cx}
+                  x={barLabelX}
                   y={STRIP_BAR_LABEL_Y}
                   textAnchor={barLabelAnchor}
                 >
-                  deflated bar {fmt(strip.bar.value)}
+                  deflated bar {fmtHoldout(strip.bar.value)}
                 </text>
               </>
             )}
@@ -437,13 +513,7 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
               <>
                 <polygon
                   data-testid="own-marker"
-                  className={
-                    strip.own.passed === true
-                      ? 'trial-dist-marker-pass'
-                      : strip.own.passed === false
-                        ? 'trial-dist-marker-fail'
-                        : 'trial-dist-marker-unknown'
-                  }
+                  className="trial-dist-own-strip-marker"
                   points={[
                     `${strip.own.cx},${STRIP_ROW_Y - STRIP_MARKER_RADIUS}`,
                     `${strip.own.cx + STRIP_MARKER_RADIUS},${STRIP_ROW_Y}`,
@@ -453,22 +523,28 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
                 />
                 <text
                   data-testid="own-marker-label"
-                  className="trial-dist-marker-label"
-                  x={strip.own.cx}
+                  className={`trial-dist-marker-label ${
+                    strip.own.passed === true
+                      ? 'trial-dist-marker-pass'
+                      : strip.own.passed === false
+                        ? 'trial-dist-marker-fail'
+                        : 'trial-dist-marker-unknown'
+                  }`}
+                  x={ownStripLabelX}
                   y={STRIP_OWN_LABEL_Y}
                   textAnchor={ownStripLabelAnchor}
                 >
-                  this strategy {fmt(strip.own.value)} · advisory
+                  this strategy {fmtHoldout(strip.own.value)} · advisory
                 </text>
               </>
             )}
-            <text className="trial-dist-tick" x={STRIP_PLOT.left} y={STRIP_AXIS_Y + 10}>
+            <text className="trial-dist-tick" x={STRIP_PLOT.left} y={STRIP_TICK_Y}>
               {strip.domain !== null ? fmt(strip.domain.min) : ''}
             </text>
             <text
               className="trial-dist-tick"
               x={stripRightEdge}
-              y={STRIP_AXIS_Y + 10}
+              y={STRIP_TICK_Y}
               textAnchor="end"
             >
               {strip.domain !== null ? fmt(strip.domain.max) : ''}
@@ -479,7 +555,7 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
               y={STRIP_CAPTION_Y}
               textAnchor="middle"
             >
-              holdout sharpe — bar vs result
+              holdout sharpe · bar vs result
             </text>
           </svg>
         )}

@@ -663,8 +663,10 @@ button { font: inherit; }
   gap: 4px;
 }
 
-.trial-dist-cloud-svg { width: 100%; flex: 13 1 0; min-height: 0; }
-.trial-dist-strip-svg { width: 100%; flex: 8 1 0; min-height: 0; }
+/* Flex ratio tracks the two viewBoxes' aspect ratios (142 : 96 ≈ 3 : 2 after fix round 3's
+   tick/caption spacing), so neither SVG letterboxes more than the other. */
+.trial-dist-cloud-svg { width: 100%; flex: 3 1 0; min-height: 0; }
+.trial-dist-strip-svg { width: 100%; flex: 2 1 0; min-height: 0; }
 
 .trial-dist-plot-area { fill: none; stroke: var(--line); stroke-width: 1; }
 
@@ -673,11 +675,21 @@ button { font: inherit; }
    individually "the" series. */
 .trial-dist-point { fill: var(--series-context); }
 
-/* This strategy's own mark in the trial CLOUD is an IDENTITY marker, not a verdict — there is no
-   threshold on this axis to pass or fail, only "where did I land in the search". Electric,
-   because among the neutral trial population this is the one point the reader is here to find —
-   never the status palette, which is reserved for the deflation strip's pass/fail marker below. */
+/* THIS STRATEGY, in BOTH marks. Colour follows the ENTITY, never its role or rank (the dataviz
+   non-negotiable): Electric means "the strategy this page is about" in the trial cloud AND in the
+   deflation strip one card-section away. It previously meant "this strategy" in the cloud and
+   "the deflated bar" in the strip, while the strategy's own strip diamond went amber — three
+   different referents for two marks. The strip diamond keeps the same fill AND the same diamond
+   shape as the cloud's, so the eye carries one identity down the card. */
 .trial-dist-own-cloud-marker { fill: var(--series-focus); }
+/* Plus a 2px surface ring (the dataviz mark spec for overlapping marks): zero-anchoring puts a
+   near-miss diamond almost exactly ON the deflated bar, and without the ring the two ran into one
+   smudge instead of reading as "this mark is right up against that one". */
+.trial-dist-own-strip-marker {
+  fill: var(--series-focus);
+  stroke: var(--panel);
+  stroke-width: 2;
+}
 
 .trial-dist-own-cloud-marker-label {
   font-family: var(--mono);
@@ -691,35 +703,48 @@ button { font: inherit; }
    position against the cloud above it). */
 .trial-dist-guide { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 2 3; }
 
-/* The deflated bar is the entire point of the deflation STRIP — Electric because it is the ONE
-   thing that matters on that mark, and drawn as a bold solid rule (never dashed, never the
-   neutral `--line-2` chrome token) so it reads as DATA, not axis decoration. */
-.trial-dist-threshold { stroke: var(--series-focus); stroke-width: 2; }
+/* The deflated bar is a REFERENCE the marks are judged against, not data about any strategy — so
+   it wears the `--slate` chrome token, exactly like `.scatter-diagonal` (the y=x honest line) and
+   `.sparkline-baseline` (zero). It used to be Electric, which put the brand's "one active thing"
+   signal on a threshold while the strategy it judges wore amber. Still a bold SOLID rule at 2px
+   (never dashed like the lighter `.trial-dist-guide`): a chrome token, but the most important
+   piece of chrome on the mark. Slate is >=3:1 on Obsidian — legal for a graphical object, and
+   this is a rule, not text. */
+.trial-dist-threshold { stroke: var(--slate); stroke-width: 2; }
 
+/* The bar's LABEL is text, and `--slate` is non-text-only (3.62:1, below the 4.5:1 AA floor), so
+   the label steps to the quietest text token that clears AA. */
 .trial-dist-threshold-label {
   font-family: var(--mono);
   font-size: 9px;
   font-weight: 600;
-  fill: var(--series-focus);
+  fill: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
 
-/* The strategy's own holdout marker is fundamentally a pass/fail VERDICT against the bar, so it
-   draws from the status palette, not a third series hue — exactly the reasoning `PassMark` and
-   the gate bullet card's fill classes already use. The underlying check (`holdout_sharpe`) is
-   ALWAYS advisory (`algua/research/gates.py`), so a "fail" here can never be a breached binding
-   floor — it must read amber (matching `GateBulletCard`'s `.bullet-fill-advisory-fail` and
-   `PassMark`'s advisory branch), never the `--red` reserved for that. */
-.trial-dist-marker-pass { fill: var(--green); }
-.trial-dist-marker-fail { fill: var(--amber); }
-.trial-dist-marker-unknown { fill: var(--text-dim); }
-
+/* The advisory VERDICT — carried by the marker's label text, not by the marker itself, so status
+   colour never has to compete with the strategy's identity colour for the same diamond (see
+   `.trial-dist-own-strip-marker` above). Status ink on a status word: exactly the reasoning
+   `PassMark` and the gate bullet card's fill classes already use. The underlying check
+   (`holdout_sharpe`) is ALWAYS advisory (`algua/research/gates.py`), so a "fail" here can never
+   be a breached binding floor — it must read amber (matching `GateBulletCard`'s
+   `.bullet-fill-advisory-fail` and `PassMark`'s advisory branch), never the `--red` reserved for
+   that. Colour is reinforcement only: the label spells out "advisory" in words, the diamond's
+   position against the bar on a zero-anchored scale carries the verdict geometrically, and the
+   prose summary below states the margin as a number. */
+/* Typography first, verdict fill after: the two are applied to the SAME element as a pair of
+   classes, and both selectors are one class deep — so source ORDER is what decides the fill.
+   `.trial-dist-marker-label`'s own `fill` is the no-verdict fallback. */
 .trial-dist-marker-label {
   font-family: var(--mono);
   font-size: 9px;
   fill: var(--text);
   font-variant-numeric: tabular-nums;
 }
+
+.trial-dist-marker-pass { fill: var(--green); }
+.trial-dist-marker-fail { fill: var(--amber); }
+.trial-dist-marker-unknown { fill: var(--text-dim); }
 
 .trial-dist-tick {
   font-family: var(--mono);
@@ -811,11 +836,28 @@ button { font: inherit; }
 /* ---- return overlay -------------------------------------------------------- */
 
 /* Names these curves as FAMILY SIBLINGS — the title alone ("return overlay") and a strategy name
-   at each line end never said so. Reserved space, not an overlay on top of the plot, so it never
-   collides with a curve or the shaded OOS band. */
+   at each line end never said so — and attributes the shaded OOS band, which the band's own
+   label is far too narrow to do. Reserved space, not an overlay on top of the plot, so it never
+   collides with a curve or the band.
+
+   THE HEIGHT IS REAL, AND IT IS THE CONTRACT. `ReturnOverlay.FAMILY_CAPTION_HEIGHT` carves
+   exactly this many pixels out of the chart's fixed `HEIGHT` budget; before this rule existed the
+   caption was free-flowing text that wrapped to a second line at 414px and pushed the panels out
+   the bottom of a frame whose whole point is that it never changes size. Two lines at 15px is the
+   worst case for the longest caption this builds (family + sibling count + strategy name + band
+   attribution) at 390px; the clamp means a pathologically long family or strategy name degrades
+   into an ellipsis instead of silently breaking the layout. KEEP THE 30 IN SYNC WITH
+   `FAMILY_CAPTION_HEIGHT`. */
 .overlay-family-caption {
   font-family: var(--sans);
   font-size: 10px;
+  line-height: 15px;
+  height: 30px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
   color: var(--text-dim);
 }
 
