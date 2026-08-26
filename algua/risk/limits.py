@@ -32,6 +32,21 @@ DRAWDOWN_DISABLED: None = None
 MAX_STALE_SESSIONS = 2
 
 
+#: Breach kinds that mean "the risk state cannot be TRUSTED", not "the position is losing money".
+#:
+#: A stale or unvaluable mark is a DARK BAR FEED with the broker still alive (#452 HIGH#3).
+#: Flattening blind off a dead feed would dump the book at unknown prices — exactly the wrong move.
+#: A dark feed is also SYSTEMIC (every strategy shares one provider), so the correct response is to
+#: HALT THE WHOLE ACCOUNT and PRESERVE positions, not to trip-and-flatten one tenant.
+#:
+#: This set lives HERE, beside the exception that carries `.kind`, because it is a property of the
+#: breach kind — not of any one lane. It was previously written as a literal in BOTH the paper and
+#: the live tick, which is how the two lanes could have silently come to disagree about whether the
+#: same market condition liquidates the book or preserves it. `tests/test_lane_parity.py` asserts
+#: neither lane re-introduces a local copy.
+DARK_FEED_KINDS = frozenset({"stale_marks", "unvaluable_marks"})
+
+
 class RiskBreach(ValueError):
     """A hard risk-limit breach. Subclasses ValueError so existing CLI error handling
     (json_errors) still renders it; the CLI inspects `.kind` to trip the kill-switch."""
@@ -40,6 +55,15 @@ class RiskBreach(ValueError):
         super().__init__(detail)
         self.kind = kind
         self.detail = detail
+
+    @property
+    def is_dark_feed(self) -> bool:
+        """True when this breach means the MARKS are untrustworthy rather than the book losing.
+
+        Callers route a dark feed to halt-and-preserve and everything else to trip-and-flatten.
+        See :data:`DARK_FEED_KINDS` for why that distinction is load-bearing.
+        """
+        return self.kind in DARK_FEED_KINDS
 
 
 def check_gross_exposure(weights: pd.Series, max_gross: float) -> None:
