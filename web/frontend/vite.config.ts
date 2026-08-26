@@ -35,7 +35,10 @@ export default defineConfig({
   ],
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8787',
+      // Default matches the deployed monitor's port (systemd `algua-web.service`
+      // binds 8787). Override with ALGUA_WEB_DEV_PROXY_TARGET to point the dev
+      // server at a scratch backend without editing this file.
+      '/api': process.env.ALGUA_WEB_DEV_PROXY_TARGET ?? 'http://127.0.0.1:8787',
     },
   },
   test: {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
+import { cssColor } from '../chartColors'
 import { parseUtc } from '../format'
 import type { Lane, SeriesPayload, SeriesRow } from '../types'
 
@@ -37,11 +38,6 @@ function normalize(rows: SeriesRow[]): Normalized {
     equity: ts.map((t) => byTs.get(t)!.equity ?? null),
     peak: ts.map((t) => byTs.get(t)!.peak_equity ?? null),
   }
-}
-
-function cssColor(name: string, fallback: string): string {
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  return v || fallback
 }
 
 export default function EquityChart({ payload }: { payload: SeriesPayload }) {
@@ -138,14 +134,18 @@ function Plot({ data }: { data: Normalized }) {
         series: [
           {},
           {
+            // `--series-focus` / `--series-context` (theme.css): the validated dataviz-slice
+            // palette, shared with `ReturnOverlay` — this chart plays the same focus/context
+            // role (the live equity line vs. its own peak) and must not hardcode a second
+            // source of truth for the same two colors.
             label: 'equity',
-            stroke: cssColor('--electric', '#3982ff'),
+            stroke: cssColor('--series-focus', '#3982ff'),
             width: 1.5,
             points: { show: false },
           },
           {
             label: 'peak',
-            stroke: cssColor('--text-fade', '#5d6675'),
+            stroke: cssColor('--series-context', '#727c8b'),
             width: 1,
             points: { show: false },
           },

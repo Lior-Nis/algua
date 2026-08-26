@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { ApiError, useFetch } from '../api'
 import { useSetFetchedAt } from '../App'
 import HealthBadge from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
+import RunList from '../components/RunList'
+import ScatterISOOS from '../components/ScatterISOOS'
 import StaleNotice from '../components/StaleNotice'
 import { utcDate, utcDateTime } from '../format'
 import type {
   ApiEnvelope,
-  FleetHealth,
   IdeaRow,
   IdeasResponse,
   ListPayload,
@@ -27,9 +27,6 @@ const STAGE_ORDER = [
   'dormant',
   'retired',
 ]
-
-/** Used only if `fleet health` did not ship its authoritative `operational_stages`. */
-const OPERATIONAL_STAGES_FALLBACK = ['live', 'paper', 'forward_tested']
 
 /** Idea lifecycle order (algua/contracts/idea.py IdeaStatus); unknowns append. */
 const STATUS_ORDER = ['open', 'needs_data', 'authored', 'refuted', 'discarded']
@@ -54,10 +51,18 @@ function statusCounts(stats: IdeasResponse['stats']): Record<string, number> {
   return out
 }
 
+/**
+ * Research — the run-ledger surface (spec Q7). Top to bottom: the research-loop liveness panel,
+ * the funnel as a one-line count strip, the IS-vs-OOS scatter (view 2), the ranked run list
+ * (view 1), then the idea pool — collapsed to a count until it actually has rows.
+ *
+ * Per-strategy detail (name, family, hypothesis status, live health) used to live here as
+ * `<details>` lists per stage; that is now Fleet's job (it already lists every strategy), and
+ * this screen only needs stage COUNTS to summarize the funnel, so the `/api/fleet` fetch this
+ * screen used to make purely for per-strategy health is gone too.
+ */
 export default function Research() {
   const strategies = useFetch<ApiEnvelope<ListPayload<StrategyRecord>>>('/api/strategies')
-  // Reuses the Now/Fleet cache entries (same URL + ttl).
-  const fleet = useFetch<ApiEnvelope<FleetHealth>>('/api/fleet', { ttlMs: 10_000 })
   const ops = useFetch<ApiEnvelope<OpsPayload>>('/api/ops', { ttlMs: 30_000 })
   const ideas = useFetch<IdeasResponse>('/api/ideas')
   const setFetchedAt = useSetFetchedAt()
@@ -89,20 +94,8 @@ export default function Research() {
   }
 
   const records = strategies.data.data.data
-  const healthByName = new Map<string, string>()
-  for (const row of fleet.data?.data.rows ?? []) healthByName.set(row.strategy, row.health)
-  // Health is only an ALERT on the stages an operator loop ticks; elsewhere it is context,
-  // so the badge must not carry alarm colour (see HealthBadge's `muted`).
-  const operational = new Set(
-    fleet.data?.data.operational_stages ?? OPERATIONAL_STAGES_FALLBACK,
-  )
-
-  const byStage = new Map<string, StrategyRecord[]>()
-  for (const rec of records) {
-    const group = byStage.get(rec.stage)
-    if (group) group.push(rec)
-    else byStage.set(rec.stage, [rec])
-  }
+  const byStage = new Map<string, number>()
+  for (const rec of records) byStage.set(rec.stage, (byStage.get(rec.stage) ?? 0) + 1)
   const stages = [
     ...STAGE_ORDER.filter((s) => byStage.has(s)),
     ...[...byStage.keys()].filter((s) => !STAGE_ORDER.includes(s)),
@@ -124,41 +117,19 @@ export default function Research() {
             no strategies registered
           </section>
         ) : (
-          stages.map((stage) => {
-            const group = byStage.get(stage)!
-            return (
-              <details key={stage} className="stage-section" open>
-                <summary className="stage-summary">
-                  <span className="micro-label">
-                    {stage} ({group.length})
-                  </span>
-                </summary>
-                <div className="row-list">
-                  {group.map((rec) => (
-                    <div key={rec.name} className="funnel-row">
-                      <div className="funnel-row-main">
-                        <Link to={`/s/${encodeURIComponent(rec.name)}`} className="row-link">
-                          {rec.name}
-                        </Link>
-                        {rec.family !== null && <span className="dim-note">{rec.family}</span>}
-                      </div>
-                      <div className="funnel-row-chips">
-                        <span className="stage-chip">{rec.hypothesis_status}</span>
-                        {healthByName.has(rec.name) && (
-                          <HealthBadge
-                            health={healthByName.get(rec.name)!}
-                            muted={!operational.has(rec.stage)}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )
-          })
+          <div className="chip-row">
+            {stages.map((stage) => (
+              <span key={stage} className="stage-chip">
+                {stage} ({byStage.get(stage)})
+              </span>
+            ))}
+          </div>
         )}
       </section>
+
+      <ScatterISOOS />
+
+      <RunList />
 
       <IdeaPool query={ideas} />
     </>
@@ -196,6 +167,10 @@ function ResearchLoop({ ops }: { ops: OpsPayload | undefined }) {
   )
 }
 
+/** The idea pool used to be this screen's largest panel while holding ZERO rows on `main` — the
+ * exact real estate the run-ledger views (spec Q7) needed. It now collapses to a bare count
+ * until it actually has rows; the full tile/chip/list view returns automatically the moment
+ * `ideas.length > 0`, unchanged from before. */
 function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>> }) {
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
 
@@ -213,6 +188,16 @@ function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>>
 
   const data = query.data
   const ideas = ideaList(data)
+
+  if (ideas.length === 0) {
+    return (
+      <section className="panel">
+        <span className="micro-label">idea pool</span>
+        <div className="dim-note num">0 ideas</div>
+      </section>
+    )
+  }
+
   const counts = statusCounts(data.stats)
   const listCounts: Record<string, number> = {}
   for (const idea of ideas) listCounts[idea.status] = (listCounts[idea.status] ?? 0) + 1

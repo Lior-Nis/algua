@@ -31,6 +31,21 @@
   --electric:      #3982ff; /* Electric Light — the on-black brand blue */
   --electric-soft: #8ab0ff;
 
+  /* series (dataviz skill validator, run against these tokens on this true-black
+     surface — do NOT "improve" without re-running it): a 4-step neutral ramp
+     FAILS (#5d6675 vs #727c8b is dE 7.5 for normal vision, floor 15). This pair
+     PASSES lightness band, CVD separation (dE 17.6 protan / 11.1 tritan), the
+     normal-vision floor (dE 18.0), and >=3:1 contrast on black. Its one FAIL is
+     the chroma floor ("reads gray") — that's the INTENT: the chroma check governs
+     categorical peer slots, not a figure/ground pair. Two tokens only — a third
+     series hue is the small-multiples case, not this one. */
+  --series-focus:   #3982ff; /* Electric — the ONE active series */
+  --series-context: #727c8b; /* neutral context line; reads gray BY DESIGN */
+  /* `--series-context` at low alpha, for the return overlay's OOS shaded region — a translucent
+     WASH, not a peer series, so it is its own token rather than an opacity hack on the line
+     color at every use site. */
+  --series-context-fill: rgba(114, 124, 139, 0.16);
+
   /* status */
   --green:  #5fd38d;
   --red:    #ff5d5d;
@@ -449,6 +464,312 @@ button { font: inherit; }
   letter-spacing: 0.14em;
 }
 
+/* ---- chart frame --------------------------------------------------------- */
+
+.chart-frame { display: grid; gap: 8px; }
+
+.chart-frame-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-frame-body { width: 100%; }
+
+/* ---- IS-vs-OOS scatter ---------------------------------------------------- */
+
+.scatter-body {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.scatter-svg { width: 100%; flex: 1 1 auto; min-height: 0; }
+
+.scatter-plot-area { fill: none; stroke: var(--line); stroke-width: 1; }
+
+/* The y=x reference line — the entire point of this chart, and the mark that carries this
+   chart's entire meaning. Neutral chrome, not a series — but `--line-2` on the pure-black
+   surface computes to ~1.53:1, half the 3:1 floor for a meaningful graphical object (deferred
+   item, promoted). `--slate` is the token this theme reserves for exactly this case ("NON-TEXT
+   only (>=3:1 covers graphical objects)", declared alongside it) and clears ~3.6:1 on black. */
+.scatter-diagonal { stroke: var(--slate); stroke-width: 1; stroke-dasharray: 3 3; }
+
+.scatter-tick {
+  font-family: var(--mono);
+  font-size: 8px;
+  fill: var(--text-fade);
+  font-variant-numeric: tabular-nums;
+}
+
+.scatter-caption {
+  font-family: var(--sans);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  fill: var(--text-fade);
+}
+
+/* Electric marks the case this chart exists to catch — but that case is an OUTLIER (gap past
+   `OUTLIER_GAP_FRACTION`, the SAME threshold the direct labels use), not merely `y > x`. At
+   `y = x + ε` a bare above/below split fires on noise — a barely-above point that is honestly
+   inside measurement error, not evidence of mining — so the fill and the outlier LABEL must
+   agree on what counts (fix round 2). Two tokens only (see theme.css series-palette comment
+   above) — no third hue. */
+.scatter-point-outlier { fill: var(--series-focus); }
+.scatter-point-normal { fill: var(--series-context); }
+
+.scatter-point-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--text);
+}
+
+/* ---- ranked run list ------------------------------------------------------- */
+
+.run-row-metric {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 34px;
+  text-align: right;
+}
+
+/* ---- sparkline (ranked run list) ------------------------------------------ */
+
+/* One series per row: never a categorical hue. `--series-context` (the neutral series token) —
+   not Electric, which is reserved for the ONE active thing on a screen; with one sparkline per
+   row, none of them is uniquely that. */
+.sparkline { flex: none; }
+
+.sparkline-line {
+  fill: none;
+  stroke: var(--series-context);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The zero baseline — chrome, not a series (mirrors `.scatter-diagonal`'s reasoning: a reference
+   the marks are judged against). Sharpe crossing zero is the threshold that actually matters, so
+   this is what makes "ends below zero" visually real once the domain is anchored to include it. */
+.sparkline-baseline {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.chart-frame-empty {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-fade);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px dashed var(--line-2);
+  border-radius: 6px;
+}
+
+/* ---- gate bullet card ------------------------------------------------------ */
+
+.bullet-card { display: grid; gap: 14px; }
+
+.bullet-group { display: grid; gap: 2px; }
+
+.bullet-row {
+  display: grid;
+  gap: 3px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.bullet-group .bullet-row:last-child { border-bottom: none; }
+
+.bullet-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bullet-check-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* The explicit non-color label — binding vs advisory survives with color stripped entirely. */
+.bullet-check-kind {
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-fade);
+}
+
+/* Stacked, not side-by-side: at 390px a bar-plus-two-numbers row has no spare width for a
+   second column, so the value/threshold line runs the FULL row width underneath the bar. */
+.bullet-bar-row { display: grid; gap: 4px; }
+
+.bullet-svg { width: 100%; height: 20px; }
+
+.bullet-track { fill: var(--line); }
+
+/* Status color is REINFORCEMENT only — the binding/advisory distinction itself is carried by
+   the group, the "binding"/"advisory" label, and the bar's height (see GateBulletCard.tsx). */
+.bullet-fill-pass { fill: var(--green); }
+.bullet-fill-fail { fill: var(--red); }
+.bullet-fill-advisory-pass { fill: var(--text-dim); }
+.bullet-fill-advisory-fail { fill: var(--amber); }
+.bullet-fill-unknown { fill: var(--text-dim); }
+
+.bullet-threshold { stroke: var(--line-2); stroke-width: 1.5; }
+
+.bullet-values {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.bullet-values span:last-child { color: var(--text); }
+
+.bullet-not-evaluated {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-fade);
+}
+
+/* ---- trial distribution ---------------------------------------------------- */
+
+/* Two INDEPENDENT marks stacked in one card (fix round 2) — never one shared axis (see
+   TrialDistribution.tsx's top docstring). The cloud gets more of the vertical budget than the
+   strip: it carries the individually-plotted N~70 swarm, while the strip is one row of two
+   points. */
+.trial-dist-body {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Flex ratio tracks the two viewBoxes' aspect ratios (142 : 96 ≈ 3 : 2 after fix round 3's
+   tick/caption spacing), so neither SVG letterboxes more than the other. */
+.trial-dist-cloud-svg { width: 100%; flex: 3 1 0; min-height: 0; }
+.trial-dist-strip-svg { width: 100%; flex: 2 1 0; min-height: 0; }
+
+.trial-dist-plot-area { fill: none; stroke: var(--line); stroke-width: 1; }
+
+/* Trial dots are the funnel POPULATION — neutral context, same reasoning as the sparkline's
+   `--series-context` (theme.css, "sparkline" section): with ~70 of them on one plot, none is
+   individually "the" series. */
+.trial-dist-point { fill: var(--series-context); }
+
+/* THIS STRATEGY, in BOTH marks. Colour follows the ENTITY, never its role or rank (the dataviz
+   non-negotiable): Electric means "the strategy this page is about" in the trial cloud AND in the
+   deflation strip one card-section away. It previously meant "this strategy" in the cloud and
+   "the deflated bar" in the strip, while the strategy's own strip diamond went amber — three
+   different referents for two marks. The strip diamond keeps the same fill AND the same diamond
+   shape as the cloud's, so the eye carries one identity down the card. */
+.trial-dist-own-cloud-marker { fill: var(--series-focus); }
+/* Plus a 2px surface ring (the dataviz mark spec for overlapping marks): zero-anchoring puts a
+   near-miss diamond almost exactly ON the deflated bar, and without the ring the two ran into one
+   smudge instead of reading as "this mark is right up against that one". */
+.trial-dist-own-strip-marker {
+  fill: var(--series-focus);
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+
+.trial-dist-own-cloud-marker-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--series-focus);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The vertical guide connecting the own-cloud marker up into the swarm band — chrome, not data
+   (mirrors `.scatter-diagonal`'s reasoning: it exists only to let the eye trace the marker's x
+   position against the cloud above it). */
+.trial-dist-guide { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 2 3; }
+
+/* The deflated bar is a REFERENCE the marks are judged against, not data about any strategy — so
+   it wears the `--slate` chrome token, exactly like `.scatter-diagonal` (the y=x honest line) and
+   `.sparkline-baseline` (zero). It used to be Electric, which put the brand's "one active thing"
+   signal on a threshold while the strategy it judges wore amber. Still a bold SOLID rule at 2px
+   (never dashed like the lighter `.trial-dist-guide`): a chrome token, but the most important
+   piece of chrome on the mark. Slate is >=3:1 on Obsidian — legal for a graphical object, and
+   this is a rule, not text. */
+.trial-dist-threshold { stroke: var(--slate); stroke-width: 2; }
+
+/* The bar's LABEL is text, and `--slate` is non-text-only (3.62:1, below the 4.5:1 AA floor), so
+   the label steps to the quietest text token that clears AA. */
+.trial-dist-threshold-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+  fill: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The advisory VERDICT — carried by the marker's label text, not by the marker itself, so status
+   colour never has to compete with the strategy's identity colour for the same diamond (see
+   `.trial-dist-own-strip-marker` above). Status ink on a status word: exactly the reasoning
+   `PassMark` and the gate bullet card's fill classes already use. The underlying check
+   (`holdout_sharpe`) is ALWAYS advisory (`algua/research/gates.py`), so a "fail" here can never
+   be a breached binding floor — it must read amber (matching `GateBulletCard`'s
+   `.bullet-fill-advisory-fail` and `PassMark`'s advisory branch), never the `--red` reserved for
+   that. Colour is reinforcement only: the label spells out "advisory" in words, the diamond's
+   position against the bar on a zero-anchored scale carries the verdict geometrically, and the
+   prose summary below states the margin as a number. */
+/* Typography first, verdict fill after: the two are applied to the SAME element as a pair of
+   classes, and both selectors are one class deep — so source ORDER is what decides the fill.
+   `.trial-dist-marker-label`'s own `fill` is the no-verdict fallback. */
+.trial-dist-marker-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.trial-dist-marker-pass { fill: var(--green); }
+.trial-dist-marker-fail { fill: var(--amber); }
+.trial-dist-marker-unknown { fill: var(--text-dim); }
+
+.trial-dist-tick {
+  font-family: var(--mono);
+  font-size: 8px;
+  fill: var(--text-fade);
+  font-variant-numeric: tabular-nums;
+}
+
+.trial-dist-caption {
+  font-family: var(--sans);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  fill: var(--text-fade);
+}
+
+/* The prose tying the two marks together — plain HTML (not SVG text) so a variable-length
+   sentence wraps instead of overflowing a fixed viewBox. The causal story (breadth produces the
+   bar) is the point of this card; this is where it gets said in words. */
+.trial-dist-summary {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
 /* ---- equity chart -------------------------------------------------------- */
 
 .chart-panel { display: grid; gap: 8px; }
@@ -511,6 +832,79 @@ button { font: inherit; }
 
 /* uPlot renders its own inline styles; keep the canvas from overflowing. */
 .uplot { font-family: var(--mono); }
+
+/* ---- return overlay -------------------------------------------------------- */
+
+/* Names these curves as FAMILY SIBLINGS — the title alone ("return overlay") and a strategy name
+   at each line end never said so — and attributes the shaded OOS band, which the band's own
+   label is far too narrow to do. Reserved space, not an overlay on top of the plot, so it never
+   collides with a curve or the band.
+
+   THE HEIGHT IS REAL, AND IT IS THE CONTRACT. `ReturnOverlay.FAMILY_CAPTION_HEIGHT` carves
+   exactly this many pixels out of the chart's fixed `HEIGHT` budget; before this rule existed the
+   caption was free-flowing text that wrapped to a second line at 414px and pushed the panels out
+   the bottom of a frame whose whole point is that it never changes size. Two lines at 15px is the
+   worst case for the longest caption this builds (family + sibling count + strategy name + band
+   attribution) at 390px; the clamp means a pathologically long family or strategy name degrades
+   into an ellipsis instead of silently breaking the layout. KEEP THE 30 IN SYNC WITH
+   `FAMILY_CAPTION_HEIGHT`. */
+.overlay-family-caption {
+  font-family: var(--sans);
+  font-size: 10px;
+  line-height: 15px;
+  height: 30px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color: var(--text-dim);
+}
+
+.overlay-panel-inner { position: relative; width: 100%; height: 100%; }
+
+.overlay-plot-host { position: absolute; inset: 0; }
+
+.overlay-small-multiples { display: flex; flex-direction: column; }
+
+/* Translucent wash for the OOS shaded region — color-matched to `--series-context` (the same
+   neutral token the context line uses), not a fresh hex: this is chart chrome for holdout
+   evidence, not a third series hue. */
+.overlay-region-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--series-context-fill);
+  border-left: 1px dashed var(--line-2);
+  border-right: 1px dashed var(--line-2);
+  pointer-events: none;
+}
+
+.overlay-region-label {
+  position: absolute;
+  bottom: 2px;
+  left: 4px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-fade);
+  white-space: nowrap;
+}
+
+/* Direct end-of-line labels — no legend box, per the mobile no-hover rule. Position is a real
+   CSS percentage computed from the SAME y-domain uPlot is told to use (`Panel`'s fixed
+   `scales.y.range`), so the label always sits level with where the canvas line actually ends. */
+.overlay-end-label {
+  position: absolute;
+  right: 4px;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  color: var(--series-focus);
+}
+
+.overlay-end-label[data-role='context'] { color: var(--series-context); }
 
 /* ---- funnel --------------------------------------------------------------- */
 

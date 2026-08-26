@@ -32,6 +32,42 @@ export async function getJSON<T>(url: string): Promise<T> {
   return (await res.json()) as T
 }
 
+export interface RunsQuery {
+  kind?: string
+  strategy?: string
+  family?: string
+  sort?: string
+  limit?: number
+}
+
+/** Builds the `/api/runs` query string. Centralizes the encoding so every run-ledger view (the
+ * IS-vs-OOS scatter here; the ranked run list and trial distribution in later tasks) constructs
+ * the same URL shape instead of each hand-rolling its own `encodeURIComponent` calls. */
+export function runsUrl(query: RunsQuery = {}): string {
+  const params = new URLSearchParams()
+  if (query.kind) params.set('kind', query.kind)
+  if (query.strategy) params.set('strategy', query.strategy)
+  if (query.family) params.set('family', query.family)
+  if (query.sort) params.set('sort', query.sort)
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  const qs = params.toString()
+  return qs ? `/api/runs?${qs}` : '/api/runs'
+}
+
+/** Builds the `/api/runs/{id}` URL — `runs show` (one run's full detail, including the
+ * allow-list-projected `gate_decision` for a `gate` run). Never returns a return series. */
+export function runDetailUrl(id: number): string {
+  return `/api/runs/${id}`
+}
+
+/** Builds the `/api/runs/series` URL — `runs series` (per-bar IN-SAMPLE return series, batched
+ * into ONE request for every id the caller needs). Mirrors the CLI's own multi-id shape
+ * (`runs series <id> [--run-id ...]`) — never call this in a loop, one per run id; the whole
+ * point of the batched shape is one round trip for N runs. */
+export function runSeriesUrl(ids: number[]): string {
+  return `/api/runs/series?ids=${ids.map((id) => String(id)).join(',')}`
+}
+
 /** Format an ISO timestamp as a local HH:MM:SS for the header / banners. */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso)
@@ -70,15 +106,20 @@ export interface UseFetchResult<T> {
  * - Serves the cached payload immediately, revalidating in the background when
  *   the entry is older than ttlMs.
  * - Refetches when the tab becomes visible again (the phone-unlock case).
+ * - `url: null` SKIPS the fetch entirely (no network call, `data` stays `undefined`,
+ *   `loading` is `false`) — for a second-stage lookup whose id isn't known yet (e.g. the gate
+ *   bullet card's list-then-detail waterfall). Never pass an empty string as a "skip" sentinel:
+ *   that would actually fetch the current page.
  */
-export function useFetch<T>(url: string, opts: { ttlMs?: number } = {}): UseFetchResult<T> {
+export function useFetch<T>(url: string | null, opts: { ttlMs?: number } = {}): UseFetchResult<T> {
   const ttlMs = opts.ttlMs ?? 30_000
-  const initial = cache.get(url)
+  const initial = url !== null ? cache.get(url) : undefined
   const [data, setData] = useState<T | undefined>(initial ? (initial.data as T) : undefined)
   const [error, setError] = useState<Error | null>(null)
-  const [loading, setLoading] = useState(!initial)
+  const [loading, setLoading] = useState(url !== null && !initial)
 
   const load = useCallback(async () => {
+    if (url === null) return
     if (!cache.has(url)) setLoading(true)
     try {
       const fresh = await fetchShared<T>(url)
@@ -93,6 +134,12 @@ export function useFetch<T>(url: string, opts: { ttlMs?: number } = {}): UseFetc
   }, [url])
 
   useEffect(() => {
+    if (url === null) {
+      setData(undefined)
+      setError(null)
+      setLoading(false)
+      return
+    }
     const hit = cache.get(url)
     if (hit) {
       setData(hit.data as T)

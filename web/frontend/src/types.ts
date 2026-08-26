@@ -328,3 +328,68 @@ export interface TriagePayload {
   stale: boolean
   last_error_code?: string | null
 }
+
+/** One `runs list` row — the full `runs` table row, JSON-TEXT columns parsed
+ * (algua/registry/run_views.py `_parsed_row`). A run row carries many provenance/metric
+ * columns (see METRIC_COLUMNS in algua/registry/store/runs.py); only the fields the run-ledger
+ * views read today are typed explicitly, and the rest ride the index signature so a later view
+ * can read a new column without a type change here. `mean_window_sharpe`/`sharpe_oos` are
+ * genuinely nullable — NOT every run kind carries walk-forward/holdout evidence, and a NULL
+ * metric must never be treated as 0. */
+export interface RunRow {
+  id: number
+  kind: 'backtest' | 'walk_forward' | 'sweep' | 'sweep_trial' | 'gate'
+  strategy_name: string
+  strategy_id: number | null
+  created_at: string
+  passed: number | boolean | null
+  mean_window_sharpe: number | null
+  sharpe_oos: number | null
+  [key: string]: unknown
+}
+
+/** GET /api/runs — `runs list` payload (algua/registry/run_views.py run_list_payload). */
+export interface RunsListPayload {
+  runs: RunRow[]
+  count: number
+}
+
+/** GET /api/runs/{id} — `runs show` payload (algua/registry/run_views.py run_detail_payload):
+ * one run row plus its `run_metrics` overflow tail and — for a `gate` run with a `gate_id` — the
+ * allow-list-projected gate decision. `gate_decision` carries the SAME shape `GateRow.decision`
+ * does (both go through `gate_history._project_decision`), but is sourced from the `runs` ledger
+ * rather than the `registry gates` ledger — the gate bullet card's contract (task 5) is to read
+ * checks from HERE, never from `StrategyDetailResponse.gates`. Never a return series. */
+export interface RunDetail extends RunRow {
+  extra_metrics: Record<string, unknown>
+  gate_decision?: GateDecision | null
+  gate_decision_dropped_keys?: string[]
+  gate_decision_error?: string
+}
+
+/** One entry of GET /api/runs/series?ids= (algua/registry/run_views.py `_series_entry`).
+ * `kind: 'backtest'` carries the run's own IN-SAMPLE per-bar returns — safe to expose, since
+ * this is not single-use holdout evidence. `kind: 'holdout'` carries ONLY the OOS interval and
+ * `n_bars` — NEVER a per-bar vector: `holdout_returns.returns_blob` is SENSITIVE (the DDL
+ * comment in `algua/registry/db/holdout.py` says no "get my own vector" API may read it), and
+ * exposing a strategy's own OOS vector here would re-open the single-use best-of-N surface the
+ * promotion gate's holdout burn exists to prevent. `null` means the run has no series pointer
+ * at all (e.g. an unregistered strategy's backtest, or a pre-slice holdout). */
+export type RunSeriesEntry =
+  | {
+      kind: 'backtest'
+      period_start: string
+      period_end: string
+      /** `[iso_date, daily_return]` pairs (`algua/registry/store/backtest_returns.py`
+       * `persist_backtest_returns` — `[[idx.isoformat(), float(v)], ...]`), one per in-sample
+       * bar, in order. NOT a bare number array: the per-bar date rides alongside each value. */
+      returns: [string, number][]
+    }
+  | { kind: 'holdout'; holdout_start: string; holdout_end: string; n_bars: number }
+  | null
+
+/** GET /api/runs/series?ids= payload (algua/registry/run_views.py `run_series_payload`) —
+ * keyed by run id AS A STRING (JSON object keys are always strings). */
+export interface RunSeriesPayload {
+  series: Record<string, RunSeriesEntry>
+}
