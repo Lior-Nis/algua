@@ -14,6 +14,7 @@ from collections.abc import Callable
 from algua.config.settings import get_settings
 from algua.tracking.base import ExperimentTracker, NoopTracker
 from algua.tracking.mlflow_tracker import MlflowTracker
+from algua.tracking.sqlite_tracker import SqliteMlflowTracker
 
 #: Starts EMPTY: the built-ins below register themselves through the same public seam a
 #: third party uses, so "add a tracker without editing this file" is a property the code
@@ -41,4 +42,5 @@ def get_tracker(name: str | None = None) -> ExperimentTracker:
 
 
 register_tracker("mlflow", MlflowTracker)
+register_tracker("mlflow-sqlite", SqliteMlflowTracker)
 register_tracker("noop", NoopTracker)

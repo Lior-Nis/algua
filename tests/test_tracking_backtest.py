@@ -85,7 +85,7 @@ def test_registered_trackers_satisfy_the_protocol():
     type-checks every registered factory's return value against the full Protocol signature."""
     from algua.tracking.factory import get_tracker
 
-    for name in ("mlflow", "noop"):
+    for name in ("mlflow", "mlflow-sqlite", "noop"):
         tracker = get_tracker(name)
         assert isinstance(tracker, ExperimentTracker)
         for method in ("log_backtest", "log_sweep", "log_walk_forward"):
