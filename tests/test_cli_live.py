@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 from algua.cli._common import resolve_wall_clock_window
 from algua.cli.main import app
 from algua.contracts.types import LiveAuthorization
+from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
 
@@ -83,6 +84,12 @@ def _to_live(name="cross_sectional_momentum", allocate=True):
     from algua.registry.store import SqliteStrategyRepository
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
+    # #601: the live tick now binds its operational universe to the newest passing gate row, the
+    # same wall paper has enforced since #559. A real live strategy always has one (it reached
+    # `live` THROUGH the gate); this scaffolding writes the stage directly, so seed the row it
+    # would have. universe_name=None seeds a legacy row -> the binding falls back to
+    # CONFIG.universe, preserving what these tick tests already assume.
+    seed_passing_gate(name)
     # CANDIDATE via human: scaffolding to live, not exercising the agent shortlist gate.
     for to, actor in (("candidate", "human"), ("paper", "agent")):
         runner.invoke(app, ["registry", "transition", name, "--to", to, "--actor", actor,
