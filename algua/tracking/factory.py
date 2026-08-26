@@ -15,10 +15,10 @@ from algua.config.settings import get_settings
 from algua.tracking.base import ExperimentTracker, NoopTracker
 from algua.tracking.mlflow_tracker import MlflowTracker
 
-_REGISTRY: dict[str, Callable[[], ExperimentTracker]] = {
-    "mlflow": MlflowTracker,
-    "noop": NoopTracker,
-}
+#: Starts EMPTY: the built-ins below register themselves through the same public seam a
+#: third party uses, so "add a tracker without editing this file" is a property the code
+#: actually has rather than one the docstring claims. (Mirrors `execution/broker_factory`.)
+_REGISTRY: dict[str, Callable[[], ExperimentTracker]] = {}
 
 
 def register_tracker(name: str, factory: Callable[[], ExperimentTracker]) -> None:
@@ -38,3 +38,7 @@ def get_tracker(name: str | None = None) -> ExperimentTracker:
     except KeyError:
         valid = ", ".join(sorted(_REGISTRY))
         raise ValueError(f"unknown tracking backend {key!r}; valid: {valid}") from None
+
+
+register_tracker("mlflow", MlflowTracker)
+register_tracker("noop", NoopTracker)

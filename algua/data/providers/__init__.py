@@ -40,10 +40,10 @@ def _build_alpaca(settings: Settings) -> BarProvider:
     )
 
 
-_REGISTRY: dict[str, ProviderFactory] = {
-    "yfinance": _build_yfinance,
-    "alpaca": _build_alpaca,
-}
+#: Starts EMPTY: the built-ins below register themselves through the same public seam a
+#: third party uses, so "add a provider without editing this file" is a property the code
+#: actually has rather than one the docstring claims. (Mirrors `execution/broker_factory`.)
+_REGISTRY: dict[str, ProviderFactory] = {}
 
 
 def register_provider(name: str, factory: ProviderFactory) -> None:
@@ -61,3 +61,7 @@ def get_provider(name: str, settings: Settings) -> BarProvider:
     except KeyError:
         raise ValueError(f"unsupported bar provider: {name}") from None
     return factory(settings)
+
+
+register_provider("yfinance", _build_yfinance)
+register_provider("alpaca", _build_alpaca)
