@@ -7,6 +7,7 @@ import GateBulletCard from '../components/GateBulletCard'
 import HealthBadge, { healthColor } from '../components/HealthBadge'
 import MetricTile from '../components/MetricTile'
 import PassMark from '../components/PassMark'
+import ReturnOverlay from '../components/ReturnOverlay'
 import StageChip from '../components/StageChip'
 import TrialDistribution from '../components/TrialDistribution'
 import { num, pct, utcDateTime } from '../format'
@@ -112,6 +113,8 @@ export default function StrategyDetail() {
           </div>
         </section>
       )}
+
+      <ReturnOverlay strategy={d.strategy} family={registry?.family ?? null} />
 
       {paper !== null && <PaperTiles paper={paper} />}
 

@@ -60,6 +60,14 @@ export function runDetailUrl(id: number): string {
   return `/api/runs/${id}`
 }
 
+/** Builds the `/api/runs/series` URL — `runs series` (per-bar IN-SAMPLE return series, batched
+ * into ONE request for every id the caller needs). Mirrors the CLI's own multi-id shape
+ * (`runs series <id> [--run-id ...]`) — never call this in a loop, one per run id; the whole
+ * point of the batched shape is one round trip for N runs. */
+export function runSeriesUrl(ids: number[]): string {
+  return `/api/runs/series?ids=${ids.map((id) => String(id)).join(',')}`
+}
+
 /** Format an ISO timestamp as a local HH:MM:SS for the header / banners. */
 export function formatTimestamp(iso: string): string {
   const d = new Date(iso)

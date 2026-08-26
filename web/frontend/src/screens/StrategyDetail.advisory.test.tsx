@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type {
   ApiEnvelope,
   RunDetail,
+  RunSeriesPayload,
   RunsListPayload,
   SeriesPayload,
   StrategyDetailResponse,
@@ -134,6 +135,16 @@ const runDetailEnvelope: ApiEnvelope<RunDetail> = {
   },
 }
 
+// ReturnOverlay (task 7) also queries `/api/runs?...&kind=backtest` and batches its ids through
+// `/api/runs/series` — no backtest/holdout series is fixtured here, so this stays an empty
+// envelope; the overlay just renders its own honest empty state.
+const runSeriesEnvelope: ApiEnvelope<RunSeriesPayload> = {
+  ok: true,
+  fetched_at: '2026-08-09T14:30:00Z',
+  stale: false,
+  data: { series: {} },
+}
+
 function renderDetail() {
   vi.stubGlobal(
     'fetch',
@@ -141,6 +152,9 @@ function renderDetail() {
       ok: true,
       status: 200,
       json: async () => {
+        // Registered before the `/api/runs?`/`/api/runs/{id}` checks below — see the sibling
+        // note in StrategyDetail.test.tsx.
+        if (url.startsWith('/api/runs/series')) return runSeriesEnvelope
         if (url.endsWith('/series')) return seriesEnvelope
         if (/^\/api\/runs\/\d+$/.test(url)) return runDetailEnvelope
         if (url.startsWith('/api/runs?')) return runsListEnvelope

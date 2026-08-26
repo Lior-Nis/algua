@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type {
   ApiEnvelope,
   RunDetail,
+  RunSeriesPayload,
   RunsListPayload,
   SeriesPayload,
   StrategyDetailResponse,
@@ -128,6 +129,16 @@ const runDetailEnvelope: ApiEnvelope<RunDetail> = {
   },
 }
 
+// ReturnOverlay (task 7) also queries `/api/runs?...&kind=backtest` and batches its ids through
+// `/api/runs/series` — no backtest/holdout series is fixtured here, so this stays an empty
+// envelope; the overlay just renders its own honest empty state, same as the equity chart above.
+const runSeriesEnvelope: ApiEnvelope<RunSeriesPayload> = {
+  ok: true,
+  fetched_at: '2026-08-09T14:30:00Z',
+  stale: false,
+  data: { series: {} },
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -140,6 +151,11 @@ it('renders the degraded paper banner and the rest of the page when paper is nul
       ok: true,
       status: 200,
       json: async () => {
+        // Registered before the `/api/runs?` and `/api/runs/{id}` checks below — its own path
+        // segment ("series") would otherwise fall through to neither and hit the `detail`
+        // catch-all, handing ReturnOverlay a StrategyDetailResponse where it expects
+        // `{series: {...}}` (mirrors web/backend/main.py's own route-registration-order note).
+        if (url.startsWith('/api/runs/series')) return runSeriesEnvelope
         if (url.endsWith('/series')) return seriesEnvelope
         if (/^\/api\/runs\/\d+$/.test(url)) return runDetailEnvelope
         if (url.startsWith('/api/runs?')) return runsListEnvelope

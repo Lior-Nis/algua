@@ -41,6 +41,10 @@
      series hue is the small-multiples case, not this one. */
   --series-focus:   #3982ff; /* Electric — the ONE active series */
   --series-context: #727c8b; /* neutral context line; reads gray BY DESIGN */
+  /* `--series-context` at low alpha, for the return overlay's OOS shaded region — a translucent
+     WASH, not a peer series, so it is its own token rather than an opacity hack on the line
+     color at every use site. */
+  --series-context-fill: rgba(114, 124, 139, 0.16);
 
   /* status */
   --green:  #5fd38d;
@@ -767,6 +771,53 @@ button { font: inherit; }
 
 /* uPlot renders its own inline styles; keep the canvas from overflowing. */
 .uplot { font-family: var(--mono); }
+
+/* ---- return overlay -------------------------------------------------------- */
+
+.overlay-panel-inner { position: relative; width: 100%; height: 100%; }
+
+.overlay-plot-host { position: absolute; inset: 0; }
+
+.overlay-small-multiples { display: flex; flex-direction: column; }
+
+/* Translucent wash for the OOS shaded region — color-matched to `--series-context` (the same
+   neutral token the context line uses), not a fresh hex: this is chart chrome for holdout
+   evidence, not a third series hue. */
+.overlay-region-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--series-context-fill);
+  border-left: 1px dashed var(--line-2);
+  border-right: 1px dashed var(--line-2);
+  pointer-events: none;
+}
+
+.overlay-region-label {
+  position: absolute;
+  bottom: 2px;
+  left: 4px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-fade);
+  white-space: nowrap;
+}
+
+/* Direct end-of-line labels — no legend box, per the mobile no-hover rule. Position is a real
+   CSS percentage computed from the SAME y-domain uPlot is told to use (`Panel`'s fixed
+   `scales.y.range`), so the label always sits level with where the canvas line actually ends. */
+.overlay-end-label {
+  position: absolute;
+  right: 4px;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+  color: var(--series-focus);
+}
+
+.overlay-end-label[data-role='context'] { color: var(--series-context); }
 
 /* ---- funnel --------------------------------------------------------------- */
 

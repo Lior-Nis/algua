@@ -366,3 +366,30 @@ export interface RunDetail extends RunRow {
   gate_decision_dropped_keys?: string[]
   gate_decision_error?: string
 }
+
+/** One entry of GET /api/runs/series?ids= (algua/registry/run_views.py `_series_entry`).
+ * `kind: 'backtest'` carries the run's own IN-SAMPLE per-bar returns — safe to expose, since
+ * this is not single-use holdout evidence. `kind: 'holdout'` carries ONLY the OOS interval and
+ * `n_bars` — NEVER a per-bar vector: `holdout_returns.returns_blob` is SENSITIVE (the DDL
+ * comment in `algua/registry/db/holdout.py` says no "get my own vector" API may read it), and
+ * exposing a strategy's own OOS vector here would re-open the single-use best-of-N surface the
+ * promotion gate's holdout burn exists to prevent. `null` means the run has no series pointer
+ * at all (e.g. an unregistered strategy's backtest, or a pre-slice holdout). */
+export type RunSeriesEntry =
+  | {
+      kind: 'backtest'
+      period_start: string
+      period_end: string
+      /** `[iso_date, daily_return]` pairs (`algua/registry/store/backtest_returns.py`
+       * `persist_backtest_returns` — `[[idx.isoformat(), float(v)], ...]`), one per in-sample
+       * bar, in order. NOT a bare number array: the per-bar date rides alongside each value. */
+      returns: [string, number][]
+    }
+  | { kind: 'holdout'; holdout_start: string; holdout_end: string; n_bars: number }
+  | null
+
+/** GET /api/runs/series?ids= payload (algua/registry/run_views.py `run_series_payload`) —
+ * keyed by run id AS A STRING (JSON object keys are always strings). */
+export interface RunSeriesPayload {
+  series: Record<string, RunSeriesEntry>
+}
