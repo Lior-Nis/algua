@@ -1,103 +1,32 @@
 import { cleanup, render, screen, within } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
-import type { ApiEnvelope, GateCheck, RunDetail, RunRow, RunsListPayload } from '../types'
+import { afterEach, expect, it } from 'vitest'
+import type { GateCheck } from '../types'
 import GateBulletCard, { buildBulletGeometry, splitChecks } from './GateBulletCard'
-
-function listEnvelope(runs: RunRow[]): ApiEnvelope<RunsListPayload> {
-  return { ok: true, fetched_at: '2026-08-26T00:00:00Z', stale: false, data: { count: runs.length, runs } }
-}
-
-function detailEnvelope(detail: RunDetail): ApiEnvelope<RunDetail> {
-  return { ok: true, fetched_at: '2026-08-26T00:00:00Z', stale: false, data: detail }
-}
-
-function runRow(id: number, strategy: string): RunRow {
-  return {
-    id,
-    kind: 'gate',
-    strategy_name: strategy,
-    strategy_id: 1,
-    created_at: '2026-08-25T00:00:00+00:00',
-    passed: 0,
-    mean_window_sharpe: null,
-    sharpe_oos: null,
-  }
-}
-
-function runDetail(id: number, strategy: string, checks: GateCheck[]): RunDetail {
-  return {
-    ...runRow(id, strategy),
-    extra_metrics: {},
-    gate_decision: { passed: false, checks },
-  }
-}
-
-/** Stubs the two-call waterfall the card issues: `/api/runs?...&kind=gate&limit=1` (find the
- * latest gate run id for the strategy) then `/api/runs/{id}` (its checks). */
-function stubGateFetch(strategy: string, runId: number, checks: GateCheck[]): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      if (/^\/api\/runs\/\d+$/.test(url)) {
-        return { ok: true, status: 200, json: async () => detailEnvelope(runDetail(runId, strategy, checks)) }
-      }
-      return { ok: true, status: 200, json: async () => listEnvelope([runRow(runId, strategy)]) }
-    }) as unknown as typeof fetch,
-  )
-}
-
-function stubNoGateRuns(): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => ({ ok: true, status: 200, json: async () => listEnvelope([]) })) as unknown as typeof fetch,
-  )
-}
 
 afterEach(() => {
   cleanup()
-  vi.unstubAllGlobals()
 })
 
-it('fetches the latest gate run for the strategy, then its detail — never requests more than the allowlist gives it', async () => {
-  const calls: string[] = []
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      calls.push(url)
-      if (/^\/api\/runs\/\d+$/.test(url)) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () =>
-            detailEnvelope(
-              runDetail(42, 'mom_breakout', [
-                { name: 'pit_universe', op: '==', threshold: null, value: null, passed: true },
-              ]),
-            ),
-        }
-      }
-      return { ok: true, status: 200, json: async () => listEnvelope([runRow(42, 'mom_breakout')]) }
-    }) as unknown as typeof fetch,
+it('renders exactly the checks it is given — no fetch, no waterfall (fix round 2: the card ' +
+  'takes `checks` as a prop; `StrategyDetail` feeds it `row.decision.checks`, already fetched)', () => {
+  render(
+    <GateBulletCard
+      checks={[{ name: 'pit_universe', op: '==', threshold: null, value: null, passed: true }]}
+    />,
   )
-
-  render(<GateBulletCard strategy="mom_breakout" />)
-  await screen.findByText('pit_universe')
-
-  expect(calls.some((u) => u.startsWith('/api/runs?') && u.includes('kind=gate'))).toBe(true)
-  expect(calls).toContain('/api/runs/42')
+  expect(screen.getByText('pit_universe')).toBeTruthy()
 })
 
-it('a binding fail and an advisory fail are distinguishable with colour stripped', async () => {
-  // Own strategy name + run id (distinct from the other tests in this file): `useFetch`'s
-  // cache is module-level and keyed by URL, and vitest shares one module graph per FILE —
-  // reusing another test's URL would silently serve ITS cached response instead of this stub.
-  stubGateFetch('gate_probe_binding_advisory', 101, [
-    { name: 'holdout_sharpe_floor', op: '>=', threshold: 0.3, value: 0.1, passed: false },
-    { name: 'dsr_evidence', op: '>=', threshold: 2.0, value: 0.5, passed: false, advisory: true },
-  ])
-
-  render(<GateBulletCard strategy="gate_probe_binding_advisory" />)
-  const bindingRow = (await screen.findByText('holdout_sharpe_floor')).closest(
+it('a binding fail and an advisory fail are distinguishable with colour stripped', () => {
+  render(
+    <GateBulletCard
+      checks={[
+        { name: 'holdout_sharpe_floor', op: '>=', threshold: 0.3, value: 0.1, passed: false },
+        { name: 'dsr_evidence', op: '>=', threshold: 2.0, value: 0.5, passed: false, advisory: true },
+      ]}
+    />,
+  )
+  const bindingRow = screen.getByText('holdout_sharpe_floor').closest(
     '[data-testid="gate-check-row"]',
   ) as HTMLElement
   const advisoryRow = screen.getByText('dsr_evidence').closest(
@@ -124,45 +53,47 @@ it('a binding fail and an advisory fail are distinguishable with colour stripped
   expect(bindingFill.getAttribute('height')).not.toBe(advisoryFill.getAttribute('height'))
 })
 
-it('a NULL-value check reads "not evaluated", never 0', async () => {
-  stubGateFetch('gate_probe_null_value', 102, [
-    { name: 'pit_universe', op: '==', threshold: null, value: null, passed: true },
-  ])
-
-  render(<GateBulletCard strategy="gate_probe_null_value" />)
-  const row = (await screen.findByText('pit_universe')).closest(
+it('a NULL-value check reads "no numeric value", never 0 — NOT "not evaluated", since a ' +
+  'boolean/None-by-construction/fail-closed check genuinely ran (fix round 2)', () => {
+  render(
+    <GateBulletCard
+      checks={[{ name: 'pit_universe', op: '==', threshold: null, value: null, passed: true }]}
+    />,
+  )
+  const row = screen.getByText('pit_universe').closest(
     '[data-testid="gate-check-row"]',
   ) as HTMLElement
 
-  expect(within(row).getByText('not evaluated')).toBeTruthy()
+  expect(within(row).getByText('no numeric value')).toBeTruthy()
+  expect(within(row).queryByText('not evaluated')).toBeNull()
   expect(within(row).queryByTestId('bullet-fill')).toBeNull()
   expect(within(row).queryByText('0')).toBeNull()
 })
 
-it('a FAILED verdict and a NULL value are independent: both the fail mark and "not evaluated" render together', async () => {
-  // Regression: a check that never ran (NULL value) can still carry a real `false` verdict —
-  // e.g. "returns not available" auto-fails a check with nothing to compare. The fail mark
-  // must not disappear just because there is no bar to draw, and "not evaluated" must not
-  // disappear just because the verdict is a real fail. If PassMark were ever moved inside the
-  // `geometry === null` branch (coupling the two), this test catches it.
-  stubGateFetch('gate_probe_failed_null', 103, [
-    { name: 'holdout_sharpe_floor', op: '>', threshold: 0.0, value: null, passed: false },
-  ])
-
-  render(<GateBulletCard strategy="gate_probe_failed_null" />)
-  const row = (await screen.findByText('holdout_sharpe_floor')).closest(
+it('a FAILED verdict and a NULL value are independent: both the fail mark and "no numeric ' +
+  'value" render together', () => {
+  // Regression: a check with no numeric value (e.g. a fail-closed non-finite Sharpe) can still
+  // carry a real `false` verdict — e.g. "returns not available" auto-fails a check with nothing
+  // to compare. The fail mark must not disappear just because there is no bar to draw, and "no
+  // numeric value" must not disappear just because the verdict is a real fail. If PassMark were
+  // ever moved inside the `geometry === null` branch (coupling the two), this test catches it.
+  render(
+    <GateBulletCard
+      checks={[{ name: 'holdout_sharpe_floor', op: '>', threshold: 0.0, value: null, passed: false }]}
+    />,
+  )
+  const row = screen.getByText('holdout_sharpe_floor').closest(
     '[data-testid="gate-check-row"]',
   ) as HTMLElement
 
   expect(within(row).getByText('fail')).toBeTruthy()
-  expect(within(row).getByText('not evaluated')).toBeTruthy()
+  expect(within(row).getByText('no numeric value')).toBeTruthy()
   expect(within(row).queryByTestId('bullet-fill')).toBeNull()
 })
 
-it('mounts inside ChartFrame — an honest empty state when the strategy has no gate run yet', async () => {
-  stubNoGateRuns()
-  render(<GateBulletCard strategy="never_gated" />)
-  expect(await screen.findByText(/no gate checks recorded yet/i)).toBeTruthy()
+it('an honest empty state when there are no checks (e.g. no gate run yet)', () => {
+  render(<GateBulletCard checks={[]} />)
+  expect(screen.getByText(/no gate checks recorded yet/i)).toBeTruthy()
   expect(document.querySelector('svg')).toBeNull()
 })
 

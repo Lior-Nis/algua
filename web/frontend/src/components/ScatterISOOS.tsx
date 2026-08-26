@@ -188,7 +188,7 @@ export default function ScatterISOOS() {
           {geometry.points.map((p) => (
             <g key={p.id} data-testid="scatter-point" data-region={p.above ? 'above' : 'below'}>
               <circle
-                className={p.above ? 'scatter-point-above' : 'scatter-point-below'}
+                className={p.outlier ? 'scatter-point-outlier' : 'scatter-point-normal'}
                 cx={p.cx}
                 cy={p.cy}
                 r={POINT_RADIUS}

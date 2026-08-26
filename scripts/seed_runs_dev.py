@@ -11,12 +11,19 @@ so seeded rows obey exactly the validation real rows do, and the seed cannot sil
 the schema when the schema next changes.
 
 SAFETY (hard requirement): this script must be INCAPABLE of writing to the operator's real
-registry (`data/algua.db`, relative to the repository root — 10 strategies, 9 gate evaluations,
-the holdout burn ledger live there). `--db PATH` is required; the path is resolved (not
-string-compared) and the script refuses if it resolves to the real registry. A second, INODE-level
-check (`os.path.samefile`) catches a hardlink sharing the real registry's inode under a different
-path — `Path.resolve()` alone dereferences symlinks but says nothing about hardlinks, since a
-hardlink IS a distinct path to the same file, not a link to resolve. `--yes` is required to
+registry. This repo's dominant workflow is git WORKTREES, and every worktree carries its own copy
+of this file — a guard computed only from `__file__`'s location protects that one worktree's own
+`data/algua.db` and is INERT against a different checkout's registry (including the operator's
+real one, e.g. `~/Projects/algua/data/algua.db`) passed in as an absolute `--db` path: it does not
+equal the script-relative path as a string, and it is not a hardlink of it, so a pure
+`__file__`-relative check lets it through. The refusal therefore checks `--db` (resolved, never
+string-compared) against EVERY plausible real-registry path: the script-relative path, the
+CURRENT WORKING DIRECTORY's `data/algua.db` (whatever shell the invoker happens to run from), and
+`Settings.db_path` (which honours `ALGUA_DB_PATH`/`.env`, exactly the knob this script's own usage
+instructions tell you to set) — so an operator-configured path is covered too. A second,
+INODE-level check (`os.path.samefile`) catches a hardlink sharing any candidate's inode under a
+different path — `Path.resolve()` alone dereferences symlinks but says nothing about hardlinks,
+since a hardlink IS a distinct path to the same file, not a link to resolve. `--yes` is required to
 proceed. All checks run BEFORE anything touches disk — `connect()` (which creates the file) is
 called only after every check passes.
 
@@ -51,6 +58,7 @@ from typing import Any
 
 import pandas as pd
 
+from algua.config.settings import get_settings
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 
@@ -58,10 +66,20 @@ DEFAULT_SEED = 20260826  # today's date, at authorship time — fixed, not "what
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _real_registry_path() -> Path:
-    """The operator's real registry, resolved relative to THIS script's location (not cwd) —
-    so the refusal check is correct regardless of where the invoker's shell happens to be."""
-    return (REPO_ROOT / "data" / "algua.db").resolve()
+def _real_registry_candidates() -> list[Path]:
+    """Every path that could plausibly BE (or alias) the operator's real registry, resolved.
+    See the module docstring's SAFETY section for why a single `__file__`-relative check is not
+    enough: this repo is worked from git worktrees, each carrying its own copy of this script, so
+    the guard must also cover the invoking shell's cwd and whatever `Settings.db_path` resolves to
+    (which honours `ALGUA_DB_PATH`/`.env`) — not just this copy's own worktree-relative guess."""
+    candidates = [REPO_ROOT / "data" / "algua.db", Path.cwd() / "data" / "algua.db"]
+    try:
+        candidates.append(get_settings().db_path)
+    except Exception:
+        # Settings construction failing (e.g. a malformed .env) must never WEAKEN the guard —
+        # the two path-based candidates above still stand.
+        pass
+    return [c.resolve() for c in candidates]
 
 
 def _short_hash(*parts: str) -> str:
@@ -440,28 +458,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     target = Path(args.db).resolve()
-    real_db = _real_registry_path()
+    real_candidates = _real_registry_candidates()
     print(f"seed target (resolved): {target}", file=sys.stderr)
 
-    if target == real_db:
-        print(
-            f"REFUSING: --db resolves to the operator's real registry ({real_db}). "
-            "This script may only write to a scratch path. Nothing was written.",
-            file=sys.stderr,
-        )
-        return 1
-    # Inode-level check: a hardlink at `target` sharing the real registry's inode resolves to a
-    # DIFFERENT path (samefile, not the same string), so the check above alone would miss it and
-    # `connect()` would open the real registry's actual bytes under a scratch-looking name. Only
-    # meaningful when both paths already exist (a hardlink target must pre-exist) — `samefile`
-    # raises on a missing path, and a fresh scratch DB not existing yet is the normal case.
-    if real_db.exists() and target.exists() and os.path.samefile(target, real_db):
-        print(
-            f"REFUSING: --db ({target}) is a hardlink to the operator's real registry "
-            f"({real_db}) — same file, different path. Nothing was written.",
-            file=sys.stderr,
-        )
-        return 1
+    for real_db in real_candidates:
+        if target == real_db:
+            print(
+                f"REFUSING: --db resolves to a real-registry candidate ({real_db}). "
+                "This script may only write to a scratch path. Nothing was written.",
+                file=sys.stderr,
+            )
+            return 1
+        # Inode-level check: a hardlink at `target` sharing a candidate's inode resolves to a
+        # DIFFERENT path (samefile, not the same string), so the equality check above alone would
+        # miss it and `connect()` would open the real registry's actual bytes under a
+        # scratch-looking name. Only meaningful when both paths already exist (a hardlink target
+        # must pre-exist) — `samefile` raises on a missing path, and a fresh scratch DB not
+        # existing yet is the normal case.
+        if real_db.exists() and target.exists() and os.path.samefile(target, real_db):
+            print(
+                f"REFUSING: --db ({target}) is a hardlink to a real-registry candidate "
+                f"({real_db}) — same file, different path. Nothing was written.",
+                file=sys.stderr,
+            )
+            return 1
     if not args.yes:
         print(
             "Refusing to write without --yes. Re-run with --yes once you've reviewed the "

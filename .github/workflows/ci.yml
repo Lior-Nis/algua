@@ -20,7 +20,7 @@ jobs:
       - name: Ruff
         run: uv run ruff check .
       - name: Mypy
-        run: uv run mypy algua
+        run: uv run mypy algua scripts
       - name: Import boundaries
         run: uv run lint-imports
 

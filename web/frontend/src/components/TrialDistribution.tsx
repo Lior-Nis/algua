@@ -4,18 +4,31 @@ import ChartFrame from './ChartFrame'
 
 const HEIGHT = 220 // ChartFrame body height — fixed whether empty or populated.
 
-// Internal SVG coordinate space (viewBox scales to fit, same convention as ScatterISOOS/
-// GateBulletCard — no ResizeObserver dance needed).
-const PLOT = { width: 340, height: 190, left: 16, right: 16 }
-const LABEL_Y = 12 // threshold rule's direct label
-const RULE_TOP = 20 // the rule spans the whole plot, judged against the entire swarm
-const SWARM_TOP = 30
-const SWARM_HEIGHT = 66
-const MARKER_ROW_Y = 122 // dedicated row BELOW the swarm — a distinct position, not a jittered dot
-const AXIS_Y = 148
-const CAPTION_Y = 178
-const POINT_RADIUS = 3.5 // trial dots — small, honest, individually plotted (N~70, not binned)
-const MARKER_RADIUS = 7 // this-strategy marker — visibly larger than a trial dot
+// The API's own max page size (see the docstring below) — `runs.length === TRIAL_LIMIT` is the
+// only honest truncation signal available: the payload's `count` is just the returned row count,
+// never a funnel-wide total.
+const TRIAL_LIMIT = 500
+
+// Two INDEPENDENT SVG coordinate spaces — one per mark — each scaled to its OWN data (fix round
+// 2: a `sweep_trial` row never carries an OOS metric, so `mean_window_sharpe` (the trial cloud)
+// and holdout-class Sharpe (the deflation strip) cannot share one axis; see this file's top
+// docstring).
+const CLOUD_PLOT = { width: 340, height: 130, left: 16, right: 16 }
+const CLOUD_SWARM_TOP = 12
+const CLOUD_SWARM_HEIGHT = 46
+const CLOUD_OWN_ROW_Y = 80 // this strategy's own marker — a dedicated row, not blended into the jittered cloud
+const CLOUD_AXIS_Y = 98
+const CLOUD_CAPTION_Y = 118
+const CLOUD_POINT_RADIUS = 3.5 // trial dots — small, honest, individually plotted (N~70, not binned)
+const CLOUD_OWN_RADIUS = 6 // visibly larger than a trial dot
+
+const STRIP_PLOT = { width: 340, height: 84, left: 16, right: 16 }
+const STRIP_ROW_Y = 36
+const STRIP_BAR_LABEL_Y = 14
+const STRIP_OWN_LABEL_Y = 58
+const STRIP_AXIS_Y = 70
+const STRIP_CAPTION_Y = 82
+const STRIP_MARKER_RADIUS = 7
 
 function isFiniteMetric(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
@@ -42,55 +55,42 @@ export interface TrialPoint {
   cy: number
 }
 
-export interface ThresholdGeometry {
+export interface OwnCloudMarker {
   value: number
-  x: number
-}
-
-export interface OwnMarkerGeometry {
-  value: number
-  passed: boolean | null
   cx: number
-  cy: number
 }
 
-export interface TrialDistributionGeometry {
+export interface TrialCloudGeometry {
   points: TrialPoint[]
   excludedCount: number
   domain: { min: number; max: number }
-  threshold: ThresholdGeometry | null
-  marker: OwnMarkerGeometry | null
+  own: OwnCloudMarker | null
 }
 
-/** Pure layout: funnel-wide sweep-trial rows + this strategy's deflated bar/holdout result ->
- * SVG-space geometry. A trial missing `mean_window_sharpe` is excluded and counted, never
- * coerced to 0 — a missing measurement plotted at zero would fabricate a data point on the very
- * chart that argues the bar is trustworthy. The shared domain always stretches to cover the
- * threshold and the marker even when they sit far outside the trial cluster (the real case this
- * chart exists to show: holdout 0.025 against a bar of 2.677) — clipping either off the canvas
- * would hide the argument the chart is making. */
-export function buildTrialDistributionGeometry(
+/** Pure layout, mark 1 of 2 — the funnel-wide trial cloud on `mean_window_sharpe`, with THIS
+ * strategy's own `mean_window_sharpe` (its walk-forward run's stability mean — the SAME
+ * statistic every `sweep_trial` row carries) marked. Same sample class throughout, so the
+ * comparison is legitimate: "how much searching happened, and where did I land in it?"
+ *
+ * A trial missing `mean_window_sharpe` is excluded and counted, never coerced to 0 — a missing
+ * measurement plotted at zero would fabricate a data point. The domain scales to the trial
+ * cloud (and the own marker, when it sits outside the cloud) ONLY — never stretched to also fit
+ * a holdout-class number, which lives on its own axis in `buildHoldoutStripGeometry` below. */
+export function buildTrialCloudGeometry(
   trials: RunRow[],
-  effectiveMinHoldoutSharpe: number | null | undefined,
-  ownHoldout: { value: number | null | undefined; passed: boolean | null | undefined } | null,
-): TrialDistributionGeometry {
+  ownMeanWindowSharpe: number | null | undefined,
+): TrialCloudGeometry {
   const finite = trials.filter((t) => isFiniteMetric(t.mean_window_sharpe))
   const excludedCount = trials.length - finite.length
-  const threshold = isFiniteMetric(effectiveMinHoldoutSharpe) ? effectiveMinHoldoutSharpe : null
-  const ownValue =
-    ownHoldout != null && isFiniteMetric(ownHoldout.value) ? (ownHoldout.value as number) : null
+  const ownValue = isFiniteMetric(ownMeanWindowSharpe) ? ownMeanWindowSharpe : null
 
   if (finite.length === 0) {
-    return { points: [], excludedCount, domain: { min: 0, max: 0 }, threshold: null, marker: null }
+    return { points: [], excludedCount, domain: { min: 0, max: 0 }, own: null }
   }
 
   const values = finite.map((t) => t.mean_window_sharpe as number)
   let domainMin = Math.min(...values)
   let domainMax = Math.max(...values)
-  if (threshold !== null) {
-    domainMin = Math.min(domainMin, threshold)
-    domainMax = Math.max(domainMax, threshold)
-  }
   if (ownValue !== null) {
     domainMin = Math.min(domainMin, ownValue)
     domainMax = Math.max(domainMax, ownValue)
@@ -104,42 +104,94 @@ export function buildTrialDistributionGeometry(
   domainMax += span * 0.12
   const range = domainMax - domainMin
 
-  const plotW = PLOT.width - PLOT.left - PLOT.right
-  const scaleX = (v: number) => PLOT.left + ((v - domainMin) / range) * plotW
+  const plotW = CLOUD_PLOT.width - CLOUD_PLOT.left - CLOUD_PLOT.right
+  const scaleX = (v: number) => CLOUD_PLOT.left + ((v - domainMin) / range) * plotW
 
   const points: TrialPoint[] = finite.map((t) => ({
     id: t.id,
     strategy: t.strategy_name,
     value: t.mean_window_sharpe as number,
     cx: scaleX(t.mean_window_sharpe as number),
-    cy: SWARM_TOP + hashUnit(t.id) * SWARM_HEIGHT,
+    cy: CLOUD_SWARM_TOP + hashUnit(t.id) * CLOUD_SWARM_HEIGHT,
   }))
 
-  const thresholdGeom: ThresholdGeometry | null =
-    threshold !== null ? { value: threshold, x: scaleX(threshold) } : null
+  const own: OwnCloudMarker | null =
+    ownValue !== null ? { value: ownValue, cx: scaleX(ownValue) } : null
 
-  const marker: OwnMarkerGeometry | null =
+  return { points, excludedCount, domain: { min: domainMin, max: domainMax }, own }
+}
+
+export interface StripPoint {
+  value: number
+  cx: number
+}
+
+export interface HoldoutStripGeometry {
+  bar: StripPoint | null
+  own: (StripPoint & { passed: boolean | null }) | null
+  domain: { min: number; max: number } | null
+}
+
+/** Pure layout, mark 2 of 2 — a two-value strip: the deflated holdout-Sharpe bar
+ * (`effective_min_holdout_sharpe`) against this strategy's own holdout Sharpe. BOTH values are
+ * holdout-class (never mixed with the trial cloud's `mean_window_sharpe`), so this is the ONE
+ * legitimate place to ask "did I clear it?" Scales to whichever of the two values is present —
+ * never stretched to also contain the trial cloud. */
+export function buildHoldoutStripGeometry(
+  effectiveMinHoldoutSharpe: number | null | undefined,
+  ownHoldout: { value: number | null | undefined; passed: boolean | null | undefined } | null,
+): HoldoutStripGeometry {
+  const barValue = isFiniteMetric(effectiveMinHoldoutSharpe) ? effectiveMinHoldoutSharpe : null
+  const ownValue =
+    ownHoldout != null && isFiniteMetric(ownHoldout.value) ? (ownHoldout.value as number) : null
+
+  if (barValue === null && ownValue === null) {
+    return { bar: null, own: null, domain: null }
+  }
+
+  const values = [barValue, ownValue].filter((v): v is number => v !== null)
+  let domainMin = Math.min(...values)
+  let domainMax = Math.max(...values)
+  if (domainMin === domainMax) {
+    domainMin -= 0.5
+    domainMax += 0.5
+  }
+  const span = domainMax - domainMin
+  domainMin -= span * 0.15
+  domainMax += span * 0.15
+  const range = domainMax - domainMin
+
+  const plotW = STRIP_PLOT.width - STRIP_PLOT.left - STRIP_PLOT.right
+  const scaleX = (v: number) => STRIP_PLOT.left + ((v - domainMin) / range) * plotW
+
+  const bar: StripPoint | null = barValue !== null ? { value: barValue, cx: scaleX(barValue) } : null
+  const own =
     ownValue !== null
       ? {
           value: ownValue,
+          cx: scaleX(ownValue),
           passed:
             ownHoldout?.passed === true ? true : ownHoldout?.passed === false ? false : null,
-          cx: scaleX(ownValue),
-          cy: MARKER_ROW_Y,
         }
       : null
 
-  return {
-    points,
-    excludedCount,
-    domain: { min: domainMin, max: domainMax },
-    threshold: thresholdGeom,
-    marker,
-  }
+  return { bar, own, domain: { min: domainMin, max: domainMax } }
 }
 
 function fmt(v: number): string {
   return v.toFixed(2)
+}
+
+/** The one sentence tying the two marks together (fix round 2): the causal story — breadth
+ * produces the bar — is the point of putting these two independently-scaled marks in one card.
+ * Only rendered once the strip has a bar to name; the trial count is the cloud's OWN plotted
+ * count (the funnel-wide search volume the reader just saw), not a re-derivation. */
+function buildSummary(nTrials: number, strip: HoldoutStripGeometry): string | null {
+  if (strip.bar === null) return null
+  const trialWord = nTrials === 1 ? 'trial' : 'trials'
+  const lead = `${nTrials} ${trialWord} of search raised the bar to ${fmt(strip.bar.value)}`
+  if (strip.own === null) return `${lead}.`
+  return `${lead}; your holdout was ${fmt(strip.own.value)}.`
 }
 
 /**
@@ -150,41 +202,60 @@ function fmt(v: number): string {
  * tracker has no concept of breadth deflation — this is the most algua-specific view in the
  * slice.
  *
+ * TWO STACKED, INDEPENDENT MARKS (fix round 2) — not one shared axis. A `sweep_trial` row carries
+ * only the four window-stability statistics and can never carry an OOS metric (a trial never
+ * burns a holdout), so there is no common scale for "every trial's mean_window_sharpe" and "the
+ * holdout-Sharpe bar/result" to share. Putting them on one linear axis — even a domain-stretched
+ * one — reintroduces exactly the failure the promotion gate exists to prevent: reading an
+ * in-sample/search-population number and an out-of-sample/single-use number as if they were
+ * comparable magnitudes. Two measures of different scale get two charts (dataviz skill), never a
+ * dual-axis chart:
+ *
+ *   1. The TRIAL CLOUD (`buildTrialCloudGeometry`) — every funnel-wide `sweep_trial`'s
+ *      `mean_window_sharpe`, with this strategy's OWN `mean_window_sharpe` (its walk-forward
+ *      run's stability mean, the identical statistic) marked. Same sample class throughout:
+ *      "how much searching happened, and where did I land in it?"
+ *   2. The DEFLATION STRIP (`buildHoldoutStripGeometry`) — the deflated bar
+ *      (`effective_min_holdout_sharpe`) against this strategy's own holdout Sharpe, both
+ *      holdout-class, both direct-labelled: "did I clear it?"
+ *   3. One prose caption (`buildSummary`) ties them together — the causal story (breadth
+ *      produces the bar) is the point, not a decoration.
+ *
  * Funnel-wide, not per-sweep: a single sweep is 5-8 combos, but the gate's breadth figure is
  * ACCUMULATED across the funnel window, so the trial source is `/api/runs?kind=sweep_trial` with
  * NO `strategy` filter — every strategy's trials, the same population the bar was computed
  * against. `limit=500` (the API's max) rather than the 100 default: silently truncating the one
  * chart whose entire point is showing accumulated breadth would misrepresent the very thing it
- * argues about.
+ * argues about — and since truncation is still possible at the max, `runs.length === TRIAL_LIMIT`
+ * triggers an explicit notice rather than a partial cloud passed off as the whole population.
  *
  * At N~70 a dot/strip plot is chosen over a histogram: it shows every individual trial honestly
- * rather than imposing bins that would hide exactly how close (or far) the cluster sits from the
- * bar. Trial dots get a deterministic vertical jitter (`hashUnit`) purely to keep same-valued
- * trials legible — the y position carries no meaning.
+ * rather than imposing bins. Trial dots get a deterministic vertical jitter (`hashUnit`) purely
+ * to keep same-valued trials legible — the y position carries no meaning.
  *
- * The threshold rule and the strategy's own holdout marker are the two things the chart is FOR,
- * so each gets its own colour lane, not a third categorical hue: the rule is `--series-focus`
- * (Electric, the one thing that matters on this screen) and is drawn as a bold rule spanning the
- * whole plot — real data, not axis chrome. The marker uses the STATUS palette (pass=green,
- * fail=red), because it fundamentally IS a pass/fail verdict against the rule, and is shaped as a
- * diamond on its own dedicated row below the swarm (never a circle at swarm height) so it can
- * never be mistaken for one more trial dot. Both carry a direct text label — there is no hover on
- * mobile to fall back on.
+ * The deflation strip's marker uses the STATUS palette (pass=green, fail=amber — see
+ * `theme.css`'s `.trial-dist-marker-fail` comment: the underlying `holdout_sharpe` check is
+ * ALWAYS advisory, so a fail here can never be a breached binding floor and must never render in
+ * the red reserved for that), shaped as a diamond so it can never be mistaken for a trial dot.
+ * Both marks carry direct text labels — there is no hover on mobile to fall back on.
  *
- * Source for the threshold/marker: this strategy's own latest research-gate run
+ * Source for the holdout evidence: this strategy's own latest research-gate run
  * (`/api/runs?strategy=&kind=gate&limit=1` -> `/api/runs/{id}`, the SAME two-step waterfall
  * `GateBulletCard` uses), reading `gate_decision.effective_min_holdout_sharpe` for the bar and
  * the `holdout_sharpe` check's `value`/`passed` for the marker — the same check the bullet card
- * renders, so the two views can never disagree about what "the bar" or "the result" was.
+ * renders, so the two views can never disagree about what "the bar" or "the result" was. The
+ * cloud's own marker reads `mean_window_sharpe` off the SAME gate run's list row (a run row
+ * always carries that column; no extra request).
  */
 export default function TrialDistribution({ strategy }: { strategy: string }) {
   const trialsFetch = useFetch<ApiEnvelope<RunsListPayload>>(
-    runsUrl({ kind: 'sweep_trial', limit: 500 }),
+    runsUrl({ kind: 'sweep_trial', limit: TRIAL_LIMIT }),
   )
   const gateListFetch = useFetch<ApiEnvelope<RunsListPayload>>(
     runsUrl({ strategy, kind: 'gate', limit: 1 }),
   )
-  const gateRunId = gateListFetch.data?.data?.runs?.[0]?.id ?? null
+  const gateRow = gateListFetch.data?.data?.runs?.[0] ?? null
+  const gateRunId = gateRow?.id ?? null
   const gateDetailFetch = useFetch<ApiEnvelope<RunDetail>>(
     gateRunId !== null ? runDetailUrl(gateRunId) : null,
   )
@@ -203,145 +274,226 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
           holdoutCheck.passed === true ? true : holdoutCheck.passed === false ? false : null,
       }
     : null
+  const ownMeanWindowSharpe =
+    typeof gateRow?.mean_window_sharpe === 'number' ? gateRow.mean_window_sharpe : null
 
-  const geometry = buildTrialDistributionGeometry(trials, effectiveMinHoldoutSharpe, ownHoldout)
-  const isEmpty = geometry.points.length === 0
+  const cloud = buildTrialCloudGeometry(trials, ownMeanWindowSharpe)
+  const strip = buildHoldoutStripGeometry(effectiveMinHoldoutSharpe, ownHoldout)
+  const isEmpty = cloud.points.length === 0
+  const showStrip = strip.bar !== null || strip.own !== null
+  const summary = buildSummary(cloud.points.length, strip)
+  const isTruncated = trials.length === TRIAL_LIMIT
 
   const emptyLabel =
     trials.length === 0
       ? 'no sweep trials recorded yet'
-      : `${geometry.excludedCount} sweep trial${geometry.excludedCount === 1 ? '' : 's'} ` +
+      : `${cloud.excludedCount} sweep trial${cloud.excludedCount === 1 ? '' : 's'} ` +
         'recorded, none with a mean-window-sharpe metric yet'
 
   const excludedNote =
-    geometry.excludedCount > 0
-      ? `${geometry.excludedCount} trial${geometry.excludedCount === 1 ? '' : 's'} excluded — ` +
+    cloud.excludedCount > 0
+      ? `${cloud.excludedCount} trial${cloud.excludedCount === 1 ? '' : 's'} excluded — ` +
         'missing a mean-window-sharpe metric'
       : null
 
-  const rightEdge = PLOT.width - PLOT.right
+  const cloudRightEdge = CLOUD_PLOT.width - CLOUD_PLOT.right
+  const ownCloudLabelAnchor =
+    cloud.own !== null && cloud.own.cx > cloudRightEdge - 100 ? 'end' : 'start'
+
+  const stripRightEdge = STRIP_PLOT.width - STRIP_PLOT.right
   // Anchor buffers are sized to each label's OWN text ("deflated bar N.NN" vs the longer
   // "this strategy N.NN · advisory" qualifier) so a label near the right edge flips to
-  // right-anchored instead of running off the viewBox — re-measured after the advisory
-  // qualifier lengthened the marker label (fix round 1).
-  const thresholdLabelAnchor =
-    geometry.threshold !== null && geometry.threshold.x > rightEdge - 85 ? 'end' : 'start'
-  const markerLabelAnchor =
-    geometry.marker !== null && geometry.marker.cx > rightEdge - 140 ? 'end' : 'start'
+  // right-anchored instead of running off the viewBox.
+  const barLabelAnchor = strip.bar !== null && strip.bar.cx > stripRightEdge - 85 ? 'end' : 'start'
+  const ownStripLabelAnchor =
+    strip.own !== null && strip.own.cx > stripRightEdge - 140 ? 'end' : 'start'
 
   return (
     <ChartFrame title="funnel trial distribution" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
       <div className="trial-dist-body">
         <svg
-          className="trial-dist-svg"
-          viewBox={`0 0 ${PLOT.width} ${PLOT.height}`}
+          className="trial-dist-cloud-svg"
+          data-testid="trial-cloud-svg"
+          viewBox={`0 0 ${CLOUD_PLOT.width} ${CLOUD_PLOT.height}`}
           role="img"
           aria-label={
-            `funnel-wide sweep trial distribution, ${geometry.points.length} trials plotted` +
-            (geometry.threshold !== null
-              ? `; deflated bar at ${fmt(geometry.threshold.value)}`
-              : '') +
-            (geometry.marker !== null
-              ? `; this strategy's holdout result ${fmt(geometry.marker.value)}, ` +
-                `${geometry.marker.passed === true ? 'clears the deflated bar' : geometry.marker.passed === false ? 'below the deflated bar' : 'verdict unknown'}` +
-                ' (advisory check, does not veto the gate)'
+            `funnel-wide search: ${cloud.points.length} trials plotted on mean window sharpe` +
+            (cloud.own !== null
+              ? `; this strategy's own mean window sharpe ${fmt(cloud.own.value)}`
               : '')
           }
         >
           <rect
             className="trial-dist-plot-area"
-            x={PLOT.left}
-            y={RULE_TOP}
-            width={PLOT.width - PLOT.left - PLOT.right}
-            height={AXIS_Y - RULE_TOP}
+            x={CLOUD_PLOT.left}
+            y={0}
+            width={CLOUD_PLOT.width - CLOUD_PLOT.left - CLOUD_PLOT.right}
+            height={CLOUD_AXIS_Y}
           />
-          {geometry.points.map((p) => (
+          {cloud.points.map((p) => (
             <circle
               key={p.id}
               data-testid="trial-point"
               className="trial-dist-point"
               cx={p.cx}
               cy={p.cy}
-              r={POINT_RADIUS}
+              r={CLOUD_POINT_RADIUS}
             />
           ))}
-          {geometry.threshold !== null && (
-            <>
-              <line
-                data-testid="threshold-line"
-                className="trial-dist-threshold"
-                x1={geometry.threshold.x}
-                x2={geometry.threshold.x}
-                y1={RULE_TOP}
-                y2={AXIS_Y}
-              />
-              <text
-                data-testid="threshold-label"
-                className="trial-dist-threshold-label"
-                x={geometry.threshold.x}
-                y={LABEL_Y}
-                textAnchor={thresholdLabelAnchor}
-              >
-                deflated bar {fmt(geometry.threshold.value)}
-              </text>
-            </>
-          )}
-          {geometry.marker !== null && (
+          {cloud.own !== null && (
             <>
               <line
                 className="trial-dist-guide"
-                x1={geometry.marker.cx}
-                x2={geometry.marker.cx}
-                y1={SWARM_TOP}
-                y2={MARKER_ROW_Y - MARKER_RADIUS}
+                x1={cloud.own.cx}
+                x2={cloud.own.cx}
+                y1={CLOUD_SWARM_TOP}
+                y2={CLOUD_OWN_ROW_Y - CLOUD_OWN_RADIUS}
               />
               <polygon
-                data-testid="own-marker"
-                className={
-                  geometry.marker.passed === true
-                    ? 'trial-dist-marker-pass'
-                    : geometry.marker.passed === false
-                      ? 'trial-dist-marker-fail'
-                      : 'trial-dist-marker-unknown'
-                }
+                data-testid="own-cloud-marker"
+                className="trial-dist-own-cloud-marker"
                 points={[
-                  `${geometry.marker.cx},${geometry.marker.cy - MARKER_RADIUS}`,
-                  `${geometry.marker.cx + MARKER_RADIUS},${geometry.marker.cy}`,
-                  `${geometry.marker.cx},${geometry.marker.cy + MARKER_RADIUS}`,
-                  `${geometry.marker.cx - MARKER_RADIUS},${geometry.marker.cy}`,
+                  `${cloud.own.cx},${CLOUD_OWN_ROW_Y - CLOUD_OWN_RADIUS}`,
+                  `${cloud.own.cx + CLOUD_OWN_RADIUS},${CLOUD_OWN_ROW_Y}`,
+                  `${cloud.own.cx},${CLOUD_OWN_ROW_Y + CLOUD_OWN_RADIUS}`,
+                  `${cloud.own.cx - CLOUD_OWN_RADIUS},${CLOUD_OWN_ROW_Y}`,
                 ].join(' ')}
               />
               <text
-                data-testid="own-marker-label"
-                className="trial-dist-marker-label"
-                x={geometry.marker.cx}
-                y={MARKER_ROW_Y + MARKER_RADIUS + 11}
-                textAnchor={markerLabelAnchor}
+                data-testid="own-cloud-marker-label"
+                className="trial-dist-own-cloud-marker-label"
+                x={cloud.own.cx}
+                y={CLOUD_OWN_ROW_Y + CLOUD_OWN_RADIUS + 11}
+                textAnchor={ownCloudLabelAnchor}
               >
-                this strategy {fmt(geometry.marker.value)} · advisory
+                this strategy {fmt(cloud.own.value)}
               </text>
             </>
           )}
-          <text className="trial-dist-tick" x={PLOT.left} y={AXIS_Y + 12}>
-            {fmt(geometry.domain.min)}
+          <text className="trial-dist-tick" x={CLOUD_PLOT.left} y={CLOUD_AXIS_Y + 12}>
+            {fmt(cloud.domain.min)}
           </text>
           <text
             className="trial-dist-tick"
-            x={rightEdge}
-            y={AXIS_Y + 12}
+            x={cloudRightEdge}
+            y={CLOUD_AXIS_Y + 12}
             textAnchor="end"
           >
-            {fmt(geometry.domain.max)}
+            {fmt(cloud.domain.max)}
           </text>
           <text
             className="trial-dist-caption"
-            x={(PLOT.left + rightEdge) / 2}
-            y={CAPTION_Y}
+            x={(CLOUD_PLOT.left + cloudRightEdge) / 2}
+            y={CLOUD_CAPTION_Y}
             textAnchor="middle"
           >
-            mean window sharpe — trials · bar & marker: holdout sharpe
+            mean window sharpe — trial cloud (search population)
           </text>
         </svg>
+        {showStrip && (
+          <svg
+            className="trial-dist-strip-svg"
+            data-testid="trial-strip-svg"
+            viewBox={`0 0 ${STRIP_PLOT.width} ${STRIP_PLOT.height}`}
+            role="img"
+            aria-label={
+              (strip.bar !== null ? `deflated bar ${fmt(strip.bar.value)}` : 'no deflated bar recorded') +
+              (strip.own !== null
+                ? `; this strategy's holdout result ${fmt(strip.own.value)}, ` +
+                  `${strip.own.passed === true ? 'clears the deflated bar' : strip.own.passed === false ? 'below the deflated bar' : 'verdict unknown'}` +
+                  ' (advisory check, does not veto the gate)'
+                : '')
+            }
+          >
+            <rect
+              className="trial-dist-plot-area"
+              x={STRIP_PLOT.left}
+              y={0}
+              width={STRIP_PLOT.width - STRIP_PLOT.left - STRIP_PLOT.right}
+              height={STRIP_AXIS_Y}
+            />
+            {strip.bar !== null && (
+              <>
+                <line
+                  data-testid="bar-line"
+                  className="trial-dist-threshold"
+                  x1={strip.bar.cx}
+                  x2={strip.bar.cx}
+                  y1={0}
+                  y2={STRIP_AXIS_Y}
+                />
+                <text
+                  data-testid="bar-label"
+                  className="trial-dist-threshold-label"
+                  x={strip.bar.cx}
+                  y={STRIP_BAR_LABEL_Y}
+                  textAnchor={barLabelAnchor}
+                >
+                  deflated bar {fmt(strip.bar.value)}
+                </text>
+              </>
+            )}
+            {strip.own !== null && (
+              <>
+                <polygon
+                  data-testid="own-marker"
+                  className={
+                    strip.own.passed === true
+                      ? 'trial-dist-marker-pass'
+                      : strip.own.passed === false
+                        ? 'trial-dist-marker-fail'
+                        : 'trial-dist-marker-unknown'
+                  }
+                  points={[
+                    `${strip.own.cx},${STRIP_ROW_Y - STRIP_MARKER_RADIUS}`,
+                    `${strip.own.cx + STRIP_MARKER_RADIUS},${STRIP_ROW_Y}`,
+                    `${strip.own.cx},${STRIP_ROW_Y + STRIP_MARKER_RADIUS}`,
+                    `${strip.own.cx - STRIP_MARKER_RADIUS},${STRIP_ROW_Y}`,
+                  ].join(' ')}
+                />
+                <text
+                  data-testid="own-marker-label"
+                  className="trial-dist-marker-label"
+                  x={strip.own.cx}
+                  y={STRIP_OWN_LABEL_Y}
+                  textAnchor={ownStripLabelAnchor}
+                >
+                  this strategy {fmt(strip.own.value)} · advisory
+                </text>
+              </>
+            )}
+            <text className="trial-dist-tick" x={STRIP_PLOT.left} y={STRIP_AXIS_Y + 10}>
+              {strip.domain !== null ? fmt(strip.domain.min) : ''}
+            </text>
+            <text
+              className="trial-dist-tick"
+              x={stripRightEdge}
+              y={STRIP_AXIS_Y + 10}
+              textAnchor="end"
+            >
+              {strip.domain !== null ? fmt(strip.domain.max) : ''}
+            </text>
+            <text
+              className="trial-dist-caption"
+              x={(STRIP_PLOT.left + stripRightEdge) / 2}
+              y={STRIP_CAPTION_Y}
+              textAnchor="middle"
+            >
+              holdout sharpe — bar vs result
+            </text>
+          </svg>
+        )}
+        {summary !== null && (
+          <div className="trial-dist-summary" data-testid="trial-dist-summary">
+            {summary}
+          </div>
+        )}
+        {isTruncated && (
+          <div className="chart-footnote" data-testid="truncation-notice">
+            showing the first {TRIAL_LIMIT} trials — the funnel may hold more; this view can
+            understate total breadth
+          </div>
+        )}
         {excludedNote !== null && <div className="chart-footnote">{excludedNote}</div>}
       </div>
     </ChartFrame>

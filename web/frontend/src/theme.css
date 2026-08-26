@@ -490,9 +490,12 @@ button { font: inherit; }
 
 .scatter-plot-area { fill: none; stroke: var(--line); stroke-width: 1; }
 
-/* The y=x reference line — the entire point of this chart. Neutral chrome, not a series: it
-   reuses the structural line token rather than either series color. */
-.scatter-diagonal { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 3 3; }
+/* The y=x reference line — the entire point of this chart, and the mark that carries this
+   chart's entire meaning. Neutral chrome, not a series — but `--line-2` on the pure-black
+   surface computes to ~1.53:1, half the 3:1 floor for a meaningful graphical object (deferred
+   item, promoted). `--slate` is the token this theme reserves for exactly this case ("NON-TEXT
+   only (>=3:1 covers graphical objects)", declared alongside it) and clears ~3.6:1 on black. */
+.scatter-diagonal { stroke: var(--slate); stroke-width: 1; stroke-dasharray: 3 3; }
 
 .scatter-tick {
   font-family: var(--mono);
@@ -509,11 +512,14 @@ button { font: inherit; }
   fill: var(--text-fade);
 }
 
-/* Above the diagonal is the case this chart exists to catch — Electric marks it as the one
-   thing that matters. Below/on the diagonal is honest-or-conservative context. Two tokens only
-   (see theme.css series-palette comment above) — no third hue. */
-.scatter-point-above { fill: var(--series-focus); }
-.scatter-point-below { fill: var(--series-context); }
+/* Electric marks the case this chart exists to catch — but that case is an OUTLIER (gap past
+   `OUTLIER_GAP_FRACTION`, the SAME threshold the direct labels use), not merely `y > x`. At
+   `y = x + ε` a bare above/below split fires on noise — a barely-above point that is honestly
+   inside measurement error, not evidence of mining — so the fill and the outlier LABEL must
+   agree on what counts (fix round 2). Two tokens only (see theme.css series-palette comment
+   above) — no third hue. */
+.scatter-point-outlier { fill: var(--series-focus); }
+.scatter-point-normal { fill: var(--series-context); }
 
 .scatter-point-label {
   font-family: var(--mono);
@@ -645,6 +651,10 @@ button { font: inherit; }
 
 /* ---- trial distribution ---------------------------------------------------- */
 
+/* Two INDEPENDENT marks stacked in one card (fix round 2) — never one shared axis (see
+   TrialDistribution.tsx's top docstring). The cloud gets more of the vertical budget than the
+   strip: it carries the individually-plotted N~70 swarm, while the strip is one row of two
+   points. */
 .trial-dist-body {
   width: 100%;
   height: 100%;
@@ -653,7 +663,8 @@ button { font: inherit; }
   gap: 4px;
 }
 
-.trial-dist-svg { width: 100%; flex: 1 1 auto; min-height: 0; }
+.trial-dist-cloud-svg { width: 100%; flex: 13 1 0; min-height: 0; }
+.trial-dist-strip-svg { width: 100%; flex: 8 1 0; min-height: 0; }
 
 .trial-dist-plot-area { fill: none; stroke: var(--line); stroke-width: 1; }
 
@@ -662,14 +673,27 @@ button { font: inherit; }
    individually "the" series. */
 .trial-dist-point { fill: var(--series-context); }
 
-/* The vertical guide connecting the marker up into the swarm band — chrome, not data (mirrors
-   `.scatter-diagonal`'s reasoning: it exists only to let the eye trace the marker's x position
-   against the cloud above it). */
+/* This strategy's own mark in the trial CLOUD is an IDENTITY marker, not a verdict — there is no
+   threshold on this axis to pass or fail, only "where did I land in the search". Electric,
+   because among the neutral trial population this is the one point the reader is here to find —
+   never the status palette, which is reserved for the deflation strip's pass/fail marker below. */
+.trial-dist-own-cloud-marker { fill: var(--series-focus); }
+
+.trial-dist-own-cloud-marker-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--series-focus);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The vertical guide connecting the own-cloud marker up into the swarm band — chrome, not data
+   (mirrors `.scatter-diagonal`'s reasoning: it exists only to let the eye trace the marker's x
+   position against the cloud above it). */
 .trial-dist-guide { stroke: var(--line-2); stroke-width: 1; stroke-dasharray: 2 3; }
 
-/* The deflated bar is the entire point of this chart — Electric because it is the ONE thing
-   that matters on this screen, and drawn as a bold solid rule (never dashed, never the neutral
-   `--line-2` chrome token) so it reads as DATA, not axis decoration. */
+/* The deflated bar is the entire point of the deflation STRIP — Electric because it is the ONE
+   thing that matters on that mark, and drawn as a bold solid rule (never dashed, never the
+   neutral `--line-2` chrome token) so it reads as DATA, not axis decoration. */
 .trial-dist-threshold { stroke: var(--series-focus); stroke-width: 2; }
 
 .trial-dist-threshold-label {
@@ -682,9 +706,12 @@ button { font: inherit; }
 
 /* The strategy's own holdout marker is fundamentally a pass/fail VERDICT against the bar, so it
    draws from the status palette, not a third series hue — exactly the reasoning `PassMark` and
-   the gate bullet card's fill classes already use. */
+   the gate bullet card's fill classes already use. The underlying check (`holdout_sharpe`) is
+   ALWAYS advisory (`algua/research/gates.py`), so a "fail" here can never be a breached binding
+   floor — it must read amber (matching `GateBulletCard`'s `.bullet-fill-advisory-fail` and
+   `PassMark`'s advisory branch), never the `--red` reserved for that. */
 .trial-dist-marker-pass { fill: var(--green); }
-.trial-dist-marker-fail { fill: var(--red); }
+.trial-dist-marker-fail { fill: var(--amber); }
 .trial-dist-marker-unknown { fill: var(--text-dim); }
 
 .trial-dist-marker-label {
@@ -707,6 +734,15 @@ button { font: inherit; }
   letter-spacing: 0.1em;
   text-transform: uppercase;
   fill: var(--text-fade);
+}
+
+/* The prose tying the two marks together — plain HTML (not SVG text) so a variable-length
+   sentence wraps instead of overflowing a fixed viewBox. The causal story (breadth produces the
+   bar) is the point of this card; this is where it gets said in words. */
+.trial-dist-summary {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--text-dim);
 }
 
 /* ---- equity chart -------------------------------------------------------- */
@@ -773,6 +809,15 @@ button { font: inherit; }
 .uplot { font-family: var(--mono); }
 
 /* ---- return overlay -------------------------------------------------------- */
+
+/* Names these curves as FAMILY SIBLINGS — the title alone ("return overlay") and a strategy name
+   at each line end never said so. Reserved space, not an overlay on top of the plot, so it never
+   collides with a curve or the shaded OOS band. */
+.overlay-family-caption {
+  font-family: var(--sans);
+  font-size: 10px;
+  color: var(--text-dim);
+}
 
 .overlay-panel-inner { position: relative; width: 100%; height: 100%; }
 

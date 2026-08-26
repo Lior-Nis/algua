@@ -71,7 +71,7 @@ it("a PASSING advisory marker's aria-label still names the deflated bar clearly 
 
   render(<TrialDistribution strategy="aria_probe_pass" />)
   await screen.findByTestId('own-marker')
-  const svg = document.querySelector('svg.trial-dist-svg') as SVGElement
+  const svg = screen.getByTestId('trial-strip-svg')
   const ariaLabel = svg.getAttribute('aria-label') ?? ''
   expect(ariaLabel).toMatch(/clears the deflated bar/i)
   expect(ariaLabel).toMatch(/advisory check, does not veto the gate/i)

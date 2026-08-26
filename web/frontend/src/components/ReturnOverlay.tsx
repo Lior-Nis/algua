@@ -23,8 +23,31 @@ const PANEL_GAP = 6
 // Spec: "up to ~4 runs overlaid" (2026-08-23 design doc §6). 1-2 render as focus+context on one
 // plot; 3+ render as small multiples, capped here so the panel budget never shrinks past
 // legibility.
-const MAX_CURVES = 4
+export const MAX_CURVES = 4
 const SMALL_MULTIPLES_MIN = 3
+
+// Small-multiples axis budget (fix round 2). uPlot's calcPlotRect only reserves space for an
+// axis when `axis.show` is true (uPlot source: `if (axis.show && axis._show)`) — hiding an axis
+// fully returns its space, it doesn't just suppress its ticks. uPlot's DEFAULT axis size is 50px
+// (both x and y) when not overridden; at MAX_CURVES the per-panel height budget
+// (`computeSmallMultiplesPanelHeight`) is far too tight for that default PLUS the explicit 44px
+// y-axis this component already used — the arithmetic went negative and the preview's SVG
+// stand-in concealed it. Small multiples therefore (a) shows the x-axis on ONLY the last panel —
+// the shared time domain makes a per-panel x-axis redundant anyway — and (b) uses compact,
+// EXPLICIT sizes for both axes rather than uPlot's 50px default.
+export const SMALL_MULT_Y_AXIS_SIZE = 22
+export const SMALL_MULT_X_AXIS_SIZE = 16
+// The overlay (1-2 curve) case keeps the original, roomier y-axis size — one full-height panel
+// has plenty of budget and always shows its own x-axis.
+const OVERLAY_Y_AXIS_SIZE = 44
+
+// Fix round 2 (review FIX 7): a fixed strip carved out of the SAME `HEIGHT` budget (never added
+// on top of it — the frame's fixed height, and therefore "no layout shift", is unaffected) for
+// the caption naming these curves as family siblings. Only reserved when a sibling curve is
+// actually plotted (`hasSiblings` below) — this is a per-mount-static condition (a strategy's
+// family doesn't change while its detail page is open), not a value that flips after first
+// render, so it never reintroduces the shift the fixed `HEIGHT` guards against.
+const FAMILY_CAPTION_HEIGHT = 16
 
 function toEpochSeconds(iso: string): number | null {
   const d = parseUtc(iso)
@@ -119,11 +142,18 @@ function buildCurve(
  * `holdout_end`/`n_bars` from the series entry (never a `returns` field, which this entry never
  * carries per the backend contract) and the run's own already-fetched scalar metrics for the
  * label. Returns `null` (no region drawn) when there is no gate run, no holdout leg, or the
- * interval does not parse. */
+ * interval does not parse.
+ *
+ * `viewedStrategy` is named IN the label (fix round 2) — the region always belongs to the page's
+ * own strategy (its gate run is fetched via `?strategy=&kind=gate`), but in overlay mode the band
+ * is drawn full-width across a plot that ALSO contains a family sibling's curve. A bare metrics
+ * string ("63 bars OOS · sharpe 0.5") reads as if it could apply to either line; naming the
+ * strategy closes that. */
 function buildRegion(
   gateRun: RunRow | null,
   entry: RunSeriesEntry | undefined,
   detail: RunDetail | null,
+  viewedStrategy: string,
 ): OverlayRegion | null {
   if (gateRun === null || entry === null || entry === undefined || entry.kind !== 'holdout') {
     return null
@@ -138,7 +168,7 @@ function buildRegion(
   if (sharpeOos !== null) bits.push(`sharpe ${num(sharpeOos, 3)}`)
   if (totalReturnOos !== null) bits.push(`return ${pct(totalReturnOos)}`)
 
-  return { runId: gateRun.id, startTs, endTs, label: bits.join(' · ') }
+  return { runId: gateRun.id, startTs, endTs, label: `${viewedStrategy} holdout: ${bits.join(' · ')}` }
 }
 
 /**
@@ -146,7 +176,7 @@ function buildRegion(
  * when it has a family — see `ReturnOverlay`'s docstring for why family membership is the source
  * of "up to ~4 runs" rather than one strategy's own history) + their `runs series` entries + this
  * strategy's latest gate run's holdout leg -> the geometry `ReturnOverlay` renders. Isolated from
- * fetching (like `buildTrialDistributionGeometry`/`buildBulletGeometry`) so THE HARD RULE — a
+ * fetching (like `buildTrialCloudGeometry`/`buildBulletGeometry`) so THE HARD RULE — a
  * holdout leg becomes an interval, never an array — is a property of this one function, directly
  * unit-testable without a DOM or a canvas.
  *
@@ -171,6 +201,7 @@ export function buildReturnOverlayGeometry(
     gateRun,
     gateRun !== null ? seriesById[String(gateRun.id)] : undefined,
     gateDetail,
+    viewedStrategy,
   )
 
   if (curves.length === 0) {
@@ -200,6 +231,16 @@ function fracOf(v: number, min: number, max: number): number {
   return max === min ? 0.5 : (v - min) / (max - min)
 }
 
+/** Pure arithmetic (fix round 2): the small-multiples per-panel height, given `n` curves and the
+ * plot budget available (defaults to the full `HEIGHT` — the value every existing call site and
+ * test uses; `ReturnOverlay` passes a slightly smaller budget when the family caption is shown,
+ * see its docstring) — isolated from `ReturnOverlay` so the "does the axis budget still leave
+ * usable plot area at the cap" question is directly unit-testable without a canvas (uPlot
+ * doesn't render in jsdom). */
+export function computeSmallMultiplesPanelHeight(n: number, budget: number = HEIGHT): number {
+  return Math.max(40, Math.floor((budget - PANEL_GAP * (n - 1)) / Math.max(n, 1)))
+}
+
 /** One plot: 1-2 curves (the overlay case) or exactly 1 curve (one small-multiples panel).
  * Draws the real uPlot canvas line(s) PLUS a CSS-positioned end-label per curve and, when a
  * region is given, a CSS-positioned shaded band + label — all computed from the SAME domain
@@ -209,10 +250,20 @@ function Panel({
   curves,
   region,
   height,
+  showXAxis = true,
+  yAxisSize = OVERLAY_Y_AXIS_SIZE,
+  xAxisSize,
 }: {
   curves: OverlayCurve[]
   region: OverlayRegion | null
   height: number
+  /** Small multiples shows the x-axis on only the LAST panel (fix round 2) — see the module
+   * docstring on `SMALL_MULT_Y_AXIS_SIZE`. The single-panel overlay case always shows it. */
+  showXAxis?: boolean
+  yAxisSize?: number
+  /** `undefined` keeps uPlot's own default (50px) — correct for the overlay case's one
+   * full-height panel. Small multiples passes `SMALL_MULT_X_AXIS_SIZE` explicitly. */
+  xAxisSize?: number
 }) {
   const allValues = curves.flatMap((c) => c.values)
   let yMin = Math.min(...allValues)
@@ -235,7 +286,15 @@ function Panel({
 
   return (
     <div className="overlay-panel-inner" style={{ height }}>
-      <Plot curves={curves} xDomain={[xMin, xMax]} yDomain={[yMin, yMax]} height={height} />
+      <Plot
+        curves={curves}
+        xDomain={[xMin, xMax]}
+        yDomain={[yMin, yMax]}
+        height={height}
+        showXAxis={showXAxis}
+        yAxisSize={yAxisSize}
+        xAxisSize={xAxisSize}
+      />
       {region !== null && (
         <div
           className="overlay-region-band"
@@ -270,11 +329,17 @@ function Plot({
   xDomain,
   yDomain,
   height,
+  showXAxis = true,
+  yAxisSize = OVERLAY_Y_AXIS_SIZE,
+  xAxisSize,
 }: {
   curves: OverlayCurve[]
   xDomain: [number, number]
   yDomain: [number, number]
   height: number
+  showXAxis?: boolean
+  yAxisSize?: number
+  xAxisSize?: number
 }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
@@ -331,13 +396,16 @@ function Plot({
             points: { show: false },
           })),
         ],
-        axes: [axis, { ...axis, size: 44 }],
+        axes: [
+          { ...axis, show: showXAxis, ...(xAxisSize !== undefined ? { size: xAxisSize } : {}) },
+          { ...axis, size: yAxisSize },
+        ],
       },
       buildAlignedData(curves),
       el,
     )
     return () => u.destroy()
-  }, [curves, xDomain, yDomain, width, height])
+  }, [curves, xDomain, yDomain, width, height, showXAxis, yAxisSize, xAxisSize])
 
   return <div ref={hostRef} className="chart-host overlay-plot-host" style={{ minHeight: height }} />
 }
@@ -417,13 +485,25 @@ export default function ReturnOverlay({
       : `${geometry.excludedCurveCount} backtest run${geometry.excludedCurveCount === 1 ? '' : 's'} ` +
         'recorded, none with a persisted return series yet'
 
+  // Fix round 2: nothing on screen said these were FAMILY SIBLINGS, not this strategy's own
+  // history — the title just says "return overlay" and the only signal was a strategy name at
+  // each line end. `hasSiblings` is a real 'context'-role curve, not just `family !== null`
+  // (a lone strategy in its family still renders with zero siblings plotted).
+  const hasSiblings = geometry.curves.some((c) => c.role === 'context')
+  const plotBudget = hasSiblings ? HEIGHT - FAMILY_CAPTION_HEIGHT : HEIGHT
+
   const n = geometry.curves.length
-  const panelHeight = Math.max(40, Math.floor((HEIGHT - PANEL_GAP * (n - 1)) / Math.max(n, 1)))
+  const panelHeight = computeSmallMultiplesPanelHeight(n, plotBudget)
 
   return (
     <ChartFrame title="return overlay" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
+      {hasSiblings && (
+        <div className="overlay-family-caption" data-testid="overlay-family-caption">
+          {family} family — {n - 1} sibling curve{n - 1 === 1 ? '' : 's'} alongside {strategy}&apos;s own
+        </div>
+      )}
       {geometry.mode === 'overlay' ? (
-        <Panel curves={geometry.curves} region={geometry.region} height={HEIGHT} />
+        <Panel curves={geometry.curves} region={geometry.region} height={plotBudget} />
       ) : (
         <div className="overlay-small-multiples">
           {geometry.curves.map((c, i) => (
@@ -435,7 +515,14 @@ export default function ReturnOverlay({
               {/* The region belongs to the VIEWED strategy's own gate evaluation, so it must
                   land on the FOCUS panel specifically — not whichever curve the family query
                   happened to list first (newest-first order, unrelated to role). */}
-              <Panel curves={[c]} region={c.role === 'focus' ? geometry.region : null} height={panelHeight} />
+              <Panel
+                curves={[c]}
+                region={c.role === 'focus' ? geometry.region : null}
+                height={panelHeight}
+                showXAxis={i === n - 1}
+                yAxisSize={SMALL_MULT_Y_AXIS_SIZE}
+                xAxisSize={SMALL_MULT_X_AXIS_SIZE}
+              />
             </div>
           ))}
         </div>

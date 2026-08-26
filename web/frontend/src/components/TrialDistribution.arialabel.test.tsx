@@ -47,7 +47,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-it("the marker's aria-label spells out the advisory qualifier in plain words — a screen-reader " +
+it("the strip's aria-label spells out the advisory qualifier in plain words — a screen-reader " +
   'user gets no shape/colour/position cue at all, so the text is the whole encoding', async () => {
   const trials = Array.from({ length: 5 }, (_, i) =>
     trial({ id: i + 1, strategy_name: `s${i}`, mean_window_sharpe: 0.1 * i }),
@@ -73,7 +73,8 @@ it("the marker's aria-label spells out the advisory qualifier in plain words —
 
   render(<TrialDistribution strategy="aria_probe" />)
   await screen.findByTestId('own-marker')
-  const svg = document.querySelector('svg.trial-dist-svg') as SVGElement
+  const svg = screen.getByTestId('trial-strip-svg')
   const ariaLabel = svg.getAttribute('aria-label') ?? ''
   expect(ariaLabel).toMatch(/advisory check, does not veto the gate/i)
+  expect(ariaLabel).toMatch(/below the deflated bar/i)
 })

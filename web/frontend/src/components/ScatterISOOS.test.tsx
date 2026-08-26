@@ -1,7 +1,45 @@
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, RunRow, RunsListPayload } from '../types'
 import ScatterISOOS, { buildScatterGeometry } from './ScatterISOOS'
+
+// ---- deferred item, promoted: the diagonal's contrast against pure black ------------------
+
+function srgbToLinear(c: number): number {
+  const v = c / 255
+  return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+}
+
+function relativeLuminance(hex: string): number {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b)
+}
+
+function contrastVsBlack(hex: string): number {
+  // WCAG contrast ratio, black's luminance is exactly 0.
+  return (relativeLuminance(hex) + 0.05) / 0.05
+}
+
+describe('.scatter-diagonal contrast (deferred item, promoted)', () => {
+  it("the diagonal's stroke token clears the 3:1 floor for a meaningful graphical object on " +
+    'pure black — `--line-2` (the previous token) computed to ~1.53:1', () => {
+    const css = readFileSync(path.resolve(__dirname, '../theme.css'), 'utf-8')
+    const rule = css.match(/\.scatter-diagonal\s*\{([^}]*)\}/)
+    expect(rule).toBeTruthy()
+    expect(rule![1]).not.toMatch(/--line-2\b/)
+    const strokeVarMatch = rule![1].match(/stroke:\s*var\((--[\w-]+)/)
+    expect(strokeVarMatch).toBeTruthy()
+    const tokenName = strokeVarMatch![1]
+    const tokenMatch = css.match(new RegExp(`${tokenName}:\\s*(#[0-9a-fA-F]{6})`))
+    expect(tokenMatch).toBeTruthy()
+    const contrast = contrastVsBlack(tokenMatch![1])
+    expect(contrast).toBeGreaterThanOrEqual(3)
+  })
+})
 
 function row(overrides: Partial<RunRow> & { id: number; strategy_name: string }): RunRow {
   return {
@@ -155,4 +193,25 @@ it('direct-labels only the far outlier, never every point', async () => {
   expect(screen.queryByText('honest_pos')).toBeNull()
   expect(screen.queryByText('overfit_below')).toBeNull()
   expect(screen.queryByText('honest_neg')).toBeNull()
+})
+
+it('colours a point Electric ONLY when it is a true outlier — never merely "above the ' +
+  'diagonal" (fix round 2: honest_pos sits above by a hair (gap 0.09) and must read as ' +
+  'context, exactly like the label rule)', async () => {
+  stubRunsFetch()
+  render(<ScatterISOOS />)
+  await screen.findByTestId('diagonal')
+  const points = screen.getAllByTestId('scatter-point')
+  const above = points.filter((p) => p.getAttribute('data-region') === 'above')
+  // Two points sit above the diagonal (honest_pos, mined_above_1) but only ONE is a real
+  // outlier — the colour encoding must agree with the label rule, not with "above" alone.
+  expect(above.length).toBe(2)
+  const electricAbove = above.filter(
+    (p) => p.querySelector('.scatter-point-outlier') !== null,
+  )
+  expect(electricAbove.length).toBe(1)
+  const neutralAbove = above.filter(
+    (p) => p.querySelector('.scatter-point-normal') !== null,
+  )
+  expect(neutralAbove.length).toBe(1)
 })

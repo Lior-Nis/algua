@@ -1,7 +1,14 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { ApiEnvelope, RunDetail, RunRow, RunSeriesEntry, RunSeriesPayload, RunsListPayload } from '../types'
-import ReturnOverlay, { buildAlignedData, buildReturnOverlayGeometry } from './ReturnOverlay'
+import ReturnOverlay, {
+  MAX_CURVES,
+  SMALL_MULT_X_AXIS_SIZE,
+  SMALL_MULT_Y_AXIS_SIZE,
+  buildAlignedData,
+  buildReturnOverlayGeometry,
+  computeSmallMultiplesPanelHeight,
+} from './ReturnOverlay'
 
 // uPlot renders to <canvas>, which this jsdom environment cannot inspect (no `canvas` package
 // installed — see EquityChart.test.tsx's precedent of never mounting `<Plot>` with real data).
@@ -270,6 +277,10 @@ it('two family runs render two direct end-labels, focus and context distinguisha
   expect(labels).toHaveLength(2)
   const roles = labels.map((l) => l.getAttribute('data-role')).sort()
   expect(roles).toEqual(['context', 'focus'])
+  // Fix round 2: a sibling curve is on screen, so the panel must say so — the title
+  // ("return overlay") and a bare strategy name at the line end never did.
+  expect(screen.getByTestId('overlay-family-caption').textContent).toMatch(/momentum/i)
+  expect(screen.getByTestId('overlay-family-caption').textContent).toMatch(/sibling/i)
   expect(document.querySelectorAll('[data-testid="overlay-panel"]')).toHaveLength(0) // single-panel mode, not small multiples
 })
 
@@ -335,6 +346,8 @@ it('with no family, the strategy renders its own curve alone (no context line)',
   const labels = await screen.findAllByTestId('overlay-end-label')
   expect(labels).toHaveLength(1)
   expect(labels[0].getAttribute('data-role')).toBe('focus')
+  // No sibling curve is plotted, so no family caption — it would be false advertising.
+  expect(screen.queryByTestId('overlay-family-caption')).toBeNull()
 })
 
 it('a gate run with a holdout leg renders the OOS region and its scalar label, never a curve for it', async () => {
@@ -356,6 +369,32 @@ it('a gate run with a holdout leg renders the OOS region and its scalar label, n
   // Exactly one curve (the backtest's own in-sample line) plus the region — never a second
   // "line" standing in for the gate run's holdout leg.
   expect(screen.getAllByTestId('overlay-end-label')).toHaveLength(1)
+})
+
+it("in OVERLAY mode with a sibling curve, the OOS band names the VIEWED strategy — it cannot " +
+  'be read as applying to the sibling sharing the same plot (fix round 2)', async () => {
+  const runs = [
+    backtestRun(1, 'band_focus', '2026-08-20T00:00:00+00:00'),
+    backtestRun(2, 'band_sibling', '2026-08-01T00:00:00+00:00'),
+  ]
+  const gate = gateRun(20, 'band_focus')
+  stubFetch({
+    backtests: runs,
+    gate,
+    series: {
+      '1': backtestSeries('2024-01-02', '2024-12-30', 10),
+      '2': backtestSeries('2023-01-02', '2023-12-29', 8),
+      '20': holdoutSeries('2025-01-06', '2025-04-01', 63),
+    },
+    gateDetail: { ...gate, extra_metrics: {}, sharpe_oos: 0.3, total_return_oos: 0.02 } as RunDetail,
+  })
+  render(<ReturnOverlay strategy="band_focus" family="band_family" />)
+  const region = await screen.findByTestId('overlay-region-label')
+  expect(region.textContent).toMatch(/band_focus/)
+  expect(region.textContent).not.toMatch(/band_sibling/)
+  // Both curves really do share this one plot — the band's strategy name is the only thing
+  // distinguishing which curve it belongs to.
+  expect(screen.getAllByTestId('overlay-end-label')).toHaveLength(2)
 })
 
 it('fetches runs/series in ONE batched request, never one call per run id', async () => {
@@ -380,4 +419,31 @@ it('fetches runs/series in ONE batched request, never one call per run id', asyn
   expect(seriesCalls).toHaveLength(1)
   expect(seriesCalls[0]).toContain('101')
   expect(seriesCalls[0]).toContain('102')
+})
+
+// Fix round 2 (review FIX 6): jsdom never actually instantiates a real uPlot canvas in this
+// suite — `Plot`'s effect bails out below `width < 40`, and jsdom's `clientWidth` is always 0 —
+// so no component-level render test here ever exercised uPlot's real axis-size arithmetic. That
+// blind spot is exactly how the small-multiples zero/negative plot-area bug at MAX_CURVES shipped
+// unnoticed (the preview artifact papered over it with a stretched SVG polyline standing in for
+// the canvas). This is plain arithmetic instead: no canvas needed.
+it('small multiples leaves positive, usable plot area at the MAX_CURVES cap for every panel', () => {
+  const panelHeight = computeSmallMultiplesPanelHeight(MAX_CURVES)
+  // A hidden x-axis (all but the last panel) reserves ONLY the y-axis's space.
+  const plotHeightHiddenXAxis = panelHeight - SMALL_MULT_Y_AXIS_SIZE
+  // The last panel shows both axes.
+  const plotHeightLastPanel = panelHeight - SMALL_MULT_Y_AXIS_SIZE - SMALL_MULT_X_AXIS_SIZE
+  expect(plotHeightHiddenXAxis).toBeGreaterThan(0)
+  expect(plotHeightLastPanel).toBeGreaterThan(0)
+  // "Usable", not a sliver: at least a few pixels of real plot area survive even on the one
+  // panel carrying both axes.
+  expect(plotHeightLastPanel).toBeGreaterThanOrEqual(10)
+})
+
+it("uPlot's own default axis size (50px, unset) would have gone negative at the cap — the " +
+  'regression this fix closes', () => {
+  const UPLOT_DEFAULT_AXIS_SIZE = 50
+  const panelHeight = computeSmallMultiplesPanelHeight(MAX_CURVES)
+  const plotHeightWithBothDefaultAxes = panelHeight - UPLOT_DEFAULT_AXIS_SIZE - UPLOT_DEFAULT_AXIS_SIZE
+  expect(plotHeightWithBothDefaultAxes).toBeLessThanOrEqual(0)
 })

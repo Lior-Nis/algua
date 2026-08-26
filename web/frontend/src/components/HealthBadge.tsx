@@ -11,25 +11,16 @@ export function healthColor(health: string): string {
 }
 
 /**
- * `muted` renders the verdict factually but WITHOUT alarm color, for rows where health
- * is not an alert. fleet_alert only alerts on operational stages (live/paper/
- * forward_tested): a benched or retired strategy is `idle` because nothing ticks it, and
- * even a lingering kill-switch on it is deliberately quiet ("a benched strategy can never
- * wedge the watchdog permanently red"). Painting those red contradicts the gate.
+ * Renders the health verdict with its alarm color. The `muted` opt-out (rendering a verdict
+ * factually but without alarm color, for a stage `fleet_alert` never watches — a benched/retired
+ * strategy is `idle` because nothing ticks it) was removed (fix round 2, deferred item promoted):
+ * it had no consumer, and the semantic it protected — a benched strategy can never wedge the
+ * watchdog permanently red — is enforced server-side, in `fleet status`'s own stage-aware
+ * verdict, not by a client-side color override.
  */
-export default function HealthBadge({
-  health,
-  muted = false,
-}: {
-  health: string
-  muted?: boolean
-}) {
+export default function HealthBadge({ health }: { health: string }) {
   return (
-    <span
-      className="health-badge"
-      style={{ color: muted ? 'var(--text-dim)' : healthColor(health) }}
-      title={muted ? `${health} — not watched at this stage (no operator loop)` : undefined}
-    >
+    <span className="health-badge" style={{ color: healthColor(health) }}>
       {health}
     </span>
   )

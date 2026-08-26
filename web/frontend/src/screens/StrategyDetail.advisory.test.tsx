@@ -80,8 +80,9 @@ const seriesEnvelope: ApiEnvelope<SeriesPayload> = {
   },
 }
 
-// The gate bullet card (task 5) sources checks from `/api/runs/{id}`, a SEPARATE waterfall from
-// `detail.gates` above (`/api/runs?...&kind=gate&limit=1` -> `/api/runs/{id}`). Same checks as
+// The gate bullet card (task 5) is fed `checks` directly from `detail.gates.gate_evaluations[0]
+// .decision` (fix round 2 — no fetch of its own). Only `TrialDistribution` (task 6) still does
+// the `/api/runs?...&kind=gate&limit=1` -> `/api/runs/{id}` waterfall below. Same checks as
 // `detail.gates.gate_evaluations[0].decision` so this exercises the same advisory-pass scenario.
 const runsListEnvelope: ApiEnvelope<RunsListPayload> = {
   ok: true,

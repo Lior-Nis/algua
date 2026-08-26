@@ -1,6 +1,5 @@
-import { runDetailUrl, runsUrl, useFetch } from '../api'
 import { num } from '../format'
-import type { ApiEnvelope, GateCheck, RunDetail, RunsListPayload } from '../types'
+import type { GateCheck } from '../types'
 import ChartFrame from './ChartFrame'
 import PassMark from './PassMark'
 
@@ -36,9 +35,12 @@ export interface BulletGeometry {
  * tick, all in one row-local domain (each check has its own units/scale — a Sharpe ratio and a
  * combo count cannot share an axis, so every row is self-scaled).
  *
- * Returns `null` when `value` is missing (`null`/`undefined`) — a check that never ran has no
- * geometry to draw, and must NEVER be rendered as a bar reaching zero. The caller renders
- * "not evaluated" instead of calling this. */
+ * Returns `null` when `value` is missing (`null`/`undefined`) — a check with no numeric value has
+ * no geometry to draw, and must NEVER be rendered as a bar reaching zero. The caller renders
+ * "no numeric value" instead of calling this — NOT "not evaluated": a boolean check
+ * (`pit_required`), a check whose `value` is `None` by construction (`regime_robustness`), and a
+ * fail-closed non-finite Sharpe (`holdout_sharpe_floor`) all hit this branch despite having
+ * genuinely run, so the wording must not imply the check never executed (fix round 2). */
 export function buildBulletGeometry(check: GateCheck): BulletGeometry | null {
   const value = check.value
   if (value === null || value === undefined || !Number.isFinite(value)) return null
@@ -113,7 +115,7 @@ function CheckRow({ check, index }: { check: GateCheck; index: number }) {
       </div>
       {geometry === null ? (
         <div className="bullet-not-evaluated" data-testid="not-evaluated">
-          not evaluated
+          no numeric value
         </div>
       ) : (
         <div className="bullet-bar-row">
@@ -177,11 +179,18 @@ function CheckRow({ check, index }: { check: GateCheck; index: number }) {
  * View 5 — the gate bullet card (spec §6.1). Replaces the per-check `<table>` that used to sit
  * inside `StrategyDetail`'s `LatestGate` — the densest text dump in the app.
  *
- * Source is deliberately `/api/runs/{id}` for a `gate` run, NOT the already-fetched
- * `StrategyDetailResponse.gates` composite: this is a two-step read over the SAME run-ledger
- * surface every other view in this slice uses (`/api/runs?strategy=&kind=gate&limit=1` to find
- * the latest gate run's id, then `/api/runs/{id}` for its allow-list-projected `gate_decision`).
- * Renders exactly what the allowlist gives it — never requests a wider payload.
+ * TAKES `checks` AS A PROP (fix round 2) — it does NOT fetch. The card used to independently
+ * fetch `/api/runs?strategy=&kind=gate&limit=1` -> `/api/runs/{id}` on the theory that this was a
+ * read over the SAME run-ledger surface every other view in this slice uses. But `LatestGate`
+ * (`StrategyDetail.tsx`) already has `row: GateRow` — the `registry gates` composite — in hand,
+ * and `row.decision.checks` goes through the SAME `_project_decision` allowlist projection as
+ * `RunDetail.gate_decision.checks` (`algua/registry/gate_history.py`), so it is the identical
+ * shape, not a lesser one. Under spec Q8 there is no backfill of the `runs` ledger, so on a
+ * database with real `gate_evaluations` rows but zero `runs` rows the card's own fetch found
+ * nothing and rendered "no gate checks recorded yet" OVER a real, passing gate header — the
+ * per-check breakdown for every historical evaluation was unreachable in the UI. Taking `checks`
+ * as a prop instead removes that waterfall entirely: one source, no second ledger, two fewer
+ * requests per `StrategyDetail` mount.
  *
  * THE DISTINCTION THIS CARD EXISTS TO MAKE: binding checks decide pass/fail; advisory checks
  * compute and are recorded but have NO veto power (`algua/research/gates.py`). Conflating them
@@ -190,17 +199,14 @@ function CheckRow({ check, index }: { check: GateCheck; index: number }) {
  * advisory bar is visibly thinner — a real SVG height attribute). Status color (pass=green,
  * binding fail=red, advisory fail=amber) is reinforcement only, exactly PassMark's existing rule.
  *
- * A check whose `value` is NULL (never ran, or ran but the shape guard dropped it) renders
- * "not evaluated" — never a bar drawn at zero, which would fabricate a data point on the one
- * card whose entire job is explaining a rejection.
+ * A check with no numeric `value` renders "no numeric value" — never a bar drawn at zero (which
+ * would fabricate a data point on the one card whose entire job is explaining a rejection) and
+ * never "not evaluated" (fix round 2): a boolean check (`pit_required`), a `value: None`-by-
+ * construction check (`regime_robustness`), and a fail-closed non-finite Sharpe
+ * (`holdout_sharpe_floor`) all lack a numeric value while having genuinely run — the verdict
+ * beside the text still stands on its own for those.
  */
-export default function GateBulletCard({ strategy }: { strategy: string }) {
-  const listUrl = runsUrl({ strategy, kind: 'gate', limit: 1 })
-  const list = useFetch<ApiEnvelope<RunsListPayload>>(listUrl)
-  const runId = list.data?.data?.runs?.[0]?.id ?? null
-  const detail = useFetch<ApiEnvelope<RunDetail>>(runId !== null ? runDetailUrl(runId) : null)
-
-  const checks = detail.data?.data?.gate_decision?.checks ?? []
+export default function GateBulletCard({ checks }: { checks: GateCheck[] }) {
   const { binding, advisory: advisoryChecks } = splitChecks(checks)
   const isEmpty = checks.length === 0
 

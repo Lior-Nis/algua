@@ -239,7 +239,7 @@ function LatestGate({ row, strategy }: { row: GateRow; strategy: string }) {
         <div className="dim-note">decision unparseable: {row.decision_error ?? 'unknown'}</div>
       ) : (
         <>
-          <GateBulletCard strategy={strategy} />
+          <GateBulletCard checks={decision.checks ?? []} />
           {scalars.length > 0 && <div className="dim-note num">{scalars.join(' · ')}</div>}
           <TrialDistribution strategy={strategy} />
         </>

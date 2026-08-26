@@ -79,11 +79,12 @@ const seriesEnvelope: ApiEnvelope<SeriesPayload> = {
   },
 }
 
-// The gate bullet card (task 5) sources its checks from `/api/runs/{id}`, NOT from
-// `detail.gates` above — a SEPARATE two-call waterfall (`/api/runs?...&kind=gate&limit=1` to
-// find the latest gate run's id, then `/api/runs/{id}` for its checks). Same `holdout_sharpe`
-// binding-fail check as `detail.gates.gate_evaluations[0].decision`, so this exercises the same
-// scenario the old inline text-dump table used to.
+// The gate bullet card (task 5) is fed `checks` directly from `detail.gates.gate_evaluations[0]
+// .decision` (fix round 2 — no fetch of its own; see `GateBulletCard.tsx`'s docstring). Only
+// `TrialDistribution` (task 6) still does the `/api/runs?...&kind=gate&limit=1` ->
+// `/api/runs/{id}` two-step waterfall, for the deflation strip and the trial cloud's own marker
+// — these two fixtures exist for THAT fetch. Same `holdout_sharpe` check value as
+// `detail.gates.gate_evaluations[0].decision` so the two views agree, per both docstrings.
 const runsListEnvelope: ApiEnvelope<RunsListPayload> = {
   ok: true,
   fetched_at: '2026-08-09T14:30:00Z',
@@ -178,11 +179,17 @@ it('renders the degraded paper banner and the rest of the page when paper is nul
   expect(screen.getByText('mom_breakout')).toBeTruthy()
   expect(screen.getByText('breakout over rolling high')).toBeTruthy()
   expect(screen.getByText('idea → backtested')).toBeTruthy()
-  // The gate bullet card's checks land via its OWN two-step fetch (`/api/runs?...` then
-  // `/api/runs/{id}`), a beat after the composite `/api/strategy/{name}` response above — wait
-  // for it rather than asserting synchronously.
+  // The gate bullet card's checks come straight from the already-fetched composite response
+  // (fix round 2 — no fetch of its own), so this is available as soon as the page renders.
   expect(await screen.findByText('holdout_sharpe')).toBeTruthy()
   expect(screen.getAllByText('fail').length).toBeGreaterThanOrEqual(2) // verdict + check row
   // empty series -> chart placeholder, no crash
   expect(screen.getByText(/awaiting tick history/i)).toBeTruthy()
 })
+
+// The runs-ledger-empty regression (fix round 2) lives in its own file
+// (`StrategyDetail.emptyruns.test.tsx`): the funnel-wide `/api/runs?kind=sweep_trial...` URL is
+// never `strategy=`-scoped, and this file's first test above already populates that URL's
+// module-level fetch cache with a non-empty response — a second, empty-runs fixture for the SAME
+// URL in this file would silently read back the FIRST test's cached response (the precedent
+// `TrialDistribution.render.test.tsx`'s header comment documents).
