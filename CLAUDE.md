@@ -6,7 +6,8 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 ## Orientation — where to look
 - **START HERE if you are adding anything:** `docs/architecture.md` — the one-page module map: what
   each package owns, and the registration seam for adding a provider / importer / broker / tracker /
-  calendar / strategy / command **without editing core files**. It also lists the walls (PIT,
+  calendar / strategy / command — new module + one registration line, not a core-file rewrite.
+  It also lists the walls (PIT,
   single-use holdout, the paper→live gate, lane parity, executable CODEOWNERS) so you know why a
   change might be refused.
 - **Architecture & roadmap (source of truth):** `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md`

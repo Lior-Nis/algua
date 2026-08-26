@@ -77,7 +77,9 @@ stays visible rather than being blessed by an exemption.
 ```python
 register_provider("myvendor", lambda settings: MyProvider(...))
 ```
-`get_provider(name, settings)` resolves it. **No core file changes.**
+`get_provider(name, settings)` resolves it. The built-ins register themselves the same way, so
+your factory is not a second-class citizen — see the tracker section below for the one
+unavoidable two-line cost (an import so your registration actually runs).
 
 ### A bulk importer
 `algua/data/importers/` — same shape: `register_importer("myvendor", factory)`.
@@ -95,9 +97,20 @@ runtime would be a hazard, not a feature. Declare the host allowlist (`_ALLOWED_
 adapter — the base class enforces https + allowlisted host.
 
 ### An experiment tracker
-`algua/tracking/` — implement the `ExperimentTracker` Protocol, then
+`algua/tracking/` — implement the `ExperimentTracker` Protocol in **its own module**, then
 `register_tracker("mybackend", MyTracker)`. `tracking_backend` in settings selects it.
 Return `TRACKING_SKIPPED` from a no-op backend so the JSON reports "skipped", not a null run id.
+
+**Two lines land in `tracking/factory.py`** — an import and the `register_tracker` call. That is the
+whole core-file cost, and it is a *declaration that the backend exists*, not a change to any logic:
+Python needs something to import your module before its registration can run. (Entry points would
+remove even that, and would be over-engineering while every backend ships in-tree.) The same shape
+applies to providers, importers and brokers.
+
+**Expect the size ratchet to push you into a new file.** `tests/test_module_size_ratchet.py` pins
+every module ≥300 lines at its current size, and several are pinned at *exactly* their length — so
+appending a class to an existing module often fails the gate. That is the ratchet working: the new
+thing belongs in its own module. Check `wc -l` before you plan to extend a large file.
 
 ### A trading calendar
 There is one implementation and one selector (`ALGUA_EXCHANGE`), so there is **no registry** — just
