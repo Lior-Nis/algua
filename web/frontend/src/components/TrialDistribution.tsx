@@ -220,10 +220,14 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
       : null
 
   const rightEdge = PLOT.width - PLOT.right
+  // Anchor buffers are sized to each label's OWN text ("deflated bar N.NN" vs the longer
+  // "this strategy N.NN · advisory" qualifier) so a label near the right edge flips to
+  // right-anchored instead of running off the viewBox — re-measured after the advisory
+  // qualifier lengthened the marker label (fix round 1).
   const thresholdLabelAnchor =
-    geometry.threshold !== null && geometry.threshold.x > rightEdge - 70 ? 'end' : 'start'
+    geometry.threshold !== null && geometry.threshold.x > rightEdge - 85 ? 'end' : 'start'
   const markerLabelAnchor =
-    geometry.marker !== null && geometry.marker.cx > rightEdge - 70 ? 'end' : 'start'
+    geometry.marker !== null && geometry.marker.cx > rightEdge - 140 ? 'end' : 'start'
 
   return (
     <ChartFrame title="funnel trial distribution" isEmpty={isEmpty} emptyLabel={emptyLabel} height={HEIGHT}>
@@ -239,7 +243,8 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
               : '') +
             (geometry.marker !== null
               ? `; this strategy's holdout result ${fmt(geometry.marker.value)}, ` +
-                `${geometry.marker.passed === true ? 'clears the bar' : geometry.marker.passed === false ? 'below the bar' : 'verdict unknown'}`
+                `${geometry.marker.passed === true ? 'clears the deflated bar' : geometry.marker.passed === false ? 'below the deflated bar' : 'verdict unknown'}` +
+                ' (advisory check, does not veto the gate)'
               : '')
           }
         >
@@ -313,7 +318,7 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
                 y={MARKER_ROW_Y + MARKER_RADIUS + 11}
                 textAnchor={markerLabelAnchor}
               >
-                this strategy {fmt(geometry.marker.value)}
+                this strategy {fmt(geometry.marker.value)} · advisory
               </text>
             </>
           )}
@@ -334,7 +339,7 @@ export default function TrialDistribution({ strategy }: { strategy: string }) {
             y={CAPTION_Y}
             textAnchor="middle"
           >
-            mean window sharpe — funnel-wide sweep trials
+            mean window sharpe — trials · bar & marker: holdout sharpe
           </text>
         </svg>
         {excludedNote !== null && <div className="chart-footnote">{excludedNote}</div>}

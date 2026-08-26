@@ -85,6 +85,10 @@ it('renders the threshold rule, direct-labelled, and the strategy holdout marker
   expect(marker).toBeTruthy()
   expect(marker.tagName.toLowerCase()).not.toBe('circle') // trial points are circles; marker is not
   expect(screen.getByTestId('own-marker-label').textContent).toMatch(/0\.03|0\.025/)
+  // The marker's own advisory check never vetoes the OVERALL gate (types.ts: an advisory fail
+  // "must never render like a failed binding floor") — the fail-red diamond must carry the word
+  // "advisory" in its direct label, since colour/shape alone would read exactly like one.
+  expect(screen.getByTestId('own-marker-label').textContent).toMatch(/advisory/i)
 
   const points = screen.getAllByTestId('trial-point')
   expect(points.length).toBe(10)
