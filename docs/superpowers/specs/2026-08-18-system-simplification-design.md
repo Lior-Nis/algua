@@ -276,6 +276,24 @@ End-state rule: every `*_cmd.py` is thin — parse options → call one domain f
 - **Acceptance:** dispatch a fresh agent on the MLflow backlog task; it must land as
   new module(s) + registration without editing core files, reading only
   `docs/architecture.md` + touched modules.
+  **RUN (stage 9): SUBSTANTIAL PASS, with one honest caveat and one finding.**
+  A fresh agent was given only `docs/architecture.md` and the real MLflow FileStore-deprecation
+  task. It landed `algua/tracking/sqlite_tracker.py` + tests, read only the four modules it
+  touched, and reported the map was sufficient to locate the seam. Gate green (3580 tests).
+  * **Caveat:** it touched `tracking/factory.py` for TWO lines — an import and the
+    `register_tracker` call. Not "without editing core files" as written. That cost is structural
+    (Python needs an import before a registration can run), not a design failure; entry points
+    would remove it and would be over-engineering while every backend ships in-tree. The docs were
+    corrected to claim "new module + one registration line" instead of "no core changes".
+  * **Finding, caught BEFORE the probe by inspecting the seams:** three of the four registration
+    seams were half-built — `register_provider`, `register_importer` and `register_tracker` were
+    each defined and never called, sitting beside a hardcoded `_REGISTRY` literal. They LOOKED
+    extensible while actually requiring a core edit. All three now follow `broker_factory`'s
+    working pattern (empty registry, built-ins self-register through the public seam). The probe
+    would otherwise have failed on the seam rather than on the agent.
+  * **The ratchet earned its place on first contact:** `mlflow_tracker.py` is pinned at exactly its
+    316 lines, so the agent could not append the new class and wrote a focused 58-line module
+    instead. The ratchet shaped the design rather than merely blocking it.
 
 ## 8. Stage sequence
 
