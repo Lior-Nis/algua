@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { FIXTURE_SENTINEL, resolveFixture } from './index'
-import type { ApiEnvelope, BookPayload, FleetHealth, TriagePayload } from '../types'
+import type {
+  ApiEnvelope,
+  BookPayload,
+  FleetHealth,
+  ListPayload,
+  StrategyRecord,
+  TriagePayload,
+} from '../types'
 
 describe('resolveFixture', () => {
   it('returns undefined for an unknown URL rather than a fabricated payload', () => {
@@ -25,14 +32,20 @@ describe('resolveFixture', () => {
     }
   })
 
-  it('carries the sentinel so a production build can be proven fixture-free', () => {
-    expect(JSON.stringify(resolveFixture('/api/fleet'))).toContain(FIXTURE_SENTINEL)
+  it('carries the sentinel on a fixture-only endpoint no real screen ever fetches, so a '
+    + 'production build can be proven fixture-free without a debug string leaking onto a '
+    + 'rendered screen', () => {
+    expect(JSON.stringify(resolveFixture('/api/__demo'))).toContain(FIXTURE_SENTINEL)
   })
 
-  it('is rich enough to exercise the design: >= 10 fleet rows across >= 3 stages', () => {
+  it('is rich enough to exercise the design: >= 10 fleet rows across >= 3 stages, and the '
+    + 'row count matches /api/strategies exactly (fleet_status emits one row per REGISTRY '
+    + 'strategy, not just the ticked ones — a subset here would be silent drift)', () => {
     const fleet = resolveFixture('/api/fleet') as ApiEnvelope<FleetHealth>
+    const strategies = resolveFixture('/api/strategies') as ApiEnvelope<ListPayload<StrategyRecord>>
     expect(fleet.data.rows.length).toBeGreaterThanOrEqual(10)
     expect(new Set(fleet.data.rows.map((r) => r.stage)).size).toBeGreaterThanOrEqual(3)
+    expect(fleet.data.rows.length).toBe(strategies.data.data.length)
   })
 
   it('has a NON-empty triage list, so the attention slot is exercised', () => {

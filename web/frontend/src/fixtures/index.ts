@@ -8,6 +8,7 @@ import {
   FIXTURE_SENTINEL,
   FLEET,
   IDEAS,
+  OPERATIONAL_STAGES,
   OPS,
   RUNS,
   SEEDS,
@@ -114,9 +115,12 @@ function recentOrdersFor(seed: Seed): RecentOrder[] {
   ]
 }
 
-/** Only strategies the operator loop actually ticks (live/paper/forward_tested/dormant) carry a
- * `FleetRow` — reuse it rather than re-deriving health/drawdown a second time. */
+/** `/api/fleet` now carries a row for EVERY registry strategy (fleet_status() emits one per
+ * strategy, not just the ticked ones), so a row existing is no longer proof an operator loop
+ * watches it — gate explicitly on `OPERATIONAL_STAGES` and reuse the row for the fields that
+ * do apply, rather than re-deriving health/drawdown a second time. */
 function paperRollupFor(seed: Seed): PaperRollup | null {
+  if (!OPERATIONAL_STAGES.includes(seed.stage)) return null
   const row = FLEET.data.rows.find((r) => r.strategy === seed.name)
   if (row === undefined) return null
   return {
@@ -275,6 +279,10 @@ export function resolveFixture(url: string): unknown | undefined {
     // (holdout_returns.returns_blob is SENSITIVE) — an empty series map is the honest fixture.
     case '/api/runs/series': return envelope<RunSeriesPayload>({ series: {} })
     case '/api/push/key':    return { key: null }
+    // Fixture-only: no screen ever fetches this. The dist guard only needs FIXTURE_SENTINEL
+    // present somewhere in the bundle, not inside a payload a real screen renders — parking it
+    // in, say, a fleet row's `last_tick_error` would eventually print debug text on-screen.
+    case '/api/__demo':      return { fixture: FIXTURE_SENTINEL }
   }
 
   const series = path.match(/^\/api\/strategy\/([^/]+)\/series$/)
@@ -286,7 +294,14 @@ export function resolveFixture(url: string): unknown | undefined {
   const runId = path.match(/^\/api\/runs\/(\d+)$/)
   if (runId) {
     const run = RUNS.data.runs.find((r) => r.id === Number(runId[1])) ?? RUNS.data.runs[0]
-    return envelope<RunDetail>({ ...run, extra_metrics: {} })
+    // Every RUNS row is `kind: 'gate'` — the gate bullet card (one of the five headline views)
+    // reads its checks from HERE (RunDetail.gate_decision), never from StrategyDetailResponse.
+    // Reuse the same research-gate builder as the strategy-detail composite so the two agree,
+    // and so the card's binding/advisory split (a failed advisory check inside a passing gate
+    // must never look like a breached binding floor) actually has something to render.
+    const seed = SEEDS.find((s) => s.id === run.strategy_id)
+    const gateDecision = seed !== undefined ? buildGateRow(seed, run.id, 'research').decision : null
+    return envelope<RunDetail>({ ...run, extra_metrics: {}, gate_decision: gateDecision })
   }
 
   return undefined

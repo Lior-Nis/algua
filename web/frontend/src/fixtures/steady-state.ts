@@ -56,8 +56,15 @@ export interface Seed {
   description: string | null
 }
 
-/** 14 strategies across 4 operational stages plus research stages. Two are unhealthy, which
- * is what gives the attention slot and the fleet grid something to disagree about. */
+/** The stages an operator loop actually ticks (algua/execution/fleet_health.py
+ * `OPERATIONAL_STAGES` — dormant is explicitly NOT in that set, unlike the informal
+ * "operational-ish" grouping used elsewhere in this file for book/allocation purposes). */
+export const OPERATIONAL_STAGES: string[] = ['live', 'paper', 'forward_tested']
+
+/** 14 strategies spanning all 7 lifecycle stages — `fleet_status()` emits one row per
+ * REGISTRY strategy, not just the ticked ones, so every seed here gets a fleet row. Two are
+ * unhealthy, which is what gives the attention slot and the fleet grid something to disagree
+ * about. */
 export const SEEDS: Seed[] = [
   {
     name: 'liquid10_adj_momentum', stage: 'live', health: 'ok', drawdown: 0.021, capital: 1800, pnl: 74.2,
@@ -154,10 +161,7 @@ function fleetRow(s: Seed): FleetRow {
     stage: s.stage,
     health: s.health,
     staleness_sessions: s.health === 'stale' ? 3 : s.health === 'drift' ? 2 : 0,
-    // The stale row's tick error is where the sentinel rides in `/api/fleet` — a demo build's
-    // dist guard greps for FIXTURE_SENTINEL, so it must surface somewhere in EVERY endpoint's
-    // reachable payload, not just `/api/triage`.
-    last_tick_error: s.health === 'stale' ? `no fresh mark received · ${FIXTURE_SENTINEL}` : null,
+    last_tick_error: s.health === 'stale' ? 'no fresh mark received in 3 sessions' : null,
     kill_switch: { tripped: false, reason: null, global_halt: false },
     drawdown: {
       peak_equity: s.capital > 0 ? s.capital : null,
@@ -169,7 +173,9 @@ function fleetRow(s: Seed): FleetRow {
   }
 }
 
-const rows = operational.map(fleetRow)
+// One row per REGISTRY strategy (fleet_status() emits idle rows for research-stage
+// strategies too — see OPERATIONAL_STAGES above), not just the ticked ones.
+const rows = SEEDS.map(fleetRow)
 const alerting = rows.filter((r) => r.health !== 'ok' && r.health !== 'idle')
 
 export const FLEET: ApiEnvelope<FleetHealth> = envelope({
@@ -185,7 +191,7 @@ export const FLEET: ApiEnvelope<FleetHealth> = envelope({
     }, {}),
   },
   stale_after_sessions: 2,
-  operational_stages: ['live', 'paper', 'forward_tested', 'dormant'],
+  operational_stages: OPERATIONAL_STAGES,
   rows,
 })
 
