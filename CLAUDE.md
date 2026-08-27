@@ -4,6 +4,12 @@ Algua is an agent-first algotrading platform. You (an agent) and the human opera
 drive the system through the **same** CLI. Every data command emits JSON on stdout.
 
 ## Orientation — where to look
+- **START HERE if you are adding anything:** `docs/architecture.md` — the one-page module map: what
+  each package owns, and the registration seam for adding a provider / importer / broker / tracker /
+  calendar / strategy / command — new module + one registration line, not a core-file rewrite.
+  It also lists the walls (PIT,
+  single-use holdout, the paper→live gate, lane parity, executable CODEOWNERS) so you know why a
+  change might be refused.
 - **Architecture & roadmap (source of truth):** `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md`
 - **Why the rules exist (detail):** `docs/agent/operating.md`
 - **How this foundation was built (task plan):** `docs/superpowers/plans/2026-05-29-foundation-command-surface.md`
@@ -153,6 +159,15 @@ run that mints an identity-matched, single-use gate token, not a raw `registry t
 
 ## Quality gates before committing
 `uv run pytest -q && uv run ruff check . && uv run mypy algua && uv run lint-imports`
+
+Two of those enforce structure, not style, and are worth knowing before you fight them:
+- **`lint-imports`** — 28 contracts fixing the package layering (`cli` composes everything; nothing
+  composes `cli`). Adding an import that breaks one is a design decision; do not add an exemption
+  without saying why in the commit.
+- **`tests/test_module_size_ratchet.py`** — a shrink-only size ratchet over every module ≥300 lines.
+  Carved files cannot regrow and new god-files cannot appear silently. When it fails, prefer putting
+  the change where it belongs, or carving; raising a pin is the last option and is meant to be
+  visible in review.
 
 When a change touches `web/` (the monitor PWA — a STANDALONE uv project; NEVER add web deps to
 the root project, the root `uv.lock` is dependency_hash identity), also run:

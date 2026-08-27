@@ -27,10 +27,10 @@ def _build_databento() -> BarImporter:
     return DatabentoImporter()
 
 
-_REGISTRY: dict[str, ImporterFactory] = {
-    "firstrate": _build_firstrate,
-    "databento": _build_databento,
-}
+#: Starts EMPTY: the built-ins below register themselves through the same public seam a
+#: third party uses, so "add a importer without editing this file" is a property the code
+#: actually has rather than one the docstring claims. (Mirrors `execution/broker_factory`.)
+_REGISTRY: dict[str, ImporterFactory] = {}
 
 
 def register_importer(name: str, factory: ImporterFactory) -> None:
@@ -45,3 +45,7 @@ def get_importer(name: str) -> BarImporter:
     except KeyError:
         raise ValueError(f"unsupported bar importer: {name}") from None
     return factory()
+
+
+register_importer("firstrate", _build_firstrate)
+register_importer("databento", _build_databento)
