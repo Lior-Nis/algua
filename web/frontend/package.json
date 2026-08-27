@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "build:demo": "VITE_ALGUA_DEMO=1 tsc -b && VITE_ALGUA_DEMO=1 vite build --outDir dist-demo",
     "verify:demo-build": "node scripts/verify-demo-build.mjs",
+    "verify:viewport": "node scripts/verify-viewport.mjs",
     "check": "tsc --noEmit && vitest run",
     "preview": "vite preview"
   },
@@ -26,6 +27,7 @@
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",
     "jsdom": "30.0.1",
+    "playwright": "^1.62.0",
     "typescript": "5.9.3",
     "vite": "8.2.1",
     "vite-plugin-pwa": "^1.3.0",

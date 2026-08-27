@@ -423,10 +423,7 @@ button { font: inherit; }
 }
 
 /* Tables never widen the page — they scroll inside their own container. */
-.table-scroll {
-  overflow-x: auto;
-  max-width: 100%;
-}
+.table-scroll { overflow-x: auto; min-width: 0; max-width: 100%; contain: inline-size; }
 
 .data-table {
   border-collapse: collapse;
