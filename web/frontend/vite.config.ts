@@ -1,8 +1,27 @@
+import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { defineConfig } from 'vitest/config'
 
-export default defineConfig({
+// Only the real `vite build` for the PRODUCTION (non-demo) bundle swaps `./transport` for the
+// fixture-free stub — never `vite build` for the demo bundle (VITE_ALGUA_DEMO=1, which needs
+// the real fixtures), never `vite dev`, and never a Vitest run (which imports `./transport`
+// directly from transport.test.ts and must get the real module). See src/transport.prod.ts
+// for why tree-shaking alone isn't enough to keep fixtures out of the production bundle.
+function prodTransportAlias(command: string) {
+  if (command !== 'build' || process.env.VITEST || process.env.VITE_ALGUA_DEMO === '1') return []
+  return [
+    {
+      find: './transport',
+      replacement: fileURLToPath(new URL('./src/transport.prod.ts', import.meta.url)),
+    },
+  ]
+}
+
+export default defineConfig(({ command }) => ({
+  resolve: {
+    alias: prodTransportAlias(command),
+  },
   plugins: [
     react(),
     VitePWA({
@@ -45,4 +64,4 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test-setup.ts'],
   },
-})
+}))

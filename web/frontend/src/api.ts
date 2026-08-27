@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { DEMO, demoJSON } from './transport'
 
 /** Error thrown by getJSON on a non-2xx response, carrying the backend envelope's code. */
 export class ApiError extends Error {
@@ -14,6 +15,9 @@ export class ApiError extends Error {
 }
 
 export async function getJSON<T>(url: string): Promise<T> {
+  // Demo mode swaps the TRANSPORT, not the components: every screen renders identically in
+  // both modes because neither knows which one it is in.
+  if (DEMO) return demoJSON<T>(url)
   const res = await fetch(url, { headers: { accept: 'application/json' } })
   if (!res.ok) {
     let code: string | null = null
