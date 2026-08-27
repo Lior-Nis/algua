@@ -9,25 +9,36 @@ import type {
   TriagePayload,
 } from '../types'
 
+// Enumerated from the useFetch/fetch() call sites across screens, components, and push.ts —
+// every URL the REAL app can ask for. A new endpoint must be added here deliberately, not
+// discovered as a blank screen in the demo build. Deliberately EXCLUDES `/api/__demo`, which
+// exists solely as the sentinel's home and which no real screen ever fetches.
+const REAL_ENDPOINT_URLS = [
+  '/api/triage',
+  '/api/fleet',
+  '/api/book',
+  '/api/ops',
+  '/api/ideas',
+  '/api/strategies',
+  '/api/activity?limit=25',
+  '/api/runs',
+  '/api/runs?kind=gate&sort=sharpe_oos&limit=20',
+  '/api/runs?kind=backtest&strategy=liquid10_adj_momentum&limit=1',
+  '/api/runs?kind=sweep_trial&limit=200',
+  '/api/runs/100',
+  '/api/runs/series?ids=100,101',
+  '/api/strategy/liquid10_adj_momentum',
+  '/api/strategy/liquid10_adj_momentum/series',
+  '/api/push/key',
+]
+
 describe('resolveFixture', () => {
   it('returns undefined for an unknown URL rather than a fabricated payload', () => {
     expect(resolveFixture('/api/nope')).toBeUndefined()
   })
 
   it('serves every endpoint the app actually calls', () => {
-    // Enumerated from the useFetch call sites; a new endpoint must be added here
-    // deliberately, not discovered as a blank screen in the demo build.
-    for (const url of [
-      '/api/triage',
-      '/api/fleet',
-      '/api/book',
-      '/api/ops',
-      '/api/ideas',
-      '/api/strategies',
-      '/api/runs',
-      '/api/runs?kind=gate&sort=sharpe_oos&limit=20',
-      '/api/strategy/liquid10_adj_momentum',
-    ]) {
+    for (const url of REAL_ENDPOINT_URLS) {
       expect(resolveFixture(url), url).toBeDefined()
     }
   })
@@ -36,6 +47,13 @@ describe('resolveFixture', () => {
     + 'production build can be proven fixture-free without a debug string leaking onto a '
     + 'rendered screen', () => {
     expect(JSON.stringify(resolveFixture('/api/__demo'))).toContain(FIXTURE_SENTINEL)
+  })
+
+  it('never leaks the sentinel into a payload a real screen actually renders — the fixture-only '
+    + '/api/__demo route above is the sentinel\'s ONLY home', () => {
+    for (const url of REAL_ENDPOINT_URLS) {
+      expect(JSON.stringify(resolveFixture(url)), url).not.toContain(FIXTURE_SENTINEL)
+    }
   })
 
   it('is rich enough to exercise the design: >= 10 fleet rows across >= 3 stages, and the '

@@ -202,7 +202,7 @@ export const TRIAGE: TriagePayload = {
       kind: 'strategy',
       severity: 2,
       title: 'orderly_six_day_rebound',
-      detail: `marks stale · 3 sessions · ${FIXTURE_SENTINEL}`,
+      detail: 'marks stale · 3 sessions',
       since: '2026-08-24T13:30:00+00:00',
       route: '/s/orderly_six_day_rebound',
     },
