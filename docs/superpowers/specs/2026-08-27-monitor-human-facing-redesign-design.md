@@ -84,8 +84,18 @@ Strategy detail remains a drill-down reached from any of the three.
 ### 4.1 Now
 
 **Attention slot (the one variable band).** Either a single all-clear mark with a
-one-line basis, or a count plus one compact card per exception (severity bar, strategy
-name, cause, age).
+one-line basis, or a count plus one compact card per exception (strategy name and the
+cause).
+
+> **Amended 2026-08-27 (slice 1).** This originally specified a *severity bar* and an
+> *age* per card. `/api/triage` can supply neither: `web/backend/triage.py` hardcodes
+> `since: None` for `strategy`-kind items, and their severity is the constant
+> `SEVERITY['strategy']` (3) — there is no gradient to encode. Designing those two
+> encodings would have produced a card that renders uniform and blank against real
+> data, which slice 1's fixture work caught before slice 2 built it. Ranking between
+> *kinds* (loop_down, global_halt, capital_stranded, queue_wedged, strategy) is real
+> and still available; ranking *within* the strategy kind is not. If an age is wanted
+> later, it is a backend change first.
 
 **The all-clear must be bound to the verdict `fleet health` already computes** — the
 fail-closed one that exits non-zero on `stale`/`drift`/`idle`/`halted`, global halt, or
@@ -93,10 +103,20 @@ a corrupt fleet row. The UI must NOT compute its own notion of "fine". A UI-side
 definition will eventually show green while a loop is dead, which is strictly worse
 than today's noisy screen because the operator will have learned to trust it.
 
-**Fleet grid.** One cell per operational strategy (live / paper / forward_tested /
+**Fleet grid.** One cell per *fielded* strategy (live / paper / forward_tested /
 dormant — research stages belong to §4.3). Position groups by stage; colour encodes the
 health verdict: trading, stale, halted, resting. Verified to 65 cells without layout
 change.
+
+> **Amended 2026-08-27 (slice 1).** This paragraph originally called that set
+> *operational*. It is not: `algua/execution/fleet_health.py:66` defines
+> `OPERATIONAL_STAGES = {live, paper, forward_tested}` and explicitly EXCLUDES dormant,
+> while `fleet_status()` emits a row for every registry strategy at any stage. The
+> DISPLAY choice — dormant cells rendered as resting, research stages omitted from this
+> grid — stands and is unchanged; only the word was wrong, and it collided with a
+> codebase constant that means something narrower. Slice 2 must filter by stage
+> explicitly rather than trusting the term, and must sort worst-severity-first, because
+> that is the order the API returns (`fleet_health.py:263`).
 
 **Deltas, not events.** What moved since the last look: equity change with a
 zero-anchored sparkline, and counts for promoted / benched / gates run. No event list,
