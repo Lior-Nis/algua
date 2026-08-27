@@ -92,6 +92,37 @@ auth layer in this app — loopback + tailscale is the security boundary.
 - **Dev fallback:** if `<repo>/.venv/bin/algua` is missing, it falls back to
   `uv run --no-sync algua ...` (slower; logged once at startup).
 
+## Demo build (fixture-served, no backend)
+
+`web/frontend` also ships a **demo** build: a byte-stable, fixture-served bundle for previewing
+every screen without a live backend (used by the monitor-redesign harness — `npm run
+verify:viewport` renders it headlessly at a 390px mobile viewport). Build it separately from the
+real production bundle:
+
+```sh
+cd web/frontend
+npm run build:demo   # VITE_ALGUA_DEMO=1, outputs dist-demo/
+```
+
+The demo transport (`src/transport.ts`) swaps in fixture data (`src/fixtures/`) in place of
+`fetch()`; every screen renders identically in both modes because neither knows which one it's
+in. **Two guards keep this demo-only and out of the real deploy path:**
+
+1. **The production bundle must never carry fixture data.** `npm run build` (the command the
+   deploy steps above run) ends with `node scripts/verify-demo-build.mjs prod dist`, which greps
+   the built output for a fixture sentinel string and fails the build if it's present — so a
+   stray `VITE_ALGUA_DEMO=1` left set in a shell can't silently ship 14 invented strategies as
+   real data. `vite.config.ts` also aliases `./fixtures` away entirely for a non-demo build (a
+   Vite plugin that throws at *resolve* time if anything imports it), which is airtight against
+   tree-shaking gaps the grep alone could miss.
+2. **The demo build must never reach the network.** `demoJSON()` never calls `fetch`, and
+   `src/push.ts`'s web-push plumbing (which does call `fetch` directly, bypassing the transport)
+   short-circuits to `'unsupported'` whenever `DEMO` is true, so the demo's ENABLE ALERTS control
+   never fires a real `Notification.requestPermission()` or `/api/push/*` request.
+
+Run `node scripts/verify-demo-build.mjs demo dist-demo` to confirm the demo build the other way —
+that it DOES carry fixture data (an unfixtured demo build would render every screen empty).
+
 ## Dependency isolation
 
 Web dependencies (fastapi, uvicorn, httpx, ...) must **NEVER** be added to the

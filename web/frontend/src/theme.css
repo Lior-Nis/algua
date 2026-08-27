@@ -130,6 +130,14 @@ button { font: inherit; }
 
 .content {
   display: grid;
+  /* Root cause of the /money overflow (spec §1.1), not just its symptom: an implicit auto grid
+     track sizes itself to its widest child's CONTENT, so any wide child — a table, a chart, a
+     `<pre>`, one long unbroken token — still widens the page even with `.table-scroll` in place.
+     `minmax(0, 1fr)` caps the track at the container's own width and lets a wide child overflow
+     INSIDE itself instead, which is what makes the bug class actually unrepresentable rather
+     than merely mitigated for the one child that happened to get `.table-scroll`. Verified by
+     `scripts/verify-viewport.mjs`, including an injected oversized div that must still fail. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   align-content: start;
   padding: 16px 16px calc(80px + env(safe-area-inset-bottom));
@@ -423,10 +431,7 @@ button { font: inherit; }
 }
 
 /* Tables never widen the page — they scroll inside their own container. */
-.table-scroll {
-  overflow-x: auto;
-  max-width: 100%;
-}
+.table-scroll { overflow-x: auto; min-width: 0; max-width: 100%; contain: inline-size; }
 
 .data-table {
   border-collapse: collapse;

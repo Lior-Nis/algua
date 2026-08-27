@@ -49,3 +49,15 @@ jobs:
       - name: Frontend build
         run: npm run build
         working-directory: web/frontend
+      - name: Production build carries no fixtures
+        run: node scripts/verify-demo-build.mjs prod dist
+        working-directory: web/frontend
+      - name: Demo build
+        run: npm run build:demo
+        working-directory: web/frontend
+      - name: Demo build carries fixtures
+        run: node scripts/verify-demo-build.mjs demo dist-demo
+        working-directory: web/frontend
+      - name: No horizontal overflow at 390px
+        run: npm run verify:viewport
+        working-directory: web/frontend
