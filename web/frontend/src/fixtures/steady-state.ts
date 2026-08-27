@@ -17,6 +17,7 @@ import type {
   RunRow,
   RunsListPayload,
   StrategyRecord,
+  TriageItem,
   TriagePayload,
 } from '../types'
 
@@ -173,9 +174,21 @@ function fleetRow(s: Seed): FleetRow {
   }
 }
 
+// Worst-offender-first, matching `fleet_status()`'s own sort key EXACTLY
+// (algua/execution/fleet_health.py `_SEVERITY` + `fleet_status`'s `rows.sort(...)`, ties broken
+// by strategy name) — a fixture in seed/registration order would look right in this file and
+// scramble against the real API the moment a screen is designed against row position (FIX 5).
+const HEALTH_SEVERITY: Record<string, number> = { halted: 0, drift: 1, stale: 2, idle: 3, ok: 4 }
+
+function byFleetOrder(a: FleetRow, b: FleetRow): number {
+  const sa = HEALTH_SEVERITY[a.health] ?? 99
+  const sb = HEALTH_SEVERITY[b.health] ?? 99
+  return sa - sb || a.strategy.localeCompare(b.strategy)
+}
+
 // One row per REGISTRY strategy (fleet_status() emits idle rows for research-stage
 // strategies too — see OPERATIONAL_STAGES above), not just the ticked ones.
-const rows = SEEDS.map(fleetRow)
+const rows = SEEDS.map(fleetRow).sort(byFleetOrder)
 const alerting = rows.filter((r) => r.health !== 'ok' && r.health !== 'idle')
 
 export const FLEET: ApiEnvelope<FleetHealth> = envelope({
@@ -195,31 +208,47 @@ export const FLEET: ApiEnvelope<FleetHealth> = envelope({
   rows,
 })
 
+// Mirrors `web/backend/triage.py::_fleet_items` field-for-field (no loop/capital items in this
+// fixture — OPS is all-`ok` and BOOK's `unallocated_operational` is empty) so a screen designed
+// against this data cannot invent a field the real endpoint never sends (FIX 3): `severity` is
+// ALWAYS `SEVERITY['strategy']` (3), `title` is `f"{name} {health}"`, `detail` follows the exact
+// kill_switch-reason -> staleness -> stage fallback chain, and `since` is ALWAYS `None` for a
+// strategy item — the real endpoint has no per-strategy "since" timestamp to offer. (There is no
+// `drawdown N% of M% wall` detail string anywhere in triage.py — that kind of item does not
+// exist.) Spec §4.1's exception card asks for an age the real API cannot supply; see the fix-wave
+// report for what to amend there instead of inventing it here.
+function triageDetailFor(row: FleetRow): string {
+  if (row.kill_switch?.reason) return row.kill_switch.reason
+  if (typeof row.staleness_sessions === 'number') return `${row.staleness_sessions} sessions since last tick`
+  return `stage ${row.stage} — no tick evidence`
+}
+
+const TRIAGE_ITEMS: TriageItem[] = alerting
+  .map(
+    (row): TriageItem => ({
+      kind: 'strategy',
+      severity: 3,
+      title: `${row.strategy} ${row.health}`,
+      detail: triageDetailFor(row),
+      since: null,
+      route: `/s/${row.strategy}`,
+    }),
+  )
+  // build_triage() re-sorts the merged item list by (severity, title); every item here shares
+  // severity 3, so the tiebreak (title, alphabetical) is the whole order.
+  .sort((a, b) => a.title.localeCompare(b.title))
+
 export const TRIAGE: TriagePayload = {
   ok: true,
-  items: [
-    {
-      kind: 'strategy',
-      severity: 2,
-      title: 'orderly_six_day_rebound',
-      detail: 'marks stale · 3 sessions',
-      since: '2026-08-24T13:30:00+00:00',
-      route: '/s/orderly_six_day_rebound',
-    },
-    {
-      kind: 'strategy',
-      severity: 1,
-      title: 'cross_horizon_low_vol',
-      detail: 'drawdown 8.4% of 10% wall',
-      since: '2026-08-26T18:05:00+00:00',
-      route: '/s/cross_horizon_low_vol',
-    },
-  ],
+  items: TRIAGE_ITEMS,
   // All three sources loaded — a degraded read must NEVER render as an all-clear
   // (see TriagePayload's docstring in types.ts).
   sources: { fleet: true, ops: true, book: true },
   headline: {
-    fleet_ok: rows.length - alerting.length,
+    // Fleet-wide `ok` count from ALL rows, exactly like triage.py's `by_health.get("ok", 0)` —
+    // NOT `rows.length - alerting.length`, which double-counts `idle` research-stage strategies
+    // as healthy (FIX 4; that miscount is exactly what spec §7 forbids).
+    fleet_ok: rows.filter((r) => r.health === 'ok').length,
     fleet_total: rows.length,
     book_allocated: allocated.length,
     book_capacity: 64,

@@ -165,13 +165,18 @@ function stageRank(stage: string): number {
 function buildGateRow(seed: Seed, id: number, kind: 'research' | 'forward'): GateRow {
   const r = rng(seed.id * 7919 + (kind === 'research' ? 1 : 2))
   const holdoutSharpe = 0.15 + r() * 0.7
+  // Drawn ONCE and reused below for both the bullet-card check's value and the ledger's
+  // `dsr_confidence` scalar — they name the SAME quantity (research/gates.py never computes DSR
+  // confidence twice), so two independent `r()` calls previously showed the gate card and the
+  // ledger disagreeing (0.8482 vs 0.8931) on one number for the same run.
+  const dsrConfidence = kind === 'research' ? Number((0.6 + r() * 0.35).toFixed(4)) : null
   const checks: GateCheck[] =
     kind === 'research'
       ? [
           { name: 'pit_universe', passed: true },
           buildGateCheck('holdout_observations', 63, 90 + r() * 400),
           buildGateCheck('holdout_sharpe_floor', 0, holdoutSharpe),
-          buildGateCheck('dsr_confidence', 0.9, 0.6 + r() * 0.35, { advisory: true }),
+          buildGateCheck('dsr_confidence', 0.9, dsrConfidence as number, { advisory: true }),
         ]
       : [
           buildGateCheck('forward_sharpe_floor', holdoutSharpe * 0.5, holdoutSharpe * (0.6 + r() * 0.6)),
@@ -181,7 +186,7 @@ function buildGateRow(seed: Seed, id: number, kind: 'research' | 'forward'): Gat
   const decision: GateDecision = {
     passed: checks.every((c) => c.advisory === true || c.passed !== false),
     checks,
-    dsr_confidence: kind === 'research' ? Number((0.6 + r() * 0.35).toFixed(4)) : undefined,
+    dsr_confidence: dsrConfidence ?? undefined,
     appraisal_ratio: Number((0.8 + r() * 0.9).toFixed(4)),
   }
   return {

@@ -3,13 +3,30 @@
  * defect into a test: no route may overflow horizontally at 390px.
  *
  * Serves the DEMO build, so every route has rich data — an empty screen cannot overflow and
- * would make this check vacuous. */
+ * would make this check vacuous. THAT CLAIM IS ITSELF ASSERTED BELOW (FIX 6, 2026-08-27 fix
+ * wave): before measuring overflow on a route, this checks one known fixture string actually
+ * landed in the page. Without it, an unfixtured endpoint (demoJSON throws -> the screen renders
+ * its error panel, which is narrow and never overflows) would pass this whole script silently —
+ * exactly the "new screen's overflow never measured" failure the header comment already warned
+ * about but nothing enforced. Mirrors the same idea as the word-budget test's "actually renders
+ * fixture data" block. */
 import { createServer } from 'node:http'
 import { readFileSync, existsSync } from 'node:fs'
 import { extname, join, normalize } from 'node:path'
 import { chromium } from 'playwright'
 
 const ROUTES = ['/', '/fleet', '/money', '/research', '/s/liquid10_adj_momentum']
+
+// One string per route that only appears if the real fixture data rendered — picked from
+// src/fixtures/steady-state.ts (kept as literals here rather than imported: this script runs
+// as plain Node against the BUILT demo bundle, not through the TS/Vitest module graph).
+const ROUTE_CONTENT = {
+  '/': 'cross_horizon_low_vol', // TRIAGE.items[0].title after the worst-first sort (FIX 3/5)
+  '/fleet': 'liquid10_adj_momentum', // a real "every strategy" row (FLEET.data.rows)
+  '/money': 'liquid10_adj_momentum', // BOOK.data.slices[0].strategy
+  '/research': 'liquid10_adj_momentum', // RUNS.data.runs[0].strategy_name
+  '/s/liquid10_adj_momentum': 'Cross-sectional momentum over the liquid10 universe', // registry.description
+}
 const DIR = 'dist-demo'
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                 '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png',
@@ -33,6 +50,19 @@ const failures = []
 for (const route of ROUTES) {
   await page.goto(base + route, { waitUntil: 'networkidle' })
   await page.waitForTimeout(600)
+
+  const expected = ROUTE_CONTENT[route]
+  const bodyText = await page.evaluate(() => document.body.innerText)
+  if (expected === undefined || !bodyText.includes(expected)) {
+    failures.push(
+      `${route}: expected fixture text "${expected}" not found in the rendered page — the ` +
+        'route likely errored/emptied instead of rendering real data, which would make the ' +
+        'overflow check below vacuous',
+    )
+    console.log(`FAIL ${route} missing expected content "${expected}"`)
+    continue
+  }
+
   const m = await page.evaluate(() => {
     const vw = window.innerWidth
     // An element clipped by an ancestor's own horizontal scrollport (overflow-x: auto/scroll/

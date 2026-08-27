@@ -40,7 +40,7 @@
  * real (see task-3-report.md). `vi.useRealTimers()` after each test keeps the fake clock from
  * bleeding into unrelated assertions. */
 import { cleanup, render, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resolveFixture } from '../fixtures'
 import { ACTIVITY, BOOK, FLEET, RUNS, TRIAGE } from '../fixtures/steady-state'
@@ -48,25 +48,42 @@ import Fleet from '../screens/Fleet'
 import Money from '../screens/Money'
 import Now from '../screens/Now'
 import Research from '../screens/Research'
+import StrategyDetail from '../screens/StrategyDetail'
 
-/** Ceilings are the measured word count against the steady-state fixture + 10%, rounded up
- * (measured with the CORRECTED TreeWalker metric: Now 61, Money 85, Research 187, Fleet 76 — see
- * task-3-report.md for the raw run, including the earlier, wrong textContent-based numbers this
- * replaces). This slice's screens already carry the redesign's leaner markup, so these are the
- * current, real numbers, not padding for an old verbose layout. The ratchet exists so THIS is
- * the last time a screen's word count grows without a deliberate, reviewed bump to the number
- * below.
+/** Ceilings are the measured word count against the steady-state fixture + 10%, rounded up. This
+ * slice's screens already carry the redesign's leaner markup, so these are the current, real
+ * numbers, not padding for an old verbose layout. The ratchet exists so THIS is the last time a
+ * screen's word count grows without a deliberate, reviewed bump to the number below.
  *
  * Floors guard ONLY against total render failure (see file header) — picked at roughly HALF the
  * measured count, comfortably below ordinary wording variance but far above what a
  * blank/near-blank/error-only render would produce. They are NOT a data-presence check; that is
- * the job of the "actually renders fixture data" block. Fleet leaves this slice in slice 2; its
- * budget entry goes with it. */
-export const BUDGETS: Record<string, { min: number; max: number }> = {
-  Now: { min: 31, max: 68 },
-  Money: { min: 43, max: 94 },
-  Research: { min: 94, max: 206 },
-  Fleet: { min: 38, max: 84 },
+ * the job of the "actually renders fixture data" block.
+ *
+ * `marks` is the OTHER half of spec §5.2 (fix wave 2026-08-27, FIX 7): a per-screen MINIMUM count
+ * of `<svg>`/`<canvas>` elements (the logo excluded — see `marks()` below — so it can never
+ * satisfy this floor by itself). Without it, a screen with zero visualizations passes the word
+ * ceiling forever, which was true of Now/Money/Fleet before this fix (Research already carries
+ * 12 via ScatterISOOS + RunList's sparklines). Each value below is pinned at TODAY's measured
+ * count (0 where a screen genuinely has no chart yet) purely to stop a regression; slices 2 and 3
+ * are expected to RAISE these numbers as marks land, the same deliberate, reviewed bump the word
+ * ceiling already requires.
+ *
+ * NOW'S CEILING moved in THIS fix wave (57, was 61) because FIX 3/4 reshaped the triage fixture
+ * to match what the real endpoint can actually emit (no `since` line, shorter `detail` strings) —
+ * a legitimate content change, not slack. It will move again, and MUST be re-derived rather than
+ * left high, the moment slice 2 deletes Now's activity feed: a ceiling that stays high after a
+ * screen gets leaner stops enforcing anything. */
+export const BUDGETS: Record<string, { min: number; max: number; marks: number }> = {
+  Now: { min: 29, max: 63, marks: 0 },
+  Money: { min: 43, max: 94, marks: 0 },
+  Research: { min: 94, max: 206, marks: 12 },
+  Fleet: { min: 38, max: 84, marks: 0 },
+  // The deepest prose surface (spec §4.3 says to trim it) — and, until this fix, the one route
+  // `verify-viewport.mjs` covered that this file did not. Rendered standalone below via its own
+  // MemoryRouter+Route (it reads `useParams()`, unlike the other four screens). Measured 204
+  // words / 4 marks (EquityChart's canvas, GateBulletCard's and TrialDistribution's svgs).
+  StrategyDetail: { min: 102, max: 225, marks: 4 },
 }
 
 function mockFetch(overrides: Record<string, unknown> = {}) {
@@ -119,6 +136,21 @@ function words(el: HTMLElement): number {
   return joined ? joined.split(/\s+/).length : 0
 }
 
+/** Counts `<svg>`/`<canvas>` elements — the "does this screen actually visualize anything" half
+ * of spec §5.2 that the word ceiling alone cannot answer (a screen can be verbose in PROSE and
+ * still carry zero marks). The brand logo (`svg.brand-lockup`, see `components/Logo.tsx`) is
+ * excluded so it can never satisfy a screen's floor by itself — none of these screens render it
+ * when mounted standalone (it lives in App.tsx's header), but a future screen that does must
+ * still be made to earn its own mark count. */
+function marks(el: HTMLElement): number {
+  let count = 0
+  el.querySelectorAll('svg, canvas').forEach((node) => {
+    if (node.tagName.toLowerCase() === 'svg' && node.classList.contains('brand-lockup')) return
+    count++
+  })
+  return count
+}
+
 describe.each([
   ['Now', Now],
   ['Money', Money],
@@ -139,6 +171,51 @@ describe.each([
       `${name} rendered ${count} words (floor ${min}) — did it render at all?`,
     ).toBeGreaterThanOrEqual(min)
     expect(count, `${name} rendered ${count} words (budget ${max})`).toBeLessThanOrEqual(max)
+  })
+
+  it(`carries >= ${BUDGETS[name].marks} mark(s) (svg/canvas, excluding the logo)`, async () => {
+    const { container } = render(
+      <MemoryRouter>
+        <Screen />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(container.textContent).not.toBe(''))
+    const count = marks(container as HTMLElement)
+    expect(count).toBeGreaterThanOrEqual(BUDGETS[name].marks)
+  })
+})
+
+describe('StrategyDetail stays inside its word budget', () => {
+  const { min, max, marks: minMarks } = BUDGETS.StrategyDetail
+
+  function renderDetail() {
+    return render(
+      <MemoryRouter initialEntries={['/s/liquid10_adj_momentum']}>
+        <Routes>
+          <Route path="/s/:name" element={<StrategyDetail />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+  }
+
+  it(`renders <= ${max} words (and >= ${min}) against the fixture`, async () => {
+    const { container } = renderDetail()
+    await waitFor(() => expect(container.textContent).not.toBe(''))
+    const count = words(container as HTMLElement)
+    expect(
+      count,
+      `StrategyDetail rendered ${count} words (floor ${min}) — did it render at all?`,
+    ).toBeGreaterThanOrEqual(min)
+    expect(count, `StrategyDetail rendered ${count} words (budget ${max})`).toBeLessThanOrEqual(
+      max,
+    )
+  })
+
+  it(`carries >= ${minMarks} mark(s) (svg/canvas, excluding the logo)`, async () => {
+    const { container } = renderDetail()
+    await waitFor(() => expect(container.textContent).not.toBe(''))
+    const count = marks(container as HTMLElement)
+    expect(count).toBeGreaterThanOrEqual(minMarks)
   })
 })
 

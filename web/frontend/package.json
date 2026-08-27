@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/verify-demo-build.mjs prod dist",
     "build:demo": "VITE_ALGUA_DEMO=1 tsc -b && VITE_ALGUA_DEMO=1 vite build --outDir dist-demo",
     "verify:demo-build": "node scripts/verify-demo-build.mjs",
     "verify:viewport": "node scripts/verify-viewport.mjs",

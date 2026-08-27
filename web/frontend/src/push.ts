@@ -1,5 +1,6 @@
 // Web-push client plumbing (slice E): capability detection + enable/disable
 // against the backend's /api/push endpoints.
+import { DEMO } from './transport'
 
 export type AlertsState = 'unsupported' | 'needs-install' | 'denied' | 'on' | 'off'
 
@@ -24,6 +25,11 @@ function supported(): boolean {
 }
 
 export async function alertsState(): Promise<AlertsState> {
+  // Spec §6 guard 2: the demo build must never reach the network. Short-circuit BEFORE any
+  // other check — the ENABLE ALERTS control this feeds is real UI wired to real fetch() calls
+  // (Notification.requestPermission + /api/push/key + /api/push/subscribe), and the fixture
+  // happily serves /api/push/key, so nothing else here would notice a live demo hitting it.
+  if (DEMO) return 'unsupported'
   // needs-install FIRST: iOS Safari outside standalone hides PushManager entirely,
   // so the unsupported check would otherwise shadow the actionable answer.
   if (needsInstall()) return 'needs-install'
@@ -36,6 +42,10 @@ export async function alertsState(): Promise<AlertsState> {
 }
 
 export async function enableAlerts(): Promise<AlertsState> {
+  // Belt-and-suspenders with the alertsState() short-circuit above: alertsState() already
+  // hides the ENABLE ALERTS control in demo mode, but this guards the subscribe path directly
+  // in case anything ever calls enableAlerts() without going through that gate first.
+  if (DEMO) return 'unsupported'
   const permission = await Notification.requestPermission()
   if (permission !== 'granted') return permission === 'denied' ? 'denied' : 'off'
   const keyRes = await fetch('/api/push/key', { headers: { accept: 'application/json' } })
@@ -60,6 +70,8 @@ export async function enableAlerts(): Promise<AlertsState> {
 }
 
 export async function disableAlerts(): Promise<AlertsState> {
+  // Same belt-and-suspenders as enableAlerts() above.
+  if (DEMO) return 'off'
   const reg = await navigator.serviceWorker.getRegistration()
   const sub = reg ? await reg.pushManager.getSubscription() : null
   if (sub) {
