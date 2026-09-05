@@ -15,8 +15,8 @@ WorkingDirectory=/opt/algua
 # marker unwritten for a clean retry) fires first; this is only the last resort.
 TimeoutStartSec=2400
 # The command after `--` MUST exactly match the `paper` job's canonical argv template
-# (`algua paper run-all --snapshot {snapshot}`) or `operator run` fail-closes with command_mismatch.
-# ${ALGUA_PAPER_SNAPSHOT} is expanded by systemd from the EnvironmentFile. `algua` must be on PATH
-# for the operator's subprocess (a `.venv/bin` entry or a symlink); do NOT append ad-hoc flags — a
-# drawdown/window override is a manual human path OUTSIDE the timer (see README, direct-invocation).
-ExecStart=/opt/algua/.venv/bin/algua operator run --job paper -- algua paper run-all --snapshot ${ALGUA_PAPER_SNAPSHOT}
+# (`algua paper run-all --refresh`) or `operator run` fail-closes with command_mismatch. The lane
+# refreshes its own bars each session (#556) — there is no snapshot variable to configure. `algua`
+# must be on PATH for the operator's subprocess (a `.venv/bin` entry or a symlink); do NOT append
+# ad-hoc flags — a drawdown/window override is a manual human path OUTSIDE the timer (see README).
+ExecStart=/opt/algua/.venv/bin/algua operator run --job paper -- algua paper run-all --refresh

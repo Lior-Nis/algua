@@ -6,7 +6,7 @@ import pytest
 
 from algua.operator.jobs import OPERATOR_JOBS, CommandMismatch, OperatorJob
 
-_PAPER_ARGV = ("algua", "paper", "run-all", "--snapshot", "SNAP")
+_PAPER_ARGV = ("algua", "paper", "run-all", "--refresh")
 
 
 def _paper() -> OperatorJob:
@@ -52,11 +52,34 @@ def test_is_completed_rc0_without_explicit_ok_true_is_false() -> None:
     assert _paper().is_completed(0, {}) is False
 
 
+def test_is_completed_requires_snapshot_id_when_strategies_ticked() -> None:
+    ok = {"ok": True, "strategies": [{"strategy": "s", "ok": True}]}
+    assert _paper().is_completed(0, {**ok, "snapshot": {"id": "snap-1"}}) is True
+    assert _paper().is_completed(0, ok) is False
+    assert _paper().is_completed(0, {**ok, "snapshot": {"id": ""}}) is False
+    assert _paper().is_completed(0, {**ok, "snapshot": {"id": None}}) is False
+
+
+def test_is_completed_requires_at_least_one_successful_tick() -> None:
+    # Every tenant failed tick-time setup: ok:true at the top, a valid snapshot, zero ticks.
+    all_setup_errors = {"ok": True, "snapshot": {"id": "snap-1"},
+                        "strategies": [{"ok": False, "strategy": "s", "kind": "setup_error"},
+                                       {"strategy": "t", "traded": False, "skipped": "x"}]}
+    assert _paper().is_completed(0, all_setup_errors) is False
+    one_ok = {**all_setup_errors,
+              "strategies": [*all_setup_errors["strategies"], {"strategy": "u", "ok": True}]}
+    assert _paper().is_completed(0, one_ok) is True
+
+
+def test_is_completed_no_work_needs_no_snapshot() -> None:
+    assert _paper().is_completed(0, {"ok": True, "strategies": []}) is True
+
+
 # --- bind: exact-arity full-argv match --------------------------------------------------------
 
 
-def test_bind_accepts_canonical_argv_and_captures_snapshot() -> None:
-    assert _paper().bind(_PAPER_ARGV) == {"snapshot": "SNAP"}
+def test_bind_accepts_canonical_argv_and_captures_nothing() -> None:
+    assert _paper().bind(_PAPER_ARGV) == {}
 
 
 def test_bind_rejects_trailing_extra_token() -> None:
@@ -64,24 +87,24 @@ def test_bind_rejects_trailing_extra_token() -> None:
         _paper().bind((*_PAPER_ARGV, "--evil"))
 
 
+def test_bind_rejects_trailing_snapshot_flag() -> None:
+    with pytest.raises(CommandMismatch):
+        _paper().bind(("algua", "paper", "run-all", "--refresh", "--snapshot", "X"))
+
+
+def test_bind_rejects_legacy_snapshot_argv() -> None:
+    with pytest.raises(CommandMismatch):
+        _paper().bind(("algua", "paper", "run-all", "--snapshot", "SNAP"))
+
+
 def test_bind_rejects_wrong_head() -> None:
     with pytest.raises(CommandMismatch):
-        _paper().bind(("algua", "data", "inspect", "--snapshot", "SNAP"))
-
-
-def test_bind_rejects_missing_snapshot_value() -> None:
-    with pytest.raises(CommandMismatch):
-        _paper().bind(("algua", "paper", "run-all", "--snapshot"))
-
-
-def test_bind_rejects_empty_placeholder_value() -> None:
-    with pytest.raises(CommandMismatch):
-        _paper().bind(("algua", "paper", "run-all", "--snapshot", ""))
+        _paper().bind(("algua", "data", "inspect", "--refresh"))
 
 
 def test_bind_rejects_swapped_flag() -> None:
     with pytest.raises(CommandMismatch):
-        _paper().bind(("algua", "paper", "run-all", "--dataset", "SNAP"))
+        _paper().bind(("algua", "paper", "run-all", "--dataset"))
 
 
 def test_bind_rejects_short_arity() -> None:

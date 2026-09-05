@@ -96,7 +96,7 @@ done
 if [[ "${HAVE_ENV_FILE}" -eq 0 ]]; then
   echo "note: ${ENV_FILE} missing or unreadable — EnvironmentFile= lines are dropped from the rendered units."
   echo "      Provide ALGUA_* config another way (create/fix the env file and re-run this installer,"
-  echo "      or 'systemctl --user set-environment'); algua-paper.service needs ALGUA_PAPER_SNAPSHOT."
+  echo "      or 'systemctl --user set-environment'); algua-paper.service needs the ALGUA_ALPACA_* paper credentials."
 fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then

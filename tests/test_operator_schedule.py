@@ -104,6 +104,16 @@ def test_marker_round_trips_enriched_entry(tmp_path) -> None:
     assert "recorded_at" in entry
 
 
+def test_marker_record_round_trips_snapshot_id(tmp_path) -> None:
+    m = SessionMarker(tmp_path)
+    m.record("paper", date(2023, 6, 1), command=["algua", "paper", "run-all", "--refresh"],
+             rc=0, host="h", pid=1, snapshot_id="s9")
+    m.record("research", date(2023, 6, 1), command=["algua"], rc=0, host="h", pid=1)
+    data = json.loads((tmp_path / "operator_sessions.json").read_text())
+    assert data["paper"]["snapshot_id"] == "s9"
+    assert data["research"]["snapshot_id"] is None
+
+
 def test_marker_missing_file_returns_none(tmp_path) -> None:
     assert SessionMarker(tmp_path).last_session("paper") is None
 
