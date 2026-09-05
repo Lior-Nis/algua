@@ -126,8 +126,7 @@ def test_misdated_newer_bar_fails_closed(tmp_path):
         _call(store, _Provider(_frame([("AAPL", "2026-01-08"), ("MSFT", "2026-01-08"),
                                        ("MSFT", "2026-01-09")])),
               require_bar_on="2026-01-08", end="2026-01-10", timeframe="1d")
-    # to_bar_schema may reject the intraday stamp first
-    assert exc.value.kind in {"misdated", "stale"}
+    assert exc.value.kind == "misdated" and exc.value.symbols == ["MSFT"]
     assert store.list_snapshots(Dataset.BARS) == []
 
 
