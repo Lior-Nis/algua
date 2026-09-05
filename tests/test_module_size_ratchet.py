@@ -55,7 +55,7 @@ BUDGET: dict[str, int] = {
     "algua/contracts/types.py": 426,
     "algua/execution/alpaca_broker.py": 501,
     "algua/execution/live_ledger.py": 620,
-    "algua/execution/order_state.py": 388,
+    "algua/execution/order_state.py": 385,
     "algua/knowledge/sync.py": 475,
     "algua/live/live_loop.py": 418,
     "algua/models/registry.py": 329,

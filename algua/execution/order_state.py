@@ -206,12 +206,8 @@ def record_tick_snapshot(
     """Append one completed-tick snapshot (equity + positions) for a strategy — the per-tick
     operability/equity-curve record read by `paper show`.
 
-    ``lane`` must be one of ``("paper", "live")`` and ``clock_source`` must be one of
-    ``("broker", "local")``. These are enforced here rather than via a DB CHECK constraint
-    because SQLite ALTER TABLE cannot add CHECK constraints to existing tables — writer
-    discipline is the enforcement layer; the forward gate rejects NULL/invalid values
-    fail-closed. Legacy rows (NULL) are inadmissible by design.
-
+    ``lane``/``clock_source`` are enforced here (not a DB CHECK constraint — SQLite ALTER TABLE
+    can't add one to an existing table); legacy NULL rows are inadmissible by design.
     ``snapshot_id`` is the bars snapshot the tick decided on (None for legacy rows)."""
     if lane not in _VALID_LANES:
         raise ValueError(f"lane must be one of {sorted(_VALID_LANES)!r}, got {lane!r}")
