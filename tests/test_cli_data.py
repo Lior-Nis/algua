@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-from algua.cli import data_cmd
+from algua.cli import data_refresh_cmd
 from algua.cli.main import app
 from algua.data.contracts import ProviderBars
 
@@ -17,9 +17,14 @@ def _tmp_data_dir(monkeypatch, tmp_path):
 
 
 def _json(result):
-    """Parse JSON from result, supporting both success (exit_code=0) and error (exit_code=1)."""
-    if result.exit_code not in (0, 1):
-        raise AssertionError(f"unexpected exit code {result.exit_code}: {result.stdout}")
+    """Parse JSON from a successful (exit_code=0) result."""
+    assert result.exit_code == 0, result.stdout
+    return json.loads(result.stdout)
+
+
+def _err_json(result):
+    """Parse JSON from a failed (exit_code=1) result."""
+    assert result.exit_code == 1, result.stdout
     return json.loads(result.stdout)
 
 
@@ -441,7 +446,7 @@ _REFRESH_ARGS = ["data", "refresh-bars", "--provider", "fake", "--symbols", "AAP
 
 def test_refresh_bars_cli_emits_snapshot_and_refreshed_flag(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(data_cmd, "_bar_provider",
+    monkeypatch.setattr(data_refresh_cmd, "_bar_provider",
                         lambda _name: _fake_provider(["2026-01-07", "2026-01-08"]))
     first = _json(runner.invoke(app, _REFRESH_ARGS))
     assert first["ok"] is True and first["refreshed"] is True
@@ -453,16 +458,16 @@ def test_refresh_bars_cli_emits_snapshot_and_refreshed_flag(monkeypatch, tmp_pat
 
 def test_refresh_bars_cli_stale_symbol_is_refresh_failed(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(data_cmd, "_bar_provider", lambda _name: _fake_provider(["2026-01-07"]))
+    monkeypatch.setattr(data_refresh_cmd, "_bar_provider",
+                        lambda _name: _fake_provider(["2026-01-07"]))
     r = runner.invoke(app, _REFRESH_ARGS)
-    assert r.exit_code == 1
-    out = _json(r)
+    out = _err_json(r)
     assert out["ok"] is False and out["code"] == "refresh_failed" and "stale" in out["error"]
 
 
 def test_refresh_bars_cli_min_rows(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(data_cmd, "_bar_provider",
+    monkeypatch.setattr(data_refresh_cmd, "_bar_provider",
                         lambda _name: _fake_provider(["2026-01-07", "2026-01-08"]))
     r = runner.invoke(app, [*_REFRESH_ARGS, "--min-rows", "5"])
-    assert r.exit_code == 1 and _json(r)["code"] == "refresh_failed"
+    assert _err_json(r)["code"] == "refresh_failed"

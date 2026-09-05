@@ -110,9 +110,11 @@ and the reconcile → tick window is unchanged from today.
    get_calendar().previous_session(date.fromisoformat(end))`.
 2. **Cycle plan** over the tickable strategies (paper: PAPER ∪ FORWARD_TESTED with an active
    allocation; live: verified ∧ allocated). For each: `load_tradable_strategy(name)` — the
-   **same admission path the tick uses** (it rejects fundamentals-/news-/model-dependent
-   strategies whose runtime lanes do not exist, so a tenant cannot pass planning and fail only at
-   tick time) — then `resolve_operational_universe(conn, data_dir, name, strategy.universe)` (the
+   **tick's tradability admission** (it rejects fundamentals-/news-/model-dependent strategies
+   whose runtime lanes do not exist, so a tenant cannot pass planning and fail tradability at
+   tick time; stage/halt/kill-switch are still judged at tick time by `load_gated_strategy`, and
+   a tenant tripped there is a per-tick `setup_error` — follow-up: consult the kill-switch at plan
+   time) — then `resolve_operational_universe(conn, data_dir, name, strategy.universe)` (the
    #559 gate-bound universe). The plan records the universe, the ledger-believed held symbols,
    and a per-symbol history floor over **every bar-consuming contract**:
    `max(config.feature_lookback, execution.warmup_bars, execution.capacity.adv_window_bars
@@ -258,6 +260,10 @@ Declined for this change, each filed as a follow-up issue on merge:
 - Snapshot GC; intraday timeframes; a live operator unit; alt-data refresh (#472); Alpaca provider
   pagination; `ALGUA_ALERT_CMD` as a deployment prerequisite; multi-PR staging (the tuition run is
   the soak; the paper unit is the only consumer).
+- **Session marker records target session S while the decision bar is S−1 in the after-close
+  window; two retries of the same session can decide on different bars across UTC midnight** —
+  `snapshot_id` on the marker/tick row is what makes this auditable; part of the
+  session-addressed-ticks follow-up.
 
 ## Test plan
 

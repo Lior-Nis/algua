@@ -1,24 +1,38 @@
 """`algua data refresh-bars` — the lane-refresh primitive as a CLI seam (#556). Carved out of
-data_cmd.py so that module stays under its size pin; registered onto the same `data_app`.
+data_cmd.py so that module stays under its size pin.
 
-Resolves `_bar_provider`/`_store` through the `algua.cli.data_cmd` module attribute at call time
-(not a direct name import) so `tests/test_cli_data.py`'s monkeypatch of `data_cmd._bar_provider`
-still reaches this command.
+Owns its own `_store`/`_bar_provider` seam (mirrors data_cmd.py's, but does not import that
+module — a cli->cli sibling import is exactly what
+`tests/test_lint_imports.py::"cli command modules are independent of one another"` forbids). It
+registers on its own `refresh_app`, which `algua.cli.main` merges flat onto `data_cmd.data_app`
+at the composition root (the same pattern main.py already uses to mount `idea_app` under
+`research_app`), so `algua data refresh-bars ...` is unchanged.
 """
 from __future__ import annotations
 
 import typer
 
-from algua.cli import data_cmd
 from algua.cli._common import ok
 from algua.cli.app import emit
-from algua.cli.data_cmd import data_app
 from algua.cli.errors import json_errors
 from algua.config.settings import get_settings
+from algua.data.contracts import BarProvider
+from algua.data.providers import get_provider
 from algua.data.refresh import refresh_bars
+from algua.data.store import DataStore
+
+refresh_app = typer.Typer()
 
 
-@data_app.command("refresh-bars")
+def _store() -> DataStore:
+    return DataStore(get_settings().data_dir)
+
+
+def _bar_provider(name: str) -> BarProvider:
+    return get_provider(name, get_settings())
+
+
+@refresh_app.command("refresh-bars")
 @json_errors
 def refresh_bars_cmd(
     symbols: str = typer.Option(..., "--symbols", help="comma-separated symbols"),
@@ -42,7 +56,7 @@ def refresh_bars_cmd(
     name = provider or get_settings().bars_refresh_provider
     syms = symbols.split(",")
     rec, refreshed = refresh_bars(
-        data_cmd._store(), data_cmd._bar_provider(name), symbols=syms, start=start, end=end,
+        _store(), _bar_provider(name), symbols=syms, start=start, end=end,
         require_bar_on=require_bar_on,
         min_rows={s.strip().upper(): min_rows for s in syms} if min_rows > 0 else None,
         timeframe=timeframe,

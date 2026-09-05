@@ -563,6 +563,8 @@ def test_unparseable_decision_fails_closed_to_stale(monkeypatch, tmp_path):
 def test_decision_after_now_fails_closed_to_stale(monkeypatch, tmp_path):
     row = _health_for(monkeypatch, tmp_path, decision_ts="2023-06-20T00:00:00+00:00")
     assert row["health"] == "stale"
+    # clock-skew sentinel: distinct message from genuine elapsed staleness (#556 review finding 5)
+    assert row["stale_detail"] == "decision_ts is after now"
 
 
 def test_fleet_health_cli_exits_nonzero_on_decision_stale(monkeypatch, tmp_path):
