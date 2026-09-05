@@ -14,6 +14,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     audit_cmd,
     backtest_cmd,
     data_cmd,
+    data_refresh_cmd,
     eval_cmd,
     fleet_cmd,
     governance_cmd,
@@ -41,6 +42,10 @@ from algua.cli.errors import error_code, is_retryable
 research_cmd.research_app.add_typer(idea_cmd.idea_app, name="idea")
 research_cmd.research_app.add_typer(negative_cmd.log_app, name="log")
 research_cmd.research_app.add_typer(research_batch_cmd.run_all_app, name="run-all")
+# data_refresh_cmd.refresh_app carries only `refresh-bars`; merged flat (no `name=`) onto
+# data_app so `algua data refresh-bars ...` is unchanged while data_refresh_cmd never imports
+# data_cmd (#556 review finding 2).
+data_cmd.data_app.add_typer(data_refresh_cmd.refresh_app)
 
 __all__ = ["app", "main"]
 

@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     # filesystem backend), or "noop" (log nothing). See algua/tracking/factory.py. Default
     # preserves existing behaviour exactly.
     tracking_backend: str = "mlflow"
+    # Bars provider the PAPER lane refreshes through (`paper run-all --refresh`, #556). Any name
+    # registered in algua.data.providers. env: ALGUA_BARS_REFRESH_PROVIDER.
+    bars_refresh_provider: str = "yfinance"
+    # Bars provider the LIVE lane refreshes through (`live run-all --refresh`). NO default on
+    # purpose: real-money decision data is a human choice made explicitly, never inherited from
+    # the research convenience default above. Unset => live refresh fails closed
+    # (`live_refresh_provider_unset`). env: ALGUA_BARS_REFRESH_PROVIDER_LIVE.
+    bars_refresh_provider_live: str | None = None
     # Optional operator alert command (#486). Fed the alert JSON on stdin when an always-on operator
     # run fails / halts / hits a corrupt marker / a wedged lock / a calendar-out-of-bounds anomaly.
     # Declared as a first-class field (not an ad-hoc os.environ read) so it surfaces through

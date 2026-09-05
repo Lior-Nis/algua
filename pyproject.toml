@@ -350,14 +350,16 @@ forbidden_modules = ["algua.registry"]
 
 [[tool.importlinter.contracts]]
 # The CLI is a thin JSON seam: command modules must not import one another (domain logic belongs in
-# the layer that owns it, shared CLI helpers in cli._common/app/errors). This kills paper/live
-# gating drift at the structural level (issue #165). Shared infra (app, _common, errors, main) is
-# NOT listed, so command modules may still import it.
+# the layer that owns it, shared CLI helpers in cli._common/app/errors, and also cli.lane_refresh —
+# the paper/live run-all cycle-plan + lane-refresh helper, deliberately shared and NOT listed below).
+# This kills paper/live gating drift at the structural level (issue #165). Shared infra (app,
+# _common, errors, main, lane_refresh) is NOT listed, so command modules may still import it.
 name = "cli command modules are independent of one another (no cli->cli sibling imports)"
 type = "independence"
 modules = [
     "algua.cli.backtest_cmd",
     "algua.cli.data_cmd",
+    "algua.cli.data_refresh_cmd",
     "algua.cli.fleet_cmd",
     "algua.cli.governance_cmd",
     "algua.cli.idea_cmd",

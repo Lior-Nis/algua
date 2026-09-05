@@ -105,6 +105,57 @@ def test_yfinance_intraday_output_is_converted_to_utc():
     assert out.index[0] == pd.Timestamp("2026-01-02T14:30:00", tz="UTC")
 
 
+def test_yfinance_normalizer_drops_all_nan_rows_but_not_partial_nan():
+    # yf.download(group_by="ticker") returns a union date index: AAPL traded both sessions, MSFT
+    # only the second, so MSFT's row on the first session is all-NaN (no info, should be dropped)
+    # while a genuinely partial-NaN row (data corruption/a real gap) must still fail validation.
+    idx = pd.DatetimeIndex(
+        [pd.Timestamp("2026-01-02"), pd.Timestamp("2026-01-05")], name="Date"
+    )
+    columns = pd.MultiIndex.from_tuples(
+        [
+            ("AAPL", "Open"), ("AAPL", "High"), ("AAPL", "Low"), ("AAPL", "Close"),
+            ("AAPL", "Adj Close"), ("AAPL", "Volume"),
+            ("MSFT", "Open"), ("MSFT", "High"), ("MSFT", "Low"), ("MSFT", "Close"),
+            ("MSFT", "Adj Close"), ("MSFT", "Volume"),
+        ]
+    )
+    raw = pd.DataFrame(
+        [
+            [100.0, 101.0, 99.0, 100.5, 100.25, 1000,
+             float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), float("nan")],
+            [102.0, 103.0, 101.0, 102.5, 102.25, 1100,
+             50.0, 51.0, 49.0, 50.5, 50.25, 500],
+        ],
+        index=idx,
+        columns=columns,
+    )
+
+    frame = _normalize_yfinance(raw, ("AAPL", "MSFT"))
+
+    # 4 raw rows (2 symbols x 2 sessions) minus the one all-NaN MSFT/2026-01-02 row = 3.
+    assert len(frame) == 3
+    assert not frame[["open", "high", "low", "close", "volume"]].isna().any().any()
+    remaining = set(zip(frame["symbol"], frame["ts"].dt.strftime("%Y-%m-%d"), strict=True))
+    assert remaining == {
+        ("AAPL", "2026-01-02"), ("AAPL", "2026-01-05"), ("MSFT", "2026-01-05"),
+    }
+
+    # A PARTIAL-nan row (only volume missing, rest populated) must survive normalization
+    # unchanged — the drop is all-or-nothing, never partial — and still fail validate_bars
+    # downstream, since it is real corruption/a gap rather than an index-alignment artifact.
+    raw.loc[idx[0], ("MSFT", "Volume")] = float("nan")
+    raw.loc[idx[0], ("MSFT", "Open")] = 40.0
+    raw.loc[idx[0], ("MSFT", "High")] = 41.0
+    raw.loc[idx[0], ("MSFT", "Low")] = 39.0
+    raw.loc[idx[0], ("MSFT", "Close")] = 40.5
+    raw.loc[idx[0], ("MSFT", "Adj Close")] = 40.25
+    frame_partial = _normalize_yfinance(raw, ("AAPL", "MSFT"))
+    assert len(frame_partial) == 4
+    with pytest.raises(ValueError, match="NaN"):
+        to_bar_schema(frame_partial, timeframe="1d")
+
+
 def test_yfinance_provider_rejects_auto_adjustment():
     provider = YFinanceBarProvider()
     request = BarRequest(("AAPL",), "2026-01-02", "2026-01-03", adjustment="auto")

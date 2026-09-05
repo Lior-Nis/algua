@@ -22,6 +22,7 @@ from algua.cli._common import (
 )
 from algua.cli.app import app, emit
 from algua.cli.errors import json_errors
+from algua.cli.lane_refresh import build_cycle_plan, lane_symbols, refresh_lane_snapshot
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Actor, Stage
 from algua.contracts.types import (
@@ -143,11 +144,9 @@ _PAPER_CURSOR_FAR_PAST = "1970-01-01T00:00:00Z"
 def _recover_stranded(
     conn: sqlite3.Connection, broker: OrderLookupBroker, kind: LedgerKind
 ) -> None:
-    """#312: backfill broker_order_id onto any crash-stranded NULL order row by asking the venue for
-    the order carrying each row's client_order_id (never submits; symbol-verified). Recovery is
-    ACCOUNT-WIDE (it scans every strategy's NULL rows), so the audit is account-wide (strategy=None)
-    since a per-strategy label would misattribute a recovered sibling's order. Audit-only effects;
-    a broker error propagates to the caller's fail-closed handling."""
+    """#312: backfill broker_order_id onto any crash-stranded NULL order row (asks the venue for the
+    order carrying its client_order_id; never submits). ACCOUNT-WIDE, so the audit is too
+    (strategy=None) — a per-strategy label would misattribute a sibling's order."""
     outcome = recover_stranded_broker_order_ids(conn, broker, kind=kind)
     if outcome.recovered:
         audit_append(conn, actor="system", action="stranded_order_recovered",
@@ -169,14 +168,9 @@ def _ingest_paper_venue(
     conn: sqlite3.Connection, broker: ActivityWindowBroker, until: str
 ) -> None:
     """Exhaustively ingest the paper venue's activities into paper_venue_fills, fail-closed.
-
-    Cursor is a broker-time high-water: fetch (cursor, until] via the paginated
-    account_activities_window (raises on a partial page), dedup by activity_id, then persist the
-    `until` value as the new cursor in the SAME ingest transaction.
-
-    The caller is responsible for resolving `until` (e.g. from tick_clock or broker.clock())
-    before calling — this function never calls broker.clock() itself so that a clock failure
-    stays in the caller's hands (resilient fallback vs. fail-closed, per call site)."""
+    Cursor is a broker-time high-water: fetch (cursor, until] (raises on a partial page), dedup by
+    activity_id, persist `until` as the new cursor in the SAME transaction. The caller resolves
+    `until` itself (never calls broker.clock() here), so a clock failure stays in its hands."""
     after = fill_cursor(conn, LedgerKind.PAPER) or _PAPER_CURSOR_FAR_PAST
     acts = broker.account_activities_window(after, until)
     ingest_activities(conn, acts, LedgerKind.PAPER, cursor_value=until)
@@ -677,13 +671,10 @@ def merge_back(
 
 
 def _still_paper_allocated(conn, name: str) -> bool:
-    """True iff `name` is still a paper-lane book tenant: Stage.PAPER or Stage.FORWARD_TESTED AND
-    holding an active allocation. Re-read at submit time so a `paper -> ...`/`... -> dormant` (or
-    any lane-crossing) transition committed MID-CYCLE — which atomically revokes the slice (#497) —
-    aborts this tick's further orders instead of sizing/trading on a stale, now-revoked capital base
-    whose position the paper run-all (iterating only the paper-lane stages) would never wind down.
-    The paper mirror of live `_still_live_allocated` (#281); broader than any single edge — ANY exit
-    from the paper book mid-cycle halts further submits this tick."""
+    """True iff `name` is still a paper-lane book tenant (Stage.PAPER/FORWARD_TESTED AND an active
+    allocation). Re-read at submit time so a mid-cycle lane-crossing transition (which atomically
+    revokes the slice, #497) halts further submits instead of trading a stale capital base — the
+    paper mirror of live `_still_live_allocated` (#281)."""
     rec = SqliteStrategyRepository(conn).get(name)
     return (rec.stage in (Stage.PAPER, Stage.FORWARD_TESTED)
             and active_allocation(conn, rec.id) is not None)
@@ -692,24 +683,18 @@ def _still_paper_allocated(conn, name: str) -> bool:
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
     tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
-    start: str, end: str,
+    start: str, end: str, snapshot_id: str | None = None,
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
     recording, breach trip + scoped flatten, tick-snapshot persistence (equity = per-strategy NAV).
-    Returns ok({...}) on success, or an {"ok": False, ...} marker on TickHalted/RiskBreach (so
-    #316b's run-all can surface siblings on a breach, like live #270). Caller does the account
-    reconcile BEFORE calling this; no venue_belief here.
+    Returns ok({...}), or an {"ok": False, ...} marker on TickHalted/RiskBreach so run-all can
+    surface siblings on a breach (#316b, live #270). Caller reconciles BEFORE calling this.
 
-    Fault-isolation boundary (#374 GATE-2): the SETUP portion below (allocation lookup, identity,
-    hook wiring) runs strictly BEFORE any broker/ledger side effect, so a failure there is wrapped
-    in ``StrategySetupError`` for run-all to isolate, UNLESS it's a
-    :data:`SYSTEMIC_SETUP_EXCEPTIONS` member (a shared-infrastructure fault, e.g. a
-    locked/unavailable sqlite3 connection), which propagates raw so it aborts the whole cycle
-    rather than being misread as this one tenant's problem. Everything from ``run_tick`` onward
-    (the before_submit/on_submitted ledger hooks once an order has been recorded/hit the venue,
-    TickHalted/RiskBreach side-effect handling — trip_for_breach / flatten_strategy / audit — and
-    snapshot persistence) is NOT wrapped: any exception escaping there is book-integrity-critical
-    and propagates RAW to abort the cycle."""
+    Fault-isolation boundary (#374 GATE-2): SETUP (allocation, identity, hook wiring) runs before
+    any broker/ledger side effect, so a setup failure is wrapped ``StrategySetupError`` for run-all
+    to isolate — except a :data:`SYSTEMIC_SETUP_EXCEPTIONS` member, which propagates raw (a
+    shared-infra fault is book-wide, not this tenant's). Everything from ``run_tick`` onward is
+    unwrapped: any exception escaping there is book-integrity-critical and aborts the cycle."""
     try:
         alloc = active_allocation(conn, rec.id)
         if alloc is None:
@@ -717,12 +702,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         allocation = float(alloc["capital"])
         identity = compute_artifact_hashes(name)
 
-        # #559: bind this tick to the GATED universe, never the module's CONFIG template. Resolved
-        # once per tick from the newest passing gate row; rebinding the strategy's config universe
-        # makes EVERY downstream consumer (run_tick's bar fetch + decision view, the sizing
-        # snapshot below) see the gate universe. A missing gate row raises LookupError -> a
-        # per-tenant StrategySetupError (an unpromoted strategy has no business ticking); a legacy
-        # pre-v39 row (universe_name NULL) falls back to CONFIG with a loud warning.
+        # #559: bind this tick to the GATED universe (never the CONFIG template); a missing gate
+        # row raises -> StrategySetupError; a legacy row (universe_name NULL) falls back to CONFIG.
         resolved_universe, universe_source = resolve_operational_universe(
             conn, get_settings().data_dir, name, strategy.universe)
         if universe_source == SOURCE_CONFIG_LEGACY:
@@ -735,10 +716,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                 strategy,
                 config=strategy.config.model_copy(update={"universe": resolved_universe}))
 
-        # coids this tick's before_submit FRESHLY inserted an intent row for (record returned True —
-        # no prior run had this coid). Only such rows are safe to retract on a noop/skipped: a
-        # pre-existing NULL row is indistinguishable from a real accepted order whose backfill was
-        # lost to a crash and MUST be preserved (#311).
+        # coids THIS tick's before_submit freshly inserted are safe to retract on a noop; a
+        # pre-existing NULL row may be a crash-orphaned real order and MUST be preserved (#311).
         freshly_recorded: set[str] = set()
 
         def _before_submit(intent: OrderIntent, coid: str | None) -> None:
@@ -782,10 +761,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         # ``code`` survives instead of being double-wrapped (defense-in-depth; unreachable today).
         raise
     except SYSTEMIC_SETUP_EXCEPTIONS:
-        # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's problem: propagate
-        # RAW so run-all aborts the whole cycle and the top-level json_errors envelope's
-        # db_unavailable/retryable signal survives, instead of misclassifying it as an isolatable
-        # per-tenant setup fault (#374 GATE-2).
+        # A shared-infra fault (e.g. sqlite3.Error) is book-wide, not this tenant's: propagate RAW
+        # so the db_unavailable/retryable signal survives (#374 GATE-2) instead of misclassifying.
         raise
     except Exception as exc:  # noqa: BLE001 - pre-side-effect setup fault: isolate ONE tenant
         raise StrategySetupError(name, exc) from exc
@@ -804,23 +781,17 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                                               "tick_ts": str(tick_ts), "kind": exc.kind}},
                   exc_info=True)
         if exc.is_dark_feed:
-            # DARK BAR FEED, broker still alive (#452 HIGH#3): a stale / unvaluable mark means the
-            # risk state cannot be TRUSTED, not that the position is losing money. Flattening blind
-            # off a dead feed would dump the book at unknown prices — exactly the wrong move. A dark
-            # feed is SYSTEMIC (all strategies share one provider), so HALT the whole account and
-            # PRESERVE positions — no flatten.
+            # DARK BAR FEED, broker still alive (#452 HIGH#3): a stale mark means risk state is
+            # untrustworthy, not that the position is losing money, so HALT (systemic — one shared
+            # provider) and PRESERVE positions instead of flattening blind at unknown prices.
             global_halt.engage(conn, reason=exc.detail, actor="system")
             audit_append(conn, actor="system", action="paper_mark_freshness_halt",
                          reason=f"{exc.kind}: {exc.detail}", strategy=name)
             return {"ok": False, "strategy": name,
                     **breach_payload(exc.detail, strategy=name, kind=exc.kind, halted=True,
                                      global_halt="set", liquidation_submitted=False)}
-        # ECONOMIC / integrity breach (drawdown, gross_exposure_realized, reconcile,
-        # non_positive_equity, ...): trip + scoped flatten. The cancel is scoped when the caller
-        # supplies one (run-all passes a per-strategy scoped cancel so a breach never cancels a
-        # sibling's orders); account-wide fallback for single-strategy trade-tick. Ingest fills up
-        # to the broker clock, then offset every believed position — single-sourced in the execution
-        # layer (#336).
+        # ECONOMIC / integrity breach: trip + scoped flatten (run-all: per-strategy, never a
+        # sibling's orders; account-wide fallback for trade-tick). Offsets every belief (#336).
         res = flatten_strategy(
             conn, broker, name, LedgerKind.PAPER, lane="paper", strategy_id=rec.id,
             cancel=cancel if cancel is not None else broker.cancel_open_orders,
@@ -849,7 +820,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             reconcile_ok=result.reconcile_ok, lane="paper", strategy_id=rec.id,
             code_hash=identity.code_hash, config_hash=identity.config_hash,
             dependency_hash=identity.dependency_hash, account_id=acct.account_id,
-            cash=acct.cash, clock_source=clock_source)
+            cash=acct.cash, clock_source=clock_source, snapshot_id=snapshot_id)
     audit_append(conn, actor="agent", action="trade_tick",
                  reason=f"{len(result.submitted)} orders submitted", strategy=name)
     return ok({
@@ -900,9 +871,8 @@ def trade_tick(
                 tick_ts, clock_source = tick_clock(broker.clock)
                 try:
                     _ingest_paper_venue(conn, broker, tick_ts)
-                    # #312: resolve any crash-stranded NULL-broker_order_id row (accepted-but-not-
-                    # backfilled) BEFORE reconcile, so its now-attributed fill no longer reads as
-                    # drift. Fail-closed on a broker error, like the ingest above.
+                    # #312: resolve any crash-stranded NULL-broker_order_id row BEFORE reconcile,
+                    # so its now-attributed fill no longer reads as drift.
                     _recover_stranded(conn, broker, LedgerKind.PAPER)
                 except Exception as exc:   # fail closed on ANY ingest/transport error
                     audit_append(conn, actor="system", action="venue_ingest_failed",
@@ -939,13 +909,11 @@ def trade_tick(
                 try:
                     out = _run_paper_strategy_tick(
                         conn, name, strategy, rec, broker, provider, max_drawdown,
-                        tick_ts, clock_source, acct, start=start, end=end)
+                        tick_ts, clock_source, acct, start=start, end=end,
+                        snapshot_id=snapshot)
                 except StrategySetupError as exc:
-                    # SINGLE-strategy path: there are no siblings to isolate, so the per-tenant
-                    # StrategySetupError wrapper (used only to let run-all skip ONE tenant) just
-                    # buries the real fault behind an opaque "internal"/"<name>: ValueError". Unwrap
-                    # and re-raise the original cause so json_errors renders its actionable message
-                    # and specific code (e.g. a missing allocation stays `invalid_input`) (#374).
+                    # SINGLE-strategy path has no siblings to isolate: unwrap the per-tenant
+                    # StrategySetupError so json_errors renders the real cause's message/code (#374)
                     raise exc.cause from exc
                 counters.ticks += 1
                 if out.get("ok") is False:
@@ -968,7 +936,16 @@ def trade_tick(
 @paper_app.command("run-all")
 @json_errors
 def run_all(
-    snapshot: str = typer.Option(..., "--snapshot", help="ingested bars snapshot id"),
+    snapshot: str | None = typer.Option(
+        None, "--snapshot", help="tick against this ingested bars snapshot id (explicit/replay)"),
+    refresh: bool = typer.Option(
+        False, "--refresh",
+        help="resolve-or-ingest the lane's bars for the cycle window — the union of every "
+             "tickable strategy's gate-bound universe, ledger-held and broker-held symbols — "
+             "requiring each symbol's newest bar on the session the tick decides on and each "
+             "universe symbol's history floor; the always-on operator path. Exactly one of "
+             "--snapshot/--refresh is required; --start/--end are derived (not accepted) under "
+             "--refresh (#556)"),
     start: str | None = typer.Option(None, "--start"),
     end: str | None = typer.Option(None, "--end"),
     max_drawdown: float | None = typer.Option(
@@ -979,22 +956,21 @@ def run_all(
         False, "--disable-drawdown-breaker",
         help="HUMAN-ONLY emergency: turn the drawdown breaker fully OFF (audited)"),
 ) -> None:
-    """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest venue fills,
-    reconcile the account against the paper broker, then tick each strategy (scoped cancel on a
-    breach so one strategy never cancels a sibling's resting orders). Trades only when the account
-    reconciles clean; a persistent unexplained drift engages the global halt. A simple whole-account
-    buying-power pool caps the aggregate of this cycle's buys (NO book-level #389 risk here).
+    """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest fills, reconcile
+    against the paper broker, then tick each (scoped cancel — never a sibling's orders) only on a
+    clean reconcile; persistent drift halts. A whole-account BP pool caps this cycle's buys (#389).
 
-    Strategy selection is ``stage IN ('paper','forward_tested')`` — the same admission set as
-    ``load_gated_strategy`` and single-strategy ``paper trade-tick``: a forward_tested strategy
-    keeps paper-ticking while awaiting the go-live signature so its live-wall certificate stays
-    fresh (#124). The "paper" in the name is the LANE, not a paper-only stage filter.
+    Strategy selection is ``stage IN ('paper','forward_tested')`` — same admission as
+    ``load_gated_strategy``/``trade-tick``: forward_tested keeps ticking for its live-wall
+    certificate (#124); "paper" in the name is the LANE, not a stage filter.
 
-    CONCURRENCY: run-all and ``paper trade-tick`` (and the paper liquidation commands) each ingest
-    venue fills and mutate the shared paper account; they are NOT mutually safe under concurrent
-    execution (double-ingest, reconcile races, per-process buying-power over-commit). They are
-    mutually-exclusive BY OPERATOR DISCIPLINE only — do not run two paper-account cycles at once. An
-    advisory paper-lane lock that enforces this is a filed follow-up (see the design doc)."""
+    CONCURRENCY: shares the mutable paper account with ``trade-tick``/liquidation — not safe
+    concurrently; serialized by operator discipline only (an advisory lock is a filed follow-up)."""
+    if bool(snapshot) == refresh:
+        raise ValueError("pass exactly one of --snapshot <id> or --refresh")
+    if refresh and (start is not None or end is not None):
+        raise ValueError("--refresh derives the cycle window (end = today, start from the "
+                         "strategies' history need); --start/--end are not accepted")
     if max_drawdown is not None and not 0.0 < max_drawdown <= 1.0:
         raise ValueError("--max-drawdown must be in (0, 1]")
     max_drawdown = resolve_drawdown_breaker(max_drawdown, disable_drawdown_breaker)
@@ -1004,7 +980,8 @@ def run_all(
     # One correlation id per cycle; golden_signals flushes in `finally` so the rollup survives even
     # when the cycle fails before/around the strategy loop (#346).
     with correlation_context():
-        log.info("cycle_start", extra={"fields": {"lane": "paper", "snapshot": snapshot}})
+        log.info("cycle_start",
+                 extra={"fields": {"lane": "paper", "snapshot": snapshot or "refresh"}})
         try:
             with registry_conn() as conn:
                 if disable_drawdown_breaker:
@@ -1012,19 +989,12 @@ def run_all(
                                  reason="paper run-all invoked with --disable-drawdown-breaker",
                                  strategy=None)
                 repo = SqliteStrategyRepository(conn)
-                # Both paper-lane stages tick (parity with load_gated_strategy / trade-tick): a
-                # forward_tested strategy keeps accruing evidence ticks awaiting the go-live
-                # signature (#124). Merge preserving each list's insertion order.
+                # Both paper-lane stages tick (parity with load_gated_strategy/trade-tick),
+                # preserving each list's insertion order (#124).
                 paper = repo.list_strategies(Stage.PAPER) + repo.list_strategies(
                     Stage.FORWARD_TESTED)
-                # A trading-stage strategy with NO active allocation is a recovery/demotion
-                # re-entrant (dormant->paper, live->paper), not a book tenant — sizing has no
-                # capital base for it. It is always FLAT (its slice was revoked on the way out),
-                # so we SKIP it, never TICK it: ticking would `raise "no paper allocation"` and
-                # abort the ENTIRE multi-tenant cycle — a book-wide DoS every time one strategy is
-                # recovered/demoted but not yet re-allocated (#317, finding #2). Computed ONCE,
-                # up front, so the skip list is surfaced in EVERY exit envelope (including the
-                # early reconcile-defer / halt returns), never only the loop-completes path.
+                # A recovery/demotion re-entrant (dormant->paper, live->paper) has no allocation and
+                # is always FLAT: SKIP it, don't tick it (would abort the whole cycle, #317 #2).
                 skipped_unallocated = [prec.name for prec in paper
                                        if active_allocation(conn, prec.id) is None]
                 tickable = [prec for prec in paper if prec.name not in set(skipped_unallocated)]
@@ -1037,7 +1007,6 @@ def run_all(
                           "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1)
                 broker = _alpaca_broker_from_settings()
-                provider = _select_provider(False, snapshot)
                 acct = broker.account()
                 tick_ts, clock_source = tick_clock(broker.clock)
                 # ingest fills + recover crash-stranded rows BEFORE reconcile; fail closed on any
@@ -1053,6 +1022,55 @@ def run_all(
                     emit({**breach_payload(str(exc), kind="venue_ingest_failed"),
                           "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1) from exc
+
+                results: list[dict] = []
+                # Lane bars refresh (#556): AFTER fill ingest (so ledger-held symbols are current),
+                # BEFORE the reconcile. Broker positions are read TWICE on purpose: this first
+                # read only feeds symbol DISCOVERY (orphan/residual marks get fetched too); the
+                # reconcile below takes its own fresh read AFTER the network round-trip, so a fill
+                # that lands during the refresh is judged by the reconcile (defer), never traded
+                # against a stale sample. A per-tenant plan fault is isolated like any setup
+                # error; EVERY tenant failing to plan is a failed cycle, not a benign no-op; a
+                # refresh failure fails the WHOLE cycle closed — the operator alerts, leaves the
+                # session marker unwritten, and the next fire retries. Never fall back to an older
+                # snapshot. The derived window (start from the deepest history floor) is the one
+                # the ticks read too.
+                snapshot_info: dict = {"id": snapshot, "refreshed": False,
+                                       "start": start, "end": end}
+                if refresh:
+                    plan = build_cycle_plan(
+                        conn, names=[prec.name for prec in tickable], kind=LedgerKind.PAPER,
+                        data_dir=get_settings().data_dir)
+                    results.extend(plan.skipped)
+                    if tickable and not plan.universes:
+                        audit_append(conn, actor="system", action="cycle_plan_failed",
+                                     reason=f"{len(plan.skipped)} tenant(s) failed planning",
+                                     strategy=None)
+                        emit({"ok": False, "code": "cycle_plan_failed",
+                              "error": "every tickable strategy failed the cycle plan",
+                              "strategies": results,
+                              "skipped_unallocated": skipped_unallocated})
+                        raise typer.Exit(1)
+                    tickable = [prec for prec in tickable if prec.name in plan.universes]
+                    if tickable:
+                        try:
+                            snapshot_info = refresh_lane_snapshot(
+                                lane_symbols(plan, _paper_broker_net(broker)), end=end,
+                                min_rows=plan.min_rows, kind=LedgerKind.PAPER)
+                        except Exception as exc:  # noqa: BLE001 — any refresh fault fails closed
+                            audit_append(conn, actor="system", action="bars_refresh_failed",
+                                         reason=str(exc), strategy=None)
+                            log.error("bars_refresh_failed",
+                                      extra={"fields": {"lane": "paper"}}, exc_info=True)
+                            emit({"ok": False, "code": "refresh_failed", "error": str(exc),
+                                  "strategies": results,
+                                  "skipped_unallocated": skipped_unallocated})
+                            raise typer.Exit(1) from exc
+                        snapshot, start = snapshot_info["id"], snapshot_info["start"]
+                        log.info("bars_refreshed",
+                                 extra={"fields": {"lane": "paper", **snapshot_info}})
+                # No tickable tenant -> no provider needed; the reconcile below still runs.
+                provider = _select_provider(False, snapshot) if tickable else None
 
                 # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book.
                 # halt -> global halt; not clean -> defer the whole cycle (no trade); clean -> tick.
@@ -1072,30 +1090,26 @@ def run_all(
                     global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
                                        actor="system")
                     emit({"ok": False, "deferred": True, "halted": True,
-                          "reconcile": recon_payload,
-                          "skipped_unallocated": skipped_unallocated})
+                          "reconcile": recon_payload, "strategies": results,
+                          "skipped_unallocated": skipped_unallocated, "snapshot": snapshot_info})
                     raise typer.Exit(1)
                 if not recon.clean:
                     counters.reconcile_deferred += 1
                     log.info("reconcile_deferred", extra={"fields": {"lane": "paper"}})
-                    emit(ok({"strategies": [], "deferred": True, "reconcile": recon_payload,
-                             "skipped_unallocated": skipped_unallocated,
+                    emit(ok({"strategies": results, "deferred": True, "reconcile": recon_payload,
+                             "skipped_unallocated": skipped_unallocated, "snapshot": snapshot_info,
                              "note": "reconcile pending; deferring trades this cycle"}))
                     return
 
-                # Simple whole-account buying-power pool: the aggregate of this cycle's buys can
-                # never exceed the paper account's buying power. Each strategy's reserve trims first
-                # against the running pool; a trimmed buy is audited (accounting stays in step).
+                # Whole-account buying-power pool: this cycle's buys can never exceed it; each
+                # strategy's reserve trims against the running pool, and a trim is audited.
                 pool = {"available": float(acct.buying_power)}
 
                 def _paper_reserve_for(strategy_name):
                     def _reserve(symbol: str, notional: float) -> float:
                         grant = min(notional, max(0.0, pool["available"]))
-                        # Debit the pool by what submit_sized will ACTUALLY post, not the raw grant:
-                        # a grant that floors to cents or falls below MIN_NOTIONAL is skipped by
-                        # submit_sized (posts nothing), so debiting `grant` would phantom-consume
-                        # BP for a buy that never happened and wrongly starve a later sibling. The
-                        # shared `posted_notional` keeps pool == start_BP - sum(real posted buys).
+                        # Debit what submit_sized ACTUALLY posts, not the raw grant: a
+                        # below-MIN_NOTIONAL grant posts nothing and would phantom-starve a sibling.
                         pool["available"] -= posted_notional(grant)
                         if grant < notional:  # the POOL bound this buy -> audit the shortfall
                             audit_append(conn, actor="system", action="paper_reserve_trim",
@@ -1104,22 +1118,14 @@ def run_all(
                         return grant
                     return _reserve
 
-                results: list[dict] = []
                 breached = False
                 for prec in tickable:
                     name = prec.name
-                    # Per-strategy fault isolation (#374 / GATE-2): ONLY a pre-side-effect setup
-                    # fault (StrategySetupError — module/gate-token load, missing allocation,
-                    # identity/config error, raised strictly before any broker/ledger side effect)
-                    # is contained here so the loop CONTINUES for siblings. TickHalted/RiskBreach
-                    # are already converted to {ok:False} markers inside the tick helper. Any OTHER
-                    # exception — one escaping the tick helper's own breach/halt side-effect
-                    # handling (trip_for_breach / flatten_strategy / audit) or a before_submit/
-                    # on_submitted ledger hook AFTER an order was recorded/hit the venue — is
-                    # book-integrity-critical and propagates RAW to abort the cycle (fail closed on
-                    # ambiguous breach/order state). The raw exception message is NEVER put in the
-                    # envelope/audit (only the stable class code + the exc_info=True log), to avoid
-                    # leaking credentials/paths.
+                    # Per-strategy fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault
+                    # is contained here (siblings still tick); any other exception is
+                    # book-integrity-critical and propagates RAW to abort the cycle. The raw
+                    # message is NEVER put in the envelope/audit — only the stable class code —
+                    # to avoid leaking credentials/paths.
                     try:
                         # load_gated_strategy is also pre-side-effect setup: a load/gate-token
                         # failure here isolates this tenant, so wrap it as StrategySetupError too.
@@ -1130,18 +1136,12 @@ def run_all(
                         except StrategySetupError:
                             raise
                         except global_halt.GlobalHaltActive:
-                            # The account-wide halt is book-wide, NOT this tenant's setup fault:
-                            # propagate RAW so it aborts the WHOLE cycle (fail closed) exactly as it
-                            # did before the per-tenant isolation wrapper existed — never demote it
-                            # to an isolatable StrategySetupError that skips one tenant and ticks
-                            # siblings on under an active book-wide halt.
+                            # Book-wide, not this tenant's fault: propagate RAW to abort the cycle —
+                            # never demote to a StrategySetupError that ticks siblings under a halt.
                             raise
                         except SYSTEMIC_SETUP_EXCEPTIONS:
-                            # A shared-infrastructure fault (e.g. sqlite3.Error), not this tenant's
-                            # problem: propagate RAW so the cycle aborts and the top-level
-                            # json_errors envelope's db_unavailable/retryable signal survives
-                            # (#374 GATE-2), instead of misclassifying it as an isolatable
-                            # per-tenant fault.
+                            # A shared-infra fault is book-wide too: propagate RAW so the top-level
+                            # db_unavailable/retryable signal survives (#374 GATE-2).
                             raise
                         except Exception as load_exc:  # noqa: BLE001 - pre-side-effect setup fault
                             raise StrategySetupError(name, load_exc) from load_exc
@@ -1150,7 +1150,7 @@ def run_all(
                             tick_ts, clock_source, acct,
                             reserve_buy=_paper_reserve_for(name),
                             cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
-                            start=start, end=end)
+                            start=start, end=end, snapshot_id=snapshot)
                     except StrategySetupError as exc:
                         log.error("strategy_setup_error",
                                   extra={"fields": {"lane": "paper", "strategy": name,
@@ -1172,11 +1172,11 @@ def run_all(
                         break
             envelope = {"reconcile": recon_payload, "strategies": results,
                         "skipped_unallocated": skipped_unallocated,
-                        "setup_errors": [r for r in results if r.get("kind") == "setup_error"]}
+                        "setup_errors": [r for r in results if r.get("kind") == "setup_error"],
+                        "snapshot": snapshot_info}
             if breached:
-                # A strategy breached/halted (already tripped + scoped-flattened): surface the
-                # breaching strategy AND every sibling ticked before it in one envelope, then exit
-                # non-zero (#270) — don't discard the prior results.
+                # A breach (already tripped + scoped-flattened): surface it AND every sibling
+                # ticked before it in one envelope, then exit non-zero (#270).
                 emit({"ok": False, **envelope})
                 raise typer.Exit(1)
             emit(ok(envelope))

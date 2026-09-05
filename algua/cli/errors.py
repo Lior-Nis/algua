@@ -29,6 +29,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     from algua.contracts.lifecycle import TransitionError
     from algua.data.manifest import ManifestLockReplacedError
     from algua.data.providers.errors import ProviderError
+    from algua.data.refresh import RefreshError
     from algua.data.store import SnapshotNotFound
     from algua.execution.errors import BrokerError
     from algua.execution.live_sizing import LiveSizingError
@@ -51,6 +52,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
         # --- LookupError family ---
         (SnapshotNotFound, "not_found"),  # explicit; other *NotFound inherit the generic below
         # --- RuntimeError family (distinct domain types kept out of the `internal` bucket) ---
+        (RefreshError, "refresh_failed"),
         (SignatureError, "bad_signature"),
         (LiveAuthorizationError, "live_unauthorized"),
         (BrokerError, "broker_error"),
