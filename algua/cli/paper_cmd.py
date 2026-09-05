@@ -944,8 +944,8 @@ def run_all(
              "tickable strategy's gate-bound universe, ledger-held and broker-held symbols — "
              "requiring each symbol's newest bar on the session the tick decides on and each "
              "universe symbol's history floor; the always-on operator path. Exactly one of "
-             "--snapshot/--refresh is required; --end is derived (not accepted) under --refresh "
-             "(#556)"),
+             "--snapshot/--refresh is required; --start/--end are derived (not accepted) under "
+             "--refresh (#556)"),
     start: str | None = typer.Option(None, "--start"),
     end: str | None = typer.Option(None, "--end"),
     max_drawdown: float | None = typer.Option(
@@ -956,19 +956,16 @@ def run_all(
         False, "--disable-drawdown-breaker",
         help="HUMAN-ONLY emergency: turn the drawdown breaker fully OFF (audited)"),
 ) -> None:
-    """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest venue fills,
-    reconcile the account against the paper broker, then tick each strategy (scoped cancel on a
-    breach so one strategy never cancels a sibling's resting orders). Trades only when the account
-    reconciles clean; a persistent unexplained drift engages the global halt. A simple whole-account
-    buying-power pool caps the aggregate of this cycle's buys (NO book-level #389 risk here).
+    """One sequenced multi-tenant cycle over ALL paper-lane strategies: ingest fills, reconcile
+    against the paper broker, then tick each (scoped cancel — never a sibling's orders) only on a
+    clean reconcile; persistent drift halts. A whole-account BP pool caps this cycle's buys (#389).
 
-    Strategy selection is ``stage IN ('paper','forward_tested')`` — same admission set as
-    ``load_gated_strategy``/``trade-tick``: forward_tested keeps ticking to keep its live-wall
-    certificate fresh (#124). "paper" in the name is the LANE, not a stage filter.
+    Strategy selection is ``stage IN ('paper','forward_tested')`` — same admission as
+    ``load_gated_strategy``/``trade-tick``: forward_tested keeps ticking for its live-wall
+    certificate (#124); "paper" in the name is the LANE, not a stage filter.
 
-    CONCURRENCY: shares the mutable paper account with ``trade-tick``/liquidation — not safe run
-    concurrently (double-ingest, reconcile races, BP over-commit); serialized by operator
-    discipline only (an advisory lock is a filed follow-up)."""
+    CONCURRENCY: shares the mutable paper account with ``trade-tick``/liquidation — not safe
+    concurrently; serialized by operator discipline only (an advisory lock is a filed follow-up)."""
     if bool(snapshot) == refresh:
         raise ValueError("pass exactly one of --snapshot <id> or --refresh")
     if refresh and (start is not None or end is not None):
@@ -1072,7 +1069,8 @@ def run_all(
                         snapshot, start = snapshot_info["id"], snapshot_info["start"]
                         log.info("bars_refreshed",
                                  extra={"fields": {"lane": "paper", **snapshot_info}})
-                provider = _select_provider(False, snapshot)
+                # No tickable tenant -> no provider needed; the reconcile below still runs.
+                provider = _select_provider(False, snapshot) if tickable else None
 
                 # Account-wide reconcile (multi-tenant): attributed_paper_net vs the broker book.
                 # halt -> global halt; not clean -> defer the whole cycle (no trade); clean -> tick.
@@ -1092,14 +1090,14 @@ def run_all(
                     global_halt.engage(conn, reason=f"paper reconcile drift {recon.mismatches}",
                                        actor="system")
                     emit({"ok": False, "deferred": True, "halted": True,
-                          "reconcile": recon_payload,
-                          "skipped_unallocated": skipped_unallocated})
+                          "reconcile": recon_payload, "strategies": results,
+                          "skipped_unallocated": skipped_unallocated, "snapshot": snapshot_info})
                     raise typer.Exit(1)
                 if not recon.clean:
                     counters.reconcile_deferred += 1
                     log.info("reconcile_deferred", extra={"fields": {"lane": "paper"}})
-                    emit(ok({"strategies": [], "deferred": True, "reconcile": recon_payload,
-                             "skipped_unallocated": skipped_unallocated,
+                    emit(ok({"strategies": results, "deferred": True, "reconcile": recon_payload,
+                             "skipped_unallocated": skipped_unallocated, "snapshot": snapshot_info,
                              "note": "reconcile pending; deferring trades this cycle"}))
                     return
 
@@ -1125,7 +1123,9 @@ def run_all(
                     name = prec.name
                     # Per-strategy fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault
                     # is contained here (siblings still tick); any other exception is
-                    # book-integrity-critical and propagates RAW to abort the cycle.
+                    # book-integrity-critical and propagates RAW to abort the cycle. The raw
+                    # message is NEVER put in the envelope/audit — only the stable class code —
+                    # to avoid leaking credentials/paths.
                     try:
                         # load_gated_strategy is also pre-side-effect setup: a load/gate-token
                         # failure here isolates this tenant, so wrap it as StrategySetupError too.

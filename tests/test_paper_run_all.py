@@ -927,6 +927,9 @@ def test_run_all_refresh_discovers_on_first_read_and_reconciles_on_second(monkey
     assert seen["min_rows"]["AAPL"] >= 61
     assert payload.get("deferred") is True and ticked == [], r.stdout   # reconcile saw ORPH
     assert len(reads) >= 2
+    # The deferred early-return envelope still carries the snapshot the refresh already minted
+    # (the refresh happened BEFORE the reconcile that deferred the cycle).
+    assert payload["snapshot"]["id"] == "fresh-1"
 
 
 def test_run_all_refresh_clean_account_ticks_over_the_derived_window(monkeypatch):
@@ -1007,3 +1010,26 @@ def test_run_all_refresh_all_planless_is_a_failed_cycle(monkeypatch):
     payload = json.loads(r.stdout)
     assert payload["ok"] is False and payload["code"] == "cycle_plan_failed"
     assert payload["strategies"][0]["strategy"] == _S1 and called == []
+
+
+def test_run_all_refresh_zero_tickable_skips_provider_and_refresh(monkeypatch):
+    """All paper-lane strategies are unallocated re-entrants (dormant->paper, live->paper): `paper`
+    is non-empty but `tickable` is empty. Before the fix, `_select_provider(False, None)` was
+    called unconditionally and raised on a bare `--refresh` (no --demo/--snapshot) — a bogus
+    red alarm on a benign, first-class recovery state (#317)."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    # NEITHER strategy is allocated (both recovery/demotion re-entrants).
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _RunAllBroker())
+    called: list = []
+    monkeypatch.setattr("algua.cli.paper_cmd.refresh_lane_snapshot",
+                        lambda *a, **k: called.append(1))
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert payload["strategies"] == []
+    assert set(payload["skipped_unallocated"]) == {_S1, _S2}
+    assert called == []                          # no tickable tenant -> no refresh attempted
+    assert payload["snapshot"]["id"] is None and payload["snapshot"]["refreshed"] is False
