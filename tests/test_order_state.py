@@ -295,3 +295,21 @@ def _seed_fill(conn, strategy, symbol, qty):
     conn.commit()
 
 
+def test_tick_snapshot_round_trips_snapshot_id(conn):
+    record_tick_snapshot(
+        conn, "s", tick_ts="2023-06-01T21:00:00+00:00", decision_ts="2023-05-31T00:00:00+00:00",
+        equity=1.0, peak_equity=1.0, positions={}, n_submitted=0, reconcile_ok=True,
+        lane="paper", strategy_id=1, code_hash="c", config_hash="cfg", dependency_hash="d",
+        account_id="a", cash=1.0, clock_source="broker", snapshot_id="snap-abc")
+    assert latest_tick_snapshot(conn, "s")["snapshot_id"] == "snap-abc"
+
+
+def test_tick_snapshot_without_snapshot_id_is_none(conn):
+    record_tick_snapshot(
+        conn, "s2", tick_ts="2023-06-01T21:00:00+00:00", decision_ts=None,
+        equity=1.0, peak_equity=1.0, positions={}, n_submitted=0, reconcile_ok=True,
+        lane="paper", strategy_id=1, code_hash="c", config_hash="cfg", dependency_hash="d",
+        account_id="a", cash=1.0, clock_source="broker")
+    assert latest_tick_snapshot(conn, "s2")["snapshot_id"] is None
+
+

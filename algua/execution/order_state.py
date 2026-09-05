@@ -201,6 +201,7 @@ def record_tick_snapshot(
     reconcile_ok: bool,
     lane: str, strategy_id: int, code_hash: str, config_hash: str,
     dependency_hash: str | None, account_id: str, cash: float, clock_source: str,
+    snapshot_id: str | None = None,
 ) -> None:
     """Append one completed-tick snapshot (equity + positions) for a strategy — the per-tick
     operability/equity-curve record read by `paper show`.
@@ -209,7 +210,9 @@ def record_tick_snapshot(
     ``("broker", "local")``. These are enforced here rather than via a DB CHECK constraint
     because SQLite ALTER TABLE cannot add CHECK constraints to existing tables — writer
     discipline is the enforcement layer; the forward gate rejects NULL/invalid values
-    fail-closed. Legacy rows (NULL) are inadmissible by design."""
+    fail-closed. Legacy rows (NULL) are inadmissible by design.
+
+    ``snapshot_id`` is the bars snapshot the tick decided on (None for legacy rows)."""
     if lane not in _VALID_LANES:
         raise ValueError(f"lane must be one of {sorted(_VALID_LANES)!r}, got {lane!r}")
     if clock_source not in _VALID_CLOCK_SOURCES:
@@ -219,12 +222,12 @@ def record_tick_snapshot(
     conn.execute(
         "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, peak_equity, "
         "positions, n_submitted, reconcile_ok, lane, strategy_id, code_hash, config_hash, "
-        "dependency_hash, account_id, cash, clock_source, recorded_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "dependency_hash, account_id, cash, clock_source, recorded_at, snapshot_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (strategy, tick_ts, decision_ts, equity, peak_equity, json.dumps(positions),
          n_submitted, 1 if reconcile_ok else 0,
          lane, strategy_id, code_hash, config_hash, dependency_hash,
-         account_id, cash, clock_source, datetime.now(UTC).isoformat()),
+         account_id, cash, clock_source, datetime.now(UTC).isoformat(), snapshot_id),
     )
     conn.commit()
 
@@ -234,7 +237,7 @@ def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None
     row = conn.execute(
         "SELECT tick_ts, decision_ts, equity, peak_equity, positions, n_submitted, reconcile_ok, "
         "lane, strategy_id, code_hash, config_hash, dependency_hash, account_id, cash, "
-        "clock_source, recorded_at "
+        "clock_source, recorded_at, snapshot_id "
         "FROM tick_snapshots WHERE strategy = ? ORDER BY id DESC LIMIT 1", (strategy,)
     ).fetchone()
     if row is None:
@@ -247,7 +250,7 @@ def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None
         "code_hash": row["code_hash"], "config_hash": row["config_hash"],
         "dependency_hash": row["dependency_hash"], "account_id": row["account_id"],
         "cash": row["cash"], "clock_source": row["clock_source"],
-        "recorded_at": row["recorded_at"],
+        "recorded_at": row["recorded_at"], "snapshot_id": row["snapshot_id"],
     }
 
 

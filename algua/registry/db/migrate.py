@@ -235,5 +235,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     # (no backfill — provenance matching is non-unique across re-runs).
     _add_missing_columns(
         conn, "runs", {"series_backtest_id": "INTEGER", "series_holdout_id": "INTEGER"})
+    # v45 (#556): the bars snapshot a tick decided on. Additive nullable; legacy rows stay NULL
+    # ("unknown"), never inferred — provenance is recorded at the tick, not reconstructed.
+    _add_missing_columns(conn, "tick_snapshots", {"snapshot_id": "TEXT"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()
