@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
+from algua.cli import data_cmd
 from algua.cli.main import app
 from algua.data.contracts import ProviderBars
 
@@ -16,7 +17,9 @@ def _tmp_data_dir(monkeypatch, tmp_path):
 
 
 def _json(result):
-    assert result.exit_code == 0, result.stdout
+    """Parse JSON from result, supporting both success (exit_code=0) and error (exit_code=1)."""
+    if result.exit_code not in (0, 1):
+        raise AssertionError(f"unexpected exit code {result.exit_code}: {result.stdout}")
     return json.loads(result.stdout)
 
 
@@ -413,3 +416,53 @@ def test_cli_databento_rejects_adjusted_dir(tmp_path, monkeypatch):
     ])
     assert res.exit_code != 0
     assert "adjusted-dir" in res.output
+
+
+def _fake_provider(dates: list[str]):
+    class FakeProvider:
+        name = "fake"
+
+        def get_bars(self, _request):
+            n = len(dates)
+            return ProviderBars(
+                frame=pd.DataFrame({
+                    "ts": [f"{d}T00:00:00+00:00" for d in dates], "symbol": ["AAPL"] * n,
+                    "open": [1.0] * n, "high": [1.0] * n, "low": [1.0] * n,
+                    "close": [1.0] * n, "adj_close": [1.0] * n, "volume": [1.0] * n,
+                }),
+                source_metadata={"provider": "fake"},
+            )
+    return FakeProvider()
+
+
+_REFRESH_ARGS = ["data", "refresh-bars", "--provider", "fake", "--symbols", "AAPL",
+                 "--start", "2026-01-05", "--end", "2026-01-09", "--require-bar-on", "2026-01-08"]
+
+
+def test_refresh_bars_cli_emits_snapshot_and_refreshed_flag(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(data_cmd, "_bar_provider",
+                        lambda _name: _fake_provider(["2026-01-07", "2026-01-08"]))
+    first = _json(runner.invoke(app, _REFRESH_ARGS))
+    assert first["ok"] is True and first["refreshed"] is True
+    assert first["snapshot"]["dataset"] == "bars"
+    second = _json(runner.invoke(app, _REFRESH_ARGS))
+    assert second["refreshed"] is False
+    assert second["snapshot"]["snapshot_id"] == first["snapshot"]["snapshot_id"]
+
+
+def test_refresh_bars_cli_stale_symbol_is_refresh_failed(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(data_cmd, "_bar_provider", lambda _name: _fake_provider(["2026-01-07"]))
+    r = runner.invoke(app, _REFRESH_ARGS)
+    assert r.exit_code == 1
+    out = _json(r)
+    assert out["ok"] is False and out["code"] == "refresh_failed" and "stale" in out["error"]
+
+
+def test_refresh_bars_cli_min_rows(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(data_cmd, "_bar_provider",
+                        lambda _name: _fake_provider(["2026-01-07", "2026-01-08"]))
+    r = runner.invoke(app, [*_REFRESH_ARGS, "--min-rows", "5"])
+    assert r.exit_code == 1 and _json(r)["code"] == "refresh_failed"
