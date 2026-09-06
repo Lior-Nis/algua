@@ -4,6 +4,9 @@ Algua is an agent-first algotrading platform. You (an agent) and the human opera
 drive the system through the **same** CLI. Every data command emits JSON on stdout.
 
 ## Orientation — where to look
+- **THE VISION OF RECORD:** `docs/PRD.md` — what Algua is for, how success is measured, the
+  capital ladder, the thesis, the four markets, the four strategy kinds, who does what, and the
+  seven-step roadmap. When any spec, plan, issue or review disagrees with it, the PRD wins.
 - **START HERE if you are adding anything:** `docs/architecture.md` — the one-page module map: what
   each package owns, and the registration seam for adding a provider / importer / broker / tracker /
   calendar / strategy / command — new module + one registration line, not a core-file rewrite.

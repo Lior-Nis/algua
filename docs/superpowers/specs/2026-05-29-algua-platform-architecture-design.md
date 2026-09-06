@@ -1,7 +1,9 @@
 # Algua — Platform Architecture Design
 
 **Date:** 2026-05-29
-**Status:** Approved (architecture + roadmap); sub-project specs to follow.
+**Status:** Approved (architecture); **the thesis (§1) and roadmap (§9) are superseded by
+`docs/PRD.md` (2026-09-06)** — the walls, engine contract and correctness essentials here still
+stand; `docs/architecture.md` is the current module map.
 
 ## 1. Purpose
 
