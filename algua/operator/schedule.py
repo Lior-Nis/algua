@@ -192,8 +192,12 @@ class SessionMarker:
         rc: int,
         host: str,
         pid: int,
+        snapshot_id: str | None = None,
     ) -> None:
         """Write ``job``'s enriched entry (``command`` = full argv), preserving other jobs' entries.
+
+        ``snapshot_id`` = the bars snapshot the driver reported ticking on (#556), so a session's
+        completion is attributable to a concrete artifact even though the argv is now fixed.
 
         Atomic + fsync-durable under the marker lock (§D3): read-modify-write the whole map, write a
         sibling temp file, ``fsync`` it, ``os.replace``, then ``fsync`` the dir so the rename's
@@ -209,6 +213,7 @@ class SessionMarker:
                 "rc": rc,
                 "host": host,
                 "pid": pid,
+                "snapshot_id": snapshot_id,
             }
             payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
             write_bytes_durable(payload, self._path)

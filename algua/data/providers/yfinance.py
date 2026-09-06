@@ -106,6 +106,15 @@ def _normalize_yfinance(raw: pd.DataFrame, symbols: tuple[str, ...]) -> pd.DataF
             "yfinance returned no bars for requested symbols: " + ", ".join(missing_symbols)
         )
 
+    # yf.download(group_by="ticker") returns a UNION date index across all requested symbols: a
+    # symbol that did not trade on a session another symbol traded on gets an all-NaN OHLCV row
+    # for that session. Such a row carries no information and validate_bars rejects any NaN, so
+    # ONE halted/no-data name would otherwise fail the whole multi-symbol frame. Drop only rows
+    # where OHLC + volume are ALL NaN; a row with just SOME of those NaN is real corruption/a gap
+    # and must still reach validate_bars and fail closed.
+    _all_nan_cols = ["open", "high", "low", "close", "volume"]
+    out = out[~out[_all_nan_cols].isna().all(axis=1)].reset_index(drop=True)
+
     # Normalize to tz-aware UTC so output satisfies the schema's tz-aware requirement (#108).
     out["ts"] = _to_utc(out["ts"])
     out = out[list(REQUIRED_COLUMNS)].sort_values(["symbol", "ts"]).reset_index(drop=True)

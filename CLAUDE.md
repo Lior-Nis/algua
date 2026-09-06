@@ -42,6 +42,19 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   (`ALGUA_EXCHANGE`, default XNYS) since the last tick (never
   wall-clock), so a weekend/holiday gap never false-alarms; a benched/retired strategy's ancient
   tick never wedges it red.
+- `uv run algua paper run-all --refresh` / `uv run algua live run-all --refresh` — the always-on
+  lane cycle resolves-or-ingests its OWN bars each session (#556): union of every tickable
+  strategy's gate-bound universe ∪ ledger-held ∪ broker-held symbols over the cycle window; each
+  symbol's newest bar must fall on the session the tick decides on (`previous_session(today)`)
+  and each universe symbol must carry its strategies' history floor; a same-request snapshot is
+  reused only if it still passes that wall (content hash re-checked). Missing/stale/misdated/
+  short → `refresh_failed`, nothing minted, no tick, the timer retries; every tenant failing to
+  plan → `cycle_plan_failed`. `--snapshot <id>` is the explicit replay path (exactly one of the
+  two; `--end` is derived under `--refresh`). Tick rows record the `snapshot_id` they decided on
+  (v45) and the operator marks a session complete only with one; `fleet status` reports
+  `decision_stale_sessions` (vs now) and flags `stale` past 2 (`DECISION_STALE_AFTER_SESSIONS`).
+  `uv run algua data refresh-bars --symbols … --start D --end D --require-bar-on D [--min-rows N]`
+  is the manual primitive.
 - `uv run algua registry add <name>` — register a strategy (stage `idea`).
 - `uv run algua registry list [--stage S]` — list strategies.
 - `uv run algua registry show <name>` — strategy + transition history.

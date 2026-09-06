@@ -7,6 +7,8 @@ from typer.testing import CliRunner
 from algua.cli._common import resolve_wall_clock_window
 from algua.cli.main import app
 from algua.contracts.types import LiveAuthorization
+from algua.data.refresh import RefreshError
+from algua.execution.live_ledger import LedgerKind
 from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
@@ -618,7 +620,7 @@ def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, snapshot_id=None):
         calls.append(name)
         if len(calls) == 1:
             return {"strategy": name, "venue": "live", "submitted": []}  # first ticks clean
@@ -677,7 +679,7 @@ def test_run_all_isolates_setup_error_and_ticks_siblings(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, snapshot_id=None):
         calls.append(name)
         if len(calls) == 1:  # first tenant's setup fault (pre-side-effect) — isolatable
             raise StrategySetupError(name, ModuleNotFoundError("secret-token-abc/path/leak"))
@@ -777,7 +779,7 @@ def test_run_all_all_strategies_setup_error_in_one_cycle(monkeypatch):
     _seed_second_live(monkeypatch)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, snapshot_id=None):
         raise StrategySetupError(name, ValueError("bad config"))
 
     monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
@@ -801,7 +803,7 @@ def test_run_all_non_setup_exception_aborts_cycle(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, snapshot_id=None):
         calls.append(name)
         raise RuntimeError("flatten_strategy blew up mid-breach")
 
@@ -823,7 +825,7 @@ def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 30_000.0)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, snapshot_id=None):
         captured["first"] = reserve_buy("AAA", 50_000.0)   # ask for 50k from a 30k pool
         captured["second"] = reserve_buy("BBB", 50_000.0)  # pool now drained
         return {"strategy": name}
@@ -940,7 +942,7 @@ def test_run_all_forwards_start_end_to_tick(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 1_000.0)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None):
+                   reserve_buy=None, cancel=None, snapshot_id=None):
         captured["start"], captured["end"] = start, end
         return {"strategy": name}
 
@@ -1826,3 +1828,91 @@ def test_run_all_book_stale_marks_halts_without_close_all(monkeypatch):
     assert payload["skipped_unallocated"] == []  # #497 F1: threaded into stale-marks-halt
     assert broker.closed_all is False  # halt-only: NEVER flatten off a dead feed
     assert _global_halt_engaged() is True
+
+
+# --- live run-all --refresh (#556 Task 7: lane parity with paper) ---
+
+def _one_live_strategy(monkeypatch, *, broker_net=None):
+    """ONE verified + allocated live strategy over a clean account — the stub set
+    `test_run_all_skips_only_the_unauthorized_strategy` uses, minus the phantom sibling."""
+    _permissive_book(monkeypatch)
+    _to_live("cross_sectional_momentum")
+    monkeypatch.setattr("algua.cli.live_cmd.verify_live_authorization", lambda *a, **k: _auth())
+    monkeypatch.setattr("algua.cli.live_cmd._alpaca_live_broker", lambda auth: object())
+    monkeypatch.setattr("algua.cli.live_cmd.ingest_activities", lambda conn, acts, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd.fill_cursor", lambda conn, kind: None)
+    monkeypatch.setattr("algua.cli.live_cmd._broker_account_activities", lambda broker, after: [])
+    monkeypatch.setattr("algua.cli.live_cmd._broker_net_positions",
+                        lambda broker: dict(broker_net or {}))
+    monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda broker: 100_000.0)
+
+
+def _refresh_stub(seen: dict | None = None, snapshot_id="live-fresh"):
+    def _refresh(symbols, *, end, min_rows, kind):
+        if seen is not None:
+            seen["symbols"], seen["min_rows"], seen["kind"] = symbols, min_rows, kind
+        return {"id": snapshot_id, "refreshed": True, "symbols": len(symbols),
+                "require_bar_on": "2026-01-30", "provider": "fake",
+                "start": "2024-12-01", "end": end}
+    return _refresh
+
+
+def test_live_run_all_rejects_neither_both_and_window_flags_with_refresh():
+    for args in ([], ["--snapshot", "x", "--refresh"], ["--refresh", "--end", "2026-02-01"],
+                 ["--refresh", "--start", "2025-01-01"]):
+        r = runner.invoke(app, ["live", "run-all", *args])
+        assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False, args
+
+
+def test_live_run_all_refresh_ticks_on_the_resolved_snapshot(monkeypatch):
+    _one_live_strategy(monkeypatch)
+    seen: dict = {}
+    monkeypatch.setattr("algua.cli.live_cmd.refresh_lane_snapshot", _refresh_stub(seen))
+    selected: dict = {}
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider",
+                        lambda demo, snap: selected.setdefault("snap", snap) or object())
+    ticked: dict = {}
+
+    def _tick(conn, name, authorization, broker, provider, max_drawdown, start, end,
+              reserve_buy=None, cancel=None, snapshot_id=None):
+        ticked["snapshot_id"], ticked["window"] = snapshot_id, (start, end)
+        return {"strategy": name, "submitted": []}
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _tick)
+    r = runner.invoke(app, ["live", "run-all", "--refresh"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["snapshot"]["id"] == "live-fresh" and selected["snap"] == "live-fresh"
+    assert ticked["snapshot_id"] == "live-fresh"
+    assert ticked["window"] == ("2024-12-01", payload["snapshot"]["end"])   # derived window
+    assert set(seen["symbols"]) == {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"}
+    assert seen["min_rows"]["AAPL"] >= 61
+    assert seen["kind"] is LedgerKind.LIVE   # the LIVE provider setting is consulted, not paper's
+
+
+def test_live_run_all_refresh_includes_broker_orphans(monkeypatch):
+    # A broker-truth holding no strategy owns is still fetched (the book breakers mark it). The
+    # live reconcile tolerates the mismatch for --grace-cycles, so the cycle proceeds.
+    _one_live_strategy(monkeypatch, broker_net={"ORPH": 2.0})
+    seen: dict = {}
+    monkeypatch.setattr("algua.cli.live_cmd.refresh_lane_snapshot", _refresh_stub(seen))
+    monkeypatch.setattr("algua.cli.live_cmd._select_provider", lambda demo, snap: object())
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick",
+                        lambda *a, **k: {"strategy": "cross_sectional_momentum", "submitted": []})
+    r = runner.invoke(app, ["live", "run-all", "--refresh"])
+    assert "ORPH" in seen["symbols"], r.stdout
+
+
+def test_live_run_all_refresh_failure_fails_closed(monkeypatch):
+    _one_live_strategy(monkeypatch)
+
+    def _boom(symbols, *, end, min_rows, kind):
+        raise RefreshError("missing", ["AAPL"], require_bar_on="2026-01-30")
+    monkeypatch.setattr("algua.cli.live_cmd.refresh_lane_snapshot", _boom)
+    ticked: list = []
+    monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick",
+                        lambda *a, **k: ticked.append(1) or {"strategy": "x", "submitted": []})
+    r = runner.invoke(app, ["live", "run-all", "--refresh"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["code"] == "refresh_failed" and "missing" in payload["error"]
+    assert ticked == []

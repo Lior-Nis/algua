@@ -8,11 +8,11 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 # Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
 # with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
 _SCHEMA_OBJECT_COUNT = 106
-_SCHEMA_DIGEST = "f71a8a469cd027767721b9e2893ca83325a77ad1e16c3d7c51fc3aa25fd573c2"
+_SCHEMA_DIGEST = "fe5deddb357b0a3b90d561c7a923735f336b08cb7880da5cd8c226cd0b3afe15"
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 44
+    assert SCHEMA_VERSION == 45
 
 
 def _schema_fingerprint(conn: sqlite3.Connection) -> tuple[int, str, str]:
@@ -836,7 +836,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 44
+    assert SCHEMA_VERSION == 45
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -860,7 +860,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 44
+    assert SCHEMA_VERSION == 45
 
 
 def test_v32_negative_results_table_created(tmp_path):

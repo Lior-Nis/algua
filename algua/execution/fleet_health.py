@@ -10,11 +10,10 @@ Pure reads only — SELECTs against the registry DB, no broker call, no writes, 
 by the import-linter ``independence`` contract; ``execution -> registry/risk/calendar`` is
 permitted and introduces no load-time cycle (registry's execution import is lazy/in-function).
 
-Liveness (#399): ``health`` is NOT derived from a row merely existing. ``staleness_sessions`` counts
-completed market sessions since the newest tick; a non-idle strategy whose newest tick is older than
-``STALE_AFTER_SESSIONS`` — or whose ``tick_ts`` is unparseable/tz-naive/future — is reported
-``stale``, never a silent ``ok``. A never-ticked strategy stays ``idle``. So ``ok`` requires actual,
-fresh, parseable, non-future tick evidence.
+Liveness (#399): ``health`` is NOT derived from a row merely existing. ``staleness_sessions``
+counts completed market sessions since the newest tick; a non-idle strategy whose tick is older
+than ``STALE_AFTER_SESSIONS`` — or unparseable/tz-naive/future — is ``stale``, never a silent
+``ok``; a never-ticked strategy stays ``idle``. So ``ok`` requires fresh, parseable tick evidence.
 """
 
 from __future__ import annotations
@@ -40,10 +39,14 @@ from algua.execution.order_state import (
 from algua.registry.repository import StrategyRecord
 from algua.risk import global_halt, kill_switch
 
-# Newest admissible tick may be at most this many completed sessions old before a non-idle strategy
-# is flagged ``stale`` (matches the forward gate's MAX_STALENESS_SESSIONS). A dead operator loop is
-# one of the most dangerous silent failures — positions held with no risk-checking tick running.
+# Newest admissible tick's max age in completed sessions before a non-idle strategy is ``stale``
+# (matches the forward gate's MAX_STALENESS_SESSIONS) — a dead loop is a dangerous silent failure.
 STALE_AFTER_SESSIONS = 5
+
+# Decision-DATA freshness (#556): sessions between the bar the newest tick DECIDED on and NOW;
+# ages against now (not the tick), so a stuck refresh still trips it. Distinct from
+# STALE_AFTER_SESSIONS: "loop alive" vs "decided on fresh bars" have different tolerances.
+DECISION_STALE_AFTER_SESSIONS = 2
 
 # Worst-first severity ordering for both the ``health`` verdict and the fleet ranking.
 _SEVERITY = {"halted": 0, "drift": 1, "stale": 2, "idle": 3, "ok": 4}
@@ -58,18 +61,17 @@ _ALL_STAGES = frozenset(s.value for s in Stage)
 
 # Stages an operator loop actually ticks — the ONLY stages for which a dead/stalled/never-started
 # loop is a real alert. VERIFIED against origin/main: ``registry.gating.load_gated_strategy`` gates
-# every paper tick surface (``paper run`` / ``paper trade-tick``) to PAPER or FORWARD_TESTED, and
-# ``live run-all`` ticks LIVE. A strategy in any other stage (idea/backtested/candidate/dormant/
-# retired) is NOT run by a loop, so its old/absent tick is expected — not a heartbeat failure. The
-# ``test_operational_stages_match_gating`` drift-guard pins this to the real tick surface so it can
-# never silently diverge from the loop it watches (#399).
+# every paper tick surface to PAPER/FORWARD_TESTED, and ``live run-all`` ticks LIVE. Any other stage
+# (idea/backtested/candidate/dormant/retired) is not loop-run, so an old/absent tick there is
+# expected — not a heartbeat failure — and ``test_operational_stages_match_gating`` pins this set
+# to the real tick surface so it can never silently diverge from the loop it watches (#399).
 OPERATIONAL_STAGES = frozenset({Stage.LIVE.value, Stage.PAPER.value, Stage.FORWARD_TESTED.value})
 
 # For an OPERATIONAL strategy these verdicts each mean a loop that is stopped, stalled, drifted, or
-# never started — every one an actively-alertable liveness failure. ``idle`` (never ticked) alerts
-# here because a live/paper loop that never produced a tick is a loop that never started; on a
-# NON-operational stage ``idle`` is correctly quiet (see :func:`fleet_alert`). ``halted`` alerts
-# because a stopped, unmonitored operational loop is exactly the silent failure #399 targets.
+# never started — every one an actively-alertable liveness failure. ``idle`` alerts here because a
+# live/paper loop that never produced a tick never started (on a NON-operational stage ``idle`` is
+# correctly quiet, see :func:`fleet_alert`); ``halted`` alerts because a stopped, unmonitored
+# operational loop is exactly the silent failure #399 targets.
 _ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "idle", "halted"})
 
 
@@ -157,9 +159,9 @@ def strategy_health(
     reads the ledger + NAV peak; a strategy with paper-venue orders reads the venue ledger + equity
     peak; otherwise the sim-derived positions + equity peak.
 
-    ``health`` precedence (worst first): ``halted`` (kill-switch or global halt) > ``drift`` (newest
-    tick failed reconcile) > ``stale`` (non-idle but newest tick is unparseable/future/older than
-    ``STALE_AFTER_SESSIONS``) > ``idle`` (never ticked) > ``ok``.
+    ``health`` precedence (worst first): ``halted`` > ``drift`` (newest tick failed reconcile) >
+    ``stale`` (newest tick itself stale, OR its decision bar > ``DECISION_STALE_AFTER_SESSIONS``
+    sessions behind now) > ``idle`` (never ticked) > ``ok``.
     """
     if rec.stage is Stage.LIVE:
         positions = believed_positions(conn, rec.name, LedgerKind.LIVE)
@@ -191,11 +193,11 @@ def strategy_health(
     # Staleness: completed sessions since the newest tick. A non-idle strategy whose tick_ts is
     # unparseable/tz-naive/future — or whose row is unreadable — fails closed to sentinel staleness
     # so it can never read as ``ok``.
+    tick_dt = _parse_utc(last["tick_ts"]) if last is not None else None
     staleness_sessions: int | None = None
     if has_unreadable_tick:
         staleness_sessions = STALE_AFTER_SESSIONS + 1  # fail closed -> stale
     elif last is not None:
-        tick_dt = _parse_utc(last["tick_ts"])
         if tick_dt is None or tick_dt > now:
             staleness_sessions = STALE_AFTER_SESSIONS + 1  # fail closed -> stale
         else:
@@ -208,7 +210,33 @@ def strategy_health(
                 staleness_sessions = calendar.sessions_between_instants(tick_dt, now)
             except Exception:  # noqa: BLE001 — any calendar mapping failure fails closed -> stale
                 staleness_sessions = STALE_AFTER_SESSIONS + 1
-
+    # Decision-data staleness (#556). NULL decision_ts = no-op tick, not evaluated; unparseable, a
+    # calendar failure, or decision-after-now fails closed to stale, measured against `now`.
+    decision_stale_sessions: int | None = None
+    decision_stale_at_tick: int | None = None
+    stale_detail: str | None = None
+    if last is not None and not has_unreadable_tick and last.get("decision_ts") is not None:
+        decision_dt = _parse_utc(last["decision_ts"])
+        if decision_dt is None:
+            decision_stale_sessions = DECISION_STALE_AFTER_SESSIONS + 1
+            stale_detail = "decision_ts unparseable"
+        else:
+            def _stale(vs: datetime | None) -> int | None:
+                if vs is None:
+                    return None
+                try:
+                    n = calendar.sessions_stale(decision_dt, vs)
+                except Exception:  # noqa: BLE001 — any calendar failure fails closed -> stale
+                    return DECISION_STALE_AFTER_SESSIONS + 1
+                return DECISION_STALE_AFTER_SESSIONS + 1 if n < 0 else n
+            decision_stale_sessions = _stale(now)
+            decision_stale_at_tick = _stale(tick_dt)
+            if (decision_stale_sessions is not None
+                    and decision_stale_sessions > DECISION_STALE_AFTER_SESSIONS):
+                if decision_dt > now:  # clock-skew sentinel, not real elapsed staleness
+                    stale_detail = "decision_ts is after now"
+                else:
+                    stale_detail = f"decision bars {decision_stale_sessions} sessions behind"
     if tripped or halted_globally:
         health = "halted"
     elif last is not None and not last["reconcile_ok"]:
@@ -216,6 +244,9 @@ def strategy_health(
     elif last is None and not has_unreadable_tick:
         health = "idle"
     elif staleness_sessions is not None and staleness_sessions > STALE_AFTER_SESSIONS:
+        health = "stale"
+    elif (decision_stale_sessions is not None
+          and decision_stale_sessions > DECISION_STALE_AFTER_SESSIONS):
         health = "stale"
     else:
         health = "ok"
@@ -226,6 +257,10 @@ def strategy_health(
         "health": health,
         "staleness_sessions": staleness_sessions,
         "stale_after_sessions": STALE_AFTER_SESSIONS,
+        "decision_stale_sessions": decision_stale_sessions,
+        "decision_stale_at_tick": decision_stale_at_tick,
+        "decision_stale_after_sessions": DECISION_STALE_AFTER_SESSIONS,
+        "stale_detail": stale_detail,
         "last_tick_error": tick_error,
         "kill_switch": {
             "tripped": tripped,

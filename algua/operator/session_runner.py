@@ -241,8 +241,12 @@ def run_session(
                 )
             )
             return True
-        marker.record(job, decision.session, command=list(command), rc=rc, host=host, pid=pid)
-        emit(ok({"job": job, "ran": True, "recorded": True, "session": sess_iso, "rc": rc}))
+        snap = payload.get("snapshot") if isinstance(payload, dict) else None
+        snapshot_id = snap.get("id") if isinstance(snap, dict) else None
+        marker.record(job, decision.session, command=list(command), rc=rc, host=host, pid=pid,
+                      snapshot_id=snapshot_id)
+        emit(ok({"job": job, "ran": True, "recorded": True, "session": sess_iso, "rc": rc,
+                 "snapshot_id": snapshot_id}))
         return True
 
     # rc != 0 — a failure. The alert ALWAYS fires and ALWAYS carries rc + stdout_head;

@@ -35,8 +35,8 @@ def test_runs_tables_exist() -> None:
 
 def test_schema_version_is_44() -> None:
     conn = _fresh()
-    assert SCHEMA_VERSION == 44
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+    assert SCHEMA_VERSION == 45
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
 
 
 def test_no_bare_sharpe_column() -> None:
@@ -63,7 +63,7 @@ def test_migrate_is_idempotent() -> None:
     conn = _fresh()
     migrate(conn)
     migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
 
 
 def test_migrates_a_legacy_db_lacking_runs() -> None:

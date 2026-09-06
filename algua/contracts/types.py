@@ -382,15 +382,15 @@ class LiveReconcileBroker(PositionsBroker, AccountActivityBroker, OrderLookupBro
 
 
 class SessionSpanCalendar(Protocol):
-    """Counts completed exchange sessions between two instants.
+    """Session-staleness helpers a liveness/health check needs from a trading calendar.
 
-    The narrow slice of a trading calendar that liveness/staleness checks need — deliberately one
-    method, matching this module's convention of narrow role Protocols (see the Broker split above)
-    rather than one fat calendar interface. ``registry/forward_promotion.SessionCalendar`` is a
-    different, non-overlapping slice and stays where it is.
+    Deliberately narrow role Protocols (see the Broker split above) rather than one fat calendar
+    interface; ``registry/forward_promotion.SessionCalendar`` is a different, non-overlapping slice.
     """
 
     def sessions_between_instants(self, a: datetime, b: datetime) -> int: ...
+
+    def sessions_stale(self, latest_bar: datetime, now: datetime) -> int: ...
 
 
 @dataclass(frozen=True)

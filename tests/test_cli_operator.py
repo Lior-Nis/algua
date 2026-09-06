@@ -26,7 +26,7 @@ runner = CliRunner()
 
 _DUE = "2023-06-01T21:30:00+00:00"  # after the 2023-06-01 XNYS close -> session 2023-06-01
 _SESSION = date(2023, 6, 1)
-_CMD = ["algua", "paper", "run-all", "--snapshot", "SNAP"]  # the paper job's canonical argv
+_CMD = ["algua", "paper", "run-all", "--refresh"]  # the paper job's canonical argv
 
 
 @pytest.fixture
@@ -343,7 +343,7 @@ def test_calendar_out_of_bounds_fails_closed(db_dir, monkeypatch):
     "cmd",
     [
         ["algua", "data", "inspect"],  # wrong head
-        ["algua", "paper", "run-all", "--snapshot", "SNAP", "--evil"],  # trailing junk
+        ["algua", "paper", "run-all", "--refresh", "--evil"],  # trailing junk
     ],
 )
 def test_command_mismatch_fails_closed(db_dir, monkeypatch, cmd):
@@ -533,6 +533,12 @@ def test_paper_systemd_units_present_and_shaped():
     assert "operator run --job paper" in svc
     # a hung firing must not wedge forever — systemd caps it as the last-resort backstop
     assert "TimeoutStartSec=" in svc
+    assert "paper run-all --refresh" in svc
+    assert "ALGUA_PAPER_SNAPSHOT" not in svc
+    env = (_SYSTEMD / "algua.env.example").read_text()
+    assert "ALGUA_PAPER_SNAPSHOT=" not in env
+    installer = (_SYSTEMD / "install-user-units.sh").read_text()
+    assert "ALGUA_PAPER_SNAPSHOT" not in installer
 
     tmr = (_SYSTEMD / "algua-paper.timer").read_text()
     assert "OnCalendar" in tmr
@@ -551,6 +557,29 @@ def test_research_systemd_units_shipped_and_sandboxed():
     assert "ALGUA_ALPACA_API_SECRET" in service
     assert "OnCalendar=" in timer                        # scheduled cadence
     assert "WantedBy=timers.target" in timer
+
+
+def test_due_clean_run_records_snapshot_id_from_driver_payload(db_dir, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_driver", _fake_driver(
+        0, json.dumps({"ok": True, "strategies": [{"strategy": "s", "ok": True}],
+                       "snapshot": {"id": "snap-9", "refreshed": True}})))
+    r = _invoke()
+    assert r.exit_code == 0, r.stdout
+    assert json.loads(r.stdout)["snapshot_id"] == "snap-9"
+    entry = json.loads((db_dir / "operator_sessions.json").read_text())["paper"]
+    assert entry["snapshot_id"] == "snap-9" and entry["command"] == _CMD
+
+
+def test_due_ticked_without_snapshot_is_completion_unconfirmed(db_dir, monkeypatch):
+    alerts = _spy_alerts(monkeypatch)
+    monkeypatch.setattr(operator_cmd, "_run_driver", _fake_driver(
+        0, json.dumps({"ok": True, "strategies": [{"strategy": "s", "ok": True}]})))
+    r = _invoke()
+    assert r.exit_code == 0, r.stdout
+    assert json.loads(r.stdout)["recorded"] is False
+    assert not (db_dir / "operator_sessions.json").exists() or \
+        "paper" not in json.loads((db_dir / "operator_sessions.json").read_text())
+    assert any(kind == "completion_unconfirmed" for kind, _ in alerts)
 
 
 def test_resolve_driver_argv_uses_venv_sibling(monkeypatch, tmp_path):

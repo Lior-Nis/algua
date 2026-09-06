@@ -22,8 +22,11 @@ from typer.testing import CliRunner
 import algua.strategies.momentum as _momentum_pkg
 from algua.cli.main import app
 from algua.config.settings import get_settings
+from algua.data.refresh import RefreshError
 from algua.execution.alpaca_broker import AccountState
+from algua.execution.order_state import latest_tick_snapshot
 from algua.live.live_loop import TickResult
+from algua.primitives.timeparse import utc
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt
@@ -863,3 +866,170 @@ def test_run_all_no_gate_row_is_isolated_setup_error(monkeypatch):
     by_name = {s["strategy"]: s for s in payload["strategies"]}
     assert by_name[_S1]["ok"] is True                      # gate-rowed sibling ticked
     assert by_name[_S2]["kind"] == "setup_error"           # unpromoted tenant isolated
+
+
+_DERIVED_START = "2024-12-01"  # what the stubbed refresh reports as the cycle window start
+
+
+def _stub_refresh(monkeypatch, *, snapshot_id="fresh-1", seen=None):
+    def _refresh(symbols, *, end, min_rows, kind):
+        if seen is not None:
+            seen["symbols"], seen["min_rows"] = symbols, min_rows
+            seen["end"], seen["kind"] = end, kind
+        return {"id": snapshot_id, "refreshed": True, "symbols": len(symbols),
+                "require_bar_on": "2026-01-30", "provider": "fake",
+                "start": _DERIVED_START, "end": end}
+    monkeypatch.setattr("algua.cli.paper_cmd.refresh_lane_snapshot", _refresh)
+
+
+def _stub_tick(monkeypatch, ticked=None, windows=None):
+    def _rt(strategy, broker, provider, start, end, hooks=None, max_drawdown=None):
+        if ticked is not None:
+            ticked.append(strategy.name)
+        if windows is not None:
+            windows.append((start, end))
+        return _success_result()
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _rt)
+
+
+def test_run_all_rejects_neither_both_and_window_flags_with_refresh():
+    for args in ([], ["--snapshot", _SNAP, "--refresh"], ["--refresh", "--end", _END],
+                 ["--refresh", "--start", _START]):
+        r = runner.invoke(app, ["paper", "run-all", *args])
+        assert r.exit_code == 1 and json.loads(r.stdout)["ok"] is False, args
+
+
+def test_run_all_refresh_discovers_on_first_read_and_reconciles_on_second(monkeypatch):
+    """Broker positions are read twice: the first sample only feeds symbol discovery; the
+    reconcile runs on a FRESH read taken after the (slow) refresh — a fill that lands during the
+    refresh must be judged by the reconcile, never traded against a stale sample."""
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+    broker = _RunAllBroker()  # flat at first read
+    reads: list[dict] = []
+    real_get_positions = broker.get_positions
+
+    def _get_positions():
+        reads.append({})
+        if len(reads) == 2:               # a resting order filled during the refresh
+            broker._positions = {"ORPH": 2.0}
+        return real_get_positions()
+    broker.get_positions = _get_positions
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    seen: dict = {}
+    _stub_refresh(monkeypatch, seen=seen)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    ticked: list = []
+    _stub_tick(monkeypatch, ticked)
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    payload = json.loads(r.stdout)
+    assert "ORPH" not in seen["symbols"] and "AAPL" in seen["symbols"]   # discovery saw flat
+    assert seen["min_rows"]["AAPL"] >= 61
+    assert payload.get("deferred") is True and ticked == [], r.stdout   # reconcile saw ORPH
+    assert len(reads) >= 2
+    # The deferred early-return envelope still carries the snapshot the refresh already minted
+    # (the refresh happened BEFORE the reconcile that deferred the cycle).
+    assert payload["snapshot"]["id"] == "fresh-1"
+
+
+def test_run_all_refresh_clean_account_ticks_over_the_derived_window(monkeypatch):
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+    broker = _RunAllBroker()
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    _stub_refresh(monkeypatch)
+    selected: dict = {}
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider",
+                        lambda demo, snap: selected.setdefault("snap", snap) or object())
+    windows: list = []
+    _stub_tick(monkeypatch, windows=windows)
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["snapshot"]["id"] == "fresh-1" and selected["snap"] == "fresh-1"
+    assert payload["snapshot"]["start"] == _DERIVED_START
+    # ticks read the same window `_run_paper_strategy_tick` derives (utc()-converted, per its
+    # existing contract — not the raw ISO strings from the refresh block).
+    assert windows == [(utc(_DERIVED_START), utc(payload["snapshot"]["end"]))]
+    with closing(connect(get_settings().db_path)) as conn:
+        assert latest_tick_snapshot(conn, _S1)["snapshot_id"] == "fresh-1"
+
+
+def test_run_all_refresh_failure_fails_closed_before_any_tick(monkeypatch):
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _RunAllBroker())
+
+    def _boom(symbols, *, end, min_rows, kind):
+        raise RefreshError("stale", ["AAPL"], require_bar_on="2026-01-30")
+    monkeypatch.setattr("algua.cli.paper_cmd.refresh_lane_snapshot", _boom)
+    ticked: list = []
+    _stub_tick(monkeypatch, ticked)
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False and payload["code"] == "refresh_failed"
+    assert "stale" in payload["error"] and ticked == []
+
+
+def test_run_all_refresh_isolates_one_planless_strategy(monkeypatch):
+    _to_paper(_S1)
+    _seed_allocation(_S1)
+    # _S2 reaches paper WITHOUT a gate row: the plan must skip it and still tick _S1.
+    assert runner.invoke(app, ["backtest", "run", _S2, "--demo", "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
+    _force_stage(_S2, "paper")
+    _seed_allocation(_S2)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _RunAllBroker())
+    _stub_refresh(monkeypatch)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+    ticked: list = []
+    _stub_tick(monkeypatch, ticked)
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    assert r.exit_code == 0, r.stdout
+    by_name = {s["strategy"]: s for s in json.loads(r.stdout)["strategies"]}
+    assert by_name[_S1].get("ok") is True and ticked == [_S1]
+    assert by_name[_S2]["traded"] is False and "cycle plan" in by_name[_S2]["skipped"]
+
+
+def test_run_all_refresh_all_planless_is_a_failed_cycle(monkeypatch):
+    # Registered + allocated + paper stage, but NO gate row: every tenant fails planning.
+    assert runner.invoke(app, ["backtest", "run", _S1, "--demo", "--register",
+                               "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
+    _force_stage(_S1, "paper")
+    _seed_allocation(_S1)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _RunAllBroker())
+    called: list = []
+    monkeypatch.setattr("algua.cli.paper_cmd.refresh_lane_snapshot",
+                        lambda *a, **k: called.append(1))
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    assert r.exit_code == 1
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is False and payload["code"] == "cycle_plan_failed"
+    assert payload["strategies"][0]["strategy"] == _S1 and called == []
+
+
+def test_run_all_refresh_zero_tickable_skips_provider_and_refresh(monkeypatch):
+    """All paper-lane strategies are unallocated re-entrants (dormant->paper, live->paper): `paper`
+    is non-empty but `tickable` is empty. Before the fix, `_select_provider(False, None)` was
+    called unconditionally and raised on a bare `--refresh` (no --demo/--snapshot) — a bogus
+    red alarm on a benign, first-class recovery state (#317)."""
+    _to_paper(_S1)
+    _to_paper(_S2)
+    # NEITHER strategy is allocated (both recovery/demotion re-entrants).
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings",
+                        lambda: _RunAllBroker())
+    called: list = []
+    monkeypatch.setattr("algua.cli.paper_cmd.refresh_lane_snapshot",
+                        lambda *a, **k: called.append(1))
+    r = runner.invoke(app, ["paper", "run-all", "--refresh"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["ok"] is True
+    assert payload["strategies"] == []
+    assert set(payload["skipped_unallocated"]) == {_S1, _S2}
+    assert called == []                          # no tickable tenant -> no refresh attempted
+    assert payload["snapshot"]["id"] is None and payload["snapshot"]["refreshed"] is False

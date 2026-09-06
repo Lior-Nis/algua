@@ -69,10 +69,30 @@ class OperatorJob:
         return captured
 
 
+def _paper_completed(rc: int, payload: dict | None) -> bool:
+    """A cycle COMPLETED the session iff the driver asserted success, did not defer, and — when
+    it had tenants — decided on a named snapshot AND at least one tenant actually ticked. A cycle
+    whose every tenant failed tick-time setup, or that ticked without provenance, is NOT
+    completed: the marker stays unwritten and the next fire retries (#556)."""
+    p = payload or {}
+    if not (rc == 0 and p.get("ok") is True and not p.get("deferred")):
+        return False
+    strategies = p.get("strategies") or []
+    if not strategies:
+        return True
+    snap = p.get("snapshot")
+    has_snapshot = isinstance(snap, dict) and isinstance(snap.get("id"), str) and bool(snap["id"])
+    any_ticked = any(isinstance(s, dict) and s.get("ok") is True for s in strategies)
+    return has_snapshot and any_ticked
+
+
 OPERATOR_JOBS: dict[str, OperatorJob] = {
     "paper": OperatorJob(
         key="paper",
-        argv_template=("algua", "paper", "run-all", "--snapshot", "{snapshot}"),
+        # #556: no variable token. The lane refreshes its own bars; `--refresh` is a fixed flag,
+        # so the exact-arity match still rejects any appended/altered token (incl. `--snapshot X`),
+        # and the env-var-left-empty failure mode of the old {snapshot} placeholder cannot recur.
+        argv_template=("algua", "paper", "run-all", "--refresh"),
         expected_duration_seconds=900.0,
         # Require the driver's OWN positive verdict (`ok: true`), not just rc==0: `paper run-all`
         # today always exits non-zero on an `ok:false` outcome, but this predicate is the ONLY
@@ -80,10 +100,10 @@ OPERATOR_JOBS: dict[str, OperatorJob] = {
         # session complete (GATE-2 finding, #486) — `rc==0` alone is not proof of success. A
         # `deferred:true` cycle exits 0 with `ok:true` but did NOT trade the session (a transient
         # reconcile condition) — also NOT completed, so the marker is left unwritten and the next
-        # fire retries.
-        is_completed=lambda rc, payload: (
-            rc == 0 and (payload or {}).get("ok") is True and not (payload or {}).get("deferred")
-        ),
+        # fire retries. PLUS (#556): a cycle that TICKED strategies must carry the snapshot it
+        # decided on (`snapshot.id`) — provenance is part of "completed"; a no-work cycle (no
+        # strategies) needs none.
+        is_completed=lambda rc, payload: _paper_completed(rc, payload),
     ),
 }
 # Merge-back does NOT get an OPERATOR_JOBS entry (factory slice 3). `algua operator run --job X` is

@@ -14,7 +14,7 @@ from algua.registry.store import SqliteStrategyRepository
 
 
 def test_schema_version_is_44():
-    assert SCHEMA_VERSION == 44
+    assert SCHEMA_VERSION == 45
 
 
 def test_holdout_returns_table_and_indexes_exist(tmp_path):

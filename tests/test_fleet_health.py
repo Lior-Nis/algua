@@ -11,6 +11,7 @@ from algua.cli.main import app
 from algua.config.settings import get_settings
 from algua.contracts.lifecycle import Stage
 from algua.execution.fleet_health import (
+    DECISION_STALE_AFTER_SESSIONS,
     OPERATIONAL_STAGES,
     STALE_AFTER_SESSIONS,
     fleet_alert,
@@ -501,3 +502,81 @@ def test_fleet_health_global_halt_sampled_once(monkeypatch, tmp_path):
         # the caller's value, not re-sample the DB.
         rows = fleet_status(conn, MarketCalendar(), now=now, halted_globally=True)
     assert rows[0]["health"] == "halted"
+
+
+def _tick2(conn, rec, *, tick_ts, decision_ts):
+    """Like _tick but with an explicit decision_ts (None = a no-op tick that decided nothing)."""
+    update_peak_equity(conn, rec.name, 100_000.0)
+    record_tick_snapshot(
+        conn, rec.name, tick_ts=tick_ts, decision_ts=decision_ts, equity=100_000.0,
+        peak_equity=100_000.0, positions={}, n_submitted=0, reconcile_ok=True, lane="paper",
+        strategy_id=rec.id, code_hash="c", config_hash="cfg", dependency_hash="d",
+        account_id="acct", cash=100_000.0, clock_source="broker", snapshot_id="snap")
+
+
+def _health_for(monkeypatch, tmp_path, *, decision_ts, now=None):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "s")
+        # after the 2023-06-15 XNYS close; a normal tick decides on the prior session (06-14)
+        _tick2(conn, rec, tick_ts="2023-06-15T20:30:00+00:00", decision_ts=decision_ts)
+        return strategy_health(conn, rec, MarketCalendar("XNYS"), halted_globally=False,
+                               now=now or (_now() + timedelta(hours=1)))
+
+
+def test_decision_one_session_behind_is_ok(monkeypatch, tmp_path):
+    row = _health_for(monkeypatch, tmp_path, decision_ts="2023-06-14T00:00:00+00:00")
+    assert row["decision_stale_sessions"] == 1 and row["decision_stale_at_tick"] == 1
+    assert row["health"] == "ok" and row["stale_detail"] is None
+
+
+def test_decision_ages_against_now_not_the_tick(monkeypatch, tmp_path):
+    """The tick is fresh, but no NEW tick has landed: by 06-21 the 06-14 decision bar is 4
+    sessions behind the calendar (06-15, 16, 20, 21 — 06-19 is Juneteenth, closed) -> stale,
+    even though at-tick it was 1."""
+    row = _health_for(monkeypatch, tmp_path, decision_ts="2023-06-14T00:00:00+00:00",
+                      now=datetime(2023, 6, 21, 15, 0, tzinfo=UTC))
+    assert row["decision_stale_at_tick"] == 1
+    assert row["decision_stale_sessions"] == 4
+    assert row["health"] == "stale"
+    assert row["stale_detail"] == "decision bars 4 sessions behind"
+
+
+def test_decision_two_behind_is_tolerated(monkeypatch, tmp_path):
+    # 06-16 (Fri) 15:00 UTC: session 06-16 open; 06-14 -> 06-16 = 2 completed sessions -> ok
+    row = _health_for(monkeypatch, tmp_path, decision_ts="2023-06-14T00:00:00+00:00",
+                      now=datetime(2023, 6, 16, 15, 0, tzinfo=UTC))
+    assert row["decision_stale_sessions"] == 2 and row["health"] == "ok"
+
+
+def test_decision_none_falls_through_to_tick_staleness(monkeypatch, tmp_path):
+    row = _health_for(monkeypatch, tmp_path, decision_ts=None)
+    assert row["decision_stale_sessions"] is None and row["health"] == "ok"
+
+
+def test_unparseable_decision_fails_closed_to_stale(monkeypatch, tmp_path):
+    row = _health_for(monkeypatch, tmp_path, decision_ts="not-a-timestamp")
+    assert row["health"] == "stale"
+    assert row["decision_stale_sessions"] == DECISION_STALE_AFTER_SESSIONS + 1
+
+
+def test_decision_after_now_fails_closed_to_stale(monkeypatch, tmp_path):
+    row = _health_for(monkeypatch, tmp_path, decision_ts="2023-06-20T00:00:00+00:00")
+    assert row["health"] == "stale"
+    # clock-skew sentinel: distinct message from genuine elapsed staleness (#556 review finding 5)
+    assert row["stale_detail"] == "decision_ts is after now"
+
+
+def test_fleet_health_cli_exits_nonzero_on_decision_stale(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    with closing(_conn()) as conn:
+        rec = _register(conn, "s")
+        _tick2(conn, rec, tick_ts="2023-06-15T20:30:00+00:00",
+               decision_ts="2023-06-14T00:00:00+00:00")
+    # `fleet health` takes now=datetime.now(UTC) in algua/cli/fleet_cmd.py (~line 105).
+    monkeypatch.setattr(
+        "algua.cli.fleet_cmd.datetime",
+        type("D", (), {"now": staticmethod(
+            lambda tz=None: datetime(2023, 6, 20, 15, 0, tzinfo=UTC))}))
+    r = CliRunner().invoke(app, ["fleet", "health"])
+    assert r.exit_code != 0, r.stdout

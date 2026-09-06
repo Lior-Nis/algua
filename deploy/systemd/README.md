@@ -38,13 +38,16 @@ Assumes the app is deployed at `/opt/algua` with its virtualenv at `/opt/algua/.
    sudo editor /etc/algua/algua.env
    ```
 
-2. Set `ALGUA_PAPER_SNAPSHOT` in the env file — it is expanded into the paper unit's `ExecStart`
-   (`… paper run-all --snapshot ${ALGUA_PAPER_SNAPSHOT}`) as the lone variable token of the `paper`
-   job's canonical argv. The trailing command in `ExecStart` **must exactly match** that argv
-   template (`algua paper run-all --snapshot {snapshot}`) — an exact-arity structural match — or the
-   wrapper fail-closes with `command_mismatch`. If you launch via `uv run algua …`, adjust the
-   entrypoint AND the job's `argv_template` to match; do NOT append ad-hoc flags to the always-on
-   `ExecStart`.
+2. Nothing to set for data (#556): the paper unit runs `algua paper run-all --refresh`, which
+   resolves-or-ingests the lane's bars each session — the union of every tickable strategy's
+   gate-bound universe plus ledger-held and broker-held symbols, each required to carry its newest
+   bar on the session the tick decides on and each universe symbol its history floor; a
+   missing/lagging/short symbol fails the cycle closed and the next fire retries. The trailing
+   command in `ExecStart` **must exactly match** the `paper` job's argv template
+   (`algua paper run-all --refresh`) — an exact-arity structural match — or the wrapper fail-closes
+   with `command_mismatch`. `ALGUA_BARS_REFRESH_PROVIDER` (default `yfinance`) picks the provider.
+   For a replay or incident forensics run `algua paper run-all --snapshot <id>` by hand, outside
+   the timer.
 
 3. Copy the units into place and enable the timer:
 
