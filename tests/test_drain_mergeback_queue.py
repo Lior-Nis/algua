@@ -418,3 +418,98 @@ def test_cleanup_on_a_non_run_branch_is_benign_and_never_fails_the_drain(tmp_pat
     cleanup = json.loads(proc.stdout.split("worktree cleanup: ", 1)[1].splitlines()[0])
     assert cleanup["skipped"] == "not_a_research_run_branch"
     assert _items(tmp_path)["s@research-run/1"]["status"] == "already_done"
+
+
+# --- ideation feedback (spec 2026-09-08 §7): link / record-outcome on the idea-bound item --------
+
+
+def _logging_stub(tmp_path: Path, *, response: dict) -> tuple[Path, Path]:
+    """A fake `algua` that ALSO appends every invocation's argv to a log, so the ideation
+    feedback calls (`research idea link` / `record-outcome`) are observable — the plain stub
+    answers every invocation identically and cannot distinguish them."""
+    log = tmp_path / "algua-calls.log"
+    stub = tmp_path / "algua-stub.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' \"$*\" >> {shlex.quote(str(log))}\n"
+        f"printf '%s' {shlex.quote(json.dumps(response))}\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+    return stub, log
+
+
+def _idea_calls(log: Path) -> list[str]:
+    if not log.exists():
+        return []
+    return [ln for ln in log.read_text().splitlines() if "research idea" in ln]
+
+
+def _seed_bound(tmp_path: Path, **over) -> None:
+    kwargs = dict(strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+                  branch="research-run/1", idea_id=7, claim_token="tok-7")
+    kwargs.update(over)
+    _seed(tmp_path, **kwargs)
+
+
+@pytest.mark.parametrize("status", ["promoted_allocated", "promoted_queued"])
+def test_a_promoted_item_links_its_idea_to_the_authoritative_strategy(tmp_path, status):
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": status})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == ["research idea link 7 --strategy s --token tok-7"]
+
+
+def test_a_proven_promote_failure_records_integrity_fail_against_the_claim(tmp_path):
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "promote_failed"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == [
+        "research idea record-outcome 7 --token tok-7 --outcome integrity_fail "
+        "--reason authoritative promote failed --strategy-name s"]
+
+
+@pytest.mark.parametrize("response", [
+    {"ok": True, "status": "gate_failed"},          # retryable: a later attempt may still promote
+    {"ok": True, "ran": False, "reason": "locked"},  # not an attempt at all
+    {"ok": False, "error": "boom"},                  # transient/unclassifiable
+])
+def test_a_non_terminal_outcome_writes_no_idea_feedback(tmp_path, response):
+    # An outcome written now would be a lie the retry cannot correct — record_outcome is
+    # single-write per claim.
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response=response)
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == []
+
+
+def test_a_legacy_item_with_no_idea_binding_writes_no_idea_feedback(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "promoted_allocated"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == []
+
+
+def test_a_failing_idea_link_warns_but_never_fails_the_drain(tmp_path):
+    # Best-effort by contract: the queue is already updated, and the ideation ledger is feedback.
+    _seed_bound(tmp_path)
+    stub = tmp_path / "algua-stub.sh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$*" == *"research idea"* ]]; then echo "claim_token_mismatch" >&2; exit 1; fi\n'
+        f"printf '%s' {shlex.quote(json.dumps({'ok': True, 'status': 'promoted_allocated'}))}\n",
+        encoding="utf-8")
+    stub.chmod(0o755)
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert "WARNING: idea link failed" in proc.stderr
+    assert _items(tmp_path)["s@research-run/1"]["status"] == "promoted_allocated"

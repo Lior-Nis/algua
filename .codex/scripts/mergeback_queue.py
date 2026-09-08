@@ -383,7 +383,8 @@ def _shell_context_fields(item: dict) -> dict[str, str]:
 
 def enqueue(
     queue_path: Path, lock_path: Path, *, strategy: str, universe: str, start: str, end: str,
-    branch: str, eval_context: dict,
+    branch: str, eval_context: dict, idea_id: int | None = None,
+    claim_token: str | None = None,
 ) -> dict:
     """Idempotently enqueue one validated merge-back candidate, keyed on ``"<strategy>@<branch>"``.
 
@@ -400,6 +401,12 @@ def enqueue(
     ``eval_context`` is REQUIRED and validated fail-closed via :func:`validate_eval_context`
     BEFORE the lock is even taken — an invalid candidate raises ValueError and never touches the
     queue file (the producer logs the warning and drops the candidacy).
+
+    ``idea_id``/``claim_token`` (ideation engine, spec 2026-09-08 §7) are OPTIONAL — legacy items
+    and candidacies the driver could not bind to one of its own claims carry neither. When both
+    are present the drainer closes the ideation loop with them: ``research idea link`` on a
+    promoted item, ``record-outcome integrity_fail`` on a proven authoritative promote failure.
+    They are carried, never interpreted, here.
     """
     context = validate_eval_context(eval_context)
     key = f"{strategy}@{branch}"
@@ -410,7 +417,7 @@ def enqueue(
         item = {
             "strategy": strategy, "universe": universe, "start": start, "end": end,
             "branch": branch, "eval_context": context, "enqueued_at": _now_iso(), "attempts": 0,
-            "transient_failures": 0,
+            "transient_failures": 0, "idea_id": idea_id, "claim_token": claim_token,
             "status": "pending", "last_attempt_at": None, "last_result": None,
         }
         data["items"][key] = item
@@ -885,6 +892,7 @@ def _cmd_enqueue(args: argparse.Namespace) -> int:
         Path(args.queue), Path(args.lock), strategy=args.strategy, universe=args.universe,
         start=args.start, end=args.end, branch=args.branch,
         eval_context=json.loads(args.eval_context),
+        idea_id=args.idea_id, claim_token=args.claim_token,
     )
     print(json.dumps(result))
     return 0
@@ -903,6 +911,10 @@ def _print_selection(result: dict, fmt: str) -> None:
         MERGEBACK_STRATEGY=item["strategy"], MERGEBACK_UNIVERSE=item["universe"],
         MERGEBACK_START=item["start"], MERGEBACK_END=item["end"],
         MERGEBACK_BRANCH=item["branch"],
+        # Ideation binding (optional; empty for a legacy/unbound item -> the drainer skips the
+        # idea-pool feedback entirely rather than guessing at a claim).
+        MERGEBACK_IDEA_ID=str(item["idea_id"]) if item.get("idea_id") is not None else "",
+        MERGEBACK_CLAIM_TOKEN=item.get("claim_token") or "",
         **_shell_context_fields(item),
     ))
 
@@ -958,6 +970,12 @@ def main(argv: list[str] | None = None) -> int:
     p_enqueue.add_argument(
         "--eval-context", required=True, dest="eval_context",
         help="the eval_context recipe as a JSON object (validated fail-closed)")
+    p_enqueue.add_argument(
+        "--idea-id", type=int, default=None, dest="idea_id",
+        help="the idea-pool id this candidacy came from (ideation feedback; optional)")
+    p_enqueue.add_argument(
+        "--claim-token", default=None, dest="claim_token",
+        help="the fencing token of that idea's claim (required with --idea-id to be useful)")
     p_enqueue.set_defaults(fn=_cmd_enqueue)
 
     p_select = sub.add_parser("select")

@@ -122,6 +122,29 @@ RESULT="$(printf '%s' "${STDOUT_TEXT}" | python3 "${QUEUE_MOD}" record-attempt \
   --max-attempts "${MAX_MERGEBACK_ATTEMPTS}" --stdin)"
 echo "queue update: ${RESULT}"
 
+# Ideation feedback (spec 2026-09-08 §7): link the idea to its now-authoritative strategy on
+# success; record the gate's failure on a PROVEN promote failure (never on a transient/lock
+# outcome — those retry, and an outcome written now would be a lie the retry cannot correct).
+# Best-effort and loud; it never changes the queue, and never fails the drain. Legacy items carry
+# no idea binding and skip this entirely.
+if [[ -n "${MERGEBACK_IDEA_ID:-}" && -n "${MERGEBACK_CLAIM_TOKEN:-}" ]]; then
+  STATUS="$(printf '%s' "${STDOUT_TEXT}" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("status",""))
+except Exception: print("")' 2>/dev/null || true)"
+  case "${STATUS}" in
+    promoted_allocated|promoted_queued)
+      "${ALGUA_BIN}" research idea link "${MERGEBACK_IDEA_ID}" --strategy "${MERGEBACK_STRATEGY}" \
+        --token "${MERGEBACK_CLAIM_TOKEN}" || echo "WARNING: idea link failed" >&2 ;;
+    promote_failed)
+      # The one permitted outcome rewrite: the research run recorded candidate_preview_pass, the
+      # AUTHORITATIVE promote then refused it (see IdeaAttemptsRepository.record_outcome).
+      "${ALGUA_BIN}" research idea record-outcome "${MERGEBACK_IDEA_ID}" \
+        --token "${MERGEBACK_CLAIM_TOKEN}" --outcome integrity_fail \
+        --reason "authoritative promote failed" --strategy-name "${MERGEBACK_STRATEGY}" \
+        || echo "WARNING: record-outcome failed" >&2 ;;
+  esac
+fi
+
 # Outcome-keyed worktree reclaim (runs-worktree lifecycle, #555): after a TERMINAL classification
 # ("terminal" = a recognized success/non-retryable failure; "exhausted" = gate_failed at the
 # attempt cap) this item's branch may be fully drained — cleanup-branch checks, under the queue

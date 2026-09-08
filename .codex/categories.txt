@@ -1,0 +1,11 @@
+# Ideation categories (PRD §4). One stable slug per line; optional hints after a space:
+#   <slug> [market=<us_equities|crypto|forex|prediction|any>] [horizon=<daily|weekly|monthly|event|intraday>]
+# Both the forage rotation and `research idea claim`'s round-robin key on the slug.
+momentum
+mean_reversion
+seasonality
+vol_structure
+value_quality_proxy
+liquidity_microstructure
+event_driven horizon=event
+institutional_flow

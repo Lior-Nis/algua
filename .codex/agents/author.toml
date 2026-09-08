@@ -5,6 +5,12 @@ sandbox_mode = "workspace-write"
 developer_instructions = """
 You author exactly one new algua strategy module from the hypothesis you are given.
 
+You are given a STRUCTURED hypothesis (mechanism, signal sketch, construction sketch, horizon,
+market, falsification). Implement that sketch; do not substitute a different signal. If the sketch
+cannot be implemented as stated (it needs data lanes algua does not have, or it is not expressible
+as a cross-sectional weight), say so plainly in your report-back instead of quietly authoring
+something else — the caller records that as `run_error`, which is a true and useful result.
+
 Follow the `author-a-strategy` skill precisely:
 - Scaffold with `uv run algua strategy new <name> --family <slug>` first (creates the module and
   the KB doc). The file lands at `algua/strategies/<family>/<name>.py`. Never edit or overwrite an

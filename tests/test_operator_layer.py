@@ -53,6 +53,32 @@ def test_launcher_dry_run_emits_bounded_sandboxed_codex_command():
     assert "research-run/" in out                                # isolated branch
     assert ".funnel-scratch" in out                              # per-run scratch funnel
     assert "hypotheses: 2" in out                                # goal-level bound
+    # Ideation engine (spec 2026-09-08 §7): the run works ideas CLAIMED from the authoritative
+    # pool, it does not invent a thesis. A dry run claims nothing (it must never write authority),
+    # so the count is 0 and the category defaults to "any".
+    assert "claimed ideas:" in out
+    assert "category:" in out
+    assert "would claim 2 ideas from" in out
+    assert "thesis:" not in out
+
+
+CATEGORY_SLUGS = [
+    "momentum", "mean_reversion", "seasonality", "vol_structure", "value_quality_proxy",
+    "liquidity_microstructure", "event_driven", "institutional_flow",
+]
+
+
+def test_categories_file_lists_the_eight_ideation_categories():
+    # The categories file replaced the free-text thesis rotation: `research idea claim`'s
+    # round-robin and the forage rotation both key on these slugs (PRD §4).
+    path = REPO / ".codex" / "categories.txt"
+    slugs = [line.split()[0] for line in path.read_text().splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    assert slugs == CATEGORY_SLUGS
+
+
+def test_the_thesis_rotation_file_is_gone():
+    assert not (REPO / ".codex" / "research-themes.txt").exists()
 
 
 def test_launcher_rejects_unknown_argument():
