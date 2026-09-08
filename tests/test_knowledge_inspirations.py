@@ -72,6 +72,38 @@ def test_accept_new_notes_copies_valid_rejects_invalid_and_records_seen(tmp_path
     assert any("already seen" in r for rej in out2["rejected"] for r in rej["reasons"])
 
 
+def test_accept_new_notes_rejects_dangling_symlink_without_aborting_batch(tmp_path):
+    s = _settings(tmp_path)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "2026-09-08-quiet-turnover-drift.md").write_text(GOOD)
+    dangling = staged / "2026-09-08-dangling-note.md"
+    dangling.symlink_to(staged / "does-not-exist.md")
+    seen = tmp_path / "data" / "inspirations-seen.jsonl"
+
+    out = accept_new_notes(staged_dir=staged, settings=s, seen_path=seen, categories=CATS,
+                           run_stamp="f1", max_notes=10)
+
+    assert out["accepted"] == ["2026-09-08-quiet-turnover-drift"]
+    reasons = {r["file"]: r["reasons"] for r in out["rejected"]}
+    assert reasons["2026-09-08-dangling-note.md"] == ["not a regular file"]
+
+
+def test_accept_new_notes_copies_staged_bytes_exactly(tmp_path):
+    s = _settings(tmp_path)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    staged_file = staged / "2026-09-08-quiet-turnover-drift.md"
+    staged_file.write_text(GOOD)
+    seen = tmp_path / "data" / "inspirations-seen.jsonl"
+
+    accept_new_notes(staged_dir=staged, settings=s, seen_path=seen, categories=CATS,
+                     run_stamp="f1", max_notes=10)
+
+    vault_file = s.knowledge_dir / "inspirations" / "2026-09-08-quiet-turnover-drift.md"
+    assert vault_file.read_bytes() == staged_file.read_bytes()
+
+
 def test_mark_used_and_exhausted_edit_frontmatter_only(tmp_path):
     s = _settings(tmp_path)
     d = s.knowledge_dir / "inspirations"

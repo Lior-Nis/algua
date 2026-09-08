@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ import yaml
 from algua.config.settings import Settings
 from algua.knowledge.frontmatter import parse_doc, render_doc
 from algua.knowledge.sync import _safe_path, kb_sync_lock
+from algua.primitives.atomic_io import write_text_atomic
 
 NOTE_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{2,60}$")
 SOURCE_KINDS = frozenset({"book_summary", "paper", "forum", "video", "blog", "other"})
@@ -97,18 +99,28 @@ def accept_new_notes(*, staged_dir: Path, settings: Settings, seen_path: Path,
     accepted: list[str] = []
     rejected: list[dict] = []
     for path in sorted(staged_dir.glob("*.md")) if staged_dir.exists() else []:
-        reasons: list[str] = []
         stem = path.stem
+        # Early-exit BEFORE any stat/read: a dangling symlink's stat() raises FileNotFoundError
+        # (which would abort the whole batch), and a symlink to a big file would otherwise leak
+        # that file's size into the rejection reason.
         if path.is_symlink() or not path.is_file():
-            reasons.append("not a regular file")
+            rejected.append({"file": path.name, "reasons": ["not a regular file"]})
+            continue
+        reasons: list[str] = []
         if not NOTE_ID_RE.match(stem):
             reasons.append(f"bad filename: {path.name}")
-        elif path.stat().st_size > MAX_NOTE_BYTES:
-            reasons.append(f"too large: {path.stat().st_size} bytes")
+        else:
+            size = path.stat().st_size
+            if size > MAX_NOTE_BYTES:
+                reasons.append(f"too large: {size} bytes")
         if reasons:
             rejected.append({"file": path.name, "reasons": reasons})
             continue
-        fm, _ = parse_note(path.read_text(encoding="utf-8"))
+        # Read ONCE: the same bytes are parsed for validation and, on acceptance, written into
+        # the vault — a second read here would be a TOCTOU gap (the staged file could change
+        # between the validating read and a later copying read).
+        text = path.read_text(encoding="utf-8")
+        fm, _ = parse_note(text)
         reasons = validate_note(fm, stem=stem, categories=categories)
         if not reasons and url_hash(str(fm["source_url"])) in seen_hashes:
             reasons.append("already seen: source_url")
@@ -121,22 +133,23 @@ def accept_new_notes(*, staged_dir: Path, settings: Settings, seen_path: Path,
             continue
         with kb_sync_lock(settings):
             target = _safe_path(dest, path.name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            write_text_atomic(text, target)
         seen.append(str(fm["source_url"]), run_stamp=run_stamp)
         seen_hashes.add(url_hash(str(fm["source_url"])))
         accepted.append(stem)
     return {"accepted": accepted, "rejected": rejected}
 
 
-def _edit_frontmatter(settings: Settings, inspiration_id: str, mutate) -> dict[str, Any]:
+def _edit_frontmatter(
+    settings: Settings, inspiration_id: str, mutate: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
     if not NOTE_ID_RE.match(inspiration_id):
         raise ValueError(f"bad inspiration id {inspiration_id!r}")
     path = _safe_path(inspirations_dir(settings), f"{inspiration_id}.md")
     with kb_sync_lock(settings):
         fm, body = parse_note(path.read_text(encoding="utf-8"))
         mutate(fm)
-        path.write_text(render_doc(fm, body), encoding="utf-8")
+        write_text_atomic(render_doc(fm, body), path)
     return fm
 
 
