@@ -53,3 +53,57 @@ def test_scorecard_withholds_rates_below_n5(tmp_path):
     att.record_outcome(c.id, token=c.claim_token, outcome=AttemptOutcome.RUN_ERROR, reason="x")
     v = scorecard(conn, days=90)["by_venue"]["blog/y"]
     assert v["n"] == 1 and v["integrity_yield"] is None
+
+
+def test_scorecard_counts_two_attempts_on_the_same_idea_separately(tmp_path):
+    """A second attempt on the SAME idea (re-claimed after a run_error released it) must count
+    as its own attempt, not collapse into the first — the per-(group,key) dedup marker must key
+    on the attempt's OWN id, not (idea_id, outcome), which two same-outcome attempts share."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo, att = IdeaRepository(conn), IdeaAttemptsRepository(conn)
+    repo.add(title="retried idea distinct words", hypothesis="retried mech distinct words",
+             family=None, tags=[], source_type=SourceType.INSPIRATION, source_ref=None,
+             source_date=None, source_note=None, required_data=[DataCapability.OHLCV],
+             status=IdeaStatus.OPEN, category="momentum", market=Market.US_EQUITIES,
+             horizon=Horizon.DAILY, falsification="f", created_by_run="t",
+             inspirations=[InspirationLink("n", "blog/retry", Obscurity.COMMON)])
+    (c1,) = att.claim(run_stamp="r", limit=1, ttl_minutes=180)
+    att.record_outcome(c1.id, token=c1.claim_token, outcome=AttemptOutcome.RUN_ERROR, reason="x")
+    (c2,) = att.claim(run_stamp="r", limit=1, ttl_minutes=180)
+    assert c2.id == c1.id  # run_error released the claim; the only OPEN idea is re-claimed
+    att.record_outcome(c2.id, token=c2.claim_token, outcome=AttemptOutcome.RUN_ERROR, reason="x")
+    v = scorecard(conn, days=90)["by_venue"]["blog/retry"]
+    assert v["n"] == 2
+    assert v["outcomes"]["run_error"] == 2
+
+
+def test_scorecard_survival_counts_promote_and_forward_tested_stage_once(tmp_path):
+    """An idea that was directly promoted AND whose strategy later reached forward_tested must
+    count as ONE survival, not two — survival is a union over the attempt, not a sum of the
+    'promoted_candidate' outcome count and the 'forward_survivor' stage count."""
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    repo, att = IdeaRepository(conn), IdeaAttemptsRepository(conn)
+    idea = repo.add(
+        title="promoted idea distinct words", hypothesis="promoted mech distinct words",
+        family=None, tags=[], source_type=SourceType.INSPIRATION, source_ref=None,
+        source_date=None, source_note=None, required_data=[DataCapability.OHLCV],
+        status=IdeaStatus.OPEN, category="momentum", market=Market.US_EQUITIES,
+        horizon=Horizon.DAILY, falsification="f", created_by_run="t",
+        inspirations=[InspirationLink("n", "blog/survivor", Obscurity.RARE)])
+    (c,) = att.claim(run_stamp="r", limit=1, ttl_minutes=180)
+    att.record_outcome(idea.id, token=c.claim_token,
+                       outcome=AttemptOutcome.CANDIDATE_PREVIEW_PASS, reason="x")
+    now = "2026-01-01T00:00:00+00:00"
+    cur = conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at) VALUES (?,?,?,?)",
+        ("promoted_strat", "forward_tested", now, now))
+    strategy_id = cur.lastrowid
+    conn.commit()
+    att.link(idea.id, token=c.claim_token, strategy_id=strategy_id, strategy_name="promoted_strat")
+
+    v = scorecard(conn, days=90)["by_venue"]["blog/survivor"]
+    assert v["n"] == 1
+    assert v["outcomes"]["promoted_candidate"] == 1
+    assert v["survivals"] == 1

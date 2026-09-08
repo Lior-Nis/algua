@@ -28,6 +28,9 @@ def _eligibility(idea: Idea) -> tuple[IdeaStatus, str | None]:
 
 def import_ideas(auth: sqlite3.Connection, scratch: sqlite3.Connection, *, run_stamp: str,
                  max_new: int, ceiling: int, seeded_max_id: int) -> dict:
+    if auth.in_transaction:
+        raise RuntimeError(
+            "import_ideas must run at top level, not inside an open transaction")
     src = IdeaRepository(scratch)
     dst = IdeaRepository(auth)
     new_rows = [i for i in src.list() if i.id > seeded_max_id]

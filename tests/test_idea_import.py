@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from algua.contracts.idea import (
     AttemptOutcome,
     DataCapability,
@@ -90,6 +92,20 @@ def test_import_dedups_near_duplicate_siblings_within_one_call(tmp_path):
     assert [s["reason"] for s in res["skipped"]] == ["dedup_collision"]
     arepo = IdeaRepository(auth)
     assert [i.title for i in arepo.list()] == ["brand new leap idea alpha"]
+
+
+def test_import_ideas_refuses_inside_open_transaction(tmp_path):
+    """import_ideas owns its own per-row BEGIN IMMEDIATE/commit; called from inside a caller's
+    already-open transaction it must refuse rather than silently nest (matching the guard on
+    IdeaAttemptsRepository.claim/record_outcome/link)."""
+    auth = _db(tmp_path / "auth.db")
+    scratch = _scratch_from(tmp_path / "auth.db", tmp_path / "scratch.db")
+    auth.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(RuntimeError):
+            import_ideas(auth, scratch, run_stamp="l", max_new=1, ceiling=100, seeded_max_id=0)
+    finally:
+        auth.rollback()
 
 
 def test_import_respects_max_and_ceiling(tmp_path):
