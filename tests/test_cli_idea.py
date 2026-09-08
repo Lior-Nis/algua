@@ -137,3 +137,28 @@ def test_stats_counts_by_status():
     out = _json(runner.invoke(app, ["research", "idea", "stats"]))
     assert out["counts"]["open"] == 1
     assert out["counts"]["total"] == 1
+
+
+def test_add_inspiration_requires_category_market_and_stores_links():
+    r = _add("--title", "leap idea words", "--hypothesis", "leap hyp words",
+             "--source-type", "inspiration", "--category", "momentum", "--market", "us_equities",
+             "--horizon", "daily", "--falsification", "refuted if z",
+             "--inspiration", "2026-09-08-x|reddit/algotrading|niche")
+    body = _json(r)
+    assert r.exit_code == 0, r.output
+    assert body["category"] == "momentum" and body["market"] == "us_equities"
+    assert body["inspirations"] == [
+        {"inspiration_id": "2026-09-08-x", "venue": "reddit/algotrading", "obscurity": "niche"}]
+
+
+def test_add_inspiration_without_category_fails():
+    r = _add("--title", "t words", "--hypothesis", "h words", "--source-type", "inspiration")
+    assert r.exit_code == 1 and "category" in r.output
+
+
+def test_add_parks_on_unsupported_market_with_reason():
+    r = _add("--title", "crypto idea words", "--hypothesis", "crypto hyp words",
+             "--source-type", "inspiration", "--category", "momentum", "--market", "crypto",
+             "--horizon", "daily", "--falsification", "f")
+    body = _json(r)
+    assert body["status"] == "needs_data" and body["parked_reason"] == "market:crypto"

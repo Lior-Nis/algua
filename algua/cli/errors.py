@@ -36,6 +36,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     from algua.live.live_loop import TickHalted
     from algua.portfolio.construction import ConstructionError
     from algua.registry.allocations import AllocationError
+    from algua.registry.idea_attempts import ClaimTokenMismatch
     from algua.registry.live_gate import LiveAuthorizationError, SignatureError
     from algua.risk.limits import RiskBreach
 
@@ -44,6 +45,7 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     return [
         # --- ValueError family (specific -> generic) ---
         (AllocationError, "allocation_error"),
+        (ClaimTokenMismatch, "claim_token_mismatch"),
         (TransitionError, "wrong_stage"),
         (ProviderError, "provider_error"),
         (ConstructionError, "construction_error"),

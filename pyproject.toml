@@ -363,6 +363,7 @@ modules = [
     "algua.cli.fleet_cmd",
     "algua.cli.governance_cmd",
     "algua.cli.idea_cmd",
+    "algua.cli.idea_ops_cmd",
     "algua.cli.live_cmd",
     "algua.cli.negative_cmd",
     "algua.cli.operator_cmd",
