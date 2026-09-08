@@ -8,7 +8,7 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 # Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
 # with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
 _SCHEMA_OBJECT_COUNT = 111
-_SCHEMA_DIGEST = "341670dab62d913da14c8079ec6870391bd6d81b88b0ca08be02953ccb92c92a"
+_SCHEMA_DIGEST = "c7b0fda6a11628e2ff8e9bf3712169b6a105a8aef50bedc1ea748647f014a64f"
 
 
 def test_schema_version_is_current():

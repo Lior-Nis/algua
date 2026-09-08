@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 VALID_KINDS = frozenset({"gate_fail", "discard", "dead_end"})
-VALID_SOURCES = frozenset({"auto:research_promote", "manual"})
+VALID_SOURCES = frozenset({"auto:research_promote", "auto:leap_critic", "manual"})
 VALID_ACTORS = frozenset({"agent", "human", "system"})
 
 _MAX_TEXT = 8000  # cap any single free-text field so a pasted blob can't bloat the ledger row

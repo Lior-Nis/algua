@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS negative_results (
     params_json         TEXT,
     tags                TEXT,
     source              TEXT NOT NULL
-        CHECK (source IN ('auto:research_promote', 'manual'))
+        CHECK (source IN ('auto:research_promote', 'auto:leap_critic', 'manual'))
 );
 CREATE INDEX IF NOT EXISTS ix_negative_results_strategy ON negative_results(strategy_name);
 CREATE INDEX IF NOT EXISTS ix_negative_results_created ON negative_results(created_at);
