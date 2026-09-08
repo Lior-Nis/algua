@@ -1,6 +1,8 @@
 import hashlib
 import sqlite3
 
+import pytest
+
 from algua.registry.db import SCHEMA_VERSION, connect, migrate
 
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
@@ -984,3 +986,78 @@ def test_v46_preserves_v45_idea_rows(tmp_path):
     row = conn.execute("SELECT title FROM ideas").fetchone()
     assert row["title"] == "t"
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+
+
+def test_v46_rebuilds_negative_results_check_on_legacy_db(tmp_path):
+    """A DB that reached v45/v46 before #626 widened negative_results.source's CHECK still
+    carries the OLD CHECK (SQLite can't ALTER a CHECK, and CREATE TABLE IF NOT EXISTS is a
+    no-op on an already-existing table) — migrate() must rebuild it in place: the existing row
+    survives, the new source value is now accepted, both indexes still exist, and a SECOND
+    migrate() call is a true no-op (same table object, not a repeat rebuild)."""
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE negative_results (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at          TEXT NOT NULL,
+            strategy_name       TEXT,
+            gate_evaluation_id  INTEGER,
+            kind                TEXT NOT NULL CHECK (kind IN ('gate_fail', 'discard', 'dead_end')),
+            verdict             TEXT NOT NULL,
+            actor               TEXT NOT NULL,
+            reason              TEXT NOT NULL,
+            hypothesis          TEXT,
+            params_json         TEXT,
+            tags                TEXT,
+            source              TEXT NOT NULL
+                CHECK (source IN ('auto:research_promote', 'manual'))
+        );
+        CREATE INDEX ix_negative_results_strategy ON negative_results(strategy_name);
+        CREATE INDEX ix_negative_results_created ON negative_results(created_at);
+        CREATE INDEX ix_negative_results_kind ON negative_results(kind);
+        """
+    )
+    conn.execute(
+        "INSERT INTO negative_results(created_at, strategy_name, gate_evaluation_id, kind,"
+        " verdict, actor, reason, hypothesis, params_json, tags, source)"
+        " VALUES('2026-01-01T00:00:00+00:00', 's', NULL, 'discard', 'FAIL', 'agent', 'r', NULL,"
+        " NULL, NULL, 'manual')"
+    )
+    conn.commit()
+
+    # Sanity: the OLD CHECK really does reject the new source value before migrate() runs.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO negative_results(created_at, strategy_name, gate_evaluation_id, kind,"
+            " verdict, actor, reason, hypothesis, params_json, tags, source)"
+            " VALUES('2026-01-01T00:00:00+00:00', NULL, NULL, 'discard', 'FAIL', 'agent', 'r',"
+            " NULL, NULL, NULL, 'auto:leap_critic')"
+        )
+    conn.rollback()
+
+    migrate(conn)
+
+    row = conn.execute("SELECT * FROM negative_results").fetchone()
+    assert row["strategy_name"] == "s" and row["source"] == "manual"
+    conn.execute(
+        "INSERT INTO negative_results(created_at, strategy_name, gate_evaluation_id, kind,"
+        " verdict, actor, reason, hypothesis, params_json, tags, source)"
+        " VALUES('2026-01-02T00:00:00+00:00', NULL, NULL, 'discard', 'CRITIC:x', 'agent', 'r',"
+        " NULL, NULL, NULL, 'auto:leap_critic')"
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM negative_results").fetchone()[0] == 2
+    indexes = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='negative_results'")}
+    assert {"ix_negative_results_strategy", "ix_negative_results_created",
+            "ix_negative_results_kind"} <= indexes
+
+    before = conn.execute(
+        "SELECT rootpage, sql FROM sqlite_master WHERE type='table' AND name='negative_results'"
+    ).fetchone()
+    migrate(conn)  # second call: must be a no-op, not a repeat rebuild
+    after = conn.execute(
+        "SELECT rootpage, sql FROM sqlite_master WHERE type='table' AND name='negative_results'"
+    ).fetchone()
+    assert (before["rootpage"], before["sql"]) == (after["rootpage"], after["sql"])
+    assert conn.execute("SELECT COUNT(*) FROM negative_results").fetchone()[0] == 2

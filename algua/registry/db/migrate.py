@@ -25,6 +25,7 @@ from algua.registry.db.constants import SCHEMA_VERSION
 from algua.registry.db.core import _migrate_shortlisted_to_candidate
 from algua.registry.db.gate import _backfill_fdr_cohorts, _relabel_fdr_cohorts_for_current_size
 from algua.registry.db.holdout import _backfill_holdout_intervals
+from algua.registry.db.knowledge import _rebuild_negative_results_if_stale
 from algua.registry.db.schema import SCHEMA
 
 
@@ -246,5 +247,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         "claimed_at": "TEXT",
     })
     conn.execute("CREATE INDEX IF NOT EXISTS ix_ideas_claim ON ideas(status, claimed_by)")
+    # v46 (#626): widen negative_results.source's CHECK to admit 'auto:leap_critic' on a DB that
+    # bootstrapped before this change (SQLite can't ALTER a CHECK; see the docstring for why a
+    # rebuild is needed and why it's safe). No-op on a fresh DB or one already rebuilt.
+    _rebuild_negative_results_if_stale(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()

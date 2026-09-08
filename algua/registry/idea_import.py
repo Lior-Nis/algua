@@ -26,18 +26,6 @@ def _eligibility(idea: Idea) -> tuple[IdeaStatus, str | None]:
                          supported_horizons=supported_horizons())
 
 
-def _from_this_run(auth: sqlite3.Connection, idea_id: int, run_stamp: str) -> bool:
-    """Whether `idea_id` was itself imported earlier IN THIS SAME CALL (or a same-`run_stamp`
-    prior call) — carried by its inspiration links' `created_by_run` stamp (import_ideas always
-    passes `run_stamp` through to the copied links; see the `_insert_locked` call below). Sibling
-    proposals from one leap batch must not dedup-collide with each other; only ESTABLISHED
-    (other-run) content should block a new candidate."""
-    row = auth.execute(
-        "SELECT 1 FROM idea_inspirations WHERE idea_id=? AND created_by_run=? LIMIT 1",
-        (idea_id, run_stamp)).fetchone()
-    return row is not None
-
-
 def import_ideas(auth: sqlite3.Connection, scratch: sqlite3.Connection, *, run_stamp: str,
                  max_new: int, ceiling: int, seeded_max_id: int) -> dict:
     src = IdeaRepository(scratch)
@@ -58,12 +46,8 @@ def import_ideas(auth: sqlite3.Connection, scratch: sqlite3.Connection, *, run_s
                 auth.rollback()
                 skipped.append({"scratch_id": idea.id, "reason": "ceiling"})
                 continue
-            collisions = [
-                c for c in dst.find_collisions(
-                    title=idea.title, hypothesis=idea.hypothesis, family=idea.family)
-                if not _from_this_run(auth, c.idea.id, run_stamp)
-            ]
-            if collisions:
+            if dst.find_collisions(title=idea.title, hypothesis=idea.hypothesis,
+                                   family=idea.family):
                 auth.rollback()
                 skipped.append({"scratch_id": idea.id, "reason": "dedup_collision"})
                 continue

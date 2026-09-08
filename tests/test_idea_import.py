@@ -52,8 +52,13 @@ def test_import_copies_new_scratch_rows_with_links_and_recheck(tmp_path):
     seeded_max = auth.execute("SELECT MAX(id) FROM ideas").fetchone()[0]
     scratch = _scratch_from(tmp_path / "auth.db", tmp_path / "scratch.db")
     srepo = IdeaRepository(scratch)
-    _add(srepo, "brand new leap idea alpha", "alpha mechanism text distinct")
-    _add(srepo, "brand new leap idea beta", "beta mechanism text distinct",
+    # alpha/beta are lexically DISTINCT from each other and from the seeded idea (verified
+    # against algua.research.idea_dedup.is_collision — jaccard 0.0 for every pair below) so this
+    # test isolates the "new content imports, a duplicate of PRE-EXISTING content is rejected"
+    # behavior from same-batch sibling dedup (covered separately, see
+    # test_import_dedups_near_duplicate_siblings_within_one_call).
+    _add(srepo, "overnight gap fade after quiet opens", "fade opens that gapped quietly overnight")
+    _add(srepo, "turnover decline predicts drift", "declining turnover predicts price drift",
          market=Market.CRYPTO)  # will park on import: market unsupported
     _add(srepo, "seeded idea words here again", "seeded hypothesis words here again")  # dup
     res = import_ideas(auth, scratch, run_stamp="leap-1", max_new=10, ceiling=100,
@@ -62,17 +67,48 @@ def test_import_copies_new_scratch_rows_with_links_and_recheck(tmp_path):
     assert [s["reason"] for s in res["skipped"]] == ["dedup_collision"]
     arepo = IdeaRepository(auth)
     ideas = {i.title: i for i in arepo.list()}
-    assert ideas["brand new leap idea beta"].status is IdeaStatus.NEEDS_DATA
-    assert ideas["brand new leap idea beta"].parked_reason == "market:crypto"
-    assert arepo.inspirations_of(ideas["brand new leap idea alpha"].id)[0].venue == "blog/x"
+    assert ideas["turnover decline predicts drift"].status is IdeaStatus.NEEDS_DATA
+    assert ideas["turnover decline predicts drift"].parked_reason == "market:crypto"
+    assert arepo.inspirations_of(
+        ideas["overnight gap fade after quiet opens"].id)[0].venue == "blog/x"
+
+
+def test_import_dedups_near_duplicate_siblings_within_one_call(tmp_path):
+    """Two near-duplicate proposals from the SAME leap batch must dedup against each other, not
+    just against pre-existing authority content: the collision check re-runs against everything
+    already in authority, including what this same import already inserted (spec §6). "brand new
+    leap idea alpha/beta" is a real near-duplicate pair under the token-Jaccard dedup (0.778 >=
+    the 0.6 threshold), verified via algua.research.idea_dedup.is_collision."""
+    auth = _db(tmp_path / "auth.db")
+    scratch = _scratch_from(tmp_path / "auth.db", tmp_path / "scratch.db")
+    srepo = IdeaRepository(scratch)
+    _add(srepo, "brand new leap idea alpha", "alpha mechanism text distinct")
+    _add(srepo, "brand new leap idea beta", "beta mechanism text distinct")
+    res = import_ideas(auth, scratch, run_stamp="leap-2", max_new=10, ceiling=100,
+                       seeded_max_id=0)
+    assert len(res["imported"]) == 1
+    assert [s["reason"] for s in res["skipped"]] == ["dedup_collision"]
+    arepo = IdeaRepository(auth)
+    assert [i.title for i in arepo.list()] == ["brand new leap idea alpha"]
 
 
 def test_import_respects_max_and_ceiling(tmp_path):
     auth = _db(tmp_path / "auth.db")
     scratch = _scratch_from(tmp_path / "auth.db", tmp_path / "scratch.db")
     srepo = IdeaRepository(scratch)
-    for i in range(5):
-        _add(srepo, f"leap idea number {i} distinct", f"mechanism {i} distinct words")
+    # Five LEXICALLY DISTINCT ideas (no pair collides under is_collision) so this test isolates
+    # max_new/ceiling counting from dedup behavior.
+    distinct_ideas = [
+        ("overnight gap fade after quiet opens", "fade opens that gapped quietly overnight"),
+        ("turnover decline predicts drift", "declining turnover predicts price drift"),
+        ("insider cluster buying signals reversal",
+         "clustered insider buying predicts reversal moves"),
+        ("sector rotation breadth thrust indicator",
+         "breadth thrust flags sector rotation shifts"),
+        ("earnings drift persists past surprise", "post surprise earnings drift continues weeks"),
+    ]
+    for title, hyp in distinct_ideas:
+        _add(srepo, title, hyp)
     res = import_ideas(auth, scratch, run_stamp="l", max_new=3, ceiling=100, seeded_max_id=0)
     assert len(res["imported"]) == 3
     res2 = import_ideas(auth, scratch, run_stamp="l", max_new=10, ceiling=4, seeded_max_id=0)
