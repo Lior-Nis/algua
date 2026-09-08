@@ -9,7 +9,7 @@ provider `openai`.
 
 ## Results
 
-| # | Probe | Command (see brief) | Expected | Observed | Verdict |
+| # | Probe | Command (full command in the matching detail paragraph below) | Expected | Observed | Verdict |
 |---|-------|----------------------|----------|----------|---------|
 | 1 | Built-in web search works sandboxed | `codex exec -s workspace-write -c approval_policy=never -c web_search=live '...arXiv 1706.03762...'` | `WEB_OK:Attention Is All You Need` | `WEB_OK:Attention Is All You Need` | **PASS** |
 | 2 | Shell network off when told | `codex exec -s workspace-write -c approval_policy=never -c 'sandbox_workspace_write.network_access=false' 'curl ... example.com ...'` | `NET_OFF` | `NET_OFF` (curl: `Could not resolve host: example.com`) | **PASS** |
@@ -19,22 +19,42 @@ provider `openai`.
 
 ## Per-probe detail
 
-**Probe 1 — web search.** Ran clean, exit 0, one line of stdout exactly as expected. The sandbox
+**Probe 1 — web search.** Run from a throwaway `mktemp -d` git-init'd workspace:
+```
+WS=$(mktemp -d); cd "$WS"; git init -q
+timeout 5m codex exec -s workspace-write -c approval_policy=never -c web_search=live \
+  'Use web search to find the title of the arXiv paper 1706.03762 and print WEB_OK:<title> on one line. Do nothing else.' </dev/null
+```
+Ran clean, exit 0, one line of stdout exactly as expected. The sandbox
 banner for this run read `sandbox: workspace-write [workdir, /tmp, $TMPDIR] (network access
 enabled)` — notable because `network_access` was **not** explicitly set in this invocation, yet
 the banner already shows it enabled (see cross-cutting note below). Launcher takeaway: forage/leap
 can rely on `-c web_search=live` for research without opening the shell network — the tool has its
 own path independent of `sandbox_workspace_write.network_access`.
 
-**Probe 2 — shell network off.** Ran clean, exit 0. With `network_access=false` explicitly set,
+**Probe 2 — shell network off.** Run from a fresh throwaway workspace:
+```
+WS=$(mktemp -d); cd "$WS"; git init -q
+timeout 3m codex exec -s workspace-write -c approval_policy=never \
+  -c 'sandbox_workspace_write.network_access=false' \
+  'Run: curl -sS -m 5 https://example.com >/dev/null && echo NET_ON || echo NET_OFF. Print only that word.' </dev/null
+```
+Ran clean, exit 0. With `network_access=false` explicitly set,
 the banner drops the "(network access enabled)" suffix and the in-sandbox `curl` fails DNS
 resolution (`Could not resolve host`), landing on the `NET_OFF` branch. Launcher takeaway:
 `sandbox_workspace_write.network_access=false` is a real, working kill switch for the agent's
 shell — set it explicitly on any launcher invocation that must not shell out to the network,
 since the default (see below) is *not* to block it.
 
-**Probe 3 — writes outside the workspace.** This did **not** match the brief's expectation. The
-`touch /tmp/algua-spike-<pid>` succeeded (`WROTE`, exit 0) rather than being `BLOCKED`. The
+**Probe 3 — writes outside the workspace.** Run from a fresh throwaway workspace:
+```
+WS=$(mktemp -d); cd "$WS"; git init -q
+timeout 3m codex exec -s workspace-write -c approval_policy=never \
+  "Run: touch /tmp/algua-spike-$$ && echo WROTE || echo BLOCKED. Print only that word." </dev/null
+```
+(`$$` is the invoking shell's own PID, substituted before codex ever sees the command; the actual
+run touched `/tmp/algua-spike-180372`.) This did **not** match the brief's expectation. The
+`touch /tmp/algua-spike-180372` succeeded (`WROTE`, exit 0) rather than being `BLOCKED`. The
 sandbox banner explains why: codex 0.149's default `workspace-write` policy grants write access
 to `[workdir, /tmp, $TMPDIR]` — `/tmp` is a standing writable root, not part of "the workspace."
 This is a deterministic, repeatable result (not ambiguous — no rerun performed), so it is recorded
@@ -65,13 +85,34 @@ does hold for the paths that actually matter — repo config, `$HOME`, credentia
 (no writes to real authority paths outside the worktree); the earlier probe-3 caveat is scoped
 narrowly to `/tmp`/`$TMPDIR` themselves being a declared exception, not a hole in the wall generally.
 
-**Probe 4 — MCP tool call under workspace-write.** The command exactly as given in the brief
-(with `--strict-config`) failed before ever reaching the sandbox: `~/.codex/config.toml:101`
-carries `features.experimental_use_rmcp_client = true`, a field codex 0.149 doesn't recognize
-under `--strict-config`, so it aborts with a config-parse error (exit 1) unrelated to MCP-under-
-sandbox. Per the brief's own instruction not to modify anything outside the findings file, the
-global `~/.codex/config.toml` was left untouched. Re-running the identical probe without
-`--strict-config` produced `MCP_FAIL:search_arxiv tool unavailable`, exit 0. Session-transcript
+**Probe 4 — MCP tool call under workspace-write.** Run from a fresh throwaway workspace, command
+exactly as given in the brief:
+```
+WS=$(mktemp -d); cd "$WS"; git init -q
+timeout 5m codex exec -s workspace-write -c approval_policy=never --strict-config \
+  -c 'mcp_servers.papers={command="uvx",args=["--from","paper-search-mcp==0.1.3","python","-m","paper_search_mcp.server"],startup_timeout_sec=90,enabled_tools=["search_arxiv"]}' \
+  'Call search_arxiv for "momentum crash" and print MCP_OK:<count> or MCP_FAIL:<error>.' </dev/null
+```
+This (with `--strict-config`) failed before ever reaching the sandbox, exit 1, stderr verbatim:
+```
+Error loading config.toml:
+/home/liornisimov/.codex/config.toml:101:1: unknown configuration field `features.experimental_use_rmcp_client`
+    |
+101 | experimental_use_rmcp_client = true
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+`~/.codex/config.toml:101` carries `features.experimental_use_rmcp_client = true`, a field codex
+0.149 doesn't recognize under `--strict-config`, so it aborts with a config-parse error unrelated
+to MCP-under-sandbox. Per the brief's own instruction not to modify anything outside the findings
+file, the global `~/.codex/config.toml` was left untouched. Re-running the identical probe
+without `--strict-config`:
+```
+WS=$(mktemp -d); cd "$WS"; git init -q
+timeout 5m codex exec -s workspace-write -c approval_policy=never \
+  -c 'mcp_servers.papers={command="uvx",args=["--from","paper-search-mcp==0.1.3","python","-m","paper_search_mcp.server"],startup_timeout_sec=90,enabled_tools=["search_arxiv"]}' \
+  'Call search_arxiv for "momentum crash" and print MCP_OK:<count> or MCP_FAIL:<error>.' </dev/null
+```
+produced `MCP_FAIL:search_arxiv tool unavailable`, exit 0. Session-transcript
 inspection (`~/.codex/sessions/.../rollout-*-<session-id>.jsonl`) shows the model ran a JS filter
 over its own `ALL_TOOLS` list for anything matching `search_arxiv`/`arxiv`, found nothing, and
 reported failure immediately — it never attempted to invoke or wait on the `papers` server, and
