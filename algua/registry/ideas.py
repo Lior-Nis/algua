@@ -8,8 +8,11 @@ from datetime import UTC, datetime, timedelta
 
 from algua.contracts.idea import (
     DataCapability,
+    Horizon,
     Idea,
     IdeaStatus,
+    Market,
+    Obscurity,
     SourceType,
     can_change_status,
 )
@@ -42,6 +45,15 @@ def _load_caps(value: str | None) -> list[DataCapability]:
 
 
 def _row_to_idea(row: sqlite3.Row) -> Idea:
+    # `row.keys()` guard: pre-v46 rows in tests that hand-build a bare `ideas` table (without the
+    # eight new columns) must never KeyError here.
+    keys = set(row.keys())
+
+    def _opt(name: str) -> str | None:
+        return row[name] if name in keys else None
+
+    market = _opt("market")
+    horizon = _opt("horizon")
     return Idea(
         id=row["id"], title=row["title"], hypothesis=row["hypothesis"],
         family=row["family"], tags=load_tags(row["tags"]),
@@ -53,7 +65,22 @@ def _row_to_idea(row: sqlite3.Row) -> Idea:
         duplicate_of_idea_id=row["duplicate_of_idea_id"],
         override_reason=row["override_reason"],
         created_at=row["created_at"], updated_at=row["updated_at"],
+        category=_opt("category"),
+        market=Market(market) if market else None,
+        horizon=Horizon(horizon) if horizon else None,
+        falsification=_opt("falsification"), parked_reason=_opt("parked_reason"),
+        claimed_by=_opt("claimed_by"), claim_token=_opt("claim_token"),
+        claimed_at=_opt("claimed_at"),
     )
+
+
+@dataclass(frozen=True)
+class InspirationLink:
+    """One inspiration an idea leaped from (kb/inspirations note id + venue + obscurity)."""
+
+    inspiration_id: str
+    venue: str
+    obscurity: Obscurity
 
 
 @dataclass
@@ -77,7 +104,38 @@ class IdeaRepository:
         source_type: SourceType, source_ref: str | None, source_date: str | None,
         source_note: str | None, required_data: list[DataCapability], status: IdeaStatus,
         duplicate_of_idea_id: int | None = None, override_reason: str | None = None,
+        category: str | None = None, market: Market | None = None,
+        horizon: Horizon | None = None, falsification: str | None = None,
+        parked_reason: str | None = None, inspirations: list[InspirationLink] | None = None,
+        created_by_run: str | None = None,
     ) -> Idea:
+        # `with self._conn:` commits on exit, so `add()` cannot be nested inside a caller's own
+        # BEGIN IMMEDIATE (it would commit the caller's transaction early). Task 4's bulk import
+        # calls `_insert_locked` directly inside its own transaction instead.
+        with self._conn:
+            rowid = self._insert_locked(
+                title=title, hypothesis=hypothesis, family=family, tags=tags,
+                source_type=source_type, source_ref=source_ref, source_date=source_date,
+                source_note=source_note, required_data=required_data, status=status,
+                duplicate_of_idea_id=duplicate_of_idea_id, override_reason=override_reason,
+                category=category, market=market, horizon=horizon, falsification=falsification,
+                parked_reason=parked_reason, inspirations=inspirations,
+                created_by_run=created_by_run,
+            )
+        return self.get(rowid)
+
+    def _insert_locked(
+        self, *, title: str, hypothesis: str, family: str | None, tags: list[str],
+        source_type: SourceType, source_ref: str | None, source_date: str | None,
+        source_note: str | None, required_data: list[DataCapability], status: IdeaStatus,
+        duplicate_of_idea_id: int | None = None, override_reason: str | None = None,
+        category: str | None = None, market: Market | None = None,
+        horizon: Horizon | None = None, falsification: str | None = None,
+        parked_reason: str | None = None, inspirations: list[InspirationLink] | None = None,
+        created_by_run: str | None = None,
+    ) -> int:
+        """Insert the idea row (+ its inspiration links) WITHOUT committing — the caller owns the
+        transaction (either `add()`'s `with self._conn:` or a caller's own BEGIN IMMEDIATE)."""
         # add() always inserts authored_strategy_id=None, so an AUTHORED idea created here would
         # violate the AUTHORED<->authored_strategy_id invariant set_status enforces (and silently
         # defeat the refuted-wall join in find_collisions). Authoring goes through
@@ -89,19 +147,35 @@ class IdeaRepository:
             )
         sig = signature(title, hypothesis)
         now = _now()
-        with self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO ideas(title, hypothesis, family, tags, source_type, source_ref,"
-                " source_date, source_note, required_data, status, signature,"
-                " authored_strategy_id, duplicate_of_idea_id, override_reason,"
-                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (title, hypothesis, family, dump_tags(tags), source_type.value, source_ref,
-                 source_date, source_note, _dump_caps(required_data), status.value, sig,
-                 None, duplicate_of_idea_id, override_reason, now, now),
-            )
+        cur = self._conn.execute(
+            "INSERT INTO ideas(title, hypothesis, family, tags, source_type, source_ref,"
+            " source_date, source_note, required_data, status, signature,"
+            " authored_strategy_id, duplicate_of_idea_id, override_reason,"
+            " created_at, updated_at, category, market, horizon, falsification, parked_reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (title, hypothesis, family, dump_tags(tags), source_type.value, source_ref,
+             source_date, source_note, _dump_caps(required_data), status.value, sig,
+             None, duplicate_of_idea_id, override_reason, now, now, category,
+             market.value if market else None, horizon.value if horizon else None,
+             falsification, parked_reason),
+        )
         rowid = cur.lastrowid
         assert rowid is not None
-        return self.get(int(rowid))
+        for link in inspirations or []:
+            self._conn.execute(
+                "INSERT INTO idea_inspirations(idea_id, inspiration_id, venue, obscurity,"
+                " created_by_run) VALUES (?,?,?,?,?)",
+                (rowid, link.inspiration_id, link.venue, link.obscurity.value,
+                 created_by_run or "manual"),
+            )
+        return int(rowid)
+
+    def inspirations_of(self, idea_id: int) -> _list[InspirationLink]:
+        rows = self._conn.execute(
+            "SELECT inspiration_id, venue, obscurity FROM idea_inspirations WHERE idea_id=?"
+            " ORDER BY inspiration_id", (idea_id,))
+        return [InspirationLink(r["inspiration_id"], r["venue"], Obscurity(r["obscurity"]))
+                for r in rows]
 
     def get(self, idea_id: int) -> Idea:
         row = self._conn.execute("SELECT * FROM ideas WHERE id=?", (idea_id,)).fetchone()
@@ -110,7 +184,8 @@ class IdeaRepository:
         return _row_to_idea(row)
 
     def list(
-        self, *, status: IdeaStatus | None = None, family: str | None = None
+        self, *, status: IdeaStatus | None = None, family: str | None = None,
+        limit: int | None = None,
     ) -> list[Idea]:
         sql = "SELECT * FROM ideas"
         clauses: list[str] = []
@@ -123,7 +198,11 @@ class IdeaRepository:
             params.append(family)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY id"
+        if limit is not None:
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+        else:
+            sql += " ORDER BY id"
         return [_row_to_idea(r) for r in self._conn.execute(sql, params)]
 
     def find_collisions(
