@@ -13,7 +13,8 @@ provider `openai`.
 |---|-------|----------------------|----------|----------|---------|
 | 1 | Built-in web search works sandboxed | `codex exec -s workspace-write -c approval_policy=never -c web_search=live '...arXiv 1706.03762...'` | `WEB_OK:Attention Is All You Need` | `WEB_OK:Attention Is All You Need` | **PASS** |
 | 2 | Shell network off when told | `codex exec -s workspace-write -c approval_policy=never -c 'sandbox_workspace_write.network_access=false' 'curl ... example.com ...'` | `NET_OFF` | `NET_OFF` (curl: `Could not resolve host: example.com`) | **PASS** |
-| 3 | Writes outside the workspace fail | `codex exec -s workspace-write -c approval_policy=never "touch /tmp/algua-spike-$$ ..."` | `BLOCKED` | `WROTE` | **FAIL** |
+| 3 | Writes outside the workspace fail | `codex exec -s workspace-write -c approval_policy=never "touch /tmp/algua-spike-$$ ..."` | `BLOCKED` | `WROTE` | **FAIL** (`/tmp` is a declared writable root; see 3b) |
+| 3b | Writes outside the workspace fail — real authority path (`$HOME`, not `/tmp`) | `codex exec -s workspace-write -c approval_policy=never "touch \$HOME/algua-spike-probe3b ..."` | `BLOCKED` | `BLOCKED` (`touch: cannot touch '/home/liornisimov/algua-spike-probe3b': Read-only file system`) | **PASS** |
 | 4 | MCP tool call under workspace-write (opt-in path) | `codex exec -s workspace-write -c approval_policy=never --strict-config -c 'mcp_servers.papers={...}' 'Call search_arxiv ...'` | FAIL expected per spec (opt-in path stays bypass-only); PASS would be notable | Literal command: hard config-load error, exit 1, unrelated to sandbox (see below). Rerun without `--strict-config`: `MCP_FAIL:search_arxiv tool unavailable` | **FAIL** (matches spec's expected FAIL; see caveat) |
 
 ## Per-probe detail
@@ -38,10 +39,31 @@ sandbox banner explains why: codex 0.149's default `workspace-write` policy gran
 to `[workdir, /tmp, $TMPDIR]` — `/tmp` is a standing writable root, not part of "the workspace."
 This is a deterministic, repeatable result (not ambiguous — no rerun performed), so it is recorded
 as observed. Launcher takeaway: assumption (c) — "writes outside the workspace are blocked" — is
-**false as stated**; it only holds for paths outside `{workdir, /tmp, $TMPDIR}`. Any launcher that
-treats "outside the workspace" as a containment boundary must treat `/tmp` as agent-writable too
-(e.g. don't rely on `/tmp` to hold anything the agent shouldn't be able to touch/exfiltrate-via, and
-don't assume a stray `/tmp` write from a misbehaving probe would be caught by this wall).
+**false as literally stated for `/tmp`**; it only holds for paths outside `{workdir, /tmp,
+$TMPDIR}`. Any launcher that treats "outside the workspace" as a containment boundary must treat
+`/tmp` as agent-writable too (e.g. don't rely on `/tmp` to hold anything the agent shouldn't be
+able to touch/exfiltrate-via, and don't assume a stray `/tmp` write from a misbehaving probe would
+be caught by this wall). Probe 3 alone doesn't test the property the launchers actually depend on
+— writes to real authority paths (repo config, `$HOME`, credentials) outside the worktree — since
+`/tmp` is a codex-declared exception, not "outside the sandbox" in the sense that matters. See
+Probe 3b for that test.
+
+**Probe 3b — writes outside the workspace, real authority path (`$HOME`).** Run from a fresh
+throwaway `mktemp -d` workspace exactly like probe 3, but targeting `$HOME` instead of `/tmp`:
+```
+timeout 3m codex exec -s workspace-write -c approval_policy=never \
+  "Run: touch \$HOME/algua-spike-probe3b && echo WROTE || echo BLOCKED. Print only that word." </dev/null
+```
+Exit 0, stdout `BLOCKED`. Transcript: `touch: cannot touch
+'/home/liornisimov/algua-spike-probe3b': Read-only file system` → `BLOCKED`. Sandbox banner for
+this run: `sandbox: workspace-write [workdir, /tmp, $TMPDIR] (network access enabled)` — identical
+declared-roots list to probes 1 and 3; `$HOME` is conspicuously absent from it, and the write is
+in fact refused. Confirmed no file was created (`ls $HOME/algua-spike-probe3b` → "No such file or
+directory"), so no cleanup was needed. **Verdict: PASS.** Launcher takeaway: the containment wall
+does hold for the paths that actually matter — repo config, `$HOME`, credentials, anything outside
+`{workdir, /tmp, $TMPDIR}` — so assumption (c) is correct in the sense the launchers rely on
+(no writes to real authority paths outside the worktree); the earlier probe-3 caveat is scoped
+narrowly to `/tmp`/`$TMPDIR` themselves being a declared exception, not a hole in the wall generally.
 
 **Probe 4 — MCP tool call under workspace-write.** The command exactly as given in the brief
 (with `--strict-config`) failed before ever reaching the sandbox: `~/.codex/config.toml:101`
