@@ -929,14 +929,58 @@ def test_v46_ideas_columns_and_tables_exist_after_migrate(tmp_path):
 
 
 def test_v46_preserves_v45_idea_rows(tmp_path):
-    """A pre-v46 ideas row (no new columns) survives migrate with NULLs in the new columns."""
+    """A pre-v46 ideas row (no new columns, no idea_attempts/idea_inspirations tables) survives
+    the real ALTER-TABLE migration path with NULLs in the new columns."""
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
-    migrate(conn)
+    # Hand-written v45-shaped `ideas` table: the CREATE TABLE from algua/registry/db/ideas.py
+    # WITHOUT the eight v46 columns and WITHOUT idea_attempts/idea_inspirations.
+    conn.executescript(
+        """
+        CREATE TABLE ideas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            family TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            source_type TEXT NOT NULL,
+            source_ref TEXT,
+            source_date TEXT,
+            source_note TEXT,
+            required_data TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            authored_strategy_id INTEGER REFERENCES strategies(id),
+            duplicate_of_idea_id INTEGER REFERENCES ideas(id),
+            override_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX ix_ideas_status ON ideas(status);
+        CREATE INDEX ix_ideas_family ON ideas(family);
+        """
+    )
+    conn.execute("PRAGMA user_version=45;")
     conn.execute("INSERT INTO ideas(title,hypothesis,tags,source_type,required_data,status,"
                  "signature,created_at,updated_at) VALUES('t','h','[]','manual','[]','open',"
                  "'sig','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')")
     conn.commit()
+
     migrate(conn)
-    row = conn.execute("SELECT category, claimed_by FROM ideas").fetchone()
-    assert row["category"] is None and row["claimed_by"] is None
+
+    row = conn.execute("SELECT * FROM ideas").fetchone()
+    assert row["title"] == "t"
+    for col in ("category", "market", "horizon", "falsification", "parked_reason",
+                "claimed_by", "claim_token", "claimed_at"):
+        assert row[col] is None, f"{col} should be NULL on a pre-v46 row, got {row[col]!r}"
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(ideas)")}
+    assert {"category", "market", "horizon", "falsification", "parked_reason",
+            "claimed_by", "claim_token", "claimed_at"} <= cols
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"idea_attempts", "idea_inspirations"} <= tables
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+
+    migrate(conn)  # idempotent re-run must not raise
+    row = conn.execute("SELECT title FROM ideas").fetchone()
+    assert row["title"] == "t"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
