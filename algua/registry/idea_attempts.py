@@ -149,12 +149,21 @@ class IdeaAttemptsRepository:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._check_token(idea_id, token)
+            # The ONE permitted rewrite is candidate_preview_pass -> integrity_fail specifically
+            # (the merge-back drainer's "authoritative promote failed" path). Gating the guard on
+            # the NEW value too (not just the old one) closes candidate_preview_pass -> anything
+            # (e.g. -> run_error), which would otherwise silently overwrite preview-pass evidence.
+            if outcome is AttemptOutcome.INTEGRITY_FAIL:
+                guard = "(outcome IS NULL OR outcome = ?)"
+                guard_params: tuple[object, ...] = (AttemptOutcome.CANDIDATE_PREVIEW_PASS.value,)
+            else:
+                guard = "outcome IS NULL"
+                guard_params = ()
             cur = self._conn.execute(
                 "UPDATE idea_attempts SET outcome=?, reason=?, evidence_ref=?, strategy_name=?,"
-                " outcome_at=? WHERE idea_id=? AND claim_token=?"
-                " AND (outcome IS NULL OR outcome = ?)",
+                f" outcome_at=? WHERE idea_id=? AND claim_token=? AND {guard}",
                 (outcome.value, reason[:300], evidence_ref, strategy_name, now, idea_id, token,
-                 AttemptOutcome.CANDIDATE_PREVIEW_PASS.value))
+                 *guard_params))
             if cur.rowcount != 1:
                 raise ClaimTokenMismatch(f"idea {idea_id}: attempt already has an outcome")
             sets = ["updated_at=?"]
@@ -182,11 +191,17 @@ class IdeaAttemptsRepository:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self._check_token(idea_id, token)
-            self._conn.execute(
+            cur = self._conn.execute(
                 "UPDATE idea_attempts SET outcome=?, strategy_name=?, outcome_at=?"
                 " WHERE idea_id=? AND claim_token=? AND (outcome = ? OR outcome IS NULL)",
                 (AttemptOutcome.PROMOTED_CANDIDATE.value, strategy_name, now, idea_id, token,
                  AttemptOutcome.CANDIDATE_PREVIEW_PASS.value))
+            if cur.rowcount != 1:
+                # A live claim (token checked above) whose attempt row already carries a terminal
+                # outcome other than candidate_preview_pass -- mirrors record_outcome's CAS check
+                # so the idea is never flipped to AUTHORED while the attempt ledger diverges.
+                raise ClaimTokenMismatch(
+                    f"idea {idea_id}: attempt outcome is not candidate_preview_pass or NULL")
             self._conn.execute(
                 "UPDATE ideas SET status=?, authored_strategy_id=?, claimed_by=NULL,"
                 " claim_token=NULL, claimed_at=NULL, updated_at=? WHERE id=?",

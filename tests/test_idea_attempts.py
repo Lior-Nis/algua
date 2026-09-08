@@ -147,3 +147,52 @@ def test_record_outcome_allows_preview_pass_to_integrity_fail_rewrite(tmp_path):
     assert rewritten.status is IdeaStatus.REFUTED and rewritten.claimed_by is None
     (row,) = att.attempts_of(idea.id)
     assert row["outcome"] == "integrity_fail"
+
+
+def test_record_outcome_rejects_preview_pass_rewrite_to_other_outcomes(tmp_path):
+    """The ONE permitted rewrite is candidate_preview_pass -> integrity_fail specifically; any
+    other new outcome (incl. re-recording candidate_preview_pass itself) must still raise, and
+    must leave the attempt row exactly as candidate_preview_pass recorded it."""
+    _, repo, att = _setup(tmp_path)
+    (idea,) = _seed(repo, n=1, category="momentum")
+    (c,) = att.claim(run_stamp="r1", limit=1, ttl_minutes=180)
+    att.record_outcome(idea.id, token=c.claim_token,
+                       outcome=AttemptOutcome.CANDIDATE_PREVIEW_PASS, reason="preview ok")
+    (before,) = att.attempts_of(idea.id)
+
+    with pytest.raises(ClaimTokenMismatch):
+        att.record_outcome(idea.id, token=c.claim_token, outcome=AttemptOutcome.RUN_ERROR,
+                           reason="should not land")
+    with pytest.raises(ClaimTokenMismatch):
+        att.record_outcome(idea.id, token=c.claim_token,
+                           outcome=AttemptOutcome.CANDIDATE_PREVIEW_PASS,
+                           reason="should not re-land")
+
+    (after,) = att.attempts_of(idea.id)
+    assert after == before  # attempt row untouched by either rejected rewrite
+    idea_after = repo.get(idea.id)
+    assert idea_after.status is IdeaStatus.OPEN and idea_after.claimed_by == "r1"
+
+
+def test_link_rejects_when_attempt_outcome_is_not_preview_pass_or_null(tmp_path):
+    """A live claim (token still valid) whose attempt row already carries a terminal outcome
+    other than candidate_preview_pass/NULL must not flip the idea to AUTHORED — the
+    idea_attempts UPDATE's rowcount is checked, mirroring record_outcome's CAS."""
+    conn, repo, att = _setup(tmp_path)
+    (idea,) = _seed(repo, n=1, category="momentum")
+    (c,) = att.claim(run_stamp="r1", limit=1, ttl_minutes=180)
+    # Simulate a terminal, non-preview-pass outcome landing on this claim's attempt row while the
+    # claim itself is still live -- bypasses record_outcome (which would release the claim) so
+    # this exercises link()'s own rowcount guard rather than _check_token's claimed_by check.
+    conn.execute("UPDATE idea_attempts SET outcome=? WHERE idea_id=? AND claim_token=?",
+                 (AttemptOutcome.RUN_ERROR.value, idea.id, c.claim_token))
+    conn.commit()
+
+    strat = SqliteStrategyRepository(conn).add("strat_b")
+    with pytest.raises(ClaimTokenMismatch):
+        att.link(idea.id, token=c.claim_token, strategy_id=strat.id, strategy_name="strat_b")
+
+    idea_after = repo.get(idea.id)
+    assert idea_after.status is IdeaStatus.OPEN and idea_after.authored_strategy_id is None
+    (row,) = att.attempts_of(idea.id)
+    assert row["outcome"] == "run_error"
