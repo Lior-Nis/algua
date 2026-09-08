@@ -238,5 +238,13 @@ def migrate(conn: sqlite3.Connection) -> None:
     # v45 (#556): the bars snapshot a tick decided on. Additive nullable; legacy rows stay NULL
     # ("unknown"), never inferred — provenance is recorded at the tick, not reconstructed.
     _add_missing_columns(conn, "tick_snapshots", {"snapshot_id": "TEXT"})
+    # v46 — ideation engine (spec 2026-09-08 §7): claim/eligibility columns on ideas. The
+    # idea_attempts / idea_inspirations tables come from the ideas context SCHEMA above.
+    _add_missing_columns(conn, "ideas", {
+        "category": "TEXT", "market": "TEXT", "horizon": "TEXT", "falsification": "TEXT",
+        "parked_reason": "TEXT", "claimed_by": "TEXT", "claim_token": "TEXT",
+        "claimed_at": "TEXT",
+    })
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_ideas_claim ON ideas(status, claimed_by)")
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()

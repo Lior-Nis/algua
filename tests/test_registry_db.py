@@ -7,12 +7,12 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 
 # Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
 # with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
-_SCHEMA_OBJECT_COUNT = 106
-_SCHEMA_DIGEST = "fe5deddb357b0a3b90d561c7a923735f336b08cb7880da5cd8c226cd0b3afe15"
+_SCHEMA_OBJECT_COUNT = 111
+_SCHEMA_DIGEST = "341670dab62d913da14c8079ec6870391bd6d81b88b0ca08be02953ccb92c92a"
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 45
+    assert SCHEMA_VERSION == 46
 
 
 def _schema_fingerprint(conn: sqlite3.Connection) -> tuple[int, str, str]:
@@ -836,7 +836,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 45
+    assert SCHEMA_VERSION == 46
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -860,7 +860,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 45
+    assert SCHEMA_VERSION == 46
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -913,3 +913,30 @@ def test_v41_factor_evaluations_table_dropped(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "factor_evaluations" not in tables
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v46_ideas_columns_and_tables_exist_after_migrate(tmp_path):
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.row_factory = sqlite3.Row
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(ideas)")}
+    assert {"category", "market", "horizon", "falsification", "parked_reason",
+            "claimed_by", "claim_token", "claimed_at"} <= cols
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"idea_attempts", "idea_inspirations"} <= tables
+    migrate(conn)  # idempotent
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+
+
+def test_v46_preserves_v45_idea_rows(tmp_path):
+    """A pre-v46 ideas row (no new columns) survives migrate with NULLs in the new columns."""
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.row_factory = sqlite3.Row
+    migrate(conn)
+    conn.execute("INSERT INTO ideas(title,hypothesis,tags,source_type,required_data,status,"
+                 "signature,created_at,updated_at) VALUES('t','h','[]','manual','[]','open',"
+                 "'sig','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')")
+    conn.commit()
+    migrate(conn)
+    row = conn.execute("SELECT category, claimed_by FROM ideas").fetchone()
+    assert row["category"] is None and row["claimed_by"] is None
