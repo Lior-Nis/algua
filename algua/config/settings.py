@@ -80,6 +80,16 @@ class Settings(BaseSettings):
     # that the backtested->candidate gate is an integrity floor rather than a statistical veto. An
     # explicit --max-concurrent still overrides this per-invocation. env: ALGUA_PAPER_BOOK_CAPACITY.
     paper_book_capacity: int = 64
+    # Ideation engine (spec 2026-09-08 §6/§8). ONE canonical source for the pool depth math:
+    # runs/day must match algua-research.timer's OnCalendar; hypotheses/run is what the research
+    # launcher claims per run (N_HYPOTHESES). Floor/ceiling are in DAYS of loop consumption.
+    research_runs_per_day: int = 12
+    research_hypotheses_per_run: int = 3
+    idea_pool_floor_days: int = 2
+    idea_pool_ceiling_days: int = 7
+    # A claim older than this is reaped as `abandoned` by the next `research idea claim`.
+    # Must exceed the research run's TIMEOUT (45m) + prewarm (5m) with margin.
+    idea_claim_ttl_minutes: int = 180
 
     @field_validator("db_path", "data_dir")
     @classmethod
