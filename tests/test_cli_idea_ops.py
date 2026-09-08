@@ -93,6 +93,19 @@ def test_import_from_scratch_db(tmp_path):
     assert len(_json(_run("list"))) == 2
 
 
+def test_import_from_non_sqlite_file_fails_closed_without_leaking_connection(tmp_path):
+    # A corrupt/non-sqlite --from target must fail closed through the JSON envelope (never a raw
+    # traceback), and must not leak the scratch connection: `migrate(scratch)` has to run INSIDE
+    # the try/finally that closes it (review fix round 1 — it previously ran before the try).
+    bogus = tmp_path / "not_a_db.txt"
+    bogus.write_bytes(b"this is not a sqlite file, just some text bytes")
+    r = _run("import", "--from", str(bogus), "--run", "leap-1", "--max", "6")
+    assert r.exit_code == 1
+    body = _json(r)
+    assert body["ok"] is False
+    assert "Traceback" not in r.output
+
+
 def test_scorecard_and_refuted_read_paths():
     _seed(1)
     (c,) = _json(_run("claim", "--run", "r1", "--limit", "1"))["claimed"]

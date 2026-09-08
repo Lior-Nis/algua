@@ -26,7 +26,11 @@ from algua.registry.idea_scorecard import scorecard as _scorecard
 from algua.registry.ideas import IdeaRepository
 from algua.registry.store import SqliteStrategyRepository
 
-idea_ops_app = typer.Typer(no_args_is_help=True)
+idea_ops_app = typer.Typer(
+    no_args_is_help=True,
+    help="Driver-facing idea-pool ops: claim / record-outcome / link / depth / refuted / import "
+         "/ reclassify / scorecard. Agents never run these against authority.",
+)
 
 
 @idea_ops_app.command("claim")
@@ -55,7 +59,7 @@ def record_outcome(
     evidence_ref: str = typer.Option(None, "--evidence-ref"),
     strategy_name: str = typer.Option(None, "--strategy-name"),
 ) -> None:
-    """Write a claimed idea's attempt outcome once (token-fenced); refuting outcomes refute."""
+    """Write a claimed idea's attempt outcome once (driver only); refuting outcomes refute."""
     with registry_conn() as conn:
         idea = IdeaAttemptsRepository(conn).record_outcome(
             idea_id, token=token, outcome=outcome, reason=reason, evidence_ref=evidence_ref,
@@ -79,7 +83,7 @@ def link(idea_id: int = typer.Argument(..., metavar="ID"),
 @idea_ops_app.command("depth")
 @json_errors
 def depth() -> None:
-    """Pool depth vs the refill trigger / ceiling (counts derived from settings)."""
+    """Pool depth vs the refill trigger / ceiling (driver only; counts derived from settings)."""
     s = get_settings()
     with registry_conn() as conn:
         emit(ok(IdeaAttemptsRepository(conn).depth(
@@ -91,7 +95,7 @@ def depth() -> None:
 @idea_ops_app.command("refuted")
 @json_errors
 def refuted(limit: int = typer.Option(50, "--limit", min=1)) -> None:
-    """Refuted ideas with their latest attempt reason (bare JSON array)."""
+    """Refuted ideas with their latest attempt reason (driver only; bare JSON array)."""
     with registry_conn() as conn:
         emit(refuted_with_reasons(conn, limit=limit))
 
@@ -107,12 +111,12 @@ def import_(
         help="max ideas.id at seed time (default: read from authority)"),
     critic_file: Path = typer.Option(None, "--critic-file", help="leap-critic.jsonl"),
 ) -> None:
-    """Move new scratch ideas into authority under a fresh dedup + eligibility check (driver)."""
+    """Move scratch ideas into authority under a dedup + eligibility check (driver only)."""
     s = get_settings()
     ceiling = s.research_runs_per_day * s.research_hypotheses_per_run * s.idea_pool_ceiling_days
     scratch = connect(from_db)
-    migrate(scratch)
     try:
+        migrate(scratch)
         with registry_conn() as auth:
             if seeded_max_id is None:
                 seeded_max_id = auth.execute(
@@ -133,7 +137,7 @@ def import_(
 @idea_ops_app.command("reclassify")
 @json_errors
 def reclassify_() -> None:
-    """Re-open parked ideas whose market/horizon/data became supported."""
+    """Re-open parked ideas whose market/horizon/data became supported (driver only)."""
     with registry_conn() as conn:
         emit(ok(reclassify(conn)))
 
@@ -141,6 +145,6 @@ def reclassify_() -> None:
 @idea_ops_app.command("scorecard")
 @json_errors
 def scorecard(days: int = typer.Option(90, "--days", min=1)) -> None:
-    """Attempt outcomes and downstream stage by venue / category / obscurity / inspiration."""
+    """Attempt outcomes + stage by venue/category/obscurity/inspiration (driver only)."""
     with registry_conn() as conn:
         emit(ok(_scorecard(conn, days=days)))
