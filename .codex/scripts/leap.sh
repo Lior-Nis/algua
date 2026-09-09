@@ -28,8 +28,11 @@
 #   against the note-id format) -> `research idea scorecard | research inspirations write-yield`
 #   -> one digest line in data/leap-runs.jsonl. The worktree and branch are always removed.
 #
-# The run is gated on POOL DEPTH: unless --force, it exits 0 immediately when `research idea depth`
-# says the pool is at or above its refill trigger — leaping is refill, not a treadmill.
+# The run is gated TWICE, both before any worktree exists:
+#   1. POOL DEPTH — unless --force, it exits 0 when `research idea depth` says the pool is at or
+#      above its refill trigger. Leaping is refill, not a treadmill.
+#   2. MATERIAL — it exits 0 when the vault holds no non-exhausted inspiration note. Leap turns
+#      inspirations into hypotheses; with none, the run would only burn a codex call.
 #
 # Usage:
 #   .codex/scripts/leap.sh [--max-ideas N] [--timeout DUR] [--force] [--dry-run]
@@ -51,7 +54,7 @@ while [[ $# -gt 0 ]]; do
     --timeout)   _need_val "$@"; TIMEOUT="$2"; shift 2 ;;
     --force)     FORCE=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
-    -h|--help)   sed -n '2,37p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -103,6 +106,24 @@ print("%d %s %s" % (1 if d.get("below_refill") else 0,
   echo "pool below refill trigger (open_unclaimed=${OPEN_UNCLAIMED}, refill_at=${REFILL_AT}); leaping."
 fi
 
+MATERIAL_CMD=(uv run algua research inspirations list --exclude-status exhausted --limit 1)
+
+# --- Material gate (spec §6): leap turns INSPIRATIONS into hypotheses. With none left, the run
+# would build a worktree, `uv sync` it and burn a codex call to produce nothing from an empty
+# block — so check the vault BEFORE any of that, and exit 0 (a dry vault is a forage problem,
+# not a leap failure). Runs AFTER the depth gate, which is the cheaper of the two.
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  echo "would check material: ${MATERIAL_CMD[*]}"
+else
+  N_MATERIAL="$(cd "${REPO_ROOT}" && ALGUA_DB_PATH="${AUTH_DB}" "${MATERIAL_CMD[@]}" 2>/dev/null \
+    | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)"
+  if [[ "${N_MATERIAL}" -eq 0 ]]; then
+    echo "no fresh material (0 non-exhausted inspirations); nothing to do"
+    exit 0
+  fi
+  echo "material available (>=${N_MATERIAL} non-exhausted inspiration(s)); leaping."
+fi
+
 # SEEDED_MAX_ID (the scratch seed watermark: authority's max idea id BEFORE the agent runs) is
 # read below, in the SAME python invocation that performs the sqlite backup seeding the scratch
 # registry — see the "Building the scratch pool" step further down for why, and for the comment
@@ -131,8 +152,12 @@ _read_json() {
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
   echo "Reading this run's context from authority (inspirations, refuted, log, scorecard)..."
-  INSPIRATIONS_JSON="$(_read_json uv run algua research inspirations list --status fresh \
-    --limit 20 --rare-first)"
+  # EVERY non-exhausted note, not just `fresh`: `mark-used` flips a note to `used` the first time
+  # it feeds a hypothesis, but a note usually holds more than one leap — reading only `fresh`
+  # starved leap of material after a single pass over the vault. `exhausted` is the agent's own
+  # "nothing left here" verdict and is the only status excluded.
+  INSPIRATIONS_JSON="$(_read_json uv run algua research inspirations list \
+    --exclude-status exhausted --limit 20 --rare-first)"
   REFUTED_JSON="$(_read_json uv run algua research idea refuted --limit 50)"
   NEGATIVE_JSON="$(_read_json uv run algua research log list --limit 50)"
   SCORECARD_RAW="$(_read_json uv run algua research idea scorecard --days 90)"
@@ -175,7 +200,7 @@ ${CATEGORY_LINES}
 Market vocabulary: us_equities, crypto, forex, prediction, any.
 Horizon vocabulary: intraday, daily, weekly, monthly, event.
 
---- UNTRUSTED DATA (fresh inspiration notes, rare/obscure first, at most 20), as JSON ---
+--- UNTRUSTED DATA (non-exhausted inspiration notes, rare/obscure first, at most 20), as JSON ---
 ${INSPIRATIONS_JSON}
 --- end untrusted data ---
 

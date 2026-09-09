@@ -68,8 +68,10 @@ def test_forage_units_shaped_and_daily():
 
 
 def test_sources_registry_seed_has_venues_for_every_category():
+    # The TRACKED artifact is the SEED under deploy/ — kb/inspirations/ is runtime state and
+    # git-ignored (the vault's own registry is curated by a human and stamped by write-yield).
     import yaml
-    reg = yaml.safe_load((REPO / "kb/inspirations/_sources.yaml").read_text())
+    reg = yaml.safe_load((REPO / "deploy/kb/inspirations/_sources.yaml").read_text())
     cats = {line.split()[0] for line in (REPO / ".codex/categories.txt").read_text().splitlines()
             if line.strip() and not line.startswith("#")}
     covered = set()
@@ -366,3 +368,232 @@ def test_leap_exhausted_section_absent_vs_present_but_empty(tmp_path):
     assert empty.returncode == 0, empty.stderr
     assert json.loads(empty.stdout) == []
     assert 'note: no "Exhausted inspirations" section' not in empty.stderr
+
+
+# --- Vault placement (final fix wave): the seed lives in deploy/, the vault is runtime state ------
+
+
+def test_vault_inspirations_dir_is_git_ignored_and_the_seed_is_tracked():
+    assert "kb/inspirations/" in (REPO / ".gitignore").read_text()
+    assert (REPO / "deploy/kb/inspirations/_sources.yaml").exists()
+    tracked = subprocess.run(["git", "ls-files", "kb/inspirations"], cwd=REPO,
+                             capture_output=True, text=True, check=True).stdout
+    assert tracked.strip() == ""
+
+
+def test_installer_dry_run_would_seed_the_sources_registry_when_absent(tmp_path):
+    installer = REPO / "deploy/systemd/install-user-units.sh"
+    env = {**os.environ, "ALGUA_KNOWLEDGE_DIR": str(tmp_path / "kb")}
+    out = subprocess.run(["bash", str(installer), "--dry-run"], cwd=REPO, capture_output=True,
+                         text=True, check=True, env=env).stdout
+    assert "would seed sources registry: " in out
+    assert str(tmp_path / "kb" / "inspirations" / "_sources.yaml") in out
+    assert not (tmp_path / "kb").exists()          # a dry run writes nothing
+
+
+def test_installer_never_overwrites_an_existing_sources_registry(tmp_path):
+    installer = REPO / "deploy/systemd/install-user-units.sh"
+    dest = tmp_path / "kb" / "inspirations" / "_sources.yaml"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("venues: []  # human-curated\n")
+    env = {**os.environ, "ALGUA_KNOWLEDGE_DIR": str(tmp_path / "kb")}
+    out = subprocess.run(["bash", str(installer), "--dry-run"], cwd=REPO, capture_output=True,
+                         text=True, check=True, env=env).stdout
+    assert "already present" in out and "would seed sources registry" not in out
+    assert dest.read_text() == "venues: []  # human-curated\n"
+
+
+def test_forage_seeds_the_sources_registry_when_the_vault_has_none(tmp_path):
+    # A vault relocated via ALGUA_KNOWLEDGE_DIR self-heals at forage startup — copy-if-absent,
+    # never over an existing registry.
+    kb = tmp_path / "kb"
+    env = {**os.environ, "ALGUA_KNOWLEDGE_DIR": str(kb)}
+    out = subprocess.run(["bash", str(FORAGE), "--dry-run"], cwd=REPO, capture_output=True,
+                         text=True, check=True, env=env).stdout
+    assert "would seed sources registry: " in out
+    assert not kb.exists()
+
+    dest = kb / "inspirations" / "_sources.yaml"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("venues: []\n")
+    out = subprocess.run(["bash", str(FORAGE), "--dry-run"], cwd=REPO, capture_output=True,
+                         text=True, check=True, env=env).stdout
+    assert "seed sources registry" not in out
+    assert dest.read_text() == "venues: []\n"
+
+
+# --- Forage fix round 2 (final fix wave) ---------------------------------------------------------
+
+
+def _extract_block(script: Path, start: str, end: str) -> str:
+    src = script.read_text(encoding="utf-8")
+    start_idx = src.index(start)
+    end_idx = src.index(end, start_idx) + len(end)
+    return src[start_idx:end_idx]
+
+
+_ACCEPT_CAPTURE_SRC = _extract_block(
+    FORAGE,
+    'echo "Landing foraged notes via: ${ACCEPT_CMD[*]}"',
+    "REJECTED_JSON=\"$(_accept_field rejected '[]')\"")
+
+
+def _run_accept_capture(tmp_path: Path, fake_uv_bindir: Path) -> dict:
+    run_log = tmp_path / "run.log"
+    script = tmp_path / "run_accept_capture.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"REPO_ROOT={tmp_path!s}\n"
+        f"RUN_LOG={run_log!s}\n"
+        "ACCEPT_CMD=(uv run algua research inspirations accept --from x --run y --max 1)\n"
+        f"{_ACCEPT_CAPTURE_SRC}\n"
+        'echo "RESULT_ACCEPTED=${ACCEPTED_JSON}"\n'
+        'echo "RESULT_REJECTED=${REJECTED_JSON}"\n'
+        'echo "RESULT_PARSE_ERROR=${ACCEPT_PARSE_ERROR}"\n',
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PATH": f"{fake_uv_bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env,
+                          timeout=30, check=True)
+    result: dict = {"stdout": proc.stdout, "stderr": proc.stderr, "run_log": run_log}
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT_"):
+            key, _, val = line.partition("=")
+            result[key] = val
+    return result
+
+
+def test_forage_accept_stderr_noise_never_corrupts_the_accepted_list(tmp_path):
+    # Folding stderr into the captured JSON (`2>&1`) meant ANY stderr line (a `uv` resolve notice,
+    # a Python warning) silently turned ACCEPTED_JSON into "[]" with rc 0 — the digest then said
+    # the run foraged nothing while the vault had the notes. Same bug leap.sh already fixed.
+    payload = ('{"ok": true, "accepted": ["2026-09-08-a-note"], '
+               '"rejected": [{"file": "x.md", "reasons": ["bad filename: x.md"]}]}')
+    fake_uv = _fake_uv_bin(tmp_path, stdout=payload,
+                           stderr="warning: resolved uv.lock in 4ms (fake noise)")
+    result = _run_accept_capture(tmp_path, fake_uv)
+    assert json.loads(result["RESULT_ACCEPTED"]) == ["2026-09-08-a-note"]
+    assert json.loads(result["RESULT_REJECTED"])[0]["file"] == "x.md"
+    assert result["RESULT_PARSE_ERROR"] == "0"
+    assert "fake noise" in result["run_log"].read_text(encoding="utf-8")
+
+
+def test_forage_accept_output_not_json_fails_loudly_and_flags_the_digest(tmp_path):
+    fake_uv = _fake_uv_bin(tmp_path, stdout="not json at all")
+    result = _run_accept_capture(tmp_path, fake_uv)
+    assert json.loads(result["RESULT_ACCEPTED"]) == []
+    assert result["RESULT_PARSE_ERROR"] == "1"
+    assert "WARNING: accept output was not JSON" in result["stderr"]
+    assert result["stderr"].count("WARNING: accept output was not JSON") == 1
+
+
+def test_forage_digest_records_the_accept_parse_error_flag():
+    src = FORAGE.read_text(encoding="utf-8")
+    assert '"accept_parse_error": accept_parse_error == "1"' in src
+
+
+# forage.sh heredoc 0 = the seen-hash reader; 1 = the sources-registry slice; 2 = the
+# proposed-venue validator/proposer (extracted here); 3 = the digest append. Keep these indices in
+# sync when adding a heredoc to forage.sh.
+_PROPOSED_SRC = _HEREDOC_RE.findall(FORAGE.read_text(encoding="utf-8"))[2]
+
+
+def test_forage_proposed_venues_block_emits_only_json_on_stdout(tmp_path):
+    # PROPOSED_JSON is a command substitution of this block's stdout. A progress line printed on
+    # stdout ("proposed venue: X") made the whole capture unparseable, so the digest row's
+    # `proposed` list came back empty even on a run that really did add a venue.
+    report = tmp_path / "forage-report.md"
+    report.write_text("## Proposed venues\n"
+                      "- key: blog/goodone kind: blog url: https://g/x categories: [momentum]\n"
+                      "- key: BADKEY kind: blog url: https://g/y categories: [momentum]\n")
+    cats = tmp_path / "categories.txt"
+    cats.write_text("momentum\n")
+    bindir = tmp_path / "fakebin-propose"
+    bindir.mkdir()
+    fake_uv = bindir / "uv"
+    fake_uv.write_text("#!/usr/bin/env bash\necho '{\"ok\": true}'\nexit 0\n", encoding="utf-8")
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+    proc = subprocess.run(
+        [sys.executable, "-", str(report), str(cats), str(tmp_path)],
+        input=_PROPOSED_SRC, capture_output=True, text=True, env=env, timeout=30)
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == ["blog/goodone"]      # stdout is PURE JSON
+    assert "proposed venue: blog/goodone" in proc.stderr    # the progress line still shows
+    assert "BADKEY" in proc.stderr
+
+
+def test_forage_seen_hash_list_is_trimmed_to_the_newest_300():
+    assert "hashes[-300:]" in FORAGE.read_text(encoding="utf-8")
+
+
+def test_forage_help_covers_the_env_block():
+    out = subprocess.run(["bash", str(FORAGE), "-h"], cwd=REPO, capture_output=True, text=True,
+                         check=True).stdout
+    assert "Env: FORAGE_MAX_NOTES" in out and "FORAGE_TIMEOUT" in out
+
+
+# --- Leap fix round 2 (final fix wave) -----------------------------------------------------------
+
+
+def test_leap_reads_every_non_exhausted_note_not_only_fresh():
+    # `mark-used` flips a note to `used` the first time it feeds a hypothesis, but a note usually
+    # holds more than one leap. Reading `--status fresh` starved leap of material after one pass.
+    src = LEAP.read_text(encoding="utf-8")
+    assert "--exclude-status exhausted --limit 20 --rare-first" in src
+    assert "--status fresh" not in src
+
+
+def test_leap_dry_run_prints_the_material_gate():
+    out = _dry(LEAP, "--max-ideas", "5", "--force")
+    assert ("would check material: uv run algua research inspirations list "
+            "--exclude-status exhausted --limit 1") in out
+    # The material gate is planned AFTER the (cheaper) depth gate and BEFORE any worktree.
+    assert out.index("depth gate: skipped") < out.index("would check material: ")
+    assert out.index("would check material: ") < out.index("would create worktree: ")
+
+
+def test_leap_with_an_empty_vault_exits_zero_and_creates_no_worktree(tmp_path):
+    # --force clears the depth gate; the vault is a fresh empty dir, so the material gate must
+    # stop the run before the flock, the worktree, the uv sync and the codex call.
+    runs_before = set((REPO / ".runs").glob("leap-*")) if (REPO / ".runs").exists() else set()
+    env = {**os.environ, "ALGUA_KNOWLEDGE_DIR": str(tmp_path / "empty-kb"),
+           "ALGUA_DATA_DIR": str(tmp_path / "data")}
+    proc = subprocess.run(["bash", str(LEAP), "--force"], cwd=REPO, capture_output=True,
+                          text=True, timeout=180, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "no fresh material (0 non-exhausted inspirations); nothing to do" in proc.stdout
+    runs_after = set((REPO / ".runs").glob("leap-*")) if (REPO / ".runs").exists() else set()
+    assert runs_after == runs_before
+
+
+# --- Unit shape + operator docs (final fix wave) --------------------------------------------------
+
+
+def test_forage_service_is_installable_like_the_other_oneshot_units():
+    # Without [Install], `systemctl enable algua-forage.service` fails and the installer's
+    # multi-user.target -> default.target rewrite has nothing to rewrite. Mirrors
+    # algua-mergeback-drain.service / algua-leap.service.
+    svc = (REPO / "deploy/systemd/algua-forage.service").read_text()
+    assert "[Install]\nWantedBy=multi-user.target" in svc
+
+
+def test_leap_timer_and_readme_tell_the_truth_about_the_shared_minute():
+    # Leap fires at :30 — the merge-back drainer's own minute. The old comments claimed the grid
+    # was disjoint from the drainer, which it is not; what is true is that leap takes no
+    # operator.lock, so sharing the minute is harmless.
+    tmr = (REPO / "deploy/systemd/algua-leap.timer").read_text()
+    assert "SHARES the merge-back drainer's :30 minute" in tmr
+    assert "leap does NOT" in tmr and "operator.lock" in tmr
+    readme = (REPO / "deploy/systemd/README.md").read_text()
+    assert "shares the merge-back drainer's `:30` minute" in readme
+    assert "leap\ntakes no `operator.lock`" in readme
+
+
+def test_env_example_documents_the_driver_timeouts():
+    env = (REPO / "deploy/systemd/algua.env.example").read_text()
+    for line in ("# LEAP_TIMEOUT=25m", "# FORAGE_TIMEOUT=20m", "# SYNC_TIMEOUT=5m"):
+        assert line in env

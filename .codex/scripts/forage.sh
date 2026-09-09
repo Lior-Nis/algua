@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     --max-notes)  _need_val "$@"; FORAGE_MAX_NOTES="$2"; shift 2 ;;
     --timeout)    _need_val "$@"; TIMEOUT="$2"; shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
-    -h|--help)    sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,31p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -73,6 +73,24 @@ SEEN_FILE="${AUTH_DATA_DIR}/inspirations-seen.jsonl"
 CURSOR_FILE="${AUTH_DATA_DIR}/forage-cursor"
 DIGEST="${AUTH_DATA_DIR}/forage-runs.jsonl"
 KB_DIR="${ALGUA_KNOWLEDGE_DIR:-${REPO_ROOT}/kb}"
+SOURCES_FILE="${KB_DIR}/inspirations/_sources.yaml"
+
+# --- Sources-registry seed (spec §4). The vault is RUNTIME state and git-ignored; the tracked
+# artifact is the seed at deploy/kb/inspirations/_sources.yaml. Copy-if-absent ONLY: the live
+# registry is a human steering surface that `research inspirations write-yield` also stamps
+# yields into, so overwriting it would silently discard curation. Doing it here (as well as in
+# deploy/systemd/install-user-units.sh) means a vault relocated via ALGUA_KNOWLEDGE_DIR
+# self-heals on the next firing instead of foraging with no venue list at all.
+SEED_SOURCES="${REPO_ROOT}/deploy/kb/inspirations/_sources.yaml"
+if [[ ! -f "${SOURCES_FILE}" && -f "${SEED_SOURCES}" ]]; then
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "would seed sources registry: ${SEED_SOURCES} -> ${SOURCES_FILE}"
+  else
+    mkdir -p "$(dirname "${SOURCES_FILE}")"
+    cp "${SEED_SOURCES}" "${SOURCES_FILE}"
+    echo "seeded sources registry: ${SEED_SOURCES} -> ${SOURCES_FILE}"
+  fi
+fi
 
 # --- Category selection (spec §5): --categories overrides; else a persisted rotation cursor
 # takes FORAGE_SLICES slugs with wrap-around, so every category is foraged at least weekly. -----
@@ -129,7 +147,11 @@ for c in "${SELECTED[@]}"; do
   CATEGORY_LINES+="- ${line}"$'\n'
 done
 
-# --- Seen URL hashes (no re-reading): JSON array, capped at 2000. ------------------------------
+# --- Seen URL hashes (no re-reading): JSON array of the NEWEST 300. The cap is a prompt-budget
+# decision, not a correctness one: `research inspirations accept` re-checks the FULL seen file, so
+# a URL older than the newest 300 is still rejected on landing — the list only spares the agent
+# the fetch. 2000 sha256 hashes were ~130KB of prompt (a real slice of the context window) for a
+# de-dup the driver repeats anyway. -------------------------------------------------------------
 SEEN_HASHES_JSON="$(python3 - "${SEEN_FILE}" <<'PY'
 import json
 import sys
@@ -151,13 +173,13 @@ try:
                 hashes.append(h)
 except FileNotFoundError:
     pass
-print(json.dumps(hashes[-2000:]))
+print(json.dumps(hashes[-300:]))
 PY
 )"
 SEEN_COUNT="$(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "${SEEN_HASHES_JSON}")"
 
 # --- Sources-registry slice for the selected categories, as untrusted YAML data. ---------------
-SOURCES_SLICE_YAML="$(python3 - "${KB_DIR}/inspirations/_sources.yaml" "${CATEGORIES}" <<'PY'
+SOURCES_SLICE_YAML="$(python3 - "${SOURCES_FILE}" "${CATEGORIES}" <<'PY'
 import sys
 
 import yaml
@@ -310,31 +332,40 @@ grep -qiE 'rate.?limit|429|quota|usage limit' "${RUN_LOG}" 2>/dev/null && rate_l
 # --- Trusted acceptance (spec §5): validate + copy survivors into the real vault. --------------
 echo "Landing foraged notes via: ${ACCEPT_CMD[*]}"
 set +e
-ACCEPT_OUT="$(cd "${REPO_ROOT}" && "${ACCEPT_CMD[@]}" 2>&1)"
+# stdout ONLY goes into ACCEPT_OUT (it must be exactly the command's JSON payload for the field
+# reads below) — stderr is split off to the run log AND the terminal via `tee`, so a `uv` resolve
+# notice or a stray Python warning can never fold into the JSON and silently turn a real accept
+# into an empty one. Same shape as leap.sh's IMPORT_OUT capture.
+ACCEPT_OUT="$(cd "${REPO_ROOT}" && "${ACCEPT_CMD[@]}" 2> >(tee -a "${RUN_LOG}" >&2))"
 ACCEPT_RC=$?
 set -e
 echo "${ACCEPT_OUT}"
-ACCEPTED_JSON="$(python3 -c '
-import json, sys
-try:
-    d = json.loads(sys.argv[1])
-    print(json.dumps(d.get("accepted", [])))
-except Exception:
-    print("[]")
-' "${ACCEPT_OUT}" 2>/dev/null || echo "[]")"
-REJECTED_JSON="$(python3 -c '
-import json, sys
-try:
-    d = json.loads(sys.argv[1])
-    print(json.dumps(d.get("rejected", [])))
-except Exception:
-    print("[]")
-' "${ACCEPT_OUT}" 2>/dev/null || echo "[]")"
 if [[ "${ACCEPT_RC}" -ne 0 ]]; then
   echo "WARNING: 'research inspirations accept' exited ${ACCEPT_RC}; treating this run as accepting nothing." >&2
 fi
+# Fails LOUDLY (once, in the parent shell) when ACCEPT_OUT is not the JSON object the command
+# promises; the digest records the flag so a run that "accepted nothing" because the CLI's own
+# output was unreadable is distinguishable from a run that genuinely accepted nothing.
+ACCEPT_PARSE_ERROR=0
+if ! python3 -c 'import json, sys; json.loads(sys.argv[1])' "${ACCEPT_OUT}" 2>/dev/null; then
+  echo "WARNING: accept output was not JSON" >&2
+  ACCEPT_PARSE_ERROR=1
+fi
+_accept_field() {  # $1 = key, $2 = fallback JSON
+  python3 -c '
+import json, sys
+try:
+    print(json.dumps(json.loads(sys.argv[1])[sys.argv[2]]))
+except Exception:
+    print(sys.argv[3])
+' "${ACCEPT_OUT}" "$1" "$2" 2>/dev/null || echo "$2"
+}
+ACCEPTED_JSON="$(_accept_field accepted '[]')"
+REJECTED_JSON="$(_accept_field rejected '[]')"
 
-# --- Proposed venues (spec §5): parse the agent's report, validate, propose per survivor. ------
+# --- Proposed venues (spec §5): parse the agent's report, validate, propose per survivor. The
+# heredoc's STDOUT is exactly one JSON array (the accepted keys) — every progress/warning line
+# goes to stderr, so a proposal can never corrupt PROPOSED_JSON and blank the digest row. -------
 REPORT="${WORKTREE}/forage-report.md"
 PROPOSED_JSON="$(python3 - "${REPORT}" "${CATEGORIES_FILE}" "${REPO_ROOT}" <<'PY'
 import re
@@ -397,7 +428,7 @@ for raw_line in block.splitlines():
         cwd=repo_root, capture_output=True, text=True)
     if proc.returncode == 0:
         proposed.append(key)
-        print(f"proposed venue: {key}")
+        print(f"proposed venue: {key}", file=sys.stderr)
     else:
         print(f"WARNING: propose failed for {key!r}: {(proc.stderr or proc.stdout).strip()[:300]}",
               file=sys.stderr)
@@ -411,24 +442,33 @@ PY
 echo "Appending run digest to ${DIGEST}..."
 mkdir -p "$(dirname "${DIGEST}")"
 python3 - "${DIGEST}" "${STAMP}" "${CATEGORIES}" "${ACCEPTED_JSON}" "${REJECTED_JSON}" \
-  "${PROPOSED_JSON}" "${rc}" "${timed_out}" "${wall_s}" "${rate_limited}" <<'PY' \
+  "${PROPOSED_JSON}" "${rc}" "${timed_out}" "${wall_s}" "${rate_limited}" \
+  "${ACCEPT_PARSE_ERROR}" <<'PY' \
   || echo "WARNING: digest append failed -- run outcome unaffected." >&2
 import json
 import sys
 
 (digest_path, stamp, categories_csv, accepted_json, rejected_json, proposed_json,
- exit_code, timed_out, wall_s, rate_limited) = sys.argv[1:11]
+ exit_code, timed_out, wall_s, rate_limited, accept_parse_error) = sys.argv[1:12]
+
+
+def _json(raw: str, fallback):
+    try:
+        return json.loads(raw)
+    except Exception:
+        return fallback
 
 row = {
     "stamp": stamp,
     "categories": [c for c in categories_csv.split(",") if c],
-    "accepted": json.loads(accepted_json),
-    "rejected": json.loads(rejected_json),
-    "proposed": json.loads(proposed_json),
+    "accepted": _json(accepted_json, []),
+    "rejected": _json(rejected_json, []),
+    "proposed": _json(proposed_json, []),
     "exit_code": int(exit_code),
     "timed_out": timed_out == "1",
     "wall_s": int(wall_s),
     "rate_limited": rate_limited == "1",
+    "accept_parse_error": accept_parse_error == "1",
 }
 with open(digest_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False) + "\n")

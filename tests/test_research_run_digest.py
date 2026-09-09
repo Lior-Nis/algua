@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -1162,3 +1163,91 @@ def test_record_outcomes_skips_a_claim_with_no_token(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert calls == []
     assert "carries no claim token" in proc.stdout
+
+
+# --- Final fix wave: the prompt projection, the scratch scrub, and the setup trap -----------
+
+LAUNCHER_SRC = LAUNCHER.read_text(encoding="utf-8")
+
+
+def _claim_projection() -> str:
+    """The inline `python3 -c` program that projects CLAIMED_JSON down to what the prompt sees."""
+    start = "CLAIMED_PROMPT_JSON=\"$(python3 -c '"
+    body = LAUNCHER_SRC.split(start, 1)[1]
+    return body.split("\n' \"${CLAIMED_JSON}\")\"", 1)[0]
+
+
+def test_prompt_gets_a_projection_without_the_claim_token():
+    # The claim TOKEN is the driver's record-outcome credential. It must never reach the prompt
+    # (the agent's report, transcript and authored files are all places it would leak to), while
+    # everything needed to WORK the idea must still ride along.
+    assert "${CLAIMED_PROMPT_JSON}" in LAUNCHER_SRC
+    keep = re.search(r"KEEP = \((.*?)\)", _claim_projection(), re.DOTALL).group(1)
+    assert "claim_token" not in keep and "claimed_by" not in keep
+    for field in ("id", "title", "hypothesis", "category", "market", "horizon", "falsification",
+                  "inspirations", "required_data", "family"):
+        assert f'"{field}"' in keep
+    # The GOAL heredoc interpolates the PROJECTION, never the driver's own full list.
+    goal = LAUNCHER_SRC.split("read -r -d '' GOAL <<EOF", 1)[1].split("\nEOF\n", 1)[0]
+    assert "${CLAIMED_PROMPT_JSON}" in goal and "${CLAIMED_JSON}" not in goal
+
+
+def test_claim_projection_drops_the_token_and_keeps_the_work_fields():
+    claimed = json.dumps([{"id": 7, "title": "t", "hypothesis": "h", "category": "momentum",
+                           "market": "us_equities", "horizon": "daily", "falsification": "f",
+                           "inspirations": [{"inspiration_id": "2026-09-08-n"}],
+                           "required_data": ["ohlcv"], "family": None,
+                           "claim_token": "tok-7", "claimed_by": "run-1", "signature": "sig"}])
+    proc = subprocess.run([sys.executable, "-c", _claim_projection(), claimed],
+                          capture_output=True,
+                          text=True, timeout=30, check=True)
+    (row,) = json.loads(proc.stdout)
+    assert "claim_token" not in row and "claimed_by" not in row and "signature" not in row
+    assert row["id"] == 7 and row["category"] == "momentum"
+    assert row["inspirations"] == [{"inspiration_id": "2026-09-08-n"}]
+
+
+def test_scratch_seed_scrubs_the_claim_credentials_from_the_agents_copy(tmp_path):
+    # The scratch copy carries this run's claim rows on purpose (the agent must see its ideas as
+    # claimed) — but not the TOKEN, which is the driver's authority credential.
+    seed_src = _heredocs()[3]
+    auth = tmp_path / "auth.db"
+    conn = sqlite3.connect(auth)
+    with conn:
+        conn.execute("CREATE TABLE ideas (id INTEGER PRIMARY KEY, claim_token TEXT,"
+                     " claimed_by TEXT, claimed_at TEXT)")
+        conn.execute("INSERT INTO ideas VALUES (1, 'tok-1', 'run-1', '2026-09-09T00:00:00+00:00')")
+    conn.close()
+    scratch = tmp_path / "scratch.db"
+
+    proc = subprocess.run([sys.executable, "-", str(auth), str(scratch)], input=seed_src,
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    got = sqlite3.connect(scratch).execute(
+        "SELECT claim_token, claimed_by, claimed_at FROM ideas").fetchone()
+    assert got == (None, None, "2026-09-09T00:00:00+00:00")
+
+
+def test_scratch_seed_survives_a_cold_start_with_no_ideas_table(tmp_path):
+    seed_src = _heredocs()[3]
+    auth = tmp_path / "auth.db"
+    sqlite3.connect(auth).close()
+    proc = subprocess.run([sys.executable, "-", str(auth), str(tmp_path / "scratch.db")],
+                          input=seed_src, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_setup_failure_trap_is_armed_immediately_after_the_claim():
+    # Anything between the claim and the codex run (anti-dup read, lock, worktree, scratch seed,
+    # uv sync) can fail. Before this, such a failure exited with the claims still HELD — the ideas
+    # left the pool until the 180-minute TTL reap.
+    claim_echo = LAUNCHER_SRC.index('echo "claimed ${N_CLAIMED} idea(s) from ${AUTH_DB}')
+    arm = LAUNCHER_SRC.index("trap cleanup_setup EXIT")
+    lock = LAUNCHER_SRC.index('LOCK="${REPO_ROOT}/data/research-loop.lock"')
+    worktree = LAUNCHER_SRC.index('git -C "${REPO_ROOT}" worktree add -b "${BRANCH}"')
+    definition = LAUNCHER_SRC.index("cleanup_setup() {")
+    assert definition < claim_echo < arm < lock < worktree
+    # Still cleared once setup succeeds, before codex runs.
+    clear = LAUNCHER_SRC.index("trap - EXIT\n\necho \"Running research loop")
+    assert worktree < clear
