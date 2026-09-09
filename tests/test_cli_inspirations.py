@@ -195,10 +195,10 @@ def test_propose_rejects_non_https_url(categories_file):
 
 def test_write_yield_from_scorecard_file(tmp_path):
     # Seed the sources registry directly (write-yield only updates an existing venue row).
+    from algua.config.settings import get_settings
     from algua.knowledge.inspirations import SourcesRegistry
-    sources = tmp_path / "kb" / "inspirations" / "_sources.yaml"
-    sources.parent.mkdir(parents=True)
-    SourcesRegistry(sources).propose(
+    settings = get_settings()
+    SourcesRegistry(settings).propose(
         {"key": "blog/quant", "kind": "blog", "url": "https://q", "categories": ["momentum"]})
 
     scorecard = tmp_path / "scorecard.json"
@@ -217,6 +217,34 @@ def test_write_yield_from_scorecard_file(tmp_path):
     out = _json(r)
     assert out["updated"] == ["blog/quant"]
 
-    venues = SourcesRegistry(sources).load()
+    venues = SourcesRegistry(settings).load()
     (quant,) = [v for v in venues if v["key"] == "blog/quant"]
     assert quant["yield"]["n"] == 6 and quant["yield"]["window_days"] == 90
+
+
+def test_list_exclude_status_combines_with_rare_first_and_limit(tmp_path, categories_file):
+    # What leap reads: EVERY non-exhausted note (a `used` note may still hold another
+    # hypothesis), rare first, capped. `--exclude-status` is the flag that makes that expressible.
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    for text in (GOOD, RARE, COMMON):
+        (staged / f"{text.splitlines()[1].split(': ')[1]}.md").write_text(text)
+    r = _run("accept", "--from", str(staged), "--run", "f1",
+             "--categories-file", str(categories_file))
+    assert r.exit_code == 0, r.output
+    assert _run("mark-used", "2026-09-08-quiet-turnover-drift", "--idea", "1").exit_code == 0
+    assert _run("mark-exhausted", "2026-09-07-rare-one").exit_code == 0
+
+    r = _run("list", "--exclude-status", "exhausted", "--rare-first", "--limit", "20")
+    assert r.exit_code == 0, r.output
+    ids = [n["id"] for n in _json(r)]
+    assert ids == ["2026-09-08-quiet-turnover-drift", "2026-09-06-common-one"]
+
+    r = _run("list", "--exclude-status", "exhausted", "--limit", "1")
+    assert r.exit_code == 0, r.output
+    assert [n["id"] for n in _json(r)] == ["2026-09-08-quiet-turnover-drift"]
+
+    # A contradictory pair fails closed rather than silently returning nothing.
+    r = _run("list", "--status", "fresh", "--exclude-status", "fresh")
+    assert r.exit_code == 1
+    assert _json(r)["ok"] is False

@@ -119,9 +119,21 @@ def accept_new_notes(*, staged_dir: Path, settings: Settings, seen_path: Path,
         # Read ONCE: the same bytes are parsed for validation and, on acceptance, written into
         # the vault — a second read here would be a TOCTOU gap (the staged file could change
         # between the validating read and a later copying read).
-        text = path.read_text(encoding="utf-8")
-        fm, _ = parse_note(text)
-        reasons = validate_note(fm, stem=stem, categories=categories)
+        #
+        # The read/parse/validate of ONE note is contained: the notes are model output, so a
+        # broken-YAML or non-dict frontmatter is an EXPECTED bad input, not a driver bug. Before
+        # this containment, one malformed note raised out of the whole call and discarded every
+        # good note the forage agent wrote alongside it.
+        try:
+            text = path.read_text(encoding="utf-8")
+            fm, _ = parse_note(text)
+            if not isinstance(fm, dict):
+                raise TypeError(f"frontmatter is {type(fm).__name__}, not a mapping")
+            reasons = validate_note(fm, stem=stem, categories=categories)
+        except Exception as exc:
+            rejected.append({"file": path.name,
+                             "reasons": [f"unparseable frontmatter: {exc}"]})
+            continue
         if not reasons and url_hash(str(fm["source_url"])) in seen_hashes:
             reasons.append("already seen: source_url")
         if not reasons and (dest / path.name).exists():
@@ -171,25 +183,56 @@ def mark_exhausted(settings: Settings, inspiration_id: str) -> dict[str, Any]:
 
 
 def list_notes(settings: Settings, *, status: str | None = None,
+               exclude_status: str | None = None,
                limit: int | None = None) -> list[dict[str, Any]]:
+    """Frontmatter of every well-named note, newest id first. `status` keeps only that status;
+    `exclude_status` drops it (what the leap driver wants: everything not yet `exhausted`)."""
     d = inspirations_dir(settings)
     notes = []
     for path in sorted(d.glob("*.md"), reverse=True) if d.exists() else []:
         if not NOTE_ID_RE.match(path.stem):
             continue
         fm, _ = parse_note(path.read_text(encoding="utf-8"))
-        if status is None or fm.get("status") == status:
-            notes.append(fm)
+        note_status = fm.get("status")
+        if status is not None and note_status != status:
+            continue
+        if exclude_status is not None and note_status == exclude_status:
+            continue
+        notes.append(fm)
         if limit is not None and len(notes) >= limit:
             break
     return notes
 
 
-class SourcesRegistry:
-    """`_sources.yaml`: `{venues: [...]}`. Only trusted code writes it."""
+def load_note(settings: Settings, inspiration_id: str) -> dict[str, Any] | None:
+    """One note's frontmatter, or None when it is missing/unreadable/not a mapping.
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
+    The AUTHORITATIVE source of a note's `venue` and `obscurity` at import time (spec §6): a leap
+    agent hands those over in `--inspiration id|venue|obscurity`, i.e. model output, so the
+    trusted import re-derives them from the vault rather than trusting what it was told. Never
+    raises — a bad id or a damaged note is "no note", which the caller drops.
+    """
+    if not NOTE_ID_RE.match(inspiration_id):
+        return None
+    path = inspirations_dir(settings) / f"{inspiration_id}.md"
+    try:
+        fm, _ = parse_note(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return fm if isinstance(fm, dict) and fm else None
+
+
+class SourcesRegistry:
+    """`_sources.yaml`: `{venues: [...]}`. Only trusted code writes it.
+
+    Every write goes through `write_text_atomic` under the vault's `kb_sync_lock`, exactly like
+    the note writes above — the registry is a human-edited steering file, and a torn or
+    interleaved write would corrupt a surface nobody is watching between runs.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self.path = inspirations_dir(settings) / "_sources.yaml"
 
     def load(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -198,26 +241,24 @@ class SourcesRegistry:
         return list(data.get("venues") or [])
 
     def _save(self, venues: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(yaml.safe_dump({"venues": venues}, sort_keys=False),
-                             encoding="utf-8")
+        write_text_atomic(yaml.safe_dump({"venues": venues}, sort_keys=False), self.path)
 
-    def slice(self, categories: set[str], *, k: int) -> list[dict[str, Any]]:
-        hits = [v for v in self.load() if set(v.get("categories") or []) & categories]
-        hits.sort(key=lambda v: -(v.get("yield") or {}).get("integrity_yield", 0.0) or 0.0)
-        return hits[:k]
-
-    def write_yield(self, venue_key: str, yield_obj: dict[str, Any]) -> None:
-        venues = self.load()
-        for v in venues:
-            if v.get("key") == venue_key:
-                v["yield"] = yield_obj
-        self._save(venues)
+    def write_yields(self, yields: dict[str, dict[str, Any]]) -> None:
+        """Stamp a yield object onto every named venue in ONE load + ONE save (a per-venue
+        load/save loop re-read and rewrote the whole file once per venue)."""
+        with kb_sync_lock(self._settings):
+            venues = self.load()
+            for v in venues:
+                obj = yields.get(str(v.get("key")))
+                if obj is not None:
+                    v["yield"] = obj
+            self._save(venues)
 
     def propose(self, venue: dict[str, Any]) -> None:
-        venues = self.load()
-        if any(v.get("key") == venue.get("key") for v in venues):
-            return
-        venues.append({**venue, "added_by": "forage",
-                       "added_at": datetime.now(UTC).date().isoformat()})
-        self._save(venues)
+        with kb_sync_lock(self._settings):
+            venues = self.load()
+            if any(v.get("key") == venue.get("key") for v in venues):
+                return
+            venues.append({**venue, "added_by": "forage",
+                           "added_at": datetime.now(UTC).date().isoformat()})
+            self._save(venues)

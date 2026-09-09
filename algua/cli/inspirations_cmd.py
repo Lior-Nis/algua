@@ -15,7 +15,7 @@ import typer
 from algua.cli._common import ok
 from algua.cli.app import emit
 from algua.cli.errors import json_errors
-from algua.config.settings import Settings, get_settings
+from algua.config.settings import get_settings
 from algua.knowledge.inspirations import (
     SOURCE_KINDS,
     SourcesRegistry,
@@ -25,6 +25,7 @@ from algua.knowledge.inspirations import (
     mark_used,
 )
 from algua.primitives.timeparse import now_iso
+from algua.research.categories import categories_file_default, load_categories
 
 inspirations_app = typer.Typer(
     help="Inspirations vault domain: accept forage notes, browse them, mark them leapt/exhausted, "
@@ -32,45 +33,19 @@ inspirations_app = typer.Typer(
     no_args_is_help=True,
 )
 
-_DEFAULT_CATEGORIES_REL = Path(".codex/categories.txt")
 _KEY_RE = re.compile(r"^[a-z0-9_]+/[A-Za-z0-9_.-]+$")
 _OBSCURITY_RANK = {"rare": 0, "niche": 1, "common": 2, "canon": 3}
 _MIN_VENUE_N = 5
 
 
-def _repo_root() -> Path:
-    """Walk up from this file to the directory containing `pyproject.toml` (the repo root).
-
-    Never `Path.cwd()` — this module may run from any working directory, but the categories file
-    lives at a fixed repo-relative location.
-    """
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        if (parent / "pyproject.toml").exists():
-            return parent
-    raise RuntimeError(f"could not locate pyproject.toml walking up from {here}")
-
-
-def _resolve_categories_file(categories_file: Path | None) -> Path:
-    path = categories_file if categories_file is not None else _DEFAULT_CATEGORIES_REL
-    return path if path.is_absolute() else _repo_root() / path
-
-
-def _load_categories(path: Path) -> set[str]:
-    """Slugs = the first whitespace-separated token of each non-comment, non-blank line."""
-    if not path.exists():
-        raise FileNotFoundError(f"categories file not found: {path}")
-    cats: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        cats.add(stripped.split()[0])
-    return cats
-
-
-def _sources_path(settings: Settings) -> Path:
-    return settings.knowledge_dir / "inspirations" / "_sources.yaml"
+def _categories(categories_file: Path | None) -> set[str]:
+    """The legal category slugs — ONE reader (`algua.research.categories`) shared with the idea
+    pool's own validation, so a slug can never be legal in one lane and unknown in another."""
+    if categories_file is None:
+        return set(load_categories(categories_file_default()))
+    path = (categories_file if categories_file.is_absolute()
+            else categories_file_default().parent.parent / categories_file)
+    return set(load_categories(path))
 
 
 @inspirations_app.command("accept")
@@ -88,7 +63,7 @@ def accept(
     """Trusted acceptance of what a forage agent staged: validate, copy into the vault, and
     record the source URL as seen. Never touches a note the forage agent didn't stage this run."""
     settings = get_settings()
-    categories = _load_categories(_resolve_categories_file(categories_file))
+    categories = _categories(categories_file)
     seen_path = seen_file if seen_file is not None else (
         settings.data_dir / "inspirations-seen.jsonl")
     result = accept_new_notes(
@@ -101,21 +76,29 @@ def accept(
 @json_errors
 def list_cmd(
     status: str = typer.Option(None, "--status", help="filter: fresh | used | exhausted"),
+    exclude_status: str = typer.Option(
+        None, "--exclude-status", help="drop notes with this status (e.g. exhausted)"),
     limit: int = typer.Option(None, "--limit", min=1, help="cap after any sort"),
     rare_first: bool = typer.Option(
         False, "--rare-first", help="sort rare>niche>common>canon, then newest id first"),
 ) -> None:
-    """Bare JSON array of frontmatter dicts (collection convention)."""
+    """Bare JSON array of frontmatter dicts (collection convention).
+
+    `--exclude-status exhausted` is what the leap driver reads: a `used` note may still hold
+    another hypothesis, so leaping only from `fresh` starved leap of material after one pass."""
     settings = get_settings()
+    if status is not None and exclude_status is not None and status == exclude_status:
+        raise ValueError(
+            f"--status {status} and --exclude-status {exclude_status} contradict each other")
     if rare_first:
-        notes = list_notes(settings, status=status, limit=None)
+        notes = list_notes(settings, status=status, exclude_status=exclude_status, limit=None)
         notes.sort(key=lambda n: str(n.get("id") or ""), reverse=True)
         notes.sort(key=lambda n: _OBSCURITY_RANK.get(
             str(n.get("obscurity")), len(_OBSCURITY_RANK)))
         if limit is not None:
             notes = notes[:limit]
     else:
-        notes = list_notes(settings, status=status, limit=limit)
+        notes = list_notes(settings, status=status, exclude_status=exclude_status, limit=limit)
     emit(notes)
 
 
@@ -156,13 +139,12 @@ def propose(
     if not url.startswith("https://"):
         raise ValueError(f"invalid url {url!r}: must start with https://")
     cats = [c.strip() for c in categories.split(",") if c.strip()]
-    allowed = _load_categories(_resolve_categories_file(categories_file))
+    allowed = _categories(categories_file)
     unknown = sorted(set(cats) - allowed)
     if unknown:
         raise ValueError(f"unknown categories: {unknown}")
 
-    settings = get_settings()
-    registry = SourcesRegistry(_sources_path(settings))
+    registry = SourcesRegistry(get_settings())
     registry.propose({"key": key, "kind": kind, "url": url, "categories": cats})
     emit(ok({"key": key, "kind": kind, "url": url, "categories": cats}))
 
@@ -181,19 +163,19 @@ def write_yield_cmd(
     days = data.get("days")
     computed_at = now_iso()
 
-    settings = get_settings()
-    registry = SourcesRegistry(_sources_path(settings))
-    updated = []
-    for venue_key, stats in (data.get("by_venue") or {}).items():
-        if (stats or {}).get("n", 0) < _MIN_VENUE_N:
-            continue
-        registry.write_yield(venue_key, {
+    yields = {
+        venue_key: {
             "window_days": days,
             "n": stats["n"],
             "integrity_yield": stats.get("integrity_yield"),
             "walkforward_yield": stats.get("walkforward_yield"),
             "survival_yield": stats.get("survival_yield"),
             "computed_at": computed_at,
-        })
-        updated.append(venue_key)
-    emit(ok({"updated": updated}))
+        }
+        for venue_key, stats in (data.get("by_venue") or {}).items()
+        if (stats or {}).get("n", 0) >= _MIN_VENUE_N
+    }
+    # ONE load + ONE save for every venue (a per-venue write re-read and rewrote the whole file
+    # once per key, and left the file briefly half-updated between them).
+    SourcesRegistry(get_settings()).write_yields(yields)
+    emit(ok({"updated": sorted(yields)}))

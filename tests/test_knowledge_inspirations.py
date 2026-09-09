@@ -4,6 +4,7 @@ from algua.knowledge.inspirations import (
     accept_new_notes,
     canonical_url,
     list_notes,
+    load_note,
     mark_exhausted,
     mark_used,
     validate_note,
@@ -117,18 +118,110 @@ def test_mark_used_and_exhausted_edit_frontmatter_only(tmp_path):
     assert list_notes(s, status="exhausted")[0]["leaps"] == [42]
 
 
-def test_sources_registry_slice_and_yield_roundtrip(tmp_path):
-    p = tmp_path / "_sources.yaml"
-    p.write_text("venues:\n- key: reddit/algotrading\n  kind: forum\n  url: https://r/x\n"
-                 "  categories: [momentum]\n  added_by: human\n  added_at: 2026-09-08\n"
-                 "- key: blog/quant\n  kind: blog\n  url: https://q\n"
-                 "  categories: [mean_reversion]\n  added_by: human\n  added_at: 2026-09-08\n")
-    reg = SourcesRegistry(p)
-    assert [v["key"] for v in reg.slice({"momentum"}, k=5)] == ["reddit/algotrading"]
-    reg.write_yield("blog/quant", {"window_days": 90, "n": 6, "integrity_yield": 0.5,
-                                   "walkforward_yield": 0.2, "survival_yield": 0.0,
-                                   "computed_at": "2026-09-08T00:00:00+00:00"})
-    assert SourcesRegistry(p).load()[1]["yield"]["n"] == 6
+def test_sources_registry_yield_and_propose_roundtrip(tmp_path):
+    s = _settings(tmp_path)
+    path = s.knowledge_dir / "inspirations" / "_sources.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("venues:\n- key: reddit/algotrading\n  kind: forum\n  url: https://r/x\n"
+                    "  categories: [momentum]\n  added_by: human\n  added_at: 2026-09-08\n"
+                    "- key: blog/quant\n  kind: blog\n  url: https://q\n"
+                    "  categories: [mean_reversion]\n  added_by: human\n  added_at: 2026-09-08\n")
+    reg = SourcesRegistry(s)
+    reg.write_yields({"blog/quant": {"window_days": 90, "n": 6, "integrity_yield": 0.5,
+                                     "walkforward_yield": 0.2, "survival_yield": 0.0,
+                                     "computed_at": "2026-09-08T00:00:00+00:00"}})
+    assert SourcesRegistry(s).load()[1]["yield"]["n"] == 6
     reg.propose({"key": "youtube/someone", "kind": "video", "url": "https://yt/c",
                  "categories": ["momentum"]})
-    assert SourcesRegistry(p).load()[2]["added_by"] == "forage"
+    assert SourcesRegistry(s).load()[2]["added_by"] == "forage"
+
+
+# --- Final fix wave (whole-branch review 2026-09-09) ---------------------------------------------
+
+
+BAD_YAML = "---\nid: [unclosed\n  broken: :\n---\nbody\n"
+LIST_FRONTMATTER = "---\n- a\n- b\n---\nbody\n"
+
+
+def test_accept_new_notes_rejects_unparseable_frontmatter_without_aborting_the_batch(tmp_path):
+    # A single malformed staged note used to raise out of accept_new_notes (yaml error, or an
+    # AttributeError on a non-dict frontmatter) and abort the WHOLE batch — every good note the
+    # forage agent wrote alongside it was lost. Each note now fails on its own.
+    s = _settings(tmp_path)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "2026-09-08-quiet-turnover-drift.md").write_text(GOOD)
+    (staged / "2026-09-08-broken-yaml-note.md").write_text(BAD_YAML)
+    (staged / "2026-09-08-list-frontmatter.md").write_text(LIST_FRONTMATTER)
+    seen = tmp_path / "data" / "inspirations-seen.jsonl"
+
+    out = accept_new_notes(staged_dir=staged, settings=s, seen_path=seen, categories=CATS,
+                           run_stamp="f1", max_notes=10)
+
+    assert out["accepted"] == ["2026-09-08-quiet-turnover-drift"]
+    reasons = {r["file"]: r["reasons"] for r in out["rejected"]}
+    assert any("unparseable frontmatter" in r
+               for r in reasons["2026-09-08-broken-yaml-note.md"])
+    assert any("unparseable frontmatter" in r
+               for r in reasons["2026-09-08-list-frontmatter.md"])
+
+
+def test_list_notes_exclude_status(tmp_path):
+    s = _settings(tmp_path)
+    d = s.knowledge_dir / "inspirations"
+    d.mkdir(parents=True)
+    (d / "2026-09-08-quiet-turnover-drift.md").write_text(GOOD)
+    (d / "2026-09-07-spent-note.md").write_text(
+        GOOD.replace("2026-09-08-quiet-turnover-drift", "2026-09-07-spent-note")
+            .replace("status: fresh", "status: exhausted"))
+
+    ids = [n["id"] for n in list_notes(s, exclude_status="exhausted")]
+    assert ids == ["2026-09-08-quiet-turnover-drift"]
+    assert len(list_notes(s)) == 2
+    assert list_notes(s, exclude_status="exhausted", limit=1)[0]["id"] == \
+        "2026-09-08-quiet-turnover-drift"
+
+
+def test_load_note_returns_frontmatter_or_none(tmp_path):
+    s = _settings(tmp_path)
+    d = s.knowledge_dir / "inspirations"
+    d.mkdir(parents=True)
+    (d / "2026-09-08-quiet-turnover-drift.md").write_text(GOOD)
+
+    fm = load_note(s, "2026-09-08-quiet-turnover-drift")
+    assert fm is not None and fm["venue"] == "blog/example" and fm["obscurity"] == "niche"
+    assert load_note(s, "2026-09-08-does-not-exist") is None
+    assert load_note(s, "../escape") is None           # bad id: never raises, never escapes
+    (d / "2026-09-08-broken-yaml-note.md").write_text(BAD_YAML)
+    assert load_note(s, "2026-09-08-broken-yaml-note") is None
+
+
+def test_sources_registry_writes_are_atomic_and_locked(tmp_path):
+    s = _settings(tmp_path)
+    reg = SourcesRegistry(s)
+    reg.propose({"key": "youtube/someone", "kind": "video", "url": "https://yt/c",
+                 "categories": ["momentum"]})
+    assert reg.path == s.knowledge_dir / "inspirations" / "_sources.yaml"
+    assert SourcesRegistry(s).load()[0]["added_by"] == "forage"
+    # No temp file is left behind by the atomic write.
+    assert [p.name for p in reg.path.parent.iterdir()] == ["_sources.yaml"]
+
+
+def test_sources_registry_write_yields_does_one_load_and_one_save(tmp_path, monkeypatch):
+    s = _settings(tmp_path)
+    reg = SourcesRegistry(s)
+    for key in ("a/one", "b/two"):
+        reg.propose({"key": key, "kind": "blog", "url": "https://x", "categories": ["momentum"]})
+
+    calls = {"load": 0, "save": 0}
+    real_load, real_save = SourcesRegistry.load, SourcesRegistry._save
+    monkeypatch.setattr(SourcesRegistry, "load",
+                        lambda self: (calls.__setitem__("load", calls["load"] + 1),
+                                      real_load(self))[1])
+    monkeypatch.setattr(SourcesRegistry, "_save",
+                        lambda self, v: (calls.__setitem__("save", calls["save"] + 1),
+                                         real_save(self, v))[1])
+    reg.write_yields({"a/one": {"n": 6}, "b/two": {"n": 7}})
+    assert calls == {"load": 1, "save": 1}
+    loaded = {v["key"]: v.get("yield") for v in SourcesRegistry(s).load()}
+    assert loaded == {"a/one": {"n": 6}, "b/two": {"n": 7}}

@@ -18,6 +18,11 @@
 # Then `systemctl --user daemon-reload`. Enable commands are PRINTED, never executed — enabling
 # a timer/service is a deliberate operator action, not a side effect of installing files.
 #
+# Also SEEDS the inspirations sources registry: deploy/kb/inspirations/_sources.yaml is copied to
+# ${ALGUA_KNOWLEDGE_DIR:-<repo>/kb}/inspirations/_sources.yaml ONLY when that file is absent. The
+# live registry is runtime state (the human curates it, write-yield stamps yields into it), so an
+# existing one is NEVER overwritten.
+#
 # Usage:
 #   deploy/systemd/install-user-units.sh [--dry-run]
 #
@@ -34,7 +39,7 @@ DRY_RUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -103,15 +108,45 @@ if [[ "${HAVE_ENV_FILE}" -eq 0 ]]; then
   echo "      or 'systemctl --user set-environment'); algua-paper.service needs the ALGUA_ALPACA_* paper credentials."
 fi
 
+# --- Inspirations sources-registry seed (ideation engine spec 2026-09-08 §4) -------------------
+# The vault is runtime state and is git-ignored; the SEED lives in the repo at
+# deploy/kb/inspirations/_sources.yaml. Copy-if-absent only: the live registry is a human steering
+# surface that `research inspirations write-yield` also stamps yields into, so overwriting it
+# would silently discard curation. forage.sh performs the same copy-if-absent at startup, so a
+# vault relocated via ALGUA_KNOWLEDGE_DIR self-heals without re-running this installer.
+SEED_SRC="${REPO_ROOT}/deploy/kb/inspirations/_sources.yaml"
+SEED_DEST="${ALGUA_KNOWLEDGE_DIR:-${REPO_ROOT}/kb}/inspirations/_sources.yaml"
+
+seed_sources_registry() {
+  if [[ ! -f "${SEED_SRC}" ]]; then
+    echo "note: no sources-registry seed at ${SEED_SRC}; skipping the vault seed."
+    return 0
+  fi
+  if [[ -f "${SEED_DEST}" ]]; then
+    echo "sources registry already present at ${SEED_DEST}; left untouched."
+    return 0
+  fi
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "would seed sources registry: ${SEED_SRC} -> ${SEED_DEST}"
+    return 0
+  fi
+  mkdir -p "$(dirname "${SEED_DEST}")"
+  cp "${SEED_SRC}" "${SEED_DEST}"
+  echo "seeded sources registry: ${SEED_SRC} -> ${SEED_DEST}"
+}
+
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   for unit in "${UNITS[@]}"; do
     echo "==> ${unit}  (dry-run; would install to ${UNIT_DIR}/${unit})"
     render_unit "${SCRIPT_DIR}/${unit}"
     echo
   done
+  seed_sources_registry
   echo "dry-run complete — nothing written, no daemon-reload."
   exit 0
 fi
+
+seed_sources_registry
 
 # Preflight: the user systemd manager must be reachable BEFORE any file is written — otherwise
 # units could land on disk with no daemon-reload to pick them up.
