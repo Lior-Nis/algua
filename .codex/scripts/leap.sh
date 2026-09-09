@@ -103,23 +103,13 @@ print("%d %s %s" % (1 if d.get("below_refill") else 0,
   echo "pool below refill trigger (open_unclaimed=${OPEN_UNCLAIMED}, refill_at=${REFILL_AT}); leaping."
 fi
 
-# --- The scratch seed watermark: authority's max idea id BEFORE the agent runs. Everything the
-# agent adds lands above it, which is exactly what `research idea import` imports. Read here (not
-# after the run) so a concurrent authority insert can never be mistaken for the agent's work. ---
-SEEDED_MAX_ID="$(python3 - "${AUTH_DB}" <<'PY'
-import sqlite3
-import sys
-
-try:
-    conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-    try:
-        print(conn.execute("SELECT COALESCE(MAX(id),0) FROM ideas").fetchone()[0])
-    finally:
-        conn.close()
-except Exception:
-    print(0)   # no DB yet (cold start) / no ideas table: everything in scratch is new
-PY
-)"
+# SEEDED_MAX_ID (the scratch seed watermark: authority's max idea id BEFORE the agent runs) is
+# read below, in the SAME python invocation that performs the sqlite backup seeding the scratch
+# registry — see the "Building the scratch pool" step further down for why, and for the comment
+# explaining what actually protects a concurrent-authority-insert race (it is NOT the read timing
+# itself). It defaults to "0" here so an early exit (dry-run, depth-gate no-op) never references
+# an unset variable.
+SEEDED_MAX_ID=0
 
 # --- Context the driver pre-computes AUTHORITY-SIDE and injects as untrusted data (spec §6). ---
 INSPIRATIONS_JSON="[]"
@@ -213,10 +203,14 @@ EOF
 
 # --- Codex invocation (spec §6). The scratch routing rides as an `env` PREFIX so this shell's own
 # environment stays authoritative for every driver command below. --------------------------------
+# ALGUA_MLFLOW_TRACKING_URI rides the same `env` prefix as the other three scratch vars — without
+# it the codex child inherits the unit's EnvironmentFile= (authority) tracking URI, which is a
+# needless authority-path leak into the sandbox even though leap never tracks anything.
 CODEX_CMD=(env
   "ALGUA_DB_PATH=${SCRATCH_DB}"
   "ALGUA_DATA_DIR=${SCRATCH}/data"
   "ALGUA_KNOWLEDGE_DIR=${SCRATCH}/kb"
+  "ALGUA_MLFLOW_TRACKING_URI=${SCRATCH}/mlruns"
   "UV_CACHE_DIR=${WORKTREE}/.uv-cache"
   timeout "${TIMEOUT}" codex exec
   -s workspace-write -c approval_policy="never"
@@ -224,19 +218,23 @@ CODEX_CMD=(env
   -c web_search=disabled
   -C "${WORKTREE}" "${GOAL}")
 
-IMPORT_CMD=(uv run algua research idea import --from "${SCRATCH_DB}" --run "${STAMP}"
-  --max "${LEAP_MAX_IDEAS}" --seeded-max-id "${SEEDED_MAX_ID}" --critic-file "${CRITIC_FILE}")
+# IMPORT_CMD is NOT built here: its --seeded-max-id value is only known once the scratch registry
+# is actually seeded (see the "Building the scratch pool" step below), so building it early would
+# either use a stale watermark or force one on a code path (dry-run) that never seeds anything.
+# The dry-run branch below prints the equivalent command by hand instead.
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "DRY RUN — no worktree created, codex not invoked."
   echo "would create worktree: ${WORKTREE} on branch ${BRANCH}"
   echo "max ideas: ${LEAP_MAX_IDEAS}"
-  echo "seeded max idea id: ${SEEDED_MAX_ID}"
-  echo "would seed scratch from: ${AUTH_DB} -> ${SCRATCH_DB} (consistent sqlite backup)"
+  echo "would seed scratch from: ${AUTH_DB} -> ${SCRATCH_DB} (consistent sqlite backup;" \
+       "the seeded max idea id is read in that same step)"
   echo "would copy read-only kb inputs from: ${KB_DIR}/{inspirations,principles,strategies}"
   echo "would pre-warm env: timeout ${SYNC_TIMEOUT} uv sync (in ${WORKTREE})"
   echo "would run: ${CODEX_CMD[*]}"
-  echo "would import via: ${IMPORT_CMD[*]}"
+  echo "would import via: uv run algua research idea import --from ${SCRATCH_DB} --run" \
+       "${STAMP} --max ${LEAP_MAX_IDEAS} --seeded-max-id <read at seed time>" \
+       "--critic-file ${CRITIC_FILE}"
   echo "would mark used/exhausted via: uv run algua research inspirations mark-used <id> --idea N"
   echo "would recompute the scorecard via: uv run algua research idea scorecard --days 90"
   echo "would write yield via: uv run algua research inspirations write-yield --from-scorecard -"
@@ -264,19 +262,43 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Building the scratch pool inside the worktree..."
-mkdir -p "${SCRATCH}/data" "${SCRATCH}/kb"
+mkdir -p "${SCRATCH}/data" "${SCRATCH}/kb" "${SCRATCH}/mlruns"
+# The seed watermark (authority's max idea id BEFORE the agent runs — everything it adds in
+# scratch lands above it, which is exactly what `research idea import` imports) is read in the
+# SAME python invocation that performs the sqlite backup, right next to it, to keep the race
+# window as tight as possible. But the read-timing tightness is only a nicety: what actually makes
+# a concurrent authority insert SAFE is `research idea import`'s own dedup + eligibility check,
+# re-run against LIVE authority at import time (not against this watermark) — so even if a fresh
+# authority row lands between this read and the backup below, import can only ever skip it as a
+# duplicate, never double-count or corrupt anything.
 if [[ -f "${AUTH_DB}" ]]; then
   echo "  seeding scratch registry from ${AUTH_DB} (consistent sqlite backup)..."
-  python3 - "${AUTH_DB}" "${SCRATCH_DB}" <<'PY'
-import sqlite3, sys
-src = sqlite3.connect(sys.argv[1]); dst = sqlite3.connect(sys.argv[2])
-with dst: src.backup(dst)
-src.close(); dst.close()
+  SEEDED_MAX_ID="$(python3 - "${AUTH_DB}" "${SCRATCH_DB}" <<'PY'
+import sqlite3
+import sys
+
+auth_path, scratch_path = sys.argv[1], sys.argv[2]
+src = sqlite3.connect(auth_path)
+try:
+    seeded_max_id = src.execute("SELECT COALESCE(MAX(id),0) FROM ideas").fetchone()[0]
+except sqlite3.OperationalError:
+    seeded_max_id = 0   # no ideas table yet (cold start): everything in scratch is new
+dst = sqlite3.connect(scratch_path)
+with dst:
+    src.backup(dst)
+dst.close()
+src.close()
+print(seeded_max_id)
 PY
+)"
 else
   echo "  WARNING: no authoritative DB at ${AUTH_DB}; the agent leaps against an EMPTY scratch" \
        "pool (cold start) — dedup-check cannot see any history this run." >&2
+  SEEDED_MAX_ID=0
 fi
+
+IMPORT_CMD=(uv run algua research idea import --from "${SCRATCH_DB}" --run "${STAMP}"
+  --max "${LEAP_MAX_IDEAS}" --seeded-max-id "${SEEDED_MAX_ID}" --critic-file "${CRITIC_FILE}")
 
 # Read-only KB inputs for the agent: the inspirations it leaps from, the methodology note the
 # critic uses as its lens, and the existing strategies (so it can tell "new" from "already built").
@@ -308,13 +330,27 @@ grep -qiE 'rate.?limit|429|quota|usage limit' "${RUN_LOG}" 2>/dev/null && rate_l
 # collision + eligibility check; the critic's rejections -> the negative-result ledger. ---------
 echo "Importing survivors via: ${IMPORT_CMD[*]}"
 set +e
-IMPORT_OUT="$(cd "${REPO_ROOT}" && "${IMPORT_CMD[@]}" 2>&1)"
+# stdout ONLY goes into IMPORT_OUT (it must be exactly the command's JSON payload, nothing else,
+# for `_import_field` below to parse) — stderr is split off to the run log AND the terminal via
+# `tee`, so a `uv` resolve notice or a stray Python warning on stderr can never fold into the JSON
+# and silently turn a real import into an empty one.
+IMPORT_OUT="$(cd "${REPO_ROOT}" && "${IMPORT_CMD[@]}" 2> >(tee -a "${RUN_LOG}" >&2))"
 IMPORT_RC=$?
 set -e
 echo "${IMPORT_OUT}"
 if [[ "${IMPORT_RC}" -ne 0 ]]; then
   echo "WARNING: 'research idea import' exited ${IMPORT_RC}; treating this run as importing" \
        "nothing." >&2
+fi
+# Fails LOUDLY (one WARNING, checked ONCE, in the parent shell — never inside the `_import_field`
+# subshell below, whose IMPORT_PARSE_ERROR writes a command-substitution copy would lose) when
+# IMPORT_OUT is not the JSON object `research idea import` promises; the digest records the flag so
+# a run that "imported nothing" because the CLI's own output was unreadable is distinguishable from
+# a run that genuinely imported nothing.
+IMPORT_PARSE_ERROR=0
+if ! python3 -c 'import json, sys; json.loads(sys.argv[1])' "${IMPORT_OUT}" 2>/dev/null; then
+  echo "WARNING: import output was not JSON" >&2
+  IMPORT_PARSE_ERROR=1
 fi
 _import_field() {  # $1 = key, $2 = fallback JSON
   python3 -c '
@@ -384,11 +420,17 @@ for idea_id in imported:
             print(f"WARNING: mark-used failed for {note!r}: {out.strip()[:300]}", file=sys.stderr)
 
 # 2. mark-exhausted: the agent's own judgement about which notes are spent, from its report.
+# The heading level is `#{2,}` (accepts `##`, `###`, ...) since the agent's own heading depth for
+# this section is not itself worth enforcing; a MISSING section (no match at all) is distinguished
+# from a PRESENT-but-empty one — the former gets a note (it may mean the agent forgot the section
+# entirely, not that it judged nothing spent), the latter does not.
 try:
     text = open(report_path, encoding="utf-8").read()
 except FileNotFoundError:
     text = ""
-m = re.search(r"##\s*Exhausted inspirations\s*\n(.*?)(?:\n##\s|\Z)", text, re.DOTALL)
+m = re.search(r"#{2,}\s*Exhausted inspirations\s*\n(.*?)(?:\n#{1,}\s|\Z)", text, re.DOTALL)
+if m is None:
+    print('note: no "Exhausted inspirations" section in leap-report.md', file=sys.stderr)
 exhausted: list[str] = []
 for raw in (m.group(1) if m else "").splitlines():
     line = raw.strip().lstrip("-*").strip().strip("`")
@@ -423,12 +465,13 @@ echo "Appending run digest to ${DIGEST}..."
 mkdir -p "$(dirname "${DIGEST}")"
 python3 - "${DIGEST}" "${STAMP}" "${DEPTH_JSON}" "${IMPORTED_JSON}" "${SKIPPED_JSON}" \
   "${CRITIC_ROWS}" "${EXHAUSTED_JSON}" "${rc}" "${timed_out}" "${wall_s}" "${rate_limited}" \
+  "${IMPORT_PARSE_ERROR}" \
   <<'PY' || echo "WARNING: digest append failed -- run outcome unaffected." >&2
 import json
 import sys
 
 (digest_path, stamp, depth_json, imported_json, skipped_json, critic_rows, exhausted_json,
- exit_code, timed_out, wall_s, rate_limited) = sys.argv[1:12]
+ exit_code, timed_out, wall_s, rate_limited, import_parse_error) = sys.argv[1:13]
 
 
 def _json(raw: str, fallback):
@@ -449,6 +492,7 @@ row = {
     "timed_out": timed_out == "1",
     "wall_s": int(wall_s),
     "rate_limited": rate_limited == "1",
+    "import_parse_error": import_parse_error == "1",
 }
 with open(digest_path, "a", encoding="utf-8") as f:
     f.write(json.dumps(row, ensure_ascii=False) + "\n")

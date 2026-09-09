@@ -7,8 +7,12 @@ sources-registry seed check for both stages.
 
 from __future__ import annotations
 
+import json
 import os
+import re
+import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -169,3 +173,196 @@ def test_leap_units_shaped_and_installed():
     assert "Persistent=true" in tmr and "WantedBy=timers.target" in tmr
     installer = (REPO / "deploy/systemd/install-user-units.sh").read_text()
     assert "algua-leap.service" in installer and "algua-leap.timer" in installer
+
+
+# --- Leap fix round 1 (review findings) -----------------------------------------------------------
+
+
+def test_leap_dry_run_scratch_mlflow_tracking_uri_not_authority():
+    # Without an explicit ALGUA_MLFLOW_TRACKING_URI in the codex child's `env` prefix, the agent
+    # would inherit the unit's EnvironmentFile= (authority) tracking URI — a needless authority-path
+    # leak into the sandbox. The `would run:` line is the codex invocation itself, so this pins the
+    # var lives there, scoped under .leap-scratch, never the bare/authority value.
+    out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
+    run_line = out.split("would run: ", 1)[1].splitlines()[0]
+    assert "ALGUA_MLFLOW_TRACKING_URI=" in run_line
+    mlflow_val = next(
+        tok for tok in run_line.split() if tok.startswith("ALGUA_MLFLOW_TRACKING_URI="))
+    val = mlflow_val.split("=", 1)[1]
+    assert val.endswith("/.leap-scratch/mlruns")
+
+
+def _extract_import_capture_block() -> str:
+    # The IMPORT_OUT capture (stdout-only) plus the `_import_field` fail-loud parsing, extracted
+    # verbatim from leap.sh via literal start/end markers — the same "run the ACTUAL launcher code,
+    # not a reimplementation" technique test_research_run_digest.py uses for run-research-loop.sh's
+    # heredocs, applied here to a plain shell block instead of a python heredoc.
+    src = LEAP.read_text(encoding="utf-8")
+    start = 'echo "Importing survivors via: ${IMPORT_CMD[*]}"'
+    end = "CRITIC_ROWS=\"$(_import_field critic_rows '0')\""
+    start_idx = src.index(start)
+    end_idx = src.index(end, start_idx) + len(end)
+    return src[start_idx:end_idx]
+
+
+_IMPORT_CAPTURE_SRC = _extract_import_capture_block()
+
+
+def _fake_uv_bin(tmp_path: Path, *, stdout: str, stderr: str = "") -> Path:
+    bindir = tmp_path / "fakebin-uv"
+    bindir.mkdir(exist_ok=True)
+    fake_uv = bindir / "uv"
+    script = "#!/usr/bin/env bash\n"
+    if stderr:
+        script += f"cat >&2 <<'ERR'\n{stderr}\nERR\n"
+    script += f"cat <<'OUT'\n{stdout}\nOUT\n"
+    script += "exit 0\n"
+    fake_uv.write_text(script, encoding="utf-8")
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return bindir
+
+
+def _run_import_capture(tmp_path: Path, fake_uv_bindir: Path) -> dict:
+    run_log = tmp_path / "run.log"
+    script = tmp_path / "run_import_capture.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'REPO_ROOT={tmp_path!s}\n'
+        f'RUN_LOG={run_log!s}\n'
+        "IMPORT_CMD=(uv run algua research idea import --from x --run y --max 1"
+        " --seeded-max-id 0 --critic-file z)\n"
+        f"{_IMPORT_CAPTURE_SRC}\n"
+        'echo "RESULT_IMPORTED=${IMPORTED_JSON}"\n'
+        'echo "RESULT_SKIPPED=${SKIPPED_JSON}"\n'
+        'echo "RESULT_CRITIC=${CRITIC_ROWS}"\n'
+        'echo "RESULT_PARSE_ERROR=${IMPORT_PARSE_ERROR}"\n',
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PATH": f"{fake_uv_bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env,
+                          timeout=30, check=True)
+    result: dict = {"stdout": proc.stdout, "stderr": proc.stderr, "run_log": run_log}
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT_"):
+            key, _, val = line.partition("=")
+            result[key] = val
+    return result
+
+
+def test_leap_import_stderr_noise_never_corrupts_the_parsed_imported_list(tmp_path):
+    # The bug this closes: folding stderr into the captured JSON (`2>&1`) meant ANY stderr line (a
+    # `uv` resolve notice, a Python warning) silently turned IMPORTED_JSON into "[]" with rc 0 —
+    # mark-used would then never run, and the run looked healthy. A stderr line ahead of clean JSON
+    # on stdout must not affect parsing at all.
+    payload = '{"ok": true, "imported": [123, 456], "skipped": [], "critic_rows": 1, "ceiling": 5}'
+    fake_uv = _fake_uv_bin(tmp_path, stdout=payload,
+                           stderr="warning: resolved uv.lock in 4ms (fake noise)")
+    result = _run_import_capture(tmp_path, fake_uv)
+    assert json.loads(result["RESULT_IMPORTED"]) == [123, 456]
+    assert json.loads(result["RESULT_CRITIC"]) == 1
+    assert result["RESULT_PARSE_ERROR"] == "0"
+    # The noise must still be visible somewhere (the run log or the terminal), not swallowed.
+    assert "fake noise" in result["run_log"].read_text(encoding="utf-8")
+
+
+def test_leap_import_output_not_json_fails_loudly_and_flags_the_digest(tmp_path):
+    fake_uv = _fake_uv_bin(tmp_path, stdout="not json at all")
+    result = _run_import_capture(tmp_path, fake_uv)
+    assert json.loads(result["RESULT_IMPORTED"]) == []
+    assert result["RESULT_PARSE_ERROR"] == "1"
+    assert "WARNING: import output was not JSON" in result["stderr"]
+    # Printed exactly once, not once per field (imported/skipped/critic_rows).
+    assert result["stderr"].count("WARNING: import output was not JSON") == 1
+
+
+def test_leap_seeded_max_id_read_and_backup_share_one_python_invocation():
+    # The seed watermark (authority's max idea id BEFORE the agent runs) must be read in the SAME
+    # python invocation that performs the sqlite backup, so the race window between "read the
+    # watermark" and "seed the scratch copy" is as tight as possible; and the comment must name the
+    # REAL safety net (research idea import's own collision re-check), not just the read timing.
+    src = LEAP.read_text(encoding="utf-8")
+    m = re.search(
+        r"seeding scratch registry.*?<<'PY'\n(.*?)\nPY\n", src, re.DOTALL)
+    assert m, "could not find the scratch-seeding python heredoc in leap.sh"
+    body = m.group(1)
+    assert "SELECT COALESCE(MAX(id),0) FROM ideas" in body
+    assert "src.backup(dst)" in body
+    assert "collision" in src  # the corrected comment documents the actual safety net
+
+
+def test_leap_dry_run_seeded_max_id_is_a_placeholder_not_a_premature_read():
+    # A dry run must not need (or claim) a live watermark value — the value is only meaningful once
+    # the scratch registry is actually seeded, which a dry run never does.
+    out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
+    assert "would import via: uv run algua research idea import --from" in out
+    assert "--seeded-max-id <read at seed time>" in out
+
+
+_HEREDOC_RE = re.compile(r"<<'PY'[^\n]*\n(.*?)\n^PY$", re.DOTALL | re.MULTILINE)
+
+
+def _leap_heredocs() -> list[str]:
+    return _HEREDOC_RE.findall(LEAP.read_text(encoding="utf-8"))
+
+
+# Heredoc 0 = the combined seed-watermark-read + sqlite-backup step; heredoc 1 = the mark-used /
+# mark-exhausted inspiration bookkeeping (what the exhausted-section tests below exercise); heredoc
+# 2 = the digest append. Keep these indices in sync when adding a heredoc to leap.sh.
+_EXHAUSTED_SRC = _leap_heredocs()[1]
+
+
+def _fake_algua_bin(tmp_path: Path) -> Path:
+    # A fake `uv` intercepting exactly the two `uv run algua research inspirations ...` calls the
+    # extracted heredoc makes (mark-used, mark-exhausted), so this test never shells out to the
+    # real CLI / touches the real vault. `research idea show` is not reached (imported_json is
+    # always "[]" below, so the mark-used loop never runs).
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    fake_uv = bindir / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$*\" == *mark-exhausted* || \"$*\" == *mark-used* ]]; then\n"
+        "  echo '{\"ok\": true}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "echo \"unexpected fake-uv invocation: $*\" >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return bindir
+
+
+def _run_exhausted_block(tmp_path: Path, report_text: str | None) -> subprocess.CompletedProcess:
+    report_path = tmp_path / "leap-report.md"
+    if report_text is not None:
+        report_path.write_text(report_text, encoding="utf-8")
+    bindir = _fake_algua_bin(tmp_path)
+    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    return subprocess.run(
+        [sys.executable, "-", "[]", str(report_path), str(tmp_path)],
+        input=_EXHAUSTED_SRC, capture_output=True, text=True, env=env, timeout=30)
+
+
+def test_leap_exhausted_section_accepts_any_heading_depth(tmp_path):
+    for hashes in ("##", "###", "####"):
+        proc = _run_exhausted_block(
+            tmp_path, f"{hashes} Exhausted inspirations\n- 2026-09-07-index-add-crowding\n")
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout) == ["2026-09-07-index-add-crowding"]
+        assert 'note: no "Exhausted inspirations" section' not in proc.stderr
+
+
+def test_leap_exhausted_section_absent_vs_present_but_empty(tmp_path):
+    # Absent (no heading at all) gets a note distinguishing it from a deliberate empty list.
+    absent = _run_exhausted_block(tmp_path, "some other report content, no heading at all\n")
+    assert absent.returncode == 0, absent.stderr
+    assert json.loads(absent.stdout) == []
+    assert 'note: no "Exhausted inspirations" section in leap-report.md' in absent.stderr
+
+    # Present but empty: no such note (the agent deliberately judged nothing spent).
+    empty = _run_exhausted_block(tmp_path, "## Exhausted inspirations\n\n## Something else\n")
+    assert empty.returncode == 0, empty.stderr
+    assert json.loads(empty.stdout) == []
+    assert 'note: no "Exhausted inspirations" section' not in empty.stderr
