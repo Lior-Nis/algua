@@ -162,6 +162,21 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
 - `uv run algua data verify [--snapshot-id ID]` — power-loss backstop: read each snapshot's
   payload back from disk (full read-back) and check it against its record; emits per-snapshot
   JSON and exits non-zero if any snapshot is damaged.
+- `uv run algua research idea claim/record-outcome/link/depth/refuted/import/reclassify/scorecard`
+  — the idea-pool ops the research loop runs each cycle: claim ideas off the pool before a run,
+  record the outcome after, link an idea to the hypothesis that used it, read pool depth, list
+  critic-refuted ideas, import/reclassify from the leap scratch pool, and roll up the scorecard.
+  **Driver-facing** — the research/leap drivers and the merge-back drainer run these against
+  authority; an agent never does.
+- `uv run algua research inspirations accept/list/mark-used/mark-exhausted/propose/write-yield` —
+  the forage and leap drivers' vault-side commands over `kb/inspirations/`: accept a foraged
+  inspiration note, list/mark its lifecycle, propose one from a driver, and write the leap yield
+  back to the vault.
+- Three timers drive the ideation engine unattended: `algua-research.timer` (every 2h at `:00`,
+  claims ideas and runs the research loop), `algua-leap.timer` (every 2h at `:30`, inspirations →
+  structured hypotheses, depth-gated), `algua-forage.timer` (daily `03:00 UTC`, web search →
+  `kb/inspirations/` notes). A human steers the engine through two files: `.codex/categories.txt`
+  (the ideation category list) and `kb/inspirations/_sources.yaml` (the venue registry).
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.
