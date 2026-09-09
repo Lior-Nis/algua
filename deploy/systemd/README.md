@@ -25,6 +25,11 @@ sibling all no-op cleanly.
   authoritative `paper merge-back` through `algua operator lock-run`, which shares `operator.lock`
   with the paper tick. Trusted plumbing, no LLM, no sandbox. See "Auto merge-back (factory
   slice 3)" below.
+- `algua-leap.{service,timer}` — inspirations → structured hypotheses, every 2h at `:30` (between
+  research runs), but only when the idea pool is below its refill trigger. See "Ideation engine
+  (forage + leap)" below.
+- `algua-forage.{service,timer}` — web-search inspiration foraging into `kb/inspirations/`, daily
+  `03:00 UTC`. See "Ideation engine (forage + leap)" below.
 
 ## Install
 
@@ -69,7 +74,9 @@ deploy/systemd/install-user-units.sh            # render + install + daemon-relo
 deploy/systemd/install-user-units.sh --dry-run  # print the rendered units, write nothing
 ```
 
-For each of `algua-research.{service,timer}`, `algua-paper.{service,timer}`, `algua-web.service`
+For each of `algua-research.{service,timer}`, `algua-paper.{service,timer}`,
+`algua-mergeback-drain.{service,timer}`, `algua-forage.{service,timer}`,
+`algua-leap.{service,timer}`, `algua-web.service`
 it renders the `/opt/algua` template to `~/.config/systemd/user/<name>`, replacing `/opt/algua`
 with the actual repo root (resolved from the script's own location; a root containing whitespace
 or any character outside `[A-Za-z0-9/._-]` fails closed — plain substitution can't safely render
@@ -241,11 +248,9 @@ bugs to fix, `preview_gate.failed_checks` clusters show where hypotheses die. Th
 (recent hypothesis titles, injected as sanitized untrusted data). A digest write failure warns but
 never fails the run; the digest never stores raw report prose.
 
-**Thesis rotation (slice 1).** When `THESIS` is not explicitly set, the launcher rotates
-deterministically through `.codex/research-themes.txt` (one thesis per line;
-`index = (days_since_epoch * 12 + hour_of_day / 2) % line_count`, i.e. one theme per 2h slot).
-Edit that file to steer the factory's alpha-category mix; an explicit `THESIS`/`--thesis`
-overrides rotation entirely.
+**Categories (ideation engine).** `.codex/categories.txt` lists the PRD §4 slugs; the research
+launcher claims ideas from the pool per run (`--category` restricts), it no longer rotates a
+thesis.
 
 **Contention.** The driver holds a non-blocking `data/research-loop.lock` for the whole cycle and skips
 (no-op) rather than queue if another research cycle holds it — so the 2h cadence can never stack
@@ -269,6 +274,43 @@ validated candidate names (the directory keeps the bare stamp). Before any remov
 pruner (`RESEARCH_WORKTREE_RETENTION_DAYS`, default 7) remains as a **backstop** only — it also
 still scans the legacy `../algua-research-*` location during transition. Reap on demand with
 `git worktree remove .runs/<stamp>`; the authored code persists on the run branch either way.
+
+## Ideation engine (forage + leap)
+
+Two more units feed the idea pool the research loop claims from (spec
+`docs/superpowers/specs/2026-09-08-ideation-engine-design.md`). Three timers now share one
+staggered grid, each on its own cadence, deliberately kept off the paper/merge-back-drain grids:
+
+| unit | schedule | does |
+|---|---|---|
+| `algua-research.timer` | every 2h at `:00` | claims ideas from the pool, authors/backtests/gates them (unchanged) |
+| `algua-leap.timer` | every 2h at `:30`, between research runs | inspirations → structured hypotheses, but only when `research idea depth` is below its refill trigger (an above-trigger firing exits fast, no worktree) |
+| `algua-forage.timer` | daily `03:00 UTC` | web search → inspiration notes under `kb/inspirations/`, rotating `FORAGE_SLICES` categories per run so every category is foraged at least weekly |
+
+**Privileges (spec §9).** All three run a sandboxed Codex agent under `-s workspace-write`
+(writes confined to its throwaway run worktree) with a TRUSTED, unsandboxed DRIVER doing every
+authoritative write after the agent exits: the forage agent gets the shell network off and only
+Codex's built-in `web_search` (MCP tools are opt-in via `FORAGE_MCP=1`, which drops both walls —
+loudly logged) and no registry path at all, with the driver validating and landing survivors via
+`research inspirations accept`; the leap agent gets no web access and a THROWAWAY SCRATCH COPY of
+the registry (it can read the real pool's history but write only scratch), with the driver doing
+the real `research idea import` (re-dedup, eligibility, cap), the critic ledger, and the
+inspirations bookkeeping; the research agent is unchanged (shell network on for `uv`, scratch
+registry copy, `claim` before / `record-outcome` after via the driver, `link` via the drainer). No
+agent in this trio ever holds a path to the authoritative registry or vault directly.
+
+**Settings** (env file; see `deploy/systemd/algua.env.example`): `ALGUA_RESEARCH_RUNS_PER_DAY`,
+`ALGUA_RESEARCH_HYPOTHESES_PER_RUN`, `ALGUA_IDEA_POOL_FLOOR_DAYS`, `ALGUA_IDEA_POOL_CEILING_DAYS`,
+`ALGUA_IDEA_CLAIM_TTL_MINUTES`, `ALGUA_IDEA_PREVIEW_HOLD_HOURS` drive the pool-depth math
+(`refill_at`/`ceiling` = `runs_per_day * hypotheses_per_run * {floor,ceiling}_days`); `LEAP_MAX_IDEAS`
+bounds hypotheses per leap; `FORAGE_MAX_NOTES`/`FORAGE_SLICES`/`FORAGE_MCP` bound notes per forage
+run, the category rotation width, and the MCP opt-in.
+
+**Done.** `uv run algua research idea depth` shows a non-empty pool that recovers above
+`refill_at` within one leap interval after a research run; `uv run algua research idea scorecard
+--days 90` shows `n >= 1` for at least one venue once forage + leap + research have each fired;
+`journalctl --user -u algua-forage.service` / `journalctl --user -u algua-leap.service` show
+completed runs.
 
 ## Auto merge-back (factory slice 3)
 

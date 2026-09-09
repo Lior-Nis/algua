@@ -237,12 +237,52 @@ export interface IdeaRow {
   updated_at?: string
 }
 
-/** GET /api/ideas — ideas list + `idea stats` counts window. */
+/** `research idea depth` — pool depth vs the refill trigger / ceiling (algua/registry/idea_attempts.py). */
+export interface IdeaDepth {
+  open_unclaimed: number
+  claimed: number
+  needs_data: number
+  refill_at: number
+  ceiling: number
+  below_refill: boolean
+  inputs: {
+    runs_per_day: number
+    hypotheses_per_run: number
+    floor_days: number
+    ceiling_days: number
+  }
+}
+
+/** One group-by bucket in `research idea scorecard` (algua/registry/idea_scorecard.py). Rate
+ * fields are null below `min_n_for_rates` (n < 5) — too few attempts to trust a percentage. */
+export interface IdeaScorecardBucket {
+  n: number
+  outcomes: Record<string, number>
+  stages: Record<string, number>
+  survivals: number
+  integrity_yield: number | null
+  walkforward_yield: number | null
+  survival_yield: number | null
+}
+
+/** `research idea scorecard --days N` — attempt outcomes + downstream stage, grouped four ways. */
+export interface IdeaScorecard {
+  days: number
+  min_n_for_rates: number
+  by_venue: Record<string, IdeaScorecardBucket>
+  by_category: Record<string, IdeaScorecardBucket>
+  by_obscurity: Record<string, IdeaScorecardBucket>
+  by_inspiration: Record<string, IdeaScorecardBucket>
+}
+
+/** GET /api/ideas — ideas list + `idea stats` counts window + pool depth + yield scorecard. */
 export interface IdeasResponse {
   ok: boolean
   ideas: ListPayload<IdeaRow> | IdeaRow[]
   stats: Record<string, unknown> | null
   stats_window_days: number
+  depth?: IdeaDepth | null
+  scorecard?: IdeaScorecard | null
   fetched_at: string
   stale: boolean
   last_error_code?: string | null

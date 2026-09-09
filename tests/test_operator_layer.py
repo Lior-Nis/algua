@@ -160,6 +160,16 @@ def test_install_user_units_includes_mergeback_drain_pair():
     assert "algua-mergeback-drain.timer" in installer
 
 
+def test_install_user_units_includes_forage_and_leap_pairs():
+    # Ideation engine (spec 2026-09-08): forage + leap get the same installer treatment as
+    # every other operator unit pair (research/paper/mergeback-drain).
+    installer = (REPO / "deploy" / "systemd" / "install-user-units.sh").read_text()
+    assert "algua-forage.service" in installer
+    assert "algua-forage.timer" in installer
+    assert "algua-leap.service" in installer
+    assert "algua-leap.timer" in installer
+
+
 def test_skills_reachable_via_claude_skills_symlinks():
     # Canonical skills live in .codex/skills/ (Codex). Claude Code reads .claude/skills/,
     # so the same skills serve the co-dev harness too via symlink.

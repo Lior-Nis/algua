@@ -390,16 +390,35 @@ async def test_activity_param_validation_is_422(
 # --- /api/ideas ---
 
 
+_DEPTH_DATA = {
+    "ok": True, "open_unclaimed": 10, "claimed": 2, "needs_data": 1,
+    "refill_at": 72, "ceiling": 252, "below_refill": False,
+    "inputs": {"runs_per_day": 12, "hypotheses_per_run": 3, "floor_days": 2, "ceiling_days": 7},
+}
+_SCORECARD_DATA = {
+    "ok": True, "days": 90, "min_n_for_rates": 5,
+    "by_venue": {}, "by_category": {}, "by_obscurity": {}, "by_inspiration": {},
+}
+
+
+def _ideas_routes(**overrides: Any) -> dict[tuple[str, ...], Any]:
+    routes: dict[tuple[str, ...], Any] = {
+        ("research", "idea", "list"): _env(
+            {"data": [{"id": 1, "title": "vol carry"}]}, fetched_at="2026-08-09T00:00:05+00:00"),
+        ("research", "idea", "stats"): _env(
+            {"window_days": 90, "counts": {"pool": 3}}, fetched_at="2026-08-09T00:00:01+00:00"),
+        ("research", "idea", "depth"): _env(_DEPTH_DATA, fetched_at="2026-08-09T00:00:02+00:00"),
+        ("research", "idea", "scorecard", "--days", "90"): _env(
+            _SCORECARD_DATA, fetched_at="2026-08-09T00:00:03+00:00"),
+    }
+    routes.update({k: v for k, v in overrides.items()})  # type: ignore[misc]
+    return routes
+
+
 async def test_ideas_composition(monkeypatch: pytest.MonkeyPatch) -> None:
     ideas_data = {"data": [{"id": 1, "title": "vol carry"}]}  # bare array wrapped by the seam
     stats_data = {"window_days": 90, "counts": {"pool": 3}}
-    _route_cli(
-        monkeypatch,
-        {
-            ("research", "idea", "list"): _env(ideas_data, fetched_at="2026-08-09T00:00:05+00:00"),
-            ("research", "idea", "stats"): _env(stats_data, fetched_at="2026-08-09T00:00:01+00:00"),
-        },
-    )
+    _route_cli(monkeypatch, _ideas_routes())
     async with _client() as client:
         resp = await client.get("/api/ideas")
     assert resp.status_code == 200
@@ -408,20 +427,19 @@ async def test_ideas_composition(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["ideas"] == ideas_data
     assert body["stats"] == stats_data
     assert body["stats_window_days"] == 90
-    assert body["fetched_at"] == "2026-08-09T00:00:01+00:00"  # min of the parts
+    assert body["depth"] == _DEPTH_DATA
+    assert body["scorecard"] == _SCORECARD_DATA
+    assert body["fetched_at"] == "2026-08-09T00:00:01+00:00"  # min of the four parts
     assert body["stale"] is False
 
 
 async def test_ideas_stale_part_ors_into_composed_stale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _route_cli(
-        monkeypatch,
-        {
-            ("research", "idea", "list"): _env({"data": []}, stale=True),
-            ("research", "idea", "stats"): _env({"window_days": 90, "counts": {}}),
-        },
-    )
+    routes = _ideas_routes()
+    routes[("research", "idea", "list")] = _env({"data": []}, stale=True)
+    routes[("research", "idea", "stats")] = _env({"window_days": 90, "counts": {}})
+    _route_cli(monkeypatch, routes)
     async with _client() as client:
         resp = await client.get("/api/ideas")
     assert resp.status_code == 200
@@ -489,13 +507,9 @@ async def test_triage_with_every_source_down_fails_loudly(
 
 
 async def test_ideas_cli_error_is_502(monkeypatch: pytest.MonkeyPatch) -> None:
-    _route_cli(
-        monkeypatch,
-        {
-            ("research", "idea", "list"): CliError("cli_timeout", "idea list timed out"),
-            ("research", "idea", "stats"): _env({"window_days": 90, "counts": {}}),
-        },
-    )
+    routes = _ideas_routes()
+    routes[("research", "idea", "list")] = CliError("cli_timeout", "idea list timed out")
+    _route_cli(monkeypatch, routes)
     async with _client() as client:
         resp = await client.get("/api/ideas")
     assert resp.status_code == 502
