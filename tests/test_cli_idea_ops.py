@@ -83,14 +83,48 @@ def test_import_from_scratch_db(tmp_path):
                        env=env)
     assert r.exit_code == 0, r.output
     critic = tmp_path / "critic.jsonl"
-    critic.write_text(json.dumps({"title": "bad", "hypothesis": "beta", "reason_kind":
-                                  "beta_in_disguise"}) + "\n")
+    critic.write_text(json.dumps({"title": "bad", "hypothesis": "beta",
+                                  "reason_kind": "beta_in_disguise",
+                                  "reason": "long-short beta in disguise"}) + "\n")
     r = _run("import", "--from", str(scratch), "--run", "leap-1", "--max", "6",
              "--seeded-max-id", "1", "--critic-file", str(critic))
     assert r.exit_code == 0, r.output
     body = _json(r)
     assert len(body["imported"]) == 1 and body["critic_rows"] == 1
+    assert body["critic_errors"] == 0
     assert len(_json(_run("list"))) == 2
+
+
+def test_import_bad_critic_lines_are_counted_never_fatal(tmp_path):
+    # The critic file is agent output. A malformed LINE and a row with no usable reason used to
+    # raise out of `import` AFTER the ideas had been committed — an exit-1 for a run whose
+    # authoritative work had actually succeeded. Both are now counted, and the run still exits 0.
+    _seed(1)
+    auth = tmp_path / "r.db"
+    scratch = tmp_path / "scratch.db"
+    src, dst = sqlite3.connect(auth), sqlite3.connect(scratch)
+    with dst:
+        src.backup(dst)
+    src.close()
+    dst.close()
+    critic = tmp_path / "critic.jsonl"
+    critic.write_text("\n".join([
+        json.dumps({"title": "a", "hypothesis": "h1", "reason_kind": "beta_in_disguise",
+                    "reason": "long-short beta in disguise"}),
+        "{not json at all",
+        json.dumps({"title": "c", "hypothesis": "h3", "reason_kind": "no_mechanism",
+                    "reason": "   "}),
+        json.dumps({"title": "d", "hypothesis": "h4", "reason_kind": "no_mechanism",
+                    "reason": "states no mechanism at all"}),
+    ]) + "\n")
+
+    r = _run("import", "--from", str(scratch), "--run", "leap-1", "--max", "6",
+             "--seeded-max-id", "1", "--critic-file", str(critic))
+
+    assert r.exit_code == 0, r.output
+    body = _json(r)
+    assert body["ok"] is True
+    assert body["critic_rows"] == 2 and body["critic_errors"] == 2
 
 
 def test_import_from_non_sqlite_file_fails_closed_without_leaking_connection(tmp_path):

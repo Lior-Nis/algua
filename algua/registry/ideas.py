@@ -110,10 +110,10 @@ class IdeaRepository:
         created_by_run: str | None = None,
     ) -> Idea:
         # `with self._conn:` commits on exit, so `add()` cannot be nested inside a caller's own
-        # BEGIN IMMEDIATE (it would commit the caller's transaction early). Task 4's bulk import
-        # calls `_insert_locked` directly inside its own transaction instead.
+        # BEGIN IMMEDIATE (it would commit the caller's transaction early). The trusted leap
+        # import calls `insert_locked` directly inside its own transaction instead.
         with self._conn:
-            rowid = self._insert_locked(
+            rowid = self.insert_locked(
                 title=title, hypothesis=hypothesis, family=family, tags=tags,
                 source_type=source_type, source_ref=source_ref, source_date=source_date,
                 source_note=source_note, required_data=required_data, status=status,
@@ -124,7 +124,7 @@ class IdeaRepository:
             )
         return self.get(rowid)
 
-    def _insert_locked(
+    def insert_locked(
         self, *, title: str, hypothesis: str, family: str | None, tags: list[str],
         source_type: SourceType, source_ref: str | None, source_date: str | None,
         source_note: str | None, required_data: list[DataCapability], status: IdeaStatus,

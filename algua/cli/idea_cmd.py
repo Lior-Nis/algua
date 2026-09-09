@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import typer
 
@@ -17,6 +18,7 @@ from algua.data.capabilities import (
 from algua.registry.db import registry_conn
 from algua.registry.ideas import IdeaRepository
 from algua.registry.store import SqliteStrategyRepository
+from algua.research.categories import load_categories
 from algua.research.ideas import classify_idea
 
 _FAMILY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -47,6 +49,8 @@ def add(
     falsification: str = typer.Option(None, "--falsification", help="what would refute it"),
     inspiration: list[str] = typer.Option(
         None, "--inspiration", help="id|venue|obscurity (repeatable)"),
+    categories_file: Path = typer.Option(
+        None, "--categories-file", help="default: .codex/categories.txt at the repo root"),
 ) -> None:
     """Add a sourced idea. Auto-parks (needs_data) when it needs unsupported data/market/horizon.
     Fails closed on a dedup collision unless --allow-duplicate --reason. `--source-type inspiration`
@@ -59,9 +63,17 @@ def add(
         raise ValueError(
             "--source-type inspiration requires --category, --market, --horizon and "
             "--falsification")
-    if category is not None and not _CATEGORY_RE.match(category):
-        raise ValueError(
-            f"invalid category {category!r}: must be a lowercase slug (a-z, 0-9, underscore)")
+    if category is not None:
+        # The category is not free text: it is the human's steering vocabulary
+        # (`.codex/categories.txt`), and the forage rotation, the claim round-robin and the
+        # scorecard all key on it. An invented slug would create an idea no rotation ever
+        # reaches — so membership, not just shape, is checked here.
+        if not _CATEGORY_RE.match(category):
+            raise ValueError(
+                f"invalid category {category!r}: must be a lowercase slug (a-z, 0-9, underscore)")
+        known = load_categories(categories_file)
+        if category not in known:
+            raise ValueError(f"unknown category {category!r}; known: {', '.join(known)}")
     caps = _parse_required_data(required_data)
     links = _parse_inspirations(inspiration)
     status, parked = classify_idea(

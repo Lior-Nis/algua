@@ -25,6 +25,28 @@ from algua.registry.idea_import import (
 from algua.registry.idea_scorecard import scorecard as _scorecard
 from algua.registry.ideas import IdeaRepository
 from algua.registry.store import SqliteStrategyRepository
+from algua.research.categories import load_categories
+
+
+def _critic_rows(critic_file: Path) -> tuple[list[dict], int]:
+    """Parse `leap-critic.jsonl` line by line. A line that is not a JSON OBJECT is counted, never
+    raised — the whole file is agent output, and one bad line must not cost the ledger the rest."""
+    rows: list[dict] = []
+    errors = 0
+    for line in critic_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            errors += 1
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+        else:
+            errors += 1
+    return rows, errors
+
 
 idea_ops_app = typer.Typer(
     no_args_is_help=True,
@@ -111,10 +133,17 @@ def import_(
         None, "--seeded-max-id",
         help="max ideas.id at seed time (default: read from authority)"),
     critic_file: Path = typer.Option(None, "--critic-file", help="leap-critic.jsonl"),
+    categories_file: Path = typer.Option(
+        None, "--categories-file", help="default: .codex/categories.txt at the repo root"),
 ) -> None:
-    """Move scratch ideas into authority under a dedup + eligibility check (driver only)."""
+    """Move scratch ideas into authority under a dedup + eligibility check (driver only).
+
+    The critic file is model output: every line is parsed and filed INSIDE its own try/except and
+    counted in `critic_errors`, so a malformed line can never abort the command AFTER the ideas
+    have already been committed (which reported a failed run whose real work had succeeded)."""
     s = get_settings()
     ceiling = s.research_runs_per_day * s.research_hypotheses_per_run * s.idea_pool_ceiling_days
+    categories = set(load_categories(categories_file))
     scratch = connect(from_db)
     try:
         migrate(scratch)
@@ -122,15 +151,17 @@ def import_(
             if seeded_max_id is None:
                 seeded_max_id = auth.execute(
                     "SELECT COALESCE(MAX(id),0) FROM ideas").fetchone()[0]
-            result = import_ideas(auth, scratch, run_stamp=run, max_new=max_new,
-                                  ceiling=ceiling, seeded_max_id=seeded_max_id)
-            critic_rows = 0
+            result = import_ideas(auth, scratch, settings=s, categories=categories,
+                                  run_stamp=run, max_new=max_new, ceiling=ceiling,
+                                  seeded_max_id=seeded_max_id)
+            critic_rows, critic_errors = 0, 0
             if critic_file is not None and critic_file.exists():
-                rows = [json.loads(line) for line in critic_file.read_text().splitlines()
-                        if line.strip()]
-                critic_rows = import_critic_rejections(auth, rows, run_stamp=run,
-                                                       max_rows=3 * max_new)
-            emit(ok({**result, "critic_rows": critic_rows, "ceiling": ceiling}))
+                rows, critic_errors = _critic_rows(critic_file)
+                critic_rows, record_errors = import_critic_rejections(
+                    auth, rows, run_stamp=run, max_rows=3 * max_new)
+                critic_errors += record_errors
+            emit(ok({**result, "critic_rows": critic_rows, "critic_errors": critic_errors,
+                     "ceiling": ceiling}))
     finally:
         scratch.close()
 
