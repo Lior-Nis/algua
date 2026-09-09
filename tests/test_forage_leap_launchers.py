@@ -1,7 +1,8 @@
-"""Verification for the forage launcher (ideation engine spec 2026-09-08 §5) and, once Task 9
-lands it, the leap launcher (§6). Task 8 wires forage only; `leap.sh` does not exist yet, so its
-tests are added alongside it in Task 9 — this file carries the forage tests plus the units + the
-sources-registry seed check.
+"""Verification for the forage launcher (ideation engine spec 2026-09-08 §5) and the leap
+launcher (§6): both are TRUSTED DRIVERS wrapping a sandboxed Codex agent, and what these tests
+pin is the privilege story (what the agent may reach) plus the driver's own authority-side step
+list — the two things a refactor can silently weaken. Also carries the systemd units and the
+sources-registry seed check for both stages.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 FORAGE = REPO / ".codex" / "scripts" / "forage.sh"
+LEAP = REPO / ".codex" / "scripts" / "leap.sh"
 
 
 def _dry(script, *args):
@@ -101,3 +103,69 @@ def test_forage_lock_skip_leaves_the_rotation_cursor_untouched(tmp_path):
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+
+# --- Leap (spec §6) ------------------------------------------------------------------------------
+
+
+def test_leap_dry_run_is_sandboxed_no_web_scratch_db_then_import():
+    out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
+    assert "-s workspace-write" in out
+    assert "sandbox_workspace_write.network_access=false" in out
+    assert "web_search=disabled" in out
+    assert "mcp_servers" not in out and "--dangerously-bypass" not in out
+    assert ".leap-scratch/data/algua.db" in out             # ALGUA_DB_PATH -> scratch copy
+    assert "research idea import --from" in out            # trusted driver imports
+    assert "research inspirations write-yield" in out       # scorecard -> _sources.yaml
+    assert "max ideas: 5" in out and "leap/" in out
+
+
+def test_leap_dry_run_prints_every_planned_driver_step():
+    # The dry run is the ONLY cheap check that the driver still does its whole authority-side
+    # step list (seed -> codex -> import -> yield -> digest) in the right order; each line here
+    # is one step that would otherwise be droppable without any test noticing.
+    out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
+    assert "DRY RUN" in out
+    assert "depth gate: skipped (--force)" in out
+    assert "would create worktree: " in out and "on branch leap/" in out
+    assert "max ideas: 5" in out
+    assert "would seed scratch from: " in out
+    assert "would pre-warm env: " in out
+    assert "would run: " in out and "codex exec" in out and "timeout 10m" in out
+    assert "would import via: uv run algua research idea import --from" in out
+    assert "--seeded-max-id" in out and "--critic-file" in out
+    assert ("would write yield via: uv run algua research inspirations write-yield "
+            "--from-scorecard -") in out
+    assert "would append digest to: " in out and "leap-runs.jsonl" in out
+    # Order matters: nothing authoritative may be planned before the agent's run.
+    assert out.index("would run: ") < out.index("would import via: ")
+    assert out.index("would import via: ") < out.index("would write yield via: ")
+
+
+def test_leap_dry_run_without_force_still_gates_on_pool_depth():
+    out = _dry(LEAP, "--max-ideas", "5")
+    assert "would check depth: " in out and "research idea depth" in out
+
+
+def test_leap_rejects_unknown_argument():
+    proc = subprocess.run(["bash", str(LEAP), "--bogus"], cwd=REPO, capture_output=True, text=True)
+    assert proc.returncode == 2
+
+
+def test_leap_units_every_two_hours_at_half_past_and_disjoint_from_paper():
+    from tests.test_operator_layer import _fire_minutes, _oncalendar
+    leap = _fire_minutes(_oncalendar("algua-leap.timer"))
+    paper = _fire_minutes(_oncalendar("algua-paper.timer"))
+    assert leap == {30} and not (leap & paper)
+    tmr = (REPO / "deploy/systemd/algua-leap.timer").read_text()
+    assert "OnCalendar=*-*-* 00/2:30:00 UTC" in tmr
+
+
+def test_leap_units_shaped_and_installed():
+    svc = (REPO / "deploy/systemd/algua-leap.service").read_text()
+    assert "Type=oneshot" in svc and "leap.sh" in svc
+    assert "TimeoutStartSec=2100" in svc          # > LEAP_TIMEOUT (25m) + prewarm
+    tmr = (REPO / "deploy/systemd/algua-leap.timer").read_text()
+    assert "Persistent=true" in tmr and "WantedBy=timers.target" in tmr
+    installer = (REPO / "deploy/systemd/install-user-units.sh").read_text()
+    assert "algua-leap.service" in installer and "algua-leap.timer" in installer
