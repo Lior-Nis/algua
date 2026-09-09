@@ -1,0 +1,69 @@
+# Inspirations sources registry (ideation engine spec 2026-09-08 §4). One steering surface for
+# "point the system at sources" (PRD §7): the human edits this file freely; the trusted forage
+# driver may also append a proposed venue (never the agent, never a rewrite of an existing entry).
+# `yield` objects are absent here (n < 5) and get filled in by `research inspirations write-yield`
+# once a venue has enough scorecard observations.
+venues:
+  - key: reddit/algotrading
+    kind: forum
+    url: https://www.reddit.com/r/algotrading/
+    categories: [momentum, mean_reversion, liquidity_microstructure]
+    added_by: human
+    added_at: 2026-09-08
+  - key: reddit/quant
+    kind: forum
+    url: https://www.reddit.com/r/quant/
+    categories: [value_quality_proxy, institutional_flow]
+    added_by: human
+    added_at: 2026-09-08
+  - key: ssrn
+    kind: paper
+    url: https://www.ssrn.com/
+    categories: [momentum, mean_reversion, seasonality, vol_structure, value_quality_proxy,
+                 liquidity_microstructure, event_driven, institutional_flow]
+    added_by: human
+    added_at: 2026-09-08
+  - key: arxiv/q-fin
+    kind: paper
+    url: https://arxiv.org/list/q-fin/recent
+    categories: [momentum, mean_reversion, seasonality, vol_structure, value_quality_proxy,
+                 liquidity_microstructure, event_driven, institutional_flow]
+    added_by: human
+    added_at: 2026-09-08
+  - key: blog/quantocracy
+    kind: blog
+    url: https://quantocracy.com/
+    categories: [momentum, seasonality, vol_structure]
+    added_by: human
+    added_at: 2026-09-08
+  - key: blog/alphaarchitect
+    kind: blog
+    url: https://alphaarchitect.com/
+    categories: [value_quality_proxy, momentum]
+    added_by: human
+    added_at: 2026-09-08
+  - key: blog/robotwealth
+    kind: blog
+    url: https://robotwealth.com/
+    categories: [vol_structure, mean_reversion]
+    added_by: human
+    added_at: 2026-09-08
+  - key: youtube/quantinsti
+    kind: video
+    url: https://www.youtube.com/@quantinsti
+    categories: [institutional_flow, event_driven]
+    added_by: human
+    added_at: 2026-09-08
+  - key: blog/quantpedia
+    kind: blog
+    url: https://quantpedia.com/
+    categories: [seasonality, event_driven, institutional_flow]
+    added_by: human
+    added_at: 2026-09-08
+  - key: book_summary/goodreads-algotrading
+    kind: book_summary
+    url: https://www.goodreads.com/shelf/show/algorithmic-trading
+    categories: [momentum, mean_reversion, seasonality, vol_structure, value_quality_proxy,
+                 liquidity_microstructure, event_driven, institutional_flow]
+    added_by: human
+    added_at: 2026-09-08

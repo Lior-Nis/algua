@@ -1,0 +1,28 @@
+[Unit]
+Description=Algua forage — web inspiration foraging (sandboxed Codex, no registry)
+# Fired by algua-forage.timer. A Codex agent, sandboxed under `-s workspace-write` with
+# `sandbox_workspace_write.network_access=false` (no shell network) and Codex's built-in
+# `web_search=live` as its only web tool, writes inspiration notes under kb/inspirations/ inside
+# a throwaway worktree (.runs/forage-<stamp>). The agent has NO registry path (no ALGUA_DB_PATH)
+# and is told never to run an `algua` command — it can only write markdown files. The TRUSTED
+# DRIVER (this unit's ExecStart, after codex exits) validates and lands the survivors into the
+# vault via `algua research inspirations accept`, parses the agent's proposed-venue list into
+# `research inspirations propose`, and appends one digest line to data/forage-runs.jsonl. MCP
+# tools (paper-search) are opt-in only (FORAGE_MCP=1) and drop the sandbox entirely — see
+# .codex/scripts/forage.sh for the full privilege story.
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/algua/algua.env
+# Scrub broker credentials — foraging never needs them, and the sandboxed agent's shell has no
+# network access anyway; this closes needless exfiltration surface the same way algua-research
+# already does.
+UnsetEnvironment=ALGUA_ALPACA_API_KEY ALGUA_ALPACA_API_SECRET ALGUA_ALPACA_LIVE_API_KEY ALGUA_ALPACA_LIVE_API_SECRET
+WorkingDirectory=/opt/algua
+# The driver bounds the codex run itself (FORAGE_TIMEOUT, default 20m) and the env pre-warm
+# (SYNC_TIMEOUT, default 5m). This is the last-resort backstop if the wrapper itself hangs (e.g.
+# a stuck flock) — kept comfortably above the driver's own caps so the driver's own timeout fires
+# first with a clean non-zero exit instead of systemd SIGKILLing mid-run.
+TimeoutStartSec=1800
+# codex must be on PATH and AUTHENTICATED for the user this unit runs as (see README).
+ExecStart=/opt/algua/.codex/scripts/forage.sh
