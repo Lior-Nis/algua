@@ -279,13 +279,19 @@ still scans the legacy `../algua-research-*` location during transition. Reap on
 
 Two more units feed the idea pool the research loop claims from (spec
 `docs/superpowers/specs/2026-09-08-ideation-engine-design.md`). Three timers now share one
-staggered grid, each on its own cadence, deliberately kept off the paper/merge-back-drain grids:
+staggered grid, each on its own cadence, all kept off the **paper tick's** minutes (`:07/:27/:47`):
 
 | unit | schedule | does |
 |---|---|---|
 | `algua-research.timer` | every 2h at `:00` | claims ideas from the pool, authors/backtests/gates them (unchanged) |
-| `algua-leap.timer` | every 2h at `:30`, between research runs | inspirations → structured hypotheses, but only when `research idea depth` is below its refill trigger (an above-trigger firing exits fast, no worktree) |
+| `algua-leap.timer` | every 2h at `:30`, between research runs | inspirations → structured hypotheses, but only when `research idea depth` is below its refill trigger AND the vault still holds a non-exhausted note (either gate exits fast, no worktree) |
 | `algua-forage.timer` | daily `03:00 UTC` | web search → inspiration notes under `kb/inspirations/`, rotating `FORAGE_SLICES` categories per run so every category is foraged at least weekly |
+
+`algua-leap.timer` **shares the merge-back drainer's `:30` minute**, and that is deliberate: leap
+takes no `operator.lock` — only the drainer and the paper tick contend for that. Leap, forage and
+the research loop each serialize against THEMSELVES only, on their own
+`data/{leap,forage,research-loop}.lock` flock, so an overlapping firing of the same unit skips
+cleanly instead of queueing.
 
 **Privileges (spec §9).** All three run a sandboxed Codex agent under `-s workspace-write`
 (writes confined to its throwaway run worktree) with a TRUSTED, unsandboxed DRIVER doing every
@@ -298,6 +304,12 @@ the real `research idea import` (re-dedup, eligibility, cap), the critic ledger,
 inspirations bookkeeping; the research agent is unchanged (shell network on for `uv`, scratch
 registry copy, `claim` before / `record-outcome` after via the driver, `link` via the drainer). No
 agent in this trio ever holds a path to the authoritative registry or vault directly.
+
+**The vault's sources registry.** `kb/inspirations/` is runtime state and git-ignored; the tracked
+artifact is the SEED at `deploy/kb/inspirations/_sources.yaml`, which `install-user-units.sh` (and
+`forage.sh` at startup, so a relocated `ALGUA_KNOWLEDGE_DIR` self-heals) copies to
+`${ALGUA_KNOWLEDGE_DIR:-<repo>/kb}/inspirations/_sources.yaml` **only when that file is absent** —
+your curation and the `write-yield` stamps are never overwritten.
 
 **Settings** (env file; see `deploy/systemd/algua.env.example`): `ALGUA_RESEARCH_RUNS_PER_DAY`,
 `ALGUA_RESEARCH_HYPOTHESES_PER_RUN`, `ALGUA_IDEA_POOL_FLOOR_DAYS`, `ALGUA_IDEA_POOL_CEILING_DAYS`,

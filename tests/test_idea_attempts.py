@@ -135,7 +135,8 @@ def test_claim_with_category_filters_to_that_category(tmp_path):
 
 def test_record_outcome_allows_preview_pass_to_integrity_fail_rewrite(tmp_path):
     """The merge-back drainer's 'authoritative promote failed' path: an attempt already recorded
-    as candidate_preview_pass may be rewritten to integrity_fail (the ONE permitted rewrite)."""
+    as candidate_preview_pass may be rewritten to integrity_fail (one of the two permitted
+    rewrites)."""
     _, repo, att = _setup(tmp_path)
     (idea,) = _seed(repo, n=1, category="momentum")
     (c,) = att.claim(run_stamp="r1", limit=1, ttl_minutes=180)

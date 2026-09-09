@@ -158,7 +158,7 @@ Finish by writing `leap-report.md` at the worktree root:
 ```
 
 One note id per line, exactly as it appears in the note's frontmatter `id`. The driver validates
-each id and flips those notes to `exhausted` so forage stops feeding them back to you; every note
+each id and flips those notes to `exhausted` so the leap driver stops feeding them to future leaps; every note
 cited by an imported idea is marked `used` automatically. Be honest here — marking a rich note
 spent throws away material, and never marking anything spent leaves the pool re-reading the same
 dead notes forever.

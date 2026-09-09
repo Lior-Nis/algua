@@ -26,3 +26,6 @@ WorkingDirectory=/opt/algua
 TimeoutStartSec=1800
 # codex must be on PATH and AUTHENTICATED for the user this unit runs as (see README).
 ExecStart=/opt/algua/.codex/scripts/forage.sh
+
+[Install]
+WantedBy=multi-user.target
