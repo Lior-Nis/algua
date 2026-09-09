@@ -86,6 +86,12 @@ if (( CEIL_DAYS > 7 )); then
 fi
 
 SELECTED=()
+# CURSOR_ADVANCE=1 means "commit NEW_CURSOR to CURSOR_FILE once the run has actually earned it" —
+# the write itself happens later, AFTER the flock is held and the worktree + uv sync succeed (see
+# the write-back site below, right before codex exec). A lock-skip, worktree failure, or sync
+# timeout must never advance the rotation past a category this run never actually foraged.
+CURSOR_ADVANCE=0
+NEW_CURSOR=0
 if [[ -n "${CATEGORIES_OVERRIDE}" ]]; then
   IFS=',' read -r -a SELECTED <<< "${CATEGORIES_OVERRIDE}"
   for c in "${SELECTED[@]}"; do
@@ -104,14 +110,17 @@ else
     SELECTED+=("${ALL_SLUGS[idx]}")
   done
   NEW_CURSOR=$(( (CURSOR + FORAGE_SLICES) % N_SLUGS ))
-  if [[ "${DRY_RUN}" -eq 0 ]]; then
-    mkdir -p "$(dirname "${CURSOR_FILE}")"
-    tmp="${CURSOR_FILE}.tmp.$$"
-    echo "${NEW_CURSOR}" > "${tmp}"
-    mv -f "${tmp}" "${CURSOR_FILE}"
-  fi
+  CURSOR_ADVANCE=1
 fi
 CATEGORIES="$(IFS=,; echo "${SELECTED[*]}")"
+
+_advance_cursor() {
+  [[ "${CURSOR_ADVANCE}" -eq 1 ]] || return 0
+  mkdir -p "$(dirname "${CURSOR_FILE}")"
+  tmp="${CURSOR_FILE}.tmp.$$"
+  echo "${NEW_CURSOR}" > "${tmp}"
+  mv -f "${tmp}" "${CURSOR_FILE}"
+}
 
 # Full line (with market=/horizon= hints) per selected slug, for the prompt.
 CATEGORY_LINES=""
@@ -217,15 +226,22 @@ EOF
 
 # --- Codex invocation (spec §5). Default: workspace-write + no shell network + built-in web
 # search only. FORAGE_MCP=1 drops BOTH walls for the pinned paper-search MCP server — loudly. ---
+# The agent gets NO registry path (spec §5): even though this driver script itself needs
+# ALGUA_DATA_DIR/ALGUA_KNOWLEDGE_DIR (for the cursor/seen/digest/sources-registry paths above) and
+# may have ALGUA_DB_PATH/ALGUA_MLFLOW_TRACKING_URI inherited from the unit's EnvironmentFile=, none
+# of those four may reach the codex CHILD process — `env -u` strips them from just that child's
+# environment; the driver's own shell (and its later accept/propose/digest calls, which legitimately
+# need them) is untouched.
+ENV_UNSET=(env -u ALGUA_DB_PATH -u ALGUA_KNOWLEDGE_DIR -u ALGUA_DATA_DIR -u ALGUA_MLFLOW_TRACKING_URI)
 if [[ "${FORAGE_MCP}" -eq 1 ]]; then
   echo "WARNING: FORAGE_MCP=1 -- MCP tools need the sandbox bypass: NO OS WALL this run."
-  CODEX_CMD=(timeout "${TIMEOUT}" codex exec
+  CODEX_CMD=("${ENV_UNSET[@]}" timeout "${TIMEOUT}" codex exec
     --dangerously-bypass-approvals-and-sandbox --ignore-user-config --strict-config
     -c web_search=live
     -c 'mcp_servers.papers={command="uvx",args=["--from","'"${PAPER_SEARCH_MCP_VERSION}"'","python","-m","paper_search_mcp.server"],startup_timeout_sec=90,tool_timeout_sec=120,enabled_tools=["search_arxiv","search_ssrn","search_papers","read_paper"]}'
     -C "${WORKTREE}" "${GOAL}")
 else
-  CODEX_CMD=(timeout "${TIMEOUT}" codex exec
+  CODEX_CMD=("${ENV_UNSET[@]}" timeout "${TIMEOUT}" codex exec
     -s workspace-write -c approval_policy="never"
     -c 'sandbox_workspace_write.network_access=false'
     -c web_search=live
@@ -270,6 +286,11 @@ trap cleanup EXIT
 echo "Pre-warming the worktree environment (uv sync, timeout ${SYNC_TIMEOUT})..."
 ( cd "${WORKTREE}" && timeout "${SYNC_TIMEOUT}" uv sync ) \
   || { echo "pre-warm (uv sync) failed or timed out after ${SYNC_TIMEOUT}; aborting." >&2; exit 1; }
+
+# Only now — lock held, worktree created, environment ready — has this run actually earned its
+# rotation slice. A lock-skip, worktree-creation failure, or sync timeout above all exit before
+# this point, leaving CURSOR_FILE untouched so the NEXT firing retries the same categories.
+_advance_cursor
 
 echo "Foraging (timeout ${TIMEOUT}, up to ${FORAGE_MAX_NOTES} notes), SANDBOXED, no registry..."
 RUN_LOG="${WORKTREE}/forage-loop.log"

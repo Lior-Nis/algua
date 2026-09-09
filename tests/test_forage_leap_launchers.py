@@ -6,7 +6,9 @@ sources-registry seed check.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -27,16 +29,21 @@ def test_forage_dry_run_is_sandboxed_web_search_only_no_registry():
     assert "web_search=live" in out
     assert "--dangerously-bypass-approvals-and-sandbox" not in out
     assert "mcp_servers" not in out                       # MCP is opt-in (FORAGE_MCP=1)
-    assert "ALGUA_DB_PATH" not in out.split("would run:")[1]  # no registry path to the agent
+    # No registry path VALUE reaches the agent (an `ALGUA_DB_PATH=...` assignment would be a leak;
+    # the `-u ALGUA_DB_PATH` UNSET directive asserted below is the opposite of that).
+    assert "ALGUA_DB_PATH=" not in out.split("would run:")[1]
+    # The codex CHILD must have these four stripped even though the driver's own environment (and
+    # its later accept/propose/digest calls) legitimately needs them.
+    assert ("env -u ALGUA_DB_PATH -u ALGUA_KNOWLEDGE_DIR -u ALGUA_DATA_DIR "
+            "-u ALGUA_MLFLOW_TRACKING_URI") in out
     assert "research inspirations accept" in out          # trusted driver lands the notes
-    assert "categories: momentum,seasonality" and "max notes: 4" in out
+    assert "categories: momentum,seasonality" in out and "max notes: 4" in out
     assert "forage/" in out and "timeout 10m" in out
 
 
-def test_forage_mcp_opt_in_drops_the_sandbox_and_says_so(monkeypatch):
+def test_forage_mcp_opt_in_drops_the_sandbox_and_says_so():
     out = subprocess.run(["bash", str(FORAGE), "--dry-run"], cwd=REPO, capture_output=True,
-                         text=True, check=True, env={**__import__("os").environ,
-                                                     "FORAGE_MCP": "1"}).stdout
+                         text=True, check=True, env={**os.environ, "FORAGE_MCP": "1"}).stdout
     assert "--dangerously-bypass-approvals-and-sandbox" in out
     assert "NO OS WALL" in out and "paper-search-mcp==" in out  # pinned spec
 
@@ -63,3 +70,34 @@ def test_sources_registry_seed_has_venues_for_every_category():
     for v in reg["venues"]:
         covered |= set(v["categories"])
     assert cats <= covered
+
+
+def test_forage_dry_run_leaves_the_rotation_cursor_untouched(tmp_path):
+    cursor = tmp_path / "forage-cursor"
+    cursor.write_text("3")
+    subprocess.run(["bash", str(FORAGE), "--dry-run"], cwd=REPO, capture_output=True, text=True,
+                   check=True, env={**os.environ, "ALGUA_DATA_DIR": str(tmp_path)})
+    assert cursor.read_text() == "3"
+
+
+def test_forage_lock_skip_leaves_the_rotation_cursor_untouched(tmp_path):
+    # The cursor write-back happens only after the flock is held AND the worktree + uv sync
+    # succeed — a lock-skip must exit 0 before ever touching CURSOR_FILE, so the next firing
+    # retries the SAME rotation slice rather than silently skipping past it.
+    cursor = tmp_path / "forage-cursor"
+    cursor.write_text("3")
+    lock = tmp_path / "forage.lock"
+    holder = subprocess.Popen(["flock", "-n", str(lock), "sleep", "30"])
+    try:
+        deadline = time.monotonic() + 5
+        while not lock.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)  # give flock a moment to actually acquire, not just create the file
+        proc = subprocess.run(
+            ["bash", str(FORAGE)], cwd=REPO, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "ALGUA_DATA_DIR": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr
+        assert cursor.read_text() == "3"
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
