@@ -513,3 +513,66 @@ def test_a_failing_idea_link_warns_but_never_fails_the_drain(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "WARNING: idea link failed" in proc.stderr
     assert _items(tmp_path)["s@research-run/1"]["status"] == "promoted_allocated"
+
+
+# --- a TERMINAL merge-back failure must RELEASE the held claim ------------------------------------
+#
+# An idea-bound item's claim is held open by its `candidate_preview_pass` outcome so `link` can
+# spend the fencing token. If the merge-back dies terminally instead, nothing will ever link it —
+# the claim must be released here, or the idea sits held until the 72-hour preview hold expires.
+# `run_error` (not `integrity_fail`) because a diff-policy rejection or an exhausted retry budget
+# says nothing about the hypothesis: the idea must return to the pool UNREFUTED.
+
+
+def test_diff_policy_rejection_releases_the_claim_as_run_error(tmp_path):
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "diff_policy_rejected"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == [
+        "research idea record-outcome 7 --token tok-7 --outcome run_error "
+        "--reason mergeback_terminal_failed:diff_policy_rejected --strategy-name s"]
+
+
+def test_gate_failure_at_the_attempt_cap_releases_the_claim_as_run_error(tmp_path):
+    # max_attempts=1: the first gate_failed exhausts the cap -> action "exhausted" -> dead item.
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "gate_failed"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub, max_attempts=1, backoff_minutes=0.0)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == [
+        "research idea record-outcome 7 --token tok-7 --outcome run_error "
+        "--reason mergeback_terminal_failed:gate_failed --strategy-name s"]
+
+
+def test_a_retryable_gate_failure_still_writes_nothing(tmp_path):
+    # Same status, but attempts remain: an outcome written now would be a lie a later PASS could
+    # not correct (record_outcome is single-write per claim).
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "gate_failed"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub, max_attempts=3, backoff_minutes=0.0)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == []
+
+
+def test_already_done_writes_no_idea_feedback(tmp_path):
+    # An earlier cycle applied the merge-back and owns this idea's feedback.
+    _seed_bound(tmp_path)
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "already_done"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == []
+
+
+def test_a_terminal_failure_on_an_unbound_item_writes_nothing(tmp_path):
+    _seed(tmp_path, strategy="s", universe="sp500", start="2024-01-01", end="2024-06-01",
+          branch="research-run/1")
+    stub, log = _logging_stub(tmp_path, response={"ok": True, "status": "diff_policy_rejected"})
+
+    proc = _run_drainer(tmp_path, algua_bin=stub)
+    assert proc.returncode == 0, proc.stderr
+    assert _idea_calls(log) == []

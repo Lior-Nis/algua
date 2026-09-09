@@ -149,10 +149,38 @@ def test_record_outcome_allows_preview_pass_to_integrity_fail_rewrite(tmp_path):
     assert row["outcome"] == "integrity_fail"
 
 
-def test_record_outcome_rejects_preview_pass_rewrite_to_other_outcomes(tmp_path):
-    """The ONE permitted rewrite is candidate_preview_pass -> integrity_fail specifically; any
-    other new outcome (incl. re-recording candidate_preview_pass itself) must still raise, and
-    must leave the attempt row exactly as candidate_preview_pass recorded it."""
+def test_record_outcome_allows_preview_pass_to_run_error_rewrite_without_refuting(tmp_path):
+    """The drainer's TERMINAL merge-back failure path (diff policy rejected, retry budget
+    exhausted): the merge-back died for an INFRASTRUCTURE reason, which says nothing about the
+    hypothesis — so the claim is released but the idea must stay OPEN, not REFUTED, and must be
+    re-claimable by a later run."""
+    _, repo, att = _setup(tmp_path)
+    (idea,) = _seed(repo, n=1, category="momentum")
+    (c,) = att.claim(run_stamp="r1", limit=1, ttl_minutes=180)
+    att.record_outcome(idea.id, token=c.claim_token,
+                       outcome=AttemptOutcome.CANDIDATE_PREVIEW_PASS, reason="preview ok")
+    rewritten = att.record_outcome(idea.id, token=c.claim_token,
+                                   outcome=AttemptOutcome.RUN_ERROR,
+                                   reason="mergeback_terminal_failed:diff_policy_rejected")
+    assert rewritten.status is IdeaStatus.OPEN      # run_error does not refute
+    assert rewritten.claimed_by is None             # ...but the claim IS released
+    (row,) = att.attempts_of(idea.id)
+    assert row["outcome"] == "run_error"
+    assert [i.id for i in att.claim(run_stamp="r2", limit=1, ttl_minutes=180)] == [idea.id]
+
+
+@pytest.mark.parametrize("outcome", [
+    AttemptOutcome.CANDIDATE_PREVIEW_PASS,   # re-recording the same outcome
+    AttemptOutcome.WALKFORWARD_REFUTED,      # an AGENT-judgement outcome, forged after the fact
+    AttemptOutcome.HOLDOUT_NEGATIVE,
+    AttemptOutcome.SWEEP_UNSTABLE,
+    AttemptOutcome.ABANDONED,
+])
+def test_record_outcome_rejects_preview_pass_rewrite_to_other_outcomes(tmp_path, outcome):
+    """Only PREVIEW_PASS_REWRITES (integrity_fail | run_error, both drainer-only) may overwrite a
+    candidate_preview_pass. Every other new outcome must still raise and leave the attempt row
+    exactly as candidate_preview_pass recorded it — an agent's judgement of the hypothesis can
+    never be rewritten after the preview."""
     _, repo, att = _setup(tmp_path)
     (idea,) = _seed(repo, n=1, category="momentum")
     (c,) = att.claim(run_stamp="r1", limit=1, ttl_minutes=180)
@@ -161,17 +189,74 @@ def test_record_outcome_rejects_preview_pass_rewrite_to_other_outcomes(tmp_path)
     (before,) = att.attempts_of(idea.id)
 
     with pytest.raises(ClaimTokenMismatch):
-        att.record_outcome(idea.id, token=c.claim_token, outcome=AttemptOutcome.RUN_ERROR,
+        att.record_outcome(idea.id, token=c.claim_token, outcome=outcome,
                            reason="should not land")
-    with pytest.raises(ClaimTokenMismatch):
-        att.record_outcome(idea.id, token=c.claim_token,
-                           outcome=AttemptOutcome.CANDIDATE_PREVIEW_PASS,
-                           reason="should not re-land")
 
     (after,) = att.attempts_of(idea.id)
-    assert after == before  # attempt row untouched by either rejected rewrite
+    assert after == before  # attempt row untouched by the rejected rewrite
     idea_after = repo.get(idea.id)
     assert idea_after.status is IdeaStatus.OPEN and idea_after.claimed_by == "r1"
+
+
+# --- the reaper's two clocks: an ordinary TTL, and the preview HOLD ------------------------------
+
+
+def _preview_claim(att, repo, idea, *, at, hold_hours=72):
+    """Claim `idea` at instant `at` and record candidate_preview_pass on it (the state that
+    deliberately keeps a claim held for the merge-back drainer's `link`)."""
+    (c,) = att.claim(run_stamp="r1", limit=1, ttl_minutes=180, now=at,
+                     preview_hold_hours=hold_hours)
+    att.record_outcome(idea.id, token=c.claim_token,
+                       outcome=AttemptOutcome.CANDIDATE_PREVIEW_PASS, reason="preview ok")
+    return c
+
+
+def test_preview_pass_claim_past_the_ttl_but_inside_the_hold_is_not_reaped(tmp_path):
+    """The whole point of the exemption: the drainer drains one item per 30-minute fire, so a
+    backlogged candidate is routinely older than the 180-minute TTL. Reaping it would break the
+    later `link`'s fencing token and strand an idea whose strategy did reach authority."""
+    _, repo, att = _setup(tmp_path)
+    (idea, other) = _seed(repo, n=2, category="momentum")
+    old = datetime.now(UTC) - timedelta(minutes=500)   # way past the 180-minute TTL...
+    _preview_claim(att, repo, idea, at=old)            # ...but well inside a 72-hour hold
+
+    claimed = att.claim(run_stamp="r2", limit=5, ttl_minutes=180, preview_hold_hours=72)
+
+    assert [i.id for i in claimed] == [other.id]       # the held idea was NOT re-offered
+    held = repo.get(idea.id)
+    assert held.claimed_by == "r1" and held.claim_token is not None
+    (row,) = att.attempts_of(idea.id)
+    assert row["outcome"] == "candidate_preview_pass"  # evidence intact
+
+
+def test_preview_pass_claim_past_the_hold_is_reaped_as_preview_hold_expired(tmp_path):
+    _, repo, att = _setup(tmp_path)
+    (idea,) = _seed(repo, n=1, category="momentum")
+    ancient = datetime.now(UTC) - timedelta(hours=100)  # past a 72-hour hold
+    _preview_claim(att, repo, idea, at=ancient)
+
+    claimed = att.claim(run_stamp="r2", limit=1, ttl_minutes=180, preview_hold_hours=72)
+
+    assert [i.id for i in claimed] == [idea.id]        # released back into the pool
+    (reaped, _live) = att.attempts_of(idea.id)
+    assert reaped["outcome"] == "abandoned"
+    assert reaped["reason"] == "preview_hold_expired"
+    assert repo.get(idea.id).status is IdeaStatus.OPEN  # abandoning never refutes
+
+
+def test_an_ordinary_in_flight_claim_still_reaps_on_the_short_ttl(tmp_path):
+    """The exemption is keyed on the ATTEMPT's outcome, not on age: a claim with no outcome yet
+    (a crashed run) must still be reaped at the TTL, not held for 72 hours."""
+    _, repo, att = _setup(tmp_path)
+    (idea,) = _seed(repo, n=1, category="momentum")
+    old = datetime.now(UTC) - timedelta(minutes=500)
+    att.claim(run_stamp="r1", limit=1, ttl_minutes=180, now=old, preview_hold_hours=72)
+
+    claimed = att.claim(run_stamp="r2", limit=1, ttl_minutes=180, preview_hold_hours=72)
+
+    assert [i.id for i in claimed] == [idea.id]
+    (reaped, _live) = att.attempts_of(idea.id)
+    assert (reaped["outcome"], reaped["reason"]) == ("abandoned", "claim_ttl_expired")
 
 
 def test_link_rejects_when_attempt_outcome_is_not_preview_pass_or_null(tmp_path):

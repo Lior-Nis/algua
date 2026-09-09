@@ -462,14 +462,16 @@ PY
 #
 # $1 is the per-idea outcome source: the run report whose v2 trailer carries `idea_id`/`outcome`/
 # `reason` (empty on any path that never produced one -> every claimed idea gets `run_error`).
+# $2 is the FIRING PHASE ("completed" | "setup_failed" | "skipped_lock"), which is what makes the
+# fallback reason honest: only a phase that actually reached codex may blame a codex exit code.
 # Best-effort and LOUD by contract: a failed record-outcome warns and never changes the run's exit
 # code — feedback, not control flow.
 record_outcomes() {
-  local report="$1" outcomes_ok=0
+  local report="$1" phase="$2" outcomes_ok=0
   [[ "${N_CLAIMED:-0}" -gt 0 ]] || return 0
   echo "Recording ${N_CLAIMED} claimed idea outcome(s) against ${AUTH_DB}..."
   python3 - "${CLAIMED_JSON}" "${report}" "${AUTH_DB}" "${FINAL_BRANCH:-${DIGEST_BRANCH}}" \
-    "${STAMP}" "${rc}" "${REPO_ROOT}" <<'PY' && outcomes_ok=1
+    "${STAMP}" "${rc}" "${REPO_ROOT}" "${phase}" <<'PY' && outcomes_ok=1
 import json
 import os
 import re
@@ -479,7 +481,17 @@ import sys
 # claimed_json is the DRIVER's own authority-side claim result (id + claim_token per idea); the
 # report is MODEL OUTPUT and is read with the same untrusted-data discipline the digest parser
 # uses (bounded tail, EOF-anchored fence, enum-checked outcome, charset-cleaned reason).
-(claimed_json, report_path, auth_db, branch, stamp, exit_code, repo_root) = sys.argv[1:8]
+(claimed_json, report_path, auth_db, branch, stamp, exit_code, repo_root,
+ run_phase) = sys.argv[1:9]
+
+# Scrub the SCRATCH routing this driver exported for the agent: on the setup_failed / skipped_lock
+# paths those directories point into a worktree that was never built (or was just removed), and an
+# authority-side `record-outcome` must not be steered by them. ALGUA_DB_PATH is re-set explicitly
+# below; every other lane falls back to the process defaults.
+_CHILD_ENV = {k: v for k, v in os.environ.items()
+              if k not in ("UV_CACHE_DIR", "ALGUA_DATA_DIR", "ALGUA_KNOWLEDGE_DIR",
+                           "ALGUA_MLFLOW_TRACKING_URI", "ALGUA_DB_PATH")}
+_CHILD_ENV["ALGUA_DB_PATH"] = auth_db
 
 _VALID_OUTCOMES = {"integrity_fail", "holdout_negative", "walkforward_refuted", "sweep_unstable",
                    "candidate_preview_pass", "run_error"}
@@ -538,8 +550,17 @@ for unknown in sorted(set(entries) - claimed_ids):
 
 # A run that never produced a parseable trailer (crash, timeout, lock-skip, setup failure) still
 # owes every claimed idea an outcome: run_error, so the claim is released and the idea returns to
-# the pool now rather than at the TTL reap.
-aborted_reason = f"codex exit {exit_code}" if exit_code else "run did not complete"
+# the pool now rather than at the TTL reap. The REASON must name the real failure — blaming a
+# "codex exit" for a firing that never reached codex would make the ledger lie.
+if run_phase == "setup_failed":
+    aborted_reason = f"setup_failed:{exit_code}" if exit_code else "setup_failed"
+elif run_phase == "completed":
+    # Reached codex: a non-zero/timeout exit explains itself; a CLEAN exit with no usable trailer
+    # means the agent simply never wrote one.
+    aborted_reason = (f"codex exit {exit_code}" if exit_code not in ("", "0")
+                      else "trailer_unparseable")
+else:
+    aborted_reason = "run did not complete"  # skipped_lock: the firing never started
 evidence_ref = f"{branch}:kb/research-runs/{stamp}.md" if branch else None
 recorded = 0
 for idea in claimed:
@@ -565,8 +586,7 @@ for idea in claimed:
     if evidence_ref:
         cmd += ["--evidence-ref", evidence_ref]
     proc = subprocess.run(
-        cmd, cwd=repo_root or None, capture_output=True, text=True,
-        env={**os.environ, "ALGUA_DB_PATH": auth_db})
+        cmd, cwd=repo_root or None, capture_output=True, text=True, env=_CHILD_ENV)
     if proc.returncode == 0:
         recorded += 1
         print(f"idea {idea_id}: recorded {outcome} ({reason})")
@@ -794,7 +814,7 @@ cleanup_setup() {
   fi
   rc="${ec}"
   append_digest setup_failed
-  record_outcomes ""   # no report exists -> every claimed idea gets run_error and is released
+  record_outcomes "" setup_failed   # no report -> every claimed idea gets run_error, released
 }
 trap cleanup_setup EXIT
 
@@ -807,7 +827,7 @@ if ! flock -n 9; then
   echo "another research cycle holds ${LOCK}; skipping this firing." >&2
   trap - EXIT  # a skip is not a setup failure
   append_digest skipped_lock
-  record_outcomes ""   # release this firing's claims now; the next firing can work them
+  record_outcomes "" skipped_lock   # release this firing's claims; the next firing works them
   exit 0
 fi
 
@@ -960,7 +980,7 @@ FINAL_BRANCH="$(git -C "${WORKTREE}" branch --show-current 2>/dev/null || true)"
 # Ideation feedback (spec §7): one record-outcome per claimed idea, read from the SAME report
 # trailer the digest just parsed. Placed after the FINAL_BRANCH re-read so each attempt's
 # evidence_ref names the branch that actually exists (post candidate-keyed rename).
-record_outcomes "${DIGEST_REPORT_PATH}"
+record_outcomes "${DIGEST_REPORT_PATH}" completed
 
 # Outcome-keyed worktree reclaim (runs-worktree lifecycle, #555): when this run enqueued ZERO
 # merge-back candidates (crashed/timed-out run, rate-limited, trailer-invalid, or all hypotheses

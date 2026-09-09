@@ -993,9 +993,12 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, Path]:
     recorder = tmp_path / "record_call.py"
     recorder.write_text(
         "import json, os, sys\n"
+        "SCRATCH = ('UV_CACHE_DIR', 'ALGUA_DATA_DIR', 'ALGUA_KNOWLEDGE_DIR',\n"
+        "           'ALGUA_MLFLOW_TRACKING_URI')\n"
         "with open(sys.argv[1], 'a') as f:\n"
         "    f.write(json.dumps({'argv': sys.argv[2:],\n"
-        "                        'db': os.environ.get('ALGUA_DB_PATH')}) + '\\n')\n",
+        "                        'db': os.environ.get('ALGUA_DB_PATH'),\n"
+        "                        'leaked': [k for k in SCRATCH if k in os.environ]}) + '\\n')\n",
         encoding="utf-8")
     fake = bin_dir / "uv"
     fake.write_text(
@@ -1007,15 +1010,17 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, Path]:
 
 def _run_record_outcomes(tmp_path: Path, *, claimed: list, report_path: Path | str,
                          rc: str = "0", branch: str = "research-run/20260811-000000",
-                         stamp: str = "20260811-000000",
-                         auth_db: str = "/auth/algua.db") -> tuple[subprocess.CompletedProcess,
+                         stamp: str = "20260811-000000", phase: str = "completed",
+                         auth_db: str = "/auth/algua.db",
+                         scratch_env: dict | None = None) -> tuple[subprocess.CompletedProcess,
                                                                    list[dict]]:
     bin_dir, log = _fake_uv(tmp_path)
     proc = subprocess.run(
         [sys.executable, "-", json.dumps(claimed), str(report_path), auth_db, branch, stamp,
-         rc, str(tmp_path)],
+         rc, str(tmp_path), phase],
         input=_RECORD_OUTCOMES_SRC, capture_output=True, text=True, timeout=30,
-        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        env={**os.environ, **(scratch_env or {}),
+             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
     )
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return proc, calls
@@ -1050,6 +1055,7 @@ def test_record_outcomes_writes_the_trailer_outcome_and_run_error_for_the_missin
     assert _flags(second["argv"])["--reason"] == "missing_from_trailer"
     # Every write is routed at AUTHORITY, never at the run's scratch registry.
     assert {c["db"] for c in calls} == {"/auth/algua.db"}
+    assert all(c["leaked"] == [] for c in calls)
     assert "recorded 2/2 claimed idea outcome(s)" in proc.stdout
 
 
@@ -1066,10 +1072,47 @@ def test_record_outcomes_without_a_report_records_run_error_with_the_exit_code(t
 
 
 def test_record_outcomes_with_no_exit_code_says_the_run_did_not_complete(tmp_path):
+    # skipped_lock: the firing lost the flock race and never started.
     proc, calls = _run_record_outcomes(
-        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="")
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="",
+        phase="skipped_lock")
     assert proc.returncode == 0, proc.stderr
     assert _flags(calls[0]["argv"])["--reason"] == "run did not complete"
+
+
+def test_record_outcomes_on_a_setup_failure_blames_setup_not_codex(tmp_path):
+    # The firing never reached codex, so "codex exit 1" would be a lie in the ledger.
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="1",
+        phase="setup_failed")
+    assert proc.returncode == 0, proc.stderr
+    flags = _flags(calls[0]["argv"])
+    assert (flags["--outcome"], flags["--reason"]) == ("run_error", "setup_failed:1")
+
+
+def test_a_clean_run_with_no_usable_trailer_reads_as_trailer_unparseable(tmp_path):
+    # codex exited 0 but never wrote a parseable v2 trailer — "codex exit 0" would say nothing.
+    report = tmp_path / "report.md"
+    report.write_text("prose, but no fenced json trailer at all\n", encoding="utf-8")
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path=report, rc="0")
+    assert proc.returncode == 0, proc.stderr
+    flags = _flags(calls[0]["argv"])
+    assert (flags["--outcome"], flags["--reason"]) == ("run_error", "trailer_unparseable")
+
+
+def test_record_outcomes_scrubs_the_scratch_routing_from_the_child_env(tmp_path):
+    """On the setup_failed / skipped_lock paths these point into a worktree that was never built
+    (or was just removed); an AUTHORITY-side write must not be steered by them."""
+    scratch = {"UV_CACHE_DIR": "/gone/.uv-cache", "ALGUA_DATA_DIR": "/gone/data",
+               "ALGUA_KNOWLEDGE_DIR": "/gone/kb", "ALGUA_MLFLOW_TRACKING_URI": "/gone/mlruns",
+               "ALGUA_DB_PATH": "/gone/scratch.db"}
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="1",
+        phase="setup_failed", scratch_env=scratch)
+    assert proc.returncode == 0, proc.stderr
+    assert calls[0]["leaked"] == []                 # every scratch lane removed...
+    assert calls[0]["db"] == "/auth/algua.db"       # ...and the DB re-pointed at authority
 
 
 def test_record_outcomes_ignores_trailer_ids_this_run_never_claimed(tmp_path):
@@ -1104,7 +1147,7 @@ def test_record_outcomes_survives_a_failing_record_outcome_call(tmp_path):
     fake.chmod(0o755)
     proc = subprocess.run(
         [sys.executable, "-", json.dumps([{"id": 7, "claim_token": "tok-7"}]), "", "/auth.db",
-         "b", "s", "0", str(tmp_path)],
+         "b", "s", "0", str(tmp_path), "completed"],
         input=_RECORD_OUTCOMES_SRC, capture_output=True, text=True, timeout=30,
         env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
     )

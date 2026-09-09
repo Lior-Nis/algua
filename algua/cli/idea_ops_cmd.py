@@ -44,7 +44,8 @@ def claim(run: str = typer.Option(..., "--run", help="run stamp that owns the cl
     with registry_conn() as conn:
         att = IdeaAttemptsRepository(conn)
         claimed = att.claim(run_stamp=run, limit=limit, ttl_minutes=s.idea_claim_ttl_minutes,
-                            category=category)
+                            category=category,
+                            preview_hold_hours=s.idea_preview_hold_hours)
         repo = IdeaRepository(conn)
         emit(ok({"run": run, "claimed": [idea_json(i, repo) for i in claimed]}))
 

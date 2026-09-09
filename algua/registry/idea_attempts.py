@@ -22,6 +22,22 @@ from algua.registry.ideas import IdeaRepository
 # builtin, but the alias mirrors ideas.py's convention for consistency in this pair of modules.
 _list = list
 
+#: How long a claim whose attempt already reached `candidate_preview_pass` is HELD before the
+#: reaper abandons it — a second, much longer clock than `ttl_minutes` (see `_reap`). Mirrored by
+#: `Settings.idea_preview_hold_hours`, which is what the CLI actually passes;
+#: `tests/test_settings_ideation.py` asserts the two never drift.
+DEFAULT_PREVIEW_HOLD_HOURS = 72
+
+#: The outcomes an attempt already recorded as `candidate_preview_pass` may be REWRITTEN to, both
+#: written only by the merge-back drainer once the authoritative run has spoken: `integrity_fail`
+#: (the authoritative promote refused the strategy — a real refutation) and `run_error` (the
+#: merge-back died for an infrastructure reason: diff policy, an exhausted retry budget — which
+#: says nothing about the hypothesis, so it must NOT refute the idea). Every other rewrite,
+#: including re-recording `candidate_preview_pass`, still raises.
+PREVIEW_PASS_REWRITES: frozenset[AttemptOutcome] = frozenset({
+    AttemptOutcome.INTEGRITY_FAIL, AttemptOutcome.RUN_ERROR,
+})
+
 
 class ClaimTokenMismatch(ValueError):
     """The (idea, token) pair does not match a live claim — stale run, wrong idea, or released."""
@@ -41,21 +57,26 @@ class IdeaAttemptsRepository:
 
     # -- claim ---------------------------------------------------------------------------
     def claim(self, *, run_stamp: str, limit: int, ttl_minutes: int,
-              now: datetime | None = None, category: str | None = None) -> _list[Idea]:
+              now: datetime | None = None, category: str | None = None,
+              preview_hold_hours: int = DEFAULT_PREVIEW_HOLD_HOURS) -> _list[Idea]:
         """Reap expired claims, then claim up to `limit` open ideas, in ONE BEGIN IMMEDIATE.
 
         Selection: round-robin over categories (fewest claims in the trailing 7 days first),
         then obscurity rare>niche>common>canon (best linked inspiration), then oldest created.
         Legacy NULL-category rows are eligible only when no categorized row is. `category`, when
-        given, restricts eligibility to that one category (legacy NULL rows excluded)."""
+        given, restricts eligibility to that one category (legacy NULL rows excluded).
+
+        `preview_hold_hours` is the reaper's SECOND clock, for claims deliberately held open by a
+        `candidate_preview_pass` outcome — see `_reap`."""
         if self._conn.in_transaction:
             raise RuntimeError("claim must run at top level, not inside an open transaction")
         now = now or datetime.now(UTC)
         cutoff = _iso(now - timedelta(minutes=ttl_minutes))
+        preview_cutoff = _iso(now - timedelta(hours=preview_hold_hours))
         week = _iso(now - timedelta(days=7))
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            self._reap(cutoff=cutoff, now=now)
+            self._reap(cutoff=cutoff, preview_cutoff=preview_cutoff, now=now)
             picked = self._select(limit=limit, week_cutoff=week, category=category)
             claimed: list[Idea] = []
             for idea_id in picked:
@@ -76,16 +97,51 @@ class IdeaAttemptsRepository:
             raise
         return claimed
 
-    def _reap(self, *, cutoff: str, now: datetime) -> None:
+    def _reap(self, *, cutoff: str, preview_cutoff: str, now: datetime) -> None:
+        """Release timed-out claims. TWO clocks, because a `candidate_preview_pass` DELIBERATELY
+        keeps its claim so the merge-back drainer's `link` can still spend the fencing token:
+
+        * an ordinary in-flight claim is reaped at `ttl_minutes` (sized against the research run's
+          own timeout) with reason `claim_ttl_expired`;
+        * a claim whose live attempt already reached `candidate_preview_pass` is EXEMPT from that
+          and held for `preview_hold_hours` instead, then abandoned with reason
+          `preview_hold_expired`.
+
+        Without the exemption the TTL would strand exactly the successful ideas: the drainer
+        drains ONE queue item per 30-minute fire, so a deep backlog routinely outlives the TTL,
+        and reaping the claim makes the later `link` fail on its token — leaving an idea whose
+        strategy really did reach authority stuck `open` with no FK, forever.
+
+        The preview branch is the ONLY place `candidate_preview_pass` is overwritten outside
+        `record_outcome`'s explicit rewrite set, and it is CAS-guarded on that exact prior value.
+        `abandoned` does not refute: the idea returns to the pool for a future run."""
+        # Prefilter on the LATER of the two cutoffs — a row reapable under either clock always
+        # satisfies it, so this narrows the scan without ever hiding a reapable row (correct even
+        # if preview_hold_hours is configured shorter than ttl_minutes).
         rows = self._conn.execute(
-            "SELECT id, claim_token FROM ideas WHERE claimed_by IS NOT NULL AND claimed_at < ?",
-            (cutoff,)).fetchall()
+            "SELECT i.id AS id, i.claim_token AS claim_token, i.claimed_at AS claimed_at,"
+            " a.outcome AS outcome FROM ideas i"
+            " LEFT JOIN idea_attempts a ON a.idea_id = i.id AND a.claim_token = i.claim_token"
+            " WHERE i.claimed_by IS NOT NULL AND i.claimed_at < ?",
+            (max(cutoff, preview_cutoff),)).fetchall()
         for r in rows:
-            self._conn.execute(
-                "UPDATE idea_attempts SET outcome=?, reason=?, outcome_at=? WHERE idea_id=?"
-                " AND claim_token=? AND outcome IS NULL",
-                (AttemptOutcome.ABANDONED.value, "claim_ttl_expired", _iso(now), r["id"],
-                 r["claim_token"]))
+            held = r["outcome"] == AttemptOutcome.CANDIDATE_PREVIEW_PASS.value
+            # A NULL claimed_at on a claimed row is corrupt; "" sorts before any cutoff, so it
+            # reaps (fail toward releasing a claim nobody can account for).
+            if (r["claimed_at"] or "") >= (preview_cutoff if held else cutoff):
+                continue
+            if held:
+                self._conn.execute(
+                    "UPDATE idea_attempts SET outcome=?, reason=?, outcome_at=? WHERE idea_id=?"
+                    " AND claim_token=? AND outcome=?",
+                    (AttemptOutcome.ABANDONED.value, "preview_hold_expired", _iso(now), r["id"],
+                     r["claim_token"], AttemptOutcome.CANDIDATE_PREVIEW_PASS.value))
+            else:
+                self._conn.execute(
+                    "UPDATE idea_attempts SET outcome=?, reason=?, outcome_at=? WHERE idea_id=?"
+                    " AND claim_token=? AND outcome IS NULL",
+                    (AttemptOutcome.ABANDONED.value, "claim_ttl_expired", _iso(now), r["id"],
+                     r["claim_token"]))
             self._conn.execute(
                 "UPDATE ideas SET claimed_by=NULL, claim_token=NULL, claimed_at=NULL,"
                 " updated_at=? WHERE id=?", (_iso(now), r["id"]))
@@ -139,9 +195,11 @@ class IdeaAttemptsRepository:
                        strategy_name: str | None = None) -> Idea:
         """Write the attempt's outcome once (CAS on the token). Refuting outcomes move the idea
         to REFUTED. CANDIDATE_PREVIEW_PASS keeps the claim (the drainer's `link` releases it);
-        every other outcome releases it. The ONE permitted rewrite: an attempt already recorded
-        as candidate_preview_pass may be rewritten to integrity_fail (the merge-back drainer's
-        "authoritative promote failed" path) — any other rewrite raises ClaimTokenMismatch."""
+        every other outcome releases it. The ONLY permitted rewrites are from an attempt already
+        recorded as candidate_preview_pass, to one of `PREVIEW_PASS_REWRITES` — integrity_fail
+        (the drainer's "authoritative promote failed") or run_error (the drainer's terminal
+        merge-back failure, which must NOT refute the idea). Any other rewrite, including
+        re-recording candidate_preview_pass, raises ClaimTokenMismatch."""
         if self._conn.in_transaction:
             raise RuntimeError(
                 "record_outcome must run at top level, not inside an open transaction")
@@ -149,11 +207,12 @@ class IdeaAttemptsRepository:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._check_token(idea_id, token)
-            # The ONE permitted rewrite is candidate_preview_pass -> integrity_fail specifically
-            # (the merge-back drainer's "authoritative promote failed" path). Gating the guard on
-            # the NEW value too (not just the old one) closes candidate_preview_pass -> anything
-            # (e.g. -> run_error), which would otherwise silently overwrite preview-pass evidence.
-            if outcome is AttemptOutcome.INTEGRITY_FAIL:
+            # The permitted rewrites are candidate_preview_pass -> integrity_fail | run_error
+            # (both drainer-only; see PREVIEW_PASS_REWRITES). Gating the guard on the NEW value
+            # too, not just the old one, closes candidate_preview_pass -> anything: an
+            # agent-judgement outcome (walkforward_refuted, holdout_negative, sweep_unstable) can
+            # never be forged over preview-pass evidence after the fact.
+            if outcome in PREVIEW_PASS_REWRITES:
                 guard = "(outcome IS NULL OR outcome = ?)"
                 guard_params: tuple[object, ...] = (AttemptOutcome.CANDIDATE_PREVIEW_PASS.value,)
             else:

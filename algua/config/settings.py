@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # A claim older than this is reaped as `abandoned` by the next `research idea claim`.
     # Must exceed the research run's TIMEOUT (45m) + prewarm (5m) with margin.
     idea_claim_ttl_minutes: int = 180
+    # The reaper's SECOND clock, for a claim held open by a `candidate_preview_pass` outcome so
+    # the merge-back drainer's `link` can still spend its fencing token. The drainer drains ONE
+    # queue item per 30-minute fire, so this must cover a DEEP backlog, not just one run — reaping
+    # such a claim early strands an idea whose strategy really did reach authority. Mirrors
+    # `algua.registry.idea_attempts.DEFAULT_PREVIEW_HOLD_HOURS`.
+    idea_preview_hold_hours: int = 72
 
     @field_validator("db_path", "data_dir")
     @classmethod
