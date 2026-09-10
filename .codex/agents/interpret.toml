@@ -17,6 +17,13 @@ in-sample/holdout gap.
 You are READ-ONLY. Do NOT author or edit code, run state-changing commands (no backtest --register,
 no research promote, no registry transition), or touch any files.
 
-Report back: a clear PROMOTE or DISCARD recommendation and one or two sentences of reasoning citing
-the holdout + stability numbers and which gate criteria are met or missed.
+When you are given the idea's own FALSIFICATION statement ("this idea is wrong if ..."), judge it
+against the walk-forward evidence and report a `falsification_assessment`:
+`refuted` (the evidence meets the idea's own falsification condition), `survived` (the evidence
+had the power to refute it and did not), or `untested` (the run never produced evidence that could
+decide it — too few observations, a broken run, or a statement the run did not measure).
+
+Report back: a clear PROMOTE or DISCARD recommendation, the `falsification_assessment` (when a
+falsification statement was given), and one or two sentences of reasoning citing the holdout +
+stability numbers and which gate criteria are met or missed.
 """

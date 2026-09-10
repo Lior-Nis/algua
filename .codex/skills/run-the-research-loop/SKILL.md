@@ -1,6 +1,6 @@
 ---
 name: run-the-research-loop
-description: The autonomous research loop playbook — ideate a hypothesis, author a strategy, backtest/walk-forward/sweep it, gate it with research promote, promote to candidate or discard, and record a run report. Use when running an autonomous research session.
+description: The autonomous research loop playbook — work the ideas claimed from the pool for this run, author a strategy per idea, backtest/walk-forward/sweep it, gate it with research promote, and record a run report whose v2 trailer reports each idea's outcome. Use when running an autonomous research session.
 ---
 
 # Running the research loop
@@ -11,21 +11,27 @@ for human review. Read `operating-algua` first for the golden rules. Delegate au
 
 ## The thesis
 
-algua's research thesis is **riding institutional / "whale" momentum** — strategies that follow
-the moves big players make rather than fighting them. The concrete signal isn't fixed; that's what
-research explores. Ground your hypotheses in this thesis unless told otherwise.
+**Scale is the moat** (PRD §4). Algua tests as many uncorrelated hypotheses as it can — cheaply,
+fast and honestly — and lets harsh forward selection keep the few that survive. No single market
+belief is privileged. The beliefs live one level down, as the **ideation categories** the idea
+engine rotates through (`.codex/categories.txt`): momentum, mean-reversion, seasonality,
+volatility structure, value/quality proxies, liquidity and microstructure, event-driven, and
+institutional / whale flow (the original 2026-05 thesis, now one category among several).
 
-## The loop (repeat for N hypotheses, then stop)
+You do not pick the belief. The driver claims ideas from the pool before your run and names them
+in your goal; your job is to test them honestly and report what happened.
 
-For each hypothesis:
+## The loop (repeat for each claimed idea, then stop)
 
-1. **Ideate.** First read the knowledge base: `kb/strategies/_index.md` and
-   `kb/strategies/_families.md`, plus the research methodology
-   `kb/principles/research-methodology.md` (leakage vectors, search-breadth honesty, designing for
-   generalization). Prefer a thesis family marked `exploring`/`promising` with an open axis
-   in its `## Open questions`; read that family doc and the relevant strategy docs to avoid
-   re-running a refuted idea. Form one concrete, testable hypothesis on the most promising
-   open axis. Pick a unique strategy name; skip names already in `uv run algua registry list`.
+For each claimed idea:
+
+1. **Work the claimed ideas.** Your goal names them (`idea_id`, title, hypothesis, category,
+   market, horizon, `falsification`, inspirations). Do not invent a hypothesis; if an idea is
+   untestable, report `outcome: run_error` with the reason. Read
+   `kb/principles/research-methodology.md` before authoring (leakage vectors, search-breadth
+   honesty, designing for generalization), plus `kb/strategies/_index.md` and
+   `kb/strategies/_families.md` for what the relevant family already learned. Pick a unique
+   strategy name; skip names already in `uv run algua registry list`.
 2. **Author.** Scaffold with `uv run algua strategy new <name> --family <slug> --derived-from
    <parent>` (creates the module *and* the KB doc + family hub). Delegate to the `author`
    subagent (it follows `author-a-strategy`) to write `algua/strategies/<family>/<name>.py`,
@@ -38,7 +44,8 @@ For each hypothesis:
    to scan parameters — but remember every combo you search raises the bar the holdout must clear
    (see `interpret-results` on search breadth).
 5. **Interpret.** Delegate the results JSON to the `interpret` subagent for a promote/discard
-   recommendation with reasoning.
+   recommendation with reasoning, and assess the idea's own `falsification` statement against the
+   walk-forward evidence -> `falsification_assessment` (`refuted` | `survived` | `untested`).
 6. **Gate.** Run `uv run algua research promote <name> --demo` (record the combos you searched with
    `--n-combos K`). The gate advances `backtested → candidate` **only on pass**; on a fail it
    reports why and leaves the stage unchanged. Trust the gate — do not lower thresholds to force a pass.
@@ -52,8 +59,10 @@ For each hypothesis:
 
 ## Stopping
 
-Evaluate exactly **N hypotheses** (N is given in your goal), then stop. If you are running low on
-time, stop early — but always finish by committing your work and writing the report.
+Work exactly the **claimed ideas** in your goal (at most N), then stop. If you are running low on
+time, stop early — but always finish by writing the report, and give every claimed idea you never
+got to its own trailer entry with `outcome: run_error`. An idea missing from the trailer is
+recorded as `run_error` / `missing_from_trailer` anyway; saying why yourself is strictly better.
 
 ## Boundaries
 
@@ -69,12 +78,26 @@ time, stop early — but always finish by committing your work and writing the r
 2. Write your report to `kb/research-runs/<stamp>.md` (create the directory if it doesn't exist):
    one section per hypothesis (name, params, backtest + walk-forward + gate results, decision +
    why), then a summary of what you promoted to candidate.
-3. The report MUST end with a machine-readable trailer — one fenced ```json block naming, per
-   hypothesis, its `title`, `verdict` (`"discarded"|"candidate-preview-pass"|"error"`), and — only
-   when `verdict` is `"candidate-preview-pass"` — a `merge_back` object (`strategy`, `universe`,
-   `start`, `end`) naming the exact strategy module you authored and its promote window. The
-   launcher parses this into the durable run digest and, for every valid `merge_back`, enqueues
-   the REAL, authoritative `paper merge-back` for the automated drainer to run — the merge-back
-   you'd otherwise hand a human is now automatic; do not run it yourself.
+3. The report MUST end with a machine-readable trailer — one fenced ```json block with **exactly
+   one `hypotheses[]` entry per claimed idea** (trailer **v2**):
+   - `idea_id` — the claimed idea's id. Required; an entry without it teaches the pool nothing.
+   - `title` — <= 120 chars, plain ASCII.
+   - `outcome` — what actually happened, written straight into the authoritative idea ledger:
+     `integrity_fail` (preflight/integrity refused it) | `holdout_negative` (holdout Sharpe <= 0) |
+     `walkforward_refuted` (out-of-sample windows refute it) | `sweep_unstable` (only isolated
+     combos work) | `candidate_preview_pass` (the preview gate passed) | `run_error` (you could not
+     test it). Be honest — this is the record the funnel learns from.
+   - `reason` — <= 300 chars, why that outcome.
+   - `falsification_assessment` — `refuted` | `survived` | `untested`, judging the idea's own
+     falsification statement against your walk-forward evidence.
+   - `verdict` — `"discarded"|"candidate-preview-pass"|"error"` (kept for the digest readers).
+   - `merge_back` — ONLY when `verdict` is `"candidate-preview-pass"`: `idea_id`, `strategy`,
+     `universe`, `start`, `end`, `eval_context`, naming the exact strategy module you authored and
+     its promote window.
+
+   The launcher parses this into the durable run digest, writes one `record-outcome` per claimed
+   idea, and for every valid `merge_back` enqueues the REAL, authoritative `paper merge-back` for
+   the automated drainer to run — the merge-back you'd otherwise hand a human is now automatic; do
+   not run it yourself.
 4. Commit the report (the launcher does this for you). Review the branch afterward with
    `git diff main...<branch>` if you want to double-check what shipped.

@@ -33,4 +33,28 @@ CREATE TABLE IF NOT EXISTS ideas (
 );
 CREATE INDEX IF NOT EXISTS ix_ideas_status ON ideas(status);
 CREATE INDEX IF NOT EXISTS ix_ideas_family ON ideas(family);
+-- v46 (ideation engine, spec §7). idea_attempts is APPEND-ONLY: one row per claim, its
+-- outcome written once under the claim's fencing token by a trusted driver. idea_inspirations
+-- links an idea to every kb/inspirations note it leaped from (full credit each).
+CREATE TABLE IF NOT EXISTS idea_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id INTEGER NOT NULL REFERENCES ideas(id),
+    run_stamp TEXT NOT NULL,
+    claim_token TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    outcome TEXT,
+    reason TEXT,
+    evidence_ref TEXT,
+    strategy_name TEXT,
+    outcome_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_attempts_idea ON idea_attempts(idea_id);
+CREATE TABLE IF NOT EXISTS idea_inspirations (
+    idea_id INTEGER NOT NULL REFERENCES ideas(id),
+    inspiration_id TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    obscurity TEXT NOT NULL,
+    created_by_run TEXT NOT NULL,
+    PRIMARY KEY (idea_id, inspiration_id)
+);
 """

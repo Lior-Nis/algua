@@ -1,0 +1,23 @@
+[Unit]
+Description=Algua leap timer — every 2h at half past, between research runs
+
+[Timer]
+# Every two hours at :30. What that grid actually buys:
+#   - BETWEEN research runs. algua-research fires on the hour; leap on the half hour, so a leap
+#     never contends with the research cycle it is refilling the pool for.
+#   - OFF the paper operator's minutes (:07/:27/:47), so the box's CPU (a full `uv sync` plus a
+#     codex run) is not busy on the minutes a trading tick needs it.
+# It SHARES the merge-back drainer's :30 minute, and that is fine: neither takes operator.lock
+# from the other's side of the fence. The drainer takes operator.lock (it drives the real
+# `paper merge-back`); leap does NOT — leap, forage and the research loop each serialize only
+# against THEMSELVES, on their own data/{leap,forage,research-loop}.lock flock.
+# The depth gate makes an unnecessary firing nearly free: `research idea depth` says the pool is
+# above its refill trigger and the run exits 0 without creating a worktree. The service level is
+# "the pool never reaches zero and recovers above the trigger within one leap interval", not
+# "always above the trigger" — an hourly research run legitimately dips it.
+OnCalendar=*-*-* 00/2:30:00 UTC
+# Catch up a fire missed while the box was off; the depth gate still decides whether it acts.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

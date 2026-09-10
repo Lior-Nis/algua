@@ -150,8 +150,9 @@ within the walls, and repair of the codebase. This list of human duties **may no
 a change to this document; every human step inside the funnel is a throughput cap that compounds
 against the thesis.
 
-**Eitan builds the ideation system**: the agentic engine that produces hypotheses on a fixed
-cadence, and the knowledge base it draws on. He is not a source of ideas himself; the system is.
+**The operator builds the ideation system** (roadmap step 3); Eitan owns the knowledge-base
+management workstream. The system is the agentic engine that produces hypotheses on a fixed
+cadence, and the knowledge base it draws on. Nobody is a source of ideas themselves; the system is.
 
 ## 8. Tuition mode
 
@@ -189,7 +190,7 @@ fixes intent and sequence, not implementation.
 |---|---|---|
 | 1 | **Tuition trade to live**, plus the rung-0 rules: the signed override limited to rung 0, and the rung-1 entry condition | Every surface exercised end to end on real money; the ladder exists |
 | 2 | **The data purchase and its import**: deep survivorship-free equities at daily and minute resolution | A backtest gate with statistical power; regimes to test categories against |
-| 3 | **The ideation engine at a fixed cadence** (Eitan), fed by literature and web ingestion | The top of the funnel the diagnosis found starved |
+| 3 | **The ideation engine at a fixed cadence**, fed by literature and web ingestion | The top of the funnel the diagnosis found starved |
 | 4 | **The model-artifact seam**: machine-learned, deep-learned and agentic strategy kinds under the one contract | Strategy variety; everything after is built against the seam |
 | 5 | **New market data lanes**: crypto, forex, prediction markets as importers, calendars and instrument models | Market variety in the backtest funnel |
 | 6 | **Crypto live lane** on the existing broker | A second live market at the lowest engineering cost |

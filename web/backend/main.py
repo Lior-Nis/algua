@@ -254,17 +254,22 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ideas")
     async def ideas() -> dict[str, Any]:
-        idea_list, idea_stats = await asyncio.gather(
+        idea_list, idea_stats, idea_depth, idea_scorecard = await asyncio.gather(
             run_cli("research", "idea", "list", ttl_s=300.0),
             run_cli("research", "idea", "stats", ttl_s=300.0),
+            run_cli("research", "idea", "depth", ttl_s=300.0),
+            run_cli("research", "idea", "scorecard", "--days", "90", ttl_s=300.0),
         )
+        parts = (idea_list, idea_stats, idea_depth, idea_scorecard)
         return {
             "ok": True,
             "ideas": idea_list["data"],
             "stats": idea_stats["data"],
             "stats_window_days": IDEA_STATS_WINDOW_DAYS,
-            "fetched_at": min(idea_list["fetched_at"], idea_stats["fetched_at"]),
-            "stale": bool(idea_list["stale"]) or bool(idea_stats["stale"]),
+            "depth": idea_depth["data"],
+            "scorecard": idea_scorecard["data"],
+            "fetched_at": min(part["fetched_at"] for part in parts),
+            "stale": any(bool(part["stale"]) for part in parts),
         }
 
     @app.get("/api/runs")

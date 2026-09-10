@@ -10,6 +10,7 @@ import { utcDate, utcDateTime } from '../format'
 import type {
   ApiEnvelope,
   IdeaRow,
+  IdeaScorecardBucket,
   IdeasResponse,
   ListPayload,
   OpsPayload,
@@ -35,6 +36,11 @@ function ideaList(resp: IdeasResponse): IdeaRow[] {
   const ideas = resp.ideas
   if (Array.isArray(ideas)) return ideas
   return ideas?.data ?? []
+}
+
+/** `null` below the scorecard's `min_n_for_rates` floor — too few attempts to trust a rate. */
+function formatRate(rate: number | null): string {
+  return rate === null ? '--' : `${(rate * 100).toFixed(1)}%`
 }
 
 /** `idea stats` emits {window_days, counts:{status: n}}; tolerate a pre-flattened map too. */
@@ -221,6 +227,12 @@ function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>>
       <div className="micro-label" style={{ marginBottom: 6 }}>
         idea pool
       </div>
+      {data.depth != null && (
+        <div className="dim-note num">
+          {data.depth.open_unclaimed} open · {data.depth.claimed} claimed · refill at{' '}
+          {data.depth.refill_at} · ceiling {data.depth.ceiling}
+        </div>
+      )}
       {/* The tiles are ALL-TIME, counted off the same list rendered below and filtered by the
           same chips. `idea stats` is a DIFFERENT denominator (trailing window), so mixing it
           into this row made a histogram that could not add up. */}
@@ -275,6 +287,44 @@ function IdeaPool({ query }: { query: ReturnType<typeof useFetch<IdeasResponse>>
           ))}
         </div>
       )}
+
+      <VenueYieldTable byVenue={data.scorecard?.by_venue} />
     </section>
+  )
+}
+
+/** The scorecard's feedback edge (spec §7): which inspiration venues actually produce survivors,
+ * not just ideas. Hidden entirely with zero venues — an empty table would just be noise. */
+function VenueYieldTable({ byVenue }: { byVenue: Record<string, IdeaScorecardBucket> | undefined }) {
+  const entries = byVenue != null ? Object.entries(byVenue) : []
+  if (entries.length === 0) return null
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="micro-label" style={{ marginBottom: 6 }}>
+        yield by venue
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>venue</th>
+            <th>n</th>
+            <th>integrity</th>
+            <th>walk-forward</th>
+            <th>survival</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([venue, bucket]) => (
+            <tr key={venue}>
+              <td>{venue}</td>
+              <td className="num">{bucket.n}</td>
+              <td className="num">{formatRate(bucket.integrity_yield)}</td>
+              <td className="num">{formatRate(bucket.walkforward_yield)}</td>
+              <td className="num">{formatRate(bucket.survival_yield)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }

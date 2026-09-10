@@ -24,6 +24,7 @@ class SourceType(StrEnum):
     FILING = "filing"
     THESIS = "thesis"
     MANUAL = "manual"
+    INSPIRATION = "inspiration"
 
 
 class DataCapability(StrEnum):
@@ -39,11 +40,63 @@ class DataCapability(StrEnum):
     FORM_4 = "form_4"
 
 
+class Market(StrEnum):
+    """Which market an idea trades. Eligibility gates on the platform's supported set."""
+    US_EQUITIES = "us_equities"
+    CRYPTO = "crypto"
+    FOREX = "forex"
+    PREDICTION = "prediction"
+    ANY = "any"
+
+
+class Horizon(StrEnum):
+    """Decision cadence an idea needs. `intraday` needs the PRD step-7 execution contract."""
+    INTRADAY = "intraday"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+    EVENT = "event"
+
+
+class Obscurity(StrEnum):
+    """How widespread an inspiration is (spec §5 rubric); leap prefers the rare end."""
+    CANON = "canon"
+    COMMON = "common"
+    NICHE = "niche"
+    RARE = "rare"
+
+
+OBSCURITY_RANK: dict[Obscurity, int] = {
+    Obscurity.RARE: 0, Obscurity.NICHE: 1, Obscurity.COMMON: 2, Obscurity.CANON: 3,
+}
+
+
+class AttemptOutcome(StrEnum):
+    """Written once per claim by a trusted driver (never by an agent)."""
+    INTEGRITY_FAIL = "integrity_fail"
+    HOLDOUT_NEGATIVE = "holdout_negative"
+    WALKFORWARD_REFUTED = "walkforward_refuted"
+    SWEEP_UNSTABLE = "sweep_unstable"
+    CANDIDATE_PREVIEW_PASS = "candidate_preview_pass"
+    PROMOTED_CANDIDATE = "promoted_candidate"
+    ABANDONED = "abandoned"
+    RUN_ERROR = "run_error"
+
+
+REFUTING_OUTCOMES: frozenset[AttemptOutcome] = frozenset({
+    AttemptOutcome.INTEGRITY_FAIL, AttemptOutcome.HOLDOUT_NEGATIVE,
+    AttemptOutcome.WALKFORWARD_REFUTED, AttemptOutcome.SWEEP_UNSTABLE,
+})
+
+
 # Allowed `set-status` moves. open<->needs_data on a capability re-check; open/needs_data advance
 # to authored or discarded; an authored idea can only be refuted (its strategy failed) or
 # discarded; refuted/discarded are terminal. A no-op (X -> X) is never a legal change.
 ALLOWED_IDEA_TRANSITIONS: dict[IdeaStatus, set[IdeaStatus]] = {
-    IdeaStatus.OPEN: {IdeaStatus.NEEDS_DATA, IdeaStatus.AUTHORED, IdeaStatus.DISCARDED},
+    # OPEN -> REFUTED: an attempt refuted the idea before any authoritative strategy existed
+    # (record-outcome with a REFUTING_OUTCOMES value is the only caller).
+    IdeaStatus.OPEN: {IdeaStatus.NEEDS_DATA, IdeaStatus.AUTHORED, IdeaStatus.DISCARDED,
+                      IdeaStatus.REFUTED},
     IdeaStatus.NEEDS_DATA: {IdeaStatus.OPEN, IdeaStatus.AUTHORED, IdeaStatus.DISCARDED},
     IdeaStatus.AUTHORED: {IdeaStatus.REFUTED, IdeaStatus.DISCARDED},
     IdeaStatus.REFUTED: set(),
@@ -74,3 +127,11 @@ class Idea:
     override_reason: str | None
     created_at: str
     updated_at: str
+    category: str | None = None
+    market: Market | None = None
+    horizon: Horizon | None = None
+    falsification: str | None = None
+    parked_reason: str | None = None
+    claimed_by: str | None = None
+    claim_token: str | None = None
+    claimed_at: str | None = None

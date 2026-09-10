@@ -1,0 +1,264 @@
+"""The inspirations domain of the vault (spec 2026-09-08 §4/§5): one note per thing the web
+says works. Written ONLY by the trusted forage driver via `accept_new_notes`; frontmatter
+edited ONLY by the trusted leap driver via `mark_used` / `mark_exhausted`. Pure vault I/O:
+imports config + knowledge only."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import yaml
+
+from algua.config.settings import Settings
+from algua.knowledge.frontmatter import parse_doc, render_doc
+from algua.knowledge.sync import _safe_path, kb_sync_lock
+from algua.primitives.atomic_io import write_text_atomic
+
+NOTE_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{2,60}$")
+SOURCE_KINDS = frozenset({"book_summary", "paper", "forum", "video", "blog", "other"})
+MARKETS = frozenset({"us_equities", "crypto", "forex", "prediction", "any"})
+HORIZONS = frozenset({"intraday", "daily", "weekly", "monthly", "event"})
+OBSCURITY = frozenset({"canon", "common", "niche", "rare"})
+NOTE_STATUSES = frozenset({"fresh", "used", "exhausted"})
+REQUIRED = ("id", "found_at", "source_url", "venue", "source_kind", "category", "market",
+            "horizon", "mechanism", "obscurity", "status")
+MAX_NOTE_BYTES = 16384
+_TRACKING = re.compile(r"^(utm_.*|fbclid|gclid|mc_cid|mc_eid)$")
+
+
+def inspirations_dir(settings: Settings) -> Path:
+    return settings.knowledge_dir / "inspirations"
+
+
+def canonical_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                       if not _TRACKING.match(k)])
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, query, ""))
+
+
+def url_hash(url: str) -> str:
+    return hashlib.sha256(canonical_url(url).encode()).hexdigest()
+
+
+def parse_note(text: str) -> tuple[dict[str, Any], str]:
+    return parse_doc(text)
+
+
+def validate_note(fm: dict[str, Any], *, stem: str, categories: set[str]) -> list[str]:
+    problems = [f"missing: {k}" for k in REQUIRED if not fm.get(k)]
+    if fm.get("id") != stem:
+        problems.append("id != filename stem")
+    checks = (("source_kind", SOURCE_KINDS), ("market", MARKETS), ("horizon", HORIZONS),
+              ("obscurity", OBSCURITY), ("status", NOTE_STATUSES))
+    for key, allowed in checks:
+        if fm.get(key) and str(fm[key]) not in allowed:
+            problems.append(f"{key}: {fm[key]}")
+    if fm.get("category") and str(fm["category"]) not in categories:
+        problems.append(f"category: {fm['category']}")
+    if fm.get("status") not in (None, "fresh"):
+        problems.append("status must be fresh on acceptance")
+    return problems
+
+
+class SeenFile:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def hashes(self) -> set[str]:
+        if not self.path.exists():
+            return set()
+        out = set()
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                out.add(json.loads(line)["hash"])
+            except Exception:
+                continue
+        return out
+
+    def append(self, url: str, *, run_stamp: str) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"hash": url_hash(url), "url": canonical_url(url),
+                                "first_seen": datetime.now(UTC).isoformat(),
+                                "run": run_stamp}) + "\n")
+
+
+def accept_new_notes(*, staged_dir: Path, settings: Settings, seen_path: Path,
+                     categories: set[str], run_stamp: str, max_notes: int) -> dict:
+    """Trusted acceptance of what the forage agent staged (spec §5 policy)."""
+    seen = SeenFile(seen_path)
+    seen_hashes = seen.hashes()
+    dest = inspirations_dir(settings)
+    accepted: list[str] = []
+    rejected: list[dict] = []
+    for path in sorted(staged_dir.glob("*.md")) if staged_dir.exists() else []:
+        stem = path.stem
+        # Early-exit BEFORE any stat/read: a dangling symlink's stat() raises FileNotFoundError
+        # (which would abort the whole batch), and a symlink to a big file would otherwise leak
+        # that file's size into the rejection reason.
+        if path.is_symlink() or not path.is_file():
+            rejected.append({"file": path.name, "reasons": ["not a regular file"]})
+            continue
+        reasons: list[str] = []
+        if not NOTE_ID_RE.match(stem):
+            reasons.append(f"bad filename: {path.name}")
+        else:
+            size = path.stat().st_size
+            if size > MAX_NOTE_BYTES:
+                reasons.append(f"too large: {size} bytes")
+        if reasons:
+            rejected.append({"file": path.name, "reasons": reasons})
+            continue
+        # Read ONCE: the same bytes are parsed for validation and, on acceptance, written into
+        # the vault — a second read here would be a TOCTOU gap (the staged file could change
+        # between the validating read and a later copying read).
+        #
+        # The read/parse/validate of ONE note is contained: the notes are model output, so a
+        # broken-YAML or non-dict frontmatter is an EXPECTED bad input, not a driver bug. Before
+        # this containment, one malformed note raised out of the whole call and discarded every
+        # good note the forage agent wrote alongside it.
+        try:
+            text = path.read_text(encoding="utf-8")
+            fm, _ = parse_note(text)
+            if not isinstance(fm, dict):
+                raise TypeError(f"frontmatter is {type(fm).__name__}, not a mapping")
+            reasons = validate_note(fm, stem=stem, categories=categories)
+        except Exception as exc:
+            rejected.append({"file": path.name,
+                             "reasons": [f"unparseable frontmatter: {exc}"]})
+            continue
+        if not reasons and url_hash(str(fm["source_url"])) in seen_hashes:
+            reasons.append("already seen: source_url")
+        if not reasons and (dest / path.name).exists():
+            reasons.append("id already exists in the vault")
+        if not reasons and len(accepted) >= max_notes:
+            reasons.append("max_notes reached")
+        if reasons:
+            rejected.append({"file": path.name, "reasons": reasons})
+            continue
+        with kb_sync_lock(settings):
+            target = _safe_path(dest, path.name)
+            write_text_atomic(text, target)
+        seen.append(str(fm["source_url"]), run_stamp=run_stamp)
+        seen_hashes.add(url_hash(str(fm["source_url"])))
+        accepted.append(stem)
+    return {"accepted": accepted, "rejected": rejected}
+
+
+def _edit_frontmatter(
+    settings: Settings, inspiration_id: str, mutate: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    if not NOTE_ID_RE.match(inspiration_id):
+        raise ValueError(f"bad inspiration id {inspiration_id!r}")
+    path = _safe_path(inspirations_dir(settings), f"{inspiration_id}.md")
+    with kb_sync_lock(settings):
+        fm, body = parse_note(path.read_text(encoding="utf-8"))
+        mutate(fm)
+        write_text_atomic(render_doc(fm, body), path)
+    return fm
+
+
+def mark_used(settings: Settings, inspiration_id: str, *, idea_id: int) -> dict[str, Any]:
+    def _m(fm):
+        leaps = list(fm.get("leaps") or [])
+        if idea_id not in leaps:
+            leaps.append(idea_id)
+        fm["leaps"] = leaps
+        if fm.get("status") == "fresh":
+            fm["status"] = "used"
+    return _edit_frontmatter(settings, inspiration_id, _m)
+
+
+def mark_exhausted(settings: Settings, inspiration_id: str) -> dict[str, Any]:
+    def _m(fm):
+        fm["status"] = "exhausted"
+    return _edit_frontmatter(settings, inspiration_id, _m)
+
+
+def list_notes(settings: Settings, *, status: str | None = None,
+               exclude_status: str | None = None,
+               limit: int | None = None) -> list[dict[str, Any]]:
+    """Frontmatter of every well-named note, newest id first. `status` keeps only that status;
+    `exclude_status` drops it (what the leap driver wants: everything not yet `exhausted`)."""
+    d = inspirations_dir(settings)
+    notes = []
+    for path in sorted(d.glob("*.md"), reverse=True) if d.exists() else []:
+        if not NOTE_ID_RE.match(path.stem):
+            continue
+        fm, _ = parse_note(path.read_text(encoding="utf-8"))
+        note_status = fm.get("status")
+        if status is not None and note_status != status:
+            continue
+        if exclude_status is not None and note_status == exclude_status:
+            continue
+        notes.append(fm)
+        if limit is not None and len(notes) >= limit:
+            break
+    return notes
+
+
+def load_note(settings: Settings, inspiration_id: str) -> dict[str, Any] | None:
+    """One note's frontmatter, or None when it is missing/unreadable/not a mapping.
+
+    The AUTHORITATIVE source of a note's `venue` and `obscurity` at import time (spec §6): a leap
+    agent hands those over in `--inspiration id|venue|obscurity`, i.e. model output, so the
+    trusted import re-derives them from the vault rather than trusting what it was told. Never
+    raises — a bad id or a damaged note is "no note", which the caller drops.
+    """
+    if not NOTE_ID_RE.match(inspiration_id):
+        return None
+    path = inspirations_dir(settings) / f"{inspiration_id}.md"
+    try:
+        fm, _ = parse_note(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return fm if isinstance(fm, dict) and fm else None
+
+
+class SourcesRegistry:
+    """`_sources.yaml`: `{venues: [...]}`. Only trusted code writes it.
+
+    Every write goes through `write_text_atomic` under the vault's `kb_sync_lock`, exactly like
+    the note writes above — the registry is a human-edited steering file, and a torn or
+    interleaved write would corrupt a surface nobody is watching between runs.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self.path = inspirations_dir(settings) / "_sources.yaml"
+
+    def load(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        data = yaml.safe_load(self.path.read_text(encoding="utf-8")) or {}
+        return list(data.get("venues") or [])
+
+    def _save(self, venues: list[dict[str, Any]]) -> None:
+        write_text_atomic(yaml.safe_dump({"venues": venues}, sort_keys=False), self.path)
+
+    def write_yields(self, yields: dict[str, dict[str, Any]]) -> None:
+        """Stamp a yield object onto every named venue in ONE load + ONE save (a per-venue
+        load/save loop re-read and rewrote the whole file once per venue)."""
+        with kb_sync_lock(self._settings):
+            venues = self.load()
+            for v in venues:
+                obj = yields.get(str(v.get("key")))
+                if obj is not None:
+                    v["yield"] = obj
+            self._save(venues)
+
+    def propose(self, venue: dict[str, Any]) -> None:
+        with kb_sync_lock(self._settings):
+            venues = self.load()
+            if any(v.get("key") == venue.get("key") for v in venues):
+                return
+            venues.append({**venue, "added_by": "forage",
+                           "added_at": datetime.now(UTC).date().isoformat()})
+            self._save(venues)

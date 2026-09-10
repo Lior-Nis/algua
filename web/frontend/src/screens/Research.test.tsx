@@ -49,6 +49,21 @@ const ideas = {
   ],
   stats: { window_days: 90, counts: { open: 1, authored: 0, total: 1 } },
   stats_window_days: 90,
+  depth: {
+    open_unclaimed: 10, claimed: 2, needs_data: 1, refill_at: 72, ceiling: 252,
+    below_refill: false,
+    inputs: { runs_per_day: 12, hypotheses_per_run: 3, floor_days: 2, ceiling_days: 7 },
+  },
+  scorecard: {
+    days: 90, min_n_for_rates: 5,
+    by_venue: {
+      arxiv: { n: 12, outcomes: {}, stages: {}, survivals: 3,
+                integrity_yield: 0.6, walkforward_yield: 0.5, survival_yield: 0.25 },
+      forums: { n: 2, outcomes: {}, stages: {}, survivals: 0,
+                integrity_yield: null, walkforward_yield: null, survival_yield: null },
+    },
+    by_category: {}, by_obscurity: {}, by_inspiration: {},
+  },
   fetched_at: '2026-08-15T17:04:00Z',
   stale: false,
 }
@@ -134,4 +149,15 @@ it('absorbs the idea pool, keeping the windowed stats on their own line', async 
   expect(await screen.findByText('idea pool')).toBeTruthy()
   expect(screen.getByText('skip-month persistence')).toBeTruthy()
   expect(screen.getByText(/last 90d: open 1/)).toBeTruthy()
+})
+
+it('shows pool depth above the tiles and yield-by-venue after the list', async () => {
+  renderResearch()
+  expect(await screen.findByText(/10 open.*refill at 72/)).toBeTruthy()
+  expect(screen.getByRole('table')).toBeTruthy()
+  expect(screen.getByText('arxiv')).toBeTruthy()
+  expect(screen.getByText('forums')).toBeTruthy()
+  expect(screen.getByText('60.0%')).toBeTruthy()  // arxiv integrity_yield
+  const dashCells = screen.getAllByText('--')
+  expect(dashCells.length).toBeGreaterThan(0)  // forums' null rates render as --
 })

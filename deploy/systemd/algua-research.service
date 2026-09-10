@@ -30,5 +30,5 @@ TimeoutStartSec=4200
 # codex must be on PATH and AUTHENTICATED for the user this unit runs as (see README). The driver
 # reads the authoritative ALGUA_DB_PATH to SEED a scratch copy, then points the agent's
 # ALGUA_DB_PATH/DATA_DIR/KNOWLEDGE_DIR/MLFLOW at per-run scratch inside the sandboxed worktree.
-# Tune cadence/breadth via the timer + N_HYPOTHESES/THESIS env.
+# Tune cadence/breadth via the timer + ALGUA_RESEARCH_HYPOTHESES_PER_RUN (N_HYPOTHESES)/CATEGORY env.
 ExecStart=/opt/algua/.codex/scripts/run-research-loop.sh

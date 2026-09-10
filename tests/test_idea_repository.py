@@ -1,10 +1,10 @@
 # tests/test_idea_repository.py
 import pytest
 
-from algua.contracts.idea import DataCapability, IdeaStatus, SourceType
+from algua.contracts.idea import DataCapability, Horizon, IdeaStatus, Market, Obscurity, SourceType
 from algua.contracts.registry_metadata import HypothesisStatus
 from algua.registry.db import connect, migrate
-from algua.registry.ideas import IdeaNotFound, IdeaRepository
+from algua.registry.ideas import IdeaNotFound, IdeaRepository, InspirationLink
 from algua.registry.store import SqliteStrategyRepository
 
 
@@ -114,3 +114,36 @@ def test_windowed_counts_by_status(tmp_path):
     assert counts["open"] == 1
     assert counts["needs_data"] == 1
     assert counts["total"] == 2
+
+
+def test_add_stores_new_fields_and_inspiration_links(tmp_path):
+    repo, _ = _conns(tmp_path)
+    idea = repo.add(
+        title="overnight gap fade in rare venue", hypothesis="gaps fade after quiet opens",
+        family="mean-reversion", tags=[], source_type=SourceType.INSPIRATION, source_ref=None,
+        source_date=None, source_note=None, required_data=[DataCapability.OHLCV],
+        status=IdeaStatus.OPEN, category="mean_reversion", market=Market.US_EQUITIES,
+        horizon=Horizon.DAILY, falsification="refuted if holdout Sharpe < 0 over 2 windows",
+        inspirations=[
+            InspirationLink("2026-09-08-gap-fade", "reddit/algotrading", Obscurity.NICHE)],
+        created_by_run="leap-20260908-0130",
+    )
+    assert idea.category == "mean_reversion" and idea.market is Market.US_EQUITIES
+    assert idea.horizon is Horizon.DAILY and idea.falsification.startswith("refuted if")
+    assert idea.claimed_by is None
+    links = repo.inspirations_of(idea.id)
+    assert links == [InspirationLink("2026-09-08-gap-fade", "reddit/algotrading", Obscurity.NICHE)]
+
+
+def test_add_without_new_fields_is_unchanged(tmp_path):
+    repo, _ = _conns(tmp_path)
+    idea = _add(repo)
+    assert idea.category is None and idea.market is None and repo.inspirations_of(idea.id) == []
+
+
+def test_list_limit_returns_newest_first_when_set(tmp_path):
+    repo, _ = _conns(tmp_path)
+    for i in range(3):
+        _add(repo, title=f"idea {i} about something distinct {i}", hypothesis=f"h{i} words {i}")
+    got = repo.list(limit=2)
+    assert [i.title[:6] for i in got] == ["idea 2", "idea 1"]

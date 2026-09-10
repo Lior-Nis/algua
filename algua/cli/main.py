@@ -19,6 +19,8 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     fleet_cmd,
     governance_cmd,
     idea_cmd,
+    idea_ops_cmd,
+    inspirations_cmd,
     live_cmd,
     negative_cmd,
     operator_cmd,
@@ -40,7 +42,13 @@ from algua.cli.errors import error_code, is_retryable
 # reusable task bodies from backtest_cmd/research_cmd, so mounting at the composition root keeps
 # those listed command modules free of any sibling import.
 research_cmd.research_app.add_typer(idea_cmd.idea_app, name="idea")
+# idea_ops_cmd carries the driver-facing claim/record-outcome/link/depth/refuted/import/
+# reclassify/scorecard commands (spec 2026-09-08 §7); merged flat (no `name=`) onto idea_app,
+# the same idiom data_refresh_cmd.refresh_app uses onto data_app below, so idea_cmd never
+# imports its sibling.
+idea_cmd.idea_app.add_typer(idea_ops_cmd.idea_ops_app)
 research_cmd.research_app.add_typer(negative_cmd.log_app, name="log")
+research_cmd.research_app.add_typer(inspirations_cmd.inspirations_app, name="inspirations")
 research_cmd.research_app.add_typer(research_batch_cmd.run_all_app, name="run-all")
 # data_refresh_cmd.refresh_app carries only `refresh-bars`; merged flat (no `name=`) onto
 # data_app so `algua data refresh-bars ...` is unchanged while data_refresh_cmd never imports

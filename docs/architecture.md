@@ -65,7 +65,7 @@ stays visible rather than being blessed by an exemption.
 | `risk` | limits, breaches, kill-switch, global halt, peaks, book breaker | cli or live-lane imports |
 | `operator` | the autonomous loop: session gating, merge-back saga, loop health | cli imports |
 | `evaluation` | shared task bodies (`backtest_run`, `sweep_run`) + input resolution, importable by BOTH cli and registry | cli imports |
-| `knowledge` | the Obsidian vault sync | imports of cli/registry/backtest/live/execution |
+| `knowledge` | the Obsidian vault sync; inspirations domain (`kb/inspirations/`) | imports of cli/registry/backtest/live/execution |
 | `cli` | typer commands, the JSON envelope, flag resolution | domain logic — extract it |
 
 ---
@@ -127,6 +127,11 @@ silently disarmed.
 has zero escapes. If two commands need the same body, the body belongs in a domain package
 (`evaluation/`, `registry/`, `operator/`) and both import it from there. That is what
 `evaluation/sweep_run.py` and `registry/promote_run.py` are.
+
+### An ideation category
+One line in `.codex/categories.txt` and at least one venue covering it in
+`kb/inspirations/_sources.yaml`; the research launcher's claim round-robin and the forage rotation
+both key on the slug.
 
 ---
 

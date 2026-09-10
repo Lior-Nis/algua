@@ -1,0 +1,32 @@
+[Unit]
+Description=Algua leap — inspirations → structured hypotheses (sandboxed Codex, scratch pool; trusted import)
+# Fired by algua-leap.timer. The driver first asks `algua research idea depth` whether the idea
+# pool is BELOW its refill trigger and exits 0 immediately if it is not — leaping is refill, not a
+# treadmill. When it does run, a Codex agent (sandboxed under `-s workspace-write`, with
+# `sandbox_workspace_write.network_access=false`, `web_search=disabled` and no MCP servers) leaps
+# from the fresh inspiration notes forage brought home to structured, falsifiable hypotheses. Its
+# ALGUA_DB_PATH points at a THROWAWAY SCRATCH COPY of the registry inside the run worktree
+# (.runs/leap-<stamp>/.leap-scratch), so its `research idea dedup-check` / `add` see the real
+# pool's history but write only scratch. The TRUSTED DRIVER (this unit's ExecStart, after codex
+# exits) does every authoritative write: `research idea import` (re-running collision +
+# eligibility per row, plus the critic's rejections into the negative ledger), the
+# inspirations mark-used / mark-exhausted bookkeeping, the per-venue yield write-back into
+# _sources.yaml, and one digest line in data/leap-runs.jsonl. See .codex/scripts/leap.sh.
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/algua/algua.env
+# Scrub broker credentials — leaping never trades and never needs them; the sandboxed agent has no
+# network anyway. Same closure as algua-research / algua-forage.
+UnsetEnvironment=ALGUA_ALPACA_API_KEY ALGUA_ALPACA_API_SECRET ALGUA_ALPACA_LIVE_API_KEY ALGUA_ALPACA_LIVE_API_SECRET
+WorkingDirectory=/opt/algua
+# The driver bounds the codex run itself (LEAP_TIMEOUT, default 25m) and the env pre-warm
+# (SYNC_TIMEOUT, default 5m). This is the last-resort backstop if the wrapper itself hangs (e.g. a
+# stuck flock) — kept above the driver's own caps so the driver times out first with a clean
+# non-zero exit instead of systemd SIGKILLing mid-import.
+TimeoutStartSec=2100
+# codex must be on PATH and AUTHENTICATED for the user this unit runs as (see README).
+ExecStart=/opt/algua/.codex/scripts/leap.sh
+
+[Install]
+WantedBy=multi-user.target

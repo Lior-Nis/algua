@@ -1,18 +1,20 @@
 import hashlib
 import sqlite3
 
+import pytest
+
 from algua.registry.db import SCHEMA_VERSION, connect, migrate
 
 _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "description"}
 
 # Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
 # with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
-_SCHEMA_OBJECT_COUNT = 106
-_SCHEMA_DIGEST = "fe5deddb357b0a3b90d561c7a923735f336b08cb7880da5cd8c226cd0b3afe15"
+_SCHEMA_OBJECT_COUNT = 111
+_SCHEMA_DIGEST = "c7b0fda6a11628e2ff8e9bf3712169b6a105a8aef50bedc1ea748647f014a64f"
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 45
+    assert SCHEMA_VERSION == 46
 
 
 def _schema_fingerprint(conn: sqlite3.Connection) -> tuple[int, str, str]:
@@ -836,7 +838,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 45
+    assert SCHEMA_VERSION == 46
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -860,7 +862,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 45
+    assert SCHEMA_VERSION == 46
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -913,3 +915,149 @@ def test_v41_factor_evaluations_table_dropped(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "factor_evaluations" not in tables
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v46_ideas_columns_and_tables_exist_after_migrate(tmp_path):
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.row_factory = sqlite3.Row
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(ideas)")}
+    assert {"category", "market", "horizon", "falsification", "parked_reason",
+            "claimed_by", "claim_token", "claimed_at"} <= cols
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"idea_attempts", "idea_inspirations"} <= tables
+    migrate(conn)  # idempotent
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+
+
+def test_v46_preserves_v45_idea_rows(tmp_path):
+    """A pre-v46 ideas row (no new columns, no idea_attempts/idea_inspirations tables) survives
+    the real ALTER-TABLE migration path with NULLs in the new columns."""
+    conn = sqlite3.connect(tmp_path / "r.db")
+    conn.row_factory = sqlite3.Row
+    # Hand-written v45-shaped `ideas` table: the CREATE TABLE from algua/registry/db/ideas.py
+    # WITHOUT the eight v46 columns and WITHOUT idea_attempts/idea_inspirations.
+    conn.executescript(
+        """
+        CREATE TABLE ideas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            hypothesis TEXT NOT NULL,
+            family TEXT,
+            tags TEXT NOT NULL DEFAULT '[]',
+            source_type TEXT NOT NULL,
+            source_ref TEXT,
+            source_date TEXT,
+            source_note TEXT,
+            required_data TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            authored_strategy_id INTEGER REFERENCES strategies(id),
+            duplicate_of_idea_id INTEGER REFERENCES ideas(id),
+            override_reason TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX ix_ideas_status ON ideas(status);
+        CREATE INDEX ix_ideas_family ON ideas(family);
+        """
+    )
+    conn.execute("PRAGMA user_version=45;")
+    conn.execute("INSERT INTO ideas(title,hypothesis,tags,source_type,required_data,status,"
+                 "signature,created_at,updated_at) VALUES('t','h','[]','manual','[]','open',"
+                 "'sig','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')")
+    conn.commit()
+
+    migrate(conn)
+
+    row = conn.execute("SELECT * FROM ideas").fetchone()
+    assert row["title"] == "t"
+    for col in ("category", "market", "horizon", "falsification", "parked_reason",
+                "claimed_by", "claim_token", "claimed_at"):
+        assert row[col] is None, f"{col} should be NULL on a pre-v46 row, got {row[col]!r}"
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(ideas)")}
+    assert {"category", "market", "horizon", "falsification", "parked_reason",
+            "claimed_by", "claim_token", "claimed_at"} <= cols
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"idea_attempts", "idea_inspirations"} <= tables
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+
+    migrate(conn)  # idempotent re-run must not raise
+    row = conn.execute("SELECT title FROM ideas").fetchone()
+    assert row["title"] == "t"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+
+
+def test_v46_rebuilds_negative_results_check_on_legacy_db(tmp_path):
+    """A DB that reached v45/v46 before #626 widened negative_results.source's CHECK still
+    carries the OLD CHECK (SQLite can't ALTER a CHECK, and CREATE TABLE IF NOT EXISTS is a
+    no-op on an already-existing table) — migrate() must rebuild it in place: the existing row
+    survives, the new source value is now accepted, both indexes still exist, and a SECOND
+    migrate() call is a true no-op (same table object, not a repeat rebuild)."""
+    conn = connect(tmp_path / "r.db")
+    conn.executescript(
+        """
+        CREATE TABLE negative_results (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at          TEXT NOT NULL,
+            strategy_name       TEXT,
+            gate_evaluation_id  INTEGER,
+            kind                TEXT NOT NULL CHECK (kind IN ('gate_fail', 'discard', 'dead_end')),
+            verdict             TEXT NOT NULL,
+            actor               TEXT NOT NULL,
+            reason              TEXT NOT NULL,
+            hypothesis          TEXT,
+            params_json         TEXT,
+            tags                TEXT,
+            source              TEXT NOT NULL
+                CHECK (source IN ('auto:research_promote', 'manual'))
+        );
+        CREATE INDEX ix_negative_results_strategy ON negative_results(strategy_name);
+        CREATE INDEX ix_negative_results_created ON negative_results(created_at);
+        CREATE INDEX ix_negative_results_kind ON negative_results(kind);
+        """
+    )
+    conn.execute(
+        "INSERT INTO negative_results(created_at, strategy_name, gate_evaluation_id, kind,"
+        " verdict, actor, reason, hypothesis, params_json, tags, source)"
+        " VALUES('2026-01-01T00:00:00+00:00', 's', NULL, 'discard', 'FAIL', 'agent', 'r', NULL,"
+        " NULL, NULL, 'manual')"
+    )
+    conn.commit()
+
+    # Sanity: the OLD CHECK really does reject the new source value before migrate() runs.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO negative_results(created_at, strategy_name, gate_evaluation_id, kind,"
+            " verdict, actor, reason, hypothesis, params_json, tags, source)"
+            " VALUES('2026-01-01T00:00:00+00:00', NULL, NULL, 'discard', 'FAIL', 'agent', 'r',"
+            " NULL, NULL, NULL, 'auto:leap_critic')"
+        )
+    conn.rollback()
+
+    migrate(conn)
+
+    row = conn.execute("SELECT * FROM negative_results").fetchone()
+    assert row["strategy_name"] == "s" and row["source"] == "manual"
+    conn.execute(
+        "INSERT INTO negative_results(created_at, strategy_name, gate_evaluation_id, kind,"
+        " verdict, actor, reason, hypothesis, params_json, tags, source)"
+        " VALUES('2026-01-02T00:00:00+00:00', NULL, NULL, 'discard', 'CRITIC:x', 'agent', 'r',"
+        " NULL, NULL, NULL, 'auto:leap_critic')"
+    )
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM negative_results").fetchone()[0] == 2
+    indexes = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='negative_results'")}
+    assert {"ix_negative_results_strategy", "ix_negative_results_created",
+            "ix_negative_results_kind"} <= indexes
+
+    before = conn.execute(
+        "SELECT rootpage, sql FROM sqlite_master WHERE type='table' AND name='negative_results'"
+    ).fetchone()
+    migrate(conn)  # second call: must be a no-op, not a repeat rebuild
+    after = conn.execute(
+        "SELECT rootpage, sql FROM sqlite_master WHERE type='table' AND name='negative_results'"
+    ).fetchone()
+    assert (before["rootpage"], before["sql"]) == (after["rootpage"], after["sql"])
+    assert conn.execute("SELECT COUNT(*) FROM negative_results").fetchone()[0] == 2

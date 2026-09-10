@@ -26,6 +26,11 @@ __pycache__/
 # runtime research-output churn (issue #509)
 scratchpad-*
 kb/experience/
+# The inspirations vault is RUNTIME data (forage writes notes here; the leap driver edits
+# their frontmatter; write-yield rewrites _sources.yaml). The tracked artifact is the SEED
+# at deploy/kb/inspirations/_sources.yaml, which the installer and forage.sh copy in when
+# the vault has no registry yet — never over an existing one.
+kb/inspirations/
 kb/**/.sync.lock
 *.sync.lock
 .DS_Store

@@ -1015,3 +1015,56 @@ def test_cli_cleanup_branch_emits_json(paths, tmp_path, capsys):
     result = json.loads(capsys.readouterr().out)
     assert result["branch"] == f"research-run/{_STAMP}"
     assert result["skipped"] == "worktree_absent"
+
+
+# --- ideation binding (spec 2026-09-08 §7): idea_id + claim_token ride the item -------------------
+
+
+def test_enqueue_defaults_the_ideation_binding_to_absent(paths):
+    # A candidacy the driver could not bind to one of its own claims (and every legacy item)
+    # carries no idea binding at all — the drainer then skips the idea-pool feedback.
+    queue_path, lock_path = paths
+    result = mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    assert result["item"]["idea_id"] is None
+    assert result["item"]["claim_token"] is None
+
+
+def test_idea_binding_round_trips_through_shell_format(paths, capsys):
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, idea_id=7, claim_token="tok-7", **_item())
+    rc = mergeback_queue.main([
+        "select-and-reserve", "--queue", str(queue_path), "--lock", str(lock_path),
+        "--format", "shell",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "MERGEBACK_IDEA_ID=7" in out
+    assert "MERGEBACK_CLAIM_TOKEN=tok-7" in out
+
+
+def test_absent_idea_binding_emits_empty_shell_vars(paths, capsys):
+    # Empty (not missing) so the drainer's `${MERGEBACK_IDEA_ID:-}` guard reads a definite "no".
+    queue_path, lock_path = paths
+    mergeback_queue.enqueue(queue_path, lock_path, **_item())
+    rc = mergeback_queue.main([
+        "select-and-reserve", "--queue", str(queue_path), "--lock", str(lock_path),
+        "--format", "shell",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "MERGEBACK_IDEA_ID=''" in out
+    assert "MERGEBACK_CLAIM_TOKEN=''" in out
+
+
+def test_cli_enqueue_accepts_the_idea_binding_flags(paths, capsys):
+    queue_path, lock_path = paths
+    rc = mergeback_queue.main([
+        "enqueue", "--queue", str(queue_path), "--lock", str(lock_path),
+        "--strategy", "strat_a", "--universe", "sp500",
+        "--start", "2024-01-01", "--end", "2024-06-01", "--branch", "research-run/1",
+        "--eval-context", json.dumps({"demo": True, "sweep_grid": {"k": [1, 2]}}),
+        "--idea-id", "42", "--claim-token", "tok-42",
+    ])
+    assert rc == 0
+    item = json.loads(capsys.readouterr().out)["item"]
+    assert (item["idea_id"], item["claim_token"]) == (42, "tok-42")

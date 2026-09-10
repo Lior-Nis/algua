@@ -14,13 +14,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SKILLS = REPO / ".codex" / "skills"
 LAUNCHER = REPO / ".codex" / "scripts" / "run-research-loop.sh"
-SOURCE_LAUNCHER = REPO / ".codex" / "scripts" / "source-ideas.sh"
 SKILL_NAMES = [
     "operating-algua",
     "author-a-strategy",
     "run-the-research-loop",
     "interpret-results",
-    "source-ideas",
+    "forage-inspirations",
+    "leap-hypotheses",
 ]
 
 
@@ -53,36 +53,37 @@ def test_launcher_dry_run_emits_bounded_sandboxed_codex_command():
     assert "research-run/" in out                                # isolated branch
     assert ".funnel-scratch" in out                              # per-run scratch funnel
     assert "hypotheses: 2" in out                                # goal-level bound
+    # Ideation engine (spec 2026-09-08 §7): the run works ideas CLAIMED from the authoritative
+    # pool, it does not invent a thesis. A dry run claims nothing (it must never write authority),
+    # so the count is 0 and the category defaults to "any".
+    assert "claimed ideas:" in out
+    assert "category:" in out
+    assert "would claim 2 ideas from" in out
+    assert "thesis:" not in out
+
+
+CATEGORY_SLUGS = [
+    "momentum", "mean_reversion", "seasonality", "vol_structure", "value_quality_proxy",
+    "liquidity_microstructure", "event_driven", "institutional_flow",
+]
+
+
+def test_categories_file_lists_the_eight_ideation_categories():
+    # The categories file replaced the free-text thesis rotation: `research idea claim`'s
+    # round-robin and the forage rotation both key on these slugs (PRD §4).
+    path = REPO / ".codex" / "categories.txt"
+    slugs = [line.split()[0] for line in path.read_text().splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    assert slugs == CATEGORY_SLUGS
+
+
+def test_the_thesis_rotation_file_is_gone():
+    assert not (REPO / ".codex" / "research-themes.txt").exists()
 
 
 def test_launcher_rejects_unknown_argument():
     proc = subprocess.run(
         ["bash", str(LAUNCHER), "--bogus"],
-        cwd=REPO, capture_output=True, text=True,
-    )
-    assert proc.returncode == 2
-
-
-def test_source_ideas_dry_run_emits_web_tooled_pool_sourcing():
-    proc = subprocess.run(
-        ["bash", str(SOURCE_LAUNCHER), "--dry-run", "--thesis", "momentum", "--max-ideas", "3",
-         "--timeout", "10m"],
-        cwd=REPO, capture_output=True, text=True, check=True,
-    )
-    out = proc.stdout
-    assert "DRY RUN" in out
-    assert "--dangerously-bypass-approvals-and-sandbox" in out  # MCP tools need full bypass (spike)
-    assert "web_search=live" in out  # the web tooling this issue adds
-    assert "paper_search_mcp" in out  # arXiv/SSRN MCP wired
-    assert "research idea" in out  # sources into #126's pool, not files
-    assert "ALGUA_DB_PATH=" in out  # persistent pool, not the throwaway worktree DB
-    assert "timeout 10m" in out  # OS-level hard bound
-    assert "source-ideas/" in out  # isolated branch
-
-
-def test_source_ideas_rejects_unknown_argument():
-    proc = subprocess.run(
-        ["bash", str(SOURCE_LAUNCHER), "--bogus"],
         cwd=REPO, capture_output=True, text=True,
     )
     assert proc.returncode == 2
@@ -157,6 +158,16 @@ def test_install_user_units_includes_mergeback_drain_pair():
     installer = (REPO / "deploy" / "systemd" / "install-user-units.sh").read_text()
     assert "algua-mergeback-drain.service" in installer
     assert "algua-mergeback-drain.timer" in installer
+
+
+def test_install_user_units_includes_forage_and_leap_pairs():
+    # Ideation engine (spec 2026-09-08): forage + leap get the same installer treatment as
+    # every other operator unit pair (research/paper/mergeback-drain).
+    installer = (REPO / "deploy" / "systemd" / "install-user-units.sh").read_text()
+    assert "algua-forage.service" in installer
+    assert "algua-forage.timer" in installer
+    assert "algua-leap.service" in installer
+    assert "algua-leap.timer" in installer
 
 
 def test_skills_reachable_via_claude_skills_symlinks():

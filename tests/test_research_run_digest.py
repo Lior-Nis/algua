@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -28,12 +30,15 @@ def _heredocs() -> list[str]:
     return _HEREDOC_RE.findall(LAUNCHER.read_text(encoding="utf-8"))
 
 
-# Heredoc 0 = append_digest's trailer parser + branch rename + enqueue; heredoc 1 = the anti-dup
-# reader; heredoc 2 = the sqlite consistent-backup snippet (not tested here); heredoc 3 = the
-# end-of-run enqueued-candidate counter (runs-worktree lifecycle, #555).
+# Heredoc 0 = append_digest's trailer parser + branch rename + enqueue; heredoc 1 = record_outcomes'
+# per-claimed-idea `research idea record-outcome` loop (ideation engine); heredoc 2 = the anti-dup
+# reader; heredoc 3 = the sqlite consistent-backup snippet (not tested here); heredoc 4 = the
+# end-of-run enqueued-candidate counter (runs-worktree lifecycle, #555). Keep these indices in
+# sync when adding a heredoc to the launcher.
 _APPEND_DIGEST_SRC = _heredocs()[0]
-_ANTI_DUP_SRC = _heredocs()[1]
-_COUNT_ENQUEUED_SRC = _heredocs()[3]
+_RECORD_OUTCOMES_SRC = _heredocs()[1]
+_ANTI_DUP_SRC = _heredocs()[2]
+_COUNT_ENQUEUED_SRC = _heredocs()[4]
 
 
 def _fence(payload: dict) -> str:
@@ -49,13 +54,18 @@ def _run_append_digest(
     stamp: str = "20260811-000000",
     outcome: str = "completed",
     git_root: Path | str = "",
+    claimed: list | None = None,
 ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     """Run the append_digest heredoc with the launcher's exact positional-argv contract.
 
-    ``git_root`` is the trailing argv: where the run branch lives for the candidate-keyed rename.
+    ``git_root`` is argv 16: where the run branch lives for the candidate-keyed rename.
     Tests default it to "" (rename disabled) — NEVER the real repo, whose shared ref store could
     hold a genuine research-run branch colliding with a test stamp; rename tests pass an isolated
-    throwaway repo instead."""
+    throwaway repo instead.
+
+    ``claimed`` is the trailing argv 17: this run's AUTHORITY-SIDE claim result
+    (``[{"id": .., "claim_token": ..}]``), which supplies the digest row's ``idea_ids`` and the
+    token every idea-bound merge-back candidacy enqueues with."""
     digest_path = tmp_path / "digest.jsonl"
     report_path = tmp_path / "report.md"
     queue_path = tmp_path / "queue.json"
@@ -69,6 +79,7 @@ def _run_append_digest(
         "0", "0", "12", "1", "0",
         str(report_path), strategy_names, str(REPO_ROOT),
         str(queue_path), str(queue_lock_path), str(git_root),
+        json.dumps(claimed or []),
     ]
     proc = subprocess.run(
         [sys.executable, "-", *argv_tail],
@@ -87,6 +98,22 @@ def _queue_items(queue_path: Path) -> dict:
         return {}
     return json.loads(queue_path.read_text(encoding="utf-8"))["items"]
 
+
+
+def _expect_mb(mb: dict, *, idea_id: int | None = None) -> dict:
+    """The VALIDATED merge_back the digest row carries: the trailer object with the partition
+    attestation keys stripped from eval_context, plus the RESOLVED idea binding."""
+    ec = {k: v for k, v in mb["eval_context"].items() if k not in ("windows", "holdout_frac")}
+    return {**mb, "eval_context": ec, "idea_id": idea_id}
+
+
+def _expect_hyp(title: str, *, verdict=None, idea_id=None, outcome=None, reason=None,
+                falsification_assessment=None, merge_back=None) -> dict:
+    """The full digest hypotheses[] entry shape (trailer v2). Every key is always present; an
+    absent trailer field reads as None."""
+    return {"title": title, "verdict": verdict, "idea_id": idea_id, "outcome": outcome,
+            "reason": reason, "falsification_assessment": falsification_assessment,
+            "merge_back": merge_back}
 
 
 def _ec(**over):
@@ -114,12 +141,12 @@ def test_parses_verdict_and_validated_merge_back(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
     row = _last_digest_row(digest_path)
-    assert row["hypotheses"] == [{
-        "title": "Momentum thing", "verdict": "candidate-preview-pass",
-        "merge_back": {"strategy": "strat_a", "universe": "sp500",
-                       "start": "2024-01-01", "end": "2024-06-01",
-                       "eval_context": _ec()},
-    }]
+    assert row["hypotheses"] == [_expect_hyp(
+        "Momentum thing", verdict="candidate-preview-pass",
+        merge_back=_expect_mb({"strategy": "strat_a", "universe": "sp500",
+                               "start": "2024-01-01", "end": "2024-06-01",
+                               "eval_context": _ec()}),
+    )]
     assert row["preview_gate"] == {"passed": True, "failed_checks": []}
     assert row["trailer_parse_error"] is False
     assert row["report"] == "research-run/20260811-000000:kb/research-runs/20260811-000000.md"
@@ -159,8 +186,7 @@ def test_merge_back_dropped_when_strategy_not_in_run_commit(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
     row = _last_digest_row(digest_path)
-    assert row["hypotheses"] == [{"title": "Sneaky", "verdict": "candidate-preview-pass",
-                                   "merge_back": None}]
+    assert row["hypotheses"] == [_expect_hyp("Sneaky", verdict="candidate-preview-pass")]
     assert not queue_path.exists()
     assert "not among this run's own committed" in proc.stdout
 
@@ -185,7 +211,7 @@ def test_duplicate_strategy_in_one_run_keeps_first(tmp_path):
     assert proc.returncode == 0, proc.stderr
 
     row = _last_digest_row(digest_path)
-    assert row["hypotheses"][0]["merge_back"] == mb
+    assert row["hypotheses"][0]["merge_back"] == _expect_mb(mb)
     assert row["hypotheses"][1]["merge_back"] is None  # second dropped, first wins
     items = _queue_items(queue_path)
     assert len(items) == 1
@@ -274,7 +300,7 @@ def test_one_bad_one_good_hypothesis_still_completes_and_enqueues_the_good_one(t
     row = _last_digest_row(digest_path)
     assert row["trailer_parse_error"] is False
     assert len(row["hypotheses"]) == 2
-    assert row["hypotheses"][0]["merge_back"] == good
+    assert row["hypotheses"][0]["merge_back"] == _expect_mb(good)
     assert row["hypotheses"][1]["merge_back"] is None
 
     items = _queue_items(queue_path)
@@ -329,9 +355,7 @@ def test_bare_string_hypothesis_entries_still_parse(tmp_path):
     proc, digest_path, _queue_path = _run_append_digest(tmp_path, trailer=trailer)
     assert proc.returncode == 0, proc.stderr
     row = _last_digest_row(digest_path)
-    assert row["hypotheses"] == [
-        {"title": "an old-style bare string hypothesis", "verdict": None, "merge_back": None}
-    ]
+    assert row["hypotheses"] == [_expect_hyp("an old-style bare string hypothesis")]
     assert row["trailer_parse_error"] is False
 
 
@@ -343,7 +367,7 @@ def test_missing_verdict_key_is_lenient_not_an_error(tmp_path):
     proc, digest_path, _queue_path = _run_append_digest(tmp_path, trailer=trailer)
     assert proc.returncode == 0, proc.stderr
     row = _last_digest_row(digest_path)
-    assert row["hypotheses"] == [{"title": "No verdict field", "verdict": None, "merge_back": None}]
+    assert row["hypotheses"] == [_expect_hyp("No verdict field")]
     assert row["trailer_parse_error"] is False
 
 
@@ -454,10 +478,10 @@ def test_git_diff_filter_a_accepts_a_truly_added_strategy_file(tmp_path):
         tmp_path, trailer=trailer, strategy_names=strategy_names)
     assert proc.returncode == 0, proc.stderr
     row = _last_digest_row(digest_path)
-    assert row["hypotheses"][0]["merge_back"] == {
+    assert row["hypotheses"][0]["merge_back"] == _expect_mb({
         "strategy": "new_strat", "universe": "sp500", "start": "2024-01-01", "end": "2024-06-01",
         "eval_context": _ec(),
-    }
+    })
     items = _queue_items(queue_path)
     assert set(items) == {"new_strat@research-run/20260811-000000"}
 
@@ -808,3 +832,422 @@ def test_count_enqueued_prints_minus_one_when_the_queue_lock_is_held(tmp_path):
     assert out == "-1"
     # And once the lock is free again, the same call reports the real (nonzero) count.
     assert _run_count_enqueued(queue_path, lock_path, "research-run/20260811-000000") == "1"
+
+
+# --- trailer v2 (ideation engine, spec 2026-09-08 §7): idea_id / outcome / reason -----------------
+
+
+def test_trailer_v2_carries_idea_id_outcome_reason_and_falsification(tmp_path):
+    trailer = {
+        "hypotheses": [{
+            "idea_id": 7, "title": "Momentum thing", "outcome": "walkforward_refuted",
+            "reason": "two of four out-of-sample windows were negative",
+            "falsification_assessment": "refuted", "verdict": "discarded",
+        }],
+        "preview_gate": {"passed": False, "failed_checks": ["holdout_sharpe_floor"]},
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, claimed=[{"id": 7, "claim_token": "tok-7"}])
+    assert proc.returncode == 0, proc.stderr
+
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"] == [_expect_hyp(
+        "Momentum thing", verdict="discarded", idea_id=7, outcome="walkforward_refuted",
+        reason="two of four out-of-sample windows were negative",
+        falsification_assessment="refuted")]
+    assert row["trailer_parse_error"] is False
+    # idea_ids come from the DRIVER's own claim result, never from the trailer.
+    assert row["idea_ids"] == [7]
+    assert not queue_path.exists()
+
+
+def test_digest_row_idea_ids_come_from_the_claim_not_the_trailer(tmp_path):
+    trailer = {"hypotheses": [{"idea_id": 999, "title": "Made up", "outcome": "run_error",
+                               "reason": "not claimed"}], "preview_gate": None}
+    proc, digest_path, _q = _run_append_digest(
+        tmp_path, trailer=trailer,
+        claimed=[{"id": 4, "claim_token": "a"}, {"id": 9, "claim_token": "b"}])
+    assert proc.returncode == 0, proc.stderr
+    assert _last_digest_row(digest_path)["idea_ids"] == [4, 9]
+
+
+@pytest.mark.parametrize("bad", ["promoted_candidate", "abandoned", "passed", ""])
+def test_invalid_outcome_value_invalidates_the_whole_trailer(tmp_path, bad):
+    # `promoted_candidate`/`abandoned` are DRIVER-only outcomes — an agent claiming one is
+    # malformed output on a strict-schema field that drives a real authority-side write.
+    trailer = {"hypotheses": [{"idea_id": 7, "title": "Weird", "outcome": bad}],
+               "preview_gate": None}
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, claimed=[{"id": 7, "claim_token": "tok-7"}])
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"] == []
+    assert row["trailer_parse_error"] is True
+    assert not queue_path.exists()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("idea_id", "7"),                         # a string id, not an int
+    ("idea_id", True),                        # a bool is not an id
+    ("reason", {"why": "nope"}),              # a non-string reason
+    ("falsification_assessment", "maybe"),    # outside the three-value enum
+])
+def test_malformed_v2_fields_invalidate_the_whole_trailer(tmp_path, field, value):
+    h = {"idea_id": 7, "title": "Weird", "outcome": "run_error", "reason": "x"}
+    h[field] = value
+    proc, digest_path, _q = _run_append_digest(
+        tmp_path, trailer={"hypotheses": [h], "preview_gate": None},
+        claimed=[{"id": 7, "claim_token": "tok-7"}])
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"] == []
+    assert row["trailer_parse_error"] is True
+
+
+def test_absent_v2_fields_are_lenient_not_an_error(tmp_path):
+    # Mid-rollout tolerance, exactly like `verdict`: absent reads as unknown (None).
+    proc, digest_path, _q = _run_append_digest(
+        tmp_path, trailer={"hypotheses": [{"title": "No v2 fields"}], "preview_gate": None})
+    assert proc.returncode == 0, proc.stderr
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"] == [_expect_hyp("No v2 fields")]
+    assert row["trailer_parse_error"] is False
+
+
+def test_reason_is_charset_cleaned_and_truncated_to_300(tmp_path):
+    trailer = {"hypotheses": [{"idea_id": 7, "title": "Long", "outcome": "run_error",
+                               "reason": "<script>" + "x" * 400}], "preview_gate": None}
+    proc, digest_path, _q = _run_append_digest(
+        tmp_path, trailer=trailer, claimed=[{"id": 7, "claim_token": "tok-7"}])
+    assert proc.returncode == 0, proc.stderr
+    reason = _last_digest_row(digest_path)["hypotheses"][0]["reason"]
+    assert "<" not in reason and ">" not in reason
+    assert len(reason) <= 300
+
+
+# --- merge_back.idea_id rides into the enqueued item, bound to this run's claim token -------------
+
+
+def test_merge_back_idea_id_and_claim_token_ride_the_queue_item(tmp_path):
+    trailer = {
+        "hypotheses": [{
+            "idea_id": 7, "title": "Passer", "outcome": "candidate_preview_pass",
+            "reason": "preview gate passed", "falsification_assessment": "survived",
+            "verdict": "candidate-preview-pass",
+            "merge_back": {"idea_id": 7, "strategy": "strat_a", "universe": "sp500",
+                           "start": "2024-01-01", "end": "2024-06-01", "eval_context": _ec()},
+        }],
+        "preview_gate": {"passed": True, "failed_checks": []},
+    }
+    proc, digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a",
+        claimed=[{"id": 7, "claim_token": "tok-7"}])
+    assert proc.returncode == 0, proc.stderr
+
+    row = _last_digest_row(digest_path)
+    assert row["hypotheses"][0]["merge_back"]["idea_id"] == 7
+    item = _queue_items(queue_path)["strat_a@research-run/20260811-000000"]
+    assert item["idea_id"] == 7
+    assert item["claim_token"] == "tok-7"  # looked up from the CLAIM, never read from the trailer
+
+
+def test_merge_back_idea_id_this_run_never_claimed_drops_the_binding_not_the_candidacy(tmp_path):
+    mb = {"idea_id": 999, "strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01", "eval_context": _ec()}
+    trailer = {"hypotheses": [{"idea_id": 7, "title": "Passer", "outcome": "candidate_preview_pass",
+                               "verdict": "candidate-preview-pass", "merge_back": mb}],
+               "preview_gate": None}
+    proc, _digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a",
+        claimed=[{"id": 7, "claim_token": "tok-7"}])
+    assert proc.returncode == 0, proc.stderr
+    assert "is not among this run's claimed ideas" in proc.stdout
+    item = _queue_items(queue_path)["strat_a@research-run/20260811-000000"]
+    assert item["idea_id"] is None        # binding dropped...
+    assert item["claim_token"] is None
+    assert item["strategy"] == "strat_a"  # ...but the merge-back still runs
+
+
+def test_merge_back_without_an_idea_id_enqueues_unbound(tmp_path):
+    mb = {"strategy": "strat_a", "universe": "sp500", "start": "2024-01-01",
+          "end": "2024-06-01", "eval_context": _ec()}
+    trailer = {"hypotheses": [{"title": "Passer", "verdict": "candidate-preview-pass",
+                               "merge_back": mb}], "preview_gate": None}
+    proc, _digest_path, queue_path = _run_append_digest(
+        tmp_path, trailer=trailer, strategy_names="strat_a")
+    assert proc.returncode == 0, proc.stderr
+    item = _queue_items(queue_path)["strat_a@research-run/20260811-000000"]
+    assert item["idea_id"] is None and item["claim_token"] is None
+
+
+# --- record_outcomes (heredoc 1): one `research idea record-outcome` per CLAIMED idea -------------
+
+
+def _fake_uv(tmp_path: Path) -> tuple[Path, Path]:
+    """A `uv` shim on PATH that records each invocation's argv + ALGUA_DB_PATH as one JSON line.
+
+    The heredoc resolves `uv` through PATH on purpose, so shadowing it here exercises the REAL
+    subprocess wiring (argv shape, env routing) without touching a registry."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "uv-calls.jsonl"
+    recorder = tmp_path / "record_call.py"
+    recorder.write_text(
+        "import json, os, sys\n"
+        "SCRATCH = ('UV_CACHE_DIR', 'ALGUA_DATA_DIR', 'ALGUA_KNOWLEDGE_DIR',\n"
+        "           'ALGUA_MLFLOW_TRACKING_URI')\n"
+        "with open(sys.argv[1], 'a') as f:\n"
+        "    f.write(json.dumps({'argv': sys.argv[2:],\n"
+        "                        'db': os.environ.get('ALGUA_DB_PATH'),\n"
+        "                        'leaked': [k for k in SCRATCH if k in os.environ]}) + '\\n')\n",
+        encoding="utf-8")
+    fake = bin_dir / "uv"
+    fake.write_text(
+        f"#!/usr/bin/env bash\nexec {sys.executable} {recorder} {log} \"$@\"\n",
+        encoding="utf-8")
+    fake.chmod(0o755)
+    return bin_dir, log
+
+
+def _run_record_outcomes(tmp_path: Path, *, claimed: list, report_path: Path | str,
+                         rc: str = "0", branch: str = "research-run/20260811-000000",
+                         stamp: str = "20260811-000000", phase: str = "completed",
+                         auth_db: str = "/auth/algua.db",
+                         scratch_env: dict | None = None) -> tuple[subprocess.CompletedProcess,
+                                                                   list[dict]]:
+    bin_dir, log = _fake_uv(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, "-", json.dumps(claimed), str(report_path), auth_db, branch, stamp,
+         rc, str(tmp_path), phase],
+        input=_RECORD_OUTCOMES_SRC, capture_output=True, text=True, timeout=30,
+        env={**os.environ, **(scratch_env or {}),
+             "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return proc, calls
+
+
+def _flags(argv: list[str]) -> dict[str, str]:
+    return {argv[i]: argv[i + 1] for i in range(len(argv) - 1) if argv[i].startswith("--")}
+
+
+def test_record_outcomes_writes_the_trailer_outcome_and_run_error_for_the_missing_idea(tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text(_fence({
+        "hypotheses": [{"idea_id": 7, "title": "Worked it", "outcome": "walkforward_refuted",
+                        "reason": "windows disagree", "falsification_assessment": "refuted"}],
+        "preview_gate": None,
+    }), encoding="utf-8")
+
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}, {"id": 8, "claim_token": "tok-8"}],
+        report_path=report)
+    assert proc.returncode == 0, proc.stderr
+
+    assert len(calls) == 2
+    first, second = calls
+    assert first["argv"][:6] == ["run", "algua", "research", "idea", "record-outcome", "7"]
+    assert _flags(first["argv"]) == {
+        "--token": "tok-7", "--outcome": "walkforward_refuted", "--reason": "windows disagree",
+        "--evidence-ref": "research-run/20260811-000000:kb/research-runs/20260811-000000.md"}
+    # The claimed idea the agent never reported on still gets an honest ledger entry.
+    assert second["argv"][:6] == ["run", "algua", "research", "idea", "record-outcome", "8"]
+    assert _flags(second["argv"])["--outcome"] == "run_error"
+    assert _flags(second["argv"])["--reason"] == "missing_from_trailer"
+    # Every write is routed at AUTHORITY, never at the run's scratch registry.
+    assert {c["db"] for c in calls} == {"/auth/algua.db"}
+    assert all(c["leaked"] == [] for c in calls)
+    assert "recorded 2/2 claimed idea outcome(s)" in proc.stdout
+
+
+def test_record_outcomes_without_a_report_records_run_error_with_the_exit_code(tmp_path):
+    # The timeout / crash / lock-skip path: no trailer exists, so every claim is released now
+    # rather than waiting out the 180-minute claim TTL.
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="124")
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 1
+    flags = _flags(calls[0]["argv"])
+    assert flags["--outcome"] == "run_error"
+    assert flags["--reason"] == "codex exit 124"
+
+
+def test_record_outcomes_with_no_exit_code_says_the_run_did_not_complete(tmp_path):
+    # skipped_lock: the firing lost the flock race and never started.
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="",
+        phase="skipped_lock")
+    assert proc.returncode == 0, proc.stderr
+    assert _flags(calls[0]["argv"])["--reason"] == "run did not complete"
+
+
+def test_record_outcomes_on_a_setup_failure_blames_setup_not_codex(tmp_path):
+    # The firing never reached codex, so "codex exit 1" would be a lie in the ledger.
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="1",
+        phase="setup_failed")
+    assert proc.returncode == 0, proc.stderr
+    flags = _flags(calls[0]["argv"])
+    assert (flags["--outcome"], flags["--reason"]) == ("run_error", "setup_failed:1")
+
+
+def test_a_clean_run_with_no_usable_trailer_reads_as_trailer_unparseable(tmp_path):
+    # codex exited 0 but never wrote a parseable v2 trailer — "codex exit 0" would say nothing.
+    report = tmp_path / "report.md"
+    report.write_text("prose, but no fenced json trailer at all\n", encoding="utf-8")
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path=report, rc="0")
+    assert proc.returncode == 0, proc.stderr
+    flags = _flags(calls[0]["argv"])
+    assert (flags["--outcome"], flags["--reason"]) == ("run_error", "trailer_unparseable")
+
+
+def test_record_outcomes_scrubs_the_scratch_routing_from_the_child_env(tmp_path):
+    """On the setup_failed / skipped_lock paths these point into a worktree that was never built
+    (or was just removed); an AUTHORITY-side write must not be steered by them."""
+    scratch = {"UV_CACHE_DIR": "/gone/.uv-cache", "ALGUA_DATA_DIR": "/gone/data",
+               "ALGUA_KNOWLEDGE_DIR": "/gone/kb", "ALGUA_MLFLOW_TRACKING_URI": "/gone/mlruns",
+               "ALGUA_DB_PATH": "/gone/scratch.db"}
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="1",
+        phase="setup_failed", scratch_env=scratch)
+    assert proc.returncode == 0, proc.stderr
+    assert calls[0]["leaked"] == []                 # every scratch lane removed...
+    assert calls[0]["db"] == "/auth/algua.db"       # ...and the DB re-pointed at authority
+
+
+def test_record_outcomes_ignores_trailer_ids_this_run_never_claimed(tmp_path):
+    report = tmp_path / "report.md"
+    report.write_text(_fence({
+        "hypotheses": [{"idea_id": 999, "title": "Not mine", "outcome": "candidate_preview_pass",
+                        "reason": "sneaky"}],
+        "preview_gate": None,
+    }), encoding="utf-8")
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path=report)
+    assert proc.returncode == 0, proc.stderr
+    assert "the trailer reports idea_id 999, which this run never claimed" in proc.stdout
+    assert len(calls) == 1
+    assert calls[0]["argv"][5] == "7"
+    assert _flags(calls[0]["argv"])["--outcome"] == "run_error"
+
+
+def test_record_outcomes_is_a_no_op_without_claims(tmp_path):
+    proc, calls = _run_record_outcomes(tmp_path, claimed=[], report_path="")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == []
+
+
+def test_record_outcomes_survives_a_failing_record_outcome_call(tmp_path):
+    # Best-effort by contract: a rejected write warns loudly and the loop keeps going.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "uv"
+    fake.write_text("#!/usr/bin/env bash\necho 'claim_token_mismatch' >&2\nexit 1\n",
+                    encoding="utf-8")
+    fake.chmod(0o755)
+    proc = subprocess.run(
+        [sys.executable, "-", json.dumps([{"id": 7, "claim_token": "tok-7"}]), "", "/auth.db",
+         "b", "s", "0", str(tmp_path), "completed"],
+        input=_RECORD_OUTCOMES_SRC, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "WARNING: record-outcome failed for idea 7" in proc.stdout
+    assert "recorded 0/1 claimed idea outcome(s)" in proc.stdout
+
+
+def test_record_outcomes_skips_a_claim_with_no_token(tmp_path):
+    proc, calls = _run_record_outcomes(
+        tmp_path, claimed=[{"id": 7, "claim_token": None}], report_path="")
+    assert proc.returncode == 0, proc.stderr
+    assert calls == []
+    assert "carries no claim token" in proc.stdout
+
+
+# --- Final fix wave: the prompt projection, the scratch scrub, and the setup trap -----------
+
+LAUNCHER_SRC = LAUNCHER.read_text(encoding="utf-8")
+
+
+def _claim_projection() -> str:
+    """The inline `python3 -c` program that projects CLAIMED_JSON down to what the prompt sees."""
+    start = "CLAIMED_PROMPT_JSON=\"$(python3 -c '"
+    body = LAUNCHER_SRC.split(start, 1)[1]
+    return body.split("\n' \"${CLAIMED_JSON}\")\"", 1)[0]
+
+
+def test_prompt_gets_a_projection_without_the_claim_token():
+    # The claim TOKEN is the driver's record-outcome credential. It must never reach the prompt
+    # (the agent's report, transcript and authored files are all places it would leak to), while
+    # everything needed to WORK the idea must still ride along.
+    assert "${CLAIMED_PROMPT_JSON}" in LAUNCHER_SRC
+    keep = re.search(r"KEEP = \((.*?)\)", _claim_projection(), re.DOTALL).group(1)
+    assert "claim_token" not in keep and "claimed_by" not in keep
+    for field in ("id", "title", "hypothesis", "category", "market", "horizon", "falsification",
+                  "inspirations", "required_data", "family"):
+        assert f'"{field}"' in keep
+    # The GOAL heredoc interpolates the PROJECTION, never the driver's own full list.
+    goal = LAUNCHER_SRC.split("read -r -d '' GOAL <<EOF", 1)[1].split("\nEOF\n", 1)[0]
+    assert "${CLAIMED_PROMPT_JSON}" in goal and "${CLAIMED_JSON}" not in goal
+
+
+def test_claim_projection_drops_the_token_and_keeps_the_work_fields():
+    claimed = json.dumps([{"id": 7, "title": "t", "hypothesis": "h", "category": "momentum",
+                           "market": "us_equities", "horizon": "daily", "falsification": "f",
+                           "inspirations": [{"inspiration_id": "2026-09-08-n"}],
+                           "required_data": ["ohlcv"], "family": None,
+                           "claim_token": "tok-7", "claimed_by": "run-1", "signature": "sig"}])
+    proc = subprocess.run([sys.executable, "-c", _claim_projection(), claimed],
+                          capture_output=True,
+                          text=True, timeout=30, check=True)
+    (row,) = json.loads(proc.stdout)
+    assert "claim_token" not in row and "claimed_by" not in row and "signature" not in row
+    assert row["id"] == 7 and row["category"] == "momentum"
+    assert row["inspirations"] == [{"inspiration_id": "2026-09-08-n"}]
+
+
+def test_scratch_seed_scrubs_the_claim_credentials_from_the_agents_copy(tmp_path):
+    # The scratch copy carries this run's claim rows on purpose (the agent must see its ideas as
+    # claimed) — but not the TOKEN, which is the driver's authority credential.
+    seed_src = _heredocs()[3]
+    auth = tmp_path / "auth.db"
+    conn = sqlite3.connect(auth)
+    with conn:
+        conn.execute("CREATE TABLE ideas (id INTEGER PRIMARY KEY, claim_token TEXT,"
+                     " claimed_by TEXT, claimed_at TEXT)")
+        conn.execute("INSERT INTO ideas VALUES (1, 'tok-1', 'run-1', '2026-09-09T00:00:00+00:00')")
+    conn.close()
+    scratch = tmp_path / "scratch.db"
+
+    proc = subprocess.run([sys.executable, "-", str(auth), str(scratch)], input=seed_src,
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+    got = sqlite3.connect(scratch).execute(
+        "SELECT claim_token, claimed_by, claimed_at FROM ideas").fetchone()
+    assert got == (None, None, "2026-09-09T00:00:00+00:00")
+
+
+def test_scratch_seed_survives_a_cold_start_with_no_ideas_table(tmp_path):
+    seed_src = _heredocs()[3]
+    auth = tmp_path / "auth.db"
+    sqlite3.connect(auth).close()
+    proc = subprocess.run([sys.executable, "-", str(auth), str(tmp_path / "scratch.db")],
+                          input=seed_src, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_setup_failure_trap_is_armed_immediately_after_the_claim():
+    # Anything between the claim and the codex run (anti-dup read, lock, worktree, scratch seed,
+    # uv sync) can fail. Before this, such a failure exited with the claims still HELD — the ideas
+    # left the pool until the 180-minute TTL reap.
+    claim_echo = LAUNCHER_SRC.index('echo "claimed ${N_CLAIMED} idea(s) from ${AUTH_DB}')
+    arm = LAUNCHER_SRC.index("trap cleanup_setup EXIT")
+    lock = LAUNCHER_SRC.index('LOCK="${REPO_ROOT}/data/research-loop.lock"')
+    worktree = LAUNCHER_SRC.index('git -C "${REPO_ROOT}" worktree add -b "${BRANCH}"')
+    definition = LAUNCHER_SRC.index("cleanup_setup() {")
+    assert definition < claim_echo < arm < lock < worktree
+    # Still cleared once setup succeeds, before codex runs.
+    clear = LAUNCHER_SRC.index("trap - EXIT\n\necho \"Running research loop")
+    assert worktree < clear
