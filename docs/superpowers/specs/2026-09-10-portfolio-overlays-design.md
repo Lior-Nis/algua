@@ -280,6 +280,29 @@ Modified: `algua/strategies/base.py`, `algua/strategies/loader.py`, `algua/backt
 `author-a-strategy` skill (a section on overlays with the two policies' param tables), and the
 `interpret-results` skill (a note that a regime gate shows up as time-varying gross exposure).
 
+## Deviations recorded during implementation
+
+- **Three files, not one.** The overlay seam ended up split across `algua/portfolio/overlays.py`
+  (types, invariants, `_OVERLAYS` registry, `resolve_overlays`), `overlay_policies.py`
+  (`trailing_stop`, `regime_gate` + their validators/lookbacks) and `overlay_validation.py`
+  (`OverlayError` + shared param helpers), instead of the single module this spec assumed — the
+  module-size ratchet forced the carve.
+- **`turbulence` returns NaN, not a huge finite number, on a rank-deficient covariance.** A
+  Mahalanobis distance through `pinv` over a singular trailing covariance produces an arbitrarily
+  large but finite value (observed ~1e29), which would silently pass any `> turb_z` threshold as a
+  "real" stress; `turbulence` now detects the rank deficiency and returns NaN so the guard that
+  reads "not stressed" on NaN is correct instead of accidentally always tripped.
+- **`regime_gate` fails closed with `OverlayError` when `turb_window` doesn't exceed the universe
+  size**, rather than running with the volatility leg silently degraded. An undersized
+  `turb_window` makes the turbulence covariance singular on every bar, which — absent the
+  precondition — would mean the volatility leg of the slow gate is always NaN/not-stressed with no
+  error surfaced; a strategy would believe it has three stress checks when it only has two.
+- **The "state in effect" persistence search is bounded to the last `REGIME_SEARCH_BARS` (63)
+  bars**, not searched back indefinitely. An unbounded backward-fill could resolve to a same-state
+  run far outside the tail the turbulence/z-score arrays are actually computed over, i.e. a
+  back-fill reaching beyond the computed tail; bounding the horizon (and sizing that tail to cover
+  it) guarantees every state the search can select from is one the inputs actually define.
+
 ## Rollout order
 
 1. The two pure-move carves.

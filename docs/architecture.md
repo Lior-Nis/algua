@@ -122,6 +122,20 @@ silently disarmed.
 `algua/strategies/<category>/<name>.py` — see the `author-a-strategy` skill. A strategy declares
 `CONFIG`, a `signal()` and a named construction policy. It never touches `algua.data` directly.
 
+### An overlay policy
+The seam is three files: `algua/portfolio/overlays.py` (types, invariants, the `_OVERLAYS`
+registry, `resolve_overlays`), `algua/portfolio/overlay_policies.py` (the two bundled policies —
+`trailing_stop`, `regime_gate` — plus their validators and lookbacks), and
+`algua/portfolio/overlay_validation.py` (`OverlayError` + the shared param-domain helpers). An
+overlay is `(weights, view, params) -> weights`, applied in declared order inside
+`LoadedStrategy.construct()` AFTER the construction policy and BEFORE the capacity cap. To add one,
+implement the policy function, its param validator and its `lookback(params)` in
+`overlay_policies.py`, then register it in `_OVERLAYS` in `overlays.py` (static dict, no runtime
+registration: the module source is hashed into strategy identity — all three files are
+CODEOWNERS-protected). It must be **tighten-only** — never add a symbol, scale up, flip a side or
+emit NaN — and `apply_overlays` enforces that after every policy. A strategy opts in with
+`overlays=[OverlaySpec(policy=..., params=...)]`; sweeps tune it as `overlay.<i>.<key>`.
+
 ### A CLI command
 `algua/cli/<area>_cmd.py`. **Command modules may not import each other** — that contract is real and
 has zero escapes. If two commands need the same body, the body belongs in a domain package
@@ -141,6 +155,9 @@ both key on the slug.
   decision instant; `backtest/engine.py` shifts decisions `t → t+1`. `decision_path.py`'s parity
   guard is what licenses the fast vectorised path: it proves the fast path agrees with the canonical
   loop, so weakening it silently licenses wrong numbers.
+- **Overlays are tighten-only** — `portfolio/overlays.py::apply_overlays` rejects any policy output
+  that adds a symbol, increases `|weight|`, flips a sign or is non-finite. That is what lets the
+  #135 risk rails run once, inside construction, and stay valid after any overlay chain.
 - **Single-use holdout (#192)** — `backtest/grid.py`'s index is the date-index truth that
   `holdout_window` reproduces; a holdout is burned on peek and cannot be re-read.
 - **The paper→live wall** — an agent may drive the lifecycle up to `forward_tested` and **never**
