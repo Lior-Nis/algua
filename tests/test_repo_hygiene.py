@@ -241,6 +241,8 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/intake.py",
         "algua/portfolio/construction.py",
         "algua/portfolio/overlays.py",
+        "algua/portfolio/overlay_policies.py",
+        "algua/portfolio/overlay_validation.py",
     }
 )
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -217,3 +218,111 @@ def test_trailing_stop_through_apply_overlays_satisfies_invariants():
     fns = resolve_overlays([spec], feature_lookback=None)
     out = apply_overlays(pd.Series({"A": 0.5, "B": 0.5}), view, [spec], fns)
     assert out.to_dict() == {"A": 0.0, "B": 0.5}
+
+
+# --- regime_gate --------------------------------------------------------------------------------
+
+from algua.portfolio.overlays import regime_gate  # noqa: E402
+
+# Small windows so a 60-bar synthetic path can traverse the states. Vol/turbulence stresses are
+# disabled by absurd thresholds unless a test enables them.
+_RG = {
+    "trend_window": 10, "dd_window": 10, "dd_threshold": 0.05,
+    "turb_window": 5, "z_window": 10, "turb_z": 1e9,
+    "persistence": 2,
+    "shock_window": 3, "shock_return": 0.9, "fast_turb_z": 1e9, "fast_lookback": 1,
+    "neutral_exposure": 0.6, "risk_off_exposure": 0.2, "fast_exposure": 0.25,
+}
+_W2 = pd.Series({"A": 0.5, "B": 0.5})
+
+
+def _uni(path: list[float]) -> pd.DataFrame:
+    """A 3-symbol universe that all follow `path` (turbulence is then degenerate -> NaN -> off)."""
+    return _view({"A": path, "B": [p * 2 for p in path], "C": [p * 3 for p in path]})
+
+
+def _up(n: int, start: float = 100.0, step: float = 0.002) -> list[float]:
+    return [start * (1 + step) ** i for i in range(n)]
+
+
+def test_regime_gate_risk_on_leaves_weights_untouched():
+    out = regime_gate(_W2, _uni(_up(40)), _RG)
+    assert out.to_dict() == _W2.to_dict()
+
+
+def test_regime_gate_risk_off_after_trend_and_drawdown_persist():
+    path = _up(40) + [_up(40)[-1] * (0.98 ** i) for i in range(1, 11)]  # -18% over 10 bars
+    out = regime_gate(_W2, _uni(path), _RG)  # trend below mean AND dd < -5% for >= 2 bars
+    assert out.to_dict() == pytest.approx({"A": 0.1, "B": 0.1})
+
+
+def test_regime_gate_neutral_on_a_single_stress():
+    # 30 flat bars at 100, then 3 bars at 97: a -3% drawdown (under the 5% threshold, so NOT a
+    # drawdown stress) but the level sits below its 10-bar mean (a trend stress) for 3 bars
+    # >= persistence 2 -> exactly one stress -> neutral_exposure.
+    path = [100.0] * 30 + [97.0] * 3
+    out = regime_gate(_W2, _uni(path), _RG)
+    assert out["A"] == pytest.approx(0.5 * 0.6)
+
+
+def test_regime_gate_persistence_blocks_a_one_bar_state():
+    # One bar of stress (last bar only) with persistence=2 -> the prior risk-on run still stands.
+    path = _up(40) + [_up(40)[-1] * 0.90]
+    out = regime_gate(_W2, _uni(path), _RG)
+    assert out.to_dict() == _W2.to_dict()
+
+
+def test_regime_gate_fast_shock_applies_fast_exposure():
+    params = {**_RG, "shock_window": 1, "shock_return": 0.05, "fast_lookback": 2}
+    # -10% shock, then flat: within last 2
+    path = _up(40) + [_up(40)[-1] * 0.90, _up(40)[-1] * 0.90]
+    out = regime_gate(_W2, _uni(path), params)
+    # slow state: trend+dd stressed for 2 bars -> 0.2; fast 0.25 -> min = 0.2
+    assert out["A"] == pytest.approx(0.5 * 0.2)
+    params2 = {**params, "risk_off_exposure": 0.6, "neutral_exposure": 0.6}
+    out2 = regime_gate(_W2, _uni(path), params2)
+    assert out2["A"] == pytest.approx(0.5 * 0.25)  # now fast is the binding one
+
+
+def test_regime_gate_volatility_stress_via_turbulence():
+    rng = np.random.default_rng(3)
+    n = 60
+    rets = rng.normal(0.0, 0.005, size=(n, 3))
+    rets[-1] = 0.08  # a 16-sigma common shock on the LAST bar only (its trailing window is calm)
+    prices = 100.0 * np.cumprod(1.0 + rets, axis=0)
+    view = _view({s: prices[:, i].tolist() for i, s in enumerate(["A", "B", "C"])})
+    params = {**_RG, "turb_z": 3.0, "persistence": 1, "trend_window": 3, "dd_window": 3,
+              "dd_threshold": 0.99}  # trend can't be below a 3-bar mean while rising; dd disabled
+    out = regime_gate(_W2, view, params)
+    assert out["A"] == pytest.approx(0.5 * 0.6)  # exactly one stress (volatility) -> neutral
+
+
+def test_regime_gate_no_op_on_short_history():
+    out = regime_gate(_W2, _uni([100.0, 99.0, 98.0]), _RG)
+    assert out.to_dict() == _W2.to_dict()
+
+
+def test_regime_gate_lookback():
+    spec = OverlaySpec(policy="regime_gate", params=_RG)
+    # max(trend 10, dd 10, turb 5 + z 10, shock 3 + fast 1) + persistence 2 = 17
+    assert overlay_lookback(spec) == 17
+
+
+@pytest.mark.parametrize(
+    "over, msg",
+    [
+        ({"persistence": 11}, "persistence"),
+        ({"risk_off_exposure": 0.7}, "risk_off_exposure"),
+        ({"dd_threshold": 1.0}, "dd_threshold"),
+        ({"turb_z": 0.0}, "turb_z"),
+        ({"fast_exposure": 1.5}, "fast_exposure"),
+        ({"trend_window": 0}, "trend_window"),
+    ],
+)
+def test_validate_regime_gate_domains(over, msg):
+    with pytest.raises(OverlayError, match=msg):
+        validate_overlay_params("regime_gate", {**_RG, **over})
+
+
+def test_validate_regime_gate_ok():
+    validate_overlay_params("regime_gate", _RG)

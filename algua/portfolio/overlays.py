@@ -9,11 +9,12 @@ the gross/per-symbol rails inside construction still passes after any chain. Fre
 (no renormalisation), the same cap-and-hold-cash rule as `apply_capacity_cap`.
 
 Identity rests on this module's STATIC source (approvals hash the module); there is no dynamic
-registration. Policies are pure: no I/O, no clock, no global state.
+registration. Policies are pure: no I/O, no clock, no global state. The bundled policies live in
+`algua.portfolio.overlay_policies`; the shared exception + param-domain helpers live in
+`algua.portfolio.overlay_validation` — both are re-exported from here as the seam's public API.
 """
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -23,18 +24,35 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel
 
-from algua.features.regime import wide_adj_close
+from algua.portfolio.overlay_policies import (
+    _regime_gate_lookback,
+    _trailing_stop_lookback,
+    _validate_regime_gate,
+    _validate_trailing_stop,
+    regime_gate,
+    trailing_stop,
+)
+from algua.portfolio.overlay_validation import OverlayError
+
+__all__ = [
+    "OverlayError",
+    "OverlayFn",
+    "OverlaySpec",
+    "OVERLAY_POLICIES",
+    "apply_overlays",
+    "get_overlay_policy",
+    "overlay_lookback",
+    "regime_gate",
+    "resolve_overlays",
+    "trailing_stop",
+    "validate_overlay_params",
+]
 
 OverlayFn = Callable[[pd.Series, pd.DataFrame, dict[str, Any]], pd.Series]
 
 # Float slack for |out| <= |in|: a multiply by a factor <= 1 cannot exceed the input, but a policy
 # that recomputes a weight through a different arithmetic path may differ by an ulp.
 _TOL = 1e-12
-
-
-class OverlayError(ValueError):
-    """An invalid overlay policy id, params, or output. Subclasses ValueError so the CLI's json
-    error contract still renders it."""
 
 
 class OverlaySpec(BaseModel):
@@ -92,78 +110,6 @@ def apply_overlays(
     return weights
 
 
-# --- param validation helpers -------------------------------------------------------------------
-
-
-def _exact_keys(params: dict[str, Any], required: set[str]) -> None:
-    missing = required - set(params)
-    if missing:
-        raise OverlayError(f"missing param(s): {sorted(missing)}")
-    unknown = set(params) - required
-    if unknown:
-        raise OverlayError(f"unknown param(s): {sorted(unknown)}")
-
-
-def _positive_int(params: dict[str, Any], key: str, *, minimum: int = 1) -> int:
-    v = params[key]
-    if isinstance(v, bool) or not isinstance(v, int) or v < minimum:
-        raise OverlayError(f"{key} must be an int >= {minimum}, got {v!r}")
-    return v
-
-
-def _float_in(
-    params: dict[str, Any], key: str, lo: float, hi: float, *, lo_open: bool, hi_open: bool
-) -> float:
-    v = params[key]
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        raise OverlayError(f"{key} must be a number, got {v!r}")
-    f = float(v)
-    if not math.isfinite(f):
-        raise OverlayError(f"{key} is non-finite: {v!r}")
-    below = f <= lo if lo_open else f < lo
-    above = f >= hi if hi_open else f > hi
-    if below or above:
-        lb, rb = ("(" if lo_open else "["), (")" if hi_open else "]")
-        raise OverlayError(f"{key} must be in {lb}{lo}, {hi}{rb}, got {v!r}")
-    return f
-
-
-# --- trailing_stop ------------------------------------------------------------------------------
-
-
-def trailing_stop(weights: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
-    """Zero a name whose adj_close sits more than `stop_pct` below its `lookback`-bar rolling high
-    (incl. the current bar), and keep it at zero while that breach fired within the last
-    `cooldown_bars` bars — all read from the view, no position state. A name with fewer than
-    `lookback` bars uses the bars it has; a name absent from `view` passes through unchanged.
-    A short is stopped the same way (weight -> 0, never flipped)."""
-    lookback = int(params["lookback"])
-    stop_pct = float(params["stop_pct"])
-    cooldown = int(params["cooldown_bars"])
-    wide = wide_adj_close(view)
-    present = [s for s in weights.index if s in wide.columns]
-    if not present:
-        return weights
-    px = wide[present]
-    high = px.rolling(lookback, min_periods=1).max()
-    breached = px < (1.0 - stop_pct) * high  # NaN price -> False (no breach on a missing bar)
-    stopped = breached.iloc[-(cooldown + 1):].any(axis=0)
-    out = weights.astype("float64").copy()
-    out[stopped.index[stopped.to_numpy()]] = 0.0
-    return out
-
-
-def _validate_trailing_stop(params: dict[str, Any]) -> None:
-    _exact_keys(params, {"lookback", "stop_pct", "cooldown_bars"})
-    _positive_int(params, "lookback")
-    _float_in(params, "stop_pct", 0.0, 1.0, lo_open=True, hi_open=True)
-    _positive_int(params, "cooldown_bars", minimum=0)
-
-
-def _trailing_stop_lookback(params: dict[str, Any]) -> int:
-    return int(params["lookback"]) + int(params["cooldown_bars"])
-
-
 # --- registry -----------------------------------------------------------------------------------
 
 
@@ -176,7 +122,7 @@ class _Overlay:
 
 _OVERLAYS: dict[str, _Overlay] = {
     "trailing_stop": _Overlay(trailing_stop, _validate_trailing_stop, _trailing_stop_lookback),
-    # "regime_gate" is registered by the regime-gate task.
+    "regime_gate": _Overlay(regime_gate, _validate_regime_gate, _regime_gate_lookback),
 }
 # Read-only public dispatch view (see module docstring: static source is the identity).
 OVERLAY_POLICIES = MappingProxyType(_OVERLAYS)

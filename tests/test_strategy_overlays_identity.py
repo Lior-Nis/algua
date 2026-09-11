@@ -174,4 +174,5 @@ def test_loader_rejects_feature_lookback_below_overlay_window(tmp_strategy):
 def test_closure_includes_overlays_and_regime_modules():
     names = closure_module_names(load_strategy("cross_sectional_momentum"))
     assert "algua.portfolio.overlays" in names
+    assert "algua.portfolio.overlay_policies" in names
     assert "algua.features.regime" in names
