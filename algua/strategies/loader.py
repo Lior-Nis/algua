@@ -16,6 +16,8 @@ from algua.portfolio.construction import (
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
+)
+from algua.strategies.tradable import (
     assert_tradable_without_fundamentals,
     assert_tradable_without_model,
     assert_tradable_without_news,

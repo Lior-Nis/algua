@@ -6,8 +6,8 @@ from algua.backtest._sample import SyntheticProvider
 from algua.contracts.lifecycle import Actor, Stage
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
-from algua.strategies.base import assert_tradable_without_fundamentals
 from algua.strategies.loader import load_strategy
+from algua.strategies.tradable import assert_tradable_without_fundamentals
 
 
 def _repo(tmp_path):
