@@ -82,7 +82,11 @@ def turbulence(view: pd.DataFrame, window: int, *, last: int | None = None) -> p
     symbol enters bar t's vector only if it has a return on t AND on every one of the `window`
     prior bars. NaN until `window` prior returns exist (i.e. the first `window + 1` bars) or when no
     symbol qualifies. `last=k` computes only the final k bars (the rest NaN) — an overlay evaluated
-    per decision bar only needs the tail, and this keeps that O(window) instead of O(history)."""
+    per decision bar only needs the tail, and this keeps that O(window) instead of O(history).
+    NaN also when the trailing covariance is not full rank (e.g. perfectly correlated members, or
+    more qualifying symbols than `window` bars) — a Mahalanobis distance is undefined there and a
+    pseudo-inverse would produce arbitrarily large values; a downstream gate reads NaN as
+    "not stressed"."""
     rets = wide_adj_close(view).pct_change(fill_method=None)
     n = len(rets)
     out = pd.Series(np.nan, index=rets.index, dtype="float64")
@@ -98,5 +102,7 @@ def turbulence(view: pd.DataFrame, window: int, *, last: int | None = None) -> p
         h = hist[:, ok]
         d = values[i, ok] - h.mean(axis=0)
         cov = np.atleast_2d(np.cov(h, rowvar=False))
+        if np.linalg.matrix_rank(cov) < cov.shape[0]:
+            continue
         out.iloc[i] = float(d @ np.linalg.pinv(cov) @ d)
     return out

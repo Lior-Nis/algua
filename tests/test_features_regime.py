@@ -107,3 +107,27 @@ def test_turbulence_excludes_symbols_without_full_window_that_bar():
     partial = pd.concat([view_a_only, view_b_only[view_b_only.index >= view_b_only.index[15]]])
     partial = partial.sort_index()
     assert turbulence(partial, 5).iloc[-1] == pytest.approx(turbulence(view_a_only, 5).iloc[-1])
+
+
+def test_turbulence_nan_on_perfectly_correlated_members():
+    # A, B, C are exact scalar multiples of the same random-walk path -> identical returns every
+    # bar -> a rank-1 (rank-deficient) covariance at every bar -> NaN throughout, never a huge
+    # pinv-amplified value.
+    rng = np.random.default_rng(4)
+    p = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, size=30), axis=0)
+    view = _view({"A": p.tolist(), "B": (2.0 * p).tolist(), "C": (3.0 * p).tolist()})
+    assert turbulence(view, 5).isna().all()
+
+
+def test_turbulence_nan_when_window_shorter_than_symbol_count():
+    # 4 independent symbols but window=3 gives only 3 trailing observations -> covariance rank
+    # <= 2 < 4 symbols -> rank-deficient -> NaN throughout. The SAME data with window=10 (more
+    # observations than symbols) is finite from the first eligible bar on.
+    rng = np.random.default_rng(5)
+    n = 30
+    prices = 100.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, size=(n, 4)), axis=0)
+    view = _view({s: prices[:, i].tolist() for i, s in enumerate(["A", "B", "C", "D"])})
+    assert turbulence(view, 3).isna().all()
+    wide = turbulence(view, 10)
+    assert wide.iloc[:11].isna().all()
+    assert wide.iloc[11:].notna().all()
