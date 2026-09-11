@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 from algua.contracts.model_types import ModelHandle, ModelRef, compute_provenance_digest
 from algua.contracts.types import ExecutionContract
 from algua.portfolio.construction import ConstructFn, apply_capacity_cap
+from algua.portfolio.overlays import OverlayFn, OverlaySpec, apply_overlays
 
 # The AUTHORED signal: a pure module-level `signal(view, params) -> pd.Series` of cross-sectional
 # scores (NOT weights). The protocol-level `Strategy.target_weights(features)` is exposed only by
@@ -48,6 +49,10 @@ class StrategyConfig(BaseModel):
     # algua.portfolio.construction; construction_params are validated per-policy at load.
     construction: str
     construction_params: dict[str, Any] = {}
+    # Ordered, stateless, tighten-only overlays applied AFTER construction and BEFORE the capacity
+    # cap (overlays spec). Each spec is resolved + validated by the loader against
+    # algua.portfolio.overlays; empty = no overlay stage (every pre-existing strategy).
+    overlays: list[OverlaySpec] = []
     # Opt into the as-of fundamentals lane (issue #132). When True the loader binds the 3-arg
     # signal as `fundamentals_signal_fn` and the engine injects the PIT-correct frame per bar.
     needs_fundamentals: bool = False
@@ -117,9 +122,17 @@ class LoadedStrategy:
     # The model artifact bound at load time for a needs_model strategy (issue #376) — fixed for the
     # whole run (PIT-safe), injected as the 3rd arg to `model_signal_fn`.
     model_handle: ModelHandle | None = None
+    # The RESOLVED overlay callables, one per `config.overlays` entry, in order (raw policy fns —
+    # params are read from the spec at call time, so a sweep that rebuilds the config takes effect).
+    overlay_fns: tuple[OverlayFn, ...] = ()
 
     def __post_init__(self) -> None:
         cfg = self.config
+        if len(self.overlay_fns) != len(cfg.overlays):
+            raise ValueError(
+                f"overlay_fns must hold one resolved fn per config overlay: got "
+                f"{len(self.overlay_fns)} fn(s) for {len(cfg.overlays)} overlay(s)"
+            )
         # Three-way (fundamentals / news / model) exclusivity — a strategy uses exactly one PIT
         # sidecar lane, or none.
         exclusive = [
@@ -287,11 +300,13 @@ class LoadedStrategy:
 
     def construct(self, scores: pd.Series, view: pd.DataFrame) -> pd.Series:
         weights = self.construct_fn(scores, view, self.config.construction_params)
+        weights = apply_overlays(weights, view, self.config.overlays, self.overlay_fns)
         # ADV / capacity participation cap (issue #344). Applied HERE — the single chokepoint every
         # path (backtest loop, vectorized fast path + its parity twin, live/paper decide) resolves
         # weights through — so the cap is enforced identically everywhere. `view` is the same PIT
         # frame the signal saw (ends at the fully-closed decision bar t), so the trailing ADV never
-        # sees the fill bar. No-op when no capacity budget is declared.
+        # sees the fill bar. No-op when no capacity budget is declared. The overlay chain runs
+        # BEFORE the cap: the cap is the hardest liquidity wall and must see the final vector.
         capacity = self.config.execution.capacity
         if capacity is not None:
             weights = apply_capacity_cap(weights, view, capacity)
@@ -345,5 +360,9 @@ def config_hash(strategy: LoadedStrategy) -> str:
         assert strategy.config.model_ref is not None
         identity["needs_model"] = True
         identity["model_ref"] = strategy.config.model_ref.as_dict()
+    # Overlays fold in ONLY when declared, so every pre-existing strategy's hash is byte-identical.
+    # Policy ids, params AND order are identity: reordering two overlays is a different strategy.
+    if strategy.config.overlays:
+        identity["overlays"] = [spec.model_dump() for spec in strategy.config.overlays]
     payload = json.dumps(identity, sort_keys=True, allow_nan=False)
     return hashlib.sha256(payload.encode()).hexdigest()[:32]

@@ -239,6 +239,8 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/forward_evidence.py",
         "algua/registry/live_certificate.py",
         "algua/registry/intake.py",
+        "algua/portfolio/construction.py",
+        "algua/portfolio/overlays.py",
     }
 )
 

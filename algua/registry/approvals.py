@@ -13,19 +13,21 @@ from algua.strategies.loader import load_strategy
 
 _FIRST_PARTY_ROOT = "algua"
 _CONSTRUCTION_MODULE = "algua.portfolio.construction"
+_OVERLAYS_MODULE = "algua.portfolio.overlays"
 
 
 def _merged_closure_for(loaded: LoadedStrategy) -> dict[str, str]:
-    """First-party source closure for a strategy's identity: the union of the closure reachable from
-    its authored signal module AND the construction policy module (resolved by NAME, not via the
-    bound callable — getmodule on a partial returns functools). The construction module holds every
-    policy + the dispatch table, so a policy-body edit, a helper edit, or an id retarget invalidates
-    a prior approval."""
+    """First-party source closure for a strategy's identity: the union of the closure reachable
+    from its authored signal module AND the construction policy module AND the overlays module
+    (resolved by NAME, not via the bound callable — getmodule on a partial returns functools). The
+    construction module holds every policy + the dispatch table, so a policy-body edit, a helper
+    edit, or an id retarget invalidates a prior approval."""
     signal_root = inspect.getmodule(loaded.authored_signal)
     construction_root = importlib.import_module(_CONSTRUCTION_MODULE)
     merged: dict[str, str] = {}
     merged.update(_first_party_closure(signal_root))
     merged.update(_first_party_closure(construction_root))
+    merged.update(_first_party_closure(importlib.import_module(_OVERLAYS_MODULE)))
     return merged
 
 
