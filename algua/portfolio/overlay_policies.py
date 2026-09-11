@@ -63,10 +63,20 @@ _REGIME_KEYS = {
     "neutral_exposure", "risk_off_exposure", "fast_exposure",
 }
 
+# One quarter of trading sessions. Bounds how far back the persistence rule may look for a
+# same-state run: `tail` (below) sizes the turbulence/z-score tail to cover this whole horizon, so
+# every leg the horizon can select from is actually defined over it — a run outside it can never
+# be picked, closing the "ffill reaches an arbitrarily distant, differently-legged state" gap.
+REGIME_SEARCH_BARS = 63
+
 
 def regime_gate(weights: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
     """Two-speed exposure multiplier from the strategy's OWN universe (no reference symbols). The
     regime controls the risk budget, not asset selection: every weight is scaled by one factor.
+
+    Precondition: `turb_window` must exceed the number of distinct symbols in `view` so the
+    trailing turbulence covariance can be full rank — a universe at least as wide as `turb_window`
+    raises `OverlayError` rather than silently leaving the volatility leg off.
 
     SLOW gate, per bar: count three stresses on the equal-weight universe index —
       trend       level < its `trend_window`-bar mean
@@ -74,7 +84,7 @@ def regime_gate(weights: pd.Series, view: pd.DataFrame, params: dict[str, Any]) 
       volatility  robust_zscore(turbulence(view, turb_window), z_window) > turb_z
     score 0 -> risk-on (1.0), 1 -> neutral (`neutral_exposure`), >= 2 -> risk-off
     (`risk_off_exposure`). The state IN EFFECT is that of the most recent run of `persistence`
-    consecutive bars sharing one state; none in the view -> risk-on.
+    consecutive bars sharing one state within the last `REGIME_SEARCH_BARS` bars; none -> risk-on.
 
     FAST overlay: if within the last `fast_lookback` bars the index's `shock_window`-bar return
     was below -`shock_return` OR the turbulence robust-z exceeded `fast_turb_z`, `fast_exposure`
@@ -83,20 +93,31 @@ def regime_gate(weights: pd.Series, view: pd.DataFrame, params: dict[str, Any]) 
     Effective multiplier = min(slow, fast). A component without enough history is NOT stressed (a
     gate cannot fire on data it does not have), so on a short view this is a no-op."""
     p = params
+    turb_window = int(p["turb_window"])
+    n_symbols = view["symbol"].nunique()
+    if n_symbols >= turb_window:
+        raise OverlayError(
+            f"regime_gate: turb_window ({turb_window}) must exceed the number of symbols in the "
+            f"view ({n_symbols}) so the turbulence covariance is full rank; widen turb_window or "
+            "narrow the universe"
+        )
     persistence = int(p["persistence"])
     level = equal_weight_index(view)
-    tail = int(p["z_window"]) + persistence + int(p["fast_lookback"]) + 1
-    turb_z = robust_zscore(turbulence(view, int(p["turb_window"]), last=tail), int(p["z_window"]))
+    if level.empty:
+        return weights
+    tail = int(p["z_window"]) + REGIME_SEARCH_BARS
+    turb_z = robust_zscore(turbulence(view, turb_window, last=tail), int(p["z_window"]))
 
     trend = level < level.rolling(int(p["trend_window"]), min_periods=int(p["trend_window"])).mean()
     dd = rolling_drawdown(level, int(p["dd_window"])) < -float(p["dd_threshold"])
     vol = turb_z > float(p["turb_z"])  # NaN -> False
     score = trend.astype(int) + dd.astype(int) + vol.astype(int)
     state = score.clip(upper=2)
-    run_ok = state.rolling(persistence, min_periods=persistence).max() == state.rolling(
+    horizon = state.iloc[-REGIME_SEARCH_BARS:]
+    run_ok = horizon.rolling(persistence, min_periods=persistence).max() == horizon.rolling(
         persistence, min_periods=persistence
     ).min()
-    in_effect = state.where(run_ok).ffill().fillna(0).iloc[-1]
+    in_effect = horizon.where(run_ok).ffill().fillna(0).iloc[-1]
     slow_by_state = {0: 1.0, 1: float(p["neutral_exposure"]), 2: float(p["risk_off_exposure"])}
     slow = slow_by_state[int(in_effect)]
 
@@ -114,6 +135,10 @@ def _validate_regime_gate(params: dict[str, Any]) -> None:
         _positive_int(params, key)
     if params["persistence"] > params["dd_window"]:
         raise OverlayError("persistence must be <= dd_window")
+    if params["persistence"] > REGIME_SEARCH_BARS:
+        raise OverlayError(f"persistence must be <= REGIME_SEARCH_BARS ({REGIME_SEARCH_BARS})")
+    if params["fast_lookback"] > REGIME_SEARCH_BARS:
+        raise OverlayError(f"fast_lookback must be <= REGIME_SEARCH_BARS ({REGIME_SEARCH_BARS})")
     for key in ("dd_threshold", "shock_return"):
         _float_in(params, key, 0.0, 1.0, lo_open=True, hi_open=True)
     for key in ("turb_z", "fast_turb_z"):

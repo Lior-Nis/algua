@@ -222,6 +222,7 @@ def test_trailing_stop_through_apply_overlays_satisfies_invariants():
 
 # --- regime_gate --------------------------------------------------------------------------------
 
+from algua.portfolio import overlay_policies  # noqa: E402
 from algua.portfolio.overlays import regime_gate  # noqa: E402
 
 # Small windows so a 60-bar synthetic path can traverse the states. Vol/turbulence stresses are
@@ -302,6 +303,65 @@ def test_regime_gate_no_op_on_short_history():
     assert out.to_dict() == _W2.to_dict()
 
 
+def test_regime_gate_empty_view_is_a_noop():
+    # An empty view would otherwise hit `.iloc[-1]` on an empty Series and raise IndexError.
+    view = _uni([100.0]).iloc[0:0]
+    out = regime_gate(_W2, view, _RG)
+    assert out.to_dict() == _W2.to_dict()
+
+
+def test_regime_gate_rejects_turb_window_not_exceeding_symbol_count():
+    # _uni() is a 3-symbol universe: turb_window must exceed 3, else the trailing turbulence
+    # covariance can never be full rank (fail closed and LOUD, not a silently-off volatility leg).
+    with pytest.raises(OverlayError, match="turb_window"):
+        regime_gate(_W2, _uni(_up(40)), {**_RG, "turb_window": 3})
+    # 4 > 3 symbols -> a full-rank covariance is possible -> no raise.
+    regime_gate(_W2, _uni(_up(40)), {**_RG, "turb_window": 4})
+
+
+def test_regime_gate_persistence_search_bounded_to_regime_search_bars(monkeypatch):
+    # A hand-computed, deterministic 12-bar level path (all bars flat at level 1.0 except where
+    # noted below; level == price / price[0] since the universe is proportional, see `_uni`):
+    #   idx  0  1  2  3  4  5     6     7      8      9     10     11
+    #   lvl  1  1  1  1  1  1  0.95  0.94  1.00  0.95  1.00  0.95
+    # trend_window=3 (min_periods=3): trend[t] = level[t] < mean(level[t-2:t+1]).
+    #   idx 2..5: flat -> False.  idx 6: 0.95 < mean(1,1,0.95)=0.9833 -> True.
+    #   idx 7: 0.94 < mean(1,0.95,0.94)=0.963 -> True.              (2-bar stress RUN at 6,7)
+    #   idx 8: 1.00 < mean(0.95,0.94,1.00)=0.963 -> False.
+    #   idx 9: 0.95 < mean(0.94,1.00,0.95)=0.963 -> True.
+    #   idx 10: 1.00 < mean(1.00,0.95,1.00)=0.983 -> False.
+    #   idx 11: 0.95 < mean(0.95,1.00,0.95)=0.967 -> True.
+    # -> scores at idx 8,9,10,11 are 0,1,0,1: the last REGIME_SEARCH_BARS=4 bars oscillate, so
+    # persistence=2 is never satisfied inside a 4-bar horizon, while the persistence-2 run at
+    # 6,7 sits just outside it. dd/vol are disabled (absurd threshold / dd_threshold=0.99), so
+    # score == trend alone.
+    levels = [1.0] * 6 + [0.95, 0.94, 1.00, 0.95, 1.00, 0.95]
+    path = [100.0 * lv for lv in levels]
+    view = _uni(path)
+    params = {
+        **_RG, "trend_window": 3, "dd_window": 3, "dd_threshold": 0.99, "z_window": 3,
+        "persistence": 2,
+    }
+    spec = OverlaySpec(policy="regime_gate", params=params)
+    # max(trend 3, dd 3, turb 5 + z 3, shock 3 + fast 1) + persistence 2 = 10, regardless of the
+    # search horizon (the horizon does not change the declared lookback formula).
+    expected_lookback = 10
+
+    # Default REGIME_SEARCH_BARS (63): the 6,7 run is well inside the horizon -> picked up ->
+    # neutral_exposure (0.6) applies.
+    assert overlay_lookback(spec) == expected_lookback
+    out_default = regime_gate(_W2, view, params)
+    assert out_default["A"] == pytest.approx(0.5 * 0.6)
+
+    # Patch the horizon down to 4 bars: now only idx 8..11 (the oscillation) are searched, so no
+    # persistence-2 run is visible -> risk-on (weights untouched) even though a valid run exists
+    # 6 bars back.
+    monkeypatch.setattr(overlay_policies, "REGIME_SEARCH_BARS", 4)
+    assert overlay_lookback(spec) == expected_lookback  # lookback still unaffected
+    out_bounded = regime_gate(_W2, view, params)
+    assert out_bounded.to_dict() == _W2.to_dict()
+
+
 def test_regime_gate_lookback():
     spec = OverlaySpec(policy="regime_gate", params=_RG)
     # max(trend 10, dd 10, turb 5 + z 10, shock 3 + fast 1) + persistence 2 = 17
@@ -317,6 +377,8 @@ def test_regime_gate_lookback():
         ({"turb_z": 0.0}, "turb_z"),
         ({"fast_exposure": 1.5}, "fast_exposure"),
         ({"trend_window": 0}, "trend_window"),
+        ({"persistence": 64, "dd_window": 70}, "REGIME_SEARCH_BARS"),
+        ({"fast_lookback": 64}, "REGIME_SEARCH_BARS"),
     ],
 )
 def test_validate_regime_gate_domains(over, msg):
