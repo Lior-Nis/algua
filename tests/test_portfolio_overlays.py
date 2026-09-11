@@ -1,0 +1,219 @@
+"""The overlay seam: tighten-only invariants, validation, resolution, and trailing_stop."""
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+import pytest
+
+from algua.portfolio.overlays import (
+    OVERLAY_POLICIES,
+    OverlayError,
+    OverlaySpec,
+    apply_overlays,
+    get_overlay_policy,
+    overlay_lookback,
+    resolve_overlays,
+    trailing_stop,
+    validate_overlay_params,
+)
+
+
+def _view(prices: dict[str, list[float]]) -> pd.DataFrame:
+    n = len(next(iter(prices.values())))
+    ts = pd.date_range("2024-01-01", periods=n, freq="B", tz="UTC")
+    rows = []
+    for sym, path in prices.items():
+        for t, px in zip(ts, path, strict=True):
+            rows.append({"timestamp": t, "symbol": sym, "open": px, "high": px, "low": px,
+                         "close": px, "adj_close": px, "volume": 1.0})
+    return pd.DataFrame(rows).set_index("timestamp").sort_index()
+
+
+_W = pd.Series({"A": 0.5, "B": 0.5})
+_V = _view({"A": [1.0, 1.0], "B": [1.0, 1.0]})
+
+
+# --- invariants -------------------------------------------------------------------------------
+
+def _spec(policy: str = "trailing_stop") -> OverlaySpec:
+    return OverlaySpec(policy=policy, params={})
+
+
+def test_apply_overlays_rejects_added_symbol():
+    def adds(w: pd.Series, view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        return pd.concat([w, pd.Series({"C": 0.1})])
+    with pytest.raises(OverlayError, match=r"overlay\[0\] 'trailing_stop' added symbol"):
+        apply_overlays(_W, _V, [_spec()], [adds])
+
+
+def test_apply_overlays_rejects_scale_up():
+    def up(w, view, params):
+        return w * 1.5
+    with pytest.raises(OverlayError, match=r"overlay\[0\].*increased"):
+        apply_overlays(_W, _V, [_spec()], [up])
+
+
+def test_apply_overlays_rejects_sign_flip():
+    def flip(w, view, params):
+        return -w
+    with pytest.raises(OverlayError, match=r"overlay\[0\].*flipped"):
+        apply_overlays(_W, _V, [_spec()], [flip])
+
+
+def test_apply_overlays_rejects_non_finite():
+    def nan(w, view, params):
+        out = w.copy()
+        out["A"] = float("nan")
+        return out
+    with pytest.raises(OverlayError, match=r"overlay\[0\].*non-finite"):
+        apply_overlays(_W, _V, [_spec()], [nan])
+
+
+def test_apply_overlays_names_the_failing_index_in_a_chain():
+    ident = lambda w, view, params: w  # noqa: E731
+    up = lambda w, view, params: w * 2.0  # noqa: E731
+    with pytest.raises(OverlayError, match=r"overlay\[1\]"):
+        apply_overlays(_W, _V, [_spec(), _spec()], [ident, up])
+
+
+def test_apply_overlays_accepts_zeroing_and_dropping():
+    def zero_a_drop_b(w, view, params):
+        return pd.Series({"A": 0.0})
+    out = apply_overlays(_W, _V, [_spec()], [zero_a_drop_b])
+    assert out.to_dict() == {"A": 0.0}
+
+
+def test_apply_overlays_empty_weights_short_circuits():
+    def boom(w, view, params):
+        raise AssertionError("must not be called on empty weights")
+    empty = pd.Series(dtype="float64")
+    assert apply_overlays(empty, _V, [_spec()], [boom]).empty
+
+
+def test_apply_overlays_requires_one_fn_per_spec():
+    with pytest.raises(OverlayError, match="one resolved fn per spec"):
+        apply_overlays(_W, _V, [_spec()], [])
+
+
+# --- registry + validation ---------------------------------------------------------------------
+
+def test_registry_is_read_only_and_lists_trailing_stop():
+    assert "trailing_stop" in OVERLAY_POLICIES
+    with pytest.raises(TypeError):
+        OVERLAY_POLICIES["x"] = None  # type: ignore[index]
+
+
+def test_get_overlay_policy_unknown_id():
+    with pytest.raises(OverlayError, match="unknown overlay policy 'nope'"):
+        get_overlay_policy("nope")
+
+
+@pytest.mark.parametrize(
+    "params, msg",
+    [
+        ({"lookback": 20, "stop_pct": 0.1}, "missing"),
+        ({"lookback": 20, "stop_pct": 0.1, "cooldown_bars": 0, "x": 1}, "unknown"),
+        ({"lookback": 0, "stop_pct": 0.1, "cooldown_bars": 0}, "lookback"),
+        ({"lookback": True, "stop_pct": 0.1, "cooldown_bars": 0}, "lookback"),
+        ({"lookback": 20, "stop_pct": 1.0, "cooldown_bars": 0}, "stop_pct"),
+        ({"lookback": 20, "stop_pct": 0.0, "cooldown_bars": 0}, "stop_pct"),
+        ({"lookback": 20, "stop_pct": float("nan"), "cooldown_bars": 0}, "non-finite"),
+        ({"lookback": 20, "stop_pct": 0.1, "cooldown_bars": -1}, "cooldown_bars"),
+    ],
+)
+def test_validate_trailing_stop_params_fail_closed(params, msg):
+    with pytest.raises(OverlayError, match=msg):
+        validate_overlay_params("trailing_stop", params)
+
+
+def test_validate_trailing_stop_params_ok():
+    validate_overlay_params("trailing_stop", {"lookback": 20, "stop_pct": 0.1, "cooldown_bars": 3})
+
+
+def test_overlay_lookback_trailing_stop():
+    spec = OverlaySpec(
+        policy="trailing_stop", params={"lookback": 20, "stop_pct": 0.1, "cooldown_bars": 3}
+    )
+    assert overlay_lookback(spec) == 23
+
+
+def test_resolve_overlays_binds_fns_and_checks_feature_lookback():
+    spec = OverlaySpec(
+        policy="trailing_stop", params={"lookback": 20, "stop_pct": 0.1, "cooldown_bars": 3}
+    )
+    fns = resolve_overlays([spec], feature_lookback=None)
+    assert fns == (trailing_stop,)
+    assert resolve_overlays([spec], feature_lookback=23) == (trailing_stop,)
+    with pytest.raises(
+        OverlayError, match="feature_lookback 22 is smaller than the longest overlay window 23"
+    ):
+        resolve_overlays([spec], feature_lookback=22)
+    assert resolve_overlays([], feature_lookback=0) == ()
+
+
+def test_resolve_overlays_validates_params():
+    with pytest.raises(OverlayError, match="overlay\\[0\\] 'trailing_stop': missing"):
+        resolve_overlays([OverlaySpec(policy="trailing_stop", params={})], feature_lookback=None)
+
+
+# --- trailing_stop -----------------------------------------------------------------------------
+
+_TS = {"lookback": 5, "stop_pct": 0.10, "cooldown_bars": 2}
+
+
+def test_trailing_stop_zeroes_a_name_below_its_rolling_high():
+    # A: peak 100 then 85 (-15% off the 5-bar high) -> stopped. B flat -> kept.
+    view = _view({"A": [90.0, 100.0, 98.0, 95.0, 85.0], "B": [50.0] * 5})
+    out = trailing_stop(pd.Series({"A": 0.5, "B": 0.5}), view, _TS)
+    assert out.to_dict() == {"A": 0.0, "B": 0.5}
+
+
+def test_trailing_stop_keeps_a_name_within_tolerance():
+    view = _view({"A": [90.0, 100.0, 98.0, 95.0, 92.0]})  # -8% off the high < 10%
+    out = trailing_stop(pd.Series({"A": 1.0}), view, _TS)
+    assert out["A"] == 1.0
+
+
+def test_trailing_stop_cooldown_keeps_it_out_after_recovery():
+    # Breach at bar 4 (85 vs high 100), recovers to 99 by bar 6. cooldown_bars=2 -> bars 5,6 out.
+    path = [90.0, 100.0, 98.0, 95.0, 85.0, 99.0, 99.0]
+    for end, expect in ((5, 0.0), (6, 0.0), (7, 0.0)):
+        view = _view({"A": path[:end]})
+        assert trailing_stop(pd.Series({"A": 1.0}), view, _TS)["A"] == expect
+    # One more bar and the breach (bar 4) is outside the last cooldown_bars+1 bars; the 5-bar
+    # high no longer holds 100 either -> back in.
+    view = _view({"A": path + [99.0]})
+    assert trailing_stop(pd.Series({"A": 1.0}), view, _TS)["A"] == 1.0
+
+
+def test_trailing_stop_cooldown_zero_is_only_the_current_bar():
+    path = [90.0, 100.0, 98.0, 95.0, 85.0, 99.0]
+    params = {**_TS, "cooldown_bars": 0}
+    # bar 5: price 99 vs 5-bar high 100 -> within tolerance -> kept, even though bar 4 breached.
+    assert trailing_stop(pd.Series({"A": 1.0}), _view({"A": path}), params)["A"] == 1.0
+
+
+def test_trailing_stop_short_history_uses_available_bars():
+    view = _view({"A": [100.0, 85.0]})  # only 2 bars, lookback 5 -> high = 100 -> stopped
+    assert trailing_stop(pd.Series({"A": 1.0}), view, _TS)["A"] == 0.0
+
+
+def test_trailing_stop_passes_through_a_symbol_absent_from_view():
+    view = _view({"A": [100.0] * 5})
+    out = trailing_stop(pd.Series({"A": 0.5, "Z": 0.5}), view, _TS)
+    assert out.to_dict() == {"A": 0.5, "Z": 0.5}
+
+
+def test_trailing_stop_preserves_short_sign():
+    view = _view({"A": [90.0, 100.0, 98.0, 95.0, 85.0]})
+    out = trailing_stop(pd.Series({"A": -0.5}), view, _TS)
+    assert out["A"] == 0.0  # a short is stopped the same way (weight -> 0, never flipped)
+
+
+def test_trailing_stop_through_apply_overlays_satisfies_invariants():
+    view = _view({"A": [90.0, 100.0, 98.0, 95.0, 85.0], "B": [50.0] * 5})
+    spec = OverlaySpec(policy="trailing_stop", params=_TS)
+    fns = resolve_overlays([spec], feature_lookback=None)
+    out = apply_overlays(pd.Series({"A": 0.5, "B": 0.5}), view, [spec], fns)
+    assert out.to_dict() == {"A": 0.0, "B": 0.5}
