@@ -52,7 +52,8 @@ from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Any
 
-from algua.backtest.sweep import _RANK_KEYS, parse_grid, validate_sweep_grid
+from algua.backtest.sweep import _RANK_KEYS, validate_sweep_grid
+from algua.backtest.sweep_grid import parse_grid
 from algua.contracts.lifecycle import Actor, Stage, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import assert_gated_costs
