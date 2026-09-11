@@ -213,7 +213,8 @@ for lack of data. A symbol in `weights` but absent from `view` is passed through
 
 ## Example strategy
 
-`algua/strategies/examples/momentum_regime_stop.py`: the existing momentum signal with
+`algua/strategies/momentum/momentum_regime_stop.py` (the `examples/` family was retired in #121;
+bundled examples live beside `cross_sectional_momentum`): the existing momentum signal with
 `top_k_equal_weight`, `overlays=[regime_gate{...}, trailing_stop{...}]`, and a `signal_panel`, so
 the exhaustive parity gate exercises the overlay chain. Marked `GENERATED_BY = "agent"` like the
 other examples; it is a fixture, not a candidate.
@@ -230,7 +231,8 @@ Two touched modules sit exactly on their size pins:
   the `overlay.` namespace in `_override`.
 
 Both moves are separate commits ahead of the feature commits so the diff reviewer sees a move,
-then a change.
+then a change. The ratchet pins are not edited: a pinned module may shrink freely, and neither
+module ends more than the stale-slack below its pin.
 
 ## Non-goals (recorded so they are not re-derived)
 
@@ -273,7 +275,7 @@ New: `algua/portfolio/overlays.py`, `algua/features/regime.py`, `algua/strategie
 
 Modified: `algua/strategies/base.py`, `algua/strategies/loader.py`, `algua/backtest/sweep.py`,
 `algua/registry/approvals.py`, `CODEOWNERS`, `tests/test_repo_hygiene.py`,
-`tests/test_module_size_ratchet.py` (pins for the two carved modules shrink), `docs/architecture.md`
+`docs/architecture.md`
 ("An overlay" under *How to add things*; the walls section notes tighten-only), the
 `author-a-strategy` skill (a section on overlays with the two policies' param tables), and the
 `interpret-results` skill (a note that a regime gate shows up as time-varying gross exposure).
