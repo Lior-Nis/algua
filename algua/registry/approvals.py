@@ -32,10 +32,10 @@ def _merged_closure_for(loaded: LoadedStrategy) -> dict[str, str]:
 
 
 def closure_module_names(loaded: LoadedStrategy) -> frozenset[str]:
-    """The first-party module names in a strategy's identity closure (signal + construction). This
-    is exactly the key set of the source closure ``compute_artifact_hashes`` hashes, so lineage
-    (issue #140) and ``code_hash`` invalidation share ONE definition of a strategy's dependencies
-    at the same module granularity. Adding this consumer does NOT change the hash payload."""
+    """The first-party module names in a strategy's identity closure (signal + construction +
+    overlays). This is exactly the key set of the source closure ``compute_artifact_hashes`` hashes,
+    so lineage (issue #140) and ``code_hash`` invalidation share ONE definition of a strategy's
+    dependencies at the same module granularity. This consumer does NOT change the hash payload."""
     return frozenset(_merged_closure_for(loaded))
 
 

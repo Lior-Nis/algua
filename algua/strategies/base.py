@@ -12,7 +12,7 @@ from pydantic import BaseModel, field_validator
 from algua.contracts.model_types import ModelHandle, ModelRef, compute_provenance_digest
 from algua.contracts.types import ExecutionContract
 from algua.portfolio.construction import ConstructFn, apply_capacity_cap
-from algua.portfolio.overlays import OverlayFn, OverlaySpec, apply_overlays
+from algua.portfolio.overlays import OverlayFn, OverlaySpec, apply_overlays, get_overlay_policy
 
 # The AUTHORED signal: a pure module-level `signal(view, params) -> pd.Series` of cross-sectional
 # scores (NOT weights). The protocol-level `Strategy.target_weights(features)` is exposed only by
@@ -133,6 +133,12 @@ class LoadedStrategy:
                 f"overlay_fns must hold one resolved fn per config overlay: got "
                 f"{len(self.overlay_fns)} fn(s) for {len(cfg.overlays)} overlay(s)"
             )
+        for i, spec in enumerate(cfg.overlays):
+            if self.overlay_fns[i] is not get_overlay_policy(spec.policy):
+                raise ValueError(
+                    f"overlay_fns[{i}] is not the registered policy for {spec.policy!r} — "
+                    f"identity would describe a chain that did not run"
+                )
         # Three-way (fundamentals / news / model) exclusivity — a strategy uses exactly one PIT
         # sidecar lane, or none.
         exclusive = [

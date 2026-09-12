@@ -17,6 +17,13 @@ from algua.strategies.base import LoadedStrategy, StrategyConfig, config_hash
 from algua.strategies.loader import StrategyNotFound, _loaded_for_test, load_strategy
 
 _TS = {"lookback": 5, "stop_pct": 0.10, "cooldown_bars": 2}
+_RG_PARAMS = {
+    "trend_window": 10, "dd_window": 10, "dd_threshold": 0.05,
+    "turb_window": 5, "z_window": 10, "turb_z": 3.0,
+    "persistence": 2,
+    "shock_window": 3, "shock_return": 0.05, "fast_turb_z": 4.0, "fast_lookback": 1,
+    "neutral_exposure": 0.6, "risk_off_exposure": 0.2, "fast_exposure": 0.25,
+}
 
 
 def _cfg(**over: Any) -> StrategyConfig:
@@ -175,4 +182,32 @@ def test_closure_includes_overlays_and_regime_modules():
     names = closure_module_names(load_strategy("cross_sectional_momentum"))
     assert "algua.portfolio.overlays" in names
     assert "algua.portfolio.overlay_policies" in names
+    # Identity-relevant domain logic (the per-policy param domains), and a CODEOWNERS module.
+    assert "algua.portfolio.overlay_validation" in names
     assert "algua.features.regime" in names
+
+
+def test_overlay_fns_must_be_the_registered_policies_for_their_specs():
+    """Pairing by LENGTH alone let identity say one thing and behaviour do another: `config_hash`
+    folds `spec.policy` while `apply_overlays` calls whatever fn it was handed, so a strategy could
+    hash as regime-gated and RUN a trailing stop with nothing red. No production constructor can
+    reach that (all four pass `resolve_overlays` output), but the hole is in the identity
+    surface."""
+    cfg = _cfg(overlays=[OverlaySpec(policy="regime_gate", params=_RG_PARAMS)])
+    with pytest.raises(ValueError, match="not the registered policy"):
+        LoadedStrategy(
+            config=cfg,
+            construct_fn=get_construction_policy("top_k_equal_weight"),
+            signal_fn=lambda view, params: pd.Series(dtype="float64"),
+            overlay_fns=(trailing_stop,),
+        )
+
+
+def test_correctly_paired_overlay_fns_still_construct():
+    strat = LoadedStrategy(
+        config=_cfg(overlays=[OverlaySpec(policy="trailing_stop", params=_TS)]),
+        construct_fn=get_construction_policy("top_k_equal_weight"),
+        signal_fn=lambda view, params: pd.Series(dtype="float64"),
+        overlay_fns=(trailing_stop,),
+    )
+    assert strat.overlay_fns == (trailing_stop,)
