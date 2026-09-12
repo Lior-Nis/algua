@@ -360,14 +360,19 @@ migration — dropping a table is one line, exactly as versions 40 and 41 alread
 
 ### 7.1 Three cuts that need their reasoning stated
 
-**The family mint cap is a live throughput brake, and it is the first thing to remove.**
+**The family mint cap is a latent throughput brake on exactly the diversity the thesis wants.**
 `AGENT_NOVEL_MINT_CAP = 8` per rolling ninety days (`registry/store/family.py:22`, raising at `:379`)
 blocks the ninth novel-family promotion. So the only live effect of about 1,200 lines of clustering,
-code-ancestry analysis and compare-and-swap fingerprinting is **a hard cap on how many genuinely
+code-ancestry analysis and compare-and-swap fingerprinting is **a cap on how many genuinely
 uncorrelated strategies the factory may promote per quarter** — enforcing a breadth tax that is no
-longer levied, since its only consumer is an advisory check. Against PRD §4, which wants "as many
-uncorrelated hypotheses as it can", this is an active anti-goal. It is a one-line change and it
-should ship even if nothing else on this list does.
+longer levied, since its only consumer is an advisory check.
+
+Stated honestly, it did **not** bite during the re-gate described in §9: eleven candidates produced
+only two family mints, because the clustering merged the rest into existing families. That is the
+measured fact, and it cuts both ways. The cap is not currently binding, so removing it is not urgent.
+But it binds precisely when the factory starts doing what PRD §4 asks — testing *uncorrelated*
+hypotheses — so it is a brake that engages exactly when success begins. It is a one-line change and
+it should go out with the rest of the family machinery rather than being treated as an emergency.
 
 **The fundamentals and news seams can never reach the gate that matters.**
 `algua/strategies/tradable.py:15,25` already raises for any `needs_fundamentals` or `needs_news`
@@ -460,8 +465,25 @@ operator commits `approvers/allowed_signers` so merge-back's clean-checkout prec
 exercises the whole `backtested → candidate → paper` path today without waiting on ideation, and
 puts many strategies in the book so their observation clocks run in parallel. Width is the only lever
 that requires no new code, and with the gate's LCB posture unchanged it is also the only way to get
-enough shots at a high realized Sharpe. Expect the family mint cap to bite at the ninth novel family
-— which is the empirical case for cut §7.1.
+enough shots at a high realized Sharpe.
+
+**Run during this review. What it measured, which is worth more than the throughput it bought:**
+
+- **The research gate works, and it discriminates.** Before today it had been asked exactly once.
+  It has now been asked many times and both answers appear — passes, and a discard on
+  `holdout_sharpe_floor` for a strategy whose out-of-sample Sharpe was negative. A gate that only
+  ever says yes is not evidence of a gate.
+- **The single-use holdout wall is real.** A retry against an already-evaluated window was refused
+  with *"holdout already consumed"*. Re-gating is genuinely one shot per strategy per interval, and
+  a failed gate burns the holdout exactly as a passing one does — which is the anti-fishing design
+  working, not a defect.
+- **The family mint cap did not bite, and the reason matters.** Eleven candidates produced only two
+  family mints, because the clustering merged the rest into existing families. See §7.1 — the cap is
+  latent rather than active, and it engages precisely when the factory starts producing the
+  uncorrelated hypotheses PRD §4 asks for.
+- **The paper intake path had never executed in production.** The one strategy at `paper` was placed
+  by a hand `registry transition` on 2026-09-05, not by `paper intake`. The re-gate is the first
+  thing to exercise it.
 
 **Phase 2 — cut weight.** The list in §7, largest and least risky first: family governance, the
 advisory statistics stack, the frozen false-discovery surface, the fundamentals and news seams.
@@ -507,3 +529,16 @@ None are made here; all require the operator's edit.
 4. **§7, division of labour.** The four human steps found inside the funnel were all ops omissions
    rather than sanctioned duties, and three are now cleared. The list did not grow; it is worth
    recording that it was tested and held.
+
+---
+
+## 11. Issues filed from this review
+
+| Issue | What |
+|---|---|
+| #645 (PR) | The vault sync no longer dirties the checkout merge-back requires clean |
+| #646 (PR) | This document |
+| #647 | The paper lane has no whole-account loss breaker; lane parity enumerates instead of derives |
+| #648 | GitHub enforces CODEOWNERS on three paths, not the thirty-four the runtime denylist reads |
+| #649 | Forage supplies ~10 ideas/day against research demand of 36/day; the pool re-starves by construction |
+| #630 (comment) | The intraday step's rationale, and the observation floor and standard-error corrections that must ship with the clock |
