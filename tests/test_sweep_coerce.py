@@ -1,5 +1,5 @@
 """Tests for #48: _coerce_values widens mixed int/float lists to float."""
-from algua.backtest.sweep import _coerce_values
+from algua.backtest.sweep_grid import _coerce_values
 
 
 def test_all_ints_stay_int():

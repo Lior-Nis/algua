@@ -1,8 +1,10 @@
 import pandas as pd
+import pytest
 
 from algua.backtest.sweep import _override
 from algua.contracts.types import ExecutionContract
 from algua.portfolio.construction import top_k_equal_weight
+from algua.portfolio.overlays import OverlaySpec, trailing_stop
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 
 
@@ -81,3 +83,53 @@ def test_override_revalidates_construction_params():
     s = load_strategy("cross_sectional_momentum")
     with pytest.raises(ValueError):
         _override(s, {"construction.top_k": 0})  # fails the policy validator
+
+
+_TS = {"lookback": 5, "stop_pct": 0.10, "cooldown_bars": 2}
+
+
+def _with_overlay():
+    cfg = StrategyConfig(
+        name="m", universe=["AAA"],
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1),
+        params={"lookback": 60}, construction="top_k_equal_weight",
+        construction_params={"top_k": 3},
+        overlays=[OverlaySpec(policy="trailing_stop", params=_TS)],
+    )
+    return LoadedStrategy(
+        config=cfg, signal_fn=lambda v, p: pd.Series(dtype="float64"),
+        construct_fn=top_k_equal_weight, overlay_fns=(trailing_stop,),
+    )
+
+
+def test_override_tunes_overlay_params_and_keeps_fns():
+    base = _with_overlay()
+    out = _override(base, {"overlay.0.stop_pct": 0.2})
+    assert out.config.overlays[0].params == {**_TS, "stop_pct": 0.2}
+    assert out.overlay_fns == (trailing_stop,)
+    assert base.config.overlays[0].params == _TS  # base untouched
+
+
+def test_override_rejects_out_of_range_overlay_index():
+    with pytest.raises(ValueError, match=r"overlay\.1\.stop_pct.*declares 1 overlay"):
+        _override(_with_overlay(), {"overlay.1.stop_pct": 0.2})
+
+
+def test_override_rejects_malformed_overlay_key():
+    with pytest.raises(ValueError, match="expected overlay.<i>.<param>"):
+        _override(_with_overlay(), {"overlay.stop_pct": 0.2})
+
+
+def test_override_rejects_invalid_swept_overlay_param():
+    with pytest.raises(ValueError, match="swept overlay params invalid"):
+        _override(_with_overlay(), {"overlay.0.stop_pct": 1.5})
+
+
+def test_override_rejects_overlay_window_exceeding_declared_lookback():
+    base = _with_overlay()
+    base = LoadedStrategy(
+        config=base.config.model_copy(update={"feature_lookback": 7}),
+        signal_fn=base.signal_fn, construct_fn=base.construct_fn, overlay_fns=base.overlay_fns,
+    )
+    with pytest.raises(ValueError, match="feature_lookback 7 is smaller"):
+        _override(base, {"overlay.0.lookback": 10})

@@ -13,27 +13,29 @@ from algua.strategies.loader import load_strategy
 
 _FIRST_PARTY_ROOT = "algua"
 _CONSTRUCTION_MODULE = "algua.portfolio.construction"
+_OVERLAYS_MODULE = "algua.portfolio.overlays"
 
 
 def _merged_closure_for(loaded: LoadedStrategy) -> dict[str, str]:
-    """First-party source closure for a strategy's identity: the union of the closure reachable from
-    its authored signal module AND the construction policy module (resolved by NAME, not via the
-    bound callable — getmodule on a partial returns functools). The construction module holds every
-    policy + the dispatch table, so a policy-body edit, a helper edit, or an id retarget invalidates
-    a prior approval."""
+    """First-party source closure for a strategy's identity: the union of the closure reachable
+    from its authored signal module AND the construction policy module AND the overlays module
+    (resolved by NAME, not via the bound callable — getmodule on a partial returns functools). The
+    construction module holds every policy + the dispatch table, so a policy-body edit, a helper
+    edit, or an id retarget invalidates a prior approval."""
     signal_root = inspect.getmodule(loaded.authored_signal)
     construction_root = importlib.import_module(_CONSTRUCTION_MODULE)
     merged: dict[str, str] = {}
     merged.update(_first_party_closure(signal_root))
     merged.update(_first_party_closure(construction_root))
+    merged.update(_first_party_closure(importlib.import_module(_OVERLAYS_MODULE)))
     return merged
 
 
 def closure_module_names(loaded: LoadedStrategy) -> frozenset[str]:
-    """The first-party module names in a strategy's identity closure (signal + construction). This
-    is exactly the key set of the source closure ``compute_artifact_hashes`` hashes, so lineage
-    (issue #140) and ``code_hash`` invalidation share ONE definition of a strategy's dependencies
-    at the same module granularity. Adding this consumer does NOT change the hash payload."""
+    """The first-party module names in a strategy's identity closure (signal + construction +
+    overlays). This is exactly the key set of the source closure ``compute_artifact_hashes`` hashes,
+    so lineage (issue #140) and ``code_hash`` invalidation share ONE definition of a strategy's
+    dependencies at the same module granularity. This consumer does NOT change the hash payload."""
     return frozenset(_merged_closure_for(loaded))
 
 

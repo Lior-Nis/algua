@@ -21,40 +21,69 @@ from algua.backtest.errors import BacktestError
 from algua.backtest.walkforward import walk_forward
 from algua.contracts.types import DataProvider, FundamentalsProvider, NewsProvider
 from algua.portfolio.construction import ConstructionError, validate_construction_params
+from algua.portfolio.overlays import OverlayError, resolve_overlays
 from algua.strategies.base import LoadedStrategy
 
 _MAX_COMBOS = 200
 
 _CONSTRUCTION_PREFIX = "construction."
+_OVERLAY_PREFIX = "overlay."
+
+
+def _overlay_key(key: str, n_overlays: int) -> tuple[int, str]:
+    """`overlay.<i>.<param>` -> (i, param); fails closed on shape and on an index the strategy
+    does not declare."""
+    idx_s, sep, param = key[len(_OVERLAY_PREFIX):].partition(".")
+    if not sep or not idx_s.isdigit() or not param:
+        raise ValueError(f"sweep key {key!r}: expected overlay.<i>.<param>")
+    idx = int(idx_s)
+    if idx >= n_overlays:
+        raise ValueError(f"sweep key {key!r}: strategy declares {n_overlays} overlay(s)")
+    return idx, param
 
 
 def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy:
-    """Return a LoadedStrategy whose params/construction_params are the base merged with `combo`.
+    """Return a LoadedStrategy whose params/construction_params/overlay params are the base merged
+    with `combo`.
 
     A grid key prefixed `construction.` tunes `construction_params` (re-validated by the policy);
-    any other key tunes signal `params` and MUST already exist in the base params (so a typo'd key
-    is rejected, never a silent no-op). Preserves the resolved construction policy + signal_panel.
-    Does not mutate the base strategy/config.
+    `overlay.<i>.<key>` tunes `overlays[i].params` (re-validated by that policy, incl. the
+    feature_lookback cover check); any other key tunes signal `params` and MUST already exist in the
+    base params (so a typo'd key is rejected, never a silent no-op). Preserves the resolved
+    construction policy, overlay fns and signal_panel. Does not mutate the base strategy/config.
     """
-    new_params = dict(strategy.config.params)
-    new_cparams = dict(strategy.config.construction_params)
+    cfg = strategy.config
+    new_params = dict(cfg.params)
+    new_cparams = dict(cfg.construction_params)
+    new_oparams = [dict(spec.params) for spec in cfg.overlays]
     for key, value in combo.items():
         if key.startswith(_CONSTRUCTION_PREFIX):
             new_cparams[key[len(_CONSTRUCTION_PREFIX):]] = value
+        elif key.startswith(_OVERLAY_PREFIX):
+            idx, param = _overlay_key(key, len(cfg.overlays))
+            new_oparams[idx][param] = value
         else:
-            if key not in strategy.config.params:
+            if key not in cfg.params:
                 raise ValueError(
                     f"sweep key {key!r} is not a base signal param "
-                    f"{sorted(strategy.config.params)}; prefix with 'construction.' to tune the "
-                    f"construction policy"
+                    f"{sorted(cfg.params)}; prefix with 'construction.' to tune the "
+                    f"construction policy or 'overlay.<i>.' to tune an overlay"
                 )
             new_params[key] = value
     try:
-        validate_construction_params(strategy.config.construction, new_cparams)
+        validate_construction_params(cfg.construction, new_cparams)
     except ConstructionError as exc:
         raise ValueError(f"swept construction_params invalid: {exc}") from exc
-    new_config = strategy.config.model_copy(
-        update={"params": new_params, "construction_params": new_cparams}
+    new_overlays = [
+        spec.model_copy(update={"params": p})
+        for spec, p in zip(cfg.overlays, new_oparams, strict=True)
+    ]
+    try:
+        overlay_fns = resolve_overlays(new_overlays, feature_lookback=cfg.feature_lookback)
+    except OverlayError as exc:
+        raise ValueError(f"swept overlay params invalid: {exc}") from exc
+    new_config = cfg.model_copy(
+        update={"params": new_params, "construction_params": new_cparams, "overlays": new_overlays}
     )
     return LoadedStrategy(
         config=new_config,
@@ -63,6 +92,7 @@ def _override(strategy: LoadedStrategy, combo: dict[str, Any]) -> LoadedStrategy
         signal_panel_fn=strategy.signal_panel_fn,
         fundamentals_signal_fn=strategy.fundamentals_signal_fn,
         news_signal_fn=strategy.news_signal_fn,
+        overlay_fns=overlay_fns,
     )
 
 
@@ -80,57 +110,6 @@ def _combos(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     return [dict(zip(keys, combo, strict=True)) for combo in itertools.product(*value_lists)]
 
 
-def _coerce(value: str) -> Any:
-    """Coerce a grid value string to int, then float, else leave as str.
-
-    Non-finite floats ('inf'/'nan'/'-inf'/'1e400') are rejected here with a clear message
-    rather than coerced and carried downstream, where they only surface as an opaque
-    JSON-serialization failure in config_hash (json.dumps(allow_nan=False)) (#258).
-    """
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    try:
-        f = float(value)
-    except ValueError:
-        return value
-    if not math.isfinite(f):
-        raise ValueError(f"non-finite grid value: {value!r}")
-    return f
-
-
-def _coerce_values(values: list[Any]) -> list[Any]:
-    """Widen a homogeneous-numeric value list to float if any element is float.
-
-    Prevents silent type mixing when a grid mixes e.g. "10,10.5" → [int(10), float(10.5)].
-    Any list that already contains a non-numeric value is returned unchanged.
-    """
-    has_float = any(type(v) is float for v in values)
-    if has_float and all(isinstance(v, (int, float)) for v in values):
-        return [float(v) for v in values]
-    return list(values)
-
-
-def parse_grid(params: list[str]) -> dict[str, list[Any]]:
-    """Parse repeatable `KEY=v1,v2,...` flags into a grid dict. Values coerced int->float->str."""
-    if not params:
-        raise ValueError("provide at least one --param KEY=v1,v2,...")
-    grid: dict[str, list[Any]] = {}
-    for item in params:
-        if "=" not in item:
-            raise ValueError(f"malformed --param {item!r}: expected KEY=v1,v2,...")
-        key, _, raw = item.partition("=")
-        key = key.strip()
-        values = [v.strip() for v in raw.split(",") if v.strip() != ""]
-        if not key or not values:
-            raise ValueError(f"malformed --param {item!r}: empty key or value list")
-        if key in grid:
-            raise ValueError(f"duplicate --param key {key!r}: specify each key only once")
-        grid[key] = _coerce_values([_coerce(v) for v in values])
-    return grid
-
-
 def validate_sweep_grid(
     strategy: LoadedStrategy, grid: dict[str, list[Any]]
 ) -> tuple[list[dict[str, Any]], list[LoadedStrategy]]:
@@ -146,7 +125,7 @@ def validate_sweep_grid(
     and the real run can never drift.
 
     Raises ``BacktestError`` (grid too large) or ``ValueError`` (unknown signal key, invalid
-    construction params) — the same exceptions the sweep engine raises.
+    construction or overlay params) — the same exceptions the sweep engine raises.
     """
     combos = _combos(grid)
     overridden = [_override(strategy, combo) for combo in combos]

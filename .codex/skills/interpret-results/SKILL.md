@@ -58,6 +58,11 @@ in paper. The forward gate, not this one, is the harsh threshold.
   prefer a multi-year `--start/--end`.
 - **The judgment layer.** `kb/principles/research-methodology.md` explains *why* these walls exist,
   the leakage vectors no wall catches, and how to read an in-sample↔holdout gap honestly.
+- **Overlays show up as time-varying gross exposure.** A strategy with a `regime_gate` overlay sits
+  partly in cash through stressed regimes, so `avg_gross_exposure` < 1 and Sharpe is earned on less
+  capital at risk; a `trailing_stop` shows as extra turnover around drawdowns. Compare against the
+  same signal WITHOUT overlays before crediting the overlay — the gate does not treat overlaid
+  strategies differently.
 
 ## Your recommendation
 

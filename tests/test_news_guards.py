@@ -6,9 +6,9 @@ from algua.portfolio.construction import get_construction_policy
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
-    assert_tradable_without_news,
 )
 from algua.strategies.loader import load_strategy
+from algua.strategies.tradable import assert_tradable_without_news
 
 
 def test_helper_allows_plain_strategy():

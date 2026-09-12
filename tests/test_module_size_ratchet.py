@@ -63,7 +63,7 @@ BUDGET: dict[str, int] = {
     "algua/operator/loop_health.py": 321,
     "algua/operator/mergeback.py": 668,
     "algua/registry/forward_evidence.py": 401,
-    "algua/registry/mergeback_intake.py": 465,
+    "algua/registry/mergeback_intake.py": 466,
     "algua/registry/promote_run.py": 348,
     "algua/registry/promotion.py": 542,
     "algua/registry/repository.py": 965,

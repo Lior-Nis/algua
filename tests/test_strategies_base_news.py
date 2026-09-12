@@ -6,9 +6,9 @@ from algua.portfolio.construction import get_construction_policy
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
-    assert_tradable_without_news,
     config_hash,
 )
+from algua.strategies.tradable import assert_tradable_without_news
 
 
 def _cfg(**kw):

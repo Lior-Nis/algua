@@ -132,6 +132,42 @@ the sweep `construction.<key>` namespace see it. A policy receives `(scores, vie
 is the same PIT bar-schema frame the signal saw (passed so a future vol-targeting policy can size
 off prices with no contract change — the starter policies ignore it).
 
+## Overlays (optional): regime gating and stops, after construction
+
+`CONFIG.overlays` is an ordered list of `OverlaySpec(policy=<id>, params={...})` applied INSIDE the
+loader's `construct()` — after the construction policy, before the capacity cap — in the backtest
+loop, the fast path, and both lanes alike. Overlays are **stateless** functions of the PIT `view`
+(no entry price, no position ledger) and **tighten-only**: they may zero, drop or scale down a
+weight, never add a symbol, scale up, or flip a side. Freed weight is cash.
+
+```python
+from algua.portfolio.overlays import OverlaySpec
+
+CONFIG = StrategyConfig(
+    ...,
+    overlays=[
+        OverlaySpec(policy="regime_gate", params={...}),   # book-level exposure multiplier
+        OverlaySpec(policy="trailing_stop", params={"lookback": 60, "stop_pct": 0.15, "cooldown_bars": 5}),
+    ],
+    feature_lookback=252,  # MUST cover the longest overlay window (the loader checks this)
+)
+```
+
+| Policy id | params | What it does |
+|---|---|---|
+| `regime_gate` | `trend_window, dd_window, turb_window, z_window, shock_window, fast_lookback, persistence` (ints ≥1; `persistence <= dd_window`, and BOTH `persistence <= 63` and `fast_lookback <= 63`), `dd_threshold, shock_return` ∈ (0,1), `turb_z, fast_turb_z` > 0, `neutral_exposure, risk_off_exposure, fast_exposure` ∈ [0,1] (`risk_off <= neutral`) | Scales every weight by `min(slow, fast)`. Slow: counts trend / drawdown / turbulence stresses on the equal-weight index of YOUR universe (0 → 1.0, 1 → `neutral_exposure`, ≥2 → `risk_off_exposure`); the state IN EFFECT is the most recent `persistence`-bar same-state run found within the last 63 bars (`REGIME_SEARCH_BARS`) — none found → risk-on. Fast: a `shock_window`-bar index drop past `shock_return` or a turbulence spike within the last `fast_lookback` bars applies `fast_exposure`. Window = `max(trend, dd, turb+z, shock+fast_lookback) + 63` (the declared window covers the WHOLE 63-bar search horizon, so every leg is defined over every bar the search can select). **Precondition**: `turb_window` must exceed the number of distinct symbols in the view, or the trailing turbulence covariance cannot be full rank — `regime_gate` raises `OverlayError` rather than run degraded; size `turb_window` above your universe count. |
+| `trailing_stop` | `lookback` ≥1, `stop_pct` ∈ (0,1), `cooldown_bars` ≥0 | Zeroes a name more than `stop_pct` below its `lookback`-bar rolling high, and keeps it at zero while that breach fired within the last `cooldown_bars`. Window = `lookback + cooldown_bars`. |
+
+Rules: the regime reads only your universe (no SPY/VIX — see `algua/features/regime.py`); a
+component without enough history is not stressed, and `turbulence` itself is NaN — read as "not
+stressed" — whenever the trailing covariance is rank-deficient (perfectly correlated members, or
+more qualifying symbols than the covariance window); a stop never zeroes a name for lack of data.
+Do NOT smuggle regime or stop logic into `signal()` — it pollutes the alpha, escapes the sweep
+namespace, and is invisible to identity. Bespoke overlay = implement the policy, its validator and
+its `lookback(params)` in `algua/portfolio/overlay_policies.py` and register it in `_OVERLAYS` in
+`algua/portfolio/overlays.py` (additions-only, both CODEOWNERS-protected, alongside the shared
+`OverlayError` + param helpers in `algua/portfolio/overlay_validation.py`), never inline math.
+
 ## The bars you receive
 
 `view` is **long-format** (see `docs/contracts/bar-schema.md`): a tz-aware UTC `timestamp` index
@@ -173,6 +209,8 @@ so the next strategy can reuse it.
 **`construction.`** tunes `construction_params` (re-validated by the policy); any other key tunes a
 signal `param` and **must already exist** in the base `params` (a typo'd key is rejected, never a
 silent no-op). So `construction.top_k` sweeps the policy's `top_k`, while `lookback` sweeps the signal.
+A key prefixed **`overlay.<i>.`** tunes `overlays[i].params` (re-validated by that policy, including
+the `feature_lookback` cover check), e.g. `overlay.1.stop_pct=0.1,0.15,0.2`.
 
 ## Optional: `signal_panel` (advanced acceleration hook)
 

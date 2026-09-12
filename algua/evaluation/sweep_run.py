@@ -12,7 +12,8 @@ itself. ``sweep_task`` opens its own registry connection and records tracking ex
 
 from __future__ import annotations
 
-from algua.backtest.sweep import parse_grid, sweep
+from algua.backtest.sweep import sweep
+from algua.backtest.sweep_grid import parse_grid
 from algua.config.settings import get_settings
 from algua.data.serve import StoreBackedFundamentalsProvider, StoreBackedNewsProvider
 from algua.data.store import DataStore

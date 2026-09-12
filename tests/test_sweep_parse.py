@@ -1,6 +1,6 @@
 import pytest
 
-from algua.backtest.sweep import parse_grid
+from algua.backtest.sweep_grid import parse_grid
 
 
 def test_parses_ints_floats_strs():

@@ -57,7 +57,7 @@ JUNK_PATTERNS = [
 
 STRAT_PREFIX = "algua/strategies/"
 # Modules allowed directly at the strategies top level: infrastructure, not strategies.
-INFRA_TOP_LEVEL = frozenset({"__init__.py", "base.py", "loader.py"})
+INFRA_TOP_LEVEL = frozenset({"__init__.py", "base.py", "loader.py", "tradable.py"})
 
 
 def _tracked_files() -> list[str]:
@@ -158,6 +158,7 @@ def test_top_level_underscore_module_is_not_exempt_from_placement() -> None:
     assert _strategy_top_level_offender("_experimental.py")
     assert not _strategy_top_level_offender("base.py")
     assert not _strategy_top_level_offender("loader.py")
+    assert not _strategy_top_level_offender("tradable.py")
     assert not _strategy_top_level_offender("__init__.py")
 
 
@@ -238,6 +239,10 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/forward_evidence.py",
         "algua/registry/live_certificate.py",
         "algua/registry/intake.py",
+        "algua/portfolio/construction.py",
+        "algua/portfolio/overlays.py",
+        "algua/portfolio/overlay_policies.py",
+        "algua/portfolio/overlay_validation.py",
     }
 )
 

@@ -13,9 +13,12 @@ from algua.portfolio.construction import (
     get_construction_policy,
     validate_construction_params,
 )
+from algua.portfolio.overlays import OverlayError, resolve_overlays
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
+)
+from algua.strategies.tradable import (
     assert_tradable_without_fundamentals,
     assert_tradable_without_model,
     assert_tradable_without_news,
@@ -132,7 +135,8 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     try:
         construct_fn = get_construction_policy(config.construction)
         validate_construction_params(config.construction, config.construction_params)
-    except ConstructionError as exc:
+        overlay_fns = resolve_overlays(config.overlays, feature_lookback=config.feature_lookback)
+    except (ConstructionError, OverlayError) as exc:
         raise StrategyNotFound(f"{name}: {exc}") from exc
 
     panel_fn = getattr(module, "signal_panel", None)
@@ -163,6 +167,7 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
             model_signal_fn=module.signal,
             model_handle=handle,
             construct_fn=construct_fn,
+            overlay_fns=overlay_fns,
         )
     if needs_fundamentals:
         if panel_fn is not None:
@@ -176,7 +181,8 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
                 f"got {n_params} params"
             )
         return LoadedStrategy(
-            config=config, fundamentals_signal_fn=module.signal, construct_fn=construct_fn
+            config=config, fundamentals_signal_fn=module.signal, construct_fn=construct_fn,
+            overlay_fns=overlay_fns,
         )
 
     if needs_news:
@@ -191,13 +197,15 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
                 f"got {n_params} params"
             )
         return LoadedStrategy(
-            config=config, news_signal_fn=module.signal, construct_fn=construct_fn
+            config=config, news_signal_fn=module.signal, construct_fn=construct_fn,
+            overlay_fns=overlay_fns,
         )
 
     if n_params != 2:
         raise StrategyNotFound(f"{name}: signal must take (view, params); got {n_params} params")
     return LoadedStrategy(
-        config=config, signal_fn=module.signal, signal_panel_fn=panel_fn, construct_fn=construct_fn
+        config=config, signal_fn=module.signal, signal_panel_fn=panel_fn, construct_fn=construct_fn,
+        overlay_fns=overlay_fns,
     )
 
 
@@ -260,5 +268,6 @@ def _loaded_for_test(config: StrategyConfig) -> LoadedStrategy:
     import pandas as pd
     fn = get_construction_policy(config.construction)
     return LoadedStrategy(
-        config=config, signal_fn=lambda view, params: pd.Series(dtype="float64"), construct_fn=fn
+        config=config, signal_fn=lambda view, params: pd.Series(dtype="float64"), construct_fn=fn,
+        overlay_fns=resolve_overlays(config.overlays, feature_lookback=config.feature_lookback),
     )

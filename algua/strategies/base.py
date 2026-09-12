@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import pandas as pd
@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 from algua.contracts.model_types import ModelHandle, ModelRef, compute_provenance_digest
 from algua.contracts.types import ExecutionContract
 from algua.portfolio.construction import ConstructFn, apply_capacity_cap
+from algua.portfolio.overlays import OverlayFn, OverlaySpec, apply_overlays, get_overlay_policy
 
 # The AUTHORED signal: a pure module-level `signal(view, params) -> pd.Series` of cross-sectional
 # scores (NOT weights). The protocol-level `Strategy.target_weights(features)` is exposed only by
@@ -48,6 +49,10 @@ class StrategyConfig(BaseModel):
     # algua.portfolio.construction; construction_params are validated per-policy at load.
     construction: str
     construction_params: dict[str, Any] = {}
+    # Ordered, stateless, tighten-only overlays applied AFTER construction and BEFORE the capacity
+    # cap (overlays spec). Each spec is resolved + validated by the loader against
+    # algua.portfolio.overlays; empty = no overlay stage (every pre-existing strategy).
+    overlays: list[OverlaySpec] = []
     # Opt into the as-of fundamentals lane (issue #132). When True the loader binds the 3-arg
     # signal as `fundamentals_signal_fn` and the engine injects the PIT-correct frame per bar.
     needs_fundamentals: bool = False
@@ -117,9 +122,23 @@ class LoadedStrategy:
     # The model artifact bound at load time for a needs_model strategy (issue #376) — fixed for the
     # whole run (PIT-safe), injected as the 3rd arg to `model_signal_fn`.
     model_handle: ModelHandle | None = None
+    # The RESOLVED overlay callables, one per `config.overlays` entry, in order (raw policy fns —
+    # params are read from the spec at call time, so a sweep that rebuilds the config takes effect).
+    overlay_fns: tuple[OverlayFn, ...] = ()
 
     def __post_init__(self) -> None:
         cfg = self.config
+        if len(self.overlay_fns) != len(cfg.overlays):
+            raise ValueError(
+                f"overlay_fns must hold one resolved fn per config overlay: got "
+                f"{len(self.overlay_fns)} fn(s) for {len(cfg.overlays)} overlay(s)"
+            )
+        for i, spec in enumerate(cfg.overlays):
+            if self.overlay_fns[i] is not get_overlay_policy(spec.policy):
+                raise ValueError(
+                    f"overlay_fns[{i}] is not the registered policy for {spec.policy!r} — "
+                    f"identity would describe a chain that did not run"
+                )
         # Three-way (fundamentals / news / model) exclusivity — a strategy uses exactly one PIT
         # sidecar lane, or none.
         exclusive = [
@@ -285,13 +304,21 @@ class LoadedStrategy:
             return None
         return self.signal_panel_fn(bars, self.config.params)
 
+    def without_overlays(self) -> LoadedStrategy:
+        """This strategy with the overlay stage removed, in the config AND the resolved fns (so the
+        two stay paired). The #178 exhaustive parity gate compares this twin: overlays would scale
+        both of its sides identically and blunt the disagreement it exists to catch."""
+        return replace(self, config=self.config.model_copy(update={"overlays": []}), overlay_fns=())
+
     def construct(self, scores: pd.Series, view: pd.DataFrame) -> pd.Series:
         weights = self.construct_fn(scores, view, self.config.construction_params)
+        weights = apply_overlays(weights, view, self.config.overlays, self.overlay_fns)
         # ADV / capacity participation cap (issue #344). Applied HERE — the single chokepoint every
         # path (backtest loop, vectorized fast path + its parity twin, live/paper decide) resolves
         # weights through — so the cap is enforced identically everywhere. `view` is the same PIT
         # frame the signal saw (ends at the fully-closed decision bar t), so the trailing ADV never
-        # sees the fill bar. No-op when no capacity budget is declared.
+        # sees the fill bar. No-op when no capacity budget is declared. The overlay chain runs
+        # BEFORE the cap: the cap is the hardest liquidity wall and must see the final vector.
         capacity = self.config.execution.capacity
         if capacity is not None:
             weights = apply_capacity_cap(weights, view, capacity)
@@ -304,37 +331,6 @@ class LoadedStrategy:
         news: pd.DataFrame | None = None,
     ) -> pd.Series:
         return self.construct(self.signal(features, fundamentals, news), features)
-
-
-def assert_tradable_without_fundamentals(strategy: LoadedStrategy) -> None:
-    """Fail closed: a needs_fundamentals strategy must NOT run paper/live yet — the as-of
-    fundamentals lane is wired only into the backtest engine (issue #132). Called at every trading
-    load point so no actor (agent promote OR human raw transition) can run it blind."""
-    if strategy.config.needs_fundamentals:
-        raise ValueError(
-            f"strategy {strategy.name!r} declares needs_fundamentals; paper/live fundamentals "
-            f"wiring is not built yet (#132 follow-up) — refusing to trade it blind"
-        )
-
-
-def assert_tradable_without_news(strategy: LoadedStrategy) -> None:
-    """Fail closed: a needs_news strategy must NOT run paper/live yet — the as-of news lane is
-    wired only into the backtest engine (issue #132). Called at every trading load point."""
-    if strategy.config.needs_news:
-        raise ValueError(
-            f"strategy {strategy.name!r} declares needs_news; paper/live news wiring is not built "
-            f"yet (#132 follow-up) — refusing to trade it blind"
-        )
-
-
-def assert_tradable_without_model(strategy: LoadedStrategy) -> None:
-    """Fail closed: a needs_model strategy must NOT run paper/live yet — the model lane is wired
-    only into the `backtest run` engine (issue #376). Called at every trading load point."""
-    if strategy.config.needs_model:
-        raise ValueError(
-            f"strategy {strategy.name!r} declares needs_model; paper/live model wiring is not "
-            f"built yet (#376 follow-up) — refusing to trade it blind"
-        )
 
 
 def config_hash(strategy: LoadedStrategy) -> str:
@@ -376,5 +372,9 @@ def config_hash(strategy: LoadedStrategy) -> str:
         assert strategy.config.model_ref is not None
         identity["needs_model"] = True
         identity["model_ref"] = strategy.config.model_ref.as_dict()
+    # Overlays fold in ONLY when declared, so every pre-existing strategy's hash is byte-identical.
+    # Policy ids, params AND order are identity: reordering two overlays is a different strategy.
+    if strategy.config.overlays:
+        identity["overlays"] = [spec.model_dump() for spec in strategy.config.overlays]
     payload = json.dumps(identity, sort_keys=True, allow_nan=False)
     return hashlib.sha256(payload.encode()).hexdigest()[:32]

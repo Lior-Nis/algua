@@ -6,9 +6,8 @@ parity guard proves it agrees with the canonical per-bar loop (`_decision_weight
 weakened parity guard silently licenses a wrong fast path, and a wrong fast path means every
 backtest number downstream is wrong. `verify_signal_panel_parity` is the exhaustive (every-bar)
 twin the promotion gate runs; `_assert_parity` is the bounded runtime sample every ordinary
-backtest pays. Moved verbatim out of `algua.backtest.engine` (which stays the CODEOWNERS-protected
-consumer via `_decision_weights_fast_or_loop`); this module is independently CODEOWNERS-protected
-for the same reason (see `INTEGRITY_CRITICAL_MODULES` in `tests/test_repo_hygiene.py`).
+backtest pays. CODEOWNERS-protected for that reason, independently of its `engine.py` consumer
+(`INTEGRITY_CRITICAL_MODULES` in `tests/test_repo_hygiene.py`).
 
 `BacktestError` lives in `algua.backtest.errors` — the lane's error leaf. `adj_grid` lives in
 `algua.backtest.grid` — also a leaf, because `verify_signal_panel_parity` needs it here and
@@ -35,11 +34,11 @@ from algua.contracts.types import DataProvider
 from algua.risk.limits import WEIGHT_TOL, RiskBreach, validate_decision_weights
 from algua.strategies.base import LoadedStrategy
 
-# Fail-closed runtime parity guard: number of post-warmup bars at which the fast path is
-# re-verified against the canonical per-bar definition on every run that uses a signal_panel_fn.
-# Bounded + deterministic (evenly spread across the evaluated span) so the guard costs O(_PARITY_
-# SAMPLE) per-bar evaluations rather than O(n_bars) — preserving the speedup while still catching a
-# panel fn that disagrees with its per-bar twin. Full per-bar parity is asserted in CI (test suite).
+# Fail-closed runtime parity guard: number of post-warmup bars at which the fast path is re-verified
+# against the canonical per-bar definition on every run that uses a signal_panel_fn. Bounded +
+# deterministic (evenly spread across the evaluated span) so the guard costs O(_PARITY_SAMPLE)
+# per-bar evaluations rather than O(n_bars), still catching a panel fn that disagrees with its
+# per-bar twin. Full per-bar parity is asserted in CI (`verify_signal_panel_parity`).
 _PARITY_SAMPLE = 16
 
 
@@ -78,11 +77,10 @@ def _decision_weights(
     """
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
-    # Static operating universe = declared AND available: a declared symbol with no fetched price
-    # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
-    # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
-    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
-    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
+    # Static operating universe = declared AND available: an undeclared column a provider wrongly
+    # returned is rejected, so the validated set is provably a subset of strategy.universe.
+    # Post-#208 this equals set(columns) on the static path (simulate already projected adj) but is
+    # KEPT as defense-in-depth: it still fails closed if this private fn is called with an
     # unprojected adj (e.g. directly from a test).
     static_universe = set(strategy.universe) & set(columns)
 
@@ -137,12 +135,12 @@ def _canonical_row(
     strategy: LoadedStrategy, bars_sorted: pd.DataFrame, stop: int, columns: pd.Index
 ) -> pd.Series:
     """The canonical per-bar weights = construct(signal(view), view) over the expanding history
-    slice ending at (and including) that bar, reindexed onto `columns` and zero-filled. This is the
-    SAME computation the loop performs per bar — INCLUDING the shared risk rails — so the fast-path
-    parity guard compares against the loop's own definition, not a re-derivation. Running the full
-    `validate_decision_weights` here (not just one check) keeps the proxy a FAITHFUL loop-twin with
-    identical check ordering, so e.g. an out-of-universe per-bar weight fails closed instead of
-    being silently reindex-dropped before the comparison."""
+    slice ending at (and including) that bar, reindexed onto `columns` and zero-filled — the SAME
+    computation the loop performs per bar, INCLUDING the shared risk rails, so the parity guard
+    compares against the loop's own definition, not a re-derivation. Running the FULL
+    `validate_decision_weights` (not one check) keeps the proxy a faithful loop-twin with identical
+    check ordering: an out-of-universe per-bar weight fails closed instead of being silently
+    reindex-dropped before the comparison."""
     view = bars_sorted.iloc[:stop]
     w = strategy.target_weights(view)
     if len(w) == 0:
@@ -179,12 +177,8 @@ def _fast_weights(
         )
     columns = adj.columns
     warmup = strategy.execution.warmup_bars
-    # Static operating universe = declared AND available: a declared symbol with no fetched price
-    # column can't be traded here (reindex drops it anyway), and an undeclared column a provider
-    # wrongly returned is rejected — so the validated set is provably a subset of strategy.universe.
-    # Post-#208 this equals set(columns) on the static path (simulate already projected adj), but it
-    # is KEPT as defense-in-depth: it still fails closed if this private fn is ever called with an
-    # unprojected adj (e.g. directly from a test).
+    # Static operating universe = declared AND available; see `_decision_weights` for why this is
+    # kept as defense-in-depth even though #208 makes it equal set(columns) on the static path.
     static_universe = set(strategy.universe) & set(columns)
     # Reindex the SCORES onto the simulation grid WITHOUT filling NaN (missing score != 0 score).
     scores = panel.reindex(index=adj.index, columns=columns)
@@ -253,7 +247,8 @@ def _assert_parity(
     tolerance `WEIGHT_TOL` (rtol=0). A discontinuous policy near-tie that a signal-level check could
     miss is caught here because we compare final WEIGHTS. Any mismatch RAISES `BacktestError` naming
     the disagreement — the fast path is never trusted without this check, and never silently falls
-    back."""
+    back. NOTE: these are POST-overlay weights, so on an overlaid bar a disagreement is attenuated
+    by the chain; the unattenuated check is `verify_signal_panel_parity`'s stripped twin."""
     columns = weights.columns
     n = len(weights.index)
     for i in _parity_sample_positions(warmup, n):
@@ -326,9 +321,14 @@ def verify_signal_panel_parity(
     agent promote backtest runs under PIT (which forces the loop and never exercises the panel) or,
     if `--universe` is omitted, may run the fast path; either way the panel must be checked here
     directly, where the fast path is the thing under test. No-op when `signal_panel_fn is None`.
-    Raises `BacktestError` naming the first divergent bar + offending symbol(s)."""
+    Raises `BacktestError` naming the first divergent bar + offending symbol(s). With overlays
+    inside `construct()` both sides would be scaled by the same multiplier and the same names
+    zeroed by a stop, attenuating a disagreement (erasing it where the multiplier is 0.0), so the
+    gate compares the OVERLAY-STRIPPED twin: the property under test is `signal_panel == signal`
+    through construction, and overlays apply deterministically to both paths afterwards."""
     if strategy.signal_panel_fn is None:
         return  # nothing to verify
+    bare = strategy.without_overlays()  # see the docstring — the gate's comparison subject
 
     try:
         bars = provider.get_bars(strategy.universe, start, end, "1d")
@@ -348,9 +348,9 @@ def verify_signal_panel_parity(
         # absorbs the empty-universe fail-closed guard.
         bars, adj = _static_operating_view(strategy, bars, adj)
 
-        fast = _fast_weights(strategy, bars, adj)
+        fast = _fast_weights(bare, bars, adj)
         # static: universe_by_date=None, fundamentals=None
-        loop = _decision_weights(strategy, bars, adj)
+        loop = _decision_weights(bare, bars, adj)
 
         # Identical grid by construction (both built on adj.index/columns); assert before comparing.
         if not (fast.index.equals(loop.index) and fast.columns.equals(loop.columns)):

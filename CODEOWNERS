@@ -43,3 +43,7 @@
 /algua/backtest/walkforward.py         @Lior-Nis   # holdout_window: the #192 single-use-holdout identity source (was engine.py, stage 7)
 /.github/                              @Lior-Nis   # CI/CD workflows — the agent must not silently weaken the opencode trigger/secret gate (#456)
 /CODEOWNERS                            @Lior-Nis   # self-protection: the guard cannot rewrite its own owners
+/algua/portfolio/overlays.py           @Lior-Nis   # tighten-only overlay stage: invariants + policies, hashed into strategy identity
+/algua/portfolio/overlay_policies.py   @Lior-Nis   # bundled overlay policies (trailing_stop, regime_gate), carved out of overlays.py; hashed into strategy identity
+/algua/portfolio/overlay_validation.py @Lior-Nis   # shared OverlayError + param-domain helpers, carved out of overlays.py; hashed into strategy identity
+/algua/portfolio/construction.py       @Lior-Nis   # construction policies hashed into strategy identity (#141); was unprotected until the overlays PR
