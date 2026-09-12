@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -27,6 +28,8 @@ from algua.backtest.decision_path import (
 from algua.backtest.engine import simulate
 from algua.backtest.errors import BacktestError
 from algua.contracts.types import ExecutionContract
+from algua.portfolio.construction import score_proportional_long
+from algua.portfolio.overlays import OverlaySpec, trailing_stop
 from algua.risk.limits import WEIGHT_TOL, RiskBreach
 from algua.strategies.base import LoadedStrategy, StrategyConfig
 from algua.strategies.loader import load_strategy
@@ -623,3 +626,74 @@ def test_canonical_row_rejects_per_bar_signal_out_of_universe() -> None:
         _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
     # `_assert_parity` re-wraps with ` at {t}` but chains from the underlying RiskBreach directly.
     assert _riskbreach_kind(ei.value) == "out_of_universe"
+
+
+# --- 8. the exhaustive gate compares the OVERLAY-STRIPPED twin --------------------------------
+
+
+class _DecayProvider:
+    """Strictly DECREASING adj_close on every bar for every symbol, so a trailing stop with a
+    hair-thin `stop_pct` fires on every name on every evaluated bar."""
+
+    reproducible = True
+
+    def get_bars(
+        self, symbols: list[str], start: datetime, end: datetime, timeframe: str
+    ) -> pd.DataFrame:
+        sessions = SyntheticProvider(seed=0).get_bars(symbols, start, end, timeframe).index.unique()
+        frames = []
+        for i, sym in enumerate(sorted(symbols)):
+            px = 100.0 * (1.0 + i) * (0.99 ** np.arange(len(sessions)))
+            frames.append(pd.DataFrame({
+                "timestamp": sessions, "symbol": sym, "open": px, "high": px, "low": px,
+                "close": px, "adj_close": px, "volume": 1_000_000.0,
+            }))
+        out = pd.concat(frames).set_index("timestamp").sort_values(["timestamp", "symbol"])
+        return out[["symbol", "open", "high", "low", "close", "adj_close", "volume"]]
+
+
+def _overlaid_strategy(*, disagree: bool) -> LoadedStrategy:
+    """`signal` = last adj_close per symbol; `signal_panel` = the same matrix + 100.0 when
+    `disagree` (different PROPORTIONS, which `score_proportional_long` is sensitive to). The
+    trailing stop zeroes every name on every bar under `_DecayProvider`, so POST-overlay both
+    sides are all-zero and the disagreement is invisible unless the gate strips the overlays."""
+    def signal(view: pd.DataFrame, params: dict[str, Any]) -> pd.Series:
+        return view.reset_index().pivot(
+            index="timestamp", columns="symbol", values="adj_close"
+        ).sort_index().iloc[-1]
+
+    def signal_panel(bars: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+        wide = bars.reset_index().pivot(
+            index="timestamp", columns="symbol", values="adj_close"
+        ).sort_index()
+        return wide + 100.0 if disagree else wide
+
+    cfg = StrategyConfig(
+        name="overlaid_panel", universe=["AAA", "BBB"],
+        # warmup_bars=1: on the very first bar the rolling high IS the current price, so nothing is
+        # stopped there and the disagreement would survive the overlay by accident.
+        execution=ExecutionContract(rebalance_frequency="1d", decision_lag_bars=1, warmup_bars=1),
+        params={}, construction="score_proportional_long",
+        overlays=[OverlaySpec(
+            policy="trailing_stop",
+            params={"lookback": 2, "stop_pct": 1e-6, "cooldown_bars": 0},
+        )],
+        feature_lookback=2,
+    )
+    return LoadedStrategy(
+        config=cfg, signal_fn=signal, signal_panel_fn=signal_panel,
+        construct_fn=score_proportional_long, overlay_fns=(trailing_stop,),
+    )
+
+
+def test_exhaustive_parity_gate_catches_a_disagreement_the_overlays_would_erase() -> None:
+    # Before the overlay-stripped twin, this gate passed VACUOUSLY here: the stop zeroed every
+    # name on both sides, so `loop - fast` was identically 0 however wrong the panel was.
+    with pytest.raises(BacktestError, match="parity"):
+        verify_signal_panel_parity(
+            _overlaid_strategy(disagree=True), _DecayProvider(), START, END
+        )
+
+
+def test_exhaustive_parity_gate_passes_for_an_overlaid_strategy_with_an_agreeing_panel() -> None:
+    verify_signal_panel_parity(_overlaid_strategy(disagree=False), _DecayProvider(), START, END)

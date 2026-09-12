@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import pandas as pd
@@ -297,6 +297,12 @@ class LoadedStrategy:
         if self.signal_panel_fn is None:
             return None
         return self.signal_panel_fn(bars, self.config.params)
+
+    def without_overlays(self) -> LoadedStrategy:
+        """This strategy with the overlay stage removed, in the config AND the resolved fns (so the
+        two stay paired). The #178 exhaustive parity gate compares this twin: overlays would scale
+        both of its sides identically and blunt the disagreement it exists to catch."""
+        return replace(self, config=self.config.model_copy(update={"overlays": []}), overlay_fns=())
 
     def construct(self, scores: pd.Series, view: pd.DataFrame) -> pd.Series:
         weights = self.construct_fn(scores, view, self.config.construction_params)
