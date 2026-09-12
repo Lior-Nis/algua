@@ -23,6 +23,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.gating import load_gated_strategy
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
+from tests._session_ts import fresh_decision_ts
 
 runner = CliRunner()
 
@@ -43,10 +44,15 @@ def _register(conn, name, stage=Stage.PAPER):
     return repo.get(name)
 
 
-def _tick(conn, rec, *, tick_ts, equity=100_000.0, peak=100_000.0, reconcile_ok=True):
+def _tick(conn, rec, *, tick_ts, equity=100_000.0, peak=100_000.0, reconcile_ok=True,
+          decision_ts=None):
+    # decision_ts is a DAILY BAR timestamp (session date at UTC midnight), not the tick instant:
+    # derive the freshest closed session as of tick_ts unless a caller pins one (#632).
+    if decision_ts is None:
+        decision_ts = fresh_decision_ts(datetime.fromisoformat(tick_ts))
     update_peak_equity(conn, rec.name, peak)
     record_tick_snapshot(
-        conn, rec.name, tick_ts=tick_ts, decision_ts=tick_ts, equity=equity, peak_equity=peak,
+        conn, rec.name, tick_ts=tick_ts, decision_ts=decision_ts, equity=equity, peak_equity=peak,
         positions={}, n_submitted=0, reconcile_ok=reconcile_ok, lane="paper", strategy_id=rec.id,
         code_hash="c", config_hash="cfg", dependency_hash="d", account_id="acct", cash=equity,
         clock_source="broker")
