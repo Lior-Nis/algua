@@ -86,7 +86,8 @@ def turbulence(view: pd.DataFrame, window: int, *, last: int | None = None) -> p
     NaN also when the trailing covariance is not full rank (e.g. perfectly correlated members, or
     more qualifying symbols than `window` bars) — a Mahalanobis distance is undefined there and a
     pseudo-inverse would produce arbitrarily large values; a downstream gate reads NaN as
-    "not stressed"."""
+    "not stressed". The rank test and the inverse come from ONE symmetric eigendecomposition of the
+    trailing covariance (`d' cov^-1 d = sum_j (v_j.d)^2 / lambda_j`), not two separate SVDs."""
     rets = wide_adj_close(view).pct_change(fill_method=None)
     n = len(rets)
     out = pd.Series(np.nan, index=rets.index, dtype="float64")
@@ -102,7 +103,10 @@ def turbulence(view: pd.DataFrame, window: int, *, last: int | None = None) -> p
         h = hist[:, ok]
         d = values[i, ok] - h.mean(axis=0)
         cov = np.atleast_2d(np.cov(h, rowvar=False))
-        if np.linalg.matrix_rank(cov) < cov.shape[0]:
-            continue
-        out.iloc[i] = float(d @ np.linalg.pinv(cov) @ d)
+        w_eig, v_eig = np.linalg.eigh(cov)
+        tol = w_eig.max() * cov.shape[0] * np.finfo(float).eps  # numpy's matrix_rank default
+        if not (w_eig > tol).all():
+            continue  # rank-deficient: undefined, leave NaN
+        proj = v_eig.T @ d
+        out.iloc[i] = float(np.sum(proj * proj / w_eig))
     return out

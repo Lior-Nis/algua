@@ -131,3 +131,28 @@ def test_turbulence_nan_when_window_shorter_than_symbol_count():
     wide = turbulence(view, 10)
     assert wide.iloc[:11].isna().all()
     assert wide.iloc[11:].notna().all()
+
+
+def test_turbulence_matches_the_explicit_mahalanobis_form_on_a_full_rank_case():
+    """The single `eigh` (rank test + inverse in one decomposition) must reproduce the textbook
+    `d' pinv(cov) d` it replaced, bit-for-bit within float tolerance."""
+    rng = np.random.default_rng(5)
+    window = 20
+    paths = {s: list(100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.01, 60)))) for s in "ABC"}
+    view = _view(paths)
+    got = turbulence(view, window)
+
+    rets = wide_adj_close(view).pct_change(fill_method=None)
+    values = rets.to_numpy(dtype="float64")
+    checked = 0
+    for i in range(window + 1, len(values)):
+        hist = values[i - window : i]
+        ok = np.isfinite(hist).all(axis=0) & np.isfinite(values[i])
+        h = hist[:, ok]
+        d = values[i, ok] - h.mean(axis=0)
+        cov = np.atleast_2d(np.cov(h, rowvar=False))
+        assert np.linalg.matrix_rank(cov) == cov.shape[0]  # the case under test is full rank
+        expected = float(d @ np.linalg.pinv(cov) @ d)
+        assert got.iloc[i] == pytest.approx(expected, abs=1e-9, rel=1e-9)
+        checked += 1
+    assert checked >= 30

@@ -16,6 +16,18 @@ from algua.features.regime import (
 )
 from algua.portfolio.overlay_validation import OverlayError, _exact_keys, _float_in, _positive_int
 
+
+def _trailing_bars(view: pd.DataFrame, n: int) -> pd.DataFrame:
+    """The last `n` distinct timestamps of a long bar-schema view (all rows on those bars). A
+    policy reads only its own declared window; slicing before the pivot keeps each call
+    O(window x symbols) instead of O(history x symbols), and makes the backtest (full expanding
+    view) and the lane (feature_lookback-sized view) feed the policy byte-identical inputs."""
+    stamps = view.index.unique().sort_values()
+    if len(stamps) <= n:
+        return view
+    return view[view.index >= stamps[-n]]
+
+
 # --- trailing_stop ------------------------------------------------------------------------------
 
 
@@ -28,6 +40,7 @@ def trailing_stop(weights: pd.Series, view: pd.DataFrame, params: dict[str, Any]
     lookback = int(params["lookback"])
     stop_pct = float(params["stop_pct"])
     cooldown = int(params["cooldown_bars"])
+    view = _trailing_bars(view, _trailing_stop_lookback(params))
     wide = wide_adj_close(view)
     present = [s for s in weights.index if s in wide.columns]
     if not present:
@@ -101,6 +114,11 @@ def regime_gate(weights: pd.Series, view: pd.DataFrame, params: dict[str, Any]) 
             f"view ({n_symbols}) so the turbulence covariance is full rank; widen turb_window or "
             "narrow the universe"
         )
+    # Slice AFTER the symbol-count precondition (which judges the universe as a WHOLE, so a
+    # churned universe cannot slip past it) and before any pivot. Every leg is a ratio or a
+    # return — trend (level / rolling mean), drawdown, pct_change shock, turbulence on returns —
+    # so re-basing `equal_weight_index` to 1.0 at the slice start leaves all of them unchanged.
+    view = _trailing_bars(view, _regime_gate_lookback(params))
     persistence = int(p["persistence"])
     level = equal_weight_index(view)
     if level.empty:

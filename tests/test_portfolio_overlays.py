@@ -390,3 +390,63 @@ def test_validate_regime_gate_domains(over, msg):
 
 def test_validate_regime_gate_ok():
     validate_overlay_params("regime_gate", _RG)
+
+
+# --- view slicing (each policy reads only its own declared window) ------------------------------
+
+def _rand_uni(n: int = 300, seed: int = 11) -> pd.DataFrame:
+    """Three seeded random-walk symbols at different price levels (so the pivot is not degenerate
+    and the trend/drawdown legs actually fire somewhere along the path)."""
+    rng = np.random.default_rng(seed)
+    return _view({
+        sym: list(base * np.exp(np.cumsum(rng.normal(0.0, 0.02, n))))
+        for sym, base in (("A", 100.0), ("B", 250.0), ("C", 40.0))
+    })
+
+
+def _stamps(view: pd.DataFrame) -> pd.Index:
+    return view.index.unique().sort_values()
+
+
+def _head(view: pd.DataFrame, end: int) -> pd.DataFrame:
+    """The first `end` bars — the expanding slice the backtest loop would hand a policy."""
+    return view[view.index <= _stamps(view)[end - 1]]
+
+
+def _tail(view: pd.DataFrame, n: int) -> pd.DataFrame:
+    """The last `n` bars — the feature_lookback-sized window the LANE hands the same policy."""
+    return view[view.index >= _stamps(view)[-n]]
+
+
+# `_TS`'s 10% stop is too wide to fire on this 2%-vol path; tighten it so the case is not vacuous.
+_TS_TIGHT = {**_TS, "stop_pct": 0.02}
+
+
+@pytest.mark.parametrize("policy, p", [("regime_gate", _RG), ("trailing_stop", _TS_TIGHT)])
+def test_policy_is_invariant_to_slicing_the_view_to_its_declared_window(monkeypatch, policy, p):
+    """A policy reads only its own declared window, so the lane's `feature_lookback`-sized view and
+    the backtest's full expanding view must produce the SAME weights on the same decision bar. Two
+    equalities, on five different end bars: (a) the slice `regime_gate`/`trailing_stop` now takes
+    internally == the same call on a pre-truncated view; (b) both == the PRE-SLICE result computed
+    on the whole history (for `regime_gate` every leg is a ratio or a return, so re-basing
+    `equal_weight_index` to 1.0 at the slice start changes nothing)."""
+    fn = get_overlay_policy(policy)
+    lookback = overlay_lookback(OverlaySpec(policy=policy, params=p))
+    full = _rand_uni()
+    weights = pd.Series({"A": 0.5, "B": 0.3, "C": 0.2})
+
+    non_trivial = 0
+    for end in (120, 170, 220, 260, 300):
+        view = _head(full, end)
+        sliced = fn(weights, view, p)
+        assert sliced.to_dict() == pytest.approx(
+            fn(weights, _tail(view, lookback), p).to_dict(), abs=1e-12
+        )
+        with monkeypatch.context() as m:
+            m.setattr(overlay_policies, "_trailing_bars", lambda view, n: view)
+            unsliced = fn(weights, view, p)
+        assert sliced.to_dict() == pytest.approx(unsliced.to_dict(), abs=1e-12)
+        if sliced.to_dict() != weights.to_dict():
+            non_trivial += 1
+    # Not vacuous: the policy actually tightened something on at least one of those bars.
+    assert non_trivial >= 1
