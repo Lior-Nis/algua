@@ -31,6 +31,15 @@ kb/experience/
 # at deploy/kb/inspirations/_sources.yaml, which the installer and forage.sh copy in when
 # the vault has no registry yet — never over an existing one.
 kb/inspirations/
+# The strategy vault is RUNTIME data too: the four gate commands sync a doc per strategy
+# (knowledge/sync.py:85 -> knowledge_dir/"strategies") as a best-effort out-of-tx side effect.
+# Tracking it made every successful gate run dirty the checkout, which merge-back then refused
+# (operator/mergeback.py:200 requires `git status --porcelain` empty) -- a self-inflicted
+# deadlock: the factory blocked itself the moment it succeeded (#636).
+kb/strategies/
+# Obsidian per-user session state (pane layout, open tabs). The rest of kb/.obsidian/
+# (app/appearance/core-plugins/graph) is shared vault config and STAYS tracked.
+kb/.obsidian/workspace.json
 kb/**/.sync.lock
 *.sync.lock
 .DS_Store
