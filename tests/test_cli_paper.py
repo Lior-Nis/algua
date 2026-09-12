@@ -817,6 +817,7 @@ def _seed_snapshot(name, *, equity, peak, reconcile_ok=True, positions=None):
     from algua.execution.order_state import record_tick_snapshot, update_peak_equity
     from algua.registry.db import connect, migrate
     from algua.registry.store import SqliteStrategyRepository
+    from tests._session_ts import fresh_decision_ts
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         update_peak_equity(conn, name, peak)
@@ -825,8 +826,10 @@ def _seed_snapshot(name, *, equity, peak, reconcile_ok=True, positions=None):
         # as current — the health verdict under test is then driven by reconcile_ok/kill-switch,
         # not by accidental staleness of a hardcoded past date.
         now = datetime.now(UTC).isoformat()
+        # decision_ts is the decided daily BAR's timestamp (session date at UTC midnight), not
+        # the tick instant — a wall-clock decision_ts reads future-dated before the open (#632).
         record_tick_snapshot(conn, name, tick_ts=now,
-                             decision_ts=now, equity=equity,
+                             decision_ts=fresh_decision_ts(), equity=equity,
                              peak_equity=peak, positions=positions or {}, n_submitted=0,
                              reconcile_ok=reconcile_ok, lane="paper", strategy_id=rec.id,
                              code_hash="c", config_hash="g", dependency_hash=None,
