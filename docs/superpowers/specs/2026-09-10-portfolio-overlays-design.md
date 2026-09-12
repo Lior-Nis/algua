@@ -193,7 +193,8 @@ sensible set):
 | `neutral_exposure`, `risk_off_exposure`, `fast_exposure` | float in `[0, 1]`, with `risk_off_exposure <= neutral_exposure` |
 
 `overlay_lookback` = `max(trend_window, dd_window, turb_window + z_window, shock_window +
-fast_lookback) + persistence`.
+fast_lookback) + REGIME_SEARCH_BARS` (was `+ persistence` as first designed; see deviation 4 below —
+the declared window must cover the bounded persistence search).
 
 ### `trailing_stop` (the risk-overlay tenant)
 
@@ -216,7 +217,8 @@ for lack of data. A symbol in `weights` but absent from `view` is passed through
 `algua/strategies/momentum/momentum_regime_stop.py` (the `examples/` family was retired in #121;
 bundled examples live beside `cross_sectional_momentum`): the existing momentum signal with
 `top_k_equal_weight`, `overlays=[regime_gate{...}, trailing_stop{...}]`, and a `signal_panel`, so
-the exhaustive parity gate exercises the overlay chain. Marked `GENERATED_BY = "human"` like
+the fast path runs the overlay chain per row (the exhaustive parity gate itself compares the
+overlay-stripped twin; see deviation 5). Marked `GENERATED_BY = "human"` like
 `cross_sectional_momentum`, the sibling bundled example (hand-authored, not agent-generated); it is
 a fixture, not a candidate.
 
@@ -308,6 +310,19 @@ Modified: `algua/strategies/base.py`, `algua/strategies/loader.py`, `algua/backt
   `feature_lookback`-sized view must define every leg across ALL of it, or the lane and the
   backtest (which sees the full expanding history) can select different states on the same bar —
   and the walk-forward embargo, sized from `feature_lookback`, would be under-sized.
+- **The exhaustive `signal_panel` parity gate compares the overlay-stripped twin.** With overlays
+  inside `construct()`, both sides of the gate would be scaled by the same regime multiplier and
+  the same names zeroed by a stop, so a `signal_panel` disagreement would be attenuated — or erased
+  outright on a bar whose multiplier is 0.0. `verify_signal_panel_parity` therefore runs both paths
+  on `LoadedStrategy.without_overlays()`: the property under test is `signal_panel ≡ signal`
+  through construction, and overlays are a deterministic function of the view applied identically
+  afterwards. The bounded runtime sample (`_assert_parity`) still compares post-overlay weights and
+  is attenuated by design.
+- **Policies read a sliced view, and the spec-fn pairing is checked by identity.** Each policy
+  slices the view to its own declared window before pivoting (`_trailing_bars`), which keeps a call
+  O(window × symbols) and makes the backtest's expanding view and the lane's `feature_lookback`
+  view feed byte-identical inputs. `LoadedStrategy.__post_init__` also asserts `overlay_fns[i] is
+  get_overlay_policy(spec.policy)`, so identity can never describe a chain that did not run.
 
 ## Rollout order
 

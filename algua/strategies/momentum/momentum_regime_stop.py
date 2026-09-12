@@ -4,7 +4,9 @@ Same alpha as `cross_sectional_momentum` (trailing return, top-k equal weight); 
 the `overlays` chain: `regime_gate` scales the whole book by a universe-derived regime multiplier,
 then `trailing_stop` zeroes any name more than 15% off its 60-bar high (with a 5-bar cooldown).
 Both are stateless functions of the PIT view, enforced tighten-only inside construct(). It also
-exposes `signal_panel`, so the exhaustive parity gate exercises the overlay chain on every bar."""
+exposes `signal_panel`, so the fast path applies the overlay chain per row; the exhaustive parity
+gate compares the overlay-stripped twin (overlays are the same deterministic function on both
+sides, so stripping them keeps the gate unattenuated)."""
 from __future__ import annotations
 
 from typing import Any
