@@ -467,7 +467,14 @@ puts many strategies in the book so their observation clocks run in parallel. Wi
 that requires no new code, and with the gate's LCB posture unchanged it is also the only way to get
 enough shots at a high realized Sharpe.
 
-**Run during this review. What it measured, which is worth more than the throughput it bought:**
+**Run during this review.** Two passes over the orphaned modules, using each module's own CONFIG to
+pick the swept parameter. Result: **17 strategies passed the research gate and were admitted to the
+paper book** at an equal slice of $4,190.79 each, taking the lane from one tenant to eighteen. Three
+were discarded on `holdout_sharpe_floor` — a negative out-of-sample Sharpe. Two machine-learned
+modules were not gated, having no integer parameter to sweep, and the news and fundamentals
+strategies were excluded because `strategies/tradable.py:15,25` refuses them entry to paper anyway.
+
+**What it measured, which is worth more than the throughput it bought:**
 
 - **The research gate works, and it discriminates.** Before today it had been asked exactly once.
   It has now been asked many times and both answers appear — passes, and a discard on
@@ -481,9 +488,21 @@ enough shots at a high realized Sharpe.
   family mints, because the clustering merged the rest into existing families. See §7.1 — the cap is
   latent rather than active, and it engages precisely when the factory starts producing the
   uncorrelated hypotheses PRD §4 asks for.
-- **The paper intake path had never executed in production.** The one strategy at `paper` was placed
-  by a hand `registry transition` on 2026-09-05, not by `paper intake`. The re-gate is the first
-  thing to exercise it.
+- **The paper intake path had never executed in production, and it works.** The one strategy at
+  `paper` was placed by a hand `registry transition` on 2026-09-05, not by `paper intake`. Its first
+  real run admitted all seventeen candidates in one deterministic FIFO pass with nothing queued and
+  nothing stale.
+- **#636 reproduced on demand.** Re-syncing the strategy docs after intake left `kb/strategies/`
+  untracked and the checkout dirty on a branch without the PR #645 fix — the exact condition that
+  makes merge-back refuse. The diagnosis in §3 is not theoretical.
+
+**Slice sizing is an evidence-quality decision, not a capital one.** The book capacity default of 64
+would have produced $1,571 slices; at a typical `top_k=3` that is roughly $520 per position, which on
+a high-priced name rounds to one or two shares and lets integer-share quantization dominate the
+return series — inflating volatility and depressing the very Sharpe the forward gate measures. The
+run used `--max-concurrent 24` instead, giving $4,190 slices and leaving six slots for what the
+ideation engine produces next. The paper account is simulated, so the constraint here is fidelity of
+evidence rather than risk of capital.
 
 **Phase 2 — cut weight.** The list in §7, largest and least risky first: family governance, the
 advisory statistics stack, the frozen false-discovery surface, the fundamentals and news seams.
