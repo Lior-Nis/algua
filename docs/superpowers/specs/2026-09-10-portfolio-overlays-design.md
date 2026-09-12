@@ -216,8 +216,9 @@ for lack of data. A symbol in `weights` but absent from `view` is passed through
 `algua/strategies/momentum/momentum_regime_stop.py` (the `examples/` family was retired in #121;
 bundled examples live beside `cross_sectional_momentum`): the existing momentum signal with
 `top_k_equal_weight`, `overlays=[regime_gate{...}, trailing_stop{...}]`, and a `signal_panel`, so
-the exhaustive parity gate exercises the overlay chain. Marked `GENERATED_BY = "agent"` like the
-other examples; it is a fixture, not a candidate.
+the exhaustive parity gate exercises the overlay chain. Marked `GENERATED_BY = "human"` like
+`cross_sectional_momentum`, the sibling bundled example (hand-authored, not agent-generated); it is
+a fixture, not a candidate.
 
 ## Ratchet carves
 
@@ -302,6 +303,11 @@ Modified: `algua/strategies/base.py`, `algua/strategies/loader.py`, `algua/backt
   run far outside the tail the turbulence/z-score arrays are actually computed over, i.e. a
   back-fill reaching beyond the computed tail; bounding the horizon (and sizing that tail to cover
   it) guarantees every state the search can select from is one the inputs actually define.
+  Consequently the DECLARED window is `max(trend, dd, turb+z, shock+fast_lookback) +
+  REGIME_SEARCH_BARS`, not `+ persistence`: the search scans the whole horizon, so the lane's
+  `feature_lookback`-sized view must define every leg across ALL of it, or the lane and the
+  backtest (which sees the full expanding history) can select different states on the same bar —
+  and the walk-forward embargo, sized from `feature_lookback`, would be under-sized.
 
 ## Rollout order
 

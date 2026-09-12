@@ -19,7 +19,7 @@ END = datetime(2024, 6, 1, tzinfo=UTC)
 def test_example_loads_with_resolved_overlay_fns():
     strat = load_strategy("momentum_regime_stop")
     assert strat.overlay_fns == (regime_gate, trailing_stop)
-    assert strat.config.feature_lookback == 194
+    assert strat.config.feature_lookback == 252
 
 
 def test_example_backtests_and_never_exceeds_the_unoverlaid_gross():

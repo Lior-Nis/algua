@@ -343,13 +343,13 @@ def test_regime_gate_persistence_search_bounded_to_regime_search_bars(monkeypatc
         "persistence": 2,
     }
     spec = OverlaySpec(policy="regime_gate", params=params)
-    # max(trend 3, dd 3, turb 5 + z 3, shock 3 + fast 1) + persistence 2 = 10, regardless of the
-    # search horizon (the horizon does not change the declared lookback formula).
-    expected_lookback = 10
+    # max(trend 3, dd 3, turb 5 + z 3, shock 3 + fast 1) = 8; the declared lookback FOLLOWS the
+    # horizon (8 + REGIME_SEARCH_BARS), so the view always defines every leg the search can reach.
+    legs = 8
 
     # Default REGIME_SEARCH_BARS (63): the 6,7 run is well inside the horizon -> picked up ->
     # neutral_exposure (0.6) applies.
-    assert overlay_lookback(spec) == expected_lookback
+    assert overlay_lookback(spec) == legs + overlay_policies.REGIME_SEARCH_BARS == 71
     out_default = regime_gate(_W2, view, params)
     assert out_default["A"] == pytest.approx(0.5 * 0.6)
 
@@ -357,15 +357,17 @@ def test_regime_gate_persistence_search_bounded_to_regime_search_bars(monkeypatc
     # persistence-2 run is visible -> risk-on (weights untouched) even though a valid run exists
     # 6 bars back.
     monkeypatch.setattr(overlay_policies, "REGIME_SEARCH_BARS", 4)
-    assert overlay_lookback(spec) == expected_lookback  # lookback still unaffected
+    # ... and the declared lookback shrinks with it: the window IS the horizon plus the legs.
+    assert overlay_lookback(spec) == legs + overlay_policies.REGIME_SEARCH_BARS == 12
     out_bounded = regime_gate(_W2, view, params)
     assert out_bounded.to_dict() == _W2.to_dict()
 
 
 def test_regime_gate_lookback():
     spec = OverlaySpec(policy="regime_gate", params=_RG)
-    # max(trend 10, dd 10, turb 5 + z 10, shock 3 + fast 1) + persistence 2 = 17
-    assert overlay_lookback(spec) == 17
+    # max(trend 10, dd 10, turb 5 + z 10, shock 3 + fast 1) + REGIME_SEARCH_BARS 63 = 78: the
+    # declared window covers the whole persistence SEARCH HORIZON, not just one persistence run.
+    assert overlay_lookback(spec) == 78
 
 
 @pytest.mark.parametrize(

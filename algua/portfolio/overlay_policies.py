@@ -150,9 +150,14 @@ def _validate_regime_gate(params: dict[str, Any]) -> None:
 
 
 def _regime_gate_lookback(params: dict[str, Any]) -> int:
+    """The declared window must cover the WHOLE persistence search horizon, not just one run:
+    the search scans the last `REGIME_SEARCH_BARS` bars, so every leg must be DEFINED over all of
+    them or a `feature_lookback`-sized lane view selects a different state than the backtest's
+    expanding view. `+ REGIME_SEARCH_BARS` is a strict superset of `+ persistence` (the validator
+    caps `persistence <= REGIME_SEARCH_BARS`)."""
     p = params
     return max(
         int(p["trend_window"]), int(p["dd_window"]),
         int(p["turb_window"]) + int(p["z_window"]),
         int(p["shock_window"]) + int(p["fast_lookback"]),
-    ) + int(p["persistence"])
+    ) + REGIME_SEARCH_BARS

@@ -39,8 +39,8 @@ CONFIG = StrategyConfig(
         OverlaySpec(policy="regime_gate", params=_REGIME),
         OverlaySpec(policy="trailing_stop", params=_STOP),
     ],
-    # max(signal 60, regime_gate max(126, 63, 63+126, 3+5)+5 = 194, trailing_stop 60+5 = 65) = 194
-    feature_lookback=194,
+    # max(signal 60, regime_gate max(126, 63, 63+126, 3+5) + 63 = 252, trailing_stop 60+5 = 65)
+    feature_lookback=252,
 )
 
 
