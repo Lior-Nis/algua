@@ -52,38 +52,44 @@ def test_every_mode_dry_runs_with_its_bounds(mode: str):
     assert " -f " in out
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_no_mode_can_be_asked_a_question(mode: str):
+def test_only_forage_gets_the_web_search_backend():
+    """Web access is a per-loop capability, granted by the SEAM -- not by config alone.
+
+    This asserts the half that is verifiable without a live model: the search backend's env var is
+    exported for forage and for nothing else. The per-agent `permission` blocks in
+    `.opencode/agents/*.md` are defence in depth ON TOP of this, and are NOT yet verified to take
+    effect -- `opencode debug agent` does not reflect them, and distinguishing "not applied" from
+    "not rendered" needs a live run against a working provider. Do not treat those blocks as a
+    wall until that run has happened; the wall that IS verified is the bwrap mount namespace below.
+    """
+    assert "OPENCODE_ENABLE_EXA=1" in _dry("forage")
+    for mode in ("research", "leap"):
+        assert "OPENCODE_ENABLE_EXA" not in _dry(mode)
+
+
+def test_the_baseline_config_never_asks():
     """An unattended run that prompts is a run that hangs until its timeout.
 
-    Measured on opencode 1.18.30: the defaults ship `doom_loop` and `external_directory` as `ask`.
-    A driver firing every few hours cannot answer, so every permission must resolve to allow or
-    deny. The config is the enforcement point; this asserts it stays that way.
+    Measured on opencode 1.18.30: `doom_loop` and `external_directory` default to `ask`, and a
+    probe run against an exhausted provider produced zero bytes and had to be killed. Every
+    baseline value must therefore resolve to allow or deny.
     """
     config = json.loads(CONFIG.read_text())
     for name, value in config["permission"].items():
         assert value != "ask", f"permission {name!r} is 'ask'; an unattended run would block on it"
 
 
-def test_only_forage_may_reach_the_web():
-    """Web access is a per-loop capability, not a global one.
+def test_the_baseline_config_does_not_decide_web_access_globally():
+    """Web access must not be set at the top level, in either direction.
 
-    Research and leap work from what their driver put in the prompt. Granting either of them a
-    search tool would let untrusted web text enter a loop that writes strategy code.
+    A global `deny` resolved onto the forage agent and would have silently broken the only loop
+    that needs the web -- caught by reading the resolved permissions rather than the config. A
+    global `allow` would be worse: it would hand untrusted web text to the loop that writes
+    strategy code.
     """
-    assert "OPENCODE_ENABLE_EXA=1" in _dry("forage")
-    for mode in ("research", "leap"):
-        assert "OPENCODE_ENABLE_EXA" not in _dry(mode)
-
     config = json.loads(CONFIG.read_text())
-    assert config["permission"]["websearch"] == "deny"
-    assert config["permission"]["webfetch"] == "deny"
-
-    forage = (AGENTS_DIR / "forage.md").read_text()
-    assert "websearch: allow" in forage
-    # ...and forage pays for it by having no shell at all, so the registry is unreachable by
-    # capability rather than by discipline.
-    assert "bash: deny" in forage
+    assert "websearch" not in config["permission"]
+    assert "webfetch" not in config["permission"]
 
 
 def test_the_kernel_write_wall_is_requested_when_available():
@@ -165,11 +171,18 @@ def test_every_referenced_agent_definition_exists():
     assert "author: allow" in research and "interpret: allow" in research
 
 
-def test_interpret_stays_read_only():
+def test_interpret_declares_itself_read_only():
     """The read-only judge is what keeps a promote recommendation honest.
 
     If `interpret` could edit or run commands it could fix the strategy it is judging, and the
     split between authoring and judging would stop meaning anything.
+
+    CAVEAT, and it is the reason this test is named "declares" rather than "is": the declaration
+    is NOT yet verified to be enforced. `opencode debug agent interpret` does not show `edit` or
+    `bash` denied -- they fall through to the catch-all -- and whether that means "not applied" or
+    "not rendered by the debug command" cannot be settled without a live run against a working
+    provider. Until that run happens, treat the read-only property as INTENDED, not guaranteed,
+    and rely on the bwrap wall (which IS verified) for anything that matters.
     """
     text = (AGENTS_DIR / "interpret.md").read_text()
     assert "edit: deny" in text
