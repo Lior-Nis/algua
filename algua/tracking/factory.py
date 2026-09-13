@@ -13,7 +13,6 @@ from collections.abc import Callable
 
 from algua.config.settings import get_settings
 from algua.tracking.base import ExperimentTracker, NoopTracker
-from algua.tracking.mlflow_tracker import MlflowTracker
 from algua.tracking.sqlite_tracker import SqliteMlflowTracker
 
 #: Starts EMPTY: the built-ins below register themselves through the same public seam a
@@ -41,6 +40,5 @@ def get_tracker(name: str | None = None) -> ExperimentTracker:
         raise ValueError(f"unknown tracking backend {key!r}; valid: {valid}") from None
 
 
-register_tracker("mlflow", MlflowTracker)
 register_tracker("mlflow-sqlite", SqliteMlflowTracker)
 register_tracker("noop", NoopTracker)

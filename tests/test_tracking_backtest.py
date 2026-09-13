@@ -9,6 +9,7 @@ from algua.tracking.mlflow_tracker import (
     _numeric_metrics,
     log_backtest,
 )
+from algua.tracking.sqlite_tracker import _sqlite_tracking_uri
 
 
 def test_flatten_nested():
@@ -85,7 +86,7 @@ def test_registered_trackers_satisfy_the_protocol():
     type-checks every registered factory's return value against the full Protocol signature."""
     from algua.tracking.factory import get_tracker
 
-    for name in ("mlflow", "mlflow-sqlite", "noop"):
+    for name in ("mlflow-sqlite", "noop"):
         tracker = get_tracker(name)
         assert isinstance(tracker, ExperimentTracker)
         for method in ("log_backtest", "log_sweep", "log_walk_forward"):
@@ -114,7 +115,7 @@ def _result():
 def test_log_backtest_records_run(tmp_path):
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     run_id = log_backtest(_result(), {"lookback": 60, "top_k": 3}, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -140,7 +141,7 @@ def test_log_backtest_drops_nan_metrics(tmp_path):
         config_hash="x", data_source="SyntheticProvider", timeframe="1d",
         period={"start": "2022-01-01", "end": "2022-12-31"}, seed=0, snapshot_id=None,
     )
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_backtest(result, {}, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -160,7 +161,7 @@ def test_log_backtest_stamps_universe_mode(tmp_path):
     # that can never be confused with a real universe name.
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     named = BacktestResult(
         strategy="named", metrics={"sharpe": 1.0}, config_hash="c", data_source="Synthetic",
         timeframe="1d", period={"start": "2022-01-01", "end": "2022-12-31"}, seed=0,
@@ -183,7 +184,7 @@ def test_log_backtest_n_rebalances_is_metric_not_param(tmp_path):
     """n_rebalances comes from metrics dict and must land in run metrics, not params."""
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_backtest(_result(), {"lookback": 60}, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)

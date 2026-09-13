@@ -13,7 +13,13 @@ dependencies = [
     "pyarrow>=15,<24",
     "vectorbt>=0.26",
     "scipy>=1.11",  # #211 DSR evidence: norm.cdf/ppf in research.gates + skew/kurtosis in metrics
-    "mlflow>=3.1",
+    # >=3.15: GHSA-gqvg-gmmx-x4hm (the statsmodels flavor ignores
+    # MLFLOW_ALLOW_PICKLE_DESERIALIZATION, so a crafted artifact is RCE even with the control off)
+    # is fixed in 3.15.0, and the newer tree pulls gitpython >= 3.1.59, which clears five 2026
+    # advisories incl. a config-injection -> core.hooksPath code-execution path. The bump was
+    # blocked while `tracking_backend` defaulted to MLflow's deprecated FileStore; #605's
+    # SqliteMlflowTracker removed that blocker and is now the default.
+    "mlflow>=3.15",
     "matplotlib>=3.8",  # #181 series plots (report-experiments); was transitive via mlflow
     "threadpoolctl>=3,<4",
 ]

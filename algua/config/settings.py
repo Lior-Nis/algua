@@ -35,11 +35,16 @@ class Settings(BaseSettings):
     alpaca_live_api_secret: str | None = None
     alpaca_live_url: str = "https://api.alpaca.markets"
     mlflow_tracking_uri: str = "mlruns"
-    # Which ExperimentTracker backend `--track` uses: "mlflow" (default, deprecated FileStore),
-    # "mlflow-sqlite" (same MLflow logging, but a sqlite:// tracking URI instead of the deprecated
-    # filesystem backend), or "noop" (log nothing). See algua/tracking/factory.py. Default
-    # preserves existing behaviour exactly.
-    tracking_backend: str = "mlflow"
+    # Which ExperimentTracker backend `--track` uses: "mlflow-sqlite" (default), "mlflow" (the
+    # DEPRECATED FileStore), or "noop" (log nothing). See algua/tracking/factory.py.
+    #
+    # The default moved off "mlflow" because the FileStore is deprecated upstream (Feb 2026) and
+    # already misbehaves: a `research promote` run emits a FutureWarning plus a
+    # MissingConfigException
+    # traceback for a malformed experiment directory. #605 added the sqlite backend precisely so the
+    # tree could be upgraded; leaving the default on the deprecated store is what kept the security
+    # bump parked while six advisories accumulated in the mlflow subtree.
+    tracking_backend: str = "mlflow-sqlite"
     # Bars provider the PAPER lane refreshes through (`paper run-all --refresh`, #556). Any name
     # registered in algua.data.providers. env: ALGUA_BARS_REFRESH_PROVIDER.
     bars_refresh_provider: str = "yfinance"

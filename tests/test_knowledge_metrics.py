@@ -1,10 +1,18 @@
+from algua.config.settings import get_settings
 from algua.knowledge.metrics import latest_run_metrics
+from algua.tracking.uri import resolved_tracking_uri
 
 
 def _log_run(uri, strategy, *, kind, metrics, params):
+    """Write through the SAME resolution the reader applies.
+
+    `latest_run_metrics` opens the store the configured backend actually wrote to, so a test that
+    wrote to the raw path would be asserting against a store nothing reads. Going through
+    `resolved_tracking_uri` here is what makes the round trip the real one.
+    """
     import mlflow
 
-    mlflow.set_tracking_uri(uri)
+    mlflow.set_tracking_uri(resolved_tracking_uri(uri, get_settings().tracking_backend))
     mlflow.set_experiment(strategy)
     with mlflow.start_run():
         mlflow.log_params(params)

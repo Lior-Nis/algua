@@ -12,6 +12,13 @@ def latest_run_metrics(strategy: str, *, tracking_uri: str) -> dict[str, Any] | 
     """
     from mlflow.tracking import MlflowClient
 
+    from algua.config.settings import get_settings
+    from algua.tracking.uri import resolved_tracking_uri
+
+    # Open the store the CONFIGURED backend actually wrote to, not the raw setting (see
+    # `resolved_tracking_uri`): the sqlite backend rewrites "mlruns" to "sqlite:///mlruns.db".
+    tracking_uri = resolved_tracking_uri(tracking_uri, get_settings().tracking_backend)
+
     # An explicitly-scoped client avoids mlflow's process-global tracking-uri state, so a
     # relative `mlruns` always resolves against the caller's setting, not a stale one.
     # Metrics are an optional decoration on the doc: any read failure (missing store, stale

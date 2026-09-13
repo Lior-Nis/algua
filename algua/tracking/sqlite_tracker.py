@@ -17,26 +17,13 @@ who has already pointed the setting at a database backend is never second-guesse
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from algua.backtest.result import BacktestResult
 from algua.backtest.sweep import SweepResult
 from algua.backtest.walkforward import WalkForwardResult
 from algua.tracking.mlflow_tracker import log_backtest, log_sweep, log_walk_forward
-
-
-def _sqlite_tracking_uri(tracking_uri: str) -> str:
-    """Adapt a bare filesystem ``tracking_uri`` into a ``sqlite:///`` URI.
-
-    ``"mlruns"`` -> ``"sqlite:///mlruns.db"`` (the FileStore replacement MLflow's own deprecation
-    warning recommends). Already-schemed values (anything containing ``"://"``) are returned as-is.
-    """
-    if "://" in tracking_uri:
-        return tracking_uri
-    path = Path(tracking_uri)
-    db_path = path if path.suffix == ".db" else path.with_name(path.name + ".db")
-    return f"sqlite:///{db_path}"
+from algua.tracking.uri import sqlite_tracking_uri as _sqlite_tracking_uri
 
 
 class SqliteMlflowTracker:
