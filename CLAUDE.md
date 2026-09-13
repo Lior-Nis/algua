@@ -179,7 +179,7 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   (the ideation category list) and `kb/inspirations/_sources.yaml` (the venue registry).
 - **The agent runtime is OpenCode, reached through ONE seam.** `.opencode/scripts/run_agent.sh` is
   the only file in the repo that names a runtime, a model or a sandbox flag. Models live in
-  `opencode.json`; agent definitions (research / leap / forage, plus the `author` and `interpret`
+  `.opencode/opencode.json`; agent definitions (research / leap / forage, plus the `author` and `interpret`
   subagents) live in `.opencode/agents/`. The seam re-imposes a kernel write wall with bwrap,
   forbids every `ask` permission so an unattended run cannot block, and kills a run early on a
   terminal provider error instead of burning the whole timeout. Changing how an agent is launched

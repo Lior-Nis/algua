@@ -20,7 +20,9 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SEAM = REPO / ".opencode" / "scripts" / "run_agent.sh"
-CONFIG = REPO / "opencode.json"
+# Lives under .opencode/ rather than the repo root: opencode reads either, and the root is
+# whitelist-guarded by tests/test_repo_hygiene.py. Verified to resolve from here by a live run.
+CONFIG = REPO / ".opencode" / "opencode.json"
 AGENTS_DIR = REPO / ".opencode" / "agents"
 
 MODES = ("research", "leap", "forage")
@@ -55,12 +57,11 @@ def test_every_mode_dry_runs_with_its_bounds(mode: str):
 def test_only_forage_gets_the_web_search_backend():
     """Web access is a per-loop capability, granted by the SEAM -- not by config alone.
 
-    This asserts the half that is verifiable without a live model: the search backend's env var is
-    exported for forage and for nothing else. The per-agent `permission` blocks in
-    `.opencode/agents/*.md` are defence in depth ON TOP of this, and are NOT yet verified to take
-    effect -- `opencode debug agent` does not reflect them, and distinguishing "not applied" from
-    "not rendered" needs a live run against a working provider. Do not treat those blocks as a
-    wall until that run has happened; the wall that IS verified is the bwrap mount namespace below.
+    This asserts what the seam controls: the search backend's env var is exported for forage and
+    for nothing else. The per-agent `permission` blocks are defence in depth on top of it, and a
+    live probe confirmed they really are enforced (the denied tool is not exposed to the model at
+    all) -- see `test_interpret_is_declared_read_only`. Note that `opencode debug agent` does NOT
+    render per-agent permissions, so it is the wrong instrument for checking this.
     """
     assert "OPENCODE_ENABLE_EXA=1" in _dry("forage")
     for mode in ("research", "leap"):
@@ -171,18 +172,21 @@ def test_every_referenced_agent_definition_exists():
     assert "author: allow" in research and "interpret: allow" in research
 
 
-def test_interpret_declares_itself_read_only():
+def test_interpret_is_declared_read_only():
     """The read-only judge is what keeps a promote recommendation honest.
 
     If `interpret` could edit or run commands it could fix the strategy it is judging, and the
     split between authoring and judging would stop meaning anything.
 
-    CAVEAT, and it is the reason this test is named "declares" rather than "is": the declaration
-    is NOT yet verified to be enforced. `opencode debug agent interpret` does not show `edit` or
-    `bash` denied -- they fall through to the catch-all -- and whether that means "not applied" or
-    "not rendered by the debug command" cannot be settled without a live run against a working
-    provider. Until that run happens, treat the read-only property as INTENDED, not guaranteed,
-    and rely on the bwrap wall (which IS verified) for anything that matters.
+    ENFORCEMENT IS VERIFIED, by a live run rather than by reading config. `opencode debug agent`
+    does NOT render per-agent permissions -- which made them look inert and briefly had this
+    property downgraded to "intended". A live probe settled it: the `forage` agent, asked to run
+    one shell command, answered
+
+        BASH_BLOCKED: No shell command execution tool is available in this environment.
+
+    The denied tool is not merely refused, it is not exposed to the model at all. Re-run that
+    probe rather than trusting `debug agent` if this is ever in doubt again.
     """
     text = (AGENTS_DIR / "interpret.md").read_text()
     assert "edit: deny" in text
