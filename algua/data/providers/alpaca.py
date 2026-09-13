@@ -20,13 +20,34 @@ RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 MAX_ATTEMPTS = 4
 BACKOFF_BASE_SECONDS = 0.5
 
+#: Bars per page to ask Alpaca for. Its API caps a page at 10000 and DEFAULTS TO 1000, handing back
+#: a `next_page_token` for the remainder. Asking for the maximum minimises round trips; it does not
+#: remove the need to follow the token (see `_fetch_bars`).
+PAGE_LIMIT = 10000
+#: Hard bound on pages followed for a single request, so a server that kept returning a token could
+#: never spin forever. At PAGE_LIMIT that is 10M bars -- orders of magnitude past any real window,
+#: so hitting it means something is wrong and the request fails closed rather than returning a
+#: quietly partial frame.
+MAX_PAGES = 1000
+
+
+#: algua's canonical timeframe tokens (`data/timeframes.KNOWN`) in Alpaca's bars-API spelling.
+#: Alpaca rejects every one of algua's tokens with HTTP 400 'invalid timeframe', so an unmapped
+#: entry is not a soft fallback -- it is a dead timeframe. Covering only '1d' meant the INTRADAY
+#: tokens were silently unreachable through this provider even though the free IEX feed serves
+#: hourly and minute bars back to 2016.
+_ALPACA_TIMEFRAMES: dict[str, str] = {
+    "1d": "1Day", "1day": "1Day",
+    "1m": "1Min", "5m": "5Min", "30m": "30Min", "1h": "1Hour",
+}
+
 
 def _alpaca_timeframe(timeframe: str) -> str:
     """Map algua's canonical timeframe to Alpaca's bars-API format (e.g. '1d' -> '1Day').
 
-    Alpaca rejects '1d' with HTTP 400 'invalid timeframe'; its daily timeframe is '1Day'.
-    Unknown values pass through (Alpaca will reject anything it doesn't recognise)."""
-    return {"1d": "1Day", "1day": "1Day"}.get(timeframe.lower(), timeframe)
+    Unknown values pass through, and Alpaca rejects anything it does not recognise -- which is the
+    intended behaviour for a token algua itself would have refused at `validate_timeframe`."""
+    return _ALPACA_TIMEFRAMES.get(timeframe.lower(), timeframe)
 
 
 class AlpacaBarProvider(BarProvider):
@@ -86,27 +107,56 @@ class AlpacaBarProvider(BarProvider):
         )
 
     def _fetch_bars(self, request: BarRequest, *, adjustment: str) -> dict[str, Any]:
-        """Fetch one adjustment view, retrying transient 429/5xx with backoff.
+        """Fetch one adjustment view IN FULL, following Alpaca's pagination.
+
+        Alpaca caps a bars page at `PAGE_LIMIT` and returns `next_page_token` for the remainder.
+        Ignoring that token does not error -- it returns a short frame that looks complete, which
+        is the worst possible failure for a data lane: a ten-year daily request came back as
+        2016-01-04..2019-12-20 and nothing downstream could tell. Intraday made it acute (a page
+        is ~2.5 days of minute bars), which is how it surfaced.
 
         All transport faults (HTTP errors, connection/timeout failures) are wrapped in
         ProviderError so the CLI's @json_errors renders them on stdout rather than
         letting a raw requests traceback escape the JSON contract.
         """
+        merged: dict[str, list[Any]] = {}
+        page_token: str | None = None
+        for _ in range(MAX_PAGES):
+            payload = self._fetch_page(request, adjustment=adjustment, page_token=page_token)
+            for symbol, bars in (payload.get("bars") or {}).items():
+                merged.setdefault(symbol, []).extend(bars or [])
+            token = payload.get("next_page_token")
+            if not token:
+                return {"bars": merged}
+            page_token = str(token)
+        raise ProviderError(
+            f"alpaca paginated past {MAX_PAGES} pages for {request.timeframe} "
+            f"{request.start}..{request.end}; refusing a possibly-partial snapshot"
+        )
+
+    def _fetch_page(
+        self, request: BarRequest, *, adjustment: str, page_token: str | None,
+    ) -> dict[str, Any]:
+        """One page of one adjustment view, retrying transient 429/5xx with backoff."""
 
         def _send() -> requests.Response:
+            params: dict[str, Any] = {
+                "symbols": ",".join(request.symbols),
+                "timeframe": _alpaca_timeframe(request.timeframe),
+                "start": request.start,
+                "end": request.end,
+                "adjustment": adjustment,
+                "limit": PAGE_LIMIT,
+            }
+            if page_token:
+                params["page_token"] = page_token
             return requests.get(
                 f"{self.base_url}/stocks/bars",
                 headers={
                     "APCA-API-KEY-ID": self.api_key,
                     "APCA-API-SECRET-KEY": self.api_secret,
                 },
-                params={
-                    "symbols": ",".join(request.symbols),
-                    "timeframe": _alpaca_timeframe(request.timeframe),
-                    "start": request.start,
-                    "end": request.end,
-                    "adjustment": adjustment,
-                },
+                params=params,
                 timeout=30,
                 # Never chase a redirect: requests re-sends the APCA credential headers on a
                 # cross-host 3xx, which would leak them to the redirect target (#394).
