@@ -7,6 +7,7 @@ from algua.data.contracts import BarRequest
 from algua.data.providers import alpaca as alpaca_provider
 from algua.data.providers import get_provider, register_provider
 from algua.data.providers.alpaca import (
+    PAGE_LIMIT,
     AlpacaBarProvider,
     _canonicalize_daily_ts,
     _normalize_alpaca,
@@ -311,6 +312,22 @@ def test_alpaca_provider_merges_raw_close_with_adjusted_close(monkeypatch):
     assert bars.source_metadata["adjustment"] == "raw+all"
 
 
+def test_alpaca_timeframe_covers_every_canonical_timeframe():
+    """Every token `data.timeframes` accepts must have an Alpaca spelling.
+
+    An unmapped token is not a soft fallback: Alpaca answers HTTP 400 'invalid timeframe', so the
+    timeframe is simply dead through this provider. That is how the intraday tokens were
+    unreachable while the free IEX feed served hourly and minute bars back to 2016.
+    """
+    from algua.data.providers.alpaca import _ALPACA_TIMEFRAMES, _alpaca_timeframe
+    from algua.data.timeframes import KNOWN
+
+    for token in KNOWN:
+        assert token in _ALPACA_TIMEFRAMES, f"canonical timeframe {token!r} has no Alpaca spelling"
+        mapped = _alpaca_timeframe(token)
+        assert mapped != token, f"{token!r} maps to itself; Alpaca would reject it"
+
+
 def test_alpaca_timeframe_maps_1d_to_alpaca_format():
     from algua.data.providers.alpaca import _alpaca_timeframe
 
@@ -340,6 +357,74 @@ def test_alpaca_provider_accepts_uppercase_scheme_and_host():
         api_key="key", api_secret="secret", base_url="HTTPS://DATA.ALPACA.MARKETS/v2"
     )
     assert provider.base_url == "HTTPS://DATA.ALPACA.MARKETS/v2"
+
+
+def test_alpaca_provider_follows_pagination_to_the_last_page(monkeypatch):
+    """A paged response must come back WHOLE, not as its first page.
+
+    Alpaca caps a bars page and returns `next_page_token` for the rest. Ignoring the token does not
+    error -- it yields a short frame that looks complete, which is the worst failure mode a data
+    lane has. In production a ten-year daily request returned 1000 bars ending in 2019 and nothing
+    downstream could tell.
+    """
+    def _bar(day: int, close: float) -> dict:
+        return {"t": f"2026-01-{day:02d}T05:00:00Z", "o": close, "h": close,
+                "l": close, "c": close, "v": 100}
+
+    pages = {
+        None: {"bars": {"AAPL": [_bar(2, 10.0)]}, "next_page_token": "p2"},
+        "p2": {"bars": {"AAPL": [_bar(3, 11.0)]}, "next_page_token": "p3"},
+        "p3": {"bars": {"AAPL": [_bar(4, 12.0)]}, "next_page_token": None},
+    }
+    calls: list[str | None] = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    def fake_get(*_args, **kwargs):
+        token = kwargs["params"].get("page_token")
+        calls.append(token)
+        assert kwargs["params"]["limit"] == PAGE_LIMIT, "should ask for a full page"
+        return FakeResponse(pages[token])
+
+    monkeypatch.setattr("algua.data.providers.alpaca.requests.get", fake_get)
+    provider = AlpacaBarProvider(api_key="key", api_secret="secret")
+
+    bars = provider.get_bars(BarRequest(("AAPL",), "2026-01-02", "2026-01-04"))
+
+    # three pages per adjustment view (raw + all), and every bar present
+    assert calls == [None, "p2", "p3", None, "p2", "p3"]
+    assert len(bars.frame) == 3
+    assert [str(ts.date()) for ts in bars.frame["ts"]] == ["2026-01-02", "2026-01-03", "2026-01-04"]
+
+
+def test_alpaca_provider_fails_closed_on_runaway_pagination(monkeypatch):
+    """A server that never stops handing back a token must error, not loop or truncate."""
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "bars": {"AAPL": [{"t": "2026-01-02T05:00:00Z", "o": 1, "h": 1,
+                                   "l": 1, "c": 1, "v": 1}]},
+                "next_page_token": "always-more",
+            }
+
+    monkeypatch.setattr("algua.data.providers.alpaca.requests.get",
+                        lambda *a, **k: FakeResponse())
+    monkeypatch.setattr("algua.data.providers.alpaca.MAX_PAGES", 3)
+    provider = AlpacaBarProvider(api_key="key", api_secret="secret")
+
+    with pytest.raises(ProviderError, match="paginated past 3 pages"):
+        provider.get_bars(BarRequest(("AAPL",), "2026-01-02", "2026-01-03"))
 
 
 def test_alpaca_provider_does_not_follow_redirect(monkeypatch):
