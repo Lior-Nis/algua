@@ -56,7 +56,7 @@ def accept(
     run: str = typer.Option(..., "--run", help="run stamp recorded in the seen file"),
     max_notes: int = typer.Option(50, "--max", min=1, help="max notes accepted this run"),
     categories_file: Path = typer.Option(
-        None, "--categories-file", help="default: .codex/categories.txt at the repo root"),
+        None, "--categories-file", help="default: .opencode/categories.txt at the repo root"),
     seen_file: Path = typer.Option(
         None, "--seen-file", help="default: <data_dir>/inspirations-seen.jsonl"),
 ) -> None:
@@ -129,7 +129,7 @@ def propose(
     url: str = typer.Option(..., "--url", help="https:// venue URL"),
     categories: str = typer.Option(..., "--categories", help="comma-separated category slugs"),
     categories_file: Path = typer.Option(
-        None, "--categories-file", help="default: .codex/categories.txt at the repo root"),
+        None, "--categories-file", help="default: .opencode/categories.txt at the repo root"),
 ) -> None:
     """Propose a new venue into the sources registry (a no-op if the key already exists)."""
     if not _KEY_RE.match(key):

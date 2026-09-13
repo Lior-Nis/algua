@@ -3,7 +3,7 @@ Description=Algua forage timer — daily web inspiration foraging
 
 [Timer]
 # Daily, off-peak (03:00 UTC). Each firing takes the next FORAGE_SLICES (default 2) categories
-# off a persisted rotation cursor (data/forage-cursor), so every category in .codex/categories.txt
+# off a persisted rotation cursor (data/forage-cursor), so every category in .opencode/categories.txt
 # is foraged at least weekly (the launcher asserts ceil(n_categories / FORAGE_SLICES) <= 7 at
 # startup and fails closed otherwise). A single daily fire has no same-day retry: a lost run just
 # waits for tomorrow's rotation slice, which is fine — foraging is a slow-feeding background

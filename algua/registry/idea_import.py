@@ -6,7 +6,8 @@ check, one BEGIN IMMEDIATE per row. `import_critic_rejections`: DB-only negative
 `refuted_with_reasons`: what leap reads. `reclassify`: re-open parked rows after a capability flip.
 
 EVERY field crossing this seam is MODEL OUTPUT written into a scratch DB the agent owns, so this
-module is where it stops being trusted: the category must be in the human's `.codex/categories.txt`
+module is where it stops being trusted: the category must be in the human's
+`.opencode/categories.txt`
 vocabulary, each inspiration link's `venue`/`obscurity` is re-derived from the vault note itself
 (the agent's own labels are discarded), and every free-text field is length-capped.
 """

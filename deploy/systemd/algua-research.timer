@@ -12,7 +12,7 @@ Description=Algua autonomous research cycle — factory cadence, every 6h
 #
 # OVERLAP: a firing that lands while a previous cycle is still running SKIPS cleanly via the
 # launcher's NON-BLOCKING flock (data/research-loop.lock) — it never queues. Normally it never even
-# gets there: the driver caps the codex run at TIMEOUT=45m (+ SYNC_TIMEOUT=5m pre-warm) and the
+# gets there: the driver caps the agent run at TIMEOUT=45m (+ SYNC_TIMEOUT=5m pre-warm) and the
 # service's TimeoutStartSec=4200 (70m) backstops the wrapper, leaving ample headroom inside each
 # 6h slot.
 #
@@ -26,7 +26,7 @@ Description=Algua autonomous research cycle — factory cadence, every 6h
 # WHY THIS RATE IS SAFE FOR THE FUNNEL. Exploration runs on a THROWAWAY scratch copy, so a cycle's
 # `research promote` is a PREVIEW that records NO breadth and burns NO holdout on the authoritative
 # funnel — that budget is spent only by `paper merge-back`. The real per-cycle costs are compute/API
-# (tune N_HYPOTHESES/TIMEOUT in the env file; Codex rate-limit hits are recorded per run in the
+# (tune N_HYPOTHESES/TIMEOUT in the env file; provider rate-limit hits are recorded per run in the
 # data/research-runs.jsonl digest) and disk — each cycle leaves a worktree, which the driver
 # AUTO-PRUNES after RESEARCH_WORKTREE_RETENTION_DAYS (default 7; the authored code persists on its
 # branch regardless).

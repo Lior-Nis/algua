@@ -5,7 +5,7 @@ Description=Algua merge-back queue drainer (trusted, unsandboxed, no LLM)
 # algua-research.service) and drives the REAL, authoritative `algua paper merge-back` through
 # `algua operator lock-run`, which shares `operator.lock` with the daily paper tick (algua-paper.
 # service) so the two can never mutate the shared checkout/registry concurrently. Pure plumbing:
-# no Codex, no LLM, no sandboxing — this is trusted code driving trusted code.
+# no agent runtime, no LLM, no sandboxing — this is trusted code driving trusted code.
 
 [Service]
 Type=oneshot
@@ -19,4 +19,4 @@ WorkingDirectory=/opt/algua
 # The attempt may outlive the 30-minute timer cadence; that is safe by design — the queue
 # reservation + operator.lock make the next firing a no-op selection, never a concurrent drain.
 TimeoutStartSec=3600
-ExecStart=/opt/algua/.codex/scripts/drain-mergeback-queue.sh
+ExecStart=/opt/algua/.opencode/scripts/drain-mergeback-queue.sh

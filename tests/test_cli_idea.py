@@ -165,7 +165,7 @@ def test_add_parks_on_unsupported_market_with_reason():
 
 
 def test_add_rejects_a_category_outside_the_steering_vocabulary(tmp_path):
-    # `.codex/categories.txt` is the human's steering surface: the forage rotation, the claim
+    # `.opencode/categories.txt` is the human's steering surface: the forage rotation, the claim
     # round-robin and the scorecard all key on those slugs. A well-SHAPED but unknown slug used to
     # be accepted, creating an idea no rotation would ever reach.
     r = _add("--category", "astrology")

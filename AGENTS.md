@@ -1,6 +1,6 @@
-# AGENTS.md — Codex Review & Fix Guide for `algua`
+# AGENTS.md — Review & Fix Guide for `algua`
 
-You (Codex) are reviewing **algua**, an agent-first algorithmic-trading research & lifecycle
+You are reviewing **algua**, an agent-first algorithmic-trading research & lifecycle
 platform. **Your mission: review the system for real problems — correctness, safety,
 data-integrity, design, test gaps — and fix the ones that are in scope, while respecting the
 invariants and boundaries below.** When a problem touches a safety invariant or
@@ -42,16 +42,16 @@ Do not weaken a contract, delete a test, or `# type: ignore` your way to green �
 
 **Operating the research loop (vs. reviewing).** This guide is for *reviewing/fixing* algua. If you
 were instead launched to *operate* the research loop autonomously (ideate → author → backtest →
-gate → candidate), your playbooks are the skills under `.codex/skills/` — start with
-`operating-algua`, then `run-the-research-loop`, and delegate to the `.codex/agents/` subagents
+gate → candidate), your playbooks are the skills under `.opencode/skills/` — start with
+`operating-algua`, then `run-the-research-loop`, and delegate to the `.opencode/agents/` subagents
 (`author`, `interpret`). The same golden rules apply: drive everything through `uv run algua ...`,
 never go past `candidate`, and never edit the CODEOWNERS-protected integrity files.
 
-**Parallel-lane note:** work is currently split across two agents. **Codex owns the data lane**
-(`algua/data/*`, `algua/cli/data_cmd.py`): finish the `DataProvider` adapters (Alpaca, yfinance)
-and the `get_bars` read API conforming to `docs/contracts/bar-schema.md`. **Claude owns the
-research lane** (`algua/strategies|features|backtest|tracking/*`). Neither edits the other's
-modules; both meet only at the bar-schema contract. Work on a branch, not directly on `main`.
+**Agent runtime.** The autonomous loops (research, leap, forage) run on **OpenCode**, invoked
+through the single seam `.opencode/scripts/run_agent.sh`. That script is the only place in the repo
+that names a runtime, a model or a sandbox flag — model choices live in `opencode.json`, agent
+definitions in `.opencode/agents/`. If you are changing how an agent is launched, change the seam,
+not a driver. Work on a branch, not directly on `main`.
 
 **Source modules (what exists today — foundation only):**
 - `algua/contracts/lifecycle.py` — `Stage`/`Actor` enums + `ALLOWED_TRANSITIONS` state machine + `validate_transition`. **Pure** (stdlib only).

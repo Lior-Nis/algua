@@ -113,7 +113,7 @@ OPERATOR_JOBS: dict[str, OperatorJob] = {
 # would silently cap it at once per session. The candidate-selection gap this comment used to note
 # (WHICH branch/strategy/universe/window to merge back) is closed by a durable queue
 # (`data/mergeback-queue.json`, populated by the research driver + drained by
-# `.codex/scripts/drain-mergeback-queue.sh`), but the drainer does NOT invoke merge-back through
+# `.opencode/scripts/drain-mergeback-queue.sh`), but the drainer does NOT invoke merge-back through
 # THIS manifest. It uses the separate, purely additive `algua operator lock-run -- <command…>`
 # command instead: same `operator.lock` (so merge-back and the paper job still share real
 # kernel-enforced mutual exclusion), but no session marker and no completion recording — exactly

@@ -44,3 +44,6 @@ kb/**/.sync.lock
 *.sync.lock
 .DS_Store
 *.swp
+# OpenCode's per-repo config home, created by the run_agent.sh seam so an unattended run never
+# inherits the operator's global plugins, skills or AGENTS.md. Runtime state, not an artifact.
+.opencode/xdg/

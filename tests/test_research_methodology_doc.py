@@ -43,7 +43,7 @@ def test_methodology_documents_pit_adjusted_trichotomy() -> None:
 
 
 def test_author_skill_steers_to_adjusted() -> None:
-    text = (REPO / ".codex" / "skills" / "author-a-strategy" / "SKILL.md").read_text().lower()
+    text = (REPO / ".opencode" / "skills" / "author-a-strategy" / "SKILL.md").read_text().lower()
 
     assert "derive returns/momentum from `adj_close`, never raw `close`".lower() in text, (
         "author skill must steer signals to adj_close and never raw close"
@@ -60,7 +60,7 @@ def test_author_skill_example_code_sorts_before_positional_indexing() -> None:
     """Regression: the copyable `signal()` example must itself follow the sort-index rule it
     teaches -- a template that violates its own adjacent rule is exactly what caused #521's
     secondary bug (missing sort_index() before positional .iloc)."""
-    text = (REPO / ".codex" / "skills" / "author-a-strategy" / "SKILL.md").read_text()
+    text = (REPO / ".opencode" / "skills" / "author-a-strategy" / "SKILL.md").read_text()
 
     pivot_idx = text.index('values="adj_close")')
     next_iloc_idx = text.index(".iloc[-1]", pivot_idx)

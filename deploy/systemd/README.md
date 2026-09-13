@@ -16,7 +16,7 @@ sibling all no-op cleanly.
   calendar gate no-ops non-session firings, so the timer never re-encodes the exchange calendar.
 - `algua-research.{service,timer}` — the autonomous **research producer** cycle at **factory
   cadence: every 2 hours** (12/day; see
-  `docs/superpowers/specs/2026-08-10-strategy-factory-design.md`): a Codex agent ideates → authors
+  `docs/superpowers/specs/2026-08-10-strategy-factory-design.md`): an agent ideates → authors
   → backtests/walk-forwards/sweeps → gates (preview `research promote`) up to `candidate` in an
   explore-isolated worktree. See "Autonomous research loop" below.
 - `algua-mergeback-drain.{service,timer}` — the **research consumer** (factory slice 3): every 30
@@ -165,7 +165,7 @@ upgrade `exchange-calendars`**.
 
 `algua-research.{service,timer}` runs the candidate **producer** — the piece that was "out of scope"
 when only the paper operator shipped. It uses the **explore-isolated** topology. Each firing runs
-`.codex/scripts/run-research-loop.sh`, which:
+`.opencode/scripts/run-research-loop.sh`, which:
 
 - creates a throwaway git worktree on `research-run/<stamp>` so the **code** the agent authors never
   touches your working tree or `main`;
@@ -176,7 +176,7 @@ when only the paper operator shipped. It uses the **explore-isolated** topology.
   realistic pass/fail **preview**), but every write lands on the copy — **exploration can never mutate
   the authoritative FDR ledger / family graph / holdout rows**, and wasted search never taxes the real
   funnel;
-- runs `codex exec` (bounded by `TIMEOUT`, default 45m) to drive ideate → author → walk-forward/sweep →
+- runs `opencode run` (bounded by `TIMEOUT`, default 45m) to drive ideate → author → walk-forward/sweep →
   `research promote` (preview) up to `candidate`, then writes a report to `kb/research-runs/<stamp>.md`
   on the branch, ending in a machine-readable trailer naming, per hypothesis, its verdict and — for a
   passed preview — a `merge_back` object (strategy/universe/window). The launcher validates each
@@ -184,7 +184,7 @@ when only the paper operator shipped. It uses the **explore-isolated** topology.
   commit actually added) and enqueues every valid one to `data/mergeback-queue.json` for the automated
   drainer (factory slice 3) to run for real — see "Auto merge-back" below.
 
-**Why isolated and not "direct authoritative".** `codex exec` runs unsandboxed and could edit
+**Why isolated and not "direct authoritative".** `opencode run` runs unsandboxed and could edit
 `promotion.py`/`gates.py`/`fdr_lord.py` in its mutable worktree; strategy code and gate code are the
 same Python package, so if the agent ran against the real funnel it could execute altered gate logic
 against the real registry. CODEOWNERS only gates *merges to main*, not a live agent's local execution.
@@ -192,8 +192,8 @@ Exploration therefore runs on a throwaway copy, and the **only** path to the aut
 `paper merge-back` — whose diff-policy rejects gate-core edits *before* the merge and whose promote runs
 trusted (main + allowlisted diff) code. That is the trusted reconciler.
 
-**Prerequisites.** `codex` must be on `PATH` and **authenticated** for the user the unit runs as
-(`codex exec` is invoked headless with `--dangerously-bypass-approvals-and-sandbox` inside the isolated
+**Prerequisites.** `opencode` must be on `PATH` and **authenticated** for the user the unit runs as
+(`opencode run` is invoked headless with `(the MCP sandbox bypass is gone; see forage.sh)` inside the isolated
 worktree). Enable with `sudo systemctl enable --now algua-research.timer`.
 
 **The authoritative step is now automatic (factory slice 3).** A passed *preview* is a candidate,
@@ -217,11 +217,11 @@ producer can run as often as configured; the drainer paces the *merge-backs* (on
 cycle). The holdout is single-use *per strategy*, so the loop keeps authoring new strategies on the
 existing snapshot — the breadth/FDR tax at merge-back, not the holdout, is what makes it
 progressively harder. The real per-cycle costs are compute/API (tune `N_HYPOTHESES` / `TIMEOUT` in
-the env file; Codex plan rate-limit hits are expected at 12/day and are recorded per run in the
+the env file; provider rate-limit hits are recorded per run and are recorded per run in the
 digest — see below) and disk (auto-pruned; see below).
 
 **Run digest (feedback contract, slice 1; schema widened in slice 3).** After **every firing** — a
-completed run (success, codex failure, or timeout), a lock-skip, or a setup failure — the launcher
+completed run (success, agent failure, or timeout), a lock-skip, or a setup failure — the launcher
 appends **one JSON line** to the durable, authority-side digest at `data/research-runs.jsonl`
 (beside the authoritative DB; `ALGUA_RESEARCH_DIGEST_PATH` overrides). Fields: `stamp`, `branch`
 (`null` if the run branch was never created), `thesis`, `outcome` (`"completed"` |
@@ -232,7 +232,7 @@ bare title strings — both shapes are read by the anti-dup context builder, no 
 `preview_gate` (`{"passed": bool, "failed_checks": [...]}` or `null`, UNCHANGED — the cheap
 aggregate "did anything look promising" signal, kept alongside the new per-hypothesis `verdict`),
 `trailer_parse_error` (bool for completed runs), `rate_limited` (bool, grepped from the in-worktree
-codex log), `report` (`research-run/<stamp>:kb/research-runs/<stamp>.md` — migrated off the repo
+agent log), `report` (`research-run/<stamp>:kb/research-runs/<stamp>.md` — migrated off the repo
 root in slice 3; see "Auto merge-back" for why). A skipped/setup-failed firing produces a line with
 `outcome != "completed"` and null-ish run fields (`exit_code`/`wall_s`/`n_strategy_files`/`report`
 null — for a lock-skip `branch` too — plus `hypotheses` `[]`, `preview_gate` and
@@ -248,7 +248,7 @@ bugs to fix, `preview_gate.failed_checks` clusters show where hypotheses die. Th
 (recent hypothesis titles, injected as sanitized untrusted data). A digest write failure warns but
 never fails the run; the digest never stores raw report prose.
 
-**Categories (ideation engine).** `.codex/categories.txt` lists the PRD §4 slugs; the research
+**Categories (ideation engine).** `.opencode/categories.txt` lists the PRD §4 slugs; the research
 launcher claims ideas from the pool per run (`--category` restricts), it no longer rotates a
 thesis.
 
@@ -260,7 +260,7 @@ scratch; the sole authoritative writer, `paper merge-back`, has its own `merge_b
 policy), and research fires on the hour while paper fires at `:07/:27/:47`, so the two grids never
 coincide either.
 
-**Failure propagation.** The driver captures the `codex exec` exit code and propagates a non-zero
+**Failure propagation.** The driver captures the `opencode run` exit code and propagates a non-zero
 (timeout=124, or an auth/runtime error) so the systemd unit **fails** rather than silently reporting a
 no-op cycle as success. `TimeoutStartSec` (4200s) must stay above the driver's `TIMEOUT + SYNC_TIMEOUT`.
 
@@ -293,10 +293,10 @@ the research loop each serialize against THEMSELVES only, on their own
 `data/{leap,forage,research-loop}.lock` flock, so an overlapping firing of the same unit skips
 cleanly instead of queueing.
 
-**Privileges (spec §9).** All three run a sandboxed Codex agent under `-s workspace-write`
+**Privileges (spec §9).** All three run a sandboxed agent behind `.opencode/scripts/run_agent.sh`, which re-imposes a kernel write wall with bwrap
 (writes confined to its throwaway run worktree) with a TRUSTED, unsandboxed DRIVER doing every
 authoritative write after the agent exits: the forage agent gets the shell network off and only
-Codex's built-in `web_search` (MCP tools are opt-in via `FORAGE_MCP=1`, which drops both walls —
+the runtime's own web search (the FORAGE_MCP bypass is GONE: OpenCode configures MCP declaratively in opencode.json, so no wall has to drop —
 loudly logged) and no registry path at all, with the driver validating and landing survivors via
 `research inspirations accept`; the leap agent gets no web access and a THROWAWAY SCRATCH COPY of
 the registry (it can read the real pool's history but write only scratch), with the driver doing
@@ -338,14 +338,14 @@ promote-failed / gate-failed-exhausted — never retried) | `promoted_allocated`
 / `already_done` (terminal success). BOTH writers — the research driver (enqueue) and the drainer
 (status update) — mutate it ONLY under `mergeback-queue.lock` (a dedicated, non-blocking flock with
 a short bounded retry; queue mutations are sub-second), via
-`.codex/scripts/mergeback_queue.py`'s atomic tmp+fsync+`os.replace` read-modify-write (the same
+`.opencode/scripts/mergeback_queue.py`'s atomic tmp+fsync+`os.replace` read-modify-write (the same
 idiom `web/backend/push.py` uses for its subscription store, ported to this bash-driven side of the
 system since that module is FastAPI-process-local). The research driver only enqueues (idempotent
 on the `(strategy, branch)` key — a re-enqueue of an existing key is a no-op, since a branch is
 produced exactly once per research-run stamp); it never runs merge-back itself, so queue depth can
 never extend a research cycle past its own `TIMEOUT` budget.
 
-**The drainer (`.codex/scripts/drain-mergeback-queue.sh`).** Trusted, unsandboxed, no LLM. Every 30
+**The drainer (`.opencode/scripts/drain-mergeback-queue.sh`).** Trusted, unsandboxed, no LLM. Every 30
 minutes it selects **exactly one** eligible item (`pending`, or `gate_failed` with
 `attempts < MAX_MERGEBACK_ATTEMPTS=3` past a linear backoff window since its last attempt — draining
 more per cycle risks self-overlapping the next 30-minute firing, since a single quality gate already

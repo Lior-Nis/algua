@@ -1,4 +1,4 @@
-"""Tests for `.codex/scripts/drain-mergeback-queue.sh` (factory slice 3).
+"""Tests for `.opencode/scripts/drain-mergeback-queue.sh` (factory slice 3).
 
 Runs the REAL bash script against an isolated queue file, with a tiny STUB standing in for the
 `algua` binary (`ALGUA_BIN` env override) so no real git/quality-gate/broker machinery runs. The
@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DRAINER = REPO_ROOT / ".codex" / "scripts" / "drain-mergeback-queue.sh"
-_QUEUE_MOD_PATH = REPO_ROOT / ".codex" / "scripts" / "mergeback_queue.py"
+DRAINER = REPO_ROOT / ".opencode" / "scripts" / "drain-mergeback-queue.sh"
+_QUEUE_MOD_PATH = REPO_ROOT / ".opencode" / "scripts" / "mergeback_queue.py"
 
 _spec = importlib.util.spec_from_file_location("mergeback_queue", _QUEUE_MOD_PATH)
 mergeback_queue = importlib.util.module_from_spec(_spec)

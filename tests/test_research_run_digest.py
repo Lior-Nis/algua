@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LAUNCHER = REPO_ROOT / ".codex" / "scripts" / "run-research-loop.sh"
+LAUNCHER = REPO_ROOT / ".opencode" / "scripts" / "run-research-loop.sh"
 _HEREDOC_RE = re.compile(r"<<'PY'[^\n]*\n(.*?)\n^PY$", re.DOTALL | re.MULTILINE)
 
 
@@ -750,7 +750,7 @@ def test_rename_respects_the_name_cap(tmp_path):
 def _run_count_enqueued(queue_path: Path, lock_path: Path, branch: str) -> str:
     proc = subprocess.run(
         [sys.executable, "-", str(queue_path), str(lock_path), branch,
-         str(REPO_ROOT / ".codex" / "scripts" / "mergeback_queue.py")],
+         str(REPO_ROOT / ".opencode" / "scripts" / "mergeback_queue.py")],
         input=_COUNT_ENQUEUED_SRC, capture_output=True, text=True, timeout=30, check=True,
     )
     return proc.stdout.strip()
@@ -1069,7 +1069,7 @@ def test_record_outcomes_without_a_report_records_run_error_with_the_exit_code(t
     assert len(calls) == 1
     flags = _flags(calls[0]["argv"])
     assert flags["--outcome"] == "run_error"
-    assert flags["--reason"] == "codex exit 124"
+    assert flags["--reason"] == "agent exit 124"
 
 
 def test_record_outcomes_with_no_exit_code_says_the_run_did_not_complete(tmp_path):
@@ -1082,7 +1082,7 @@ def test_record_outcomes_with_no_exit_code_says_the_run_did_not_complete(tmp_pat
 
 
 def test_record_outcomes_on_a_setup_failure_blames_setup_not_codex(tmp_path):
-    # The firing never reached codex, so "codex exit 1" would be a lie in the ledger.
+    # The firing never reached the agent, so "agent exit 1" would be a lie in the ledger.
     proc, calls = _run_record_outcomes(
         tmp_path, claimed=[{"id": 7, "claim_token": "tok-7"}], report_path="", rc="1",
         phase="setup_failed")
@@ -1092,7 +1092,7 @@ def test_record_outcomes_on_a_setup_failure_blames_setup_not_codex(tmp_path):
 
 
 def test_a_clean_run_with_no_usable_trailer_reads_as_trailer_unparseable(tmp_path):
-    # codex exited 0 but never wrote a parseable v2 trailer — "codex exit 0" would say nothing.
+    # The agent exited 0 but never wrote a parseable v2 trailer — "agent exit 0" would say nothing.
     report = tmp_path / "report.md"
     report.write_text("prose, but no fenced json trailer at all\n", encoding="utf-8")
     proc, calls = _run_record_outcomes(

@@ -1,4 +1,4 @@
-"""Tests for `.codex/scripts/mergeback_queue.py` (factory slice 3): the durable, dual-writer
+"""Tests for `.opencode/scripts/mergeback_queue.py` (factory slice 3): the durable, dual-writer
 merge-back queue (`data/mergeback-queue.json` + `data/mergeback-queue.lock`).
 
 Imported directly via `importlib` from its repo path (it's a standalone script, not part of the
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-_MOD_PATH = REPO_ROOT / ".codex" / "scripts" / "mergeback_queue.py"
+_MOD_PATH = REPO_ROOT / ".opencode" / "scripts" / "mergeback_queue.py"
 
 _spec = importlib.util.spec_from_file_location("mergeback_queue", _MOD_PATH)
 mergeback_queue = importlib.util.module_from_spec(_spec)
@@ -853,7 +853,7 @@ def _add_run_worktree(repo: Path, branch: str, worktree: Path, *, log: bool = Tr
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree)],
                    check=True, capture_output=True)
     if log:
-        (worktree / "research-loop.log").write_text("codex transcript\n", encoding="utf-8")
+        (worktree / "research-loop.log").write_text("agent transcript\n", encoding="utf-8")
 
 
 def test_cleanup_branch_all_terminal_removes_worktree_and_archives_log(paths, tmp_path):
@@ -875,7 +875,7 @@ def test_cleanup_branch_all_terminal_removes_worktree_and_archives_log(paths, tm
     # Log archived BEFORE removal, branch slashes -> underscores.
     archived = repo / ".runs" / "logs" / f"research-run_{_STAMP}--strat_a.log"
     assert result["log_archived"] is True
-    assert archived.read_text(encoding="utf-8") == "codex transcript\n"
+    assert archived.read_text(encoding="utf-8") == "agent transcript\n"
     # The branch itself survives the worktree removal (the authored code persists on it).
     branches = subprocess.run(["git", "-C", str(repo), "branch", "--list", branch],
                               capture_output=True, text=True, check=True).stdout
