@@ -62,19 +62,37 @@ def test_launcher_dry_run_emits_bounded_sandboxed_codex_command():
     assert "thesis:" not in out
 
 
+# ACTIVE categories: those whose ideas the platform can actually test today. `capabilities.py`
+# supports OHLCV only, so a category needing fundamentals / filings / options flow produces ideas
+# that auto-park `needs_data` on import -- forage budget spent for nothing (#649).
 CATEGORY_SLUGS = [
-    "momentum", "mean_reversion", "seasonality", "vol_structure", "value_quality_proxy",
-    "liquidity_microstructure", "event_driven", "institutional_flow",
+    "momentum", "mean_reversion", "seasonality", "vol_structure", "liquidity_microstructure",
 ]
 
+# PARKED categories: removed from the rotation until their data lands, but kept documented in the
+# file so restoring one is an uncomment rather than an act of memory.
+PARKED_CATEGORY_SLUGS = ["value_quality_proxy", "event_driven", "institutional_flow"]
 
-def test_categories_file_lists_the_eight_ideation_categories():
+
+def test_categories_file_lists_the_active_ideation_categories():
     # The categories file replaced the free-text thesis rotation: `research idea claim`'s
     # round-robin and the forage rotation both key on these slugs (PRD §4).
     path = REPO / ".codex" / "categories.txt"
     slugs = [line.split()[0] for line in path.read_text().splitlines()
              if line.strip() and not line.lstrip().startswith("#")]
     assert slugs == CATEGORY_SLUGS
+
+
+def test_parked_categories_stay_documented_in_the_file():
+    """A category pulled from the rotation must remain visible with its blocking data kind.
+
+    Deleting the line instead would lose WHY it went, and the next person to widen the funnel has
+    to rediscover that `institutional_flow` -- the original 2026-05 thesis -- needs 13F/options
+    flow. Restoring one should be an uncomment, not an act of memory.
+    """
+    text = (REPO / ".codex" / "categories.txt").read_text()
+    for slug in PARKED_CATEGORY_SLUGS:
+        assert f"# {slug}" in text, f"parked category {slug} is not documented in categories.txt"
 
 
 def test_the_thesis_rotation_file_is_gone():

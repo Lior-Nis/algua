@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.config.settings import get_settings
 
 runner = CliRunner()
 
@@ -57,7 +58,16 @@ def test_claim_then_record_outcome_then_depth():
              "--outcome", "run_error", "--reason", "again")
     assert r.exit_code == 1 and _json(r)["code"] == "claim_token_mismatch"
     d = _json(_run("depth"))
-    assert d["open_unclaimed"] == 1 and d["refill_at"] == 72 and d["below_refill"] is True
+    # refill_at is DERIVED (runs/day x hypotheses/run x floor_days), so assert the arithmetic
+    # rather than a literal -- a hard-coded 72 is what broke when the funnel was resized to the
+    # paper book's real turnover (#649).
+    s = get_settings()
+    expected_refill = (
+        s.research_runs_per_day * s.research_hypotheses_per_run * s.idea_pool_floor_days
+    )
+    assert d["open_unclaimed"] == 1
+    assert d["refill_at"] == expected_refill
+    assert d["below_refill"] is True
 
 
 def test_claim_empty_pool_is_ok_with_empty_list():
