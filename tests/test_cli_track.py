@@ -4,6 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.tracking.sqlite_tracker import _sqlite_tracking_uri
 
 runner = CliRunner()
 
@@ -17,7 +18,7 @@ def _tmp(monkeypatch, tmp_path):
 
 def _runs(tmp_path, experiment="cross_sectional_momentum"):
     from mlflow.tracking import MlflowClient
-    client = MlflowClient(tracking_uri=str(tmp_path / "mlruns"))
+    client = MlflowClient(tracking_uri=_sqlite_tracking_uri(str(tmp_path / "mlruns")))
     exp = client.get_experiment_by_name(experiment)
     return [] if exp is None else client.search_runs([exp.experiment_id])
 
@@ -29,7 +30,7 @@ def test_run_track_logs_a_run(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["mlflow_run_id"]
     assert len(_runs(tmp_path)) == 1
-    # Default backend (tracking_backend="mlflow"): the fourth-state key must never appear here —
+    # Default backend (tracking_backend="mlflow-sqlite"): the fourth-state key must never appear —
     # this is the proof the no-op seam (stage 5a) changed nothing on the default path.
     assert "mlflow_tracking_skipped" not in payload
 

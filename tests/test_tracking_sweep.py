@@ -2,6 +2,7 @@ import math
 
 from algua.backtest.sweep import SweepResult
 from algua.tracking.mlflow_tracker import log_sweep
+from algua.tracking.sqlite_tracker import _sqlite_tracking_uri
 
 
 def _combo(lookback, score):
@@ -27,7 +28,7 @@ def _sweep():
 def test_log_sweep_parent_and_children(tmp_path):
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     parent_id = log_sweep(_sweep(), tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -48,7 +49,7 @@ def test_log_sweep_parent_and_children(tmp_path):
 def test_sweep_child_runs_carry_shared_stamps(tmp_path):
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(_sweep(), tracking_uri=uri)
     client = MlflowClient(tracking_uri=uri)
     exp = client.get_experiment_by_name("ew")
@@ -65,7 +66,7 @@ def test_sweep_n_combos_is_param_not_metric(tmp_path):
     """n_combos is a sweep config count — must be logged as a param, never as a metric."""
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(_sweep(), tracking_uri=uri)
     client = MlflowClient(tracking_uri=uri)
     exp = client.get_experiment_by_name("ew")
@@ -88,7 +89,7 @@ def test_sweep_nonfinite_best_score_not_logged(tmp_path):
         ranked=[_combo(20, 1.4)],
         best={"params": {"lookback": 20, "top_k": 1}, "score": float("nan")},
     )
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(sweep, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -103,7 +104,7 @@ def test_sweep_nonfinite_best_score_finite_still_logged(tmp_path):
     """Finite best['score'] must still be logged after the guard is applied."""
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(_sweep(), tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -133,7 +134,7 @@ def test_sweep_nonfinite_entry_score_not_logged(tmp_path):
         ranked=[nan_score_combo],
         best={"params": {"lookback": 20, "top_k": 1}, "score": 0.8},
     )
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(sweep, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -148,7 +149,7 @@ def test_sweep_finite_entry_score_still_logged(tmp_path):
     """Finite entry['score'] must still reach the child MLflow run after the guard."""
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(_sweep(), tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -181,7 +182,7 @@ def test_sweep_drops_nonfinite_child_metrics(tmp_path):
         grid={"lookback": [20], "top_k": [1]}, n_combos=1, rank_by="mean_sharpe",
         ranked=[bad_combo], best={"params": {"lookback": 20, "top_k": 1}, "score": 0.5},
     )
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_sweep(sweep, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)

@@ -2,6 +2,7 @@ import math
 
 from algua.backtest.walkforward import WalkForwardResult
 from algua.tracking.mlflow_tracker import log_walk_forward
+from algua.tracking.sqlite_tracker import _sqlite_tracking_uri
 
 
 def _wf():
@@ -23,7 +24,7 @@ def _wf():
 def test_log_walk_forward_records_metrics(tmp_path):
     from mlflow.tracking import MlflowClient
 
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_walk_forward(_wf(), {"lookback": 60}, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
@@ -53,7 +54,7 @@ def test_walk_forward_drops_nonfinite_metrics(tmp_path):
         stability={"mean_sharpe": float("inf"), "std_sharpe": 0.2,
                    "min_sharpe": float("-inf"), "pct_positive_windows": 0.5},
     )
-    uri = str(tmp_path / "mlruns")
+    uri = _sqlite_tracking_uri(str(tmp_path / "mlruns"))
     log_walk_forward(wf, {}, tracking_uri=uri)
 
     client = MlflowClient(tracking_uri=uri)
