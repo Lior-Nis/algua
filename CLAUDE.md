@@ -172,11 +172,18 @@ drive the system through the **same** CLI. Every data command emits JSON on stdo
   the forage and leap drivers' vault-side commands over `kb/inspirations/`: accept a foraged
   inspiration note, list/mark its lifecycle, propose one from a driver, and write the leap yield
   back to the vault.
-- Three timers drive the ideation engine unattended: `algua-research.timer` (every 2h at `:00`,
-  claims ideas and runs the research loop), `algua-leap.timer` (every 2h at `:30`, inspirations →
-  structured hypotheses, depth-gated), `algua-forage.timer` (daily `03:00 UTC`, web search →
-  `kb/inspirations/` notes). A human steers the engine through two files: `.codex/categories.txt`
+- Three timers drive the ideation engine unattended: `algua-research.timer` (every 6h, claims ideas
+  and runs the research loop), `algua-leap.timer` (every 2h at `:30`, inspirations → structured
+  hypotheses, depth-gated), `algua-forage.timer` (daily `03:00 UTC`, web search →
+  `kb/inspirations/` notes). A human steers the engine through two files: `.opencode/categories.txt`
   (the ideation category list) and `kb/inspirations/_sources.yaml` (the venue registry).
+- **The agent runtime is OpenCode, reached through ONE seam.** `.opencode/scripts/run_agent.sh` is
+  the only file in the repo that names a runtime, a model or a sandbox flag. Models live in
+  `.opencode/opencode.json`; agent definitions (research / leap / forage, plus the `author` and `interpret`
+  subagents) live in `.opencode/agents/`. The seam re-imposes a kernel write wall with bwrap,
+  forbids every `ask` permission so an unattended run cannot block, and kills a run early on a
+  terminal provider error instead of burning the whole timeout. Changing how an agent is launched
+  means changing the seam, never a driver.
 ## Lifecycle stages
 `idea -> backtested -> candidate -> paper -> forward_tested -> live -> retired`
 (plus allowed back-steps and `-> retired`). See `algua/contracts/lifecycle.py`.

@@ -6,9 +6,9 @@
 # The agent ideates -> authors -> backtests / walk-forwards / sweeps -> gates (preview
 # `research promote`) up to 'candidate'. Two independent walls keep it off the real funnel:
 #
-#   1. FILESYSTEM CONTAINMENT (the real wall). Codex runs under `-s workspace-write -a never`
-#      with its working root at the throwaway worktree, so model-generated shell commands can
-#      only WRITE inside the worktree. The authoritative registry (data/algua.db), snapshot
+#   1. FILESYSTEM CONTAINMENT (the real wall), imposed by the run_agent.sh seam with bwrap:
+#      everything outside the throwaway worktree is mounted read-only and /tmp is a private
+#      tmpfs, so model-generated shell commands can only WRITE inside the worktree. The authoritative registry (data/algua.db), snapshot
 #      tree, kb vault, and main's .git all live OUTSIDE the worktree and are therefore not
 #      writable by the agent — even though it is otherwise autonomous. Env-var path routing
 #      alone is NOT containment (an unsandboxed agent can write any absolute path); the sandbox
@@ -22,7 +22,7 @@
 #      code; its diff-policy rejects gate-core edits before the merge) — the only real reconciler.
 #
 # The agent does NOT commit — it just authors files in the worktree; the DRIVER (trusted, after
-# codex exits) commits them on research-run/<stamp>, so the agent needs no git-dir write access.
+# the agent exits) commits them on research-run/<stamp>, so the agent needs no git-dir write access.
 #
 # Ideation engine (spec 2026-09-08 §7): the driver does NOT hand the agent a thesis to invent
 # around any more. BEFORE the scratch copy is seeded it CLAIMS this run's ideas from the
@@ -44,11 +44,11 @@
 # with the mtime pruner as backstop.
 #
 # Bounds: an OS-level `timeout` hard-kills the run; a repo-root flock serializes research cycles;
-# the codex exit code propagates (a timeout/failure fails the systemd unit, never a false success).
+# the agent exit code propagates (a timeout/failure fails the systemd unit, never a false success).
 # Safety: the agent CANNOT go live (human-signed wall) and CANNOT reach the real funnel.
 #
 # Usage:
-#   .codex/scripts/run-research-loop.sh [--hypotheses N] [--timeout DUR] [--category SLUG] [--dry-run]
+#   .opencode/scripts/run-research-loop.sh [--hypotheses N] [--timeout DUR] [--category SLUG] [--dry-run]
 #
 set -euo pipefail
 
@@ -64,7 +64,7 @@ SYNC_TIMEOUT="${SYNC_TIMEOUT:-5m}"
 # silently preview against an empty funnel. Set ALGUA_ALLOW_EMPTY_FUNNEL=1 for a deliberate
 # first-ever cold-start bootstrap.
 ALLOW_EMPTY_FUNNEL="${ALGUA_ALLOW_EMPTY_FUNNEL:-0}"
-# Optional: restrict this run's claims to one ideation category slug (.codex/categories.txt).
+# Optional: restrict this run's claims to one ideation category slug (.opencode/categories.txt).
 # Empty (the default) lets `research idea claim` round-robin the whole pool.
 CATEGORY="${CATEGORY:-}"
 # This run's claimed ideas, as the JSON array `research idea claim` returned. Filled in
@@ -118,13 +118,13 @@ AUTH_DATA_DIR="${ALGUA_DATA_DIR:-${REPO_ROOT}/data}"
 # per run (see the append site near the end of this script for the schema).
 AUTH_DIGEST="${ALGUA_RESEARCH_DIGEST_PATH:-${AUTH_DATA_DIR}/research-runs.jsonl}"
 # The durable merge-back queue (factory slice 3) — same authority-side resolution as the digest
-# above, so it too survives worktree pruning. `.codex/scripts/mergeback_queue.py` owns the
+# above, so it too survives worktree pruning. `.opencode/scripts/mergeback_queue.py` owns the
 # lock+atomic-write discipline; this script only calls into it (once per validated merge_back
 # candidate — see the trailer-parsing step below). Never blocks on / runs merge-back itself, so
 # queue depth can never extend a research cycle past its TIMEOUT budget.
 AUTH_QUEUE="${ALGUA_MERGEBACK_QUEUE_PATH:-${AUTH_DATA_DIR}/mergeback-queue.json}"
 AUTH_QUEUE_LOCK="${ALGUA_MERGEBACK_QUEUE_LOCK_PATH:-${AUTH_DATA_DIR}/mergeback-queue.lock}"
-QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
+QUEUE_MOD="${REPO_ROOT}/.opencode/scripts/mergeback_queue.py"
 
 # Durable feedback digest (factory slice 1): ONE JSON line per FIRING — not just per completed
 # run. Defined EARLY (STAMP/CATEGORY are already known; the branch may still be null) with safe
@@ -137,7 +137,7 @@ QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
 DIGEST_BRANCH=""        # set once the run branch actually exists (null in the digest until then)
 DIGEST_REPORT_PATH=""   # set once a completed run may have written kb/research-runs/<stamp>.md
 STRATEGY_MODULE_NAMES=""  # comma-joined module names this run's own commit added (cross-check set)
-rc=""                   # codex exit code (or the setup-failure exit code); null until known
+rc=""                   # agent exit code (or the setup-failure exit code); null until known
 timed_out=0
 wall_s=""
 n_strategy_files=""
@@ -395,7 +395,7 @@ mergeback_queue = None
 if candidates and branch:
     try:
         spec = importlib.util.spec_from_file_location(
-            "mergeback_queue", os.path.join(repo_root, ".codex", "scripts", "mergeback_queue.py"))
+            "mergeback_queue", os.path.join(repo_root, ".opencode", "scripts", "mergeback_queue.py"))
         mergeback_queue = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mergeback_queue)
     except Exception as exc:
@@ -478,7 +478,7 @@ PY
 # $1 is the per-idea outcome source: the run report whose v2 trailer carries `idea_id`/`outcome`/
 # `reason` (empty on any path that never produced one -> every claimed idea gets `run_error`).
 # $2 is the FIRING PHASE ("completed" | "setup_failed" | "skipped_lock"), which is what makes the
-# fallback reason honest: only a phase that actually reached codex may blame a codex exit code.
+# fallback reason honest: only a phase that actually reached the agent may blame an agent exit code.
 # Best-effort and LOUD by contract: a failed record-outcome warns and never changes the run's exit
 # code — feedback, not control flow.
 record_outcomes() {
@@ -566,13 +566,13 @@ for unknown in sorted(set(entries) - claimed_ids):
 # A run that never produced a parseable trailer (crash, timeout, lock-skip, setup failure) still
 # owes every claimed idea an outcome: run_error, so the claim is released and the idea returns to
 # the pool now rather than at the TTL reap. The REASON must name the real failure — blaming a
-# "codex exit" for a firing that never reached codex would make the ledger lie.
+# "agent exit" for a firing that never reached the agent would make the ledger lie.
 if run_phase == "setup_failed":
     aborted_reason = f"setup_failed:{exit_code}" if exit_code else "setup_failed"
 elif run_phase == "completed":
-    # Reached codex: a non-zero/timeout exit explains itself; a CLEAN exit with no usable trailer
+    # Reached the agent: a non-zero/timeout exit explains itself; a CLEAN exit with no usable trailer
     # means the agent simply never wrote one.
-    aborted_reason = (f"codex exit {exit_code}" if exit_code not in ("", "0")
+    aborted_reason = (f"agent exit {exit_code}" if exit_code not in ("", "0")
                       else "trailer_unparseable")
 else:
     aborted_reason = "run did not complete"  # skipped_lock: the firing never started
@@ -822,20 +822,22 @@ that seeds future runs' do-not-retest context, and enqueues every valid "merge_b
 automated authoritative merge-back drainer.
 EOF
 
-# `-s workspace-write` confines model-generated writes to the worktree (verified: a write to any path
-# outside it fails "read-only file system"); `approval_policy=never` runs headless (a blocked/failed
-# command returns an error to the model, never a prompt). network_access=true lets the agent's shell
-# commands use the network (uv, etc.); the threat model here is FUNNEL-WRITE CORRUPTION, closed by
-# write-confinement — not network egress (codex's own API is unsandboxed anyway).
-CODEX_CMD=(timeout "${TIMEOUT}" codex exec
-  -s workspace-write
-  -c approval_policy="never"
-  -c 'sandbox_workspace_write.network_access=true'
-  -C "${WORKTREE}"
-  "${GOAL}")
+# The runtime, the sandbox posture and the model choice all live behind ONE seam
+# (.opencode/scripts/run_agent.sh) so this driver never names a vendor or a model. The seam
+# re-imposes a kernel write wall with bwrap (verified: a write to any path outside the worktree
+# fails "read-only file system"), runs headless with no `ask`
+# permission that could block, and kills the run early on a terminal provider error instead of
+# burning the whole TIMEOUT. The threat model is unchanged: FUNNEL-WRITE CORRUPTION, closed by
+# write-confinement — not network egress (the agent's own API traffic is unsandboxed regardless).
+PROMPT_FILE="${WORKTREE}/.agent-prompt.md"
+AGENT_CMD=("${REPO_ROOT}/.opencode/scripts/run_agent.sh"
+  --mode research
+  --workdir "${WORKTREE}"
+  --prompt-file "${PROMPT_FILE}"
+  --timeout "${TIMEOUT}")
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
-  echo "DRY RUN — no worktree created, codex not invoked."
+  echo "DRY RUN — no worktree created, the agent runtime is not invoked."
   echo "would create worktree:   ${WORKTREE}"
   echo "would create branch:     ${BRANCH}"
   echo "hypotheses: ${N_HYPOTHESES}   timeout: ${TIMEOUT}"
@@ -851,7 +853,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   echo "  ALGUA_KNOWLEDGE_DIR (scratch):            ${ALGUA_KNOWLEDGE_DIR}"
   echo "  ALGUA_MLFLOW_TRACKING_URI (scratch):      ${ALGUA_MLFLOW_TRACKING_URI}"
   echo "  UV_CACHE_DIR (in-worktree):               ${UV_CACHE_DIR}"
-  echo "would run: ${CODEX_CMD[*]}"
+  echo "would run: ${AGENT_CMD[*]} --dry-run"
+  "${AGENT_CMD[@]}" --dry-run 2>/dev/null || true
   exit 0
 fi
 
@@ -967,12 +970,13 @@ echo "Running research loop (timeout ${TIMEOUT}, up to ${N_HYPOTHESES} hypothese
 RUN_LOG="${WORKTREE}/research-loop.log"
 run_start="$(date +%s)"
 set +e
-"${CODEX_CMD[@]}" </dev/null 2>&1 | tee "${RUN_LOG}"
+printf '%s\n' "${GOAL}" > "${PROMPT_FILE}"
+"${AGENT_CMD[@]}" </dev/null 2>&1 | tee "${RUN_LOG}"
 rc="${PIPESTATUS[0]}"
 set -e
 wall_s=$(( $(date +%s) - run_start ))
 if [[ "${rc}" -ne 0 ]]; then
-  echo "codex exec exited ${rc} (timeout=124, or an auth/runtime error) — review the branch anyway." >&2
+  echo "the agent exited ${rc} (timeout=124, provider failure=3, or a runtime error) — review the branch anyway." >&2
 fi
 timed_out=0
 if [[ "${rc}" -eq 124 ]]; then timed_out=1; fi
@@ -983,7 +987,7 @@ if grep -qiE 'rate.?limit|429|quota|usage limit' "${RUN_LOG}" 2>/dev/null; then 
 # Scoped to the strategies tree + the kb/research-runs report (kb/** is diff-policy-allowlisted;
 # a root-level run-report.md is NOT — see the diff-policy landmine note at the top of this file) so
 # nothing stray is swept in. Best-effort: a failed commit (e.g. nothing authored) doesn't mask the
-# codex exit code.
+# agent exit code.
 echo "Committing any authored strategies on ${BRANCH} (trusted driver)..."
 git -C "${WORKTREE}" add algua/strategies kb/research-runs 2>/dev/null || true
 n_strategy_files=0
@@ -1085,7 +1089,7 @@ echo "Done. Review the run:"
 echo "  git -C ${REPO_ROOT} diff main...${FINAL_BRANCH}"
 echo "  git -C ${REPO_ROOT} show ${FINAL_BRANCH}:kb/research-runs/${STAMP}.md"
 echo "  # Every valid 'merge_back' in the trailer above was just enqueued to ${AUTH_QUEUE}"
-echo "  # for the automated drainer (.codex/scripts/drain-mergeback-queue.sh) to run for real."
+echo "  # for the automated drainer (.opencode/scripts/drain-mergeback-queue.sh) to run for real."
 echo "  # To force one through right now instead of waiting for the next drain cycle:"
 echo "  uv run algua paper merge-back --branch ${FINAL_BRANCH} --strategy <name> --universe <u> --start D --end D \\"
 echo "    --snapshot <bars-id> --sweep-param K=v1,v2   # (or --demo; the eval-context recipe is required)"

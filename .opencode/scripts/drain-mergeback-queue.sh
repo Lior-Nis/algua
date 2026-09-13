@@ -19,7 +19,7 @@
 # `in_progress` past `RESERVATION_STALE_SECONDS` (mergeback_queue.py) is reclaimed automatically.
 #
 # Usage:
-#   .codex/scripts/drain-mergeback-queue.sh [--dry-run]
+#   .opencode/scripts/drain-mergeback-queue.sh [--dry-run]
 #
 set -euo pipefail
 
@@ -41,7 +41,7 @@ BACKOFF_MINUTES="${MERGEBACK_BACKOFF_MINUTES_PER_ATTEMPT:-10}"
 # Raised 1800 -> 4200 in lockstep with the drainer unit's TimeoutStartSec 1200 -> 3600 (stale >
 # timeout always): the cycle now stacks quality gate + evidence sweep + backtest + promote.
 RESERVATION_STALE_SECONDS="${MERGEBACK_RESERVATION_STALE_SECONDS:-4200}"
-QUEUE_MOD="${REPO_ROOT}/.codex/scripts/mergeback_queue.py"
+QUEUE_MOD="${REPO_ROOT}/.opencode/scripts/mergeback_queue.py"
 # The repo venv's algua, NOT a bare `algua` from PATH: the systemd user unit's PATH
 # (~/.local/bin:/usr/local/bin:...) never contains the project venv, so a bare default made every
 # timer-fired drain exit 127 (`algua: command not found`) — classified transient_failure and

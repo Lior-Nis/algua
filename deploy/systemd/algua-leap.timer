@@ -6,7 +6,7 @@ Description=Algua leap timer — every 2h at half past, between research runs
 #   - BETWEEN research runs. algua-research fires on the hour; leap on the half hour, so a leap
 #     never contends with the research cycle it is refilling the pool for.
 #   - OFF the paper operator's minutes (:07/:27/:47), so the box's CPU (a full `uv sync` plus a
-#     codex run) is not busy on the minutes a trading tick needs it.
+#     agent run) is not busy on the minutes a trading tick needs it.
 # It SHARES the merge-back drainer's :30 minute, and that is fine: neither takes operator.lock
 # from the other's side of the fence. The drainer takes operator.lock (it drives the real
 # `paper merge-back`); leap does NOT — leap, forage and the research loop each serialize only

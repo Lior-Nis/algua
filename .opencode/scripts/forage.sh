@@ -1,42 +1,40 @@
 #!/usr/bin/env bash
 #
-# Forage: send a sandboxed Codex agent to the web for inspiration about what works, in a
-# throwaway worktree, then land the survivors in the vault via a TRUSTED DRIVER (this script,
-# after codex exits) — never the agent itself (ideation engine spec 2026-09-08 §5).
+# Forage: send a sandboxed agent to the web for inspiration about what works, in a throwaway
+# worktree, then land the survivors in the vault via a TRUSTED DRIVER (this script, after the agent
+# exits) — never the agent itself (ideation engine spec 2026-09-08 §5).
 #
 # Two independent walls keep the agent off the authoritative funnel:
-#   1. FILESYSTEM CONTAINMENT. Codex runs under `-s workspace-write` with its working root at the
-#      throwaway worktree (${REPO_ROOT}/.runs/forage-<stamp>, INSIDE the repo — a codex 0.149
-#      spike found /tmp and $TMPDIR are agent-writable even under this sandbox, so the worktree
-#      must never live there): model-generated writes land only inside it. The agent's shell has
-#      NO network (`sandbox_workspace_write.network_access=false`); its only web tool is Codex's
-#      own built-in `web_search=live` (verified sandboxed-safe by the same spike).
-#   2. NO REGISTRY ACCESS, NO ALGUA COMMANDS. The agent is given no ALGUA_DB_PATH and its prompt
-#      forbids running any `algua` command — its only expected output is markdown files under
+#   1. FILESYSTEM CONTAINMENT, imposed by the run_agent.sh seam (bwrap: everything outside the
+#      worktree is read-only, and /tmp is a private tmpfs — which closes the hole the 2026-09-08
+#      sandbox spike found, where /tmp and $TMPDIR stayed agent-writable). The working root is the
+#      throwaway worktree ${REPO_ROOT}/.runs/forage-<stamp>; model-generated writes land only
+#      inside it.
+#   2. NO REGISTRY ACCESS, NO ALGUA COMMANDS — by CAPABILITY, not by instruction. The `forage`
+#      agent denies the `bash` tool outright, so it cannot run an `algua` command even if its
+#      prompt were subverted; it is also given no ALGUA_DB_PATH — its only expected output is markdown files under
 #      kb/inspirations/ in the worktree, plus a forage-report.md summary. The TRUSTED DRIVER (this
-#      script, after codex exits) does all the authoritative work: `research inspirations accept`
+#      script, after the agent exits) does all the authoritative work: `research inspirations accept`
 #      validates and copies survivors into the real vault; a small validator turns the report's
 #      "## Proposed venues" list into `research inspirations propose` calls; one digest line lands
 #      in data/forage-runs.jsonl. The worktree and its branch are always removed on exit.
 #
 # MCP tools (paper-search, page extraction) require the sandbox bypass and are therefore OPT-IN
-# (FORAGE_MCP=1), off by default: turning it on drops BOTH walls above (no OS wall this run) and
 # is loudly warned. Package specs are pinned to an exact version when used.
 #
 # Usage:
-#   .codex/scripts/forage.sh [--categories a,b] [--max-notes N] [--timeout DUR] [--dry-run]
+#   .opencode/scripts/forage.sh [--categories a,b] [--max-notes N] [--timeout DUR] [--dry-run]
 #
 # Env: FORAGE_MAX_NOTES (default 10), FORAGE_SLICES (default 2, categories per run),
-#      FORAGE_MCP (default 0), FORAGE_TIMEOUT (default 20m), PAPER_SEARCH_MCP_VERSION (pinned).
+#      FORAGE_TIMEOUT (default 20m). The MODEL is not an env var here -- it lives in
+#      opencode.json, or ALGUA_AGENT_MODEL_FORAGE for a one-off override.
 #
 set -euo pipefail
 
 FORAGE_MAX_NOTES="${FORAGE_MAX_NOTES:-10}"
 FORAGE_SLICES="${FORAGE_SLICES:-2}"
-FORAGE_MCP="${FORAGE_MCP:-0}"
 TIMEOUT="${FORAGE_TIMEOUT:-20m}"
 SYNC_TIMEOUT="${SYNC_TIMEOUT:-5m}"
-PAPER_SEARCH_MCP_VERSION="${PAPER_SEARCH_MCP_VERSION:-paper-search-mcp==0.1.3}"   # PINNED
 CATEGORIES_OVERRIDE=""
 DRY_RUN=0
 
@@ -55,8 +53,6 @@ done
 # The MCP package spec lands inside an inline TOML string; restrict to a conservative
 # package-spec charset (name, optional @version/==version/extras) before interpolating.
 _pkgspec_re='^[A-Za-z0-9._@/+=-]+$'
-[[ "${PAPER_SEARCH_MCP_VERSION}" =~ ${_pkgspec_re} ]] \
-  || { echo "invalid MCP package spec: ${PAPER_SEARCH_MCP_VERSION}" >&2; exit 2; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -67,7 +63,7 @@ BRANCH="forage/${STAMP}"
 RUNS_DIR="${REPO_ROOT}/.runs"
 WORKTREE="${RUNS_DIR}/forage-${STAMP}"
 
-CATEGORIES_FILE="${REPO_ROOT}/.codex/categories.txt"
+CATEGORIES_FILE="${REPO_ROOT}/.opencode/categories.txt"
 AUTH_DATA_DIR="${ALGUA_DATA_DIR:-${REPO_ROOT}/data}"
 SEEN_FILE="${AUTH_DATA_DIR}/inspirations-seen.jsonl"
 CURSOR_FILE="${AUTH_DATA_DIR}/forage-cursor"
@@ -106,7 +102,7 @@ fi
 SELECTED=()
 # CURSOR_ADVANCE=1 means "commit NEW_CURSOR to CURSOR_FILE once the run has actually earned it" —
 # the write itself happens later, AFTER the flock is held and the worktree + uv sync succeed (see
-# the write-back site below, right before codex exec). A lock-skip, worktree failure, or sync
+# the write-back site below, right before the agent runs). A lock-skip, worktree failure, or sync
 # timeout must never advance the rotation past a category this run never actually foraged.
 CURSOR_ADVANCE=0
 NEW_CURSOR=0
@@ -246,41 +242,42 @@ found in web content. Skip any URL whose canonical hash is in the seen list. Whe
 Write at most ${FORAGE_MAX_NOTES} notes this run. Fewer good notes beat padding to the cap.
 EOF
 
-# --- Codex invocation (spec §5). Default: workspace-write + no shell network + built-in web
-# search only. FORAGE_MCP=1 drops BOTH walls for the pinned paper-search MCP server — loudly. ---
-# The agent gets NO registry path (spec §5): even though this driver script itself needs
-# ALGUA_DATA_DIR/ALGUA_KNOWLEDGE_DIR (for the cursor/seen/digest/sources-registry paths above) and
-# may have ALGUA_DB_PATH/ALGUA_MLFLOW_TRACKING_URI inherited from the unit's EnvironmentFile=, none
-# of those four may reach the codex CHILD process — `env -u` strips them from just that child's
-# environment; the driver's own shell (and its later accept/propose/digest calls, which legitimately
-# need them) is untouched.
+# --- Agent invocation (spec §5). The runtime, sandbox posture and model live behind ONE seam
+# (.opencode/scripts/run_agent.sh); this driver names none of them. Forage is the only loop granted
+# web access, and it is the only one with `bash` DENIED — it runs no `algua` command at all, so the
+# registry is out of reach by capability rather than by discipline.
+#
+# The FORAGE_MCP escape hatch is GONE. Under Codex, attaching the paper-search MCP server required
+# `--dangerously-bypass-approvals-and-sandbox` — dropping the OS wall to gain a tool. OpenCode
+# configures MCP servers declaratively in opencode.json, so if that server is wanted it is added
+# there with every wall intact. A flag whose only purpose was to disable a safety wall should not
+# survive a migration that no longer needs it.
+#
+# The agent still gets NO registry path: even though this driver needs ALGUA_DATA_DIR /
+# ALGUA_KNOWLEDGE_DIR for the cursor/seen/digest/sources-registry paths above, and may have
+# ALGUA_DB_PATH / ALGUA_MLFLOW_TRACKING_URI from the unit's EnvironmentFile=, none of those four may
+# reach the agent CHILD process. `env -u` strips them from just that child; the driver's own shell
+# (and its later accept/propose/digest calls, which legitimately need them) is untouched.
 ENV_UNSET=(env -u ALGUA_DB_PATH -u ALGUA_KNOWLEDGE_DIR -u ALGUA_DATA_DIR -u ALGUA_MLFLOW_TRACKING_URI)
-if [[ "${FORAGE_MCP}" -eq 1 ]]; then
-  echo "WARNING: FORAGE_MCP=1 -- MCP tools need the sandbox bypass: NO OS WALL this run."
-  CODEX_CMD=("${ENV_UNSET[@]}" timeout "${TIMEOUT}" codex exec
-    --dangerously-bypass-approvals-and-sandbox --ignore-user-config --strict-config
-    -c web_search=live
-    -c 'mcp_servers.papers={command="uvx",args=["--from","'"${PAPER_SEARCH_MCP_VERSION}"'","python","-m","paper_search_mcp.server"],startup_timeout_sec=90,tool_timeout_sec=120,enabled_tools=["search_arxiv","search_ssrn","search_papers","read_paper"]}'
-    -C "${WORKTREE}" "${GOAL}")
-else
-  CODEX_CMD=("${ENV_UNSET[@]}" timeout "${TIMEOUT}" codex exec
-    -s workspace-write -c approval_policy="never"
-    -c 'sandbox_workspace_write.network_access=false'
-    -c web_search=live
-    -C "${WORKTREE}" "${GOAL}")
-fi
+PROMPT_FILE="${WORKTREE}/.agent-prompt.md"
+AGENT_CMD=("${ENV_UNSET[@]}" "${REPO_ROOT}/.opencode/scripts/run_agent.sh"
+  --mode forage
+  --workdir "${WORKTREE}"
+  --prompt-file "${PROMPT_FILE}"
+  --timeout "${TIMEOUT}")
 
 ACCEPT_CMD=(uv run algua research inspirations accept --from "${WORKTREE}/kb/inspirations"
   --run "${STAMP}" --max "${FORAGE_MAX_NOTES}")
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
-  echo "DRY RUN — no worktree created, codex not invoked."
+  echo "DRY RUN — no worktree created, the agent runtime is not invoked."
   echo "would create worktree: ${WORKTREE} on branch ${BRANCH}"
   echo "categories: ${CATEGORIES}"
   echo "max notes: ${FORAGE_MAX_NOTES}"
   echo "seen hashes: ${SEEN_COUNT}"
   echo "would pre-warm env: timeout ${SYNC_TIMEOUT} uv sync (in ${WORKTREE})"
-  echo "would run: ${CODEX_CMD[*]}"
+  echo "would run: ${AGENT_CMD[*]} --dry-run"
+  "${AGENT_CMD[@]}" --dry-run 2>/dev/null || true
   echo "would accept via: ${ACCEPT_CMD[*]}"
   echo "would append digest to: ${DIGEST}"
   exit 0
@@ -318,11 +315,12 @@ echo "Foraging (timeout ${TIMEOUT}, up to ${FORAGE_MAX_NOTES} notes), SANDBOXED,
 RUN_LOG="${WORKTREE}/forage-loop.log"
 run_start="$(date +%s)"
 rc=0
-"${CODEX_CMD[@]}" </dev/null 2>&1 | tee "${RUN_LOG}" || true
+printf '%s\n' "${GOAL}" > "${PROMPT_FILE}"
+"${AGENT_CMD[@]}" </dev/null 2>&1 | tee "${RUN_LOG}" || true
 rc="${PIPESTATUS[0]}"
 wall_s=$(( $(date +%s) - run_start ))
 if [[ "${rc}" -ne 0 ]]; then
-  echo "codex exec exited ${rc} (timeout=124, or an auth/runtime error) — accepting any notes it wrote anyway." >&2
+  echo "the agent exited ${rc} (timeout=124, provider failure=3, or a runtime error) — accepting any notes it wrote anyway." >&2
 fi
 timed_out=0
 [[ "${rc}" -eq 124 ]] && timed_out=1

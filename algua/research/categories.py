@@ -1,4 +1,4 @@
-"""The ideation category vocabulary (`.codex/categories.txt`).
+"""The ideation category vocabulary (`.opencode/categories.txt`).
 
 ONE reader for the file that is a human steering surface (spec 2026-09-08 §4, PRD §7): the forage
 rotation, the leap prompt, `research inspirations propose/accept`, `research idea add` and the
@@ -12,11 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 
 #: Repo-relative location of the category file (the human's steering surface).
-CATEGORIES_REL = Path(".codex/categories.txt")
+CATEGORIES_REL = Path(".opencode/categories.txt")
 
 
 def categories_file_default() -> Path:
-    """The repo's `.codex/categories.txt`, located by walking up from THIS file to the directory
+    """The repo's `.opencode/categories.txt`, located by walking up from THIS file to the directory
     holding `pyproject.toml`. Never `Path.cwd()` — a driver may run from any working directory,
     but the category file lives at a fixed repo-relative location."""
     here = Path(__file__).resolve()

@@ -12,8 +12,8 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SKILLS = REPO / ".codex" / "skills"
-LAUNCHER = REPO / ".codex" / "scripts" / "run-research-loop.sh"
+SKILLS = REPO / ".opencode" / "skills"
+LAUNCHER = REPO / ".opencode" / "scripts" / "run-research-loop.sh"
 SKILL_NAMES = [
     "operating-algua",
     "author-a-strategy",
@@ -36,20 +36,27 @@ def _frontmatter(path: Path) -> dict[str, str]:
     return out
 
 
-def test_launcher_dry_run_emits_bounded_sandboxed_codex_command():
+def test_launcher_dry_run_emits_a_bounded_sandboxed_agent_command():
+    """The driver must reach the runtime ONLY through the seam, with its bounds intact.
+
+    Asserting the seam's contract rather than a vendor's flag spelling is the point: the previous
+    version of this test pinned `codex exec -s workspace-write`, so the runtime was effectively
+    load-bearing in the test suite and a migration had to rewrite assertions to move. What actually
+    matters -- one entry point, a hard timeout, an isolated branch, a scratch funnel -- is
+    runtime-independent, and that is what is checked here.
+    """
     proc = subprocess.run(
         ["bash", str(LAUNCHER), "--dry-run", "--hypotheses", "2", "--timeout", "10m"],
         cwd=REPO, capture_output=True, text=True, check=True,
     )
     out = proc.stdout
     assert "DRY RUN" in out
-    assert "codex exec" in out
-    # REAL filesystem containment — the workspace-write sandbox confines writes to the worktree.
-    # The old bypass-sandbox flag must NOT be used (env routing alone is not a wall).
-    assert "-s workspace-write" in out
-    assert "approval_policy=never" in out                         # headless, no prompts
-    assert "--dangerously-bypass-approvals-and-sandbox" not in out
-    assert "timeout 10m" in out                                  # OS-level hard bound
+    # ONE seam. The driver never names a runtime, a model or a sandbox flag itself.
+    assert "run_agent.sh" in out
+    assert "--mode research" in out
+    assert "--prompt-file" in out           # the prompt rides a FILE, never a 128 KiB-capped argv
+    assert "codex" not in out.lower().replace("opencode", "")
+    assert "--timeout 10m" in out           # hard bound, handed to the seam
     assert "research-run/" in out                                # isolated branch
     assert ".funnel-scratch" in out                              # per-run scratch funnel
     assert "hypotheses: 2" in out                                # goal-level bound
@@ -77,7 +84,7 @@ PARKED_CATEGORY_SLUGS = ["value_quality_proxy", "event_driven", "institutional_f
 def test_categories_file_lists_the_active_ideation_categories():
     # The categories file replaced the free-text thesis rotation: `research idea claim`'s
     # round-robin and the forage rotation both key on these slugs (PRD §4).
-    path = REPO / ".codex" / "categories.txt"
+    path = REPO / ".opencode" / "categories.txt"
     slugs = [line.split()[0] for line in path.read_text().splitlines()
              if line.strip() and not line.lstrip().startswith("#")]
     assert slugs == CATEGORY_SLUGS
@@ -90,13 +97,13 @@ def test_parked_categories_stay_documented_in_the_file():
     to rediscover that `institutional_flow` -- the original 2026-05 thesis -- needs 13F/options
     flow. Restoring one should be an uncomment, not an act of memory.
     """
-    text = (REPO / ".codex" / "categories.txt").read_text()
+    text = (REPO / ".opencode" / "categories.txt").read_text()
     for slug in PARKED_CATEGORY_SLUGS:
         assert f"# {slug}" in text, f"parked category {slug} is not documented in categories.txt"
 
 
 def test_the_thesis_rotation_file_is_gone():
-    assert not (REPO / ".codex" / "research-themes.txt").exists()
+    assert not (REPO / ".opencode" / "research-themes.txt").exists()
 
 
 def test_launcher_rejects_unknown_argument():
@@ -189,7 +196,7 @@ def test_install_user_units_includes_forage_and_leap_pairs():
 
 
 def test_skills_reachable_via_claude_skills_symlinks():
-    # Canonical skills live in .codex/skills/ (Codex). Claude Code reads .claude/skills/,
+    # Canonical skills live in .opencode/skills/ (Codex). Claude Code reads .claude/skills/,
     # so the same skills serve the co-dev harness too via symlink.
     for name in SKILL_NAMES:
         p = REPO / ".claude/skills" / name / "SKILL.md"

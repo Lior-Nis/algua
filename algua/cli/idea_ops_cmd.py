@@ -134,7 +134,7 @@ def import_(
         help="max ideas.id at seed time (default: read from authority)"),
     critic_file: Path = typer.Option(None, "--critic-file", help="leap-critic.jsonl"),
     categories_file: Path = typer.Option(
-        None, "--categories-file", help="default: .codex/categories.txt at the repo root"),
+        None, "--categories-file", help="default: .opencode/categories.txt at the repo root"),
 ) -> None:
     """Move scratch ideas into authority under a dedup + eligibility check (driver only).
 

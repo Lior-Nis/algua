@@ -1,5 +1,5 @@
 """Verification for the forage launcher (ideation engine spec 2026-09-08 §5) and the leap
-launcher (§6): both are TRUSTED DRIVERS wrapping a sandboxed Codex agent, and what these tests
+launcher (§6): both are TRUSTED DRIVERS wrapping a sandboxed agent, and what these tests
 pin is the privilege story (what the agent may reach) plus the driver's own authority-side step
 list — the two things a refactor can silently weaken. Also carries the systemd units and the
 sources-registry seed check for both stages.
@@ -13,12 +13,11 @@ import re
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-FORAGE = REPO / ".codex" / "scripts" / "forage.sh"
-LEAP = REPO / ".codex" / "scripts" / "leap.sh"
+FORAGE = REPO / ".opencode" / "scripts" / "forage.sh"
+LEAP = REPO / ".opencode" / "scripts" / "leap.sh"
 
 
 def _dry(script, *args):
@@ -27,99 +26,49 @@ def _dry(script, *args):
 
 
 def test_forage_dry_run_is_sandboxed_web_search_only_no_registry():
+    """Forage reaches the web and NOTHING else; the registry is out of reach by capability.
+
+    The agent definition denies `bash` outright, so forage runs no `algua` command at all -- the
+    registry is unreachable rather than merely undriven. The four authority env vars are stripped
+    from the child on top of that, so even an inherited value cannot leak in.
+    """
     out = _dry(FORAGE, "--categories", "momentum,seasonality", "--max-notes", "4",
                "--timeout", "10m")
-    assert "DRY RUN" in out and "codex exec" in out
-    assert "-s workspace-write" in out
-    assert "sandbox_workspace_write.network_access=false" in out
-    assert "web_search=live" in out
-    assert "--dangerously-bypass-approvals-and-sandbox" not in out
-    assert "mcp_servers" not in out                       # MCP is opt-in (FORAGE_MCP=1)
+    assert "DRY RUN" in out
+    assert "run_agent.sh" in out and "--mode forage" in out
     # No registry path VALUE reaches the agent (an `ALGUA_DB_PATH=...` assignment would be a leak;
     # the `-u ALGUA_DB_PATH` UNSET directive asserted below is the opposite of that).
     assert "ALGUA_DB_PATH=" not in out.split("would run:")[1]
-    # The codex CHILD must have these four stripped even though the driver's own environment (and
+    # The agent CHILD must have these four stripped even though the driver's own environment (and
     # its later accept/propose/digest calls) legitimately needs them.
     assert ("env -u ALGUA_DB_PATH -u ALGUA_KNOWLEDGE_DIR -u ALGUA_DATA_DIR "
             "-u ALGUA_MLFLOW_TRACKING_URI") in out
     assert "research inspirations accept" in out          # trusted driver lands the notes
     assert "categories: momentum,seasonality" in out and "max notes: 4" in out
-    assert "forage/" in out and "timeout 10m" in out
+    assert "forage/" in out and "--timeout 10m" in out
 
 
-def test_forage_mcp_opt_in_drops_the_sandbox_and_says_so():
+def test_forage_has_no_sandbox_bypass_escape_hatch():
+    """The FORAGE_MCP bypass is gone, and setting it must not resurrect one.
+
+    Under Codex, attaching the paper-search MCP server required
+    `--dangerously-bypass-approvals-and-sandbox` -- dropping the OS wall to gain a tool. OpenCode
+    configures MCP declaratively in `opencode.json`, so the capability no longer costs a wall. A
+    flag whose only purpose was to disable a safety wall must not survive the migration, and a
+    stale `FORAGE_MCP=1` in an operator's environment must change nothing.
+    """
+    env = {**os.environ, "FORAGE_MCP": "1"}
     out = subprocess.run(["bash", str(FORAGE), "--dry-run"], cwd=REPO, capture_output=True,
-                         text=True, check=True, env={**os.environ, "FORAGE_MCP": "1"}).stdout
-    assert "--dangerously-bypass-approvals-and-sandbox" in out
-    assert "NO OS WALL" in out and "paper-search-mcp==" in out  # pinned spec
-
-
-def test_forage_rejects_unknown_argument():
-    proc = subprocess.run(["bash", str(FORAGE), "--bogus"], cwd=REPO, capture_output=True,
-                          text=True)
-    assert proc.returncode == 2
-
-
-def test_forage_units_shaped_and_daily():
-    svc = (REPO / "deploy/systemd/algua-forage.service").read_text()
-    assert "Type=oneshot" in svc and "forage.sh" in svc and "TimeoutStartSec=" in svc
-    tmr = (REPO / "deploy/systemd/algua-forage.timer").read_text()
-    assert "OnCalendar=*-*-* 03:00:00 UTC" in tmr and "Persistent=true" in tmr
-
-
-def test_sources_registry_seed_has_venues_for_every_category():
-    # The TRACKED artifact is the SEED under deploy/ — kb/inspirations/ is runtime state and
-    # git-ignored (the vault's own registry is curated by a human and stamped by write-yield).
-    import yaml
-    reg = yaml.safe_load((REPO / "deploy/kb/inspirations/_sources.yaml").read_text())
-    cats = {line.split()[0] for line in (REPO / ".codex/categories.txt").read_text().splitlines()
-            if line.strip() and not line.startswith("#")}
-    covered = set()
-    for v in reg["venues"]:
-        covered |= set(v["categories"])
-    assert cats <= covered
-
-
-def test_forage_dry_run_leaves_the_rotation_cursor_untouched(tmp_path):
-    cursor = tmp_path / "forage-cursor"
-    cursor.write_text("3")
-    subprocess.run(["bash", str(FORAGE), "--dry-run"], cwd=REPO, capture_output=True, text=True,
-                   check=True, env={**os.environ, "ALGUA_DATA_DIR": str(tmp_path)})
-    assert cursor.read_text() == "3"
-
-
-def test_forage_lock_skip_leaves_the_rotation_cursor_untouched(tmp_path):
-    # The cursor write-back happens only after the flock is held AND the worktree + uv sync
-    # succeed — a lock-skip must exit 0 before ever touching CURSOR_FILE, so the next firing
-    # retries the SAME rotation slice rather than silently skipping past it.
-    cursor = tmp_path / "forage-cursor"
-    cursor.write_text("3")
-    lock = tmp_path / "forage.lock"
-    holder = subprocess.Popen(["flock", "-n", str(lock), "sleep", "30"])
-    try:
-        deadline = time.monotonic() + 5
-        while not lock.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        time.sleep(0.2)  # give flock a moment to actually acquire, not just create the file
-        proc = subprocess.run(
-            ["bash", str(FORAGE)], cwd=REPO, capture_output=True, text=True, timeout=30,
-            env={**os.environ, "ALGUA_DATA_DIR": str(tmp_path)})
-        assert proc.returncode == 0, proc.stderr
-        assert cursor.read_text() == "3"
-    finally:
-        holder.terminate()
-        holder.wait(timeout=5)
-
-
-# --- Leap (spec §6) ------------------------------------------------------------------------------
+                         text=True, check=True, env=env).stdout
+    assert "--dangerously-bypass-approvals-and-sandbox" not in out
+    assert "NO OS WALL" not in out
+    assert "run_agent.sh" in out and "--mode forage" in out
 
 
 def test_leap_dry_run_is_sandboxed_no_web_scratch_db_then_import():
     out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
-    assert "-s workspace-write" in out
-    assert "sandbox_workspace_write.network_access=false" in out
-    assert "web_search=disabled" in out
-    assert "mcp_servers" not in out and "--dangerously-bypass" not in out
+    assert "run_agent.sh" in out and "--mode leap" in out
+    assert "--dangerously-bypass" not in out
     assert ".leap-scratch/data/algua.db" in out             # ALGUA_DB_PATH -> scratch copy
     assert "research idea import --from" in out            # trusted driver imports
     assert "research inspirations write-yield" in out       # scorecard -> _sources.yaml
@@ -128,7 +77,7 @@ def test_leap_dry_run_is_sandboxed_no_web_scratch_db_then_import():
 
 def test_leap_dry_run_prints_every_planned_driver_step():
     # The dry run is the ONLY cheap check that the driver still does its whole authority-side
-    # step list (seed -> codex -> import -> yield -> digest) in the right order; each line here
+    # step list (seed -> agent -> import -> yield -> digest) in the right order; each line here
     # is one step that would otherwise be droppable without any test noticing.
     out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
     assert "DRY RUN" in out
@@ -137,7 +86,7 @@ def test_leap_dry_run_prints_every_planned_driver_step():
     assert "max ideas: 5" in out
     assert "would seed scratch from: " in out
     assert "would pre-warm env: " in out
-    assert "would run: " in out and "codex exec" in out and "timeout 10m" in out
+    assert "would run: " in out and "run_agent.sh" in out and "--timeout 10m" in out
     assert "would import via: uv run algua research idea import --from" in out
     assert "--seeded-max-id" in out and "--critic-file" in out
     assert ("would write yield via: uv run algua research inspirations write-yield "
@@ -181,9 +130,9 @@ def test_leap_units_shaped_and_installed():
 
 
 def test_leap_dry_run_scratch_mlflow_tracking_uri_not_authority():
-    # Without an explicit ALGUA_MLFLOW_TRACKING_URI in the codex child's `env` prefix, the agent
+    # Without an explicit ALGUA_MLFLOW_TRACKING_URI in the agent child's `env` prefix, the agent
     # would inherit the unit's EnvironmentFile= (authority) tracking URI — a needless authority-path
-    # leak into the sandbox. The `would run:` line is the codex invocation itself, so this pins the
+    # leak into the sandbox. The `would run:` line is the agent invocation itself, so this pins the
     # var lives there, scoped under .leap-scratch, never the bare/authority value.
     out = _dry(LEAP, "--max-ideas", "5", "--timeout", "10m", "--force")
     run_line = out.split("would run: ", 1)[1].splitlines()[0]

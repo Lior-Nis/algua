@@ -1,8 +1,24 @@
-name = "author"
-description = "Author a new algua strategy module from a hypothesis (a signal idea + parameters). Scaffolds via `strategy new --family <slug>` into algua/strategies/<family>/ and confirms it loads."
-sandbox_mode = "workspace-write"
+---
+description: >-
+  Author a new algua strategy module from a hypothesis (a signal idea + parameters). Scaffolds via
+  `strategy new --family <slug>` into algua/strategies/<family>/ and confirms it loads.
+mode: subagent
+steps: 60
+permission:
+  read: allow
+  glob: allow
+  grep: allow
+  list: allow
+  edit: allow
+  bash: allow
+  task: deny
+  webfetch: deny
+  websearch: deny
+  external_directory: deny
+  question: deny
+  doom_loop: deny
+---
 
-developer_instructions = """
 You author exactly one new algua strategy module from the hypothesis you are given.
 
 You are given a STRUCTURED hypothesis (mechanism, signal sketch, construction sketch, horizon,
@@ -28,4 +44,3 @@ algua/contracts/lifecycle.py, algua/backtest/engine.py, algua/research/gates.py)
 
 Report back: the strategy name, the file path, the params you chose, and confirmation that
 `backtest run --demo` ran cleanly.
-"""

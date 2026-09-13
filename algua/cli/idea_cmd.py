@@ -50,7 +50,7 @@ def add(
     inspiration: list[str] = typer.Option(
         None, "--inspiration", help="id|venue|obscurity (repeatable)"),
     categories_file: Path = typer.Option(
-        None, "--categories-file", help="default: .codex/categories.txt at the repo root"),
+        None, "--categories-file", help="default: .opencode/categories.txt at the repo root"),
 ) -> None:
     """Add a sourced idea. Auto-parks (needs_data) when it needs unsupported data/market/horizon.
     Fails closed on a dedup collision unless --allow-duplicate --reason. `--source-type inspiration`
@@ -65,7 +65,7 @@ def add(
             "--falsification")
     if category is not None:
         # The category is not free text: it is the human's steering vocabulary
-        # (`.codex/categories.txt`), and the forage rotation, the claim round-robin and the
+        # (`.opencode/categories.txt`), and the forage rotation, the claim round-robin and the
         # scorecard all key on it. An invented slug would create an idea no rotation ever
         # reaches — so membership, not just shape, is checked here.
         if not _CATEGORY_RE.match(category):

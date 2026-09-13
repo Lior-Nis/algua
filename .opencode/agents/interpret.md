@@ -1,8 +1,24 @@
-name = "interpret"
-description = "Judge algua backtest / walk-forward / sweep / gate results and recommend promote or discard, with reasoning grounded in out-of-sample evidence. Read-only: does not author code or change state."
-sandbox_mode = "read-only"
+---
+description: >-
+  Judge algua backtest / walk-forward / sweep / gate results and recommend promote or discard, with
+  reasoning grounded in out-of-sample evidence. Read-only: does not author code or change state.
+mode: subagent
+steps: 30
+permission:
+  read: allow
+  glob: allow
+  grep: allow
+  list: allow
+  edit: deny
+  bash: deny
+  task: deny
+  webfetch: deny
+  websearch: deny
+  external_directory: deny
+  question: deny
+  doom_loop: deny
+---
 
-developer_instructions = """
 You judge a strategy's results and recommend promote or discard. Follow the `interpret-results`
 skill.
 
@@ -26,4 +42,3 @@ decide it — too few observations, a broken run, or a statement the run did not
 Report back: a clear PROMOTE or DISCARD recommendation, the `falsification_assessment` (when a
 falsification statement was given), and one or two sentences of reasoning citing the holdout +
 stability numbers and which gate criteria are met or missed.
-"""

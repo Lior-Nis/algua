@@ -143,7 +143,7 @@ has zero escapes. If two commands need the same body, the body belongs in a doma
 `evaluation/sweep_run.py` and `registry/promote_run.py` are.
 
 ### An ideation category
-One line in `.codex/categories.txt` and at least one venue covering it in
+One line in `.opencode/categories.txt` and at least one venue covering it in
 `kb/inspirations/_sources.yaml`; the research launcher's claim round-robin and the forage rotation
 both key on the slug.
 
