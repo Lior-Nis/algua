@@ -173,6 +173,19 @@ for unit in "${UNITS[@]}"; do
   echo "installed ${UNIT_DIR}/${unit}"
 done
 
+# STALE PATH DROP-INS. Earlier deploys hand-wrote ~/.config/systemd/user/algua-*.service.d/path.conf
+# to add ~/.local/bin. The rendered units now carry PATH themselves, and a drop-in is applied AFTER
+# the unit, so a leftover path.conf SILENTLY WINS and reimposes the old value. That is exactly what
+# happened on 2026-09-13: the drop-in dropped ~/.opencode/bin, the research loop could not find its
+# runtime, and the failure surfaced as an opaque usage dump rather than "command not found".
+# Remove any such drop-in this installer supersedes.
+for stale in "${UNIT_DIR}"/algua-*.service.d/path.conf; do
+  [ -e "$stale" ] || continue
+  rm -f "$stale"
+  rmdir "$(dirname "$stale")" 2>/dev/null || true
+  echo "removed superseded drop-in $stale"
+done
+
 systemctl --user daemon-reload
 echo
 echo "Units installed and user daemon reloaded. To enable (printed, NOT executed by this script):"
