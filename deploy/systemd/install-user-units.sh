@@ -87,12 +87,14 @@ render_unit() {
       line="WantedBy=default.target"
     fi
     printf '%s\n' "${line//\/opt\/algua/${REPO_ROOT}}"
-    # The user manager's default PATH omits ~/.local/bin, where uv (and opencode, for the
-    # research driver) live — the /opt system deploy gets PATH from the env file instead,
+    # The user manager's default PATH omits both directories the loops need: ~/.local/bin (uv) and
+    # ~/.opencode/bin (the agent runtime, which its installer puts THERE, not in ~/.local/bin —
+    # omitting it makes run_agent.sh exit 3 "opencode is not on PATH" on every firing).
+    # The /opt system deploy gets PATH from the env file instead,
     # so the injection belongs HERE, not in the shared templates. Injected right after
     # [Service] so a template-provided Environment=PATH later in the section would win.
     if [[ "${line}" == "[Service]" ]]; then
-      printf 'Environment=PATH=%%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n'
+      printf 'Environment=PATH=%%h/.local/bin:%%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin\n'
     fi
   done < "${src}"
 }

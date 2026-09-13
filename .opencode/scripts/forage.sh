@@ -325,7 +325,18 @@ fi
 timed_out=0
 [[ "${rc}" -eq 124 ]] && timed_out=1
 rate_limited=0
-grep -qiE 'rate.?limit|429|quota|usage limit' "${RUN_LOG}" 2>/dev/null && rate_limited=1
+# PROVIDER-BLOCK DETECTION. The seam (run_agent.sh) owns this: it watches for a terminal provider
+# error and exits 3, distinct from 124 (timeout) and from the agent's own exit codes. Keying on that
+# exit code is the whole check.
+#
+# The old loose grep over the transcript is kept ONLY as a backstop for a NON-fatal block the seam
+# let through, and it is now anchored. It used to match a bare "429", which was safe against a Codex
+# transcript and is NOT safe now that the seam tees the runtime's own verbose log: a real leap run on
+# 2026-09-13 reported rate_limited on a clean exit-0 run because the message id
+# "msg_09bf42946001QWjBMeNdfh5Ffp" contains "429". A false "rate limited" is worse than no signal --
+# it sends the operator hunting a quota problem that does not exist.
+[ "${rc}" = "3" ] && rate_limited=1
+grep -qiE 'rate.?limit|HTTP 429|429 Too Many|quota exceeded|usage limit' "${RUN_LOG}" 2>/dev/null && rate_limited=1
 
 # --- Trusted acceptance (spec §5): validate + copy survivors into the real vault. --------------
 echo "Landing foraged notes via: ${ACCEPT_CMD[*]}"

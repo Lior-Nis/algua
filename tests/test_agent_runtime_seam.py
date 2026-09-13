@@ -191,3 +191,27 @@ def test_interpret_is_declared_read_only():
     text = (AGENTS_DIR / "interpret.md").read_text()
     assert "edit: deny" in text
     assert "bash: deny" in text
+
+
+def test_provider_block_is_detected_by_exit_code_not_by_scanning_ids():
+    """A false "rate limited" is worse than no signal.
+
+    The seam exits 3 on a terminal provider error, and the drivers key on that. The transcript grep
+    survives only as an anchored backstop, because the seam now tees the runtime's own verbose log:
+    a clean exit-0 leap run on 2026-09-13 reported rate_limited because the message id
+    `msg_09bf42946001QWjBMeNdfh5Ffp` contains "429". A bare 429 can never be the trigger again.
+    """
+    drivers = [p for p in sorted((REPO / ".opencode" / "scripts").glob("*.sh"))
+               if p.name != "run_agent.sh"]
+    checked = 0
+    for driver in drivers:
+        text = driver.read_text()
+        if "rate_limited=1" not in text:
+            continue
+        checked += 1
+        assert '[ "${rc}" = "3" ] && rate_limited=1' in text, (
+            f"{driver.name} must key provider blocks on the seam's exit code")
+        assert "|429|" not in text, (
+            f"{driver.name} still matches a bare 429; ids contain those digits")
+    assert checked == 3, (
+        f"expected the three agent drivers to detect provider blocks, saw {checked}")
