@@ -7,7 +7,7 @@ from algua.registry.idea_attempts import DEFAULT_PREVIEW_HOLD_HOURS
 
 def test_ideation_settings_defaults():
     s = Settings(_env_file=None)
-    assert (s.research_runs_per_day, s.research_hypotheses_per_run) == (12, 3)
+    assert (s.research_runs_per_day, s.research_hypotheses_per_run) == (4, 2)
     assert (s.idea_pool_floor_days, s.idea_pool_ceiling_days) == (2, 7)
     assert s.idea_claim_ttl_minutes == 180
     assert s.idea_preview_hold_hours == 72

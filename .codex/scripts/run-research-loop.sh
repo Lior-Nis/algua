@@ -52,10 +52,12 @@
 #
 set -euo pipefail
 
-# Hypotheses per run defaults from the ONE canonical setting (Settings.research_hypotheses_per_run,
+# Hypotheses per run comes from the ONE canonical setting (Settings.research_hypotheses_per_run,
 # env ALGUA_RESEARCH_HYPOTHESES_PER_RUN) that the pool-depth math also reads, so the claim size and
-# the refill trigger can never drift apart.
-N_HYPOTHESES="${N_HYPOTHESES:-${ALGUA_RESEARCH_HYPOTHESES_PER_RUN:-3}}"
+# the refill trigger can never drift apart. Left EMPTY here on purpose: a literal fallback would be
+# a second copy of that default and exactly the drift this comment claims is impossible. It is
+# resolved from settings once REPO_ROOT is known (uv run needs the repo), and fails closed.
+N_HYPOTHESES="${N_HYPOTHESES:-${ALGUA_RESEARCH_HYPOTHESES_PER_RUN:-}}"
 TIMEOUT="${TIMEOUT:-45m}"
 SYNC_TIMEOUT="${SYNC_TIMEOUT:-5m}"
 # A missing authoritative DB normally means a misconfigured deploy — FAIL CLOSED rather than
@@ -94,6 +96,16 @@ BRANCH="research-run/${STAMP}"
 # (research-run/<stamp>--<s1>+<s2>+...) — the DIRECTORY always keeps the bare stamp. .runs/logs/
 # archives each removed worktree's research-loop.log (see the cleanup sites below and
 # mergeback_queue.cleanup_branch).
+# Resolve the claim size from the canonical setting now that `uv run` can find the project.
+if [ -z "${N_HYPOTHESES}" ]; then
+  N_HYPOTHESES="$(cd "${REPO_ROOT}" && uv run python -c \
+    'from algua.config.settings import get_settings; print(get_settings().research_hypotheses_per_run)' \
+    2>/dev/null || true)"
+fi
+case "${N_HYPOTHESES}" in
+  ''|*[!0-9]*) echo "cannot resolve research_hypotheses_per_run from settings; refusing to guess" >&2; exit 1 ;;
+esac
+
 RUNS_DIR="${REPO_ROOT}/.runs"
 WORKTREE="${RUNS_DIR}/${STAMP}"
 

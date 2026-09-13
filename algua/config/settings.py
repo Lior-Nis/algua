@@ -83,8 +83,15 @@ class Settings(BaseSettings):
     # Ideation engine (spec 2026-09-08 §6/§8). ONE canonical source for the pool depth math:
     # runs/day must match algua-research.timer's OnCalendar; hypotheses/run is what the research
     # launcher claims per run (N_HYPOTHESES). Floor/ceiling are in DAYS of loop consumption.
-    research_runs_per_day: int = 12
-    research_hypotheses_per_run: int = 3
+    # Sized BACKWARDS from paper-book turnover, not forwards from how fast ideas can be generated
+    # (#649). The book holds `paper_book_capacity` tenants and a strategy holds its slot until the
+    # forward gate can actually be cleared -- which needs T~250-500 return observations, i.e. one to
+    # two years on the daily contract. That caps real throughput near 32-64 forward tests a year.
+    # The previous 12x3 ceiling implied ~13,000 ideas a year, roughly 200x what the book can absorb,
+    # so `refill_at` (runs x hypotheses x floor_days) could never be satisfied and every depth
+    # reading said "starving" when the funnel was merely bounded downstream.
+    research_runs_per_day: int = 4
+    research_hypotheses_per_run: int = 2
     idea_pool_floor_days: int = 2
     idea_pool_ceiling_days: int = 7
     # A claim older than this is reaped as `abandoned` by the next `research idea claim`.

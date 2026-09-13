@@ -1,8 +1,8 @@
 [Unit]
-Description=Algua autonomous research cycle — factory cadence, every 2h
+Description=Algua autonomous research cycle — factory cadence, every 6h
 
 [Timer]
-# FACTORY CADENCE: every 2 hours (12 runs/day) — the strategy-factory throughput slice (see
+# FACTORY CADENCE: every 6 hours (4 runs/day) — the strategy-factory throughput slice (see
 # docs/superpowers/specs/2026-08-10-strategy-factory-design.md). Research and paper do NOT share a
 # lock and do not need to: research exploration writes only its per-run scratch funnel (never the
 # authoritative DB), so it cannot contend with the paper operator; the sole authoritative funnel
@@ -13,17 +13,24 @@ Description=Algua autonomous research cycle — factory cadence, every 2h
 # OVERLAP: a firing that lands while a previous cycle is still running SKIPS cleanly via the
 # launcher's NON-BLOCKING flock (data/research-loop.lock) — it never queues. Normally it never even
 # gets there: the driver caps the codex run at TIMEOUT=45m (+ SYNC_TIMEOUT=5m pre-warm) and the
-# service's TimeoutStartSec=4200 (70m) backstops the wrapper, leaving ~50m of headroom inside each
-# 2h slot.
+# service's TimeoutStartSec=4200 (70m) backstops the wrapper, leaving ample headroom inside each
+# 6h slot.
 #
-# WHY 12/DAY IS SAFE FOR THE FUNNEL. Exploration runs on a THROWAWAY scratch copy, so a cycle's
+# WHY 4/DAY, NOT 12. The cadence is sized BACKWARDS from paper-book turnover (#649), not forwards
+# from how fast ideas can be generated. The book holds `paper_book_capacity` tenants and a strategy
+# occupies its slot until the forward gate can actually be cleared — T~250-500 observations, one to
+# two years on the daily contract — so real throughput is near 32-64 forward tests a year. The old
+# 12x3 ceiling implied ~13,000 ideas a year and made `refill_at` permanently unsatisfiable, so every
+# pool-depth reading said "starving" while the funnel was simply bounded downstream.
+#
+# WHY THIS RATE IS SAFE FOR THE FUNNEL. Exploration runs on a THROWAWAY scratch copy, so a cycle's
 # `research promote` is a PREVIEW that records NO breadth and burns NO holdout on the authoritative
 # funnel — that budget is spent only by `paper merge-back`. The real per-cycle costs are compute/API
 # (tune N_HYPOTHESES/TIMEOUT in the env file; Codex rate-limit hits are recorded per run in the
 # data/research-runs.jsonl digest) and disk — each cycle leaves a worktree, which the driver
 # AUTO-PRUNES after RESEARCH_WORKTREE_RETENTION_DAYS (default 7; the authored code persists on its
 # branch regardless).
-OnCalendar=*-*-* 00/2:00:00 UTC
+OnCalendar=*-*-* 00/6:00:00 UTC
 # Cover a fire missed while the box was off; research has no session gate, so it just runs once late.
 Persistent=true
 

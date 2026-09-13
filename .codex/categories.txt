@@ -1,11 +1,27 @@
 # Ideation categories (PRD §4). One stable slug per line; optional hints after a space:
 #   <slug> [market=<us_equities|crypto|forex|prediction|any>] [horizon=<daily|weekly|monthly|event|intraday>]
 # Both the forage rotation and `research idea claim`'s round-robin key on the slug.
+#
+# SCOPE RULE: a category belongs here only while the platform can actually TEST the ideas it
+# generates. `algua/data/capabilities.py` is the authority -- supported capabilities are derived
+# from datasets that have a real ingestion path (today: OHLCV only), and an idea needing anything
+# else is auto-parked `needs_data` on import. A category that reliably produces unparked ideas is
+# forage budget spent for nothing: on 2026-09-13 the first live run produced 8 ideas of which 7
+# parked (3 options_flow, 2 fundamentals, 2 crypto).
+#
+# Uncomment a category the same day its data lands. Flipping a member of `_SUPPORTED_MARKETS` or
+# adding a `_DATASET_CAPABILITY` entry re-opens every idea already parked on it
+# (`research idea reclassify`), so nothing sourced in the meantime is lost.
+
 momentum
 mean_reversion
 seasonality
 vol_structure
-value_quality_proxy
 liquidity_microstructure
-event_driven horizon=event
-institutional_flow
+
+# PARKED UNTIL THE DATA EXISTS -- every idea these produce is auto-parked today.
+# value_quality_proxy      needs `fundamentals`; free sources are restated and survivorship-biased,
+#                          which is exactly what the point-in-time wall rejects. PRD §5 purchase.
+# event_driven             needs an events/filings dataset; no ingestion path. horizon=event
+# institutional_flow       needs `form_13f` / `options_flow` / `dark_pool`; no free historical
+#                          source. This is the original 2026-05 thesis, so restore it first.
