@@ -28,6 +28,20 @@ _list = list
 #: `tests/test_settings_ideation.py` asserts the two never drift.
 DEFAULT_PREVIEW_HOLD_HOURS = 72
 
+#: How many attempts an idea gets before a non-verdict outcome retires it as `discarded`.
+#:
+#: Only REFUTING_OUTCOMES move an idea to `refuted`; `run_error` and `abandoned` release the claim
+#: and leave it OPEN, so it is re-claimed next cycle. That is right for a transient failure and
+#: catastrophic for a structural one -- an idea the construction policies simply cannot express
+#: fails identically every time and is retried forever, burning a research cycle each pass.
+#:
+#: Measured on 2026-09-14: ideas 9, 13 and 14 had FOUR `run_error` attempts each, six consecutive
+#: research runs authored ZERO strategies, and the loop was cycling the same handful of ideas with
+#: no new work possible. A cap is the safety net that does not depend on the agent choosing the
+#: right outcome value; an agent that knows an idea is impossible should still say so explicitly
+#: (`abandoned`), which retires it on the first pass rather than the third.
+MAX_IDEA_ATTEMPTS = 3
+
 #: The outcomes an attempt already recorded as `candidate_preview_pass` may be REWRITTEN to, both
 #: written only by the merge-back drainer once the authoritative run has spoken: `integrity_fail`
 #: (the authoritative promote refused the strategy — a real refutation) and `run_error` (the
@@ -190,6 +204,20 @@ class IdeaAttemptsRepository:
             raise ClaimTokenMismatch(f"idea {idea_id}: no live claim for that token")
         return row
 
+    def _spent_attempts(self, idea_id: int) -> int:
+        """Attempts CLOSED with an outcome for this idea, INCLUDING the one being written now.
+
+        Called after the caller's `UPDATE idea_attempts SET outcome=...` inside the same
+        transaction, so the attempt in flight is already counted -- do not add one for it.
+
+        Counted from `idea_attempts` rather than from a column on `ideas` so it cannot drift from
+        the append-only record that actually shows what happened.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(*) n FROM idea_attempts WHERE idea_id=? AND outcome IS NOT NULL",
+            (idea_id,)).fetchone()
+        return int(row["n"])
+
     def record_outcome(self, idea_id: int, *, token: str, outcome: AttemptOutcome, reason: str,
                        evidence_ref: str | None = None,
                        strategy_name: str | None = None) -> Idea:
@@ -230,6 +258,15 @@ class IdeaAttemptsRepository:
             if outcome in REFUTING_OUTCOMES and row["status"] == IdeaStatus.OPEN.value:
                 sets.append("status=?")
                 params.append(IdeaStatus.REFUTED.value)
+            elif (outcome is not AttemptOutcome.CANDIDATE_PREVIEW_PASS
+                    and row["status"] == IdeaStatus.OPEN.value
+                    and self._spent_attempts(idea_id) >= MAX_IDEA_ATTEMPTS):
+                # Out of attempts without ever reaching a verdict. DISCARDED, not REFUTED: nothing
+                # was learned about whether the edge is real, only that this pool entry cannot be
+                # worked. Conflating the two would poison the scorecard's refutation rate and tell
+                # the leap step a venue produces wrong ideas when it produces unbuildable ones.
+                sets.append("status=?")
+                params.append(IdeaStatus.DISCARDED.value)
             if outcome is not AttemptOutcome.CANDIDATE_PREVIEW_PASS:
                 sets.append("claimed_by=NULL, claim_token=NULL, claimed_at=NULL")
             params.append(idea_id)

@@ -51,8 +51,11 @@
     "delegation and a strict JSON trailer -- exactly where a cheap model fails and the cost of",
     "failure is a wasted cycle. It gets the best model available.",
     "",
-    "Leap and forage are short, high-volume and cheap to redo, so they get the cheapest model the",
-    "subscription serves.",
+    "LEAP gets the best model too, which is a deliberate change from the cheap tier. Its output is",
+    "the funnel's raw material: a hypothesis that cannot be built as a long-only cross-sectional",
+    "score wastes a whole research cycle downstream, and on 2026-09-14 that was EVERY cycle. Idea",
+    "quality is worth more than idea volume. Forage stays cheap -- it summarises pages, it does not",
+    "design anything.",
     "",
     "THEY SHOULD MOVE TO A SECOND PROVIDER. All three loops currently share ONE quota, which is the",
     "problem that started this migration: on 2026-09-13 three consecutive research runs came back",
@@ -64,7 +67,7 @@
     "research":  { "model": "openai/gpt-6-astra",              "variant": "high" },
     "author":    { "model": "openai/gpt-6-astra",              "variant": "high" },
     "interpret": { "model": "openai/gpt-5.6-sol",             "variant": "high" },
-    "leap":      { "model": "openai/gpt-5.3-codex-spark" },
+    "leap":      { "model": "openai/gpt-6-astra",             "variant": "high" },
     "forage":    { "model": "openai/gpt-5.3-codex-spark" }
   }
 }

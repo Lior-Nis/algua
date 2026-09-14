@@ -42,6 +42,11 @@ STALE_SLACK = 80
 #: path -> max lines. Generated from reality at the end of the simplification program; every entry
 #: is a ceiling, never a target.
 BUDGET: dict[str, int] = {
+    # Crossed the floor adding the attempt cap (#649 follow-up): an idea that never reaches a
+    # verdict now retires as `discarded` instead of being re-claimed forever. The module stays one
+    # cohesive thing -- claims, attempts, outcomes for the idea pool -- and splitting the cap away
+    # from the outcome transition it guards would put two halves of one rule in two files.
+    "algua/registry/idea_attempts.py": 332,
     "algua/backtest/bootstrap.py": 365,
     "algua/backtest/decision_path.py": 382,
     "algua/backtest/engine.py": 322,

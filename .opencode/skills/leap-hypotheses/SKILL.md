@@ -45,8 +45,38 @@ A note says "X works". `X works` is not a hypothesis — it is the note. Leap fr
 | **transfer** | the same mechanism, a different market or horizon | an intraday order-flow effect claimed in crypto, tested as a daily effect in us_equities |
 | **combine** | two mechanisms from two notes that should interact | a seasonality window *conditioned on* a volatility regime, where neither alone is the claim |
 | **invert** | if the claimed edge is real, its mirror should also hold — or the crowding it implies should show up | if everyone front-runs an index add, the *reversal* after the add is the tradable half |
-| **re-construct** | keep the signal, change the portfolio construction | the same ranking signal, but dollar-neutral and vol-scaled instead of long-only top-decile |
+| **re-construct** | keep the signal, change the portfolio construction | the same ranking signal taken to a concentrated `top_k_equal_weight` book instead of a broad `equal_weight_positive` one |
 | **trigger-new** | the note made you see a mechanism it never states | a forum complaint about slippage at the close implies a liquidity-provision edge nobody in the note is trading |
+
+## What the platform can actually build
+
+A hypothesis algua cannot express is not a hypothesis, it is a wasted research cycle. It is claimed,
+authored against, fails, and — until the attempt cap retires it — gets claimed again. On 2026-09-14
+three such ideas had four failed attempts each and six consecutive research runs produced no
+strategy at all, every one of them asking for a construction that does not exist.
+
+**A strategy is a cross-sectional score plus ONE named construction policy.** The whole vocabulary:
+
+| policy | what it does |
+|---|---|
+| `top_k_equal_weight` | equal weight across the top `top_k` scored names |
+| `equal_weight_positive` | equal weight across every name with a positive score |
+| `score_proportional_long` | weight proportional to the score |
+
+**All three are LONG-ONLY and none of them is market-, sector- or beta-neutral, and none scales to a
+volatility target.** So do not write a hypothesis whose claim depends on:
+
+- shorting, a long/short book, dollar-neutrality or market-neutrality
+- beta-hedging, sector-neutralisation, or factor-residualisation
+- volatility targeting or leverage
+- sector or industry membership (there is no sector dataset)
+
+Express the edge as **a score that ranks names**, and let the construction be one of the three. An
+edge that is real long-only is still real; an edge that only exists in a book algua cannot hold is
+untestable here, and saying so plainly is a better contribution than a hypothesis that cannot run.
+
+(Overlays — `regime_gate`, `trailing_stop` — may TIGHTEN a book after construction. They can only
+reduce or drop positions, never add one, flip a side or scale up.)
 
 The test for a real leap: **someone who read the note would not predict your hypothesis from it.**
 Prefer `rare`/`niche` notes as raw material — `canon`/`common` ground is already priced into the
@@ -78,8 +108,8 @@ A worked example:
   crowding is mechanical (indexers must buy at the close regardless of price), and it is worst in
   low-float names where the required size is large relative to available supply. Signal: for each
   announced addition, float-adjusted index demand ÷ 20-day median dollar volume, ranked
-  cross-sectionally. Construction: short the top decile of that ratio at the add-day close against
-  a long in the rest of the cohort, held 5 sessions, equal-weight, vol-scaled to the book.
+  cross-sectionally. Construction: hold the BOTTOM decile of that ratio (the cohort names with the
+  least mechanical demand pressure) as an equal-weighted `top_k_equal_weight` book for 5 sessions.
 - **category**: `event_driven`, **market**: `us_equities`, **horizon**: `event`
 - **falsification**: Refuted if the 5-session forward return of the top-decile-pressure basket is
   not negative relative to the cohort, or if the effect exists only before 2015 (i.e. it is an
