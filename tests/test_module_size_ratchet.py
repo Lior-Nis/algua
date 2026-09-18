@@ -58,7 +58,10 @@ BUDGET: dict[str, int] = {
     "algua/cli/paper_cmd.py": 1409,
     "algua/cli/registry_cmd.py": 446,
     "algua/contracts/types.py": 426,
-    "algua/execution/alpaca_broker.py": 501,
+    # +10 for #560: submits now recover from Alpaca's duplicate-client_order_id 422 instead of
+    # aborting the cycle. The concern itself was carved to algua/execution/alpaca_idempotency.py;
+    # what stayed here is the minimum wiring both submit paths share.
+    "algua/execution/alpaca_broker.py": 511,
     "algua/execution/live_ledger.py": 620,
     "algua/execution/order_state.py": 385,
     "algua/knowledge/sync.py": 475,

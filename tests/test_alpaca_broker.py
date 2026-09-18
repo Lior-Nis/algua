@@ -875,3 +875,117 @@ def test_get_order_by_client_order_id_encodes_coid(monkeypatch):
     fake = _FakeRequests({"client_order_id=a%2Fb": _FakeResp(200, {"id": "b1"})})
     monkeypatch.setattr(ab, "requests", fake)
     assert _broker().get_order_by_client_order_id("a/b") == {"id": "b1"}
+
+
+# --- #560: a duplicate client_order_id must not abort the cycle -------------------------------
+
+
+class _DuplicatingRequests(_FakeRequests):
+    """Alpaca's real behaviour on a repeated client_order_id: the first POST lands, every later
+    POST of the same id is rejected 422. The fake keeps the ids it has seen so a test can submit
+    twice and get the genuine sequence rather than a hardcoded response."""
+
+    def __init__(self, routes, first_resp, duplicate_resp):
+        super().__init__(routes, post_resp=first_resp)
+        self.duplicate_resp = duplicate_resp
+        self._seen: set[str] = set()
+
+    def post(self, url, headers=None, json=None, timeout=None, allow_redirects=None):
+        self.posted.append(json)
+        self.redirects_allowed.append(allow_redirects)
+        coid = (json or {}).get("client_order_id")
+        if coid is not None and coid in self._seen:
+            return self.duplicate_resp
+        if coid is not None:
+            self._seen.add(coid)
+        return self.post_resp
+
+
+_DUPLICATE_422 = _FakeResp(
+    422, text='{"code":42210000,"message":"client_order_id must be unique"}')
+
+
+def _intent():
+    return OrderIntent("AAPL", Side.BUY, 0.5, T0)
+
+
+def _snap_routes():
+    return {"/v2/account": _FakeResp(200, {"id": "acct-1", "equity": "10000", "cash": "10000",
+                                           "buying_power": "10000",
+                                           "last_equity": "10000"}),
+            "/v2/positions": _FakeResp(200, [])}
+
+
+def test_duplicate_client_order_id_resolves_to_the_order_that_already_landed(monkeypatch):
+    """The #560 regression. The second submit must return the FIRST order's id, not raise.
+
+    Before the fix this raised BrokerError, and because `paper run-all` ticks every tenant in one
+    cycle, that single 422 aborted the cycle for all of them -- every 20 minutes, indefinitely.
+    """
+    routes = _snap_routes()
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(
+        200, {"id": "order-abc"})
+    fake = _DuplicatingRequests(routes, _FakeResp(200, {"id": "order-abc"}), _DUPLICATE_422)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+
+    first = broker.submit_sized(_intent(), snap, "coid-1")
+    second = broker.submit_sized(_intent(), snap, "coid-1")
+
+    assert first == "order-abc"
+    assert second == "order-abc", "a retried submit must resolve to the order already on the venue"
+
+
+def test_duplicate_recovery_posts_no_second_order(monkeypatch):
+    """Recovery must READ, never re-post. Minting a fresh id would double-fill in the live lane."""
+    routes = _snap_routes()
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(
+        200, {"id": "order-abc"})
+    fake = _DuplicatingRequests(routes, _FakeResp(200, {"id": "order-abc"}), _DUPLICATE_422)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    broker.submit_sized(_intent(), snap, "coid-1")
+
+    coids = [p.get("client_order_id") for p in fake.posted]
+    assert coids == ["coid-1", "coid-1"], "the retry must reuse the id, never mint a new one"
+
+
+def test_a_422_that_is_not_a_duplicate_still_raises(monkeypatch):
+    """Insufficient buying power is also a 422. Swallowing it would report a phantom order id for
+    an order that never existed -- strictly worse than the abort this change removes."""
+    routes = _snap_routes()
+    fake = _FakeRequests(routes, post_resp=_FakeResp(
+        422, text='{"code":40310000,"message":"insufficient buying power"}'))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    with pytest.raises(BrokerError, match="422"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+def test_duplicate_without_a_resolvable_order_raises(monkeypatch):
+    """The venue said the id was taken and then could not produce the order. Inventing an id here
+    would record a fill against something nobody can reconcile."""
+    routes = _snap_routes()
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(200, {})
+    fake = _DuplicatingRequests(routes, _FakeResp(200, {"id": "order-abc"}), _DUPLICATE_422)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match="no order id"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+def test_submit_without_a_client_order_id_cannot_take_the_recovery_path(monkeypatch):
+    """With no id there is nothing to look up; such a 422 must raise like any other failure."""
+    routes = _snap_routes()
+    fake = _FakeRequests(routes, post_resp=_DUPLICATE_422)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    with pytest.raises(BrokerError, match="422"):
+        broker.submit_sized(_intent(), snap, None)
