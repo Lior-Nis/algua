@@ -901,6 +901,12 @@ class _DuplicatingRequests(_FakeRequests):
         return self.post_resp
 
 
+def _venue_order(**over):
+    """An Alpaca order object as the by-client-order-id lookup returns it."""
+    return {"id": "order-abc", "client_order_id": "coid-1", "symbol": "AAPL",
+            "side": "buy", "qty": "1", **over}
+
+
 _DUPLICATE_422 = _FakeResp(
     422, text='{"code":42210000,"message":"client_order_id must be unique"}')
 
@@ -924,7 +930,7 @@ def test_duplicate_client_order_id_resolves_to_the_order_that_already_landed(mon
     """
     routes = _snap_routes()
     routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(
-        200, {"id": "order-abc"})
+        200, _venue_order())
     fake = _DuplicatingRequests(routes, _FakeResp(200, {"id": "order-abc"}), _DUPLICATE_422)
     monkeypatch.setattr(ab, "requests", fake)
     broker = _broker()
@@ -941,7 +947,7 @@ def test_duplicate_recovery_posts_no_second_order(monkeypatch):
     """Recovery must READ, never re-post. Minting a fresh id would double-fill in the live lane."""
     routes = _snap_routes()
     routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(
-        200, {"id": "order-abc"})
+        200, _venue_order())
     fake = _DuplicatingRequests(routes, _FakeResp(200, {"id": "order-abc"}), _DUPLICATE_422)
     monkeypatch.setattr(ab, "requests", fake)
     broker = _broker()
@@ -967,16 +973,16 @@ def test_a_422_that_is_not_a_duplicate_still_raises(monkeypatch):
 
 
 def test_duplicate_without_a_resolvable_order_raises(monkeypatch):
-    """The venue said the id was taken and then could not produce the order. Inventing an id here
-    would record a fill against something nobody can reconcile."""
+    """The venue said the id was taken and then 404ed on it. Inventing an id here would record a
+    fill against something nobody can reconcile."""
     routes = _snap_routes()
-    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(200, {})
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(404, text="nope")
     fake = _DuplicatingRequests(routes, _FakeResp(200, {"id": "order-abc"}), _DUPLICATE_422)
     monkeypatch.setattr(ab, "requests", fake)
     broker = _broker()
     snap = broker.snapshot(["AAPL"])
     broker.submit_sized(_intent(), snap, "coid-1")
-    with pytest.raises(BrokerError, match="no order id"):
+    with pytest.raises(BrokerError, match="no order carries it"):
         broker.submit_sized(_intent(), snap, "coid-1")
 
 
@@ -989,3 +995,62 @@ def test_submit_without_a_client_order_id_cannot_take_the_recovery_path(monkeypa
     snap = broker.snapshot(["AAPL"])
     with pytest.raises(BrokerError, match="422"):
         broker.submit_sized(_intent(), snap, None)
+
+
+def _duplicate_recovering(returned_order):
+    routes = _snap_routes()
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(
+        200, returned_order)
+    return _DuplicatingRequests(routes, _FakeResp(200, _venue_order()), _DUPLICATE_422)
+
+
+@pytest.mark.parametrize("bad, why", [
+    ({"symbol": "MSFT"}, "a coid collision must never attribute another symbol's order"),
+    ({"side": "sell"}, "accepting a buy as a sell would misreport a position as closed"),
+    ({"client_order_id": "someone-else"}, "the venue echoed a different id"),
+    ({"id": ""}, "an empty broker id would be recorded as a real one"),
+    ({"id": 12345}, "a truthy non-str would coerce to a bogus broker id"),
+])
+def test_a_recovered_order_that_is_not_ours_is_refused(monkeypatch, bad, why):
+    """The recovered payload is a safety boundary, as in #312 stranded-order recovery.
+
+    client_order_id is truncated to 128 chars, so a long strategy name CAN collide. Attributing
+    the wrong order would let `flatten` count someone else's order as this strategy's liquidation.
+    """
+    fake = _duplicate_recovering(_venue_order(**bad))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match="does not match the submitted order"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+def test_duplicate_recovery_on_the_liquidation_path_checks_side(monkeypatch):
+    """submit_offset is the dangerous path: flatten() counts what comes back as the liquidation."""
+    fake = _duplicate_recovering(_venue_order(side="buy", qty="5"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    # A SELL offset whose recovery returns a BUY must refuse rather than report the position closed.
+    broker.submit_offset("AAPL", 5.0, "coid-1")
+    with pytest.raises(BrokerError, match="does not match the submitted order"):
+        broker.submit_offset("AAPL", 5.0, "coid-1")
+
+
+def test_duplicate_recovery_on_the_liquidation_path_succeeds_when_it_matches(monkeypatch):
+    fake = _duplicate_recovering(_venue_order(side="sell", qty="5"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    assert broker.submit_offset("AAPL", 5.0, "coid-1") == "order-abc"
+    assert broker.submit_offset("AAPL", 5.0, "coid-1") == "order-abc"
+
+
+def test_a_differently_sized_resubmit_still_recovers(monkeypatch):
+    """Size is deliberately NOT compared: the same decision re-run under a changed allocation posts
+    a different notional for the same coid, and the order that landed is still the right answer."""
+    fake = _duplicate_recovering(_venue_order(qty="999"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    assert broker.submit_sized(_intent(), snap, "coid-1") == "order-abc"

@@ -2,17 +2,14 @@
 
 `client_order_id()` is deterministic over (strategy, decision_ts, symbol) so that a retried submit
 reuses the id instead of double-filling. That design assumed the VENUE de-duplicates — the retry
-policy in `alpaca_broker` says so in as many words ("a retried POST that already landed is
-de-duplicated by Alpaca rather than double-filling"). It does not. Alpaca answers a repeat id with
+policy in `alpaca_broker` said so in as many words. It does not. Alpaca answers a repeat id with
 
     422 {"code":42210000,"message":"client_order_id must be unique"}
 
-which `_read` turns into a `BrokerError`, which aborts the WHOLE multi-tenant paper cycle. Every
-20 minutes, for every tenant behind the one that tripped it. The assumed safety never existed.
+which `_read` turned into a `BrokerError`, which aborted the WHOLE multi-tenant paper cycle.
 
 So the de-duplication is done here instead: a duplicate rejection is not a failure, it is proof the
-order ALREADY LANDED, and the recovery is to fetch that order and return its id. The submit becomes
-idempotent in fact rather than by assumption.
+order ALREADY LANDED, and the recovery is to fetch that order and return its id.
 
 Deliberately NOT the alternative fix: minting a fresh random id on rejection would turn one order
 into two in the live lane. The duplicate id is the safety mechanism, not the bug.
@@ -23,11 +20,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote
 
 from algua.execution.errors import BrokerError
-
-BY_CLIENT_ORDER_ID = "/v2/orders:by_client_order_id"
 
 # Both halves must match. A bare "must be unique" could be some other field, and a bare mention of
 # client_order_id appears in unrelated validation errors (e.g. one that is too long) -- those are
@@ -52,20 +46,51 @@ def is_duplicate_client_order_id(status_code: int, text: str) -> bool:
 
 
 def recover_duplicate_order_id(
-    get: Callable[[str], Any], client_order_id: str, *, path: str
+    lookup: Callable[[str], dict[str, Any] | None],
+    client_order_id: str,
+    *,
+    symbol: str,
+    side: str,
+    path: str,
 ) -> str:
-    """Fetch the broker id of the order that already holds `client_order_id`.
+    """The broker id of the order already holding `client_order_id`, verified to be OUR order.
 
-    `get` takes a path and returns the decoded JSON body (the broker's read-and-raise helper), so
-    this stays independent of the HTTP client and its retry policy.
+    `lookup` is the broker's per-coid read (None on 404), so this module never builds the endpoint.
+
+    The returned payload is a SAFETY BOUNDARY, mirroring #312 stranded-order recovery in
+    `live_ledger.recover_stranded_orders`: the returned client_order_id must match exactly, the
+    symbol must be the one we submitted, and the id must be a non-empty string (a truthy non-str
+    would coerce to a bogus broker id). Without this, a coid collision -- the id is truncated to
+    128 chars, so a long strategy name CAN collide -- would hand back an unrelated order, and
+    `flatten` would then count someone else's order as this strategy's liquidation.
+
+    Unlike the #312 path, SIDE IS CHECKED here: there the recorded intent side can legitimately
+    differ from the delta-derived POSTed side, whereas here we compare against the body we just
+    posted, so a mismatch is always wrong. It matters most on the liquidation path, where accepting
+    a buy as a sell would misreport a position as closed.
+
+    Size is deliberately NOT compared. The same decision re-run under a changed allocation posts a
+    different notional for the same coid, and in that case the order that already landed is still
+    the correct idempotent answer; requiring equality would break legitimate recovery.
     """
-    data = get(f"{BY_CLIENT_ORDER_ID}?client_order_id={quote(client_order_id, safe='')}")
-    order_id = data.get("id") if isinstance(data, dict) else None
-    if not order_id:
-        # The venue said the id was taken and then could not produce its order. Never invent an id
-        # here: the caller would record a fill against an order nobody can reconcile.
+    order = lookup(client_order_id)
+    if order is None:
+        # The venue said the id was taken and then 404ed on it. Never invent an id here: the caller
+        # would record a fill against an order nobody can reconcile.
         raise BrokerError(
-            f"alpaca {path}: client_order_id {client_order_id!r} rejected as duplicate but "
-            f"{BY_CLIENT_ORDER_ID} returned no order id: {data}"
+            f"alpaca {path}: client_order_id {client_order_id!r} was rejected as a duplicate but "
+            f"no order carries it"
         )
-    return str(order_id)
+    order_id = order.get("id")
+    if (
+        order.get("client_order_id") != client_order_id
+        or order.get("symbol") != symbol
+        or str(order.get("side", "")).lower() != side.lower()
+        or not isinstance(order_id, str)
+        or not order_id.strip()
+    ):
+        raise BrokerError(
+            f"alpaca {path}: the order returned for client_order_id {client_order_id!r} does not "
+            f"match the submitted order (expected {symbol} {side}); refusing to attribute it"
+        )
+    return order_id

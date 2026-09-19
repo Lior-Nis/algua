@@ -171,11 +171,13 @@ class _AlpacaBroker:
 
     def _post_order(self, body: dict[str, Any], path: str, coid: str | None) -> str:
         """POST an order and return its broker id, treating a duplicate-id rejection as proof the
-        order already landed and resolving it to that order's id (#560)."""
+        order already landed and resolving it to that order's id (#560). The recovered order is
+        verified to be ours before it is attributed -- see `recover_duplicate_order_id`."""
         resp = self._post("/v2/orders", body)
         if coid is not None and is_duplicate_client_order_id(resp.status_code, resp.text):
             return recover_duplicate_order_id(
-                lambda p: self._read(self._get(p), p), coid, path=path)
+                self.get_order_by_client_order_id, coid,
+                symbol=str(body["symbol"]), side=str(body["side"]), path=path)
         data = self._read(resp, path, ok=(200, 201))
         order_id = data.get("id") if isinstance(data, dict) else None
         if not order_id:
