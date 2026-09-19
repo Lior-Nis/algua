@@ -39,7 +39,7 @@ def test_dispatch_plain_when_not_declared():
 
     ls = LoadedStrategy(config=_cfg(False), signal_fn=plain, construct_fn=equal_weight_positive)
     out = ls.target_weights(pd.DataFrame())
-    assert out["AAPL"] == 1.0
+    assert out["AAPL"] == 0.98  # #560 construction headroom under the gross wall
 
 
 def test_post_init_requires_matching_fn():
@@ -80,6 +80,6 @@ def test_target_weights_fundamentals_lane_composes():
         config=cfg, fundamentals_signal_fn=signal, construct_fn=equal_weight_positive
     )
     w = loaded.target_weights(pd.DataFrame(), pd.DataFrame())
-    assert w.to_dict() == {"A": 1.0}
+    assert w.to_dict() == {"A": 0.98}  # 0.98: #560 construction headroom under the gross wall
     with pytest.raises(ValueError):
         loaded.target_weights(pd.DataFrame())  # needs_fundamentals but no frame -> fail closed

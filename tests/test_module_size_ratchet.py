@@ -57,7 +57,10 @@ BUDGET: dict[str, int] = {
     "algua/cli/operator_cmd.py": 334,
     "algua/cli/paper_cmd.py": 1409,
     "algua/cli/registry_cmd.py": 446,
-    "algua/contracts/types.py": 426,
+    # +19 for #560: ExecutionContract.target_gross_utilization. The field is 2 lines; the rest is
+    # the comment explaining why construction must aim BELOW max_gross_exposure and why widening
+    # the wall instead would be wrong. It belongs on the contract it constrains.
+    "algua/contracts/types.py": 445,
     # +12 for #560: submits now recover from Alpaca's duplicate-client_order_id 422 instead of
     # aborting the cycle. The concern itself was carved to algua/execution/alpaca_idempotency.py;
     # what stayed here is the minimum wiring both submit paths share.
@@ -82,7 +85,9 @@ BUDGET: dict[str, int] = {
     "algua/research/forward_gates.py": 392,
     "algua/research/gates.py": 544,
     "algua/research/regime.py": 365,
-    "algua/strategies/base.py": 380,
+    # +14 for #560: the gross-utilization step at the shared construction chokepoint. The logic
+    # itself lives in portfolio/construction.py; this is the wiring plus why it runs last.
+    "algua/strategies/base.py": 394,
     "algua/tracking/mlflow_tracker.py": 316,
 }
 

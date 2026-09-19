@@ -24,7 +24,9 @@ def test_loaded_strategy_satisfies_protocol_and_exposes_config():
     assert strat.universe == ["AAPL", "MSFT"]
     assert isinstance(strat, Strategy)  # runtime_checkable protocol
     w = strat.target_weights(pd.DataFrame())
-    assert abs(w.sum() - 1.0) < 1e-9
+    # Gross lands on the construction TARGET (0.98 of max_gross_exposure), not on the wall itself:
+    # aiming at the wall breaches it as soon as the book appreciates (#560).
+    assert abs(w.sum() - 0.98) < 1e-9
 
 
 def test_target_weights_composes_signal_then_construct():
@@ -45,7 +47,7 @@ def test_target_weights_composes_signal_then_construct():
     loaded = LoadedStrategy(config=cfg, signal_fn=signal, construct_fn=top_k_equal_weight)
     w = loaded.target_weights(pd.DataFrame())
     assert set(w.index) == {"A", "C"}
-    assert w.to_dict() == {"A": 0.5, "C": 0.5}
+    assert w.to_dict() == {"A": 0.49, "C": 0.49}  # #560 headroom
 
 
 def test_construct_reads_current_config_params_not_a_bound_partial():

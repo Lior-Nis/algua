@@ -11,7 +11,11 @@ from pydantic import BaseModel, field_validator
 
 from algua.contracts.model_types import ModelHandle, ModelRef, compute_provenance_digest
 from algua.contracts.types import ExecutionContract
-from algua.portfolio.construction import ConstructFn, apply_capacity_cap
+from algua.portfolio.construction import (
+    ConstructFn,
+    apply_capacity_cap,
+    apply_gross_utilization,
+)
 from algua.portfolio.overlays import OverlayFn, OverlaySpec, apply_overlays, get_overlay_policy
 
 # The AUTHORED signal: a pure module-level `signal(view, params) -> pd.Series` of cross-sectional
@@ -322,6 +326,16 @@ class LoadedStrategy:
         capacity = self.config.execution.capacity
         if capacity is not None:
             weights = apply_capacity_cap(weights, view, capacity)
+        # Gross-utilization headroom (#560), LAST so it sees the final vector. The construction
+        # policies normalize gross to exactly max_gross_exposure, which breaches the realized-gross
+        # wall as soon as the book appreciates (the wall marks positions against an equity
+        # denominator capped at the original allocation). Tighten-only, so it never re-inflates a
+        # vector the capacity cap or an overlay has already reduced.
+        execution = self.config.execution
+        weights = apply_gross_utilization(
+            weights,
+            target_gross=execution.max_gross_exposure * execution.target_gross_utilization,
+            max_gross=execution.max_gross_exposure)
         return weights
 
     def target_weights(

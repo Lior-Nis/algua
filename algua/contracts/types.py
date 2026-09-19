@@ -104,6 +104,17 @@ class ExecutionContract:
     # invalidates a prior live approval. See algua.contracts.types.fill_reference_column — the ONE
     # resolver both paths consult so they can never silently pick a different reference.
     fill_price: str = "open"
+    # Fraction of max_gross_exposure that CONSTRUCTION aims at (#560 follow-up). The realized-gross
+    # wall in the live/paper loop trips on marked positions over an equity denominator capped at the
+    # original allocation, so a policy that normalizes gross to exactly max_gross_exposure breaches
+    # the wall the moment the book APPRECIATES -- not on execution noise, on profit. Four paper
+    # strategies halted that way at 1.0010-1.0252 against a 1.0 cap.
+    # Aiming below the wall is the fix; widening the wall is not (any fixed epsilon is exceeded by a
+    # large enough move, and a multiplicative tolerance would silently reinterpret a deliberate
+    # max_gross_exposure). TIGHTEN-ONLY: it scales gross DOWN toward the target and never up, so it
+    # cannot add exposure to a vector a capacity cap or an overlay has already reduced.
+    # Folded into config_hash (asdict), so the utilization is part of strategy identity.
+    target_gross_utilization: float = 0.98
 
     def __post_init__(self) -> None:
         if self.decision_lag_bars < 1:
@@ -122,6 +133,14 @@ class ExecutionContract:
             raise ValueError("allow_short must be a bool")
         if self.capacity is not None and not isinstance(self.capacity, CapacityLimit):
             raise ValueError("capacity must be a CapacityLimit or None")
+        if not math.isfinite(self.target_gross_utilization):
+            # A non-finite utilization would make the construction target nan/inf and silently
+            # disable the step (every `gross > nan` comparison is false) -- fail closed, as
+            # max_weight_per_symbol does.
+            raise ValueError("target_gross_utilization must be finite")
+        if not 0.0 < self.target_gross_utilization <= 1.0:
+            # > 1.0 would aim ABOVE the realized wall, i.e. construct a guaranteed breach.
+            raise ValueError("target_gross_utilization must be in (0, 1]")
         for _name, _val in (("fees", self.fees), ("slippage", self.slippage)):
             # bool is an int subtype; a True passed here would masquerade as 1.0 (a 100% cost) and
             # a non-finite / negative value would either poison every downstream metric or SUBSIDISE
