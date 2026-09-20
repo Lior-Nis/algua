@@ -65,6 +65,7 @@ from algua.registry import allocations
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
+from algua.registry.gating import NoAllocation
 from algua.registry.live_gate import (
     ALLOWED_SIGNERS_PATH,
     LiveAuthorizationError,
@@ -151,7 +152,7 @@ def _run_strategy_tick(  # noqa: PLR0913
         rec = SqliteStrategyRepository(conn).get(name)
         alloc = active_allocation(conn, rec.id)
         if alloc is None:
-            raise ValueError(f"{name} has no live allocation")
+            raise NoAllocation(f"{name} has no live allocation")
         allocation = float(alloc["capital"])
         identity = compute_artifact_hashes(name)
 

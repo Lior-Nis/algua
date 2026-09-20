@@ -95,7 +95,7 @@ from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
 from algua.registry.forward_promotion import forward_promotion_preflight, run_forward_gate
-from algua.registry.gating import load_gated_strategy
+from algua.registry.gating import NoAllocation, load_gated_strategy
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import run_intake
 from algua.registry.kb_sync import sync_kb_doc
@@ -698,7 +698,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
     try:
         alloc = active_allocation(conn, rec.id)
         if alloc is None:
-            raise ValueError(f"{name} has no paper allocation")
+            raise NoAllocation(f"{name} has no paper allocation")
         allocation = float(alloc["capital"])
         identity = compute_artifact_hashes(name)
 
@@ -1130,6 +1130,7 @@ def run_all(
                     return _reserve
 
                 breached = False
+                contained_breaches: list[str] = []
                 for prec in tickable:
                     name = prec.name
                     # Per-strategy fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault
@@ -1175,21 +1176,39 @@ def run_all(
                         continue
                     results.append(out)
                     counters.ticks += 1
-                    if out.get("ok") is False:  # breach/halt marker: stop, keep prior results
+                    if out.get("ok") is False:
                         counters.breaches += 1
                         if out.get("flatten_error") is not None:
                             counters.flatten_failures += 1
-                        breached = True
-                        break
+                        # CONTAINED vs NOT. A breach whose scoped flatten SUCCEEDED and which
+                        # engaged no global halt is fully handled: that tenant is tripped and flat,
+                        # its siblings' books are untouched, and the lane is still trustworthy. It
+                        # must not stop them or void the session marker -- doing so cost four
+                        # recorded sessions (2026-09-11 .. 09-18) during which tenants that ticked
+                        # cleanly accrued no forward evidence, because a handful of strategies kept
+                        # breaching a gross wall they aimed exactly at.
+                        # A failed flatten (position of unknown size still open) or a global halt
+                        # (systemic, e.g. a dark feed) is NOT contained and still stops everything.
+                        if out.get("flatten_error") is not None or out.get("global_halt") == "set":
+                            breached = True
+                            break
+                        contained_breaches.append(name)
+                        continue
             envelope = {"reconcile": recon_payload, "strategies": results,
                         "skipped_unallocated": skipped_unallocated,
                         "setup_errors": [r for r in results if r.get("kind") == "setup_error"],
+                        "contained_breaches": contained_breaches,
                         "snapshot": snapshot_info}
             if breached:
-                # A breach (already tripped + scoped-flattened): surface it AND every sibling
+                # An UNCONTAINED breach (failed flatten / global halt): surface it AND every sibling
                 # ticked before it in one envelope, then exit non-zero (#270).
                 emit({"ok": False, **envelope})
                 raise typer.Exit(1)
+            # Contained breaches do NOT fail the cycle: the lane did its job, and the session is
+            # recorded so healthy tenants keep accruing evidence. The halt itself stays loud
+            # elsewhere -- the kill switch, an audit row, and `fleet health`, which is the gate that
+            # exists to exit non-zero on a halted operational strategy. `run-all` reports whether
+            # the CYCLE worked; `fleet health` reports whether the STRATEGIES are healthy.
             emit(ok(envelope))
         except typer.Exit:
             raise

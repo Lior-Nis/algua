@@ -4,8 +4,9 @@ Four required behaviours:
   1. Both paper strategies tick; envelope lists both.
   2. Not-clean reconcile defers the whole cycle; no strategy trades.
   3. A breach in one strategy trips + scoped-flattens only it; the envelope still surfaces the
-     sibling that was ticked before it; exit non-zero; the sibling's resting order is NOT
-     cancelled by the breacher's scoped cancel.
+     sibling that was ticked before it; the sibling's resting order is NOT cancelled by the
+     breacher's scoped cancel. A CONTAINED breach (flatten succeeded, no global halt) exits 0 --
+     the lane worked; an UNCONTAINED one (failed flatten / global halt) still exits non-zero.
   4. The reservation pool trims a second strategy's BUY when the pool is exhausted.
 """
 from __future__ import annotations
@@ -522,8 +523,11 @@ def test_run_all_breach_scoped_flatten_surfaces_siblings(monkeypatch):
     )
 
     payload = json.loads(result.stdout)
-    assert result.exit_code != 0
-    # Envelope contains both strategies' results (breach breaks the loop after appending S2)
+    # CONTAINED breach: S2 is tripped and its scoped flatten succeeded, so the CYCLE succeeded --
+    # exit 0, and the operator records the session so S1 keeps accruing forward evidence. The halt
+    # stays loud through the kill switch, the audit row and `fleet health`.
+    assert result.exit_code == 0, result.stdout
+    assert payload["contained_breaches"] == [_S2]
     strats_in_envelope = {s["strategy"] for s in payload["strategies"]}
     assert _S1 in strats_in_envelope  # sibling surfaced
     assert _S2 in strats_in_envelope  # breacher surfaced
@@ -692,10 +696,11 @@ def test_run_all_omitted_max_drawdown_uses_default_bound(monkeypatch):
     result = runner.invoke(
         app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END]
     )
-    assert result.exit_code != 0, result.stdout
+    # The point of this test is the RESOLVED BOUND, not the exit code: a contained breach no
+    # longer fails the cycle (the breaker fired and the tenant was flattened -- that is the lane
+    # working, not the lane failing).
     assert seen_max_dd == [default_bound]
     payload = json.loads(result.stdout)
-    assert payload.get("ok") is False
     assert any(s.get("ok") is False for s in payload["strategies"])
 
 
@@ -1033,3 +1038,66 @@ def test_run_all_refresh_zero_tickable_skips_provider_and_refresh(monkeypatch):
     assert set(payload["skipped_unallocated"]) == {_S1, _S2}
     assert called == []                          # no tickable tenant -> no refresh attempted
     assert payload["snapshot"]["id"] is None and payload["snapshot"]["refreshed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Containment: which breaches may the cycle survive?
+# ---------------------------------------------------------------------------
+
+def _two_tenants(monkeypatch, broker):
+    _to_paper(_S1)
+    _to_paper(_S2)
+    _seed_allocation(_S1)
+    _seed_allocation(_S2)
+    monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", lambda: broker)
+    monkeypatch.setattr("algua.cli.paper_cmd._select_provider", lambda demo, snap: object())
+
+
+def test_a_failed_flatten_is_NOT_contained_and_still_stops_the_cycle(monkeypatch):
+    """A flatten that did not complete leaves a position of unknown size open. The lane can no
+    longer describe its own risk, so it must stop -- this is the case the old blanket rule got
+    right, and it stays."""
+    broker = _RunAllBroker()
+    _two_tenants(monkeypatch, broker)
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        raise RiskBreach("drawdown", "drawdown 0.30 exceeds max_drawdown 0.10")
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+    monkeypatch.setattr(
+        "algua.cli.paper_cmd.flatten_strategy",
+        lambda *a, **k: type("R", (), {"n_offsets": 0, "flatten_error": "broker refused"})())
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END])
+    payload = json.loads(result.stdout)
+    assert result.exit_code != 0, result.stdout
+    assert payload["ok"] is False
+    assert payload["contained_breaches"] == []
+
+
+def test_a_contained_breach_does_not_stop_the_siblings_behind_it(monkeypatch):
+    """The regression that cost four sessions.
+
+    S1 ticks first and breaches; S2 is BEHIND it in registry order. Under the old rule the loop
+    broke at S1 and S2 never ticked at all -- so a strategy could be blocked from accruing forward
+    evidence indefinitely by an unrelated tenant with a lower id.
+    """
+    broker = _RunAllBroker()
+    _two_tenants(monkeypatch, broker)
+    ticked: list[str] = []
+
+    def _fake_run_tick(strategy, broker_, provider, start, end, hooks=None, max_drawdown=None):
+        ticked.append(strategy.name)
+        if strategy.name == _S1:
+            raise RiskBreach("drawdown", "drawdown 0.30 exceeds max_drawdown 0.10")
+        return _success_result()
+
+    monkeypatch.setattr("algua.cli.paper_cmd.run_tick", _fake_run_tick)
+
+    result = runner.invoke(
+        app, ["paper", "run-all", "--snapshot", _SNAP, "--start", _START, "--end", _END])
+    payload = json.loads(result.stdout)
+    assert result.exit_code == 0, result.stdout
+    assert ticked == [_S1, _S2], "the sibling behind the breacher must still tick"
+    assert payload["contained_breaches"] == [_S1]

@@ -10,6 +10,30 @@ from algua.strategies.base import LoadedStrategy
 from algua.strategies.loader import load_tradable_strategy
 
 
+class StageNotTradable(ValueError):
+    """The strategy is not at a stage this lane may trade."""
+
+
+class KillSwitchTripped(ValueError):
+    """This strategy's kill-switch is engaged."""
+
+
+class NoAllocation(ValueError):
+    """The strategy has no capital allocation on this lane."""
+
+
+# WHY THESE EXIST. `StrategySetupError.code` is derived from the raising exception's CLASS NAME,
+# deliberately, so no raw message (which can carry credentials or paths) ever reaches the JSON
+# envelope or the audit trail. That redaction is right, but it means a bare `ValueError` audits as
+# the useless string "ValueError" -- and for 24 hours on the live box, four halted strategies wrote
+# exactly that, with no way to tell a tripped kill-switch from a wrong stage from a missing
+# allocation without reproducing the tick.
+#
+# Naming the failure IS the fix: the existing mechanism then yields a stable, meaningful,
+# leak-free code. These stay ValueError subclasses so every existing handler keeps working, the
+# same way global_halt.GlobalHaltActive does.
+
+
 def load_gated_strategy(
     conn: sqlite3.Connection, name: str, command: str,
 ) -> tuple[LoadedStrategy, StrategyRecord]:
@@ -27,7 +51,7 @@ def load_gated_strategy(
     strategy = load_tradable_strategy(name)
     rec = SqliteStrategyRepository(conn).get(name)
     if rec.stage not in (Stage.PAPER, Stage.FORWARD_TESTED):
-        raise ValueError(
+        raise StageNotTradable(
             f"{name} is at stage '{rec.stage.value}'; "
             f"{command} requires 'paper' or 'forward_tested'"
         )
@@ -37,5 +61,6 @@ def load_gated_strategy(
         raise global_halt.GlobalHaltActive(
             "global halt active; clear with 'algua paper resume-all'")
     if kill_switch.is_tripped(conn, name):
-        raise ValueError(f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
+        raise KillSwitchTripped(
+            f"kill-switch tripped for {name}; reset with 'algua paper resume {name}'")
     return strategy, rec

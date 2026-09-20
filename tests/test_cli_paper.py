@@ -2204,5 +2204,8 @@ def test_tick_missing_allocation_is_setup_error(monkeypatch, tmp_path):
                 conn, name, strategy, rec, broker, SyntheticProvider(), 0.01,
                 "tick-ts", "broker", broker.account(),
                 start="2026-01-01", end="2026-02-01")
-        assert ei.value.code == "ValueError"          # redacted class code, not the raw message
+        # A NAMED code, still redacted (class name only, never the raw message). "ValueError" told
+        # an operator nothing: a tripped kill-switch, a wrong stage and a missing allocation all
+        # audited identically, which is what made the live halts undiagnosable.
+        assert ei.value.code == "NoAllocation"
         assert ei.value.strategy == name

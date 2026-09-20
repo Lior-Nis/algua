@@ -53,12 +53,13 @@ BUDGET: dict[str, int] = {
     "algua/backtest/sweep.py": 461,
     "algua/backtest/walkforward.py": 347,
     "algua/cli/data_cmd.py": 410,
-    "algua/cli/live_cmd.py": 749,
+    "algua/cli/live_cmd.py": 750,
     "algua/cli/operator_cmd.py": 334,
-    # +11 for #560: auditing a venue-BLOCKED leg (wash trade). Silence was the hazard -- the
-    # blocking order is a sibling's and does not clear itself, so only this row says why a leg
-    # stopped trading.
-    "algua/cli/paper_cmd.py": 1420,
+    # +30 for #560: auditing a venue-BLOCKED leg (wash trade), and the contained-vs-uncontained
+    # breach split that stops one tenant's handled breach from voiding the whole lane's session.
+    # Both are mostly the comments explaining WHY a breach may now be survived -- the rule they
+    # replace cost four recorded sessions, so the reasoning belongs at the decision.
+    "algua/cli/paper_cmd.py": 1439,
     "algua/cli/registry_cmd.py": 446,
     # +19 for #560: ExecutionContract.target_gross_utilization. The field is 2 lines; the rest is
     # the comment explaining why construction must aim BELOW max_gross_exposure and why widening
