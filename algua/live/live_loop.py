@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,6 +11,7 @@ import pandas as pd
 from algua.calendar.factory import get_calendar
 from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
+from algua.execution.alpaca_rejections import WASH_BLOCKED
 from algua.live.paper_loop import decide
 from algua.risk.limits import (
     MAX_STALE_SESSIONS,
@@ -123,6 +124,10 @@ class TickResult:
     peak_equity: float | None = None
     reconcile_ok: bool = True
     realized_gross: float = 0.0
+    #: Intents the VENUE refused without booking anything -- today only wash-trade rejections,
+    #: caused by another strategy's resting opposite-side order. Surfaced so the CLI can audit
+    #: them: unlike a noop, the cause is external to this strategy and does not clear itself.
+    blocked: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -369,6 +374,7 @@ def run_tick(
         raise TickHalted("kill-switch tripped before submit phase")
 
     submitted: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
     for intent in intents:
         # Re-check before EACH order so a halt / authorization-revoke mid-loop stops further orders.
         if hooks.should_halt is not None and hooks.should_halt():
@@ -380,10 +386,15 @@ def run_tick(
         if hooks.before_submit is not None:
             hooks.before_submit(intent, coid)
         order_id = broker.submit_sized(intent, snap, coid, reserve=hooks.reserve_buy)
-        if order_id in ("noop", "skipped"):
+        if order_id in ("noop", "skipped", WASH_BLOCKED):
             # No order reached the venue: let the lane retract the phantom before_submit row (#311).
             if hooks.on_noop is not None:
                 hooks.on_noop(intent, coid)
+            if order_id == WASH_BLOCKED:
+                # A SIBLING's resting order refused this one. Record it: the lane must be able to
+                # see that a leg is not trading for a reason outside this strategy's control.
+                blocked.append({"symbol": intent.symbol, "side": intent.side.value,
+                                "reason": "wash_trade"})
             continue
         record = SubmittedOrder(symbol=intent.symbol, side=intent.side.value,
                                 target_weight=intent.target_weight, order_id=order_id,
@@ -404,6 +415,7 @@ def run_tick(
         peak_equity=peak,
         reconcile_ok=reconcile_ok,
         realized_gross=realized_gross,
+        blocked=blocked,
     )
 
 

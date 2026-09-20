@@ -1054,3 +1054,44 @@ def test_a_differently_sized_resubmit_still_recovers(monkeypatch):
     snap = broker.snapshot(["AAPL"])
     broker.submit_sized(_intent(), snap, "coid-1")
     assert broker.submit_sized(_intent(), snap, "coid-1") == "order-abc"
+
+
+# --- wash-trade rejection: a sibling's resting order must not kill the cycle -------------------
+
+_WASH_403 = _FakeResp(403, text=(
+    '{"code":40310000,"existing_order_id":"cab2a378-b8c9-435f-abdb-80413587c0d1",'
+    '"message":"potential wash trade detected. use complex orders",'
+    '"reject_reason":"opposite side market/stop order exists"}'))
+
+
+def test_a_wash_trade_rejection_skips_the_intent_instead_of_raising(monkeypatch):
+    """The live incident. A halted strategy's liquidation SELL of BAC rested unfilled; the next
+    tenant's BUY of BAC was refused account-wide, the BrokerError propagated, and the whole
+    multi-tenant cycle aborted -- every 20 minutes, for every tenant behind it.
+
+    Nothing reached the book, so this is a skip for this one intent, exactly like the
+    sub-MIN_NOTIONAL trim `submit_sized` already skips for the same stated reason.
+    """
+    fake = _FakeRequests(_snap_routes(), post_resp=_WASH_403)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    assert broker.submit_sized(_intent(), snap, "coid-1") == ab.WASH_BLOCKED
+
+
+def test_a_wash_trade_rejection_on_the_liquidation_path_also_skips(monkeypatch):
+    fake = _FakeRequests(_snap_routes(), post_resp=_WASH_403)
+    monkeypatch.setattr(ab, "requests", fake)
+    assert _broker().submit_offset("AAPL", 5.0, "coid-1") == ab.WASH_BLOCKED
+
+
+def test_a_403_that_is_not_a_wash_trade_still_raises(monkeypatch):
+    """403 is also how a genuine authorization failure arrives. Treating one as a routine skip
+    would hide a broken key while the lane quietly stopped trading."""
+    fake = _FakeRequests(_snap_routes(), post_resp=_FakeResp(
+        403, text='{"code":40310000,"message":"account is not authorized to trade"}'))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    with pytest.raises(BrokerError, match="403"):
+        broker.submit_sized(_intent(), snap, "coid-1")

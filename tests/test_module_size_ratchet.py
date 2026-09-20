@@ -55,20 +55,26 @@ BUDGET: dict[str, int] = {
     "algua/cli/data_cmd.py": 410,
     "algua/cli/live_cmd.py": 749,
     "algua/cli/operator_cmd.py": 334,
-    "algua/cli/paper_cmd.py": 1409,
+    # +11 for #560: auditing a venue-BLOCKED leg (wash trade). Silence was the hazard -- the
+    # blocking order is a sibling's and does not clear itself, so only this row says why a leg
+    # stopped trading.
+    "algua/cli/paper_cmd.py": 1420,
     "algua/cli/registry_cmd.py": 446,
     # +19 for #560: ExecutionContract.target_gross_utilization. The field is 2 lines; the rest is
     # the comment explaining why construction must aim BELOW max_gross_exposure and why widening
     # the wall instead would be wrong. It belongs on the contract it constrains.
     "algua/contracts/types.py": 445,
     # +12 for #560: submits now recover from Alpaca's duplicate-client_order_id 422 instead of
-    # aborting the cycle. The concern itself was carved to algua/execution/alpaca_idempotency.py;
+    # aborting the cycle. The concern itself was carved to algua/execution/alpaca_rejections.py;
     # what stayed here is the minimum wiring both submit paths share.
-    "algua/execution/alpaca_broker.py": 513,
+    "algua/execution/alpaca_broker.py": 518,
     "algua/execution/live_ledger.py": 620,
     "algua/execution/order_state.py": 385,
     "algua/knowledge/sync.py": 475,
-    "algua/live/live_loop.py": 418,
+    # +12 for #560: TickResult.blocked plus the wash-trade branch in the submit loop. The
+    # classification lives in algua/execution/alpaca_rejections.py; this is the plumbing that
+    # carries it out to the lane.
+    "algua/live/live_loop.py": 430,
     "algua/models/registry.py": 329,
     "algua/operator/gitops.py": 315,
     "algua/operator/loop_health.py": 321,

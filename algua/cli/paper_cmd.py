@@ -823,11 +823,22 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             cash=acct.cash, clock_source=clock_source, snapshot_id=snapshot_id)
     audit_append(conn, actor="agent", action="trade_tick",
                  reason=f"{len(result.submitted)} orders submitted", strategy=name)
+    if result.blocked:
+        # A leg the VENUE refused without booking anything -- today only a wash trade against a
+        # sibling's resting order. Audited rather than shrugged off: the blocking order does not
+        # clear itself, so a leg can stay untraded across ticks and only this row says why.
+        audit_append(
+            conn, actor="system", action="order_blocked_by_venue",
+            reason="; ".join(f"{b['side']} {b['symbol']}: {b['reason']}" for b in result.blocked),
+            strategy=name)
+        log.warning("order_blocked_by_venue", extra={"fields": {
+            "strategy": name, "lane": "paper", "blocked": result.blocked}})
     return ok({
         "strategy": name,
         "decision_ts": result.decision_ts.isoformat() if result.decision_ts else None,
         "target_weights": result.target_weights, "positions_before": result.positions_before,
         "submitted": result.submitted, "reconcile_ok": result.reconcile_ok,
+        "blocked": result.blocked,
         "realized_gross": result.realized_gross})
 
 

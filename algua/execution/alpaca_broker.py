@@ -12,8 +12,10 @@ from requests import RequestException
 
 from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
-from algua.execution.alpaca_idempotency import (
+from algua.execution.alpaca_rejections import (
+    WASH_BLOCKED,
     is_duplicate_client_order_id,
+    is_wash_trade_rejection,
     recover_duplicate_order_id,
 )
 from algua.execution.errors import BrokerError
@@ -174,6 +176,9 @@ class _AlpacaBroker:
         order already landed and resolving it to that order's id (#560). The recovered order is
         verified to be ours before it is attributed -- see `recover_duplicate_order_id`."""
         resp = self._post("/v2/orders", body)
+        if is_wash_trade_rejection(resp.status_code, resp.text):
+            # Nothing reached the book, so this is a skip for this intent, not a cycle-killer.
+            return WASH_BLOCKED
         if coid is not None and is_duplicate_client_order_id(resp.status_code, resp.text):
             return recover_duplicate_order_id(
                 self.get_order_by_client_order_id, coid,

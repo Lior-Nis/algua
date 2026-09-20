@@ -1,4 +1,10 @@
-"""Client-side idempotency for Alpaca order submission (#560).
+"""Classifying Alpaca order rejections, and recovering from the ones that are not failures.
+
+Two venue rejections arrive as HTTP errors but are NOT book-integrity faults, and turning either
+into a `BrokerError` aborts the whole multi-tenant `paper run-all` cycle -- every tenant behind the
+one that tripped it, every 20 minutes, indefinitely. Both are classified here.
+
+## Duplicate client_order_id (#560)
 
 `client_order_id()` is deterministic over (strategy, decision_ts, symbol) so that a retried submit
 reuses the id instead of double-filling. That design assumed the VENUE de-duplicates — the retry
@@ -13,6 +19,26 @@ order ALREADY LANDED, and the recovery is to fetch that order and return its id.
 
 Deliberately NOT the alternative fix: minting a fresh random id on rejection would turn one order
 into two in the live lane. The duplicate id is the safety mechanism, not the bug.
+
+## Wash trade (#560 follow-up)
+
+Alpaca refuses an order that would cross an opposite-side order ALREADY RESTING on the account:
+
+    403 {"code":40310000,"message":"potential wash trade detected. use complex orders",
+         "reject_reason":"opposite side market/stop order exists","existing_order_id":"..."}
+
+This is an ACCOUNT-WIDE constraint meeting a per-strategy book. A halted strategy's liquidation
+sell rests unfilled (it was submitted after the close, and a halted strategy never ticks again to
+cancel its own orders), and the next tenant that wants to BUY that symbol is refused.
+
+The POST is rejected outright, so nothing reached the book: no order, no fill, no attribution. That
+makes it a SKIP for that one intent, exactly like the sub-MIN_NOTIONAL trim that `submit_sized`
+already skips for the same stated reason. The strategy simply does not get that leg this tick and
+re-targets on the next one; one tenant's stale order must not stop every tenant behind it.
+
+It is surfaced rather than swallowed: the loop records it on `TickResult.blocked` and the CLI
+audits it, because the underlying stale order does NOT clear itself -- if it never fills, the
+blocked leg never trades.
 """
 
 from __future__ import annotations
@@ -23,12 +49,24 @@ from typing import Any
 
 from algua.execution.errors import BrokerError
 
+#: `submit_sized` / `submit_offset` outcome for an order the venue refused as a wash trade. Sits
+#: alongside the existing "noop" / "skipped" sentinels: all three mean NO ORDER REACHED THE BOOK, so
+#: the tick retracts its phantom intent row. This one is distinct from "skipped" because it is the
+#: only one caused by ANOTHER strategy's resting order, so it must be audited rather than shrugged
+#: off -- the blocking order does not clear itself.
+WASH_BLOCKED = "wash_blocked"
+
 # Both halves must match. A bare "must be unique" could be some other field, and a bare mention of
 # client_order_id appears in unrelated validation errors (e.g. one that is too long) -- those are
 # real failures and must keep raising. Alpaca's own code for this rejection is 42210000, matched
 # too so a future message rewording does not silently re-open the abort.
 _MENTIONS_COID = re.compile(r"client[ _]?order[ _]?id|42210000", re.IGNORECASE)
 _MEANS_DUPLICATE = re.compile(r"unique|duplicate|already exist", re.IGNORECASE)
+# Alpaca's wash-trade rejection. Matched on the WORDING only: 40310000 is a GENERIC 403 code that
+# also carries authorization failures, so keying on it would silently skip a broken API key while
+# the lane stopped trading. A message rewording would re-open the cycle abort -- that is the
+# fail-safe direction, since raising loudly beats dropping orders in silence.
+_MEANS_WASH_TRADE = re.compile(r"wash[ _]?trade|opposite side", re.IGNORECASE)
 
 
 def is_duplicate_client_order_id(status_code: int, text: str) -> bool:
@@ -94,3 +132,14 @@ def recover_duplicate_order_id(
             f"match the submitted order (expected {symbol} {side}); refusing to attribute it"
         )
     return order_id
+
+
+def is_wash_trade_rejection(status_code: int, text: str) -> bool:
+    """True iff this response is Alpaca refusing an order that would cross a resting opposite-side
+    order on the account.
+
+    Narrow ON PURPOSE, like the duplicate predicate: 403 is also how a genuine authorization
+    failure arrives, and treating one of those as a routine skip would hide a broken key while the
+    lane quietly stopped trading.
+    """
+    return status_code == 403 and bool(_MEANS_WASH_TRADE.search(text))
