@@ -116,10 +116,15 @@ class ExecutionContract:
     # Folded into config_hash (asdict), so the utilization is part of strategy identity.
     #
     # WHY 0.95, not a rounder number. A book that starts a session at utilization u and appreciates
-    # by r crosses the wall when u*(1+r) > 1, so surviving a move of r needs u <= 1/(1+r). These
-    # rebalance daily and hold ~3 names, so a 5% single-session portfolio move is ordinary, not a
-    # tail: 1/1.05 = 0.952 -> 0.95. An earlier 0.98 was chosen by eye and does NOT cover the
-    # incident that motivated this -- 0.98 * 1.0252 = 1.0047, still a breach.
+    # by r crosses the wall when u*(1+r) > 1, so surviving a move of r needs u <= 1/(1+r), and
+    # 1/1.05 = 0.952 -> 0.95 (which actually tolerates 5.26%).
+    # 5% is a STRESS allowance, not a typical session: measured against the recorded backtest
+    # returns of the strategies that breached, a >=5% up-session is 0.5-1.2% of their non-zero
+    # sessions. It is deliberately sized well above the routine move, because the cost of being
+    # wrong is asymmetric -- a crossing permanently halts the strategy and stops its evidence,
+    # while the headroom only gives up the return on 5% of the slice.
+    # An earlier 0.98 was chosen by eye and does NOT cover the incident that motivated this:
+    # 0.98 * 1.0252 = 1.0047, still a breach.
     # This bounds the FREQUENCY of profit-driven breaches; it cannot eliminate them, because no
     # fixed headroom survives an arbitrarily large move. The complete answer is to remediate a
     # crossing (trim back to target) rather than permanently halt on it -- deliberately left as its
@@ -143,6 +148,11 @@ class ExecutionContract:
             raise ValueError("allow_short must be a bool")
         if self.capacity is not None and not isinstance(self.capacity, CapacityLimit):
             raise ValueError("capacity must be a CapacityLimit or None")
+        if isinstance(self.target_gross_utilization, bool):
+            # bool is an int subtype, so True would pass the finite and (0, 1] checks below and
+            # silently mean 1.0 -- i.e. NO headroom, the exact configuration this field exists to
+            # prevent. Rejected like allow_short and the cost fields already are.
+            raise ValueError("target_gross_utilization must be a float, not a bool")
         if not math.isfinite(self.target_gross_utilization):
             # A non-finite utilization would make the construction target nan/inf and silently
             # disable the step (every `gross > nan` comparison is false) -- fail closed, as

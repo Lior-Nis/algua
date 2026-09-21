@@ -142,3 +142,35 @@ def test_a_non_finite_gross_is_left_for_the_validator():
 def test_empty_weights_are_returned_unchanged():
     empty = pd.Series(dtype="float64")
     assert apply_gross_utilization(empty, target_gross=0.95, max_gross=1.0).empty
+
+
+# --- the contract field's own domain ------------------------------------------------------------
+
+def test_the_default_leaves_headroom_under_the_wall():
+    from algua.contracts.types import ExecutionContract
+    ec = ExecutionContract(rebalance_frequency="1d")
+    assert ec.target_gross_utilization < ec.max_gross_exposure
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.5, float("nan"), float("inf")])
+def test_an_out_of_domain_utilization_fails_closed(bad):
+    """> 1.0 would aim ABOVE the wall (a constructed guaranteed breach); <= 0 would flatten the
+    book; non-finite would make the target nan/inf and silently disable the step, since every
+    `gross > nan` comparison is false."""
+    from algua.contracts.types import ExecutionContract
+    with pytest.raises(ValueError, match="target_gross_utilization"):
+        ExecutionContract(rebalance_frequency="1d", target_gross_utilization=bad)
+
+
+def test_a_bool_utilization_is_rejected():
+    """bool is an int subtype: True would pass finite and (0, 1] and silently mean 1.0 -- no
+    headroom at all, the exact configuration this field exists to prevent."""
+    from algua.contracts.types import ExecutionContract
+    with pytest.raises(ValueError, match="not a bool"):
+        ExecutionContract(rebalance_frequency="1d", target_gross_utilization=True)
+
+
+def test_a_non_default_utilization_is_honoured_end_to_end():
+    """The wired value must reach the construction step, not just the contract."""
+    out = apply_gross_utilization(_w(A=0.5, B=0.5), target_gross=0.5, max_gross=1.0)
+    assert abs(out.abs().sum() - 0.5) < 1e-12
