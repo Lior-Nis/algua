@@ -38,11 +38,21 @@ def _cfg(**over: Any) -> StrategyConfig:
 
 # --- identity --------------------------------------------------------------------------------
 
+_NO_OVERLAY_DIGEST = "e2c60b0fcf5b163f0731e4f7ef9c73b3"
+
+
 def test_empty_overlays_leaves_config_hash_byte_identical():
-    # Digest of _cfg() computed on main at 82b8ec7, BEFORE the overlays field existed. An
-    # undeclared / empty overlays list must reproduce it exactly (no live-approval churn).
-    assert config_hash(_loaded_for_test(_cfg())) == "ea29606c94cca1a5731a1fe4552c9ea5"
-    assert config_hash(_loaded_for_test(_cfg(overlays=[]))) == "ea29606c94cca1a5731a1fe4552c9ea5"
+    """An undeclared / empty overlays list must reproduce the no-overlays digest exactly.
+
+    The digest was pinned at 82b8ec7 (before the overlays field existed) to catch ACCIDENTAL
+    live-approval churn. It moved once since, deliberately: #560 added
+    `ExecutionContract.target_gross_utilization`, which is part of the execution contract and so is
+    folded into config_hash by design. Every strategy's identity changed with it -- done while the
+    fleet held almost no forward evidence, precisely so the re-identification cost was near zero.
+    A move in this digest that no commit explains is the churn this test exists to catch.
+    """
+    assert config_hash(_loaded_for_test(_cfg())) == _NO_OVERLAY_DIGEST
+    assert config_hash(_loaded_for_test(_cfg(overlays=[]))) == _NO_OVERLAY_DIGEST
 
 
 def test_non_empty_overlays_change_config_hash_and_order_matters():
@@ -106,7 +116,8 @@ def test_construct_without_overlays_is_unchanged():
         construct_fn=get_construction_policy("top_k_equal_weight"),
     )
     view = _view({"A": [1.0] * 3, "B": [1.0] * 3})
-    assert strat.target_weights(view).to_dict() == {"A": 0.5, "B": 0.5}
+    # 0.475 not 0.5: gross 1.0 exceeds the 0.95 construction target and is scaled down (#560).
+    assert strat.target_weights(view).to_dict() == {"A": 0.475, "B": 0.475}
 
 
 # --- loader -----------------------------------------------------------------------------------

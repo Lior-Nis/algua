@@ -150,6 +150,34 @@ def apply_capacity_cap(
     return pd.Series(capped, index=weights.index, dtype="float64")
 
 
+def apply_gross_utilization(
+    weights: pd.Series, *, target_gross: float, max_gross: float
+) -> pd.Series:
+    """Scale a LEGAL vector down to `target_gross`, leaving headroom under the wall. Tighten-only.
+
+    The realized-gross wall trips on MARKED positions over an equity denominator capped at the
+    original allocation, so a vector normalized to exactly max_gross_exposure breaches that wall as
+    soon as the book appreciates. Construction therefore aims below the wall; the wall is untouched.
+
+    Only a vector that ALREADY RESPECTS the wall is scaled. A vector whose gross EXCEEDS max_gross
+    is returned untouched so the weight validator still rejects it: scaling that one into range
+    would convert a hard "this strategy is over-leveraged" rejection into a silent rescue, which is
+    exactly the failure a gross rail exists to prevent.
+
+    Scaling only ever REDUCES |weight|, so a vector that passed the per-symbol rail and the capacity
+    cap still passes them -- and a vector already inside the target is returned unchanged rather
+    than inflated up to it (that would UNDO a capacity cap or a tighten-only overlay).
+    """
+    if len(weights) == 0:
+        return weights
+    gross = float(np.abs(weights.to_numpy(dtype="float64")).sum())
+    # A non-finite gross cannot be scaled; leave it for the validator to reject rather than
+    # propagating nan/inf through a multiplication.
+    if not math.isfinite(gross) or gross <= target_gross or gross > max_gross:
+        return weights
+    return weights * (target_gross / gross)
+
+
 def _require_no_unknown_keys(params: dict[str, Any], allowed: set[str]) -> None:
     unknown = set(params) - allowed
     if unknown:
