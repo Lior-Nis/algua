@@ -58,10 +58,9 @@ BUDGET: dict[str, int] = {
     # rehearsal one) and refunds the reservation the venue refused.
     "algua/cli/live_cmd.py": 775,
     "algua/cli/operator_cmd.py": 334,
-    # +30 for #560: auditing a venue-BLOCKED leg (wash trade), and the contained-vs-uncontained
-    # breach split that stops one tenant's handled breach from voiding the whole lane's session.
-    # Both are mostly the comments explaining WHY a breach may now be survived -- the rule they
-    # replace cost four recorded sessions, so the reasoning belongs at the decision.
+    # +32 for #560: auditing a venue-BLOCKED leg (wash trade) and refunding a reservation the
+    # venue refused. (An earlier contained-vs-uncontained breach split was REVERTED -- flatten
+    # reports success once offsets are submitted, which is not proof of a flat book.)
     "algua/cli/paper_cmd.py": 1441,
     "algua/cli/registry_cmd.py": 446,
     # +29 for #560: ExecutionContract.target_gross_utilization. The field is 2 lines; the rest is
@@ -71,12 +70,20 @@ BUDGET: dict[str, int] = {
     # +12 for #560: submits now recover from Alpaca's duplicate-client_order_id 422 instead of
     # aborting the cycle. The concern itself was carved to algua/execution/alpaca_rejections.py;
     # what stayed here is the minimum wiring both submit paths share.
-    "algua/execution/alpaca_broker.py": 528,
-    "algua/execution/live_ledger.py": 620,
-    # +26 for #560: client_order_id carries a digest so truncation/sanitisation cannot collapse
-    # two decisions onto one id, plus the venue_blocked column on the tick writer. Mostly the
-    # comment explaining why the readable prefix cannot be trusted for uniqueness.
-    "algua/execution/order_state.py": 411,
+    "algua/execution/alpaca_broker.py": 534,
+    # +17 for #560: delete_live_order, the LIVE mirror of delete_paper_venue_order. flatten now
+    # records an intent before a submit that may end with no order existing, so both lanes need to
+    # retract the phantom row.
+    # Crossed the 300-line floor with #560's `blocked` verdict: a strategy whose newest tick had a
+    # leg refused by the venue is not `ok`. Six lines in the module that already owns every other
+    # health verdict -- splitting the precedence chain across two files would be worse.
+    "algua/execution/fleet_health.py": 306,
+    "algua/execution/live_ledger.py": 637,
+    # +26 for #560: client_order_id fails closed instead of truncating (truncation let distinct
+    # decisions collide on one id), plus the venue_blocked column on the tick writer and reader.
+    # Mostly the comment recording why truncation was unsafe and why a digest was tried and
+    # reverted.
+    "algua/execution/order_state.py": 416,
     "algua/knowledge/sync.py": 475,
     # +12 for #560: TickResult.blocked plus the wash-trade branch in the submit loop. The
     # classification lives in algua/execution/alpaca_rejections.py; this is the plumbing that

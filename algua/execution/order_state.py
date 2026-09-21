@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -11,10 +10,7 @@ from algua.live.paper_loop import PaperRunResult
 # Alpaca client_order_id allows up to 128 chars; keep ours under that and strip anything outside
 # [A-Za-z0-9_-] so a symbol or strategy name with odd characters can't produce an invalid id.
 _COID_SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
-# 111 readable + "-" + 16 digest = Alpaca's 128-char ceiling exactly. The digest is what makes the
-# id unique; the readable prefix only makes it greppable in a broker UI.
-_COID_DIGEST_CHARS = 16
-_COID_READABLE_CHARS = 111
+_COID_MAX_CHARS = 128  # Alpaca's documented client_order_id ceiling
 
 
 def client_order_id(strategy: str, decision_ts: datetime, symbol: str) -> str:
@@ -23,25 +19,32 @@ def client_order_id(strategy: str, decision_ts: datetime, symbol: str) -> str:
     of the same tick reuses the id and the submit is idempotent (#18, #24). The decision timestamp
     is normalised to UTC so the id does not depend on the caller's tzinfo.
 
-    UNIQUENESS IS CARRIED BY A DIGEST, not by the readable part. The readable part is built by
-    sanitising and TRUNCATING to a fixed width, and truncation cuts from the RIGHT -- so a long
-    enough strategy name pushes the timestamp and symbol off the end entirely and every session and
-    every symbol collide on one id. Sanitising can collapse distinct names onto the same string too
-    (every character outside [A-Za-z0-9_-] becomes "_").
+    FAILS CLOSED RATHER THAN TRUNCATING (#560). This used to end in `[:128]`, and truncation cuts
+    from the RIGHT -- so a strategy name long enough to fill the budget pushed the timestamp and
+    symbol off the end, and every session and every symbol collapsed onto ONE id. That is not
+    cosmetic: `submit_sized` resolves a duplicate-id rejection by returning the order that already
+    holds the id, and its guards compare the returned symbol and side, so a same-symbol same-side
+    collision across two sessions passes all of them and the current order is silently attributed
+    to a stale one and never submitted.
 
-    That is not cosmetic. `submit_sized` resolves a duplicate-id rejection by returning the order
-    that already holds the id (#560); its guards compare the returned symbol and side, but a
-    same-symbol same-side collision across two sessions passes every one of them, and the current
-    order is silently attributed to a stale one and never submitted. The digest is over the RAW,
-    unsanitised tuple, so neither truncation nor sanitisation can make two distinct decisions
-    collide."""
+    Raising is the right response because the input is CONFIGURATION, not data: a strategy name is
+    fixed at registration, so an over-long one fails immediately and identically every time rather
+    than intermittently. The longest name in the registry today yields a 60-character id, less than
+    half the budget.
+
+    A digest-based id was tried and reverted: it closed the same hole but changed EVERY id, and
+    orders resting at the venue under the old format would no longer be found by the duplicate
+    recovery that protects a same-decision re-run -- trading a hole that needs a 100-character name
+    for one that needs only a deploy."""
     ts = decision_ts.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    # NUL separators: no component can contain one, so the joined string is unambiguous and
-    # "ab" + "c" cannot digest the same as "a" + "bc".
-    digest = hashlib.sha256(
-        "\x00".join((strategy, ts, symbol)).encode("utf-8")).hexdigest()[:_COID_DIGEST_CHARS]
-    readable = _COID_SANITIZE.sub("_", f"{strategy}-{ts}-{symbol}")[:_COID_READABLE_CHARS]
-    return f"{readable}-{digest}"
+    coid = _COID_SANITIZE.sub("_", f"{strategy}-{ts}-{symbol}")
+    if len(coid) > _COID_MAX_CHARS:
+        raise ValueError(
+            f"client_order_id for {strategy!r}/{symbol!r} would be {len(coid)} chars, over the "
+            f"venue's {_COID_MAX_CHARS}; truncating it would let distinct decisions collide on one "
+            f"id — shorten the strategy name"
+        )
+    return coid
 
 
 def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
@@ -260,7 +263,7 @@ def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None
     row = conn.execute(
         "SELECT tick_ts, decision_ts, equity, peak_equity, positions, n_submitted, reconcile_ok, "
         "lane, strategy_id, code_hash, config_hash, dependency_hash, account_id, cash, "
-        "clock_source, recorded_at, snapshot_id "
+        "clock_source, recorded_at, snapshot_id, venue_blocked "
         "FROM tick_snapshots WHERE strategy = ? ORDER BY id DESC LIMIT 1", (strategy,)
     ).fetchone()
     if row is None:
@@ -274,6 +277,8 @@ def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None
         "dependency_hash": row["dependency_hash"], "account_id": row["account_id"],
         "cash": row["cash"], "clock_source": row["clock_source"],
         "recorded_at": row["recorded_at"], "snapshot_id": row["snapshot_id"],
+        # NULL on every pre-v47 row -> False: those ticks predate the field and no leg was refused.
+        "venue_blocked": bool(row["venue_blocked"]),
     }
 
 

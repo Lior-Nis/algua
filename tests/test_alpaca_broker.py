@@ -1134,3 +1134,16 @@ def test_a_sell_refused_as_a_wash_trade_refunds_nothing(monkeypatch):
     broker.submit_sized(OrderIntent("AAPL", Side.SELL, 0.0, T0), snap, "coid-1",
                         reserve=lambda s, n: n, release=lambda s, n: released.append((s, n)))
     assert released == []
+
+
+def test_release_is_not_called_when_nothing_was_reserved(monkeypatch):
+    """`reserve` and `release` are independently optional hooks. Crediting a reservation that never
+    happened would, in the live lane, subtract real seeded exposure from the book accumulator."""
+    fake = _FakeRequests(_snap_routes(), post_resp=_WASH_403)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    released: list = []
+    assert broker.submit_sized(_intent(), snap, "coid-1",
+                               release=lambda s, n: released.append((s, n))) == ab.WASH_BLOCKED
+    assert released == [], "no reserve ran, so there is nothing to give back"

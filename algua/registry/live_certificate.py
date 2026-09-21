@@ -78,10 +78,20 @@ def verify_forward_certificate(
             f"the forward-test certificate is stale: {age} sessions old, max "
             f"{CERTIFICATE_FRESH_SESSIONS}; re-run `algua paper promote` to refresh it")
     ticks_since = conn.execute(
-        "SELECT tick_ts, reconcile_ok FROM tick_snapshots WHERE lane='paper' AND strategy_id=?"
-        " AND id > ?",
+        "SELECT tick_ts, reconcile_ok, venue_blocked FROM tick_snapshots WHERE lane='paper'"
+        " AND strategy_id=? AND id > ?",
         (strategy_id, row["last_tick_id"] or 0),
     ).fetchall()
+    n_blocked = sum(1 for t in ticks_since if t["venue_blocked"])
+    if n_blocked:
+        # The venue refused a leg outright on these ticks, so the strategy did not execute its own
+        # decision. A certificate attests to a strategy that TRADED as gated; going live off a
+        # window where it demonstrably could not is exactly the false confidence the forward gate
+        # exists to prevent (#560).
+        raise TransitionError(
+            f"{n_blocked} paper tick(s) since certification had an order refused by the venue; "
+            "the strategy was not executing its decision — resolve the blockage, then re-run "
+            "`algua paper promote`")
     n_bad_ticks = sum(1 for t in ticks_since if not t["reconcile_ok"])
     if n_bad_ticks:
         raise TransitionError(

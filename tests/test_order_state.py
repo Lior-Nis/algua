@@ -316,38 +316,31 @@ def test_tick_snapshot_without_snapshot_id_is_none(conn):
 
 
 
-# --- the id must be unique, not merely readable (#560) -----------------------------------------
 
-_LONG = "x" * 200  # longer than the whole 128-char id
+# --- the id must never silently collide (#560) -------------------------------------------------
+
+_LONG = "x" * 200  # longer than the whole 128-char budget
 
 
-def test_a_long_strategy_name_cannot_collapse_distinct_decisions():
-    """Truncation cuts from the RIGHT, so before the digest a long enough name pushed the timestamp
-    and symbol off the end and EVERY session and symbol shared one id.
+def test_an_over_long_id_fails_closed_instead_of_truncating():
+    """Truncation cut from the RIGHT, so a long enough name pushed the timestamp and symbol off the
+    end and EVERY session and symbol collapsed onto one id.
 
-    That let the #560 duplicate-recovery path attribute a current order to a stale one: the guards
-    compare the returned symbol and side, but a same-symbol same-side collision across two sessions
-    passes all of them, and the new order is never submitted.
+    That defeats #560 duplicate recovery: it compares the returned symbol and side, but a
+    same-symbol same-side collision across two sessions passes all of them, and the current order
+    is silently attributed to a stale one and never submitted. The name is configuration, fixed at
+    registration, so raising fails identically every time rather than intermittently.
     """
-    a = client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "AAA")
-    b = client_order_id(_LONG, datetime(2026, 6, 5, tzinfo=UTC), "AAA")  # later session
-    c = client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "BBB")  # other symbol
-    assert len({a, b, c}) == 3
+    with pytest.raises(ValueError, match="over the venue's 128"):
+        client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "AAA")
 
 
-def test_sanitisation_cannot_collapse_distinct_names():
-    """Every character outside [A-Za-z0-9_-] becomes "_", so two different names could sanitise to
-    the same string. The digest is taken over the RAW tuple, before that."""
-    t = datetime(2026, 1, 5, tzinfo=UTC)
-    assert client_order_id("a.b", t, "AAA") != client_order_id("a/b", t, "AAA")
-
-
-def test_the_id_stays_within_the_venue_limit_and_charset():
-    ids = [client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "AAA"),
-           client_order_id("s", datetime(2026, 1, 5, tzinfo=UTC), "A.A")]
-    for i in ids:
-        assert len(i) <= 128
-        assert re.fullmatch(r"[A-Za-z0-9_-]+", i), i
+def test_a_real_strategy_name_is_nowhere_near_the_budget():
+    """The longest name in the registry today yields a 60-character id."""
+    coid = client_order_id(
+        "distributed_loss_peer_selloff_rebound", datetime(2026, 1, 5, tzinfo=UTC), "AAA")
+    assert len(coid) < 128
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", coid), coid
 
 
 def test_the_id_is_still_deterministic():
@@ -357,3 +350,10 @@ def test_the_id_is_still_deterministic():
     # tz-independent: the same instant expressed differently is the same id.
     assert client_order_id("s", t, "AAA") == client_order_id(
         "s", t.astimezone(timezone(timedelta(hours=5))), "AAA")
+
+
+def test_the_id_format_is_unchanged_from_before_the_fix():
+    """No deploy transition: orders resting at the venue under ids minted before this change must
+    still be found by duplicate recovery, so the format must be byte-identical."""
+    assert client_order_id("s", datetime(2026, 1, 5, tzinfo=UTC), "AAA") == \
+        "s-20260105T000000Z-AAA"

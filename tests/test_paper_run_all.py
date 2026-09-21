@@ -1033,5 +1033,3 @@ def test_run_all_refresh_zero_tickable_skips_provider_and_refresh(monkeypatch):
     assert set(payload["skipped_unallocated"]) == {_S1, _S2}
     assert called == []                          # no tickable tenant -> no refresh attempted
     assert payload["snapshot"]["id"] is None and payload["snapshot"]["refreshed"] is False
-
-

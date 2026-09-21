@@ -247,3 +247,28 @@ def test_a_noop_offset_is_not_counted_and_is_not_an_error(conn, monkeypatch):
                monkeypatch=monkeypatch)
     assert res.n_offsets == 0
     assert res.flatten_error is None
+
+
+def _phantom_rows(conn) -> int:
+    return conn.execute(
+        "SELECT count(*) FROM live_orders WHERE broker_order_id IS NULL").fetchone()[0]
+
+
+@pytest.mark.parametrize("broker_cls", [_WashBlockingBroker, _NoopBroker])
+def test_an_outcome_with_no_order_leaves_no_phantom_intent_row(conn, monkeypatch, broker_cls):
+    """The intent row is written BEFORE the submit, so an outcome where no order reached the venue
+    must retract it. Left behind it is a NULL broker_order_id row that stranded-order recovery
+    re-queries forever and order counts treat as a real order."""
+    _run(conn, broker_cls(), believed={"AAA": 10.0}, held=lambda: {"AAA": 10.0},
+         monkeypatch=monkeypatch)
+    assert _phantom_rows(conn) == 0
+
+
+def test_a_real_offset_still_records_its_order(conn, monkeypatch):
+    """The retraction must not eat a genuine order's row."""
+    broker = _FakeOffsetBroker()
+    res = _run(conn, broker, believed={"AAA": 10.0}, held=lambda: {"AAA": 10.0},
+               monkeypatch=monkeypatch)
+    assert res.n_offsets == 1
+    assert conn.execute(
+        "SELECT count(*) FROM live_orders WHERE broker_order_id = 'off-AAA'").fetchone()[0] == 1

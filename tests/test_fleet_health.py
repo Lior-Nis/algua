@@ -45,7 +45,7 @@ def _register(conn, name, stage=Stage.PAPER):
 
 
 def _tick(conn, rec, *, tick_ts, equity=100_000.0, peak=100_000.0, reconcile_ok=True,
-          decision_ts=None):
+          decision_ts=None, venue_blocked=False):
     # decision_ts is a DAILY BAR timestamp (session date at UTC midnight), not the tick instant:
     # derive the freshest closed session as of tick_ts unless a caller pins one (#632).
     if decision_ts is None:
@@ -55,7 +55,7 @@ def _tick(conn, rec, *, tick_ts, equity=100_000.0, peak=100_000.0, reconcile_ok=
         conn, rec.name, tick_ts=tick_ts, decision_ts=decision_ts, equity=equity, peak_equity=peak,
         positions={}, n_submitted=0, reconcile_ok=reconcile_ok, lane="paper", strategy_id=rec.id,
         code_hash="c", config_hash="cfg", dependency_hash="d", account_id="acct", cash=equity,
-        clock_source="broker")
+        clock_source="broker", venue_blocked=venue_blocked)
 
 
 def _now():
@@ -586,3 +586,34 @@ def test_fleet_health_cli_exits_nonzero_on_decision_stale(monkeypatch, tmp_path)
             lambda tz=None: datetime(2023, 6, 20, 15, 0, tzinfo=UTC))}))
     r = CliRunner().invoke(app, ["fleet", "health"])
     assert r.exit_code != 0, r.stdout
+
+
+
+# --- a strategy the venue is refusing is not healthy (#560) ------------------------------------
+
+def _blocked_health(monkeypatch, tmp_path, name, **tick):
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "p.db"))
+    now = _now()
+    with closing(_conn()) as conn:
+        rec = _register(conn, name)
+        _tick(conn, rec, tick_ts=now.isoformat(), venue_blocked=True, **tick)
+        return strategy_health(conn, rec, MarketCalendar(), halted_globally=False, now=now)
+
+
+def test_a_venue_blocked_newest_tick_is_not_ok(monkeypatch, tmp_path):
+    """The loop RAN, so nothing looks stale -- and that is exactly the danger. `ok` here would be
+    the worst kind of green: a strategy that records ticks, looks operational, and is silently not
+    trading because another strategy's resting order refuses one of its symbols every cycle."""
+    assert _blocked_health(monkeypatch, tmp_path, "s_blocked")["health"] == "blocked"
+
+
+def test_a_blocked_operational_strategy_trips_the_watchdog(monkeypatch, tmp_path):
+    """`fleet health` is the gate an external watchdog keys on; a blocked strategy must trip it."""
+    h = _blocked_health(monkeypatch, tmp_path, "s_blocked_alert")
+    assert fleet_alert([h], halted_globally=False) == [h]
+
+
+def test_reconcile_drift_still_outranks_blocked(monkeypatch, tmp_path):
+    """Precedence: a book that disagrees with the venue is worse than one that could not trade."""
+    h = _blocked_health(monkeypatch, tmp_path, "s_blocked_drift", reconcile_ok=False)
+    assert h["health"] == "drift"

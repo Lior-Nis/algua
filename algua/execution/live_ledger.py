@@ -278,6 +278,23 @@ def record_paper_venue_order(
     return cur.rowcount == 1
 
 
+def delete_live_order(conn: sqlite3.Connection, client_order_id: str) -> None:
+    """Retract a LIVE intent row that never became a real order — the mirror of
+    `delete_paper_venue_order`, with the same caller contract: only ever for a coid FRESHLY
+    inserted this attempt, because a pre-existing NULL row is indistinguishable from a real
+    accepted order whose backfill was lost to a crash.
+
+    Needed because `flatten_strategy` records the intent BEFORE submitting, and a submit can now
+    end without an order existing (the venue refused it as a wash trade, or the residual quantized
+    to a noop). Left behind, that row is a phantom `broker_order_id IS NULL` that stranded-order
+    recovery re-queries forever and order counts treat as real."""
+    conn.execute(
+        "DELETE FROM live_orders WHERE client_order_id = ? AND broker_order_id IS NULL",
+        (client_order_id,),
+    )
+    conn.commit()
+
+
 def delete_paper_venue_order(conn: sqlite3.Connection, client_order_id: str) -> None:
     """Retract a paper venue INTENT row that never became a real order — submit_sized reported
     'noop'/'skipped', so no order ever reached the venue (both sentinels return before the POST).

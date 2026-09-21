@@ -24,6 +24,8 @@ from algua.execution.live_ledger import (
     backfill_broker_order_id,
     backfill_paper_venue_broker_order_id,
     believed_positions,
+    delete_live_order,
+    delete_paper_venue_order,
     paper_believed_positions,
     record_live_order,
     record_paper_venue_order,
@@ -62,6 +64,18 @@ def _record(
     if strategy_id is None:  # PAPER venue records need a strategy_id for forward-gate attribution
         raise ValueError("flatten_strategy: PAPER kind requires strategy_id")
     record_paper_venue_order(conn, name, symbol, side, None, coid, strategy_id=strategy_id)
+
+
+def _retract(
+    conn: sqlite3.Connection, name: str, coid: str, kind: LedgerKind,
+) -> None:
+    """Undo the pre-submit intent row when NO order reached the venue. Safe because the coid was
+    minted from `now()` moments earlier and inserted by THIS call, which is exactly the caller
+    contract both delete helpers require."""
+    if kind is LedgerKind.LIVE:
+        delete_live_order(conn, coid)
+        return
+    delete_paper_venue_order(conn, coid)
 
 
 def _backfill(
@@ -141,6 +155,11 @@ def flatten_strategy(  # noqa: PLR0913
             side = "sell" if offset_qty > 0 else "buy"
             _record(conn, name, symbol, side, coid, kind, strategy_id)
             oid = broker.submit_offset(symbol, offset_qty, coid)
+            if oid in (WASH_BLOCKED, "noop"):
+                # No order reached the venue, so the intent row recorded a moment ago is a phantom:
+                # retract it before deciding what the outcome means. Left behind it is a NULL
+                # broker_order_id row that stranded-order recovery re-queries forever.
+                _retract(conn, name, coid, kind)
             if oid == WASH_BLOCKED:
                 # The venue REFUSED the liquidation (an opposite-side order rests on the account).
                 # The position is still fully open, so this flatten did NOT happen. Recording it as

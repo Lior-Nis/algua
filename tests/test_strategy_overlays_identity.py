@@ -116,7 +116,7 @@ def test_construct_without_overlays_is_unchanged():
         construct_fn=get_construction_policy("top_k_equal_weight"),
     )
     view = _view({"A": [1.0] * 3, "B": [1.0] * 3})
-    # 0.49 not 0.5: gross 1.0 exceeds the 0.95 construction target and is scaled down (#560).
+    # 0.475 not 0.5: gross 1.0 exceeds the 0.95 construction target and is scaled down (#560).
     assert strat.target_weights(view).to_dict() == {"A": 0.475, "B": 0.475}
 
 

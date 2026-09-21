@@ -49,7 +49,7 @@ STALE_AFTER_SESSIONS = 5
 DECISION_STALE_AFTER_SESSIONS = 2
 
 # Worst-first severity ordering for both the ``health`` verdict and the fleet ranking.
-_SEVERITY = {"halted": 0, "drift": 1, "stale": 2, "idle": 3, "ok": 4}
+_SEVERITY = {"halted": 0, "drift": 1, "blocked": 2, "stale": 3, "idle": 4, "ok": 5}
 
 # The complete set of verdicts ``strategy_health`` can emit. Any OTHER value on a row is a
 # corrupt/unknown verdict and the active liveness gate fails closed on it (never a silent ``ok``).
@@ -72,7 +72,7 @@ OPERATIONAL_STAGES = frozenset({Stage.LIVE.value, Stage.PAPER.value, Stage.FORWA
 # live/paper loop that never produced a tick never started (on a NON-operational stage ``idle`` is
 # correctly quiet, see :func:`fleet_alert`); ``halted`` alerts because a stopped, unmonitored
 # operational loop is exactly the silent failure #399 targets.
-_ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "idle", "halted"})
+_ALERT_HEALTHS_OPERATIONAL = frozenset({"stale", "drift", "blocked", "idle", "halted"})
 
 
 def fleet_alert(
@@ -160,8 +160,9 @@ def strategy_health(
     peak; otherwise the sim-derived positions + equity peak.
 
     ``health`` precedence (worst first): ``halted`` > ``drift`` (newest tick failed reconcile) >
-    ``stale`` (newest tick itself stale, OR its decision bar > ``DECISION_STALE_AFTER_SESSIONS``
-    sessions behind now) > ``idle`` (never ticked) > ``ok``.
+    ``blocked`` (the venue REFUSED a leg on the newest tick, so the strategy is not executing its
+    own decision — #560) > ``stale`` (newest tick itself stale, OR its decision bar >
+    ``DECISION_STALE_AFTER_SESSIONS`` sessions behind now) > ``idle`` (never ticked) > ``ok``.
     """
     if rec.stage is Stage.LIVE:
         positions = believed_positions(conn, rec.name, LedgerKind.LIVE)
@@ -241,6 +242,12 @@ def strategy_health(
         health = "halted"
     elif last is not None and not last["reconcile_ok"]:
         health = "drift"
+    elif last is not None and last["venue_blocked"]:
+        # The loop RAN but the venue refused a leg, so the strategy did not execute its decision.
+        # `ok` here would be the worst kind of green: a strategy that looks operational, records
+        # ticks, and is silently not trading. It alerts for an operational strategy, because the
+        # blocking order is another strategy's and does not clear itself.
+        health = "blocked"
     elif last is None and not has_unreadable_tick:
         health = "idle"
     elif staleness_sessions is not None and staleness_sessions > STALE_AFTER_SESSIONS:

@@ -322,7 +322,9 @@ class _AlpacaBroker:
             return "noop"
         side = "buy" if sized.delta_notional > 0 else "sell"
         amount = abs(sized.delta_notional)
+        reserved = False
         if side == "buy" and reserve is not None:
+            reserved = True
             permitted = reserve(intent.symbol, amount)
             if permitted <= 0.0:
                 return "skipped"
@@ -345,8 +347,12 @@ class _AlpacaBroker:
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
         outcome = self._post_order(body, "/v2/orders", client_order_id)
-        if outcome == WASH_BLOCKED and side == "buy" and release is not None:
-            # Nothing reached the venue; give the notional back to the pool.
+        if outcome == WASH_BLOCKED and reserved and release is not None:
+            # Nothing reached the venue; give the notional back. Gated on `reserved` -- the fact
+            # that a reservation ACTUALLY RAN -- not merely on this being a buy: `reserve` and
+            # `release` are independently optional hooks, so a caller supplying only `release`
+            # would otherwise credit a reservation that never existed, and in the live lane that
+            # subtracts real seeded exposure from the book accumulator.
             release(intent.symbol, float(notional))
         return outcome
 
