@@ -41,7 +41,8 @@ from algua.research.forward_gates import FORWARD_TOKEN_TTL_DAYS, ForwardGateCrit
 NOW = datetime(2026, 6, 12, 21, 0, tzinfo=UTC)
 IDENT = ArtifactIdentity(code_hash="c", config_hash="g", dependency_hash="d")
 
-EXCLUSION_KEYS = {"local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
+EXCLUSION_KEYS = {"venue_blocked", "local_clock", "identity_drift", "legacy_null",
+                  "bad_tick_ts",
                   "no_decision", "bad_decision_ts", "stale_decision"}
 
 
@@ -103,7 +104,8 @@ _AUTO = "AUTO"
 
 def seed_tick(conn, day: date, equity: float, *, name="s", strategy_id=1, decision_ts=_AUTO,
               reconcile_ok=True, clock_source="broker", code_hash="c", config_hash="g",
-              dependency_hash="d", account_id="acct", recorded_at=None, hour=20) -> int:
+              dependency_hash="d", account_id="acct", recorded_at=None, hour=20,
+              venue_blocked=False) -> int:
     """Seed via the REAL writer, then pin recorded_at (the writer stamps wall-clock time,
     which would fall outside the fixed test NOW)."""
     if decision_ts == _AUTO:
@@ -113,7 +115,7 @@ def seed_tick(conn, day: date, equity: float, *, name="s", strategy_id=1, decisi
         peak_equity=None, positions={}, n_submitted=0, reconcile_ok=reconcile_ok,
         lane="paper", strategy_id=strategy_id, code_hash=code_hash, config_hash=config_hash,
         dependency_hash=dependency_hash, account_id=account_id, cash=0.0,
-        clock_source=clock_source,
+        clock_source=clock_source, venue_blocked=venue_blocked,
     )
     rid = conn.execute("SELECT max(id) FROM tick_snapshots").fetchone()[0]
     conn.execute("UPDATE tick_snapshots SET recorded_at=? WHERE id=?",
@@ -162,6 +164,35 @@ def test_local_clock_excluded(conn):
     res = assemble(conn)
     assert res.excluded["local_clock"] == 1
     assert res.evidence.n_return_observations == 1  # 2 admissible sessions -> 1 return
+
+
+def test_a_venue_blocked_tick_is_not_evidence(conn):
+    """The strategy's decision was NOT executed: the venue refused a leg outright (a wash trade
+    against another strategy's resting order), so this tick's equity reflects a book the strategy
+    did not choose.
+
+    Counting it would let a strategy that is STRUCTURALLY unable to reach its target weights --
+    because a sibling's order keeps refusing one of its symbols every single tick -- accrue session
+    coverage and returns anyway, and eventually pass the forward gate. That is a silent false pass,
+    strictly worse than the loud cycle abort that motivated the wash-trade change (#560).
+    """
+    _two_admissible(conn)
+    seed_tick(conn, date(2026, 6, 11), 99.0, venue_blocked=True)
+    res = assemble(conn)
+    assert res.excluded["venue_blocked"] == 1
+    assert res.evidence.n_return_observations == 1
+
+
+def test_a_legacy_tick_predating_the_column_is_still_evidence(conn):
+    """venue_blocked is NULL on every pre-v47 row. NULL must read as "not blocked": those ticks
+    predate the field and no leg was ever refused on them."""
+    _two_admissible(conn)
+    seed_tick(conn, date(2026, 6, 11), 99.0)
+    conn.execute("UPDATE tick_snapshots SET venue_blocked=NULL")
+    conn.commit()
+    res = assemble(conn)
+    assert res.excluded["venue_blocked"] == 0
+    assert res.evidence.n_return_observations == 2
 
 
 def test_identity_drift_excluded(conn):

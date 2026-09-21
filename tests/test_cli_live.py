@@ -620,7 +620,7 @@ def test_run_all_breach_preserves_already_ticked_results(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None, snapshot_id=None):
+                   reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         calls.append(name)
         if len(calls) == 1:
             return {"strategy": name, "venue": "live", "submitted": []}  # first ticks clean
@@ -679,7 +679,7 @@ def test_run_all_isolates_setup_error_and_ticks_siblings(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None, snapshot_id=None):
+                   reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         calls.append(name)
         if len(calls) == 1:  # first tenant's setup fault (pre-side-effect) — isolatable
             raise StrategySetupError(name, ModuleNotFoundError("secret-token-abc/path/leak"))
@@ -779,7 +779,7 @@ def test_run_all_all_strategies_setup_error_in_one_cycle(monkeypatch):
     _seed_second_live(monkeypatch)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None, snapshot_id=None):
+                   reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         raise StrategySetupError(name, ValueError("bad config"))
 
     monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _fake_tick)
@@ -803,7 +803,7 @@ def test_run_all_non_setup_exception_aborts_cycle(monkeypatch):
     calls: list[str] = []
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None, snapshot_id=None):
+                   reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         calls.append(name)
         raise RuntimeError("flatten_strategy blew up mid-breach")
 
@@ -825,7 +825,7 @@ def test_run_all_reserves_buying_power_across_strategies(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 30_000.0)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None, snapshot_id=None):
+                   reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         captured["first"] = reserve_buy("AAA", 50_000.0)   # ask for 50k from a 30k pool
         captured["second"] = reserve_buy("BBB", 50_000.0)  # pool now drained
         return {"strategy": name}
@@ -942,7 +942,7 @@ def test_run_all_forwards_start_end_to_tick(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._broker_buying_power", lambda b: 1_000.0)
 
     def _fake_tick(conn, name, auth, broker, provider, max_drawdown, start=None, end=None,
-                   reserve_buy=None, cancel=None, snapshot_id=None):
+                   reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         captured["start"], captured["end"] = start, end
         return {"strategy": name}
 
@@ -1874,7 +1874,7 @@ def test_live_run_all_refresh_ticks_on_the_resolved_snapshot(monkeypatch):
     ticked: dict = {}
 
     def _tick(conn, name, authorization, broker, provider, max_drawdown, start, end,
-              reserve_buy=None, cancel=None, snapshot_id=None):
+              reserve_buy=None, release_buy=None, cancel=None, snapshot_id=None):
         ticked["snapshot_id"], ticked["window"] = snapshot_id, (start, end)
         return {"strategy": name, "submitted": []}
     monkeypatch.setattr("algua.cli.live_cmd._run_strategy_tick", _tick)

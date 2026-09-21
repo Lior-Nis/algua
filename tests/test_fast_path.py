@@ -175,7 +175,7 @@ def test_fast_path_applies_warmup_flat_period() -> None:
     bars, adj = _bars_adj(["AAA"], seed=2)
     fast = _decision_weights_fast_or_loop(strat, bars, adj, universe_by_date=None)
     assert (fast.iloc[:5]["AAA"] == 0.0).all()
-    assert (fast.iloc[5:]["AAA"] == 0.98).all()  # #560 headroom
+    assert (fast.iloc[5:]["AAA"] == 0.95).all()  # #560 headroom
 
 
 def test_fast_path_gross_breach_raises() -> None:
@@ -427,7 +427,7 @@ def test_fast_weights_skips_bounded_guard() -> None:
     )
     # `_fast_weights` does NOT raise (no bounded guard); it returns the divergent matrix as-is.
     fast = _fast_weights(strat, bars, adj)
-    assert fast.loc[target_ts, "AAA"] == 0.98  # #560 headroom
+    assert fast.loc[target_ts, "AAA"] == 0.95  # #560 headroom
     # The bounded guard at the unsampled bar also passes (documents the gap the verifier closes).
     bars_sorted = bars.sort_index()
     end_pos = bars_sorted.index.searchsorted(adj.index, side="right")

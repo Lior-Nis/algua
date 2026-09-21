@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -10,16 +11,37 @@ from algua.live.paper_loop import PaperRunResult
 # Alpaca client_order_id allows up to 128 chars; keep ours under that and strip anything outside
 # [A-Za-z0-9_-] so a symbol or strategy name with odd characters can't produce an invalid id.
 _COID_SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
+# 111 readable + "-" + 16 digest = Alpaca's 128-char ceiling exactly. The digest is what makes the
+# id unique; the readable prefix only makes it greppable in a broker UI.
+_COID_DIGEST_CHARS = 16
+_COID_READABLE_CHARS = 111
 
 
 def client_order_id(strategy: str, decision_ts: datetime, symbol: str) -> str:
     """Deterministic Alpaca client_order_id for one (strategy, decision_ts, symbol). Identical
     inputs always produce the same id, so a retried submit (after a transient failure) or a re-run
-    of the same tick reuses the id and Alpaca de-duplicates rather than double-filling (#18, #24).
-    The decision timestamp is normalised to UTC so the id does not depend on the caller's tzinfo."""
+    of the same tick reuses the id and the submit is idempotent (#18, #24). The decision timestamp
+    is normalised to UTC so the id does not depend on the caller's tzinfo.
+
+    UNIQUENESS IS CARRIED BY A DIGEST, not by the readable part. The readable part is built by
+    sanitising and TRUNCATING to a fixed width, and truncation cuts from the RIGHT -- so a long
+    enough strategy name pushes the timestamp and symbol off the end entirely and every session and
+    every symbol collide on one id. Sanitising can collapse distinct names onto the same string too
+    (every character outside [A-Za-z0-9_-] becomes "_").
+
+    That is not cosmetic. `submit_sized` resolves a duplicate-id rejection by returning the order
+    that already holds the id (#560); its guards compare the returned symbol and side, but a
+    same-symbol same-side collision across two sessions passes every one of them, and the current
+    order is silently attributed to a stale one and never submitted. The digest is over the RAW,
+    unsanitised tuple, so neither truncation nor sanitisation can make two distinct decisions
+    collide."""
     ts = decision_ts.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    raw = f"{strategy}-{ts}-{symbol}"
-    return _COID_SANITIZE.sub("_", raw)[:128]
+    # NUL separators: no component can contain one, so the joined string is unambiguous and
+    # "ab" + "c" cannot digest the same as "a" + "bc".
+    digest = hashlib.sha256(
+        "\x00".join((strategy, ts, symbol)).encode("utf-8")).hexdigest()[:_COID_DIGEST_CHARS]
+    readable = _COID_SANITIZE.sub("_", f"{strategy}-{ts}-{symbol}")[:_COID_READABLE_CHARS]
+    return f"{readable}-{digest}"
 
 
 def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:
@@ -201,14 +223,17 @@ def record_tick_snapshot(
     reconcile_ok: bool,
     lane: str, strategy_id: int, code_hash: str, config_hash: str,
     dependency_hash: str | None, account_id: str, cash: float, clock_source: str,
-    snapshot_id: str | None = None,
+    snapshot_id: str | None = None, venue_blocked: bool = False,
 ) -> None:
     """Append one completed-tick snapshot (equity + positions) for a strategy — the per-tick
     operability/equity-curve record read by `paper show`.
 
     ``lane``/``clock_source`` are enforced here (not a DB CHECK constraint — SQLite ALTER TABLE
     can't add one to an existing table); legacy NULL rows are inadmissible by design.
-    ``snapshot_id`` is the bars snapshot the tick decided on (None for legacy rows)."""
+    ``snapshot_id`` is the bars snapshot the tick decided on (None for legacy rows).
+    ``venue_blocked`` marks a tick during which the venue REFUSED a leg outright (a wash trade
+    against another strategy's resting order): the strategy's decision was not executed, so the
+    forward gate must not count the tick as evidence (#560)."""
     if lane not in _VALID_LANES:
         raise ValueError(f"lane must be one of {sorted(_VALID_LANES)!r}, got {lane!r}")
     if clock_source not in _VALID_CLOCK_SOURCES:
@@ -218,12 +243,14 @@ def record_tick_snapshot(
     conn.execute(
         "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, peak_equity, "
         "positions, n_submitted, reconcile_ok, lane, strategy_id, code_hash, config_hash, "
-        "dependency_hash, account_id, cash, clock_source, recorded_at, snapshot_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "dependency_hash, account_id, cash, clock_source, recorded_at, snapshot_id, "
+        "venue_blocked) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (strategy, tick_ts, decision_ts, equity, peak_equity, json.dumps(positions),
          n_submitted, 1 if reconcile_ok else 0,
          lane, strategy_id, code_hash, config_hash, dependency_hash,
-         account_id, cash, clock_source, datetime.now(UTC).isoformat(), snapshot_id),
+         account_id, cash, clock_source, datetime.now(UTC).isoformat(), snapshot_id,
+         1 if venue_blocked else 0),
     )
     conn.commit()
 

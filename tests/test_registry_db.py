@@ -10,11 +10,11 @@ _META_COLS = {"family", "tags", "author", "hypothesis_status", "derived_from", "
 # Pinned fingerprint of the schema a full bootstrap produces. BUMP THESE DELIBERATELY, together
 # with SCHEMA_VERSION and the migration that earns it — never to make a red test go green.
 _SCHEMA_OBJECT_COUNT = 111
-_SCHEMA_DIGEST = "c7b0fda6a11628e2ff8e9bf3712169b6a105a8aef50bedc1ea748647f014a64f"
+_SCHEMA_DIGEST = "03f193834ef0de76310ac9cff14ba654cf83d26c0e10aafaafd8e6a80e5ace9b"
 
 
 def test_schema_version_is_current():
-    assert SCHEMA_VERSION == 46
+    assert SCHEMA_VERSION == 47
 
 
 def _schema_fingerprint(conn: sqlite3.Connection) -> tuple[int, str, str]:
@@ -838,7 +838,7 @@ def test_v26_fdr_columns_are_null_on_legacy_rows(tmp_path):
 
 
 def test_paper_venue_tables_created_at_v30(tmp_path):
-    assert SCHEMA_VERSION == 46
+    assert SCHEMA_VERSION == 47
     conn = sqlite3.connect(tmp_path / "r.db")
     conn.row_factory = sqlite3.Row
     migrate(conn)
@@ -862,7 +862,7 @@ def test_paper_reconcile_and_cycle_tables_exist(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert "paper_reconcile_state" in tables
     assert "paper_cycle" in tables
-    assert SCHEMA_VERSION == 46
+    assert SCHEMA_VERSION == 47
 
 
 def test_v32_negative_results_table_created(tmp_path):
@@ -927,7 +927,7 @@ def test_v46_ideas_columns_and_tables_exist_after_migrate(tmp_path):
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"idea_attempts", "idea_inspirations"} <= tables
     migrate(conn)  # idempotent
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 47
 
 
 def test_v46_preserves_v45_idea_rows(tmp_path):
@@ -980,12 +980,12 @@ def test_v46_preserves_v45_idea_rows(tmp_path):
             "claimed_by", "claim_token", "claimed_at"} <= cols
     tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"idea_attempts", "idea_inspirations"} <= tables
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 47
 
     migrate(conn)  # idempotent re-run must not raise
     row = conn.execute("SELECT title FROM ideas").fetchone()
     assert row["title"] == "t"
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 47
 
 
 def test_v46_rebuilds_negative_results_check_on_legacy_db(tmp_path):
@@ -1061,3 +1061,15 @@ def test_v46_rebuilds_negative_results_check_on_legacy_db(tmp_path):
     ).fetchone()
     assert (before["rootpage"], before["sql"]) == (after["rootpage"], after["sql"])
     assert conn.execute("SELECT COUNT(*) FROM negative_results").fetchone()[0] == 2
+
+
+def test_v47_marks_a_venue_blocked_tick(tmp_path):
+    """A tick during which the venue refused a leg must be distinguishable in the DB.
+
+    Without the column the forward gate cannot tell a tick that executed the strategy's decision
+    from one where a leg was refused outright, and would count the second as evidence (#560).
+    """
+    conn = connect(tmp_path / "r.db")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(tick_snapshots)")}
+    assert "venue_blocked" in cols

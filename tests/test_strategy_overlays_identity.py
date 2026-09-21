@@ -38,7 +38,7 @@ def _cfg(**over: Any) -> StrategyConfig:
 
 # --- identity --------------------------------------------------------------------------------
 
-_NO_OVERLAY_DIGEST = "5a449d63bf6600e4147141784a70ffec"
+_NO_OVERLAY_DIGEST = "e2c60b0fcf5b163f0731e4f7ef9c73b3"
 
 
 def test_empty_overlays_leaves_config_hash_byte_identical():
@@ -116,8 +116,8 @@ def test_construct_without_overlays_is_unchanged():
         construct_fn=get_construction_policy("top_k_equal_weight"),
     )
     view = _view({"A": [1.0] * 3, "B": [1.0] * 3})
-    # 0.49 not 0.5: gross 1.0 exceeds the 0.98 construction target and is scaled down (#560).
-    assert strat.target_weights(view).to_dict() == {"A": 0.49, "B": 0.49}
+    # 0.49 not 0.5: gross 1.0 exceeds the 0.95 construction target and is scaled down (#560).
+    assert strat.target_weights(view).to_dict() == {"A": 0.475, "B": 0.475}
 
 
 # --- loader -----------------------------------------------------------------------------------

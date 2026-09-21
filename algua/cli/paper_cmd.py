@@ -682,7 +682,7 @@ def _still_paper_allocated(conn, name: str) -> bool:
 
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
-    tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
+    tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None, release_buy=None,
     start: str, end: str, snapshot_id: str | None = None,
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
@@ -749,6 +749,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                                  or not _still_paper_allocated(conn, name)),
             cancel=cancel,
             reserve_buy=reserve_buy,
+            release_buy=release_buy,
             peak_equity=get_peak_equity(conn, name),
             live_snapshot=lambda bars: build_paper_sizing_snapshot(
                 conn, name, allocation, bars, strategy.universe),
@@ -820,7 +821,8 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             reconcile_ok=result.reconcile_ok, lane="paper", strategy_id=rec.id,
             code_hash=identity.code_hash, config_hash=identity.config_hash,
             dependency_hash=identity.dependency_hash, account_id=acct.account_id,
-            cash=acct.cash, clock_source=clock_source, snapshot_id=snapshot_id)
+            cash=acct.cash, clock_source=clock_source, snapshot_id=snapshot_id,
+            venue_blocked=bool(result.blocked))
     audit_append(conn, actor="agent", action="trade_tick",
                  reason=f"{len(result.submitted)} orders submitted", strategy=name)
     if result.blocked:
@@ -1116,6 +1118,16 @@ def run_all(
                 # strategy's reserve trims against the running pool, and a trim is audited.
                 pool = {"available": float(acct.buying_power)}
 
+                def _paper_release_for(strategy_name):
+                    def _release(symbol: str, notional: float) -> None:
+                        # The venue refused the order (wash trade): nothing was posted, so the
+                        # notional goes back to the pool. Without this a blocked buy starves every
+                        # sibling behind it of buying power no order ever used.
+                        pool["available"] += max(0.0, notional)
+                        audit_append(conn, actor="system", action="paper_reserve_released",
+                                     reason=f"{symbol} {notional}", strategy=strategy_name)
+                    return _release
+
                 def _paper_reserve_for(strategy_name):
                     def _reserve(symbol: str, notional: float) -> float:
                         grant = min(notional, max(0.0, pool["available"]))
@@ -1130,7 +1142,6 @@ def run_all(
                     return _reserve
 
                 breached = False
-                contained_breaches: list[str] = []
                 for prec in tickable:
                     name = prec.name
                     # Per-strategy fault isolation (#374/GATE-2): ONLY a pre-side-effect setup fault
@@ -1161,6 +1172,7 @@ def run_all(
                             conn, name, strategy, rec, broker, provider, max_drawdown,
                             tick_ts, clock_source, acct,
                             reserve_buy=_paper_reserve_for(name),
+                            release_buy=_paper_release_for(name),
                             cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
                             start=start, end=end, snapshot_id=snapshot)
                     except StrategySetupError as exc:
@@ -1176,39 +1188,29 @@ def run_all(
                         continue
                     results.append(out)
                     counters.ticks += 1
-                    if out.get("ok") is False:
+                    if out.get("ok") is False:  # breach/halt marker: stop, keep prior results
                         counters.breaches += 1
                         if out.get("flatten_error") is not None:
                             counters.flatten_failures += 1
-                        # CONTAINED vs NOT. A breach whose scoped flatten SUCCEEDED and which
-                        # engaged no global halt is fully handled: that tenant is tripped and flat,
-                        # its siblings' books are untouched, and the lane is still trustworthy. It
-                        # must not stop them or void the session marker -- doing so cost four
-                        # recorded sessions (2026-09-11 .. 09-18) during which tenants that ticked
-                        # cleanly accrued no forward evidence, because a handful of strategies kept
-                        # breaching a gross wall they aimed exactly at.
-                        # A failed flatten (position of unknown size still open) or a global halt
-                        # (systemic, e.g. a dark feed) is NOT contained and still stops everything.
-                        if out.get("flatten_error") is not None or out.get("global_halt") == "set":
-                            breached = True
-                            break
-                        contained_breaches.append(name)
-                        continue
+                        breached = True
+                        break
             envelope = {"reconcile": recon_payload, "strategies": results,
                         "skipped_unallocated": skipped_unallocated,
                         "setup_errors": [r for r in results if r.get("kind") == "setup_error"],
-                        "contained_breaches": contained_breaches,
                         "snapshot": snapshot_info}
             if breached:
-                # An UNCONTAINED breach (failed flatten / global halt): surface it AND every sibling
+                # A breach (already tripped + scoped-flattened): surface it AND every sibling
                 # ticked before it in one envelope, then exit non-zero (#270).
+                #
+                # NOT relaxed to "continue if the flatten reported success", though that would let
+                # healthy tenants keep recording sessions. `flatten_strategy` returns success once
+                # offsets are SUBMITTED -- it never waits for fills or re-reconciles -- so a
+                # submitted-but-unfilled or partially-filled liquidation would be called contained
+                # while the position is still open, and `TickHalted` reaches here having flattened
+                # nothing at all. Containment needs post-liquidation proof of a flat book, which is
+                # its own change; until then this stays the safe blanket rule.
                 emit({"ok": False, **envelope})
                 raise typer.Exit(1)
-            # Contained breaches do NOT fail the cycle: the lane did its job, and the session is
-            # recorded so healthy tenants keep accruing evidence. The halt itself stays loud
-            # elsewhere -- the kill switch, an audit row, and `fleet health`, which is the gate that
-            # exists to exit non-zero on a halted operational strategy. `run-all` reports whether
-            # the CYCLE worked; `fleet health` reports whether the STRATEGIES are healthy.
             emit(ok(envelope))
         except typer.Exit:
             raise

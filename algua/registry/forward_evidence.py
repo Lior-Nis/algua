@@ -55,7 +55,7 @@ _MAX_DECISION_LAG_SESSIONS = 2
 
 # Per-filter exclusion keys, IN EVALUATION ORDER (first matching filter wins the count).
 _EXCLUSION_FILTERS = ("local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
-                      "no_decision", "bad_decision_ts", "stale_decision")
+                      "no_decision", "bad_decision_ts", "stale_decision", "venue_blocked")
 
 
 # (after_iso, until_iso) -> raw activity dicts; exhaustively paginated by the broker layer,
@@ -127,6 +127,15 @@ def _inadmissible_reason(
     lag = calendar.sessions_between(decision_dt.date(), tick_dt.date())
     if not 0 <= lag <= _MAX_DECISION_LAG_SESSIONS:
         return "stale_decision"
+    if row["venue_blocked"]:
+        # The venue refused a leg outright, so this tick did NOT execute the strategy's decision --
+        # its equity reflects a book the strategy did not choose. Counting it would let a strategy
+        # that is structurally unable to reach its target weights (because another strategy's
+        # resting order keeps refusing one of its symbols) accrue session coverage and returns
+        # anyway. That is worse than the cycle abort this filter's sibling change removed: a silent
+        # false pass rather than a loud stall. Legacy rows are NULL -> falsy -> admissible, which is
+        # correct: they predate the field and no leg was ever refused on them.
+        return "venue_blocked"
     return None
 
 
@@ -201,7 +210,7 @@ def assemble_forward_evidence(
     # 1-2. Fetch in id order; partition into admissible ticks vs per-filter exclusions.
     rows = conn.execute(
         "SELECT id, tick_ts, decision_ts, equity, reconcile_ok, clock_source, code_hash,"
-        " config_hash, dependency_hash, account_id, recorded_at"
+        " config_hash, dependency_hash, account_id, recorded_at, venue_blocked"
         " FROM tick_snapshots WHERE lane='paper' AND strategy_id=? ORDER BY id",
         (strategy_id,),
     ).fetchall()

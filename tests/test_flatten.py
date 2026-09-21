@@ -12,6 +12,7 @@ from contextlib import closing
 import pytest
 
 from algua.audit.log import read as audit_read
+from algua.execution.alpaca_rejections import WASH_BLOCKED
 from algua.execution.flatten import flatten_strategy
 from algua.execution.live_ledger import LedgerKind
 from algua.registry.db import connect, migrate
@@ -196,3 +197,53 @@ def test_flatten_submit_exception_captured_both_lanes(conn, monkeypatch, exc, ki
     rows = audit_read(conn, action="flatten_failed")
     assert len(rows) == 1
     assert rows[0]["strategy"] == "cross_sectional_momentum"
+
+
+# --- a refused liquidation is a FAILED flatten, not a successful one (#560) --------------------
+
+class _WashBlockingBroker:
+    """The venue refuses the liquidation: an opposite-side order already rests on the account."""
+
+    def __init__(self):
+        self.offsets: list[tuple[str, float, str]] = []
+
+    def submit_offset(self, symbol: str, qty: float, coid: str) -> str:
+        self.offsets.append((symbol, qty, coid))
+        return WASH_BLOCKED
+
+
+def test_a_wash_blocked_liquidation_is_reported_as_a_failed_flatten(conn, monkeypatch):
+    """The position is still fully open, so this flatten did NOT happen.
+
+    Before the fix the sentinel was backfilled as a broker order id and counted as an offset, with
+    `flatten_error=None` -- i.e. a breached tenant, or a live emergency flatten, would report a
+    position as liquidated while it was entirely untouched. Callers decide real things on this.
+    """
+    broker = _WashBlockingBroker()
+    res = _run(conn, broker, believed={"AAA": 10.0}, held=lambda: {"AAA": 10.0},
+               monkeypatch=monkeypatch)
+    assert res.n_offsets == 0, "nothing was liquidated"
+    assert res.flatten_error is not None
+    assert "wash trade" in res.flatten_error
+    assert "still open" in res.flatten_error
+
+
+def test_the_sentinel_is_never_recorded_as_a_broker_order_id(conn, monkeypatch):
+    broker = _WashBlockingBroker()
+    _run(conn, broker, believed={"AAA": 10.0}, held=lambda: {"AAA": 10.0}, monkeypatch=monkeypatch)
+    ids = [r[0] for r in conn.execute(
+        "SELECT broker_order_id FROM live_orders WHERE broker_order_id IS NOT NULL")]
+    assert WASH_BLOCKED not in ids
+
+
+class _NoopBroker:
+    def submit_offset(self, symbol: str, qty: float, coid: str) -> str:
+        return "noop"
+
+
+def test_a_noop_offset_is_not_counted_and_is_not_an_error(conn, monkeypatch):
+    """Residual quantized to zero: no order, and none needed. Distinct from a refusal."""
+    res = _run(conn, _NoopBroker(), believed={"AAA": 10.0}, held=lambda: {"AAA": 10.0},
+               monkeypatch=monkeypatch)
+    assert res.n_offsets == 0
+    assert res.flatten_error is None

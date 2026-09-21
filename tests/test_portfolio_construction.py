@@ -102,16 +102,16 @@ def test_a_full_gross_vector_is_scaled_to_the_target():
     """The #560 fix. Policies normalize gross to exactly max_gross_exposure, which breaches the
     realized-gross wall as soon as the book appreciates -- the wall marks positions against an
     equity denominator capped at the original allocation, so profit alone pushes gross over 1."""
-    out = apply_gross_utilization(_w(A=0.5, B=0.5), target_gross=0.98, max_gross=1.0)
-    assert out.to_dict() == {"A": 0.49, "B": 0.49}
-    assert abs(out.abs().sum() - 0.98) < 1e-12
+    out = apply_gross_utilization(_w(A=0.5, B=0.5), target_gross=0.95, max_gross=1.0)
+    assert out.to_dict() == {"A": 0.475, "B": 0.475}
+    assert abs(out.abs().sum() - 0.95) < 1e-12
 
 
 def test_a_vector_already_inside_the_target_is_left_alone():
     """Tighten-only. Inflating up to the target would UNDO a capacity cap or a tighten-only
     overlay -- both of which reduce gross deliberately."""
     small = _w(A=0.2, B=0.1)
-    assert apply_gross_utilization(small, target_gross=0.98, max_gross=1.0).to_dict() == \
+    assert apply_gross_utilization(small, target_gross=0.95, max_gross=1.0).to_dict() == \
         small.to_dict()
 
 
@@ -122,23 +122,23 @@ def test_an_over_leveraged_vector_is_NOT_rescued():
     is over-leveraged" rejection into a silent rescue -- exactly what a gross rail exists to stop.
     """
     hot = _w(A=1.5, B=1.5)
-    assert apply_gross_utilization(hot, target_gross=0.98, max_gross=1.0).to_dict() == hot.to_dict()
+    assert apply_gross_utilization(hot, target_gross=0.95, max_gross=1.0).to_dict() == hot.to_dict()
 
 
 def test_scaling_only_ever_reduces_magnitude():
     """A vector that passed the per-symbol rail and the capacity cap must still pass them."""
     before = _w(A=0.6, B=-0.4)
-    after = apply_gross_utilization(before, target_gross=0.98, max_gross=1.0)
+    after = apply_gross_utilization(before, target_gross=0.95, max_gross=1.0)
     assert (after.abs() <= before.abs() + 1e-12).all()
     assert (np.sign(after) == np.sign(before)).all(), "scaling must not flip a side"
 
 
 def test_a_non_finite_gross_is_left_for_the_validator():
     bad = _w(A=float("nan"), B=0.5)
-    out = apply_gross_utilization(bad, target_gross=0.98, max_gross=1.0)
+    out = apply_gross_utilization(bad, target_gross=0.95, max_gross=1.0)
     assert out.equals(bad)
 
 
 def test_empty_weights_are_returned_unchanged():
     empty = pd.Series(dtype="float64")
-    assert apply_gross_utilization(empty, target_gross=0.98, max_gross=1.0).empty
+    assert apply_gross_utilization(empty, target_gross=0.95, max_gross=1.0).empty

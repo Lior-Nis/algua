@@ -76,7 +76,8 @@ class _FlatBroker:
         qtys = {s: 0.0 for s in universe}
         return TickSnapshot(equity=1_000_000.0, market_values=dict(qtys), qtys=qtys)
 
-    def submit_sized(self, intent, snap, client_order_id=None, reserve=None) -> str:
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None,
+                     release=None) -> str:
         return "noop"
 
 

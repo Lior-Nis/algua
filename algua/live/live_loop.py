@@ -167,6 +167,10 @@ class TickHooks:
     # caps a BUY's notional to the shared per-cycle pool, returning 0 to skip the order entirely.
     # Sells are never consulted. None == no reservation (paper and any non-reserved path).
     reserve_buy: Callable[[str, float], float] | None = None
+    # release_buy(symbol, notional): refund a reservation the VENUE refused (wash trade). Paired
+    # with reserve_buy -- the pool is debited before the POST, so a blocked order would otherwise
+    # consume buying power no order ever used.
+    release_buy: Callable[[str, float], None] | None = None
     # before_submit(intent, coid): fires IMMEDIATELY BEFORE broker.submit_sized for each intent so
     # the paper lane can record order intent in a crash-safe ledger before the broker call (#249).
     # Live/sim callers that do not supply this hook are unaffected (None -> skipped).
@@ -385,7 +389,8 @@ def run_tick(
         )
         if hooks.before_submit is not None:
             hooks.before_submit(intent, coid)
-        order_id = broker.submit_sized(intent, snap, coid, reserve=hooks.reserve_buy)
+        order_id = broker.submit_sized(intent, snap, coid, reserve=hooks.reserve_buy,
+                                       release=hooks.release_buy)
         if order_id in ("noop", "skipped", WASH_BLOCKED):
             # No order reached the venue: let the lane retract the phantom before_submit row (#311).
             if hooks.on_noop is not None:

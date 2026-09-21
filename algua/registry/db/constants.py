@@ -27,7 +27,7 @@ from __future__ import annotations
 # v46 (ideation engine, #626): idea_attempts + idea_inspirations tables, and claim/eligibility
 # columns (category/market/horizon/falsification/parked_reason/claimed_by/claim_token/claimed_at)
 # on ideas.
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 
 # v37 (#524, R9-M3): the per-search_trials-row upper bound on n_combos. A per-sweep combo count
 # above any legitimate grid; bounds each summand of the funnel-lifetime seed SUM so it is

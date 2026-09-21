@@ -114,7 +114,17 @@ class ExecutionContract:
     # max_gross_exposure). TIGHTEN-ONLY: it scales gross DOWN toward the target and never up, so it
     # cannot add exposure to a vector a capacity cap or an overlay has already reduced.
     # Folded into config_hash (asdict), so the utilization is part of strategy identity.
-    target_gross_utilization: float = 0.98
+    #
+    # WHY 0.95, not a rounder number. A book that starts a session at utilization u and appreciates
+    # by r crosses the wall when u*(1+r) > 1, so surviving a move of r needs u <= 1/(1+r). These
+    # rebalance daily and hold ~3 names, so a 5% single-session portfolio move is ordinary, not a
+    # tail: 1/1.05 = 0.952 -> 0.95. An earlier 0.98 was chosen by eye and does NOT cover the
+    # incident that motivated this -- 0.98 * 1.0252 = 1.0047, still a breach.
+    # This bounds the FREQUENCY of profit-driven breaches; it cannot eliminate them, because no
+    # fixed headroom survives an arbitrarily large move. The complete answer is to remediate a
+    # crossing (trim back to target) rather than permanently halt on it -- deliberately left as its
+    # own change, since it alters what a risk breach DOES in the live lane.
+    target_gross_utilization: float = 0.95
 
     def __post_init__(self) -> None:
         if self.decision_lag_bars < 1:

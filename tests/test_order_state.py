@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -313,3 +314,46 @@ def test_tick_snapshot_without_snapshot_id_is_none(conn):
     assert latest_tick_snapshot(conn, "s2")["snapshot_id"] is None
 
 
+
+
+# --- the id must be unique, not merely readable (#560) -----------------------------------------
+
+_LONG = "x" * 200  # longer than the whole 128-char id
+
+
+def test_a_long_strategy_name_cannot_collapse_distinct_decisions():
+    """Truncation cuts from the RIGHT, so before the digest a long enough name pushed the timestamp
+    and symbol off the end and EVERY session and symbol shared one id.
+
+    That let the #560 duplicate-recovery path attribute a current order to a stale one: the guards
+    compare the returned symbol and side, but a same-symbol same-side collision across two sessions
+    passes all of them, and the new order is never submitted.
+    """
+    a = client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "AAA")
+    b = client_order_id(_LONG, datetime(2026, 6, 5, tzinfo=UTC), "AAA")  # later session
+    c = client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "BBB")  # other symbol
+    assert len({a, b, c}) == 3
+
+
+def test_sanitisation_cannot_collapse_distinct_names():
+    """Every character outside [A-Za-z0-9_-] becomes "_", so two different names could sanitise to
+    the same string. The digest is taken over the RAW tuple, before that."""
+    t = datetime(2026, 1, 5, tzinfo=UTC)
+    assert client_order_id("a.b", t, "AAA") != client_order_id("a/b", t, "AAA")
+
+
+def test_the_id_stays_within_the_venue_limit_and_charset():
+    ids = [client_order_id(_LONG, datetime(2026, 1, 5, tzinfo=UTC), "AAA"),
+           client_order_id("s", datetime(2026, 1, 5, tzinfo=UTC), "A.A")]
+    for i in ids:
+        assert len(i) <= 128
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", i), i
+
+
+def test_the_id_is_still_deterministic():
+    """The whole idempotency contract rests on this: a retry must reuse the id."""
+    t = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    assert client_order_id("s", t, "AAA") == client_order_id("s", t, "AAA")
+    # tz-independent: the same instant expressed differently is the same id.
+    assert client_order_id("s", t, "AAA") == client_order_id(
+        "s", t.astimezone(timezone(timedelta(hours=5))), "AAA")

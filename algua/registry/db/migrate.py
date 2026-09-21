@@ -251,5 +251,12 @@ def migrate(conn: sqlite3.Connection) -> None:
     # bootstrapped before this change (SQLite can't ALTER a CHECK; see the docstring for why a
     # rebuild is needed and why it's safe). No-op on a fresh DB or one already rebuilt.
     _rebuild_negative_results_if_stale(conn)
+    # v47 (#560): a tick during which the VENUE refused a leg outright (a wash trade against
+    # another strategy's resting order). Such a tick did NOT execute the strategy's decision, so it
+    # must never be counted as forward evidence -- otherwise a strategy that is structurally unable
+    # to reach its target weights keeps accruing session coverage and returns, which is strictly
+    # worse than the cycle abort this change set removed. Additive nullable; legacy rows stay NULL
+    # and are read as "not blocked" (they predate the field, and no order was ever refused then).
+    _add_missing_columns(conn, "tick_snapshots", {"venue_blocked": "INTEGER"})
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()

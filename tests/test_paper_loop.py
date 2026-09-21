@@ -102,10 +102,10 @@ def test_run_paper_buys_and_reconciles():
     result = run_paper(_all_in("AAA"), SimBroker(cash=10_000.0), _FakeProvider(bars),
                        DATES[0], DATES[-1])
     assert result.reconcile_ok is True
-    # 98 shares, not 100: construction now aims at 0.98 gross and holds the rest as cash, so
+    # 95 shares, not 100: construction now aims at 0.98 gross and holds the rest as cash, so
     # an appreciating book does not breach the realized-gross wall (#560).
-    assert result.final_positions.get("AAA", 0.0) == 98.0
-    assert result.final_cash == 200.0
+    assert result.final_positions.get("AAA", 0.0) == 95.0
+    assert result.final_cash == 500.0
     assert len(result.fills) >= 1
 
 

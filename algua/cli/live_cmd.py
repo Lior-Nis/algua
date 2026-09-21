@@ -134,7 +134,8 @@ def _still_live_allocated(conn, name: str) -> bool:
 
 def _run_strategy_tick(  # noqa: PLR0913
     conn, name: str, authorization, broker, provider, max_drawdown,
-    start: str, end: str, reserve_buy=None, cancel=None, snapshot_id: str | None = None,
+    start: str, end: str, reserve_buy=None, release_buy=None, cancel=None,
+    snapshot_id: str | None = None,
 ) -> dict:
     """Drive ONE strategy's live tick: hooks (incl. scoped `cancel`), run_tick, breach handling
     (trip + scoped flatten), snapshot persistence. Always returns a per-strategy result dict — on
@@ -195,6 +196,7 @@ def _run_strategy_tick(  # noqa: PLR0913
                                  or not _still_live_allocated(conn, name)),
             peak_equity=get_nav_peak(conn, name),
             reserve_buy=reserve_buy,
+            release_buy=release_buy,
         )
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -268,14 +270,26 @@ def _run_strategy_tick(  # noqa: PLR0913
             dependency_hash=identity.dependency_hash,
             account_id=acct.account_id, cash=acct.cash,
             clock_source=clock_source, snapshot_id=snapshot_id,
+            venue_blocked=bool(result.blocked),
         )
     audit_append(conn, actor="agent", action="live_trade_tick",
                  reason=f"{len(result.submitted)} live orders submitted", strategy=name)
+    if result.blocked:
+        # PARITY with paper: a leg the venue refused must be as visible in the real-money lane as
+        # in the rehearsal one. Dropping it here was worse than in paper -- the same silent
+        # non-trading, with capital committed.
+        audit_append(
+            conn, actor="system", action="order_blocked_by_venue",
+            reason="; ".join(f"{b['side']} {b['symbol']}: {b['reason']}" for b in result.blocked),
+            strategy=name)
+        log.warning("order_blocked_by_venue", extra={"fields": {
+            "strategy": name, "lane": "live", "blocked": result.blocked}})
     return {
         "strategy": name,
         "venue": "live",
         "decision_ts": result.decision_ts.isoformat() if result.decision_ts else None,
         "submitted": result.submitted,
+        "blocked": result.blocked,
         "reconcile_ok": result.reconcile_ok,
     }
 
@@ -570,6 +584,16 @@ def run_all(
                     return
                 pool = {"available": _broker_buying_power(broker)}
 
+                def _release_for(strategy_name):
+                    def _release(symbol: str, notional: float) -> None:
+                        # Wash-trade refusal: nothing reached the venue, so BOTH accumulators must
+                        # give the budget back -- the cycle pool and the account-wide book. Leaving
+                        # either debited trims siblings against exposure that does not exist.
+                        amount = max(0.0, notional)
+                        pool["available"] += amount
+                        book.release_buy(symbol, amount)
+                    return _release
+
                 def _reserve_for(strategy_name):
                     def _reserve(symbol: str, notional: float) -> float:
                         # Pool trims first; book.permit_buy trims to account-level headroom and
@@ -602,6 +626,7 @@ def run_all(
                             conn, name, authorization, broker, provider, max_drawdown,
                             start=start, end=end,
                             reserve_buy=_reserve_for(name),
+                            release_buy=_release_for(name),
                             cancel=lambda n=name: _scoped_cancel(conn, broker, n),
                             snapshot_id=snapshot,
                         )

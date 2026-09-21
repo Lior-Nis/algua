@@ -147,7 +147,7 @@ class _PaperVenueTestBroker:
         for s in symbols:
             self._positions.pop(s, None)
 
-    def submit_sized(self, intent, snap, coid=None, reserve=None) -> str:
+    def submit_sized(self, intent, snap, coid=None, reserve=None, release=None) -> str:
         self._order_counter += 1
         broker_id = f"bo-{intent.symbol}-{self._order_counter}"
         self.submitted_orders.append({

@@ -409,3 +409,31 @@ def test_permit_buy_at_or_above_min_notional_still_permits() -> None:
     # 5.0 >= min_notional 1.0 -> permitted and mutated.
     assert book.permit_buy("AAA", 5.0, min_notional=1.0) == pytest.approx(5.0, abs=TOL)
     assert book.book["AAA"] == pytest.approx(5.0, abs=TOL)
+
+
+# --- releasing a reservation the venue refused (#560) ------------------------------------------
+
+def test_release_buy_reverses_a_permit() -> None:
+    """A wash-trade refusal means no order reached the book, so the budget must go back -- or every
+    sibling behind it is trimmed against exposure that does not exist."""
+    lim = BookRiskLimits(max_symbol_concentration=1.0)
+    book = BookExposure(equity=10_000.0, book_notionals={}, limits=lim)
+    permitted = book.permit_buy("AAA", 1_000.0)
+    assert permitted == pytest.approx(1_000.0, abs=TOL)
+    book.release_buy("AAA", permitted)
+    assert book.gross == pytest.approx(0.0, abs=TOL)
+    assert book.net == pytest.approx(0.0, abs=TOL)
+    # Headroom is genuinely restored, not merely zeroed bookkeeping.
+    assert book.permit_buy("AAA", 1_000.0) == pytest.approx(1_000.0, abs=TOL)
+
+
+def test_release_buy_floors_at_zero_and_ignores_nonsense() -> None:
+    """A release larger than what was taken is an accounting fault; clamping keeps the accumulator
+    merely wrong rather than negative-and-unbounded."""
+    lim = BookRiskLimits(max_symbol_concentration=1.0)
+    book = BookExposure(equity=10_000.0, book_notionals={"AAA": 100.0}, limits=lim)
+    book.release_buy("AAA", 500.0)
+    assert book.gross == 0.0 and book.net == 0.0
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        book.release_buy("AAA", bad)
+    assert book.gross == 0.0

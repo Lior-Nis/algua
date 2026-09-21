@@ -59,7 +59,8 @@ class _FakeBroker:
         # market value priced at $1/share for simplicity (qty == market value)
         return TickSnapshot(equity=self._equity, market_values=dict(qtys), qtys=qtys)
 
-    def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None,
+                     release=None):
         if intent.symbol not in snap.qtys:
             raise BrokerError(f"{intent.symbol} not in universe")
         self.submitted.append(intent)
@@ -90,7 +91,8 @@ class _NoopBroker(_FakeBroker):
     delta or a position already at target. It never POSTs — mirrors alpaca_broker returning the
     sentinel before /v2/orders."""
 
-    def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None,
+                     release=None):
         self.client_order_ids.append(client_order_id)
         return "noop"
 
@@ -246,7 +248,8 @@ class _DedupBroker(_FakeBroker):
         self._by_coid = {}
         self._counter = 0
 
-    def submit_sized(self, intent, snap, client_order_id=None, reserve=None):
+    def submit_sized(self, intent, snap, client_order_id=None, reserve=None,
+                     release=None):
         if intent.symbol not in snap.qtys:
             raise BrokerError(f"{intent.symbol} not in universe")
         self.client_order_ids.append(client_order_id)
@@ -746,7 +749,7 @@ def test_run_tick_threads_reserve_buy_to_submit_sized():
     seen = {}
     broker = _FakeBroker()
     orig = broker.submit_sized
-    broker.submit_sized = lambda intent, snap, coid=None, reserve=None: (
+    broker.submit_sized = lambda intent, snap, coid=None, reserve=None, release=None: (
         seen.__setitem__("reserve", reserve) or orig(intent, snap, coid))
     hooks = TickHooks(reserve_buy=lambda sym, n: n)
     run_tick(_strategy({"AAA": 0.5}), broker, _FakeProvider(_bars({"AAA": [100.0, 100.0, 100.0]})),
@@ -760,7 +763,7 @@ def test_before_submit_fires_before_submit():
     calls = []
     broker = _FakeBroker()
     orig_submit = broker.submit_sized
-    broker.submit_sized = lambda intent, snap, coid=None, reserve=None: (
+    broker.submit_sized = lambda intent, snap, coid=None, reserve=None, release=None: (
         calls.append(("submit", coid)) or orig_submit(intent, snap, coid)
     )
     bars = _bars({"AAA": [100.0, 100.0, 100.0]})

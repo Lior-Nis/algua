@@ -1886,7 +1886,7 @@ class _FakePaperBroker:
         if self.force_breach:
             raise RiskBreach("drawdown", "forced breach for testing")
 
-    def submit_sized(self, intent, snap, coid=None, reserve=None) -> str:
+    def submit_sized(self, intent, snap, coid=None, reserve=None, release=None) -> str:
         order_id = f"o-{intent.symbol}"
         self.submitted.append(order_id)
         return order_id

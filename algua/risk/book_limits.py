@@ -177,3 +177,19 @@ class BookExposure:
             self.net = n + permitted
 
         return permitted
+
+    def release_buy(self, symbol: str, notional: float) -> None:
+        """Reverse a `permit_buy` the VENUE then refused (a wash trade): no order reached the book,
+        so the budget it consumed must go back or every sibling behind it is trimmed against
+        exposure that does not exist.
+
+        Floored at 0 in all three accumulators: they describe a long book, so a release larger than
+        what was taken is an accounting fault, and clamping keeps the accumulator merely wrong
+        rather than negative-and-unbounded. Under-refunds by up to a cent, because the caller
+        releases the FLOORED posted notional while `permit_buy` granted the unfloored amount --
+        deliberately the conservative direction."""
+        if not _finite(notional) or notional <= 0.0:
+            return
+        self.book[symbol] = max(0.0, self.book.get(symbol, 0.0) - notional)
+        self.gross = max(0.0, self.gross - notional)
+        self.net = max(0.0, self.net - notional)

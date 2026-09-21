@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 
 from algua.audit.log import append as audit_append
 from algua.contracts.types import OffsetBroker
+from algua.execution.alpaca_rejections import WASH_BLOCKED
 from algua.execution.live_ledger import (
     LedgerKind,
     backfill_broker_order_id,
@@ -140,6 +141,19 @@ def flatten_strategy(  # noqa: PLR0913
             side = "sell" if offset_qty > 0 else "buy"
             _record(conn, name, symbol, side, coid, kind, strategy_id)
             oid = broker.submit_offset(symbol, offset_qty, coid)
+            if oid == WASH_BLOCKED:
+                # The venue REFUSED the liquidation (an opposite-side order rests on the account).
+                # The position is still fully open, so this flatten did NOT happen. Recording it as
+                # an offset would backfill the sentinel as a broker order id and report a breached
+                # tenant as flat -- the caller decides real things on that, up to and including
+                # whether a live emergency flatten succeeded.
+                raise ValueError(
+                    f"liquidation of {symbol!r} refused by the venue as a wash trade; "
+                    "the position is still open"
+                )
+            if oid == "noop":
+                # Nothing to close (the residual quantized to zero). No order, and none needed.
+                continue
             _backfill(conn, coid, oid, kind)
             n_offsets += 1
     except Exception as exc:  # noqa: BLE001 — emergency path must fail safe, never propagate

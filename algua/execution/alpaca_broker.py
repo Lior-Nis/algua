@@ -289,7 +289,8 @@ class _AlpacaBroker:
 
     def submit_sized(self, intent: OrderIntent, snap: TickSnapshot,
                      client_order_id: str | None = None,
-                     reserve: Callable[[str, float], float] | None = None) -> str:
+                     reserve: Callable[[str, float], float] | None = None,
+                     release: Callable[[str, float], None] | None = None) -> str:
         """Size ONE intent against the tick snapshot (shared `size_order`) and POST it. The symbol
         MUST be in the snapshot's universe — an unknown symbol raises rather than silently sizing a
         full target-weight buy against a phantom flat position (#29). Returns the order id, or
@@ -303,7 +304,12 @@ class _AlpacaBroker:
 
         `reserve`, when given, is called ONLY for BUY orders: `reserve(symbol, amount)` returns the
         permitted notional (≤ amount). Zero means skip the order entirely; a partial amount trims
-        the notional. Sells are never reserved."""
+        the notional. Sells are never reserved.
+
+        `release(symbol, amount)` REFUNDS a reservation the venue then refused (a wash trade). The
+        pool is debited before the POST, so without this a blocked order silently consumes the
+        cycle's buying power and starves every sibling behind it -- re-creating the tenant
+        starvation this whole change set exists to remove, just without the abort."""
         if intent.symbol not in snap.market_values:
             raise BrokerError(
                 f"alpaca submit: {intent.symbol!r} is not in the strategy universe "
@@ -338,7 +344,11 @@ class _AlpacaBroker:
                                 "side": side, "type": "market", "time_in_force": "day"}
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
-        return self._post_order(body, "/v2/orders", client_order_id)
+        outcome = self._post_order(body, "/v2/orders", client_order_id)
+        if outcome == WASH_BLOCKED and side == "buy" and release is not None:
+            # Nothing reached the venue; give the notional back to the pool.
+            release(intent.symbol, float(notional))
+        return outcome
 
     def submit_offset(self, symbol: str, signed_qty: float, client_order_id: str) -> str:
         """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long

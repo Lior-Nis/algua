@@ -1095,3 +1095,42 @@ def test_a_403_that_is_not_a_wash_trade_still_raises(monkeypatch):
     snap = broker.snapshot(["AAPL"])
     with pytest.raises(BrokerError, match="403"):
         broker.submit_sized(_intent(), snap, "coid-1")
+
+
+def test_a_wash_blocked_buy_refunds_its_reservation(monkeypatch):
+    """The pool is debited BEFORE the POST. Without a refund a blocked buy silently consumes the
+    cycle's buying power and trims every sibling behind it against an order that never existed --
+    re-creating the tenant starvation this change set removes, just without the abort."""
+    fake = _FakeRequests(_snap_routes(), post_resp=_WASH_403)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    pool = {"available": 10_000.0}
+    released: list[tuple[str, float]] = []
+
+    def _reserve(symbol, notional):
+        grant = min(notional, pool["available"])
+        pool["available"] -= ab.posted_notional(grant)
+        return grant
+
+    def _release(symbol, notional):
+        released.append((symbol, notional))
+        pool["available"] += notional
+
+    assert broker.submit_sized(_intent(), snap, "coid-1",
+                               reserve=_reserve, release=_release) == ab.WASH_BLOCKED
+    assert len(released) == 1
+    assert pool["available"] == pytest.approx(10_000.0), "the pool must be made whole"
+
+
+def test_a_sell_refused_as_a_wash_trade_refunds_nothing(monkeypatch):
+    """Sells are never reserved, so there is nothing to give back."""
+    fake = _FakeRequests(_snap_routes(), post_resp=_WASH_403)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    snap.market_values["AAPL"] = 9_000.0  # held far above target -> the delta is a SELL
+    released: list = []
+    broker.submit_sized(OrderIntent("AAPL", Side.SELL, 0.0, T0), snap, "coid-1",
+                        reserve=lambda s, n: n, release=lambda s, n: released.append((s, n)))
+    assert released == []
