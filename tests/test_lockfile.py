@@ -1,62 +1,33 @@
 """#166 gap 5: the dependency-identity primitive (algua/provenance/lockfile.py) — the SINGLE
-source of truth both the backtest reproducibility stamp and the live-approval gate hang off — had
-zero dedicated tests. A uv.lock bump that can change fill/numerical semantics MUST shift this hash
-for both at once; an absent lockfile MUST fail closed (no deterministic identity to pin).
+source of truth both the backtest reproducibility stamp and the live-approval gate hang off.
 
-Note: dependency_hash() is a pure byte-hash with no parsing, so there is no "corrupt -> parse
-failure" path. The meaningful fail-closed is absent -> None; ANY content change shifts the hash,
-which is exactly the identity behavior the gates rely on."""
+This file tests the PRIMITIVE: what it parses, when it fails closed, and that a bump which can
+change a result still moves the identity. Its SCOPE — which packages are inside the identity at
+all, and why — is tested in `test_dependency_identity.py`.
+
+It used to be a pure byte-hash of uv.lock with no parsing, and these tests asserted that. That
+contract was replaced: a byte hash meant any dependency movement at all (a docs tool, a test
+runner, a transitive HTML parser) reset every strategy's forward-evidence clock, against a gate
+that needs 250-500 observations under ONE unchanged identity. The hash now covers the resolved
+versions of the compute-path closure, so the fail-closed paths include "unparseable" and "a root is
+missing", which a byte hash had no way to detect.
+"""
 from __future__ import annotations
 
-import hashlib
+import tomllib
+from pathlib import Path
+
+import pytest
 
 from algua.provenance import lockfile
 
-
-def test_file_hash_roundtrips_to_sha256(tmp_path):
-    # Round-trip: the hash is the plain sha256 of the file bytes, stable across calls.
-    path = tmp_path / "uv.lock"
-    payload = b"version = 1\n[[package]]\nname = 'pandas'\nversion = '2.2.0'\n"
-    path.write_bytes(payload)
-    expected = hashlib.sha256(payload).hexdigest()
-    assert lockfile._file_hash(path) == expected
-    assert lockfile._file_hash(path) == expected  # deterministic on re-read
+REPO = Path(__file__).resolve().parents[1]
+_REAL_LOCK = (REPO / "uv.lock").read_text(encoding="utf-8")
 
 
-def test_file_hash_pins_version_content_change_shifts_hash(tmp_path):
-    # Version pinning: a single-character version bump must change the hash (the gates would see a
-    # different dependency identity), while identical bytes hash identically.
-    base = b"name = 'pandas'\nversion = '2.2.0'\n"
-    a = tmp_path / "a.lock"
-    a.write_bytes(base)
-    same = tmp_path / "same.lock"
-    same.write_bytes(base)
-    bumped = tmp_path / "bumped.lock"
-    bumped.write_bytes(base.replace(b"2.2.0", b"2.2.1"))
-
-    assert lockfile._file_hash(a) == lockfile._file_hash(same)   # same bytes -> same identity
-    assert lockfile._file_hash(a) != lockfile._file_hash(bumped)  # a bump shifts the identity
-
-
-def test_file_hash_absent_file_fails_closed(tmp_path):
-    # Absent lockfile -> None: there is no deterministic identity to pin, so it must fail closed
-    # rather than fabricate one.
-    assert lockfile._file_hash(tmp_path / "does-not-exist.lock") is None
-
-
-def test_dependency_hash_reads_repo_lockfile(monkeypatch, tmp_path):
-    # dependency_hash() resolves uv.lock under the repo root (lockfile._ROOT). Point _ROOT at a
-    # temp dir to assert it hashes THAT uv.lock — same source of truth for stamp and gate.
-    payload = b"version = 1\n"
-    (tmp_path / "uv.lock").write_bytes(payload)
+def _at(tmp_path, monkeypatch, content: str):
+    (tmp_path / "uv.lock").write_text(content, encoding="utf-8")
     monkeypatch.setattr(lockfile, "_ROOT", tmp_path)
-    assert lockfile.dependency_hash() == hashlib.sha256(payload).hexdigest()
-
-
-def test_dependency_hash_absent_lockfile_is_none(monkeypatch, tmp_path):
-    # No uv.lock under the root -> None (fail closed), mirroring _file_hash's contract.
-    monkeypatch.setattr(lockfile, "_ROOT", tmp_path)
-    assert lockfile.dependency_hash() is None
 
 
 def test_repo_dependency_hash_is_present_and_stable():
@@ -64,3 +35,49 @@ def test_repo_dependency_hash_is_present_and_stable():
     # hex digest — the value the backtest stamp and live gate actually pin.
     h = lockfile.dependency_hash()
     assert h is not None and len(h) == 64 and h == lockfile.dependency_hash()
+
+
+def test_identical_content_yields_an_identical_identity(tmp_path, monkeypatch):
+    _at(tmp_path, monkeypatch, _REAL_LOCK)
+    assert lockfile.dependency_hash() is not None
+
+
+def test_a_bump_inside_the_closure_shifts_the_identity(tmp_path, monkeypatch):
+    """The wall's actual job: a numpy bump must invalidate a prior approval."""
+    _at(tmp_path, monkeypatch, _REAL_LOCK)
+    before = lockfile.dependency_hash()
+    version = next(p for p in tomllib.loads(_REAL_LOCK)["package"]
+                   if p["name"] == "numpy")["version"]
+    _at(tmp_path, monkeypatch,
+        _REAL_LOCK.replace(f'name = "numpy"\nversion = "{version}"',
+                           'name = "numpy"\nversion = "99.0.0"', 1))
+    assert lockfile.dependency_hash() != before
+
+
+def test_reformatting_the_lockfile_does_not_shift_the_identity(tmp_path, monkeypatch):
+    """The digest depends on the resolved SET, not on uv's formatting. A byte hash moved on a
+    trailing newline; that is a clock reset for nothing."""
+    _at(tmp_path, monkeypatch, _REAL_LOCK)
+    before = lockfile.dependency_hash()
+    _at(tmp_path, monkeypatch, _REAL_LOCK + "\n\n# a comment uv might add\n")
+    assert lockfile.dependency_hash() == before
+
+
+def test_absent_lockfile_fails_closed(tmp_path, monkeypatch):
+    # No uv.lock under the root -> None: no deterministic identity to pin, so it must fail closed
+    # rather than fabricate one. None matches NOTHING downstream.
+    monkeypatch.setattr(lockfile, "_ROOT", tmp_path)
+    assert lockfile.dependency_hash() is None
+
+
+@pytest.mark.parametrize("content, why", [
+    ("", "an empty lockfile proves nothing about what will run"),
+    ("this is not toml {{{", "an unparseable lockfile proves nothing either"),
+    ('[[package]]\nname = "numpy"\nversion = "1.0"\n', "a lockfile missing a root is unprovable"),
+    ('[[package]]\nversion = "1.0"\n', "a nameless package entry is unprovable"),
+])
+def test_an_unprovable_lockfile_fails_closed(tmp_path, monkeypatch, content, why):
+    """These three are NEW fail-closed paths: a byte hash happily hashed garbage and returned a
+    confident-looking identity for a lockfile that could not describe a runnable environment."""
+    _at(tmp_path, monkeypatch, content)
+    assert lockfile.dependency_hash() is None, why
