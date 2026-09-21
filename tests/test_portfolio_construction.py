@@ -7,6 +7,7 @@ import pytest
 from algua.portfolio.construction import (
     CONSTRUCTION_POLICIES,
     ConstructionError,
+    apply_gross_utilization,
     equal_weight_positive,
     get_construction_policy,
     score_proportional_long,
@@ -89,3 +90,87 @@ def test_validate_rejects_unknown_keys_and_nonfinite_values():
 def test_dispatch_view_is_read_only():
     with pytest.raises(TypeError):
         CONSTRUCTION_POLICIES["new"] = None  # type: ignore[index]
+
+
+# --- gross utilization (#560) -----------------------------------------------------------------
+
+def _w(**kv):
+    return pd.Series(kv, dtype="float64")
+
+
+def test_a_full_gross_vector_is_scaled_to_the_target():
+    """The #560 fix. Policies normalize gross to exactly max_gross_exposure, which breaches the
+    realized-gross wall as soon as the book appreciates -- the wall marks positions against an
+    equity denominator capped at the original allocation, so profit alone pushes gross over 1."""
+    out = apply_gross_utilization(_w(A=0.5, B=0.5), target_gross=0.95, max_gross=1.0)
+    assert out.to_dict() == {"A": 0.475, "B": 0.475}
+    assert abs(out.abs().sum() - 0.95) < 1e-12
+
+
+def test_a_vector_already_inside_the_target_is_left_alone():
+    """Tighten-only. Inflating up to the target would UNDO a capacity cap or a tighten-only
+    overlay -- both of which reduce gross deliberately."""
+    small = _w(A=0.2, B=0.1)
+    assert apply_gross_utilization(small, target_gross=0.95, max_gross=1.0).to_dict() == \
+        small.to_dict()
+
+
+def test_an_over_leveraged_vector_is_NOT_rescued():
+    """The rail must still reject it.
+
+    Scaling a vector whose gross exceeds max_gross into range would convert a hard "this strategy
+    is over-leveraged" rejection into a silent rescue -- exactly what a gross rail exists to stop.
+    """
+    hot = _w(A=1.5, B=1.5)
+    assert apply_gross_utilization(hot, target_gross=0.95, max_gross=1.0).to_dict() == hot.to_dict()
+
+
+def test_scaling_only_ever_reduces_magnitude():
+    """A vector that passed the per-symbol rail and the capacity cap must still pass them."""
+    before = _w(A=0.6, B=-0.4)
+    after = apply_gross_utilization(before, target_gross=0.95, max_gross=1.0)
+    assert (after.abs() <= before.abs() + 1e-12).all()
+    assert (np.sign(after) == np.sign(before)).all(), "scaling must not flip a side"
+
+
+def test_a_non_finite_gross_is_left_for_the_validator():
+    bad = _w(A=float("nan"), B=0.5)
+    out = apply_gross_utilization(bad, target_gross=0.95, max_gross=1.0)
+    assert out.equals(bad)
+
+
+def test_empty_weights_are_returned_unchanged():
+    empty = pd.Series(dtype="float64")
+    assert apply_gross_utilization(empty, target_gross=0.95, max_gross=1.0).empty
+
+
+# --- the contract field's own domain ------------------------------------------------------------
+
+def test_the_default_leaves_headroom_under_the_wall():
+    from algua.contracts.types import ExecutionContract
+    ec = ExecutionContract(rebalance_frequency="1d")
+    assert ec.target_gross_utilization < ec.max_gross_exposure
+
+
+@pytest.mark.parametrize("bad", [0.0, -0.1, 1.5, float("nan"), float("inf")])
+def test_an_out_of_domain_utilization_fails_closed(bad):
+    """> 1.0 would aim ABOVE the wall (a constructed guaranteed breach); <= 0 would flatten the
+    book; non-finite would make the target nan/inf and silently disable the step, since every
+    `gross > nan` comparison is false."""
+    from algua.contracts.types import ExecutionContract
+    with pytest.raises(ValueError, match="target_gross_utilization"):
+        ExecutionContract(rebalance_frequency="1d", target_gross_utilization=bad)
+
+
+def test_a_bool_utilization_is_rejected():
+    """bool is an int subtype: True would pass finite and (0, 1] and silently mean 1.0 -- no
+    headroom at all, the exact configuration this field exists to prevent."""
+    from algua.contracts.types import ExecutionContract
+    with pytest.raises(ValueError, match="not a bool"):
+        ExecutionContract(rebalance_frequency="1d", target_gross_utilization=True)
+
+
+def test_a_non_default_utilization_is_honoured_end_to_end():
+    """The wired value must reach the construction step, not just the contract."""
+    out = apply_gross_utilization(_w(A=0.5, B=0.5), target_gross=0.5, max_gross=1.0)
+    assert abs(out.abs().sum() - 0.5) < 1e-12

@@ -57,7 +57,11 @@ BUDGET: dict[str, int] = {
     "algua/cli/operator_cmd.py": 334,
     "algua/cli/paper_cmd.py": 1409,
     "algua/cli/registry_cmd.py": 446,
-    "algua/contracts/types.py": 426,
+    # +39 for #560: ExecutionContract.target_gross_utilization plus its domain guards. The field
+    # and guards are ~8 lines; the rest is the comment deriving the 0.95 default from an explicit
+    # between-tick move policy (u <= 1/(1+r)), sizing 5% as a stress allowance against measured
+    # session returns, and saying what it does NOT solve. It belongs on the contract it constrains.
+    "algua/contracts/types.py": 465,
     "algua/execution/alpaca_broker.py": 501,
     "algua/execution/live_ledger.py": 620,
     "algua/execution/order_state.py": 385,
@@ -79,7 +83,9 @@ BUDGET: dict[str, int] = {
     "algua/research/forward_gates.py": 392,
     "algua/research/gates.py": 544,
     "algua/research/regime.py": 365,
-    "algua/strategies/base.py": 380,
+    # +14 for #560: the gross-utilization step at the shared construction chokepoint. The logic
+    # itself lives in portfolio/construction.py; this is the wiring plus why it runs last.
+    "algua/strategies/base.py": 394,
     "algua/tracking/mlflow_tracker.py": 316,
 }
 
