@@ -85,92 +85,139 @@ def test_an_unprovable_lockfile_fails_closed(tmp_path, monkeypatch, content, why
     assert lockfile.dependency_hash() is None, why
 
 
-def _bump(lock: str, name: str, to: str = "99.0.0") -> str:
-    """Rewrite one package's version in the lockfile text."""
-    version = next(p["version"] for p in tomllib.loads(lock)["package"] if p["name"] == name)
-    return lock.replace(f'name = "{name}"\nversion = "{version}"',
-                        f'name = "{name}"\nversion = "{to}"', 1)
+# --- mutating the REAL lock -------------------------------------------------------------------
+#
+# Every mutation below starts from the real lockfile and changes ONE thing. A hand-built fixture is
+# how the first version of these tests passed for the wrong reason: a stub containing only numpy
+# fails at the root-presence check, long before it reaches the behaviour the test is named after --
+# which concealed a real fail-open bug in the production code.
 
 
-def test_a_bump_OUTSIDE_the_closure_does_not_shift_the_identity(tmp_path, monkeypatch):
+def _mutate(fn):
+    """The real lock as a dict, with `fn` applied."""
+    lock = tomllib.loads(_REAL_LOCK)
+    fn(lock)
+    return lock
+
+
+def _pkg(lock: dict, name: str) -> dict:
+    return next(p for p in lock["package"] if p["name"] == name)
+
+
+def _payload_hash(lock: dict) -> str | None:
+    payload = lockfile._payload(lock)
+    return None if payload is None else payload
+
+
+def test_a_bump_OUTSIDE_the_closure_does_not_shift_the_identity():
     """THE point of the change, and the property nothing else tested.
 
     `ruff` is a linter. It cannot alter a number or a fill, so bumping it must not reset every
     strategy's forward-evidence clock -- which is exactly what the old byte hash did.
     """
-    _at(tmp_path, monkeypatch, _REAL_LOCK)
-    before = lockfile.dependency_hash()
-    _at(tmp_path, monkeypatch, _bump(_REAL_LOCK, "ruff"))
-    assert lockfile.dependency_hash() == before
+    before = _payload_hash(tomllib.loads(_REAL_LOCK))
+    after = _payload_hash(_mutate(lambda lk: _pkg(lk, "ruff").__setitem__("version", "99.0.0")))
+    assert before is not None and after == before
 
 
-def test_a_TRANSITIVE_bump_inside_the_closure_does_shift_it(tmp_path, monkeypatch):
-    """numba is reached only through vectorbt, and a numba bump absolutely can change a result.
-    Pinning only the direct roots would be a wall with a hole in it."""
-    _at(tmp_path, monkeypatch, _REAL_LOCK)
-    before = lockfile.dependency_hash()
-    _at(tmp_path, monkeypatch, _bump(_REAL_LOCK, "numba"))
-    assert lockfile.dependency_hash() != before
+def test_a_TRANSITIVE_bump_inside_the_closure_does_shift_it():
+    """numba is reached only through vectorbt, and a numba bump absolutely can change a result."""
+    before = _payload_hash(tomllib.loads(_REAL_LOCK))
+    after = _payload_hash(_mutate(lambda lk: _pkg(lk, "numba").__setitem__("version", "99.0.0")))
+    assert before is not None and after is not None, "a bump must not FREEZE the fleet"
+    assert after != before
 
 
 @pytest.mark.parametrize("root", ["exchange-calendars", "yfinance", "pyarrow", "pydantic-settings"])
-def test_a_bump_to_a_late_added_root_shifts_the_identity(tmp_path, monkeypatch, root):
+def test_a_bump_to_a_late_added_root_shifts_the_identity(root):
     """The four the first attempt at this scoping missed. Sessions, bar values, snapshot decoding
     and settings parsing all change decisions, and none of them is numpy."""
-    _at(tmp_path, monkeypatch, _REAL_LOCK)
-    before = lockfile.dependency_hash()
-    _at(tmp_path, monkeypatch, _bump(_REAL_LOCK, root))
-    assert lockfile.dependency_hash() != before
+    before = _payload_hash(tomllib.loads(_REAL_LOCK))
+    after = _payload_hash(_mutate(lambda lk: _pkg(lk, root).__setitem__("version", "99.0.0")))
+    assert before is not None and after is not None
+    assert after != before
 
 
-def test_every_resolution_variant_is_hashed_not_just_one_per_name(tmp_path, monkeypatch):
-    """uv resolves a package more than once when markers differ -- this lock carries
-    typing-extensions at two versions. Collapsing by name would record whichever entry came last
-    and could describe a different environment than the one that actually runs.
+def test_swapping_marker_sets_between_two_variants_shifts_the_identity():
+    """The hole in hashing `name==version` alone.
 
-    Bumping the FIRST of the two variants must move the hash; under a name-collapsing
-    implementation it would not.
+    uv resolves typing-extensions twice, selected by `resolution-markers`. Both versions appear in
+    the lock either way, so a name==version digest is IDENTICAL after swapping the marker sets --
+    while a different version now installs on a given interpreter. Hashing only name and version
+    looks conservative and is not.
     """
-    parsed = tomllib.loads(_REAL_LOCK)
-    versions = [p["version"] for p in parsed["package"] if p["name"] == "typing-extensions"]
-    assert len(versions) > 1, "this test needs a genuinely duplicated package to be meaningful"
-    _at(tmp_path, monkeypatch, _REAL_LOCK)
-    before = lockfile.dependency_hash()
-    _at(tmp_path, monkeypatch,
-        _REAL_LOCK.replace(f'name = "typing-extensions"\nversion = "{versions[0]}"',
-                           'name = "typing-extensions"\nversion = "99.0.0"', 1))
-    assert lockfile.dependency_hash() != before
+    def swap(lock):
+        a, b = [p for p in lock["package"] if p["name"] == "typing-extensions"]
+        a["resolution-markers"], b["resolution-markers"] = (
+            b["resolution-markers"], a["resolution-markers"])
+
+    before = _payload_hash(tomllib.loads(_REAL_LOCK))
+    after = _payload_hash(_mutate(swap))
+    assert before is not None and after is not None
+    assert after != before
 
 
-def test_a_dependency_edge_pointing_outside_the_lock_fails_closed(tmp_path, monkeypatch):
-    """A graph that names a package the lock does not contain does not describe a resolvable
-    environment. Hashing a partial closure would assert an identity we cannot prove."""
-    broken = _REAL_LOCK.replace('name = "numpy"\n', 'name = "numpy"\n', 1)
-    parsed = tomllib.loads(broken)
-    scipy = next(p for p in parsed["package"] if p["name"] == "scipy")
-    assert scipy.get("dependencies"), "this test needs scipy to have a dependency edge"
-    _at(tmp_path, monkeypatch,
-        broken.replace('[[package]]\nname = "numpy"', '[[package]]\nname = "numpy-gone"', 1))
-    assert lockfile.dependency_hash() is None
+def test_changing_a_package_source_shifts_the_identity():
+    """Same version from a different index is not the same artifact."""
+    def repoint(lock):
+        _pkg(lock, "numpy")["source"] = {"registry": "https://evil.example/simple"}
+
+    before = _payload_hash(tomllib.loads(_REAL_LOCK))
+    assert _payload_hash(_mutate(repoint)) not in (None, before)
 
 
-def test_a_versionless_package_inside_the_closure_fails_closed(tmp_path, monkeypatch):
+def test_a_lock_format_change_shifts_the_identity():
+    """A new lock `version` reinterprets every field beneath it."""
+    before = _payload_hash(tomllib.loads(_REAL_LOCK))
+    assert _payload_hash(_mutate(lambda lk: lk.__setitem__("version", 99))) != before
+
+
+# --- fail-closed paths, each reached for the RIGHT reason --------------------------------------
+
+def test_a_dangling_TRANSITIVE_edge_fails_closed():
+    """Renaming a ROOT would return None at the root-presence check without ever reaching this
+    branch -- which is how the first version of this test passed for the wrong reason. numba is
+    inside the closure but is NOT a root, so only the dangling-edge path can trip."""
+    assert "numba" not in lockfile.COMPUTE_ROOTS
+    mutated = _mutate(lambda lk: _pkg(lk, "numba").__setitem__("name", "numba-gone"))
+    assert _payload_hash(mutated) is None
+
+
+def test_a_reachable_dependency_edge_without_a_name_fails_closed():
+    """An edge we cannot resolve leaves the graph incomplete, and an incomplete graph silently
+    shrinks the closure. Applied to the REAL lock, so every root is still present and only this
+    condition can cause the None."""
+    def bad_edge(lock):
+        _pkg(lock, "scipy").setdefault("dependencies", []).append({"version": "999"})
+
+    assert _payload_hash(_mutate(bad_edge)) is None
+
+
+def test_a_non_list_dependencies_field_fails_closed():
+    def not_a_list(lock):
+        _pkg(lock, "scipy")["dependencies"] = "not a list"
+
+    assert _payload_hash(_mutate(not_a_list)) is None
+
+
+def test_a_versionless_package_inside_the_closure_fails_closed():
     """`name==` is not an identity. A confident-looking digest over an unversioned closure member
     is worse than no digest."""
-    version = next(p["version"] for p in tomllib.loads(_REAL_LOCK)["package"]
-                   if p["name"] == "numpy")
-    _at(tmp_path, monkeypatch,
-        _REAL_LOCK.replace(f'name = "numpy"\nversion = "{version}"', 'name = "numpy"', 1))
-    assert lockfile.dependency_hash() is None
+    assert _payload_hash(_mutate(lambda lk: _pkg(lk, "numpy").pop("version"))) is None
 
 
-@pytest.mark.parametrize("content", [
-    'package = "not a list"',
-    '[[package]]\nname = 42\nversion = "1.0"',
-    '[[package]]\nname = "numpy"\nversion = "1.0"\ndependencies = "not a list"',
+def test_a_versionless_package_OUTSIDE_the_closure_is_tolerated():
+    """The project's own entry carries no version in some layouts. Failing closed on a package the
+    compute path cannot reach would freeze the fleet for nothing."""
+    assert _payload_hash(_mutate(lambda lk: _pkg(lk, "ruff").pop("version"))) is not None
+
+
+@pytest.mark.parametrize("lock", [
+    {"package": "not a list"},
+    {"package": [{"name": 42, "version": "1.0"}]},
+    {"package": [{"version": "1.0"}]},
+    "not a mapping at all",
 ])
-def test_structurally_malformed_but_valid_toml_fails_closed(tmp_path, monkeypatch, content):
-    """Valid TOML can still be the wrong SHAPE. Structure we cannot read is structure we cannot
-    attest to -- it must not raise out of a provenance primitive either."""
-    _at(tmp_path, monkeypatch, content)
-    assert lockfile.dependency_hash() is None
+def test_structurally_malformed_locks_fail_closed(lock):
+    """Valid TOML can still be the wrong SHAPE. A provenance primitive must answer, never raise."""
+    assert lockfile._payload(lock) is None

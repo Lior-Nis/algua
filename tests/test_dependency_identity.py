@@ -5,8 +5,9 @@ match the strategy's CURRENT identity is dropped from forward evidence as `ident
 scope of this hash decides how long an evidence clock can run.
 
 It used to be a byte hash of the whole lockfile, which meant a docs tool, a test runner or a
-trailing newline reset every strategy's clock. Measured over 180 days: 13 resets, against a gate
-that needs 250-500 observations under one unchanged identity. Under the compute closure: 5.
+trailing newline reset every strategy's clock. Replaying 180 days of lockfile revisions (15
+adjacent pairs): the byte hash moved on all 15, this closure on 6 -- against a gate that needs
+250-500 observations under one unchanged identity.
 
 The risk of scoping it is the opposite failure -- a package that CAN change results drifting outside
 the identity. `test_every_runtime_import_is_inside_the_dependency_identity` is the defence, and it
@@ -26,11 +27,12 @@ a known residual, recorded here rather than papered over.
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import tomllib
 from pathlib import Path
 
-from algua.provenance.lockfile import COMPUTE_ROOTS, _closure_payload, _variants
+from algua.provenance.lockfile import COMPUTE_ROOTS, _payload
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -43,7 +45,8 @@ _ENTRY_POINTS = (
     "algua.data.serve",             # the bars a decision reads
     "algua.data.providers",         # resolved BY NAME -> seed the whole package
     "algua.calendar.factory",       # which sessions exist at all
-    "algua.execution.alpaca_broker",  # how an order reaches the venue
+    "algua.execution.broker_factory",  # the broker REGISTRATION seam, not one broker
+    "algua.strategies",             # strategy modules are imported by COMPUTED name
     "algua.config.settings",        # parses the risk and execution settings
 )
 
@@ -64,12 +67,18 @@ def _module_path(mod: str) -> Path | None:
 
 
 def _submodules(mod: str) -> list[str]:
-    """Every module in a package directory. A package resolved by NAME at runtime can reach any of
-    them, so a static walk must treat the whole directory as reachable."""
+    """Every module under a package directory, RECURSIVELY. A package resolved by NAME at runtime
+    can reach any of them, so a static walk must treat the whole subtree as reachable -- `glob`
+    stopped at the top level and would miss a provider or strategy in a nested package."""
     directory = REPO / Path(mod.replace(".", "/"))
     if not directory.is_dir():
         return []
-    return [f"{mod}.{p.stem}" for p in directory.glob("*.py") if p.stem != "__init__"]
+    out = []
+    for path in directory.rglob("*.py"):
+        rel = path.relative_to(REPO).with_suffix("")
+        parts = rel.parts[:-1] if rel.name == "__init__" else rel.parts
+        out.append(".".join(parts))
+    return out
 
 
 def _runtime_third_party() -> dict[str, str]:
@@ -104,10 +113,19 @@ def _runtime_third_party() -> dict[str, str]:
 
 
 def _covered() -> set[str]:
+    """Distribution names inside the dependency identity, read back out of the real payload."""
     lock = tomllib.loads((REPO / "uv.lock").read_text(encoding="utf-8"))
-    payload = _closure_payload(_variants(lock))
+    payload = _payload(lock)
     assert payload is not None, "the repo lockfile must produce a provable closure"
-    return {line.split("==")[0] for line in payload.split("\n")}
+    return set(json.loads(payload)["packages"])
+
+
+def test_every_entry_point_still_exists():
+    """The entry-point list is hand-maintained, so it can drift the same way the old package list
+    did. A renamed or deleted module must FAIL here rather than silently shrink what the guard
+    covers -- a guard that quietly stops looking is worse than no guard."""
+    missing = [mod for mod in _ENTRY_POINTS if _module_path(mod) is None]
+    assert not missing, f"entry points no longer resolve: {missing}"
 
 
 def test_every_runtime_import_is_inside_the_dependency_identity():
