@@ -228,6 +228,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/research/gate_serialization.py",
         "algua/research/forward_gates.py",
         "algua/research/clustering.py",
+        "algua/provenance/lockfile.py",
         "algua/registry/live_gate.py",
         "algua/registry/challenges.py",
         "algua/registry/human_actor.py",
