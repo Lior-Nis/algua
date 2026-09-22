@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import inspect
@@ -83,6 +84,45 @@ def _is_first_party(module_name: str | None) -> bool:
     )
 
 
+def _strip_cosmetics(source: str) -> str:
+    """Source with comments, formatting and docstrings removed, via an AST round-trip.
+
+    `code_hash` must track BEHAVIOUR, not typography. Hashing raw text meant a comment edit or a
+    docstring rewrite reset every strategy's forward-evidence clock, against a gate that needs
+    250-500 observations under ONE unchanged identity.
+
+    Comments are absent from the AST, and `ast.unparse` emits canonical formatting, so both vanish.
+    Docstrings survive as `Expr(Constant(str))` and are removed explicitly -- they are the most
+    frequently edited text in this repo and cannot change a decision.
+
+    Unparseable source is returned RAW rather than normalised to "": collapsing it would give every
+    broken module one shared identity.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        body = node.body
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+def _normalized_source(module: ModuleType) -> str:
+    """The module's source, normalised. "" when it is unavailable (a namespace package, a module
+    built at runtime) -- the pre-existing contract at this call site."""
+    try:
+        return _strip_cosmetics(inspect.getsource(module))
+    except (OSError, TypeError):
+        return ""
+
+
 def _first_party_closure(root: ModuleType | None) -> dict[str, str]:
     """Map ``module_name -> source`` for every first-party ``algua.*`` module transitively
     reachable from ``root`` via its imported names. Bounded to ``algua.*`` so we never recurse
@@ -98,10 +138,7 @@ def _first_party_closure(root: ModuleType | None) -> dict[str, str]:
         if mod_name is None or mod_name in seen or not _is_first_party(mod_name):
             continue
         seen.add(mod_name)
-        try:
-            sources[mod_name] = inspect.getsource(module)
-        except (OSError, TypeError):
-            sources[mod_name] = ""
+        sources[mod_name] = _normalized_source(module)
         for dep in _imported_first_party_modules(module):
             if dep.__name__ not in seen:
                 queue.append(dep)

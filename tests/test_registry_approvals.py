@@ -131,6 +131,9 @@ def test_code_hash_covers_imported_algua_helper(repo, monkeypatch):
     # #97: the strategy imports a first-party helper (algua.strategies.base — StrategyConfig).
     # If that helper's source changes after approval, the recomputed code_hash MUST change,
     # so the stale approval can no longer promote altered behavior to live.
+    # (Task 2, #656/#657: code_hash now normalizes cosmetics away, so the injected edit here
+    # must be a REAL behavior change — a bare comment would no longer move the hash, which is
+    # the point of that fix, not a reason to weaken this test.)
     import algua.strategies.base as helper
 
     baseline, _, _ = compute_artifact_hashes(STRATEGY)
@@ -139,7 +142,7 @@ def test_code_hash_covers_imported_algua_helper(repo, monkeypatch):
 
     def fake_getsource(obj):
         if obj is helper:
-            return real_getsource(obj) + "\n# behavior-changing edit to a first-party helper\n"
+            return real_getsource(obj) + "\n_BEHAVIOR_CHANGING_EDIT = object()\n"
         return real_getsource(obj)
 
     monkeypatch.setattr(inspect, "getsource", fake_getsource)
@@ -214,14 +217,17 @@ def test_code_hash_covers_construction_module():
     import inspect
 
     import algua.portfolio.construction as construction
-    from algua.registry.approvals import _merged_closure_for
+    from algua.registry.approvals import _merged_closure_for, _strip_cosmetics
     from algua.strategies.loader import load_strategy
 
     # After Task 5 the approvals closure is rooted from BOTH the signal module and the construction
     # module; verify the construction module's source is present in the merged closure.
+    # (Task 2, #656/#657: the closure stores NORMALIZED source, not raw — comparing against raw
+    # inspect.getsource would fail even though the closure is correctly populated.)
     merged = _merged_closure_for(load_strategy("cross_sectional_momentum"))
     assert "algua.portfolio.construction" in merged
-    assert merged["algua.portfolio.construction"] == inspect.getsource(construction)
+    assert merged["algua.portfolio.construction"] == _strip_cosmetics(
+        inspect.getsource(construction))
 
 
 def test_code_hash_ignores_thirdparty_and_stdlib_changes(repo, monkeypatch):
