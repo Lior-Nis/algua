@@ -18,6 +18,10 @@
 /approvers/                     @Lior-Nis   # go-live approver public keys (the signature trust anchor)
 /algua/registry/live_gate.py    @Lior-Nis   # the signed paper->live gate
 /algua/registry/transitions.py  @Lior-Nis   # live-gate enforcement
+/algua/registry/approvals.py    @Lior-Nis   # computes the artifact identity the live gate verifies (1/3: code_hash)
+/algua/strategies/base.py       @Lior-Nis   # computes the artifact identity the live gate verifies (2/3: config_hash)
+/algua/provenance/lockfile.py   @Lior-Nis   # computes the artifact identity the live gate verifies (3/3: dependency_hash)
+/.python-version                @Lior-Nis   # pins CPython for ast.unparse stability, which is code_hash stability
 /algua/registry/promotion.py    @Lior-Nis   # promotion policy (breadth/PIT/floor + shortlist gate)
 /algua/research/forward_gates.py      @Lior-Nis   # forward-test gate criteria (#124)
 /algua/registry/forward_promotion.py  @Lior-Nis   # forward-gate scaffolding: guard + preflight + run_gate (evidence -> forward_evidence.py, certificate -> live_certificate.py)

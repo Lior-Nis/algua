@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import inspect
@@ -83,6 +84,74 @@ def _is_first_party(module_name: str | None) -> bool:
     )
 
 
+def _strip_cosmetics(source: str) -> str:
+    """Source with comments, formatting and docstrings removed, via an AST round-trip.
+
+    `code_hash` must track BEHAVIOUR, not typography. Hashing raw text meant a comment edit or a
+    docstring rewrite reset every strategy's forward-evidence clock, against a gate that needs
+    250-500 observations under ONE unchanged identity.
+
+    A second consumer depends on the SAME normalized identity for the opposite reason: the
+    forward-evidence epoch bound (`forward_evidence._epoch_start_id`) detects a revert-to-an-
+    earlier-artifact attack only because the detour artifact hashes DIFFERENTLY from the one being
+    reverted to. Narrowing what this function strips (making MORE edits cosmetic) weakens both
+    consumers at once -- it lets more genuine code changes hide behind an unchanged `code_hash`,
+    which both keeps a stale live-gate approval valid for changed code and lets a revert's detour
+    escape epoch detection.
+
+    Comments are absent from the AST, and `ast.unparse` emits canonical formatting, so both vanish.
+    Docstrings survive as `Expr(Constant(str))` and are removed explicitly -- they are the most
+    frequently edited text in this repo and cannot change a trading decision. The one runtime value
+    this knowingly discards is `__doc__` itself: `algua/features/catalogue.py` reads it via
+    `inspect.getdoc` to build `FactorSpec.summary`, and `algua.features.alphas` sits in this
+    strategy's closure -- but that path feeds catalogue metadata, not a trading decision, so
+    dropping it here is deliberate.
+
+    Unparseable source is returned RAW rather than normalised to "": collapsing it would give every
+    broken module one shared identity.
+
+    HAZARD -- `ast.unparse` output is not stable across CPython minor versions: it depends on the
+    interpreter's own unparser (e.g. f-string quote selection changed between 3.12 and 3.13 --
+    `f'{c['name']}'` vs `f"{c['name']}"`), so the normalized identity is only stable while the
+    interpreter is. Re-normalising all 290 first-party modules under 3.13 changes 28 of them versus
+    3.12 -- a concrete, not hypothetical, count. The repo-root `.python-version` pin (3.12) is what
+    holds `code_hash` stable; a deliberate interpreter bump is a deliberate identity move, exactly
+    like a deliberate `uv.lock` bump already is for `dependency_hash`.
+    """
+    try:
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(
+                    node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                node.body = body[1:] or [ast.Pass()]
+        return ast.unparse(tree)
+    except (SyntaxError, RecursionError, ValueError):
+        # RecursionError depends on the remaining C-stack budget AT CALL TIME (frames already
+        # consumed by the caller, thread-local stack size, platform), not purely on source shape --
+        # so in principle the SAME deeply-nested module could recurse-fail in one checkout/process
+        # and unparse cleanly in another, yielding two different `code_hash` values for identical
+        # source. This is a MONITORED property, not a dismissed one: measured max AST depth across
+        # all 290 first-party modules is 16, against Python's default recursion limit of 1000 --
+        # nowhere near the boundary where remaining-stack variance could flip the outcome, so there
+        # is no live trigger today. It would need to be revisited if a module's nesting grew by two
+        # orders of magnitude.
+        return source
+
+
+def _normalized_source(module: ModuleType) -> str:
+    """The module's source, normalised. "" when it is unavailable (a namespace package, a module
+    built at runtime) -- the pre-existing contract at this call site."""
+    try:
+        return _strip_cosmetics(inspect.getsource(module))
+    except (OSError, TypeError):
+        return ""
+
+
 def _first_party_closure(root: ModuleType | None) -> dict[str, str]:
     """Map ``module_name -> source`` for every first-party ``algua.*`` module transitively
     reachable from ``root`` via its imported names. Bounded to ``algua.*`` so we never recurse
@@ -98,10 +167,7 @@ def _first_party_closure(root: ModuleType | None) -> dict[str, str]:
         if mod_name is None or mod_name in seen or not _is_first_party(mod_name):
             continue
         seen.add(mod_name)
-        try:
-            sources[mod_name] = inspect.getsource(module)
-        except (OSError, TypeError):
-            sources[mod_name] = ""
+        sources[mod_name] = _normalized_source(module)
         for dep in _imported_first_party_modules(module):
             if dep.__name__ not in seen:
                 queue.append(dep)

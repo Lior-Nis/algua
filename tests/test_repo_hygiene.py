@@ -21,6 +21,7 @@ import ast
 import fnmatch
 import pathlib
 import subprocess
+import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -38,6 +39,7 @@ ROOT_WHITELIST = frozenset(
         ".gitignore",
         ".gitleaks.toml",
         ".pip-audit-ignore.txt",
+        ".python-version",  # uv's toolchain selector: pins CPython for ast.unparse stability
         "pyproject.toml",
         "README.md",
         "uv.lock",
@@ -111,6 +113,23 @@ def test_has_generated_by_recognizes_marker_forms() -> None:
     assert not _has_generated_by(ast.parse("OTHER = 1"))
     # Nested (function-scoped) assignment does not count as module-level.
     assert not _has_generated_by(ast.parse("def f():\n    GENERATED_BY = 1\n"))
+
+
+def test_python_version_pin_matches_the_running_interpreter() -> None:
+    """`.python-version` is the load-bearing anchor behind `code_hash` stability, not just a
+    toolchain preference: `ast.unparse` output is not stable across CPython minors (28 of 290
+    first-party modules re-normalize under 3.13 vs 3.12), so `_strip_cosmetics`
+    (`algua/registry/approvals.py`) only produces one stable identity per artifact while every
+    checkout runs the SAME pinned interpreter. A suite that passes under an unpinned interpreter
+    would validate normalization behavior the deployed/live-gate interpreter does not necessarily
+    share. This fails loudly the moment the pin and the interpreter actually running the suite
+    disagree, instead of the drift silently reaching the live gate."""
+    pinned = (REPO / ".python-version").read_text().strip()
+    running = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert pinned == running, (
+        f".python-version pins {pinned!r} but this suite is running under {running!r}. "
+        f"code_hash stability (ast.unparse) depends on the pin matching the running interpreter."
+    )
 
 
 def test_repo_root_is_whitelisted() -> None:
@@ -232,6 +251,9 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/challenges.py",
         "algua/registry/human_actor.py",
         "algua/registry/transitions.py",
+        "algua/registry/approvals.py",
+        "algua/strategies/base.py",
+        "algua/provenance/lockfile.py",
         "algua/registry/promotion.py",
         "algua/registry/family_assignment.py",
         "algua/registry/promote_run.py",
