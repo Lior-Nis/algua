@@ -91,6 +91,14 @@ def _strip_cosmetics(source: str) -> str:
     docstring rewrite reset every strategy's forward-evidence clock, against a gate that needs
     250-500 observations under ONE unchanged identity.
 
+    A second consumer depends on the SAME normalized identity for the opposite reason: the
+    forward-evidence epoch bound (`forward_evidence._epoch_start_id`) detects a revert-to-an-
+    earlier-artifact attack only because the detour artifact hashes DIFFERENTLY from the one being
+    reverted to. Narrowing what this function strips (making MORE edits cosmetic) weakens both
+    consumers at once -- it lets more genuine code changes hide behind an unchanged `code_hash`,
+    which both keeps a stale live-gate approval valid for changed code and lets a revert's detour
+    escape epoch detection.
+
     Comments are absent from the AST, and `ast.unparse` emits canonical formatting, so both vanish.
     Docstrings survive as `Expr(Constant(str))` and are removed explicitly -- they are the most
     frequently edited text in this repo and cannot change a trading decision. The one runtime value
@@ -121,9 +129,17 @@ def _strip_cosmetics(source: str) -> str:
                     and isinstance(body[0].value, ast.Constant)
                     and isinstance(body[0].value.value, str)):
                 node.body = body[1:] or [ast.Pass()]
-        ast.fix_missing_locations(tree)
         return ast.unparse(tree)
     except (SyntaxError, RecursionError, ValueError):
+        # RecursionError depends on the remaining C-stack budget AT CALL TIME (frames already
+        # consumed by the caller, thread-local stack size, platform), not purely on source shape --
+        # so in principle the SAME deeply-nested module could recurse-fail in one checkout/process
+        # and unparse cleanly in another, yielding two different `code_hash` values for identical
+        # source. This is a MONITORED property, not a dismissed one: measured max AST depth across
+        # all 290 first-party modules is 16, against Python's default recursion limit of 1000 --
+        # nowhere near the boundary where remaining-stack variance could flip the outcome, so there
+        # is no live trigger today. It would need to be revisited if a module's nesting grew by two
+        # orders of magnitude.
         return source
 
 

@@ -1011,33 +1011,23 @@ def test_classify_activities_attributes_fill_to_any_paper_order(tmp_path):
 # Evidence epoch: no back-crediting across an identity change (anti-gaming)
 # ---------------------------------------------------------------------------
 
-def test_ticks_before_an_identity_change_are_not_back_credited(conn):
+def test_a_revert_does_not_re_credit_the_old_run(conn):
     """Anti-gaming. Ticks are admitted only from the LAST contiguous run of the current identity.
 
-    Without this bound an operator could revert a strategy to an earlier artifact AFTER seeing how
-    that artifact's forward period turned out, and the old run would be silently re-credited.
+    The concrete attack: run under identity "c", switch away, switch BACK to "c". Without this
+    bound an operator could revert a strategy to an earlier artifact AFTER seeing how that
+    artifact's forward period turned out, and the old (here: flatteringly profitable) run would be
+    silently re-credited.
     """
-    seed_tick(conn, date(2026, 6, 1), 100.0)                      # identity "c" -- pre-epoch run
-    seed_tick(conn, date(2026, 6, 2), 101.0)                      # identity "c" -- pre-epoch run
-    seed_tick(conn, date(2026, 6, 3), 102.0, code_hash="OTHER")   # the run breaker
-    seed_tick(conn, date(2026, 6, 10), 100.0)                     # identity "c" -- current epoch
-    seed_tick(conn, date(2026, 6, 12), 101.0)                     # identity "c" -- current epoch
+    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c" -- pre-epoch run
+    seed_tick(conn, date(2026, 6, 2), 140.0)      # identity "c" -- a flattering old run
+    seed_tick(conn, date(2026, 6, 3), 90.0, code_hash="OTHER")   # the run breaker
+    seed_tick(conn, date(2026, 6, 10), 100.0)     # back to "c" -- current epoch
+    seed_tick(conn, date(2026, 6, 12), 101.0)     # current epoch
 
     res = assemble(conn)   # assembles against identity code_hash="c"
-    assert res.evidence.n_return_observations == 1, "only the final run of two sessions counts"
-
-
-def test_a_revert_does_not_re_credit_the_old_run(conn):
-    """The concrete attack: run under identity c, switch away, switch BACK to c."""
-    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c"
-    seed_tick(conn, date(2026, 6, 2), 140.0)      # identity "c" -- a flattering old run
-    seed_tick(conn, date(2026, 6, 3), 90.0, code_hash="OTHER")
-    seed_tick(conn, date(2026, 6, 10), 100.0)     # back to "c"
-    seed_tick(conn, date(2026, 6, 12), 101.0)
-
-    res = assemble(conn)
     assert res.excluded["pre_epoch"] == 2
-    assert res.evidence.n_return_observations == 1
+    assert res.evidence.n_return_observations == 1, "only the final run of two sessions counts"
 
 
 def test_a_run_is_not_broken_by_a_bad_tick_of_the_SAME_identity(conn):
@@ -1054,13 +1044,59 @@ def test_a_run_is_not_broken_by_a_bad_tick_of_the_SAME_identity(conn):
 
 
 def test_no_evidence_when_the_newest_tick_is_a_different_identity(conn):
-    """The strategy has been recoded and has not traded since. Nothing may be credited."""
+    """The strategy has been recoded and has not traded since. Nothing may be credited.
+
+    The two earlier ticks DID match the current identity "c" in isolation -- they are shed as
+    `pre_epoch` (there is no run of "c" ending at the newest tick), not `identity_drift` (which is
+    reserved for the "NEWER" tick itself, which never matches at all). That distinction is the
+    whole epoch semantics: a same-identity tick that merely predates the run boundary is a
+    different failure mode from a tick of a genuinely different artifact.
+    """
     seed_tick(conn, date(2026, 6, 10), 100.0)
     seed_tick(conn, date(2026, 6, 12), 101.0)
     seed_tick(conn, date(2026, 6, 13), 102.0, code_hash="NEWER")
 
     res = assemble(conn)
     assert res.evidence.n_return_observations == 0
+    assert res.excluded["pre_epoch"] == 2
+    assert res.excluded["identity_drift"] == 1
+
+
+def test_legacy_null_hash_tick_mid_run_truncates_the_epoch(conn):
+    """A legacy tick recorded before the hash columns existed carries NULL code/config/dependency
+    hashes -- exactly what production `tick_snapshots` rows predating this feature contain.
+    `_identity_matches` never matches a NULL stored hash (fail closed), so such a row breaks the
+    contiguous run exactly like a genuine identity change: the two SAME-identity ticks before it
+    are silently shed as `pre_epoch` even though nothing about the artifact actually changed."""
+    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c" -- would-be pre-epoch run
+    seed_tick(conn, date(2026, 6, 2), 101.0)      # identity "c" -- would-be pre-epoch run
+    raw_tick(conn, tick_ts=_ts(date(2026, 6, 3)), decision_ts=_ts(date(2026, 6, 2)),
+             code_hash=None, config_hash=None, dependency_hash=None)  # legacy NULL-hash row
+    seed_tick(conn, date(2026, 6, 10), 100.0)     # identity "c" -- current epoch
+    seed_tick(conn, date(2026, 6, 12), 101.0)     # identity "c" -- current epoch
+
+    res = assemble(conn)
+    assert res.excluded["pre_epoch"] == 2
+    assert res.excluded["identity_drift"] == 1
+    assert res.evidence.n_return_observations == 1
+
+
+def test_legacy_null_hash_tick_as_newest_zeroes_all_evidence(conn):
+    """The sharper case: the legacy NULL-hash row is the NEWEST tick. `_epoch_start_id` finds no
+    run of the current identity ending at the newest row, so it returns None and EVERY otherwise-
+    admissible tick -- however honest -- is shed as `pre_epoch`. This is exactly the production
+    shape the epoch bound must not choke on silently: a fleet with pre-existing NULL-hash rows
+    must fail closed (zero evidence), not raise and not admit the legacy row by treating NULL as
+    a wildcard match."""
+    seed_tick(conn, date(2026, 6, 10), 100.0)
+    seed_tick(conn, date(2026, 6, 12), 101.0)
+    raw_tick(conn, tick_ts=_ts(date(2026, 6, 13)), decision_ts=_ts(date(2026, 6, 12)),
+             code_hash=None, config_hash=None, dependency_hash=None)
+
+    res = assemble(conn)
+    assert res.evidence.n_return_observations == 0
+    assert res.excluded["pre_epoch"] == 2
+    assert res.excluded["identity_drift"] == 1
 
 
 def test_kill_switch_trip_in_a_shed_pre_epoch_run_does_not_taint_current_hygiene(conn):
