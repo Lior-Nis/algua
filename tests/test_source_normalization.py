@@ -60,3 +60,19 @@ def test_unparseable_source_is_hashed_raw_rather_than_collapsing():
     every broken module share one identity."""
     broken = "def f(:\n"
     assert _strip_cosmetics(broken) == broken
+
+
+def test_deeply_nested_source_falls_back_raw_instead_of_raising(monkeypatch):
+    """A source string parseable by `ast.parse` can still blow the C recursion limit inside
+    `ast.walk`/`ast.unparse` on deeply nested expressions -- how deep is stack-dependent, so this
+    forces the failure directly rather than relying on a fragile literal depth. That must fall
+    back to the raw source (same as a SyntaxError), not raise -- an uncaught RecursionError here
+    would take down `compute_artifact_hashes`, and with it `fleet status` and the live gate."""
+    import ast as ast_module
+
+    def blow_up(_tree):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(ast_module, "unparse", blow_up)
+    source = "x = 1\n"
+    assert _strip_cosmetics(source) == source

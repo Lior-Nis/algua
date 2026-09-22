@@ -93,25 +93,38 @@ def _strip_cosmetics(source: str) -> str:
 
     Comments are absent from the AST, and `ast.unparse` emits canonical formatting, so both vanish.
     Docstrings survive as `Expr(Constant(str))` and are removed explicitly -- they are the most
-    frequently edited text in this repo and cannot change a decision.
+    frequently edited text in this repo and cannot change a trading decision. The one runtime value
+    this knowingly discards is `__doc__` itself: `algua/features/catalogue.py` reads it via
+    `inspect.getdoc` to build `FactorSpec.summary`, and `algua.features.alphas` sits in this
+    strategy's closure -- but that path feeds catalogue metadata, not a trading decision, so
+    dropping it here is deliberate.
 
     Unparseable source is returned RAW rather than normalised to "": collapsing it would give every
     broken module one shared identity.
+
+    HAZARD -- `ast.unparse` output is not stable across CPython minor versions: it depends on the
+    interpreter's own unparser (e.g. f-string quote selection changed between 3.12 and 3.13 --
+    `f'{c['name']}'` vs `f"{c['name']}"`), so the normalized identity is only stable while the
+    interpreter is. Re-normalising all 290 first-party modules under 3.13 changes 28 of them versus
+    3.12 -- a concrete, not hypothetical, count. The repo-root `.python-version` pin (3.12) is what
+    holds `code_hash` stable; a deliberate interpreter bump is a deliberate identity move, exactly
+    like a deliberate `uv.lock` bump already is for `dependency_hash`.
     """
     try:
         tree = ast.parse(source)
-    except SyntaxError:
+        for node in ast.walk(tree):
+            if not isinstance(
+                    node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                node.body = body[1:] or [ast.Pass()]
+        ast.fix_missing_locations(tree)
+        return ast.unparse(tree)
+    except (SyntaxError, RecursionError, ValueError):
         return source
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        body = node.body
-        if (body and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)):
-            node.body = body[1:] or [ast.Pass()]
-    ast.fix_missing_locations(tree)
-    return ast.unparse(tree)
 
 
 def _normalized_source(module: ModuleType) -> str:

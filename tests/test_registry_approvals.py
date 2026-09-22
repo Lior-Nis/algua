@@ -151,6 +151,30 @@ def test_code_hash_covers_imported_algua_helper(repo, monkeypatch):
     assert mutated != baseline
 
 
+def test_code_hash_is_unchanged_by_a_comment_only_edit_to_a_helper(repo, monkeypatch):
+    # Task 2, #656/#657: this is the headline behaviour of source normalization, asserted
+    # end-to-end through compute_artifact_hashes rather than only at the _strip_cosmetics unit
+    # level. A comment edit to a first-party helper in the closure (algua.strategies.base) must
+    # leave code_hash IDENTICAL -- that is the whole point of the fix: a cosmetic edit must not
+    # reset a strategy's forward-evidence clock. Reuses the mutation harness from
+    # test_code_hash_covers_imported_algua_helper above, with a comment instead of a real edit.
+    import algua.strategies.base as helper
+
+    baseline, _, _ = compute_artifact_hashes(STRATEGY)
+
+    real_getsource = inspect.getsource
+
+    def fake_getsource(obj):
+        if obj is helper:
+            return real_getsource(obj) + "\n# a purely cosmetic comment, no behavior change\n"
+        return real_getsource(obj)
+
+    monkeypatch.setattr(inspect, "getsource", fake_getsource)
+    mutated, _, _ = compute_artifact_hashes(STRATEGY)
+
+    assert mutated == baseline
+
+
 def test_dependency_change_invalidates_prior_approval(repo, monkeypatch):
     # #5: the approved identity now pins the locked dependency set too. A uv.lock bump can
     # change fill/numerical semantics, so a prior human approval must NOT satisfy the gate once
@@ -214,20 +238,21 @@ def test_non_live_transition_records_null_dependency_hash(repo):
 def test_code_hash_covers_construction_module():
     # The construction module's source must be part of code_hash, so a policy edit invalidates a
     # prior approval. We assert the construction module's source contributes to the closure.
-    import inspect
-
-    import algua.portfolio.construction as construction
-    from algua.registry.approvals import _merged_closure_for, _strip_cosmetics
+    from algua.registry.approvals import _merged_closure_for
     from algua.strategies.loader import load_strategy
 
     # After Task 5 the approvals closure is rooted from BOTH the signal module and the construction
     # module; verify the construction module's source is present in the merged closure.
-    # (Task 2, #656/#657: the closure stores NORMALIZED source, not raw — comparing against raw
-    # inspect.getsource would fail even though the closure is correctly populated.)
+    # (Task 2, #656/#657: the closure stores NORMALIZED source, not raw. Comparing it against
+    # `_strip_cosmetics(inspect.getsource(construction))` would just re-assert f(x) == f(x) — a
+    # regression of _strip_cosmetics to `return ""` would pass that check too, with the closure
+    # silently empty. Assert an INDEPENDENT oracle instead: two known, distinct construction
+    # policies must both survive normalization.)
     merged = _merged_closure_for(load_strategy("cross_sectional_momentum"))
     assert "algua.portfolio.construction" in merged
-    assert merged["algua.portfolio.construction"] == _strip_cosmetics(
-        inspect.getsource(construction))
+    stored = merged["algua.portfolio.construction"]
+    assert "def top_k_equal_weight" in stored
+    assert "def apply_gross_utilization" in stored
 
 
 def test_code_hash_ignores_thirdparty_and_stdlib_changes(repo, monkeypatch):
