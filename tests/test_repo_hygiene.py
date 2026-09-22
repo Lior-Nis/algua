@@ -232,6 +232,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/challenges.py",
         "algua/registry/human_actor.py",
         "algua/registry/transitions.py",
+        "algua/registry/approvals.py",
         "algua/registry/promotion.py",
         "algua/registry/family_assignment.py",
         "algua/registry/promote_run.py",
