@@ -93,6 +93,12 @@ def test_no_evidence_when_the_newest_tick_is_a_different_identity(conn):
 
 Also add `"pre_epoch"` to `EXCLUSION_KEYS` at `tests/test_forward_promotion.py:44`.
 
+Note (shipped vs. this listing): `test_ticks_before_an_identity_change_are_not_back_credited` above seeds its
+pre-epoch run with `code_hash="OLD"`, which is vacuous — those ticks would be excluded as a plain identity
+mismatch even without the epoch bound. The shipped test seeds the pre-epoch run under the DEFAULT identity
+(`code_hash="c"`, the same as the current identity), so it actually exercises the epoch bound: same-identity
+ticks excluded solely because they precede a revert, not because they never matched.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_forward_promotion.py -q -k "back_credited or revert or same_identity or newest_tick"`

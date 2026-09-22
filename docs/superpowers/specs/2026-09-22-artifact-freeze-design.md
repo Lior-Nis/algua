@@ -1,6 +1,8 @@
 # Artifact freeze: making the forward-evidence clock runnable
 
-**Status:** design, approved in principle 2026-09-22. Not yet planned or implemented.
+**Status:** design, approved in principle 2026-09-22. Planned
+(`docs/superpowers/plans/2026-09-22-evidence-epoch-and-source-normalization.md`); slice 1 (the two
+defects below) is implemented. Slices 2-7 are not yet planned or implemented.
 
 ## The problem
 
@@ -85,7 +87,7 @@ Derived from the code, not assumed.
 | Strategy + first-party decision closure | Frozen | It is the decision |
 | Resolved `StrategyConfig` | Frozen | Already the whole of `config_hash` (`strategies/base.py:350`) |
 | Numerical / runtime dependency set | Frozen | numpy..vectorbt can change a number |
-| Python interpreter, ABI, platform | Frozen AND recorded | `pyproject.toml` pins only `>=3.12`; a lockfile is universal across markers, so the same lock selects different variants on different interpreters |
+| Python interpreter, ABI, platform | Frozen AND recorded (PARTIALLY shipped: the root `.python-version` pin, added alongside slice 1, freezes the interpreter MINOR VERSION repo-wide today — it is a single global pin, not yet a per-deployment recorded field, and does not cover ABI/platform) | `pyproject.toml` pins only `>=3.12`; a lockfile is universal across markers, so the same lock selects different variants on different interpreters |
 | Planner protocol version | Stamped | The supervisor/planner contract must be versioned or a protocol change is invisible |
 | Bars / universe / calendar inputs | NOT frozen — resolved outside and passed in, recorded per tick | Bars are already content-addressed and the tick already records `snapshot_id` (`execution/order_state.py:198`); universe membership is deliberately as-of-today (`registry/universe_binding.py:30`) |
 | Registry DB | Shared authority, unreachable from the planner | See above |
@@ -152,11 +154,19 @@ migration command, not ad hoc stage manipulation. Prefer a fresh OOS interval: t
 rejects any overlapping interval regardless of provenance (`registry/store/holdout.py:35,61`), and
 reuse is human-only and signature-bound (`registry/promote_run.py:185,225`).
 
+This section is silent on the OTHER records keyed to the moving identity: `approvals` rows
+(the live-gate approval ledger), single-use gate tokens, and `family_members.member_code_hash`
+(the #222/#524 family-lineage anchor). The identity move this design makes (freezing at
+adoption instead of at "whatever is currently checked out") affects all three the same way it
+affects forward evidence and qualified holdout Sharpe — a migration command must account for
+re-approval, token re-minting, and family-membership re-anchoring alongside the re-qualification
+above, not just the forward-gate evidence window.
+
 ## Defects to fix alongside
 
 **1. Back-crediting (anti-gaming, exists today, independent of this design).**
 `forward_evidence` selects `WHERE lane='paper' AND strategy_id=?` with no lower bound
-(`forward_evidence.py:201-207`). Any prior tick matching the adopted identity is credited, whenever
+(`forward_evidence.py:225-230`). Any prior tick matching the adopted identity is credited, whenever
 it happened — so an artifact can be adopted AFTER seeing part of its forward performance. Fix: an
 explicit epoch start; no back-crediting before activation.
 
@@ -176,13 +186,43 @@ so there is no direction in which narrowing the window helps an operator: you ca
 trip inside a window whose returns still count, because the returns that would make the trip worth
 burying are exactly what got shed with it. A separate concern — whether a trip that occurred
 before the epoch but SURVIVED into it (e.g. never resumed) should independently gate promotion
-regardless of window — is not addressed here; the current gate only ever asks "did the strategy
-trip while its own credited returns were building," and that question is well-posed only within
-the epoch.
+regardless of window — IS addressed, just not by the windowed clause: `kill_switch_tripped =
+is_tripped(conn, name)` (`forward_evidence.py:283`) is a CURRENT-STATE check with no window at
+all, so a trip that tripped before the epoch and is still tripped today still fails the gate
+regardless of when its evidence was shed. The windowed clause (`n_kill_trips_in_window`) only
+adds the narrower "did the strategy trip while its own credited returns were building" question
+on top; it does not need to (and does not) carry the surviving-trip case, because the
+current-state check already covers it unconditionally.
 
-**2. Cosmetic source churn.** `code_hash` hashes raw `inspect.getsource()` (`approvals.py:102`), so a
-comment or reformat invalidates every prior approval and resets every clock. Fix: normalize before
-hashing.
+**Standing invariant (recorded by this review, not previously stated):** the epoch bound's
+anti-gaming strength DEPENDS on `code_hash`'s discriminating power. A revert-then-return is
+detected only because the detour artifact hashes DIFFERENTLY from the reverted-to one — if two
+artifacts that behave differently ever hashed the same, the revert would be invisible to
+`_epoch_start_id` and the old run would be silently re-credited exactly as before this fix. This
+means any future widening of `_strip_cosmetics` (stripping MORE than comments/formatting/
+docstrings) weakens the epoch bound in addition to weakening the live gate's approval binding —
+the two consumers share one failure mode, not two independent ones.
+
+**Interim regression, honestly recorded.** Before slices 2-4 land (frozen execution), this change
+strictly WORSENS accumulation in one respect versus the pre-epoch-bound behavior: previously a
+transient identity blip (a stray dependency bump, a one-tick misfire) merely dropped THOSE ticks
+and left the surrounding run's evidence intact — now a single spurious tick under a transient
+identity permanently forfeits the ENTIRE prior run, because it becomes the run breaker
+`_epoch_start_id` walks past. This is the accepted cost of closing the back-crediting gaming
+vector with a derived (not stored) epoch: there is no way to distinguish "a deliberate revert" from
+"one noisy tick" without a stored deployment record, which is exactly what slice 3 adds.
+
+**2. Cosmetic source churn.** `code_hash` hashed raw `inspect.getsource()` (now `approvals.py:134`,
+inside `_normalized_source`), so a comment or reformat invalidated every prior approval and reset
+every clock. Fix: normalize before hashing.
+
+Implemented (task 2) as an AST round-trip: `_strip_cosmetics` (`algua/registry/approvals.py`)
+parses the source, strips docstrings, and re-emits it via `ast.unparse` before hashing — comments
+and formatting vanish entirely since the AST never carries them. Unparseable source is hashed RAW
+rather than collapsed to `""`, so a broken module still gets its own identity instead of sharing
+one with every other broken module. `ast.unparse` output is only stable while the interpreter is;
+the repo-root `.python-version` pin holds that stable (see `tests/test_repo_hygiene.py`'s
+interpreter-match test, added alongside this).
 
 **3. (Proposed, NOT a defect — needs its own review.)** `code_hash` covers the entire construction
 and overlays modules, so editing ANY policy invalidates EVERY strategy including ones that never use
