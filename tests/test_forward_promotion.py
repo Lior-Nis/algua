@@ -1017,11 +1017,11 @@ def test_ticks_before_an_identity_change_are_not_back_credited(conn):
     Without this bound an operator could revert a strategy to an earlier artifact AFTER seeing how
     that artifact's forward period turned out, and the old run would be silently re-credited.
     """
-    seed_tick(conn, date(2026, 6, 1), 100.0, code_hash="OLD")
-    seed_tick(conn, date(2026, 6, 2), 101.0, code_hash="OLD")
+    seed_tick(conn, date(2026, 6, 1), 100.0)                      # identity "c" -- pre-epoch run
+    seed_tick(conn, date(2026, 6, 2), 101.0)                      # identity "c" -- pre-epoch run
     seed_tick(conn, date(2026, 6, 3), 102.0, code_hash="OTHER")   # the run breaker
-    seed_tick(conn, date(2026, 6, 10), 100.0, code_hash="c")
-    seed_tick(conn, date(2026, 6, 12), 101.0, code_hash="c")
+    seed_tick(conn, date(2026, 6, 10), 100.0)                     # identity "c" -- current epoch
+    seed_tick(conn, date(2026, 6, 12), 101.0)                     # identity "c" -- current epoch
 
     res = assemble(conn)   # assembles against identity code_hash="c"
     assert res.evidence.n_return_observations == 1, "only the final run of two sessions counts"
@@ -1061,3 +1061,31 @@ def test_no_evidence_when_the_newest_tick_is_a_different_identity(conn):
 
     res = assemble(conn)
     assert res.evidence.n_return_observations == 0
+
+
+def test_kill_switch_trip_in_a_shed_pre_epoch_run_does_not_taint_current_hygiene(conn):
+    """The integrity/hygiene windows (reconcile failures, kill-switch trips, concurrency breadth)
+    anchor on `admissible[0]`, which the epoch bound now moves forward to the epoch start. A trip
+    during a PRE-epoch run of the SAME identity is shed along with that run's evidence -- it must
+    not fail the current epoch's hygiene. A trip INSIDE the epoch must still fail it."""
+    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c" -- pre-epoch run
+    seed_tick(conn, date(2026, 6, 2), 101.0)      # identity "c" -- pre-epoch run
+    seed_tick(conn, date(2026, 6, 3), 90.0, code_hash="OTHER")  # the run breaker
+    epoch_start_id = seed_tick(conn, date(2026, 6, 10), 100.0)   # epoch start
+    seed_tick(conn, date(2026, 6, 12), 101.0)
+
+    epoch_start_recorded_at = conn.execute(
+        "SELECT recorded_at FROM tick_snapshots WHERE id=?", (epoch_start_id,),
+    ).fetchone()[0]
+    assert epoch_start_recorded_at == _ts(date(2026, 6, 10))
+
+    conn.execute("INSERT INTO audit_log(ts, actor, action, reason, strategy) "
+                 "VALUES (?, 'system', 'kill_switch_trip', 'dd', 's')",
+                 (_ts(date(2026, 6, 2)),))  # inside the shed pre-epoch run -> must NOT count
+    conn.execute("INSERT INTO audit_log(ts, actor, action, reason, strategy) "
+                 "VALUES (?, 'system', 'kill_switch_trip', 'dd', 's')",
+                 (_ts(date(2026, 6, 11)),))  # inside the epoch -> must count
+    conn.commit()
+
+    res = assemble(conn)
+    assert res.evidence.n_kill_trips_in_window == 1

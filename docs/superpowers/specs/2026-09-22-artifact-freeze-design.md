@@ -160,6 +160,26 @@ reuse is human-only and signature-bound (`registry/promote_run.py:185,225`).
 it happened — so an artifact can be adopted AFTER seeing part of its forward performance. Fix: an
 explicit epoch start; no back-crediting before activation.
 
+Implemented (task 1) as a DERIVED epoch rather than a stored one: `_epoch_start_id` walks the
+id-ordered tick rows and returns the id of the first tick in the LAST contiguous run of the
+current identity (broken only by an identity change, never by an otherwise-inadmissible tick of
+the same identity). This needs no migration and closes the gaming vector directly — reverting to
+an earlier artifact starts a new run because the intervening ticks under the other identity break
+the old one. The integrity/hygiene windows downstream of the observation partition — the integrity
+universe (`admissible[0]`-anchored reconcile/defective-tick scan), the kill-switch-trip window, the
+broker-activities fetch window, and the concurrency-breadth query — all anchor on `admissible[0]`,
+so the epoch bound moves all four windows forward to the epoch start along with the observations.
+This is DELIBERATE, not an oversight: a kill-switch trip or reconcile failure that happened during
+a pre-epoch run of the same identity is shed along with that run's return evidence, not just its
+Sharpe. It is symmetric — the run that shed its good evidence also sheds its bad hygiene signal —
+so there is no direction in which narrowing the window helps an operator: you cannot bury a live
+trip inside a window whose returns still count, because the returns that would make the trip worth
+burying are exactly what got shed with it. A separate concern — whether a trip that occurred
+before the epoch but SURVIVED into it (e.g. never resumed) should independently gate promotion
+regardless of window — is not addressed here; the current gate only ever asks "did the strategy
+trip while its own credited returns were building," and that question is well-posed only within
+the epoch.
+
 **2. Cosmetic source churn.** `code_hash` hashes raw `inspect.getsource()` (`approvals.py:102`), so a
 comment or reformat invalidates every prior approval and resets every clock. Fix: normalize before
 hashing.
