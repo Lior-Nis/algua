@@ -71,7 +71,10 @@ BUDGET: dict[str, int] = {
     "algua/operator/gitops.py": 315,
     "algua/operator/loop_health.py": 321,
     "algua/operator/mergeback.py": 668,
-    "algua/registry/forward_evidence.py": 401,
+    # +28 for the evidence-epoch bound (#task-1): _epoch_start_id plus its partition-loop wiring
+    # closes the back-crediting gaming vector; it reads the same admissibility rows the module
+    # already assembles, so it belongs here rather than a new file.
+    "algua/registry/forward_evidence.py": 429,
     "algua/registry/mergeback_intake.py": 466,
     "algua/registry/promote_run.py": 348,
     "algua/registry/promotion.py": 542,

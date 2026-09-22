@@ -42,7 +42,7 @@ NOW = datetime(2026, 6, 12, 21, 0, tzinfo=UTC)
 IDENT = ArtifactIdentity(code_hash="c", config_hash="g", dependency_hash="d")
 
 EXCLUSION_KEYS = {"local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
-                  "no_decision", "bad_decision_ts", "stale_decision"}
+                  "no_decision", "bad_decision_ts", "stale_decision", "pre_epoch"}
 
 
 class FakeCalendar:
@@ -165,16 +165,18 @@ def test_local_clock_excluded(conn):
 
 
 def test_identity_drift_excluded(conn):
+    # The mismatched tick must precede the admissible run (in id order) so it does not itself
+    # become the "newest tick" and break the epoch under test elsewhere in this file.
+    seed_tick(conn, date(2026, 6, 9), 99.0, code_hash="STALE")
     _two_admissible(conn)
-    seed_tick(conn, date(2026, 6, 11), 99.0, code_hash="STALE")
     res = assemble(conn)
     assert res.excluded["identity_drift"] == 1
     assert res.evidence.n_return_observations == 1
 
 
 def test_null_hash_never_matches_identity(conn):
+    seed_tick(conn, date(2026, 6, 9), 99.0, dependency_hash=None)
     _two_admissible(conn)
-    seed_tick(conn, date(2026, 6, 11), 99.0, dependency_hash=None)
     res = assemble(conn)
     assert res.excluded["identity_drift"] == 1
     assert res.evidence.n_return_observations == 1
@@ -291,9 +293,11 @@ def test_decision_two_sessions_back_is_admissible(conn):
 
 
 def test_first_matching_filter_wins(conn):
+    # Fails BOTH local-clock and identity; counted once, under the FIRST filter only. Precedes
+    # the admissible run (in id order) so it doesn't itself become the "newest tick" and break
+    # the epoch under test elsewhere in this file.
+    seed_tick(conn, date(2026, 6, 9), 99.0, clock_source="local", code_hash="STALE")
     _two_admissible(conn)
-    # Fails BOTH local-clock and identity; counted once, under the FIRST filter only.
-    seed_tick(conn, date(2026, 6, 11), 99.0, clock_source="local", code_hash="STALE")
     res = assemble(conn)
     assert res.excluded["local_clock"] == 1
     assert res.excluded["identity_drift"] == 0
@@ -1001,3 +1005,59 @@ def test_classify_activities_attributes_fill_to_any_paper_order(tmp_path):
     n_external, n_unattributable = _classify_activities(conn, acts)
     assert n_external == 0
     assert n_unattributable == 2     # only the orphan + the null-id fill
+
+
+# ---------------------------------------------------------------------------
+# Evidence epoch: no back-crediting across an identity change (anti-gaming)
+# ---------------------------------------------------------------------------
+
+def test_ticks_before_an_identity_change_are_not_back_credited(conn):
+    """Anti-gaming. Ticks are admitted only from the LAST contiguous run of the current identity.
+
+    Without this bound an operator could revert a strategy to an earlier artifact AFTER seeing how
+    that artifact's forward period turned out, and the old run would be silently re-credited.
+    """
+    seed_tick(conn, date(2026, 6, 1), 100.0, code_hash="OLD")
+    seed_tick(conn, date(2026, 6, 2), 101.0, code_hash="OLD")
+    seed_tick(conn, date(2026, 6, 3), 102.0, code_hash="OTHER")   # the run breaker
+    seed_tick(conn, date(2026, 6, 10), 100.0, code_hash="c")
+    seed_tick(conn, date(2026, 6, 12), 101.0, code_hash="c")
+
+    res = assemble(conn)   # assembles against identity code_hash="c"
+    assert res.evidence.n_return_observations == 1, "only the final run of two sessions counts"
+
+
+def test_a_revert_does_not_re_credit_the_old_run(conn):
+    """The concrete attack: run under identity c, switch away, switch BACK to c."""
+    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c"
+    seed_tick(conn, date(2026, 6, 2), 140.0)      # identity "c" -- a flattering old run
+    seed_tick(conn, date(2026, 6, 3), 90.0, code_hash="OTHER")
+    seed_tick(conn, date(2026, 6, 10), 100.0)     # back to "c"
+    seed_tick(conn, date(2026, 6, 12), 101.0)
+
+    res = assemble(conn)
+    assert res.excluded["pre_epoch"] == 2
+    assert res.evidence.n_return_observations == 1
+
+
+def test_a_run_is_not_broken_by_a_bad_tick_of_the_SAME_identity(conn):
+    """A local-clock or stale tick is a bad tick, not a different artifact. It must not restart the
+    epoch -- only an identity CHANGE does."""
+    seed_tick(conn, date(2026, 6, 10), 100.0)
+    seed_tick(conn, date(2026, 6, 11), 99.0, clock_source="local")
+    seed_tick(conn, date(2026, 6, 12), 101.0)
+
+    res = assemble(conn)
+    assert res.excluded["local_clock"] == 1
+    assert res.excluded["pre_epoch"] == 0
+    assert res.evidence.n_return_observations == 1
+
+
+def test_no_evidence_when_the_newest_tick_is_a_different_identity(conn):
+    """The strategy has been recoded and has not traded since. Nothing may be credited."""
+    seed_tick(conn, date(2026, 6, 10), 100.0)
+    seed_tick(conn, date(2026, 6, 12), 101.0)
+    seed_tick(conn, date(2026, 6, 13), 102.0, code_hash="NEWER")
+
+    res = assemble(conn)
+    assert res.evidence.n_return_observations == 0

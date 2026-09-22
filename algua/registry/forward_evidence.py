@@ -55,7 +55,7 @@ _MAX_DECISION_LAG_SESSIONS = 2
 
 # Per-filter exclusion keys, IN EVALUATION ORDER (first matching filter wins the count).
 _EXCLUSION_FILTERS = ("local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
-                      "no_decision", "bad_decision_ts", "stale_decision")
+                      "no_decision", "bad_decision_ts", "stale_decision", "pre_epoch")
 
 
 # (after_iso, until_iso) -> raw activity dicts; exhaustively paginated by the broker layer,
@@ -104,6 +104,29 @@ def _identity_matches(row: sqlite3.Row, identity: ArtifactIdentity) -> bool:
     return (row["code_hash"] == identity.code_hash
             and row["config_hash"] == identity.config_hash
             and row["dependency_hash"] == identity.dependency_hash)
+
+
+def _epoch_start_id(rows: list[sqlite3.Row], identity: ArtifactIdentity) -> int | None:
+    """The id of the first tick in the LAST contiguous run of `identity`, or None if the newest
+    tick is a different identity.
+
+    Evidence may not be back-credited across an identity change. Without this bound, reverting a
+    strategy to an earlier artifact AFTER seeing how that artifact's forward period turned out
+    would silently re-credit the old run -- choosing the artifact on the strength of the evidence
+    it is about to be judged by.
+
+    A run is broken ONLY by a tick of a different identity. A tick that is inadmissible for some
+    other reason (a local clock, a stale decision) is a bad tick of the SAME artifact, so it must
+    not restart the epoch.
+    """
+    start: int | None = None
+    for row in rows:
+        if _identity_matches(row, identity):
+            if start is None:
+                start = int(row["id"])
+        else:
+            start = None
+    return start
 
 
 def _inadmissible_reason(
@@ -205,10 +228,15 @@ def assemble_forward_evidence(
         " FROM tick_snapshots WHERE lane='paper' AND strategy_id=? ORDER BY id",
         (strategy_id,),
     ).fetchall()
+    epoch_start = _epoch_start_id(rows, identity)
     excluded = dict.fromkeys(_EXCLUSION_FILTERS, 0)
     admissible: list[sqlite3.Row] = []
     for row in rows:
         reason = _inadmissible_reason(row, identity, calendar, now_utc)
+        if reason is None and (epoch_start is None or int(row["id"]) < epoch_start):
+            # Would have counted, but predates the current artifact's run. Reported separately so
+            # the gate's own output shows the bound was applied rather than silently dropping rows.
+            reason = "pre_epoch"
         if reason is None:
             admissible.append(row)
         else:
