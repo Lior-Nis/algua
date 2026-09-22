@@ -38,6 +38,7 @@ ROOT_WHITELIST = frozenset(
         ".gitignore",
         ".gitleaks.toml",
         ".pip-audit-ignore.txt",
+        ".python-version",  # uv's toolchain selector: pins CPython for ast.unparse stability
         "pyproject.toml",
         "README.md",
         "uv.lock",
