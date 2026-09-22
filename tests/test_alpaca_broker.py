@@ -1027,10 +1027,106 @@ def test_the_liquidation_path_recovers_too_and_checks_side(monkeypatch):
 
 def test_a_differently_sized_resubmit_still_recovers(monkeypatch):
     """Size is deliberately NOT compared: the same decision re-run under a changed allocation posts
-    a different notional for the same coid, and the landed order is still the right answer."""
+    a different notional for the same coid, and the landed order is still the right answer.
+
+    The SUBMITTED notional must actually differ between the two calls, or this tests nothing -- an
+    earlier version varied only the fake lookup payload and passed for the wrong reason.
+    """
     fake = _recovering(_venue_order(qty="999"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(OrderIntent("AAPL", Side.BUY, 0.25, T0), snap, "coid-1")
+    assert broker.submit_sized(
+        OrderIntent("AAPL", Side.BUY, 0.75, T0), snap, "coid-1") == "order-abc"
+    posted = [p.get("notional") for p in fake.posted]
+    assert posted[0] != posted[1], "the two submits must genuinely differ in size"
+
+
+@pytest.mark.parametrize("status", ["canceled", "cancelled", "expired", "rejected", "replaced"])
+def test_recovery_refuses_an_order_that_will_never_execute(monkeypatch, status):
+    """THE cancel-then-recover hole. Every tick cancels open orders before its submit loop, so a
+    same-decision re-run would otherwise cancel the original, recover the order it just cancelled,
+    and record a dead order as this tick's live submission."""
+    fake = _recovering(_venue_order(status=status))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match=f"belongs to a {status} order"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+@pytest.mark.parametrize("status", ["filled", "partially_filled", "new", "accepted"])
+def test_recovery_accepts_an_order_that_really_reached_the_book(monkeypatch, status):
+    """Filled and partially-filled orders DID land -- that is what recovery is for. An unknown
+    status is accepted too: refusing it would re-create the cycle abort, and the per-tick reconcile
+    is the backstop."""
+    fake = _recovering(_venue_order(status=status))
     monkeypatch.setattr(ab, "requests", fake)
     broker = _broker()
     snap = broker.snapshot(["AAPL"])
     broker.submit_sized(_intent(), snap, "coid-1")
     assert broker.submit_sized(_intent(), snap, "coid-1") == "order-abc"
+
+
+def test_a_recovered_order_refunds_its_buying_power_reservation(monkeypatch):
+    """The pool is debited BEFORE the POST. A recovery placed no NEW order -- the account's buying
+    power already reflects the earlier one -- so keeping the debit double-counts it and trims or
+    skips later tenants in the same cycle for buying power nothing consumed."""
+    fake = _recovering()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    pool = {"available": 10_000.0}
+    released: list = []
+
+    def _reserve(symbol, notional):
+        grant = min(notional, pool["available"])
+        pool["available"] -= ab.posted_notional(grant)
+        return grant
+
+    def _release(symbol, notional):
+        released.append((symbol, notional))
+        pool["available"] += notional
+
+    broker.submit_sized(_intent(), snap, "coid-1", reserve=_reserve, release=_release)
+    after_first = pool["available"]
+    assert released == [], "a genuinely new order must NOT be refunded"
+
+    broker.submit_sized(_intent(), snap, "coid-1", reserve=_reserve, release=_release)
+    assert len(released) == 1, "the recovered submit must refund exactly once"
+    assert pool["available"] == pytest.approx(after_first), "the pool must be left unchanged"
+
+
+def test_a_new_order_is_not_reported_as_recovered(monkeypatch):
+    """The flag must distinguish the two events, or the refund fires on every submit."""
+    fake = _recovering()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    _order_id, recovered = broker._post_order(
+        {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}, "/v2/orders", "coid-1")
+    assert recovered is False
+    _order_id2, recovered2 = broker._post_order(
+        {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}, "/v2/orders", "coid-1")
+    assert recovered2 is True
+
+
+@pytest.mark.parametrize("status_code, text, why", [
+    (403, '{"code":42210000,"message":"client_order_id must be unique"}',
+     "only a 422 is this rejection; a 403 is authorization"),
+    (422, '{"code":40310000,"message":"quantity must be unique per something"}',
+     "no mention of client_order_id"),
+    (422, '{"code":42210000,"message":"client_order_id is malformed"}',
+     "mentions the field but does not mean duplicate"),
+])
+def test_each_half_of_the_classifier_is_load_bearing(status_code, text, why):
+    """Every conjunct must matter on its own. A single negative case that mismatches ALL THREE at
+    once leaves the individual conjuncts unkilled by mutation -- which is what an earlier version
+    of this file did."""
+    assert not ab.is_duplicate_client_order_id(status_code, text), why
+
+
+def test_the_classifier_accepts_the_real_rejection():
+    assert ab.is_duplicate_client_order_id(
+        422, '{"code":42210000,"message":"client_order_id must be unique"}')

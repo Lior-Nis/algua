@@ -1666,6 +1666,6 @@ def test_registration_refuses_a_non_ascii_name(repo):
 
 
 def test_registration_accepts_an_ordinary_name(repo):
-    """The guard must not reject anything real. The longest name in the live registry is 37 chars."""
+    """The guard must not reject anything real: the longest live name is 37 chars."""
     rec = repo.add("distributed_loss_peer_selloff_rebound")
     assert rec.name == "distributed_loss_peer_selloff_rebound"

@@ -4,9 +4,8 @@ import pandas as pd
 import pytest
 
 from algua.contracts.types import OrderIntent, Side
+from algua.execution.coid_policy import MAX_STRATEGY_NAME_CHARS, assert_coid_safe_name
 from algua.execution.order_state import (
-    MAX_STRATEGY_NAME_CHARS,
-    assert_coid_safe_name,
     clear_all_peaks,
     clear_peak_equity,
     client_order_id,

@@ -169,20 +169,27 @@ class _AlpacaBroker:
         except ValueError as exc:
             raise BrokerError(f"alpaca malformed JSON on {path}: {exc}") from exc
 
-    def _post_order(self, body: dict[str, Any], path: str, coid: str | None) -> str:
-        """POST an order and return its broker id, treating a duplicate-id rejection as proof the
-        order already landed and resolving it to that order's id (#560). The recovered order is
-        verified to be ours before it is attributed -- see `recover_duplicate_order_id`."""
+    def _post_order(
+        self, body: dict[str, Any], path: str, coid: str | None
+    ) -> tuple[str, bool]:
+        """POST an order; return (broker order id, recovered?).
+
+        A duplicate-id rejection is proof the order ALREADY LANDED, so it resolves to that order's
+        id (#560) after verifying the order is ours -- see `recover_duplicate_order_id`.
+
+        The `recovered` flag exists because the caller must distinguish "a new order went to the
+        venue" from "an order from an earlier cycle was re-identified". Only the first consumes
+        buying power this cycle."""
         resp = self._post("/v2/orders", body)
         if coid is not None and is_duplicate_client_order_id(resp.status_code, resp.text):
             return recover_duplicate_order_id(
                 self.get_order_by_client_order_id, coid,
-                symbol=str(body["symbol"]), side=str(body["side"]), path=path)
+                symbol=str(body["symbol"]), side=str(body["side"]), path=path), True
         data = self._read(resp, path, ok=(200, 201))
         order_id = data.get("id") if isinstance(data, dict) else None
         if not order_id:
             raise BrokerError(f"alpaca {path}: response missing 'id': {data}")
-        return str(order_id)
+        return str(order_id), False
 
     @staticmethod
     def _num(data: dict[str, Any], key: str, path: str) -> float:
@@ -284,7 +291,8 @@ class _AlpacaBroker:
 
     def submit_sized(self, intent: OrderIntent, snap: TickSnapshot,
                      client_order_id: str | None = None,
-                     reserve: Callable[[str, float], float] | None = None) -> str:
+                     reserve: Callable[[str, float], float] | None = None,
+                     release: Callable[[str, float], None] | None = None) -> str:
         """Size ONE intent against the tick snapshot (shared `size_order`) and POST it. The symbol
         MUST be in the snapshot's universe — an unknown symbol raises rather than silently sizing a
         full target-weight buy against a phantom flat position (#29). Returns the order id, or
@@ -298,7 +306,13 @@ class _AlpacaBroker:
 
         `reserve`, when given, is called ONLY for BUY orders: `reserve(symbol, amount)` returns the
         permitted notional (≤ amount). Zero means skip the order entirely; a partial amount trims
-        the notional. Sells are never reserved."""
+        the notional. Sells are never reserved.
+
+        `release(symbol, amount)` REFUNDS that reservation when the POST placed no NEW order -- a
+        duplicate-id rejection that resolved to an order from an earlier cycle (#560). The pool is
+        debited before the POST, and the account buying power it derives from already reflects that
+        earlier order, so keeping the debit double-counts it and trims or skips later tenants in the
+        same cycle for buying power nothing consumed."""
         if intent.symbol not in snap.market_values:
             raise BrokerError(
                 f"alpaca submit: {intent.symbol!r} is not in the strategy universe "
@@ -311,7 +325,9 @@ class _AlpacaBroker:
             return "noop"
         side = "buy" if sized.delta_notional > 0 else "sell"
         amount = abs(sized.delta_notional)
+        reserved = False
         if side == "buy" and reserve is not None:
+            reserved = True
             permitted = reserve(intent.symbol, amount)
             if permitted <= 0.0:
                 return "skipped"
@@ -333,7 +349,12 @@ class _AlpacaBroker:
                                 "side": side, "type": "market", "time_in_force": "day"}
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
-        return self._post_order(body, "/v2/orders", client_order_id)
+        order_id, recovered = self._post_order(body, "/v2/orders", client_order_id)
+        if recovered and reserved and release is not None:
+            # No NEW order was placed: this id belongs to an order from an earlier cycle, which the
+            # account's buying power already reflects. Give the reservation back.
+            release(intent.symbol, float(notional))
+        return order_id
 
     def submit_offset(self, symbol: str, signed_qty: float, client_order_id: str) -> str:
         """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long
@@ -352,7 +373,7 @@ class _AlpacaBroker:
             "side": "sell" if signed_qty > 0 else "buy",
             "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
         }
-        return self._post_order(body, "/v2/orders (offset)", client_order_id)
+        return self._post_order(body, "/v2/orders (offset)", client_order_id)[0]
 
     def submit(self, intent: OrderIntent, client_order_id: str | None = None) -> str:
         """Broker-protocol single-symbol submit: snapshot scoped to this one symbol, then size +

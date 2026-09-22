@@ -34,6 +34,17 @@ from algua.execution.errors import BrokerError
 _MENTIONS_COID = re.compile(r"client[ _]?order[ _]?id|42210000", re.IGNORECASE)
 _MEANS_DUPLICATE = re.compile(r"unique|duplicate|already exist", re.IGNORECASE)
 
+#: Statuses meaning the order behind the id WILL NOT execute as submitted. Recovery must refuse
+#: these: every tick CANCELS open orders before its submit loop (`live_loop`), so a same-decision
+#: re-run would otherwise cancel the original, "recover" the order it just cancelled, and record a
+#: dead order as this tick's live submission.
+#:
+#: `filled` and `partially_filled` are deliberately NOT here -- those orders really did reach the
+#: book, which is exactly what recovery is for. An UNKNOWN status is accepted rather than refused:
+#: refusing it re-creates the cycle abort this module exists to remove, and the per-tick reconcile
+#: (belief vs broker positions) is the backstop that catches a mis-attribution loudly.
+_DEAD_STATUSES = frozenset({"canceled", "cancelled", "expired", "rejected", "replaced"})
+
 
 def is_duplicate_client_order_id(status_code: int, text: str) -> bool:
     """True iff this response is Alpaca rejecting a submit because the id is already in use.
@@ -75,6 +86,8 @@ def recover_duplicate_order_id(
     Size is deliberately NOT compared. The same decision re-run under a changed allocation posts a
     different notional for the same coid, and the order that already landed is still the correct
     idempotent answer; requiring equality would break legitimate recovery.
+
+    STATUS IS checked, against `_DEAD_STATUSES`. A dead order is not a submission.
     """
     order = lookup(client_order_id)
     if order is None:
@@ -83,6 +96,14 @@ def recover_duplicate_order_id(
         raise BrokerError(
             f"alpaca {path}: client_order_id {client_order_id!r} was rejected as a duplicate but "
             f"no order carries it"
+        )
+    status = str(order.get("status", "")).lower()
+    if status in _DEAD_STATUSES:
+        # The id is taken by an order that will never execute -- most plausibly the one THIS tick
+        # cancelled moments ago. Returning it would record a dead order as a live submission.
+        raise BrokerError(
+            f"alpaca {path}: client_order_id {client_order_id!r} belongs to a {status} order; "
+            f"refusing to report it as this tick's submission"
         )
     order_id = order.get("id")
     if (

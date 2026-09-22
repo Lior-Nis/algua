@@ -392,3 +392,19 @@ def test_bad_transport_combos_fail_before_any_git_or_journal_mutation(monkeypatc
     # The saga never began: no git seam constructed, no journal file written.
     assert git_constructed == []
     assert list(get_settings().db_path.parent.glob("merge_back.*.journal")) == []
+
+
+def test_mergeback_intake_refuses_a_name_that_would_break_client_order_id(tmp_path):
+    """The merge-back lane MINTS names autonomously and inserts them directly, bypassing
+    SqliteStrategyRepository.add. Without a guard here the client_order_id length/ASCII rule is
+    decorative on exactly the path that runs unattended (#560)."""
+    import pytest as _pytest
+
+    from algua.registry.db import connect, migrate
+    from algua.registry.mergeback_intake import ensure_backtested
+
+    conn = connect(tmp_path / "m.db")
+    migrate(conn)
+    with _pytest.raises(ValueError, match="client_order_id"):
+        ensure_backtested(conn, strategy="x" * 120, branch="b", branch_tip="a" * 40,
+                          merge_sha="b" * 40, base_sha="c" * 40)
