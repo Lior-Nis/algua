@@ -7,19 +7,66 @@ from datetime import UTC, datetime
 
 from algua.live.paper_loop import PaperRunResult
 
-# Alpaca client_order_id allows up to 128 chars; keep ours under that and strip anything outside
-# [A-Za-z0-9_-] so a symbol or strategy name with odd characters can't produce an invalid id.
+# Alpaca client_order_id allows up to 128 chars; strip anything outside [A-Za-z0-9_-] so a symbol
+# or strategy name with odd characters can't produce an invalid id.
 _COID_SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
+_COID_MAX_CHARS = 128  # Alpaca's documented client_order_id ceiling
+#: Longest strategy name that can never overflow the id. 128 - len("-YYYYmmddTHHMMSSZ-") - a
+#: generous symbol allowance. Enforced at REGISTRATION (`assert_coid_safe_name`) so the raise below
+#: is unreachable in practice: a name is configuration, fixed once, and a tick is the wrong place to
+#: discover it is too long.
+MAX_STRATEGY_NAME_CHARS = 100
+
+
+def assert_coid_safe_name(name: str) -> None:
+    """Refuse a strategy name that could make `client_order_id` ambiguous.
+
+    TWO failure modes, both of which end in one id standing for two different decisions:
+
+    * LENGTH -- the id used to be truncated with `[:128]`, and truncation cuts from the RIGHT, so a
+      long enough name pushed the timestamp and symbol off the end and every session and every
+      symbol collapsed onto one id.
+    * NON-ASCII -- sanitisation maps every character outside [A-Za-z0-9_-] to "_", so two distinct
+      names (`a.b` and `a/b`, or two different accented spellings) can sanitise to the same string.
+
+    Either one defeats duplicate-order recovery: `recover_duplicate_order_id` compares the returned
+    symbol and side, but two strategies colliding on the same symbol and side pass both checks, and
+    the current order is silently attributed to a stale one and never submitted.
+
+    Checked at registration rather than at submit time because a name is configuration: it is fixed
+    once, so this fails immediately and identically rather than intermittently mid-tick.
+    """
+    if len(name) > MAX_STRATEGY_NAME_CHARS:
+        raise ValueError(
+            f"strategy name is {len(name)} chars, over the {MAX_STRATEGY_NAME_CHARS} limit that "
+            f"keeps client_order_id unambiguous (Alpaca caps the id at {_COID_MAX_CHARS})"
+        )
+    if not name.isascii():
+        raise ValueError(
+            f"strategy name {name!r} is not ASCII; client_order_id sanitisation would map it onto "
+            f"the same id as another name, making two decisions indistinguishable"
+        )
 
 
 def client_order_id(strategy: str, decision_ts: datetime, symbol: str) -> str:
     """Deterministic Alpaca client_order_id for one (strategy, decision_ts, symbol). Identical
     inputs always produce the same id, so a retried submit (after a transient failure) or a re-run
-    of the same tick reuses the id and Alpaca de-duplicates rather than double-filling (#18, #24).
-    The decision timestamp is normalised to UTC so the id does not depend on the caller's tzinfo."""
+    of the same tick reuses the id and the submit is idempotent (#18, #24). The decision timestamp
+    is normalised to UTC so the id does not depend on the caller's tzinfo.
+
+    FAILS CLOSED RATHER THAN TRUNCATING. This used to end in `[:128]`; see `assert_coid_safe_name`
+    for why that let distinct decisions collide. Registration rejects the names that could reach
+    this raise, so it is a backstop for a name that predates that check, not a live path.
+    """
     ts = decision_ts.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    raw = f"{strategy}-{ts}-{symbol}"
-    return _COID_SANITIZE.sub("_", raw)[:128]
+    coid = _COID_SANITIZE.sub("_", f"{strategy}-{ts}-{symbol}")
+    if len(coid) > _COID_MAX_CHARS:
+        raise ValueError(
+            f"client_order_id for {strategy!r}/{symbol!r} would be {len(coid)} chars, over the "
+            f"venue's {_COID_MAX_CHARS}; truncating it would let distinct decisions collide on one "
+            f"id — shorten the strategy name"
+        )
+    return coid
 
 
 def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:

@@ -62,9 +62,16 @@ BUDGET: dict[str, int] = {
     # between-tick move policy (u <= 1/(1+r)), sizing 5% as a stress allowance against measured
     # session returns, and saying what it does NOT solve. It belongs on the contract it constrains.
     "algua/contracts/types.py": 465,
-    "algua/execution/alpaca_broker.py": 501,
+    # +12 for #560: submits recover from Alpaca's duplicate-client_order_id 422 instead of
+    # aborting the whole multi-tenant cycle. The classification and the verified recovery live in
+    # algua/execution/alpaca_rejections.py; this is the minimum wiring both submit paths share.
+    "algua/execution/alpaca_broker.py": 513,
     "algua/execution/live_ledger.py": 620,
-    "algua/execution/order_state.py": 385,
+    # +46 for #560: client_order_id fails closed instead of truncating, plus assert_coid_safe_name
+    # and the reasoning for both. Truncation cut from the RIGHT, so a long name pushed the timestamp
+    # and symbol off the end and distinct decisions collapsed onto one id — which defeats duplicate
+    # -order recovery. Mostly the comment recording why, since the rule is enforced at registration.
+    "algua/execution/order_state.py": 431,
     "algua/knowledge/sync.py": 475,
     "algua/live/live_loop.py": 418,
     "algua/models/registry.py": 329,
@@ -79,7 +86,8 @@ BUDGET: dict[str, int] = {
     "algua/registry/promote_run.py": 348,
     "algua/registry/promotion.py": 542,
     "algua/registry/repository.py": 965,
-    "algua/registry/store/crud.py": 386,
+    # +5 for #560: the registration-time call to assert_coid_safe_name plus why it lives there.
+    "algua/registry/store/crud.py": 391,
     "algua/registry/store/family.py": 470,
     "algua/registry/store/gate.py": 594,
     "algua/research/eval_harness.py": 423,

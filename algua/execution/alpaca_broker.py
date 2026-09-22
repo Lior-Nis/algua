@@ -12,6 +12,10 @@ from requests import RequestException
 
 from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
+from algua.execution.alpaca_rejections import (
+    is_duplicate_client_order_id,
+    recover_duplicate_order_id,
+)
 from algua.execution.errors import BrokerError
 from algua.execution.sizing import MIN_NOTIONAL, size_order
 from algua.primitives.retry import RetriesExhausted, call_with_backoff
@@ -22,8 +26,9 @@ _PAPER_DEFAULT_URL = "https://paper-api.alpaca.markets"
 _LIVE_DEFAULT_URL = "https://api.alpaca.markets"
 
 # Retry policy for transient broker failures (#24). Reads are always safe to retry; submits are
-# safe ONLY because they carry a deterministic client_order_id, so a retried POST that already
-# landed is de-duplicated by Alpaca rather than double-filling.
+# safe ONLY because they carry a deterministic client_order_id. Alpaca does NOT de-duplicate that
+# id -- it rejects the repeat with 422 -- so `_post_order` converts the rejection into a lookup of
+# the order that already landed (#560). Without that, this retry policy double-posts or aborts.
 _RETRYABLE_STATUS = (429, 500, 502, 503, 504)
 _MAX_RETRIES = 3  # total attempts = 1 + retries on a retryable failure
 _BACKOFF_BASE = 0.5  # seconds; sleep grows _BACKOFF_BASE * 2**attempt between attempts
@@ -163,6 +168,21 @@ class _AlpacaBroker:
             return resp.json()
         except ValueError as exc:
             raise BrokerError(f"alpaca malformed JSON on {path}: {exc}") from exc
+
+    def _post_order(self, body: dict[str, Any], path: str, coid: str | None) -> str:
+        """POST an order and return its broker id, treating a duplicate-id rejection as proof the
+        order already landed and resolving it to that order's id (#560). The recovered order is
+        verified to be ours before it is attributed -- see `recover_duplicate_order_id`."""
+        resp = self._post("/v2/orders", body)
+        if coid is not None and is_duplicate_client_order_id(resp.status_code, resp.text):
+            return recover_duplicate_order_id(
+                self.get_order_by_client_order_id, coid,
+                symbol=str(body["symbol"]), side=str(body["side"]), path=path)
+        data = self._read(resp, path, ok=(200, 201))
+        order_id = data.get("id") if isinstance(data, dict) else None
+        if not order_id:
+            raise BrokerError(f"alpaca {path}: response missing 'id': {data}")
+        return str(order_id)
 
     @staticmethod
     def _num(data: dict[str, Any], key: str, path: str) -> float:
@@ -313,11 +333,7 @@ class _AlpacaBroker:
                                 "side": side, "type": "market", "time_in_force": "day"}
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
-        data = self._read(self._post("/v2/orders", body), "/v2/orders", ok=(200, 201))
-        order_id = data.get("id") if isinstance(data, dict) else None
-        if not order_id:
-            raise BrokerError(f"alpaca /v2/orders: response missing 'id': {data}")
-        return str(order_id)
+        return self._post_order(body, "/v2/orders", client_order_id)
 
     def submit_offset(self, symbol: str, signed_qty: float, client_order_id: str) -> str:
         """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long
@@ -336,11 +352,7 @@ class _AlpacaBroker:
             "side": "sell" if signed_qty > 0 else "buy",
             "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
         }
-        data = self._read(self._post("/v2/orders", body), "/v2/orders", ok=(200, 201))
-        order_id = data.get("id") if isinstance(data, dict) else None
-        if not order_id:
-            raise BrokerError(f"alpaca /v2/orders (offset): response missing 'id': {data}")
-        return str(order_id)
+        return self._post_order(body, "/v2/orders (offset)", client_order_id)
 
     def submit(self, intent: OrderIntent, client_order_id: str | None = None) -> str:
         """Broker-protocol single-symbol submit: snapshot scoped to this one symbol, then size +
