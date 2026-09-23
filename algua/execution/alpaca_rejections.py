@@ -34,10 +34,15 @@ from algua.execution.errors import BrokerError
 _MENTIONS_COID = re.compile(r"client[ _]?order[ _]?id|42210000", re.IGNORECASE)
 _MEANS_DUPLICATE = re.compile(r"unique|duplicate|already exist", re.IGNORECASE)
 
-#: Statuses meaning the order behind the id WILL NOT execute as submitted. Recovery must refuse
-#: these: every tick CANCELS open orders before its submit loop (`live_loop`), so a same-decision
-#: re-run would otherwise cancel the original, "recover" the order it just cancelled, and record a
-#: dead order as this tick's live submission.
+#: Outcome when the id is held by an order that will never execute. The id CANNOT be reused -- the
+#: venue keeps it reserved even after cancellation -- so this decision simply gets no order for this
+#: symbol, and the next decision timestamp mints a fresh id.
+DEAD_ORDER_SKIP = "skipped"
+
+#: Statuses meaning the order behind the id WILL NOT execute as submitted. Recovery must not report
+#: these as a submission: every tick CANCELS open orders before its submit loop (`live_loop`), so a
+#: same-decision re-run would otherwise cancel the original, "recover" the order it just cancelled,
+#: and record a dead order as this tick's live submission.
 #:
 #: `filled` and `partially_filled` are deliberately NOT here -- those orders really did reach the
 #: book, which is exactly what recovery is for. An UNKNOWN status is accepted rather than refused:
@@ -87,7 +92,15 @@ def recover_duplicate_order_id(
     different notional for the same coid, and the order that already landed is still the correct
     idempotent answer; requiring equality would break legitimate recovery.
 
-    STATUS IS checked, against `_DEAD_STATUSES`. A dead order is not a submission.
+    STATUS IS checked against `_DEAD_STATUSES`, and a dead order returns `DEAD_ORDER_SKIP` rather
+    than raising. Raising was tried and is wrong: it re-created the very cycle abort this module
+    exists to remove, and it fires on the SELF-INFLICTED case -- the tick cancels its own open
+    orders, then a re-run of the same decision finds the id held by the order it just cancelled.
+    Observed live: every 20 minutes, on `cross_sectional_momentum-20260921T000000Z-AAPL`.
+
+    The leg is simply not traded for this decision. That is honest (no dead order is reported as
+    live) and it lets the cycle complete, which is what stops the retry loop that manufactures the
+    collision in the first place.
     """
     order = lookup(client_order_id)
     if order is None:
@@ -100,11 +113,9 @@ def recover_duplicate_order_id(
     status = str(order.get("status", "")).lower()
     if status in _DEAD_STATUSES:
         # The id is taken by an order that will never execute -- most plausibly the one THIS tick
-        # cancelled moments ago. Returning it would record a dead order as a live submission.
-        raise BrokerError(
-            f"alpaca {path}: client_order_id {client_order_id!r} belongs to a {status} order; "
-            f"refusing to report it as this tick's submission"
-        )
+        # cancelled moments ago. It cannot be reused, so there is no order for this leg: skip it
+        # rather than either lying about a submission or aborting every other tenant's cycle.
+        return DEAD_ORDER_SKIP
     order_id = order.get("id")
     if (
         order.get("client_order_id") != client_order_id

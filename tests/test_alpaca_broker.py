@@ -6,6 +6,7 @@ import pytest
 from algua.contracts.types import OrderIntent, Side
 from algua.execution import alpaca_broker as ab
 from algua.execution.alpaca_broker import AlpacaPaperBroker
+from algua.execution.alpaca_rejections import DEAD_ORDER_SKIP
 from algua.execution.errors import BrokerError
 
 T0 = datetime(2023, 1, 2, tzinfo=UTC)
@@ -1044,17 +1045,21 @@ def test_a_differently_sized_resubmit_still_recovers(monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["canceled", "cancelled", "expired", "rejected", "replaced"])
-def test_recovery_refuses_an_order_that_will_never_execute(monkeypatch, status):
+def test_a_dead_order_is_skipped_not_reported_as_a_submission(monkeypatch, status):
     """THE cancel-then-recover hole. Every tick cancels open orders before its submit loop, so a
-    same-decision re-run would otherwise cancel the original, recover the order it just cancelled,
-    and record a dead order as this tick's live submission."""
+    same-decision re-run finds the id held by the order it just cancelled.
+
+    Two wrong answers, both tried: reporting it as this tick's submission corrupts the ledger with a
+    dead order, and RAISING re-creates the cycle abort this module exists to remove — observed live
+    every 20 minutes on `cross_sectional_momentum-20260921T000000Z-AAPL`. The id cannot be reused,
+    so the leg simply gets no order for this decision.
+    """
     fake = _recovering(_venue_order(status=status))
     monkeypatch.setattr(ab, "requests", fake)
     broker = _broker()
     snap = broker.snapshot(["AAPL"])
     broker.submit_sized(_intent(), snap, "coid-1")
-    with pytest.raises(BrokerError, match=f"belongs to a {status} order"):
-        broker.submit_sized(_intent(), snap, "coid-1")
+    assert broker.submit_sized(_intent(), snap, "coid-1") == DEAD_ORDER_SKIP
 
 
 @pytest.mark.parametrize("status", ["filled", "partially_filled", "new", "accepted"])
@@ -1095,21 +1100,20 @@ def test_a_recovered_order_refunds_its_buying_power_reservation(monkeypatch):
     assert released == [], "a genuinely new order must NOT be refunded"
 
     broker.submit_sized(_intent(), snap, "coid-1", reserve=_reserve, release=_release)
-    assert len(released) == 1, "the recovered submit must refund exactly once"
+    assert len(released) == 1, "the re-identified submit must refund exactly once"
     assert pool["available"] == pytest.approx(after_first), "the pool must be left unchanged"
 
 
-def test_a_new_order_is_not_reported_as_recovered(monkeypatch):
-    """The flag must distinguish the two events, or the refund fires on every submit."""
+def test_only_a_genuinely_new_order_reports_posted_new(monkeypatch):
+    """The flag must distinguish the two events, or the refund fires on every submit — or never."""
     fake = _recovering()
     monkeypatch.setattr(ab, "requests", fake)
     broker = _broker()
-    _order_id, recovered = broker._post_order(
-        {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}, "/v2/orders", "coid-1")
-    assert recovered is False
-    _order_id2, recovered2 = broker._post_order(
-        {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}, "/v2/orders", "coid-1")
-    assert recovered2 is True
+    body = {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}
+    _id, posted_new = broker._post_order(body, "/v2/orders", "coid-1")
+    assert posted_new is True, "the first submit really does reach the venue"
+    _id2, posted_new2 = broker._post_order(body, "/v2/orders", "coid-1")
+    assert posted_new2 is False, "a re-identified order placed nothing new this cycle"
 
 
 @pytest.mark.parametrize("status_code, text, why", [
@@ -1130,3 +1134,33 @@ def test_each_half_of_the_classifier_is_load_bearing(status_code, text, why):
 def test_the_classifier_accepts_the_real_rejection():
     assert ab.is_duplicate_client_order_id(
         422, '{"code":42210000,"message":"client_order_id must be unique"}')
+
+
+def test_a_skipped_dead_order_also_refunds_its_reservation(monkeypatch):
+    """No order exists for this leg, so the cycle consumed nothing — keeping the debit would starve
+    a later tenant of buying power nothing used."""
+    fake = _recovering(_venue_order(status="canceled"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    pool = {"available": 10_000.0}
+
+    def _reserve(symbol, notional):
+        grant = min(notional, pool["available"])
+        pool["available"] -= ab.posted_notional(grant)
+        return grant
+
+    def _release(symbol, notional):
+        pool["available"] += notional
+
+    broker.submit_sized(_intent(), snap, "coid-1", reserve=_reserve, release=_release)
+    before = pool["available"]
+    assert broker.submit_sized(
+        _intent(), snap, "coid-1", reserve=_reserve, release=_release) == DEAD_ORDER_SKIP
+    assert pool["available"] == pytest.approx(before)
+
+
+def test_the_skip_sentinel_is_one_the_tick_loop_already_retracts():
+    """`live_loop` retracts the phantom intent row for exactly these sentinels. A novel value would
+    leave a NULL-broker_order_id row that stranded-order recovery re-queries forever."""
+    assert DEAD_ORDER_SKIP in ("noop", "skipped")
