@@ -13,6 +13,7 @@ from requests import RequestException
 from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
 from algua.execution.alpaca_rejections import (
+    DEAD_ORDER_SKIP,
     is_duplicate_client_order_id,
     recover_duplicate_order_id,
 )
@@ -172,7 +173,7 @@ class _AlpacaBroker:
     def _post_order(
         self, body: dict[str, Any], path: str, coid: str | None
     ) -> tuple[str, bool]:
-        """POST an order; return (broker order id, recovered?).
+        """POST an order; return (outcome, posted_new).
 
         A duplicate-id rejection is proof the order ALREADY LANDED, so it resolves to that order's
         id (#560) after verifying the order is ours -- see `recover_duplicate_order_id`.
@@ -376,7 +377,16 @@ class _AlpacaBroker:
             "side": "sell" if signed_qty > 0 else "buy",
             "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
         }
-        return self._post_order(body, "/v2/orders (offset)", client_order_id)[0]
+        outcome, _posted_new = self._post_order(body, "/v2/orders (offset)", client_order_id)
+        if outcome == DEAD_ORDER_SKIP:
+            # An ordinary rebalance leg may be skipped; an EMERGENCY LIQUIDATION may not. `flatten`
+            # backfills whatever comes back as a broker order id and counts it as an offset, so a
+            # sentinel here would report a position as liquidated while it is still fully open.
+            raise BrokerError(
+                f"alpaca /v2/orders (offset): client_order_id {client_order_id!r} is held by an "
+                f"order that will never execute, so {symbol} was NOT liquidated"
+            )
+        return outcome
 
     def submit(self, intent: OrderIntent, client_order_id: str | None = None) -> str:
         """Broker-protocol single-symbol submit: snapshot scoped to this one symbol, then size +

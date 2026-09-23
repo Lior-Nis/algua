@@ -1162,5 +1162,37 @@ def test_a_skipped_dead_order_also_refunds_its_reservation(monkeypatch):
 
 def test_the_skip_sentinel_is_one_the_tick_loop_already_retracts():
     """`live_loop` retracts the phantom intent row for exactly these sentinels. A novel value would
-    leave a NULL-broker_order_id row that stranded-order recovery re-queries forever."""
-    assert DEAD_ORDER_SKIP in ("noop", "skipped")
+    leave a NULL-broker_order_id row that stranded-order recovery re-queries forever.
+
+    Asserts against the loop's OWN source rather than a literal restated here, so renaming the
+    sentinel without updating `live_loop` fails.
+    """
+    import inspect as _inspect
+
+    from algua.live import live_loop as _ll
+    src = _inspect.getsource(_ll.run_tick)
+    assert f'"{DEAD_ORDER_SKIP}"' in src, "the tick loop must recognise the sentinel it is given"
+
+
+def test_an_emergency_liquidation_never_skips_a_dead_order(monkeypatch):
+    """THE critical one. `flatten_strategy` backfills whatever `submit_offset` returns as a broker
+    order id and counts it as an offset, so a sentinel here would report a position as liquidated
+    while it is still fully open. A rebalance leg may be skipped; a liquidation may not."""
+    fake = _recovering(_venue_order(side="sell", status="canceled"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    broker.submit_offset("AAPL", 5.0, "coid-1")
+    with pytest.raises(BrokerError, match="was NOT liquidated"):
+        broker.submit_offset("AAPL", 5.0, "coid-1")
+
+
+def test_a_dead_order_that_is_also_the_wrong_order_is_refused_not_skipped(monkeypatch):
+    """Identity is checked BEFORE status. A dead AND mismatched payload must raise, not quietly
+    become a skipped leg — otherwise a mis-addressed lookup is laundered into a no-op."""
+    fake = _recovering(_venue_order(symbol="MSFT", status="canceled"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match="does not match the submitted order"):
+        broker.submit_sized(_intent(), snap, "coid-1")
