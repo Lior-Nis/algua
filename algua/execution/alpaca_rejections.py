@@ -110,12 +110,6 @@ def recover_duplicate_order_id(
             f"alpaca {path}: client_order_id {client_order_id!r} was rejected as a duplicate but "
             f"no order carries it"
         )
-    status = str(order.get("status", "")).lower()
-    if status in _DEAD_STATUSES:
-        # The id is taken by an order that will never execute -- most plausibly the one THIS tick
-        # cancelled moments ago. It cannot be reused, so there is no order for this leg: skip it
-        # rather than either lying about a submission or aborting every other tenant's cycle.
-        return DEAD_ORDER_SKIP
     order_id = order.get("id")
     if (
         order.get("client_order_id") != client_order_id
@@ -124,8 +118,14 @@ def recover_duplicate_order_id(
         or not isinstance(order_id, str)
         or not order_id.strip()
     ):
+        # Identity FIRST: a dead order that is also the wrong order must be refused, not skipped.
         raise BrokerError(
             f"alpaca {path}: the order returned for client_order_id {client_order_id!r} does not "
             f"match the submitted order (expected {symbol} {side}); refusing to attribute it"
         )
+    if str(order.get("status", "")).lower() in _DEAD_STATUSES:
+        # Proven to be OUR order, and dead. The id cannot be reused, so there is no order for this
+        # leg: the CALLER decides what that means -- an ordinary rebalance skips it, an emergency
+        # liquidation must fail loudly (see `submit_offset`).
+        return DEAD_ORDER_SKIP
     return order_id
