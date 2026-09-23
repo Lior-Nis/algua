@@ -13,6 +13,7 @@ from requests import RequestException
 from algua.contracts.net import require_https_allowlisted_host
 from algua.contracts.types import LiveAuthorization, OrderIntent
 from algua.execution.alpaca_rejections import (
+    DEAD_ORDER_SKIP,
     is_duplicate_client_order_id,
     recover_duplicate_order_id,
 )
@@ -172,24 +173,25 @@ class _AlpacaBroker:
     def _post_order(
         self, body: dict[str, Any], path: str, coid: str | None
     ) -> tuple[str, bool]:
-        """POST an order; return (broker order id, recovered?).
+        """POST an order; return (outcome, posted_new).
 
         A duplicate-id rejection is proof the order ALREADY LANDED, so it resolves to that order's
         id (#560) after verifying the order is ours -- see `recover_duplicate_order_id`.
 
-        The `recovered` flag exists because the caller must distinguish "a new order went to the
-        venue" from "an order from an earlier cycle was re-identified". Only the first consumes
-        buying power this cycle."""
+        `posted_new` is False when nothing new reached the venue -- a re-identified order from an
+        earlier cycle, or `DEAD_ORDER_SKIP` when the id is held by an order that will never execute.
+        The caller needs that distinction because only a genuinely new order consumes buying power
+        this cycle."""
         resp = self._post("/v2/orders", body)
         if coid is not None and is_duplicate_client_order_id(resp.status_code, resp.text):
             return recover_duplicate_order_id(
                 self.get_order_by_client_order_id, coid,
-                symbol=str(body["symbol"]), side=str(body["side"]), path=path), True
+                symbol=str(body["symbol"]), side=str(body["side"]), path=path), False
         data = self._read(resp, path, ok=(200, 201))
         order_id = data.get("id") if isinstance(data, dict) else None
         if not order_id:
             raise BrokerError(f"alpaca {path}: response missing 'id': {data}")
-        return str(order_id), False
+        return str(order_id), True
 
     @staticmethod
     def _num(data: dict[str, Any], key: str, path: str) -> float:
@@ -349,12 +351,14 @@ class _AlpacaBroker:
                                 "side": side, "type": "market", "time_in_force": "day"}
         if client_order_id is not None:
             body["client_order_id"] = client_order_id
-        order_id, recovered = self._post_order(body, "/v2/orders", client_order_id)
-        if recovered and reserved and release is not None:
-            # No NEW order was placed: this id belongs to an order from an earlier cycle, which the
-            # account's buying power already reflects. Give the reservation back.
+        outcome, posted_new = self._post_order(body, "/v2/orders", client_order_id)
+        if not posted_new and reserved and release is not None:
+            # No NEW order went to the venue this call -- either an order from an earlier cycle was
+            # re-identified (the account's buying power already reflects it) or the id is held by a
+            # dead order and the leg is skipped. Either way this cycle consumed nothing, so the
+            # reservation goes back rather than starving a later tenant.
             release(intent.symbol, float(notional))
-        return order_id
+        return outcome
 
     def submit_offset(self, symbol: str, signed_qty: float, client_order_id: str) -> str:
         """Submit a market order to OFFSET a believed position: sell `signed_qty` shares if long
@@ -373,7 +377,16 @@ class _AlpacaBroker:
             "side": "sell" if signed_qty > 0 else "buy",
             "type": "market", "time_in_force": "day", "client_order_id": client_order_id,
         }
-        return self._post_order(body, "/v2/orders (offset)", client_order_id)[0]
+        outcome, _posted_new = self._post_order(body, "/v2/orders (offset)", client_order_id)
+        if outcome == DEAD_ORDER_SKIP:
+            # An ordinary rebalance leg may be skipped; an EMERGENCY LIQUIDATION may not. `flatten`
+            # backfills whatever comes back as a broker order id and counts it as an offset, so a
+            # sentinel here would report a position as liquidated while it is still fully open.
+            raise BrokerError(
+                f"alpaca /v2/orders (offset): client_order_id {client_order_id!r} is held by an "
+                f"order that will never execute, so {symbol} was NOT liquidated"
+            )
+        return outcome
 
     def submit(self, intent: OrderIntent, client_order_id: str | None = None) -> str:
         """Broker-protocol single-symbol submit: snapshot scoped to this one symbol, then size +

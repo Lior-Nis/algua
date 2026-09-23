@@ -66,7 +66,7 @@ BUDGET: dict[str, int] = {
     # the whole multi-tenant cycle, and `_post_order` now reports WHETHER it recovered so the caller
     # can refund a buying-power reservation no new order consumed. The classification and the
     # verified recovery live in algua/execution/alpaca_rejections.py; this is the shared wiring.
-    "algua/execution/alpaca_broker.py": 534,
+    "algua/execution/alpaca_broker.py": 547,
     "algua/execution/live_ledger.py": 620,
     # +9 for #560: client_order_id fails closed instead of truncating (truncation cut from the
     # RIGHT, so a long name pushed the timestamp and symbol off the end and distinct decisions
