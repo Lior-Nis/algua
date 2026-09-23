@@ -11,12 +11,13 @@ for human review. Read `operating-algua` first for the golden rules. Delegate au
 
 ## The thesis
 
-**Scale is the moat** (PRD §4). Algua tests as many uncorrelated hypotheses as it can — cheaply,
-fast and honestly — and lets harsh forward selection keep the few that survive. No single market
-belief is privileged. The beliefs live one level down, as the **ideation categories** the idea
-engine rotates through (`.codex/categories.txt`): momentum, mean-reversion, seasonality,
-volatility structure, value/quality proxies, liquidity and microstructure, event-driven, and
-institutional / whale flow (the original 2026-05 thesis, now one category among several).
+Read `docs/PRD.md` §§3, 8–10: search broadly for economically plausible net-of-cost edges,
+preserve failed experiments and lessons, and aim for a small portfolio of deeply validated,
+weakly correlated strategies. No thesis is permanently privileged. Ideation categories in
+`.opencode/categories.txt` guide the search within supported data and market capabilities.
+Before repeating substantially equivalent research, search the existing strategy/family notes
+and experiment records and explain what changed. Report gaps in available memory; do not invent
+evidence of a previous search. Complete structured experiment memory remains roadmap work.
 
 You do not pick the belief. The driver claims ideas from the pool before your run and names them
 in your goal; your job is to test them honestly and report what happened.

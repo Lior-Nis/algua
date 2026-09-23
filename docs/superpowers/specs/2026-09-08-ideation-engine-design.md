@@ -1,5 +1,10 @@
 # The Ideation Engine — forage, leap, and a pool the loop drinks from (design)
 
+> Historical design context: numbered PRD references below refer to the September 6 vision,
+> not the current section numbers. Product thesis and roadmap are now governed by the
+> [Vision of Record](../../PRD.md) §§3, 8–10, 25. Retain the implementation rationale;
+> use [reconciliation](../../vision-reconciliation.md) for current gaps and reference mapping.
+
 **Date:** 2026-09-08
 **Status:** design, approved by the operator after a grilled brainstorm (10 decisions, §3), then
 revised after one Gate-1 adversarial review round (Codex; findings and rulings in §12).

@@ -2,8 +2,10 @@
 
 # Algua
 
-Agent-first algorithmic-trading research and lifecycle platform.
-See `docs/superpowers/specs/` for the architecture and `docs/agent/` for operating docs.
+Building a mostly autonomous quantitative trading company, with net trading profit as the product.
+Start with the [vision of record](docs/PRD.md), the [current architecture](docs/architecture.md),
+and the [implementation gaps and roadmap reconciliation](docs/vision-reconciliation.md).
+See `docs/agent/` for operating docs. Dated material in `docs/superpowers/` preserves design history.
 Brand assets and usage guidance live in [`docs/brand/`](docs/brand/README.md).
 
 ## Quickstart

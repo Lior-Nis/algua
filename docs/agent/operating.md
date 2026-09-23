@@ -2,6 +2,12 @@
 
 This expands `CLAUDE.md` with the why behind the rules.
 
+Product direction comes from [the vision of record](../PRD.md); current implementation gaps and
+historical references are tracked in [the reconciliation record](../vision-reconciliation.md).
+The vision does not itself change runtime controls or grant a new merge/deployment permission.
+The 10% experimental-account pause is a target requiring implementation review; the current
+configured default is documented separately in that record.
+
 ## The live gate
 Lifecycle stage lives in the SQLite registry (`algua/registry`). State is a *record*,
 not a wall: because agents can write the registry, a bare `stage='live'` flag is not a
@@ -21,6 +27,10 @@ The challenge is single-use and expires after 10 minutes. Trust the signature, n
 The forward certificate is not waivable in-band.
 
 ## Module boundaries
+
+The full implemented package map is in [architecture](../architecture.md). The original
+foundation responsibilities below remain useful orientation, not an exhaustive system inventory.
+
 - `contracts/` — pure types/protocols. No I/O, no other algua imports.
 - `calendar/` — market sessions; depended on by both backtest and live.
 - `registry/` — lifecycle source of truth (`db`, `store`, `approvals`).

@@ -1,9 +1,13 @@
 # Algua — Platform Architecture Design
 
 **Date:** 2026-05-29
-**Status:** Approved (architecture); **the thesis (§1) and roadmap (§9) are superseded by
-`docs/PRD.md` (2026-09-06)** — the walls, engine contract and correctness essentials here still
-stand; `docs/architecture.md` is the current module map.
+**Status:** Historical architecture rationale. Product thesis and roadmap are superseded by
+the [Vision of Record](../../PRD.md), reconciled 2026-09-24. The original lifecycle names,
+TOTP proposal, runtime assumptions and deferred-status claims below describe the design at
+this date, not current operating instructions. Consult [current architecture](../../architecture.md),
+`CLAUDE.md`, and [the reconciliation record](../../vision-reconciliation.md) before using this
+spec. Anti-look-ahead, reproducibility and authenticated human live authority remain requirements;
+changes to their current implementation require the existing review process.
 
 ## 1. Purpose
 

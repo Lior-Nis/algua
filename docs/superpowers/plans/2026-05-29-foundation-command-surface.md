@@ -1,5 +1,9 @@
 # Foundation & Command Surface Implementation Plan
 
+> Historical implementation plan for the completed foundation. Its scope, command examples and
+> absent-module claims describe May 2026. For new work use [current architecture](../../architecture.md)
+> and the [Vision of Record](../../PRD.md); see [reconciliation](../../vision-reconciliation.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stand up the Algua repo foundation — a runnable, JSON-emitting `algua` CLI backed by a typed contracts layer, a market-calendar wrapper, and the SQLite lifecycle registry with its live-gate rules — so both humans and agents can discover and drive the system.

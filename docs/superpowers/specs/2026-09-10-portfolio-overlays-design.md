@@ -1,5 +1,9 @@
 # Portfolio overlays — a tighten-only stage after construction (design)
 
+> PRD references in the original design below use the September 6 numbering. Current anchors
+> are [PRD](../../PRD.md) §§7, 10, 13–15. The tighten-only implementation contract remains;
+> its history does not override the current roadmap. See [reconciliation](../../vision-reconciliation.md).
+
 **Status:** design agreed 2026-09-10 between the operator and the agent. Implementation follows
 the normal plan → review-gated flow.
 **PRD anchor:** `docs/PRD.md` §6 (a strategy is a pure function of point-in-time inputs) and §4

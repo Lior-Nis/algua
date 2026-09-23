@@ -1,5 +1,9 @@
 # Artifact freeze: making the forward-evidence clock runnable
 
+**Current vision anchor:** [PRD](../../PRD.md) §§5, 7, 10, 24–25 (Phase 1).
+This remains foundational implementation direction. The status below is deliberately partial;
+adopting the vision does not ship the remaining slices or authorize a live-gate change.
+
 **Status:** design, approved in principle 2026-09-22. Planned
 (`docs/superpowers/plans/2026-09-22-evidence-epoch-and-source-normalization.md`); slice 1 (the two
 defects below) is implemented. Slices 2-7 are not yet planned or implemented.

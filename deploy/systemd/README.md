@@ -248,7 +248,8 @@ bugs to fix, `preview_gate.failed_checks` clusters show where hypotheses die. Th
 (recent hypothesis titles, injected as sanitized untrusted data). A digest write failure warns but
 never fails the run; the digest never stores raw report prose.
 
-**Categories (ideation engine).** `.opencode/categories.txt` lists the PRD §4 slugs; the research
+**Categories (ideation engine).** `.opencode/categories.txt` lists the operational categories
+under the research principles in PRD §§3, 8–10; the research
 launcher claims ideas from the pool per run (`--category` restricts), it no longer rotates a
 thesis.
 
