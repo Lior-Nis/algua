@@ -43,6 +43,13 @@ class CrudMixin(TransitionMixin):
         derived_from: str | None = None,
         description: str | None = None,
     ) -> StrategyRecord:
+        # A name that could make client_order_id ambiguous is refused HERE, once, rather than
+        # surfacing as a mid-tick failure on the trading path (#560). Deferred import to keep the
+        # registry's module-level surface off the execution layer, matching the pattern at :376.
+        # The rule lives in a stdlib-only leaf: `order_state` imports `algua.live`, which the
+        # "registry stays off the live lane" contract forbids the registry from reaching.
+        from algua.execution.coid_policy import assert_coid_safe_name
+        assert_coid_safe_name(name)
         if derived_from is not None:
             if derived_from == name:
                 raise ValueError(f"{name} cannot be derived from itself")

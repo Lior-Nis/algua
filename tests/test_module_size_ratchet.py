@@ -62,9 +62,16 @@ BUDGET: dict[str, int] = {
     # between-tick move policy (u <= 1/(1+r)), sizing 5% as a stress allowance against measured
     # session returns, and saying what it does NOT solve. It belongs on the contract it constrains.
     "algua/contracts/types.py": 465,
-    "algua/execution/alpaca_broker.py": 501,
+    # +33 for #560: submits recover from Alpaca's duplicate-client_order_id 422 instead of aborting
+    # the whole multi-tenant cycle, and `_post_order` now reports WHETHER it recovered so the caller
+    # can refund a buying-power reservation no new order consumed. The classification and the
+    # verified recovery live in algua/execution/alpaca_rejections.py; this is the shared wiring.
+    "algua/execution/alpaca_broker.py": 534,
     "algua/execution/live_ledger.py": 620,
-    "algua/execution/order_state.py": 385,
+    # +9 for #560: client_order_id fails closed instead of truncating (truncation cut from the
+    # RIGHT, so a long name pushed the timestamp and symbol off the end and distinct decisions
+    # collapsed onto one id). The NAME rule itself lives in algua/execution/coid_policy.py.
+    "algua/execution/order_state.py": 394,
     "algua/knowledge/sync.py": 475,
     "algua/live/live_loop.py": 418,
     "algua/models/registry.py": 329,
@@ -75,11 +82,16 @@ BUDGET: dict[str, int] = {
     # closes the back-crediting gaming vector; it reads the same admissibility rows the module
     # already assembles, so it belongs here rather than a new file.
     "algua/registry/forward_evidence.py": 429,
-    "algua/registry/mergeback_intake.py": 466,
+    # +5 for #560: the merge-back lane mints strategy names autonomously and inserts them directly,
+    # so the client_order_id name rule must be enforced here too or it is decorative on exactly the
+    # path that runs unattended.
+    "algua/registry/mergeback_intake.py": 471,
     "algua/registry/promote_run.py": 348,
     "algua/registry/promotion.py": 542,
     "algua/registry/repository.py": 965,
-    "algua/registry/store/crud.py": 386,
+    # +7 for #560: the registration-time call to assert_coid_safe_name, plus why the rule lives in
+    # a stdlib-only leaf (order_state imports algua.live, which this layer may not reach).
+    "algua/registry/store/crud.py": 393,
     "algua/registry/store/family.py": 470,
     "algua/registry/store/gate.py": 594,
     "algua/research/eval_harness.py": 423,

@@ -1641,3 +1641,31 @@ def test_fdr_gate_agent_pass_is_born_consumed(repo):
         "SELECT consumed FROM gate_evaluations ORDER BY id DESC LIMIT 1"
     ).fetchone()
     assert row_human["consumed"] == 0
+
+
+# --- #560: a name that could make client_order_id ambiguous is refused at registration ----------
+
+def test_registration_refuses_a_name_too_long_for_a_client_order_id(repo):
+    """The id is built as `<name>-<timestamp>-<symbol>` under a 128-char venue cap. A long enough
+    name pushed the timestamp and symbol off the end when the id was truncated, collapsing every
+    session and symbol onto ONE id — which defeats duplicate-order recovery, since that compares
+    the returned symbol and side and two decisions colliding on both pass every check.
+
+    Caught HERE, once, because a name is configuration: discovering it mid-tick on the trading
+    path would be a live failure for a fixed, knowable input.
+    """
+    with pytest.raises(ValueError, match="client_order_id"):
+        repo.add("x" * 120)
+
+
+def test_registration_refuses_a_non_ascii_name(repo):
+    """Sanitisation maps every character outside [A-Za-z0-9_-] to `_`, so two distinct names can
+    reduce to the same id."""
+    with pytest.raises(ValueError, match="not ASCII"):
+        repo.add("café_momentum")
+
+
+def test_registration_accepts_an_ordinary_name(repo):
+    """The guard must not reject anything real: the longest live name is 37 chars."""
+    rec = repo.add("distributed_loss_peer_selloff_rebound")
+    assert rec.name == "distributed_loss_peer_selloff_rebound"

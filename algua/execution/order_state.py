@@ -1,25 +1,33 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from datetime import UTC, datetime
 
+from algua.execution.coid_policy import COID_MAX_CHARS, COID_SANITIZE
 from algua.live.paper_loop import PaperRunResult
-
-# Alpaca client_order_id allows up to 128 chars; keep ours under that and strip anything outside
-# [A-Za-z0-9_-] so a symbol or strategy name with odd characters can't produce an invalid id.
-_COID_SANITIZE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def client_order_id(strategy: str, decision_ts: datetime, symbol: str) -> str:
     """Deterministic Alpaca client_order_id for one (strategy, decision_ts, symbol). Identical
     inputs always produce the same id, so a retried submit (after a transient failure) or a re-run
-    of the same tick reuses the id and Alpaca de-duplicates rather than double-filling (#18, #24).
-    The decision timestamp is normalised to UTC so the id does not depend on the caller's tzinfo."""
+    of the same tick reuses the id and the submit is idempotent (#18, #24). The decision timestamp
+    is normalised to UTC so the id does not depend on the caller's tzinfo.
+
+    FAILS CLOSED RATHER THAN TRUNCATING. This used to end in `[:128]`; see
+    `coid_policy.assert_coid_safe_name` for why that let distinct decisions collide. Registration
+    rejects the names that could reach this raise, so it is a backstop for a name that predates that
+    check, not a live path.
+    """
     ts = decision_ts.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    raw = f"{strategy}-{ts}-{symbol}"
-    return _COID_SANITIZE.sub("_", raw)[:128]
+    coid = COID_SANITIZE.sub("_", f"{strategy}-{ts}-{symbol}")
+    if len(coid) > COID_MAX_CHARS:
+        raise ValueError(
+            f"client_order_id for {strategy!r}/{symbol!r} would be {len(coid)} chars, over the "
+            f"venue's {COID_MAX_CHARS}; truncating it would let distinct decisions collide on one "
+            f"id — shorten the strategy name"
+        )
+    return coid
 
 
 def persist_run(conn: sqlite3.Connection, result: PaperRunResult) -> None:

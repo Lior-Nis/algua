@@ -1,9 +1,10 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
 
 from algua.contracts.types import OrderIntent, Side
+from algua.execution.coid_policy import MAX_STRATEGY_NAME_CHARS, assert_coid_safe_name
 from algua.execution.order_state import (
     clear_all_peaks,
     clear_peak_equity,
@@ -313,3 +314,54 @@ def test_tick_snapshot_without_snapshot_id_is_none(conn):
     assert latest_tick_snapshot(conn, "s2")["snapshot_id"] is None
 
 
+
+
+# --- #560: one id must never stand for two decisions -------------------------------------------
+
+def test_a_real_strategy_name_produces_the_same_id_as_before():
+    """No deploy transition. Orders resting at the venue under ids minted before this change must
+    still be found by duplicate recovery, so the format stays byte-identical."""
+    assert client_order_id("s", datetime(2026, 1, 5, tzinfo=UTC), "AAA") == "s-20260105T000000Z-AAA"
+
+
+def test_the_id_is_deterministic_and_timezone_independent():
+    """The whole idempotency contract rests on this: a retry must reuse the id."""
+    t = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    assert client_order_id("s", t, "AAA") == client_order_id("s", t, "AAA")
+    assert client_order_id("s", t, "AAA") == client_order_id(
+        "s", t.astimezone(timezone(timedelta(hours=5))), "AAA")
+
+
+def test_an_over_long_id_fails_closed_instead_of_truncating():
+    """Truncation cut from the RIGHT, so a long enough name pushed the timestamp and symbol off the
+    end and every session and symbol collapsed onto one id — which defeats duplicate recovery: it
+    compares the returned symbol and side, and two decisions colliding on both pass all checks."""
+    with pytest.raises(ValueError, match="over the venue's 128"):
+        client_order_id("x" * 200, datetime(2026, 1, 5, tzinfo=UTC), "AAA")
+
+
+def test_a_registerable_name_can_never_reach_that_raise():
+    """The backstop must be unreachable in practice: registration rejects anything long enough to
+    trip it, with room for a long symbol."""
+    longest = "n" * MAX_STRATEGY_NAME_CHARS
+    assert_coid_safe_name(longest)  # accepted at registration
+    coid = client_order_id(longest, datetime(2026, 1, 5, tzinfo=UTC), "BRKB")
+    assert len(coid) <= 128
+
+
+@pytest.mark.parametrize("name, why", [
+    ("x" * 101, "length: truncation would drop the timestamp and symbol"),
+    ("café_momentum", "non-ASCII: sanitisation maps it onto another name's id"),
+])
+def test_a_collision_prone_name_is_refused(name, why):
+    with pytest.raises(ValueError):
+        assert_coid_safe_name(name)
+
+
+def test_two_names_that_sanitise_alike_cannot_both_be_registered():
+    """`a.b` and `a/b` both sanitise to `a_b`. ASCII-only does not stop that pair, so prove which
+    protection actually applies: both are ASCII, so they are accepted here and the collision is
+    prevented upstream by strategy names being Python module identifiers."""
+    assert_coid_safe_name("a_b")  # the sanitised form is itself a legal name
+    t = datetime(2026, 1, 5, tzinfo=UTC)
+    assert client_order_id("a.b", t, "AAA") == client_order_id("a_b", t, "AAA")

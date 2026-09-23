@@ -57,6 +57,7 @@ from algua.backtest.sweep_grid import parse_grid
 from algua.contracts.lifecycle import Actor, Stage, validate_transition
 from algua.contracts.registry_metadata import Author, HypothesisStatus
 from algua.contracts.types import assert_gated_costs
+from algua.execution.coid_policy import assert_coid_safe_name
 from algua.registry.metadata import dump_tags
 from algua.registry.store import SqliteStrategyRepository
 from algua.strategies.loader import load_strategy
@@ -140,6 +141,10 @@ def ensure_backtested(
         f"merge_sha={merge_sha} base_sha={base_sha}"
     )
     tags = [INTAKE_TAG, f"{_BRANCH_TIP_TAG_PREFIX}{branch_tip}"]
+    # The merge-back lane MINTS strategy names autonomously and inserts them directly, bypassing
+    # SqliteStrategyRepository.add. Without this the client_order_id guard is decorative on exactly
+    # the path that runs unattended (#560).
+    assert_coid_safe_name(strategy)
     try:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(

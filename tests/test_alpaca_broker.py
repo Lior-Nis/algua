@@ -875,3 +875,258 @@ def test_get_order_by_client_order_id_encodes_coid(monkeypatch):
     fake = _FakeRequests({"client_order_id=a%2Fb": _FakeResp(200, {"id": "b1"})})
     monkeypatch.setattr(ab, "requests", fake)
     assert _broker().get_order_by_client_order_id("a/b") == {"id": "b1"}
+
+
+# --- #560: a duplicate client_order_id must not abort the whole cycle -------------------------
+#
+# Measured on the live box before this change: 18 aborts in 6 hours, every one of them this
+# rejection, with the paper lane producing nothing for days. `paper run-all` ticks every tenant
+# inside ONE cycle, so a single 422 took down all of them.
+
+
+class _DuplicatingRequests(_FakeRequests):
+    """Alpaca's real behaviour: the first POST of a client_order_id lands, every later POST of the
+    same id is rejected 422. Keeps the ids it has seen so a test can submit twice and get the
+    genuine sequence rather than a hardcoded response."""
+
+    def __init__(self, routes, first_resp, duplicate_resp):
+        super().__init__(routes, post_resp=first_resp)
+        self.duplicate_resp = duplicate_resp
+        self._seen: set[str] = set()
+
+    def post(self, url, headers=None, json=None, timeout=None, allow_redirects=None):
+        self.posted.append(json)
+        self.redirects_allowed.append(allow_redirects)
+        coid = (json or {}).get("client_order_id")
+        if coid is not None and coid in self._seen:
+            return self.duplicate_resp
+        if coid is not None:
+            self._seen.add(coid)
+        return self.post_resp
+
+
+_DUPLICATE_422 = _FakeResp(
+    422, text='{"code":42210000,"message":"client_order_id must be unique"}')
+
+
+def _venue_order(**over):
+    """An Alpaca order object as the by-client-order-id lookup returns it."""
+    return {"id": "order-abc", "client_order_id": "coid-1", "symbol": "AAPL",
+            "side": "buy", "qty": "1", **over}
+
+
+def _snap_routes():
+    return {"/v2/account": _FakeResp(200, {"id": "acct-1", "equity": "10000", "cash": "10000",
+                                           "buying_power": "10000", "last_equity": "10000"}),
+            "/v2/positions": _FakeResp(200, [])}
+
+
+def _intent():
+    return OrderIntent("AAPL", Side.BUY, 0.5, T0)
+
+
+def _recovering(returned_order=None, first=None):
+    routes = _snap_routes()
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(
+        200, _venue_order() if returned_order is None else returned_order)
+    return _DuplicatingRequests(routes, first or _FakeResp(200, _venue_order()), _DUPLICATE_422)
+
+
+def test_a_duplicate_resolves_to_the_order_that_already_landed(monkeypatch):
+    """The regression. Before this, the second submit raised and took the cycle with it."""
+    fake = _recovering()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    first = broker.submit_sized(_intent(), snap, "coid-1")
+    second = broker.submit_sized(_intent(), snap, "coid-1")
+    assert first == "order-abc"
+    assert second == "order-abc", "a retried submit must resolve to the order already on the venue"
+
+
+def test_recovery_reads_and_never_re_posts(monkeypatch):
+    """Minting a fresh id would turn one order into two in the live lane. The duplicate id IS the
+    safety mechanism."""
+    fake = _recovering()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    broker.submit_sized(_intent(), snap, "coid-1")
+    assert [p.get("client_order_id") for p in fake.posted] == ["coid-1", "coid-1"]
+
+
+def test_a_422_that_is_not_a_duplicate_still_raises(monkeypatch):
+    """Insufficient buying power is also a 422. Swallowing it would report a phantom order id for
+    an order that never existed — strictly worse than the abort this removes."""
+    fake = _FakeRequests(_snap_routes(), post_resp=_FakeResp(
+        422, text='{"code":40310000,"message":"insufficient buying power"}'))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    with pytest.raises(BrokerError, match="422"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+def test_a_submit_without_a_coid_cannot_take_the_recovery_path(monkeypatch):
+    """With no id there is nothing to look up; such a 422 must raise like any other failure."""
+    fake = _FakeRequests(_snap_routes(), post_resp=_DUPLICATE_422)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    with pytest.raises(BrokerError, match="422"):
+        broker.submit_sized(_intent(), snap, None)
+
+
+def test_a_duplicate_the_venue_cannot_produce_raises(monkeypatch):
+    """The venue said the id was taken and then 404ed on it. Inventing an id here would record a
+    fill against an order nobody can reconcile."""
+    routes = _snap_routes()
+    routes["/v2/orders:by_client_order_id?client_order_id=coid-1"] = _FakeResp(404, text="nope")
+    fake = _DuplicatingRequests(routes, _FakeResp(200, _venue_order()), _DUPLICATE_422)
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match="no order carries it"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+@pytest.mark.parametrize("bad, why", [
+    ({"symbol": "MSFT"}, "a mis-addressed lookup must never attribute another symbol's order"),
+    ({"side": "sell"}, "accepting a buy as a sell would misreport a position as closed"),
+    ({"client_order_id": "someone-else"}, "the venue echoed a different id"),
+    ({"id": ""}, "an empty broker id would be recorded as a real one"),
+    ({"id": 12345}, "a truthy non-str would coerce to a bogus broker id"),
+])
+def test_a_recovered_order_that_is_not_ours_is_refused(monkeypatch, bad, why):
+    """The recovered payload is a SAFETY BOUNDARY, as in #312 stranded-order recovery."""
+    fake = _recovering(_venue_order(**bad))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match="does not match the submitted order"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+def test_the_liquidation_path_recovers_too_and_checks_side(monkeypatch):
+    """submit_offset is the dangerous one: flatten counts what comes back as the liquidation."""
+    ok = _recovering(_venue_order(side="sell", qty="5"), first=_FakeResp(200, _venue_order()))
+    monkeypatch.setattr(ab, "requests", ok)
+    assert _broker().submit_offset("AAPL", 5.0, "coid-1") == "order-abc"
+    assert _broker().submit_offset("AAPL", 5.0, "coid-1") == "order-abc"
+
+    wrong = _recovering(_venue_order(side="buy", qty="5"))
+    monkeypatch.setattr(ab, "requests", wrong)
+    broker = _broker()
+    broker.submit_offset("AAPL", 5.0, "coid-1")
+    with pytest.raises(BrokerError, match="does not match the submitted order"):
+        broker.submit_offset("AAPL", 5.0, "coid-1")
+
+
+def test_a_differently_sized_resubmit_still_recovers(monkeypatch):
+    """Size is deliberately NOT compared: the same decision re-run under a changed allocation posts
+    a different notional for the same coid, and the landed order is still the right answer.
+
+    The SUBMITTED notional must actually differ between the two calls, or this tests nothing -- an
+    earlier version varied only the fake lookup payload and passed for the wrong reason.
+    """
+    fake = _recovering(_venue_order(qty="999"))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(OrderIntent("AAPL", Side.BUY, 0.25, T0), snap, "coid-1")
+    assert broker.submit_sized(
+        OrderIntent("AAPL", Side.BUY, 0.75, T0), snap, "coid-1") == "order-abc"
+    posted = [p.get("notional") for p in fake.posted]
+    assert posted[0] != posted[1], "the two submits must genuinely differ in size"
+
+
+@pytest.mark.parametrize("status", ["canceled", "cancelled", "expired", "rejected", "replaced"])
+def test_recovery_refuses_an_order_that_will_never_execute(monkeypatch, status):
+    """THE cancel-then-recover hole. Every tick cancels open orders before its submit loop, so a
+    same-decision re-run would otherwise cancel the original, recover the order it just cancelled,
+    and record a dead order as this tick's live submission."""
+    fake = _recovering(_venue_order(status=status))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    with pytest.raises(BrokerError, match=f"belongs to a {status} order"):
+        broker.submit_sized(_intent(), snap, "coid-1")
+
+
+@pytest.mark.parametrize("status", ["filled", "partially_filled", "new", "accepted"])
+def test_recovery_accepts_an_order_that_really_reached_the_book(monkeypatch, status):
+    """Filled and partially-filled orders DID land -- that is what recovery is for. An unknown
+    status is accepted too: refusing it would re-create the cycle abort, and the per-tick reconcile
+    is the backstop."""
+    fake = _recovering(_venue_order(status=status))
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    broker.submit_sized(_intent(), snap, "coid-1")
+    assert broker.submit_sized(_intent(), snap, "coid-1") == "order-abc"
+
+
+def test_a_recovered_order_refunds_its_buying_power_reservation(monkeypatch):
+    """The pool is debited BEFORE the POST. A recovery placed no NEW order -- the account's buying
+    power already reflects the earlier one -- so keeping the debit double-counts it and trims or
+    skips later tenants in the same cycle for buying power nothing consumed."""
+    fake = _recovering()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    snap = broker.snapshot(["AAPL"])
+    pool = {"available": 10_000.0}
+    released: list = []
+
+    def _reserve(symbol, notional):
+        grant = min(notional, pool["available"])
+        pool["available"] -= ab.posted_notional(grant)
+        return grant
+
+    def _release(symbol, notional):
+        released.append((symbol, notional))
+        pool["available"] += notional
+
+    broker.submit_sized(_intent(), snap, "coid-1", reserve=_reserve, release=_release)
+    after_first = pool["available"]
+    assert released == [], "a genuinely new order must NOT be refunded"
+
+    broker.submit_sized(_intent(), snap, "coid-1", reserve=_reserve, release=_release)
+    assert len(released) == 1, "the recovered submit must refund exactly once"
+    assert pool["available"] == pytest.approx(after_first), "the pool must be left unchanged"
+
+
+def test_a_new_order_is_not_reported_as_recovered(monkeypatch):
+    """The flag must distinguish the two events, or the refund fires on every submit."""
+    fake = _recovering()
+    monkeypatch.setattr(ab, "requests", fake)
+    broker = _broker()
+    _order_id, recovered = broker._post_order(
+        {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}, "/v2/orders", "coid-1")
+    assert recovered is False
+    _order_id2, recovered2 = broker._post_order(
+        {"symbol": "AAPL", "side": "buy", "client_order_id": "coid-1"}, "/v2/orders", "coid-1")
+    assert recovered2 is True
+
+
+@pytest.mark.parametrize("status_code, text, why", [
+    (403, '{"code":42210000,"message":"client_order_id must be unique"}',
+     "only a 422 is this rejection; a 403 is authorization"),
+    (422, '{"code":40310000,"message":"quantity must be unique per something"}',
+     "no mention of client_order_id"),
+    (422, '{"code":42210000,"message":"client_order_id is malformed"}',
+     "mentions the field but does not mean duplicate"),
+])
+def test_each_half_of_the_classifier_is_load_bearing(status_code, text, why):
+    """Every conjunct must matter on its own. A single negative case that mismatches ALL THREE at
+    once leaves the individual conjuncts unkilled by mutation -- which is what an earlier version
+    of this file did."""
+    assert not ab.is_duplicate_client_order_id(status_code, text), why
+
+
+def test_the_classifier_accepts_the_real_rejection():
+    assert ab.is_duplicate_client_order_id(
+        422, '{"code":42210000,"message":"client_order_id must be unique"}')
