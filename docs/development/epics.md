@@ -1,6 +1,6 @@
 ---
 stepsCompleted: [1, 2]
-status: epics-approved-first-story-prepared
+status: epics-approved-second-story-prepared
 scope: phase-1-operating-kernel
 inputDocuments:
   - docs/PRD.md
@@ -167,7 +167,7 @@ Assigned to Lior on the Algua board, without invented deadlines:
   instrument restrictions, key custody, protected merges and immutable signing anchor before
   activation. Coordinate with the existing VPS task; never paste credentials into task comments.
 
-## First implementation story
+## Prepared implementation stories
 
 ### Story 1.1: Extract the in-process decision planner
 
@@ -184,6 +184,21 @@ explicit values rather than broker, registry, provider or hook authority.
 Full acceptance criteria, implementation tasks and current-code traps are in
 [Story 1.1](stories/1-1-extract-in-process-decision-planner.md).
 
-Only this story is prepared. Remaining Epic 1 slices (deployment epochs, frozen execution,
-migration) and Epic 2 require their own detailed stories and readiness review. Approval of the
-outcomes is not approval of protected implementation changes. No sprint completion is claimed.
+Story 1.1 is implemented, independently reviewed and merged in PR #667. Its merge is not a
+deployment.
+
+### Story 1.2: Record working-tree deployments and evaluate one explicit epoch
+
+As the operator, I want every newly admitted paper strategy and completed tick bound to an explicit
+deployment epoch so forward evidence cannot be back-credited or mixed across deployments.
+
+This story records and enforces the epoch while execution still uses the current working tree. It
+also closes the protected same-hash certificate reuse hazard created by explicit redeployment. It
+does not mint a frozen executable, migrate the existing fleet or redesign the signed live ceremony.
+
+Full acceptance criteria, transaction boundaries, migration rules and current-code traps are in
+[Story 1.2](stories/1-2-record-working-tree-deployments.md).
+
+Only Stories 1.1 and 1.2 are prepared. Remaining Epic 1 slices (frozen execution and migration) and
+Epic 2 require their own detailed stories and readiness review. Approval of the outcomes is not
+approval of protected implementation changes. No sprint completion is claimed.
