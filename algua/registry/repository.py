@@ -713,6 +713,7 @@ class ForwardGateLedger(Protocol):
         actor: str,
         decision_json: str,
         consumable: bool,
+        deployment_id: int | None = None,
     ) -> int:
         """Persist one forward-test gate evaluation (pass or fail) and return its row id. A
         passing AGENT row written ``consumable=True`` is the single-use token the paper ->
@@ -768,7 +769,6 @@ class ForwardGateLedger(Protocol):
         pass-or-fail on purpose: a newer failed re-evaluation must invalidate an older pass
         (#124). A NULL ``dependency_hash`` matches nothing — fail-closed."""
         ...
-
 
 class FamilyGraph(Protocol):
     """Family registry + parentage DAG + family-scoped breadth accounting (#222)."""

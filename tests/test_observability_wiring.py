@@ -14,7 +14,11 @@ import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
@@ -29,8 +33,9 @@ def _to_paper() -> None:
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "candidate",
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", _NAME, "--to", "paper",
-                               "--actor", "agent", "--reason", "paper"]).exit_code == 0
+    with connect(get_settings().db_path) as conn:
+        migrate(conn)
+        force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(_NAME).id)
     # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
     # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
     seed_passing_gate(_NAME)

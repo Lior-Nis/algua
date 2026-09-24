@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS forward_gate_evaluations (
     actor TEXT NOT NULL,
     decision_json TEXT NOT NULL,
     consumed INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    deployment_id INTEGER REFERENCES strategy_deployments(id)
 );
 CREATE INDEX IF NOT EXISTS ix_forward_gate_strategy ON forward_gate_evaluations(strategy_id);
 

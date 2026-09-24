@@ -18,6 +18,10 @@ from pathlib import Path
 import pytest
 
 from algua.cli.main import main
+from algua.config.settings import get_settings
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from tests._deployment_helpers import force_legacy_strategy
 from tests._human_actor_helpers import _sign, install_human_actor_anchor
 
 STRATEGY = "cross_sectional_momentum"
@@ -63,6 +67,13 @@ def _stage(capsys) -> str:
     code, payload = _run(capsys, "registry", "show", STRATEGY)
     assert code == 0
     return payload["stage"]
+
+
+def _force_legacy_paper() -> None:
+    """Fabricate the migration-era paper state used by lifecycle tests below Story 1.2."""
+    with connect(get_settings().db_path) as conn:
+        migrate(conn)
+        force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(STRATEGY).id)
 
 
 def test_full_research_lifecycle_to_shortlist_and_live_wall(capsys):
@@ -118,10 +129,11 @@ def test_full_research_lifecycle_to_shortlist_and_live_wall(capsys):
     assert payload["promoted"] is True
     assert _stage(capsys) == "candidate"
 
-    # candidate -> paper: an agent may operate the lifecycle up to and including paper.
+    # Candidate adoption is no longer a generic transition: only atomic deployment intake may do it.
     code, payload = _run(capsys, "registry", "transition", STRATEGY,
                          "--to", "paper", "--actor", "agent", "--reason", "e2e")
-    assert code == 0, payload
+    assert code == 1 and "atomic deployment intake" in payload["error"]
+    _force_legacy_paper()
     assert _stage(capsys) == "paper"
 
     # paper -> forward_tested: a human must advance to forward_tested before the live gate.
@@ -156,9 +168,7 @@ def _to_paper_e2e(capsys):
     code, payload = _run(capsys, "registry", "transition", STRATEGY,
                          "--to", "candidate", "--actor", "human", "--reason", "e2e setup")
     assert code == 0, payload
-    code, payload = _run(capsys, "registry", "transition", STRATEGY,
-                         "--to", "paper", "--actor", "agent", "--reason", "e2e setup")
-    assert code == 0, payload
+    _force_legacy_paper()
     assert _stage(capsys) == "paper"
 
 

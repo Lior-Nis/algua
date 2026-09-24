@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
 from algua.contracts.types import OrderIntent, Side
 from algua.risk.limits import WEIGHT_TOL, validate_decision_weights
 
 if TYPE_CHECKING:
     from algua.strategies.base import LoadedStrategy
 
-PLANNER_PROTOCOL_VERSION = 1
 
 
 @dataclass(frozen=True)

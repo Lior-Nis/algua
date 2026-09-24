@@ -22,6 +22,7 @@ from algua.execution.order_state import (
 from algua.execution.sim_broker import Fill
 from algua.live.paper_loop import OrderRecord, PaperRunResult
 from algua.registry.db import connect, migrate
+from tests._deployment_helpers import force_legacy_strategy
 
 T0 = datetime(2023, 1, 2, tzinfo=UTC)
 T1 = datetime(2023, 1, 3, tzinfo=UTC)
@@ -30,6 +31,13 @@ T1 = datetime(2023, 1, 3, tzinfo=UTC)
 def _conn(tmp_path):
     conn = connect(tmp_path / "r.db")
     migrate(conn)
+    conn.executemany(
+        "INSERT INTO strategies(id, name, stage, created_at, updated_at) VALUES (?, ?, 'paper',"
+        " 'test-fixture', 'test-fixture')",
+        ((1, "s"), (7, "other")),
+    )
+    force_legacy_strategy(conn, 1)
+    force_legacy_strategy(conn, 7)
     return conn
 
 
@@ -239,7 +247,7 @@ def test_nav_peak_ratchets_and_clears(tmp_path):
 
 def test_record_tick_snapshot_stamps_provenance(conn):
     record_tick_snapshot(
-        conn, "s", tick_ts="2026-06-11T14:00:00+00:00", decision_ts=None,
+        conn, "other", tick_ts="2026-06-11T14:00:00+00:00", decision_ts=None,
         equity=1.0, peak_equity=None, positions={}, n_submitted=0,
         reconcile_ok=True, lane="paper", strategy_id=7, code_hash="c",
         config_hash="g", dependency_hash="d", account_id="acct", cash=1.0,
@@ -307,11 +315,11 @@ def test_tick_snapshot_round_trips_snapshot_id(conn):
 
 def test_tick_snapshot_without_snapshot_id_is_none(conn):
     record_tick_snapshot(
-        conn, "s2", tick_ts="2023-06-01T21:00:00+00:00", decision_ts=None,
+        conn, "other", tick_ts="2023-06-01T21:00:00+00:00", decision_ts=None,
         equity=1.0, peak_equity=1.0, positions={}, n_submitted=0, reconcile_ok=True,
-        lane="paper", strategy_id=1, code_hash="c", config_hash="cfg", dependency_hash="d",
+        lane="paper", strategy_id=7, code_hash="c", config_hash="cfg", dependency_hash="d",
         account_id="a", cash=1.0, clock_source="broker")
-    assert latest_tick_snapshot(conn, "s2")["snapshot_id"] is None
+    assert latest_tick_snapshot(conn, "other")["snapshot_id"] is None
 
 
 

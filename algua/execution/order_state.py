@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import UTC, datetime
 
 from algua.execution.coid_policy import COID_MAX_CHARS, COID_SANITIZE
+from algua.execution.tick_snapshots import (
+    _VALID_LANES,
+)
+from algua.execution.tick_snapshots import (
+    latest_tick_snapshot as latest_tick_snapshot,
+)
+from algua.execution.tick_snapshots import (
+    record_tick_snapshot as record_tick_snapshot,
+)
 from algua.live.paper_loop import PaperRunResult
 
 
@@ -197,65 +205,6 @@ def clear_all_nav_peaks(conn: sqlite3.Connection) -> None:
     """Wipe every strategy's NAV peak — the live counterpart of clear_all_peaks, for resume-all."""
     conn.execute("DELETE FROM live_nav_peaks")
     conn.commit()
-
-
-_VALID_LANES = frozenset({"paper", "live"})
-_VALID_CLOCK_SOURCES = frozenset({"broker", "local"})
-
-
-def record_tick_snapshot(
-    conn: sqlite3.Connection, strategy: str, *, tick_ts: str, decision_ts: str | None,
-    equity: float, peak_equity: float | None, positions: dict[str, float], n_submitted: int,
-    reconcile_ok: bool,
-    lane: str, strategy_id: int, code_hash: str, config_hash: str,
-    dependency_hash: str | None, account_id: str, cash: float, clock_source: str,
-    snapshot_id: str | None = None,
-) -> None:
-    """Append one completed-tick snapshot (equity + positions) for a strategy — the per-tick
-    operability/equity-curve record read by `paper show`.
-
-    ``lane``/``clock_source`` are enforced here (not a DB CHECK constraint — SQLite ALTER TABLE
-    can't add one to an existing table); legacy NULL rows are inadmissible by design.
-    ``snapshot_id`` is the bars snapshot the tick decided on (None for legacy rows)."""
-    if lane not in _VALID_LANES:
-        raise ValueError(f"lane must be one of {sorted(_VALID_LANES)!r}, got {lane!r}")
-    if clock_source not in _VALID_CLOCK_SOURCES:
-        raise ValueError(
-            f"clock_source must be one of {sorted(_VALID_CLOCK_SOURCES)!r}, got {clock_source!r}"
-        )
-    conn.execute(
-        "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, peak_equity, "
-        "positions, n_submitted, reconcile_ok, lane, strategy_id, code_hash, config_hash, "
-        "dependency_hash, account_id, cash, clock_source, recorded_at, snapshot_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (strategy, tick_ts, decision_ts, equity, peak_equity, json.dumps(positions),
-         n_submitted, 1 if reconcile_ok else 0,
-         lane, strategy_id, code_hash, config_hash, dependency_hash,
-         account_id, cash, clock_source, datetime.now(UTC).isoformat(), snapshot_id),
-    )
-    conn.commit()
-
-
-def latest_tick_snapshot(conn: sqlite3.Connection, strategy: str) -> dict | None:
-    """The most recent tick snapshot for a strategy (positions parsed back to a dict), or None."""
-    row = conn.execute(
-        "SELECT tick_ts, decision_ts, equity, peak_equity, positions, n_submitted, reconcile_ok, "
-        "lane, strategy_id, code_hash, config_hash, dependency_hash, account_id, cash, "
-        "clock_source, recorded_at, snapshot_id "
-        "FROM tick_snapshots WHERE strategy = ? ORDER BY id DESC LIMIT 1", (strategy,)
-    ).fetchone()
-    if row is None:
-        return None
-    return {
-        "tick_ts": row["tick_ts"], "decision_ts": row["decision_ts"], "equity": row["equity"],
-        "peak_equity": row["peak_equity"], "positions": json.loads(row["positions"]),
-        "n_submitted": row["n_submitted"], "reconcile_ok": bool(row["reconcile_ok"]),
-        "lane": row["lane"], "strategy_id": row["strategy_id"],
-        "code_hash": row["code_hash"], "config_hash": row["config_hash"],
-        "dependency_hash": row["dependency_hash"], "account_id": row["account_id"],
-        "cash": row["cash"], "clock_source": row["clock_source"],
-        "recorded_at": row["recorded_at"], "snapshot_id": row["snapshot_id"],
-    }
 
 
 def _parse_snapshot_ts(value: str) -> datetime | None:

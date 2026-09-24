@@ -18,6 +18,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import kill_switch
 from algua.risk.limits import RiskBreach
+from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
 from tests._human_actor_helpers import install_human_actor_anchor, promote_signed
 
@@ -76,11 +77,19 @@ def _to_paper(name="cross_sectional_momentum"):
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
-                               "--actor", "agent", "--reason", "paper"]).exit_code == 0
     # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
     # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
     seed_passing_gate(name)
+    from contextlib import closing
+
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        sid = SqliteStrategyRepository(conn).get(name).id
+        force_legacy_strategy(conn, sid)
 
 
 def test_paper_run_executes_and_reconciles():
@@ -146,16 +155,8 @@ def test_dormant_strategy_not_run_by_paper_lane():
     strategy is at Stage.PAPER or Stage.FORWARD_TESTED. A dormant strategy is neither, so the
     command exits 1 with {"ok": false} containing a stage/eligibility message.
     """
-    # Register and drive to paper, then bench to dormant.
-    assert runner.invoke(app, ["backtest", "run", "cross_sectional_momentum", "--demo",
-                               "--register",
-                               "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
-                               "--to", "candidate", "--actor", "human",
-                               "--reason", "ok"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
-                               "--to", "paper", "--actor", "agent",
-                               "--reason", "paper"]).exit_code == 0
+    # Fabricate a migration-era paper tenant, then bench it to dormant.
+    _to_paper()
     assert runner.invoke(app, ["registry", "transition", "cross_sectional_momentum",
                                "--to", "dormant", "--actor", "agent",
                                "--reason", "seasonal"]).exit_code == 0
@@ -1418,8 +1419,11 @@ def _wire_promote(monkeypatch):
     monkeypatch.setattr(
         "algua.registry.forward_promotion.compute_artifact_hashes", lambda name: ident)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: ident)
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
     monkeypatch.setattr("algua.cli.paper_cmd.get_calendar", lambda: FakeCalendar())
     monkeypatch.setattr("algua.cli.paper_cmd._alpaca_broker_from_settings", _PromoteBroker)
+    _ensure_promote_deployment()
 
 
 def _promote_conn():
@@ -1442,6 +1446,48 @@ def _past_weekdays(n):
     return list(reversed(out))
 
 
+def _ensure_promote_deployment(name=_NAME):
+    """Give CLI promotion tests an explicit same-identity deployment epoch."""
+    from contextlib import closing
+
+    from algua.registry.store import SqliteStrategyRepository
+
+    with closing(_promote_conn()) as conn:
+        rec = SqliteStrategyRepository(conn).get(name)
+        if conn.execute(
+            "SELECT 1 FROM strategy_deployments WHERE strategy_id=? AND retired_at IS NULL",
+            (rec.id,),
+        ).fetchone() is not None:
+            return
+        conn.execute(
+            "INSERT INTO gate_evaluations(strategy_id, passed, n_funnel, own_lifetime_combos, "
+            "windowed_total_combos, funnel_window_days, breadth_provenance, pit_ok, "
+            "pit_override, holdout_n_bars, min_holdout_observations, code_hash, config_hash, "
+            "dependency_hash, data_source, snapshot_id, period_start, period_end, "
+            "holdout_frac, actor, decision_json, consumed, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rec.id, 1, 1, 1, 1, 90, "measured", 1, 0, 100, 63, "c", "g", "d", "snapshot",
+             None, "2026-01-01", "2026-06-01", 0.25, "agent",
+             json.dumps({"checks": [{"name": "holdout_sharpe", "value": 1.0}]}), 0,
+             "2026-06-10T00:00:00+00:00"))
+        gate_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO deployment_artifacts(manifest_digest, manifest_json, code_hash,"
+            " config_hash, dependency_hash, resolved_config_json, universe_name,"
+            " environment_digest, python_implementation, python_version, abi_tag, platform_tag,"
+            " planner_protocol_version, source_kind, source_ref, asset_digests_json, created_at)"
+            " VALUES ('promote-fixture','{}','c','g','d','{}',NULL,'e','CPython','3.12','abi',"
+            " 'platform',1,'working_tree','ref','[]','test-fixture')"
+        )
+        artifact_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id,"
+            " activated_at) VALUES (?,?,?,'2020-01-01T00:00:00+00:00')",
+            (rec.id, artifact_id, gate_id),
+        )
+        conn.commit()
+
+
 def _seed_passing_forward_window(name=_NAME, n=64):
     """64 admissible sessions (63 returns >= the floor) through the REAL tick writer, plus a
     qualified backtest gate row (holdout_sharpe=1.0 -> bar = max(.5*1.0, .3) = .5)."""
@@ -1453,6 +1499,10 @@ def _seed_passing_forward_window(name=_NAME, n=64):
     days = _past_weekdays(n)
     with closing(_promote_conn()) as conn:
         rec = SqliteStrategyRepository(conn).get(name)
+        deployment_id = conn.execute(
+            "SELECT id FROM strategy_deployments WHERE strategy_id=? AND retired_at IS NULL",
+            (rec.id,),
+        ).fetchone()[0]
         eq = 100.0
         for i, day in enumerate(days):
             decision = day - timedelta(days=1)
@@ -1465,19 +1515,9 @@ def _seed_passing_forward_window(name=_NAME, n=64):
                                      tzinfo=UTC).isoformat(),
                 equity=eq, peak_equity=None, positions={}, n_submitted=0, reconcile_ok=True,
                 lane="paper", strategy_id=rec.id, code_hash="c", config_hash="g",
-                dependency_hash="d", account_id="acct", cash=0.0, clock_source="broker")
+                dependency_hash="d", account_id="acct", cash=0.0, clock_source="broker",
+                deployment_id=deployment_id)
             eq *= 1.004 if i % 2 == 0 else 0.999
-        conn.execute(
-            "INSERT INTO gate_evaluations(strategy_id, passed, n_funnel, own_lifetime_combos, "
-            "windowed_total_combos, funnel_window_days, breadth_provenance, pit_ok, "
-            "pit_override, holdout_n_bars, min_holdout_observations, code_hash, config_hash, "
-            "dependency_hash, data_source, snapshot_id, period_start, period_end, "
-            "holdout_frac, actor, decision_json, consumed, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (rec.id, 1, 1, 1, 1, 90, "measured", 1, 0, 100, 63, "c", "g", "d", "snapshot",
-             None, "2026-01-01", "2026-06-01", 0.25, "agent",
-             json.dumps({"checks": [{"name": "holdout_sharpe", "value": 1.0}]}), 0,
-             "2026-06-10T00:00:00+00:00"))
         conn.commit()
 
 

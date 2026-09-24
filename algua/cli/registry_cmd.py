@@ -233,8 +233,8 @@ def transition(
 
             def _verify(_repo: object, sid: int, ch: str, cfg: str,
                         dep: str | None) -> PendingLiveAuthorization | bool:
-                # Verify the signature (no DB writes); the challenge consume + authorization insert
-                # are performed atomically with the stage CAS inside apply_transition (#254).
+                # Verify the signature (no DB writes); the challenge consume + authorization
+                # insert are atomic with the stage CAS inside apply_transition (#254).
                 pending = live_gate.verify_pending(
                     conn, name, sid, ch, cfg, dep, sig_bytes, ALLOWED_SIGNERS_PATH)
                 if pending is None:
@@ -250,10 +250,7 @@ def transition(
         if target is Stage.LIVE:
             # On the CLI live path the SSH signature IS the approval: the real wall is the
             # verify_and_consume signature check above + the live_authorizations row it writes,
-            # re-verified against the trust anchor at trade time. This record_approval/approvals row
-            # is AUDIT-ONLY — nothing on the production live path reads it (#273). Kept because
-            # _default_approval_verifier/has_valid_approval still back programmatic (non-CLI)
-            # transition calls, so the approvals mechanism is not fully dead.
+            # re-verified against the trust anchor at trade time; approvals is audit-only.
             record_approval(repo, name, approver["id"])
     # Re-sync the kb doc to the new stage (#331): best-effort, out-of-transaction — the
     # `with registry_conn()` block above has already committed and closed. The go-live CHALLENGE

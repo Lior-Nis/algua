@@ -1,10 +1,17 @@
 import json
+import os
+import socket
 import sqlite3
 
 import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
+from algua.config.settings import get_settings
+from algua.operator.schedule import operator_run_lock
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from tests._deployment_helpers import force_legacy_strategy
 
 runner = CliRunner()
 
@@ -37,6 +44,26 @@ def test_transition_legal():
     assert out["stage"] == "backtested"
 
 
+def test_paper_deployment_retirement_contends_on_operator_lock(tmp_path, monkeypatch):
+    _advance_to_paper("alpha")
+    lock_path = tmp_path / "operator.lock"
+    monkeypatch.setattr("algua.operator.deployment_lock._operator_lock_path", lambda: lock_path)
+
+    with operator_run_lock(
+        lock_path, job="paper", host=socket.gethostname(), pid=os.getpid(),
+    ):
+        result = runner.invoke(
+            app,
+            ["registry", "transition", "alpha", "--to", "candidate", "--actor", "human"],
+        )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert "operator.lock is held" in payload["error"]
+    assert _json(runner.invoke(app, ["registry", "show", "alpha"]))["stage"] == "paper"
+
+
 def test_transition_illegal_exits_nonzero():
     runner.invoke(app, ["registry", "add", "alpha"])
     result = runner.invoke(
@@ -48,9 +75,12 @@ def test_transition_illegal_exits_nonzero():
 def _advance_to_paper(strategy: str) -> None:
     runner.invoke(app, ["registry", "add", strategy])
     # CANDIDATE via human: scaffolding to paper, not exercising the agent shortlist gate.
-    for stage, actor in (("backtested", "agent"), ("candidate", "human"), ("paper", "agent")):
+    for stage, actor in (("backtested", "agent"), ("candidate", "human")):
         runner.invoke(app, ["registry", "transition", strategy,
                             "--to", stage, "--actor", actor])
+    with connect(get_settings().db_path) as conn:
+        migrate(conn)
+        force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(strategy).id)
 
 
 def _advance_to_forward_tested(strategy: str) -> None:

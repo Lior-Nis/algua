@@ -27,7 +27,7 @@ reach `forward_tested`; real-money activation still requires the signed human ce
 | Area | Verified current state | Target / next work |
 |---|---|---|
 | Operating kernel | Data snapshots, backtests, gates, execution, paper/live tick engines, risk and operator packages exist. | Demonstrate one strategy's safe end-to-end lifecycle; package presence is not acceptance evidence. Phase 1. |
-| Artifact reproducibility | Source normalization and contiguous evidence epochs shipped in artifact-freeze slice 1. | Frozen planner, deployment records, environment identity and signed deployment binding remain [#661](https://github.com/Lior-Nis/algua/issues/661). Phase 1, PRD §§5, 7, 10. |
+| Artifact reproducibility | The pure planner seam and explicit append-only deployment epochs are shipped. New paper intake records a canonical working-tree/environment descriptor; ticks, forward evidence and certificates bind to its deployment ID. Existing migration-time tenants remain an explicit unmigrated cohort. | Execution still imports the mutable working tree and halts on drift. Materialize a recoverable immutable planner artifact next, then bind signed live authorization to the exact deployment under [#661](https://github.com/Lior-Nis/algua/issues/661). Phase 1, PRD §§5, 7, 10. |
 | Experiment memory | `tracking/`, `knowledge/`, idea outcomes and strategy/family notes exist. `Settings.tracking_backend` defaults to `mlflow-sqlite`. | Complete the durable experiment graph, failed-result coverage, prior-search requirement and knowledge synthesis. Phase 2, PRD §9. |
 | Data and hourly operation | Bars, PIT universes and fundamentals/news storage exist. `data/capabilities.py` admits US equities and daily-family research horizons; supported storage is not proof of usable live feeds. | Deep PIT OHLCV, fundamentals, timestamped news/filings and complete hourly operation. Phase 3; [#625](https://github.com/Lior-Nis/algua/issues/625), [#630](https://github.com/Lior-Nis/algua/issues/630), and live alternative-data gap [#472](https://github.com/Lior-Nis/algua/issues/472). |
 | Autonomous engineering | Telemetry, operator machinery and research merge-back exist. `operator/diff_policy.py` permits strategy Python files and `kb/` under its deny rules. | Full incident → reproduction → test → fix → independent review → permitted release → verification loop. General core-repair merges/deployments are not enabled by PRD adoption. Phase 4. |
@@ -53,10 +53,11 @@ These findings are **flag-only** in this documentation change. Current controls 
    resumption; implement and test through safety review. Owner: Lior with the operating-kernel
    implementer, before experimental live acceptance. Do not silently change runtime settings.
 2. **Immutable execution — Important.**
-   `docs/superpowers/specs/2026-09-22-artifact-freeze-design.md` explicitly marks slices 2–7
-   unimplemented. Preserve the frozen decision/current supervisor split. Signing deployment
-   identity and any narrowing of the approved code closure require the existing protected
-   review. Owner: #661 implementer; prerequisite for immutable-artifact acceptance.
+   The planner seam and working-tree deployment/epoch slice are implemented, but a deployment
+   descriptor is evidence, not recoverable executable content. Preserve the frozen decision/current
+   supervisor split. Artifact materialization, signed deployment identity and any narrowing of the
+   approved code closure require the existing protected review. Owner: #661 implementer;
+   prerequisite for immutable-artifact acceptance.
 3. **Legacy signed relaxations — Important.**
    The old PRD tied signed research/forward relaxations to dollar capital rungs. Those rungs
    are superseded. Existing authenticated commands remain as implemented; the new vision
@@ -100,7 +101,7 @@ below changes product priority and scope, not issue completion state or deployed
 | [#628](https://github.com/Lior-Nis/algua/issues/628) | Phase 8 optional additional market data | A specific economic hypothesis and justified data cost precede adapters/calendars/instrument work. Four mandatory lanes are superseded. |
 | [#629](https://github.com/Lior-Nis/algua/issues/629) | Phase 8 conditional crypto execution | Deferred beyond initial stocks/ETF scope; requires compatible evidence, risk/capital policy and human live authorization. |
 | [#630](https://github.com/Lior-Nis/algua/issues/630) | Phase 3 hourly operation, anticipated by Phase 1 interfaces | Closed-bar timing, costs, reconciliation, staleness and evidence must be cadence-correct. No bar-count-to-calendar validation promise. |
-| [#661](https://github.com/Lior-Nis/algua/issues/661) | Phase 1 immutable deployed decision artifacts | Retain existing technical slices and separate wall-change review. Slice 1 alone is not frozen runtime completion. |
+| [#661](https://github.com/Lior-Nis/algua/issues/661) | Phase 1 immutable deployed decision artifacts | Planner extraction and explicit working-tree epochs are implemented. Materialize and execute recoverable immutable planner content next; retain separate protected review for signed deployment binding. |
 
 Phases 2, 4, 5 and 7 also require scoped acceptance work; this mapping does not claim that seven
 legacy issues exhaust the new roadmap. Each future issue must state its contribution under

@@ -17,6 +17,7 @@ from algua.registry.db.authz import SCHEMA as AUTHZ_SCHEMA
 from algua.registry.db.backtest_returns import SCHEMA as BACKTEST_RETURNS_SCHEMA
 from algua.registry.db.breadth import SCHEMA as BREADTH_SCHEMA
 from algua.registry.db.core import SCHEMA as CORE_SCHEMA
+from algua.registry.db.deployment import SCHEMA as DEPLOYMENT_SCHEMA
 from algua.registry.db.execution import SCHEMA as EXECUTION_SCHEMA
 from algua.registry.db.family import SCHEMA as FAMILY_SCHEMA
 from algua.registry.db.forward_gate import SCHEMA as FORWARD_GATE_SCHEMA
@@ -29,6 +30,7 @@ from algua.registry.db.runs import SCHEMA as RUNS_SCHEMA
 
 SCHEMA = "\n".join([
     CORE_SCHEMA,
+    DEPLOYMENT_SCHEMA,
     BREADTH_SCHEMA,
     HOLDOUT_SCHEMA,
     GATE_SCHEMA,

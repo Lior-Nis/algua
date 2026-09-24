@@ -18,6 +18,7 @@ from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.research.forward_gates import CERTIFICATE_FRESH_SESSIONS
 from algua.risk import global_halt, kill_switch
+from tests._deployment_helpers import force_legacy_strategy
 
 # Friday 2026-06-12 (June 2026 weekdays: Jun 1-5 and Jun 8-12).
 NOW = datetime(2026, 6, 12, 21, 0, tzinfo=UTC)
@@ -51,13 +52,20 @@ CAL = FakeCalendar()
 NO_ACTS = lambda after, until: []  # noqa: E731
 
 
+@pytest.fixture(autouse=True)
+def _minimal_descriptor_is_verified_elsewhere(monkeypatch):
+    """This module tests certificate semantics; descriptor bytes/source live in deployments."""
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
+
+
 @pytest.fixture
 def conn(tmp_path):
     c = connect(tmp_path / "r.db")
     migrate(c)
     c.execute("INSERT INTO strategies(name, stage, created_at, updated_at) "
               "VALUES ('s', 'forward_tested', 't', 't')")
-    c.commit()
+    force_legacy_strategy(c, 1, stage="forward_tested")
     return c
 
 
@@ -68,7 +76,7 @@ def repo(conn):
 
 def seed_cert(repo, conn, strategy_id=1, *, passed=True, created_at="2026-06-10T20:00:00+00:00",
               last_tick_id=None, account_id="acct", code_hash="c", config_hash="g",
-              dependency_hash="d") -> int:
+              dependency_hash="d", deployment_id=None) -> int:
     """Seed one forward_gate_evaluations row via the real writer, then pin created_at."""
     rid = repo.record_forward_gate_evaluation(
         strategy_id, passed=passed, n_forward_observations=80, min_forward_observations=63,
@@ -78,7 +86,7 @@ def seed_cert(repo, conn, strategy_id=1, *, passed=True, created_at="2026-06-10T
         first_tick_ts=None, last_tick_ts=None, max_staleness_sessions=5, n_reconcile_failures=0,
         n_concurrent_forward=2, account_id=account_id, code_hash=code_hash,
         config_hash=config_hash, dependency_hash=dependency_hash, actor="agent",
-        decision_json="{}", consumable=False)
+        decision_json="{}", consumable=False, deployment_id=deployment_id)
     conn.execute("UPDATE forward_gate_evaluations SET created_at=? WHERE id=?",
                  (created_at, rid))
     conn.commit()
@@ -105,6 +113,39 @@ def verify(repo, conn, **kw):
     return verify_forward_certificate(repo, conn, **args)
 
 
+def activate_deployment(conn, *, deployment_id=None) -> int:
+    conn.execute(
+        "INSERT INTO gate_evaluations(strategy_id, passed, n_funnel, own_lifetime_combos,"
+        " windowed_total_combos, funnel_window_days, breadth_provenance, pit_ok, pit_override,"
+        " holdout_n_bars, min_holdout_observations, code_hash, config_hash, dependency_hash,"
+        " data_source, snapshot_id, period_start, period_end, holdout_frac, actor, consumed,"
+        " decision_json, universe_name, created_at) VALUES"
+        " (1,1,1,1,1,90,'measured',1,0,63,63,'c','g','d','test','snap','2024-01-01',"
+        " '2024-12-31',0.2,'human',0,'{}','u','t')"
+    )
+    gate_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    if conn.execute("SELECT 1 FROM deployment_artifacts WHERE id=1").fetchone() is None:
+        conn.execute(
+            "INSERT INTO deployment_artifacts(manifest_digest, manifest_json, code_hash,"
+            " config_hash, dependency_hash, resolved_config_json, universe_name,"
+            " environment_digest, python_implementation, python_version, abi_tag, platform_tag,"
+            " planner_protocol_version, source_kind, source_ref, asset_digests_json, created_at)"
+            " VALUES ('m','{}','c','g','d','{}','u','e','CPython','3.12','abi','platform',1,"
+            " 'working_tree','ref','[]','t')"
+        )
+    columns = "id, " if deployment_id is not None else ""
+    values = "?, " if deployment_id is not None else ""
+    params = (deployment_id, gate_id) if deployment_id is not None else (gate_id,)
+    cur = conn.execute(
+        f"INSERT INTO strategy_deployments({columns}strategy_id, artifact_id, research_gate_id,"
+        f" activated_at) VALUES ({values}1,1,?,'t')",
+        params,
+    )
+    conn.commit()
+    assert cur.lastrowid is not None
+    return int(cur.lastrowid)
+
+
 # ---------------------------------------------------------------------------
 # verify_forward_certificate
 # ---------------------------------------------------------------------------
@@ -117,6 +158,37 @@ def test_happy_path_returns_certificate_summary(repo, conn):
         "realized_sharpe": 1.2, "holdout_sharpe": 1.5,
         "n_forward_observations": 80, "n_concurrent_forward": 2,
     }
+
+
+def test_same_hash_certificate_cannot_cross_deployment_epochs(repo, conn):
+    first_id = activate_deployment(conn)
+    seed_cert(repo, conn, deployment_id=first_id)
+    conn.execute(
+        "UPDATE strategy_deployments SET retired_at='2026-06-11T00:00:00+00:00' WHERE id=?",
+        (first_id,),
+    )
+    second_id = activate_deployment(conn)
+
+    with pytest.raises(TransitionError, match="forward-test certificate"):
+        verify(repo, conn)
+
+    seed_cert(repo, conn, deployment_id=second_id)
+    assert verify(repo, conn)["id"] > 0
+
+
+def test_no_deployment_outside_fixed_legacy_cohort_is_denied(repo, conn):
+    conn.execute(
+        "INSERT INTO strategies(name, stage, created_at, updated_at)"
+        " VALUES ('new', 'forward_tested', 't', 't')"
+    )
+    conn.commit()
+    seed_cert(repo, conn, strategy_id=2)
+
+    with pytest.raises(TransitionError, match="requires an active deployment"):
+        verify_forward_certificate(
+            repo, conn, name="new", strategy_id=2, identity=IDENT, calendar=CAL, now=NOW,
+            activities_fetch=NO_ACTS, account_id_fetch=lambda: "acct",
+        )
 
 
 def test_no_certificate_row_fails(repo, conn):
@@ -432,10 +504,17 @@ CERT_SUMMARY = {"id": 7, "created_at": "2026-06-10T20:00:00+00:00", "realized_sh
 
 def _cli_to_forward_tested(runner, app, name):
     runner.invoke(app, ["registry", "add", name])
-    for stage, actor in (("backtested", "agent"), ("candidate", "human"), ("paper", "agent"),
-                         ("forward_tested", "human")):
+    for stage, actor in (("backtested", "agent"), ("candidate", "human")):
         r = runner.invoke(app, ["registry", "transition", name, "--to", stage, "--actor", actor])
         assert r.exit_code == 0, r.stdout
+    from algua.config.settings import get_settings
+
+    with connect(get_settings().db_path) as db:
+        migrate(db)
+        force_legacy_strategy(db, SqliteStrategyRepository(db).get(name).id)
+    r = runner.invoke(
+        app, ["registry", "transition", name, "--to", "forward_tested", "--actor", "human"])
+    assert r.exit_code == 0, r.stdout
 
 
 @pytest.fixture

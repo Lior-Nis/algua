@@ -21,9 +21,12 @@ from typer.testing import CliRunner
 import algua.strategies.momentum as _momentum_pkg
 from algua.cli.main import app
 from algua.config.settings import get_settings
+from algua.contracts.lifecycle import Actor, Stage
 from algua.execution.alpaca_broker import AccountState
 from algua.registry.allocations import active_allocation
+from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import connect, migrate
+from algua.registry.deployment import prepare_working_tree_deployment
 from algua.registry.store import SqliteStrategyRepository
 
 runner = CliRunner()
@@ -39,6 +42,8 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGUA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("ALGUA_ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALGUA_ALPACA_API_SECRET", "s")
+    monkeypatch.setattr(
+        "algua.registry.deployment._assert_clean_working_tree", lambda _root: "test-head")
 
 
 @pytest.fixture(autouse=True)
@@ -84,12 +89,31 @@ class _FakeBroker:
 
 
 def _to_candidate(name: str) -> None:
-    """Register a real strategy via a demo backtest, then transition it to `candidate` (human
-    bypasses the shortlist gate — test setup only)."""
+    """Register, seed a human gate, then bind the candidate episode to its exact identity."""
     assert runner.invoke(app, ["backtest", "run", name, "--demo", "--register",
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
-                               "--actor", "human", "--reason", "ok"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        repo = SqliteStrategyRepository(conn)
+        rec = repo.get(name)
+        identity = compute_artifact_hashes(name)
+        repo.record_gate_evaluation(
+            rec.id, passed=True, n_funnel=1, own_lifetime_combos=1,
+            windowed_total_combos=1, funnel_window_days=90, breadth_provenance="measured",
+            pit_ok=True, pit_override=False, holdout_n_bars=63,
+            min_holdout_observations=63, code_hash=identity.code_hash,
+            config_hash=identity.config_hash, dependency_hash=identity.dependency_hash,
+            data_source="test", snapshot_id="snap", period_start="2022-01-01",
+            period_end="2023-12-31", holdout_frac=0.2, actor="human",
+            decision_json="{}", universe_name=None)
+        repo.apply_transition(
+            rec, Stage.CANDIDATE, Actor.HUMAN, "fixture gate promotion",
+            code_hash=identity.code_hash, config_hash=identity.config_hash,
+            dependency_hash=identity.dependency_hash)
+
+
+def _prepared(conn, name: str):
+    return prepare_working_tree_deployment(conn, name)
 
 
 def _force_stage(name: str, stage_value: str) -> None:
@@ -239,10 +263,13 @@ def test_primitive_rejects_non_candidate():
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         repo = SqliteStrategyRepository(conn)
+        prepared = _prepared(conn, _S1)
         with pytest.raises(TransitionError):
             repo.intake_candidate_to_paper(
                 repo.get(_S1), capital=10_000.0, actor=Actor.AGENT,
-                account_equity=100_000.0, max_concurrent=5)
+                account_equity=100_000.0, max_concurrent=5,
+                deployment_manifest=prepared.manifest,
+                research_gate_id=prepared.research_gate_id)
 
 
 def test_primitive_count_cap_is_atomic_and_rolls_back():
@@ -258,10 +285,13 @@ def test_primitive_count_cap_is_atomic_and_rolls_back():
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         repo = SqliteStrategyRepository(conn)
+        prepared = _prepared(conn, _S1)
         with pytest.raises(CountCapReached):
             repo.intake_candidate_to_paper(
                 repo.get(_S1), capital=10_000.0, actor=Actor.AGENT,
-                account_equity=100_000.0, max_concurrent=1)
+                account_equity=100_000.0, max_concurrent=1,
+                deployment_manifest=prepared.manifest,
+                research_gate_id=prepared.research_gate_id)
         assert repo.get(_S1).stage is Stage.CANDIDATE
         assert active_allocation(conn, repo.get(_S1).id) is None
 
@@ -275,10 +305,13 @@ def test_primitive_capital_bound_rolls_back():
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         repo = SqliteStrategyRepository(conn)
+        prepared = _prepared(conn, _S1)
         with pytest.raises(AllocationError):
             repo.intake_candidate_to_paper(
                 repo.get(_S1), capital=200_000.0, actor=Actor.AGENT,
-                account_equity=100_000.0, max_concurrent=5)
+                account_equity=100_000.0, max_concurrent=5,
+                deployment_manifest=prepared.manifest,
+                research_gate_id=prepared.research_gate_id)
         assert repo.get(_S1).stage is Stage.CANDIDATE
         assert active_allocation(conn, repo.get(_S1).id) is None
 

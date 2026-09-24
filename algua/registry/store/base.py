@@ -129,6 +129,25 @@ class TransitionMixin:
             raise TransitionError(
                 f"concurrent transition detected for {rec.name!r}: stage is no longer"
                 f" {from_stage.value!r} (another session moved it); re-read and retry")
+        # Deployment retirement matrix (Story 1.2): a return from paper to candidate abandons
+        # the evidence-bearing epoch, as does every terminal retirement. Pauses and lane movement
+        # retain it. The update shares the stage CAS transaction and is one-way by schema trigger.
+        if (from_stage is Stage.PAPER and to is Stage.CANDIDATE) or to is Stage.RETIRED:
+            retired = self._conn.execute(
+                "UPDATE strategy_deployments SET retired_at=?"
+                " WHERE strategy_id=? AND retired_at IS NULL",
+                (now, rec.id),
+            )
+            if retired.rowcount > 1:
+                raise TransitionError("multiple active deployments violate the deployment ledger")
+            deployment_bearing = from_stage in {
+                Stage.PAPER, Stage.FORWARD_TESTED, Stage.LIVE, Stage.DORMANT}
+            if deployment_bearing and retired.rowcount == 0 and self._conn.execute(
+                "SELECT 1 FROM legacy_deployment_strategies WHERE strategy_id=?", (rec.id,)
+            ).fetchone() is None:
+                raise TransitionError(
+                    "deployment retirement requires one active deployment; strategy is not in "
+                    "the fixed legacy cohort")
         self._conn.execute(
             "INSERT INTO stage_transitions"
             "(strategy_id, from_stage, to_stage, actor, reason, code_hash, config_hash,"

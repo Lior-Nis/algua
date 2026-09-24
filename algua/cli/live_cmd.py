@@ -62,6 +62,7 @@ from algua.observability import (
 )
 from algua.primitives.timeparse import utc
 from algua.registry import allocations
+from algua.registry import deployment_runtime as deploy
 from algua.registry.allocations import active_allocation
 from algua.registry.approvals import compute_artifact_hashes
 from algua.registry.db import registry_conn
@@ -153,14 +154,13 @@ def _run_strategy_tick(  # noqa: PLR0913
         if alloc is None:
             raise ValueError(f"{name} has no live allocation")
         allocation = float(alloc["capital"])
-        identity = compute_artifact_hashes(name)
-
+        deployment, identity = deploy.resolve_tick(conn, rec.id, name, compute_artifact_hashes)
         # #559/#601: bind this tick to the GATED universe, never CONFIG — the same wall paper
-        # enforces (landed in paper first; live lagged until #601). A missing gate row raises
-        # LookupError -> the caller's setup handling; a legacy row (universe_name NULL) falls
+        # enforces. Missing raises LookupError; a legacy row (universe_name NULL) falls
         # back to CONFIG with a warning. test_lane_parity.py asserts neither lane can lose this.
         resolved_universe, universe_source = resolve_operational_universe(
-            conn, get_settings().data_dir, name, strategy.universe)
+            conn, get_settings().data_dir, name, strategy.universe,
+            research_gate_id=(deployment.research_gate_id if deployment is not None else None))
         if universe_source == SOURCE_CONFIG_LEGACY:
             log.warning("universe_binding_config_legacy", extra={"fields": {
                 "strategy": name, "lane": "live",
@@ -264,9 +264,9 @@ def _run_strategy_tick(  # noqa: PLR0913
             reconcile_ok=result.reconcile_ok,
             lane="live", strategy_id=rec.id,
             code_hash=identity.code_hash, config_hash=identity.config_hash,
-            dependency_hash=identity.dependency_hash,
-            account_id=acct.account_id, cash=acct.cash,
-            clock_source=clock_source, snapshot_id=snapshot_id,
+            dependency_hash=identity.dependency_hash, account_id=acct.account_id,
+            cash=acct.cash, clock_source=clock_source, snapshot_id=snapshot_id,
+            deployment_id=(deployment.id if deployment is not None else None),
         )
     audit_append(conn, actor="agent", action="live_trade_tick",
                  reason=f"{len(result.submitted)} live orders submitted", strategy=name)

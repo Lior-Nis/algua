@@ -15,6 +15,7 @@ from algua.execution.order_state import record_tick_snapshot
 from algua.registry.allocations import allocate_locked
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
+from tests._deployment_helpers import force_legacy_strategy
 
 
 def _conn():
@@ -28,7 +29,10 @@ def _register(conn, name, stage=Stage.PAPER):
     repo.add(name)
     if stage is not Stage.IDEA:
         conn.execute("UPDATE strategies SET stage = ? WHERE name = ?", (stage.value, name))
-        conn.commit()
+        if stage in {Stage.PAPER, Stage.FORWARD_TESTED, Stage.LIVE, Stage.DORMANT}:
+            force_legacy_strategy(conn, repo.get(name).id, stage=stage.value)
+        else:
+            conn.commit()
     return repo.get(name)
 
 

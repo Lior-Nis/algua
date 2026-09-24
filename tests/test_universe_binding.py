@@ -82,6 +82,23 @@ def test_gate_source_newest_passing_row_wins(tmp_path):
     assert symbols == ["IBM", "ORCL"]
 
 
+def test_deployment_bound_gate_beats_newer_ambient_gate(tmp_path):
+    repo = _repo(tmp_path)
+    repo.add("s")
+    bound_gate = _gate_row(repo, "s", universe_name="bound_u")
+    _gate_row(repo, "s", universe_name="newer_u")
+    store = DataStore(tmp_path)
+    _ingest(store, "bound_u", ["AAPL", "MSFT"], "2020-01-01")
+    _ingest(store, "bound_u", ["MSFT", "GOOGL"], "2021-01-01")
+    _ingest(store, "newer_u", ["TSLA"], "2020-01-01")
+
+    symbols, source = resolve_operational_universe(
+        repo._conn, tmp_path, "s", _CONFIG_UNIVERSE, research_gate_id=bound_gate)
+
+    assert source == SOURCE_GATE
+    assert symbols == ["GOOGL", "MSFT"]
+
+
 def test_legacy_null_universe_name_falls_back_to_config(tmp_path):
     """A pre-v39 passing row (universe_name NULL) falls back to CONFIG.universe with the loud
     config_legacy source (the caller warns)."""

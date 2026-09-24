@@ -7,6 +7,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.gating import load_gated_strategy
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
+from tests._deployment_helpers import force_legacy_strategy
 
 
 def _conn(tmp_path):
@@ -18,10 +19,11 @@ def _conn(tmp_path):
 def _register_paper(conn, name="cross_sectional_momentum"):
     repo = SqliteStrategyRepository(conn)
     rec = repo.add(name)
-    # Walk the lifecycle via apply_transition (no CLI runner needed; store.py's CAS does not
-    # re-validate allowed transitions — that guard lives only in transitions.py).
-    for stage in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER):
+    for stage in (Stage.BACKTESTED, Stage.CANDIDATE):
         rec = repo.apply_transition(rec, to=stage, actor=Actor.AGENT, reason="test")
+    # This compatibility-focused gating suite models a paper tenant that existed when the
+    # deployment ledger migration ran. New candidate -> paper moves use atomic intake.
+    force_legacy_strategy(conn, rec.id)
     return repo
 
 

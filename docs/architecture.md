@@ -19,9 +19,15 @@ change fights a boundary, the boundary is usually right.
 The target is a **modular monolith + isolated live runtime + background workers** (PRD §6).
 The existing package boundaries support that direction. Isolated immutable deployment execution
 is still partial: the [artifact-freeze design](superpowers/specs/2026-09-22-artifact-freeze-design.md)
-separates a frozen decision planner from the current supervisor, with only its first slice shipped.
-The supervisor retains broker access, reconciliation and account-wide risk controls. Development
-and deployed artifacts belong to one product/repository; no production fork is required.
+separates a frozen decision planner from the current supervisor. The planner seam and explicit
+deployment epochs are shipped: new paper intake records a canonical working-tree descriptor,
+ticks and forward evaluations carry its append-only deployment ID, and certificates cannot cross
+epochs. Execution is **not frozen yet**: it still imports the mutable working tree and refuses a
+deployment-aware tick when that tree or environment drifts. The next artifact-freeze slice must
+materialize recoverable immutable planner content; existing migration-time tenants remain an
+explicit unmigrated cohort. The supervisor retains broker access, reconciliation and account-wide
+risk controls. Development and deployed artifacts belong to one product/repository; no production
+fork is required.
 
 Algua is a lifecycle: an idea becomes a backtest, a backtest becomes a gated candidate, a candidate
 paper-trades, and only a human with a signed challenge puts it live. The packages follow that arc.

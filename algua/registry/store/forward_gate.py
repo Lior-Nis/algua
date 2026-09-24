@@ -45,6 +45,7 @@ class ForwardGateMixin(TransitionMixin):
         actor: str,
         decision_json: str,
         consumable: bool,
+        deployment_id: int | None = None,
     ) -> int:
         """Persist one forward-test gate evaluation (pass or fail) and return its row id. A
         passing AGENT row written ``consumable=True`` is the single-use token the paper ->
@@ -66,7 +67,8 @@ class ForwardGateMixin(TransitionMixin):
                 n_reconcile_failures=n_reconcile_failures,
                 n_concurrent_forward=n_concurrent_forward, account_id=account_id,
                 code_hash=code_hash, config_hash=config_hash, dependency_hash=dependency_hash,
-                actor=actor, decision_json=decision_json, consumed=0 if consumable else 1)
+                actor=actor, decision_json=decision_json, consumed=0 if consumable else 1,
+                deployment_id=deployment_id)
 
     def _insert_forward_gate_row_locked(
         self,
@@ -98,6 +100,7 @@ class ForwardGateMixin(TransitionMixin):
         actor: str,
         decision_json: str,
         consumed: int,
+        deployment_id: int | None = None,
     ) -> int:
         """INSERT one forward-gate row inside the caller's already-open transaction (the caller
         owns the ``with self._conn:`` scope) and return its id."""
@@ -109,15 +112,15 @@ class ForwardGateMixin(TransitionMixin):
             " max_forward_drawdown, first_tick_id, last_tick_id, first_tick_ts, last_tick_ts,"
             " max_staleness_sessions, n_reconcile_failures, n_concurrent_forward, account_id,"
             " code_hash, config_hash, dependency_hash, actor, decision_json,"
-            " consumed, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " consumed, created_at, deployment_id)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (strategy_id, int(passed), n_forward_observations, min_forward_observations,
              session_coverage, realized_sharpe, holdout_sharpe, degradation_factor,
              sharpe_floor, realized_vol, min_forward_vol, realized_max_drawdown,
              max_forward_drawdown, first_tick_id, last_tick_id, first_tick_ts, last_tick_ts,
              max_staleness_sessions, n_reconcile_failures, n_concurrent_forward, account_id,
              code_hash, config_hash, dependency_hash, actor, decision_json,
-             consumed, _now()),
+             consumed, _now(), deployment_id),
         )
         rowid = cur.lastrowid
         assert rowid is not None

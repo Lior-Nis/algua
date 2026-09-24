@@ -18,6 +18,7 @@ from algua.registry.promotion import (
 from algua.registry.store import SqliteStrategyRepository
 from algua.research.dsr import effective_funnel_breadth
 from algua.research.gates import FUNNEL_WINDOW_DAYS, GateCriteria
+from tests._deployment_helpers import force_legacy_strategy
 
 _START = datetime(2024, 1, 1, tzinfo=UTC)
 _END = datetime(2024, 6, 1, tzinfo=UTC)
@@ -66,14 +67,18 @@ def test_resolve_pit_ok_fails_closed_on_malformed_snapshot():
 @pytest.mark.parametrize("stages", [
     (),                                              # idea
     (Stage.BACKTESTED, Stage.CANDIDATE),           # candidate
-    (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER),  # paper (PAPER->CANDIDATE is legal!)
+    (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER),  # migration-time legacy paper tenant
 ])
 def test_preflight_refuses_non_backtested_source(tmp_path, stages):
     repo = _repo(tmp_path)
     rec = repo.add("alpha")
     repo.record_search_trial("alpha", 4, "{}")  # measured breadth present (so stage is the refusal)
     for s in stages:
-        rec = repo.apply_transition(rec, s, Actor.HUMAN, "setup")
+        if s is Stage.PAPER:
+            force_legacy_strategy(repo._conn, rec.id)
+            rec = repo.get("alpha")
+        else:
+            rec = repo.apply_transition(rec, s, Actor.HUMAN, "setup")
     with pytest.raises(TransitionError, match="backtested"):
         promotion_preflight(repo, "alpha", actor=Actor.AGENT, declared_combos=None,
                             allow_holdout_reuse=False, allow_non_pit=False,
