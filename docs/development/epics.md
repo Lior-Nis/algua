@@ -1,6 +1,6 @@
 ---
 stepsCompleted: [1, 2]
-status: epics-approved-second-story-prepared
+status: epics-approved-third-story-prepared
 scope: phase-1-operating-kernel
 inputDocuments:
   - docs/PRD.md
@@ -199,6 +199,21 @@ does not mint a frozen executable, migrate the existing fleet or redesign the si
 Full acceptance criteria, transaction boundaries, migration rules and current-code traps are in
 [Story 1.2](stories/1-2-record-working-tree-deployments.md).
 
-Only Stories 1.1 and 1.2 are prepared. Remaining Epic 1 slices (frozen execution and migration) and
-Epic 2 require their own detailed stories and readiness review. Approval of the outcomes is not
-approval of protected implementation changes. No sprint completion is claimed.
+### Story 1.3: Materialize and execute frozen planner artifacts
+
+As the operator, I want each newly admitted paper strategy's planner to execute from recoverable
+immutable content so it can accumulate trustworthy evidence while repository development continues.
+
+The approved design uses a deterministic content-addressed source bundle and copied model assets,
+one short-lived planner subprocess per strategy, a shared environment only for a complete matching
+dependency/interpreter/ABI/platform fingerprint, Parquet inputs and strictly validated JSON output.
+The current supervisor retains every shared authority and broker effect. Existing working-tree and
+legacy tenants remain explicit until controlled migration; artifacts are retained without GC.
+
+Full acceptance criteria, transaction/filesystem boundaries, transport validation, failure policy
+and current-code integration seams are in
+[Story 1.3](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md).
+
+Stories 1.1–1.3 are prepared. Epic 1 migration and Epic 2 require their own detailed stories and
+readiness review. Approval of the outcomes is not approval of protected implementation changes. No
+sprint completion is claimed.

@@ -33,12 +33,15 @@ reports must distinguish tests passing, code merged, deployment verified and cap
 
 ## Current handoff
 
-[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md) is implemented
-and independently reviewed, with local verification recorded in the story. This is not a main
-merge or deployment; subsequent stories remain unprepared. The
-[readiness assessment](implementation-readiness-report-2026-09-24.md) covers only this story,
-not either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues
-outside the behavior-preserving extraction.
+[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md) and
+[Story 1.2 — explicit deployment epochs](stories/1-2-record-working-tree-deployments.md) are
+implemented, independently reviewed and merged. Neither merge is a deployment.
+[Story 1.3 — frozen planner artifacts](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md)
+is prepared as `ready-for-dev`; its approved design freezes new admissions while keeping existing
+working-tree/legacy tenants explicit until the controlled migration story. The
+[readiness assessment](implementation-readiness-report-2026-09-24.md) covers only Story 1.1, not
+either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues outside
+the active story boundary.
 
 Workflow path bindings: `planning_artifacts = docs/development`,
 `implementation_artifacts = docs/development/stories`; use `docs/PRD.md` and
