@@ -11,10 +11,10 @@ _DATASET_CAPABILITY: dict[Dataset, DataCapability] = {
     Dataset.BARS: DataCapability.OHLCV,
 }
 
-# Markets a backtest can run against today. PRD step 5 adds crypto/forex/prediction data lanes;
+# Markets a backtest can run against today. PRD phase 8 makes additional markets conditional;
 # flipping a member here re-opens every idea parked on it (research idea reclassify).
 _SUPPORTED_MARKETS: frozenset[Market] = frozenset({Market.US_EQUITIES, Market.ANY})
-# Horizons the daily execution contract serves. PRD step 7 (intraday contract) adds INTRADAY.
+# Horizons the daily execution contract serves. PRD phase 3 targets hourly operation.
 _SUPPORTED_HORIZONS: frozenset[Horizon] = frozenset(
     {Horizon.DAILY, Horizon.WEEKLY, Horizon.MONTHLY, Horizon.EVENT})
 

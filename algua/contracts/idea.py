@@ -50,7 +50,7 @@ class Market(StrEnum):
 
 
 class Horizon(StrEnum):
-    """Decision cadence an idea needs. `intraday` needs the PRD step-7 execution contract."""
+    """Decision cadence an idea needs. `intraday` needs the PRD phase-3 hourly contract."""
     INTRADAY = "intraday"
     DAILY = "daily"
     WEEKLY = "weekly"

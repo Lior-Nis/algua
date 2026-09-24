@@ -1,33 +1,39 @@
 # Algua — Agent Operating Guide
 
-Algua is an agent-first algotrading platform. You (an agent) and the human operator
+Algua is being built into a mostly autonomous quantitative trading company. You (an agent) and the human operator
 drive the system through the **same** CLI. Every data command emits JSON on stdout.
 
 ## Orientation — where to look
 - **THE VISION OF RECORD:** `docs/PRD.md` — what Algua is for, how success is measured, the
-  capital ladder, the thesis, the four markets, the four strategy kinds, who does what, and the
-  seven-step roadmap. When any spec, plan, issue or review disagrees with it, the PRD wins.
+  economic thesis, capital constraints, human authority and eight-phase development sequence.
+  It governs product direction. A conflict with current controls is work to reconcile through
+  their review process, never authorization to bypass them.
 - **START HERE if you are adding anything:** `docs/architecture.md` — the one-page module map: what
   each package owns, and the registration seam for adding a provider / importer / broker / tracker /
   calendar / strategy / command — new module + one registration line, not a core-file rewrite.
   It also lists the walls (PIT,
   single-use holdout, the paper→live gate, lane parity, executable CODEOWNERS) so you know why a
   change might be refused.
-- **Architecture & roadmap (source of truth):** `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md`
+- **Vision-to-implementation gaps and issue migration:** `docs/vision-reconciliation.md`.
+- **Historical architecture rationale:** `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md`.
+  Dated plans preserve earlier decisions; the current roadmap is PRD §25.
 - **Why the rules exist (detail):** `docs/agent/operating.md`
 - **How this foundation was built (task plan):** `docs/superpowers/plans/2026-05-29-foundation-command-surface.md`
 - **Reviewing/fixing the system?** Read `AGENTS.md` first (review mandate + invariants + deferred scope).
 - **Data contract:** `docs/contracts/bar-schema.md` — the shape of bars crossing the
   data↔research seam.
-- **Current state:** Sub-project 1 (foundation) merged. Sub-project 2 (data layer) is implemented:
-  provider-backed bars, parquet snapshots, provenance manifest, and universe snapshots. The
-  6-sub-project roadmap is in the spec above.
+- **Current state:** data, research/backtesting, paper/live execution, portfolio/risk,
+  knowledge/tracking and operator machinery are implemented. The architecture map describes
+  these packages; the reconciliation record distinguishes partial capabilities from targets.
 
 ## Golden rules
 - Drive the system through `uv run algua ...`. Never reach into modules to bypass the CLI.
 - You may operate the lifecycle autonomously **up to and including `forward_tested`**.
 - You may **never** put a strategy live. The `forward_tested -> live` transition requires a
   verified human approval AND a fresh forward-test certificate; the system enforces this.
+- Research workers follow their narrower `candidate` ceiling. Autonomous merges stay inside
+  the existing diff allowlist; broader repair/deployment autonomy requires explicitly reviewed
+  implementation. PRD adoption does not change gates, capital, runtime settings or permissions.
 - Keep `algua/contracts` and `algua/features` pure (no I/O, no cross-module imports
   beyond contracts). Import-linter enforces boundaries; run `uv run lint-imports`.
 

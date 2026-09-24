@@ -1,5 +1,13 @@
 # Algua holistic review — the verdict
 
+> **Historical review, superseded product priorities (2026-09-24).** Findings and operational
+> observations below describe September 12, not the current account or deployment state.
+> PRD section references use the September 6 version. The roadmap override below is superseded
+> by [PRD §25](../../PRD.md#25-development-sequence). Hourly bar counts do not establish a fixed
+> forward-validation time or independent statistical evidence; the quarter-versus-years
+> projections below are not an accepted planning premise. Use PRD §§10, 12 and
+> [reconciliation](../../vision-reconciliation.md) for current direction. Current gates remain binding.
+
 **Status:** agreed 2026-09-12 between the operator (Lior) and the agent.
 **Scope:** a whole-system review against `docs/PRD.md`, aligned to one goal — *the factory reliably
 produces strategies that pass the **unrelaxed** forward gate* — and to the principles the operator

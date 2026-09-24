@@ -1,7 +1,7 @@
 # AGENTS.md — Review & Fix Guide for `algua`
 
-You are reviewing **algua**, an agent-first algorithmic-trading research & lifecycle
-platform. **Your mission: review the system for real problems — correctness, safety,
+You are reviewing **algua**, the system being built toward a mostly autonomous quantitative
+trading company. **Your mission: review the system for real problems — correctness, safety,
 data-integrity, design, test gaps — and fix the ones that are in scope, while respecting the
 invariants and boundaries below.** When a problem touches a safety invariant or
 not-yet-built scope, *flag it for the human* rather than fixing it silently.
@@ -16,7 +16,7 @@ Toolchain: **Python 3.12 + uv**. From the repo root:
 
 ```bash
 uv sync                  # install deps
-uv run pytest -q         # tests (currently 40 passing)
+uv run pytest -q         # tests
 uv run ruff check .      # lint  (must stay clean)
 uv run mypy algua        # types (must stay clean)
 uv run lint-imports      # architectural import boundaries (must stay "0 broken")
@@ -31,8 +31,11 @@ Do not weaken a contract, delete a test, or `# type: ignore` your way to green �
 ## 2. Architecture map — read these first
 
 **Design intent (read before touching code):**
-- `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md` — the **architecture spec**: thesis, constraints, engine model, lifecycle, the live gate, correctness essentials, the 6-sub-project roadmap, and what is intentionally deferred. **This is the source of truth for design intent.**
-- `docs/superpowers/plans/2026-05-29-foundation-command-surface.md` — the implementation plan that built the current foundation (sub-project 1), task by task.
+- `docs/PRD.md` — **product vision of record**: objectives, constraints, capital policy and development sequence. Read before prioritizing or proposing work.
+- `docs/architecture.md` — current package responsibilities and extension seams. Read before changing implementation.
+- `docs/vision-reconciliation.md` — current implementation gaps, historical-document status and issue migration. Read when translating the vision into work or interpreting an older plan.
+- `docs/superpowers/specs/2026-05-29-algua-platform-architecture-design.md` — historical architecture rationale; its original lifecycle, authentication mechanism and roadmap are not current operating instructions.
+- `docs/superpowers/plans/2026-05-29-foundation-command-surface.md` — historical plan for the completed foundation, not the present scope limit.
 - `CLAUDE.md` — the agent operating contract (command surface, golden rules, live-gate summary).
 - `docs/agent/operating.md` — the *why* behind the rules (live-gate rationale, module boundaries, JSON convention).
 - `docs/contracts/bar-schema.md` — **FROZEN** data contract for `DataProvider.get_bars`. The data
@@ -47,13 +50,19 @@ gate → candidate), your playbooks are the skills under `.opencode/skills/` —
 (`author`, `interpret`). The same golden rules apply: drive everything through `uv run algua ...`,
 never go past `candidate`, and never edit the CODEOWNERS-protected integrity files.
 
+That ceiling applies to the isolated research worker. Operational commands may advance through
+`forward_tested` under the existing gates, as described in `CLAUDE.md`; live activation requires
+the authenticated human ceremony. The vision's future merge/deployment autonomy does not expand
+today's allowlists or approvals. Document conflicts as implementation gaps, never permission
+to bypass a control.
+
 **Agent runtime.** The autonomous loops (research, leap, forage) run on **OpenCode**, invoked
 through the single seam `.opencode/scripts/run_agent.sh`. That script is the only place in the repo
-that names a runtime, a model or a sandbox flag — model choices live in `opencode.json`, agent
+that names a runtime, a model or a sandbox flag — model choices live in `.opencode/opencode.json`, agent
 definitions in `.opencode/agents/`. If you are changing how an agent is launched, change the seam,
 not a driver. Work on a branch, not directly on `main`.
 
-**Source modules (what exists today — foundation only):**
+**Foundation modules (part of the implemented system):**
 - `algua/contracts/lifecycle.py` — `Stage`/`Actor` enums + `ALLOWED_TRANSITIONS` state machine + `validate_transition`. **Pure** (stdlib only).
 - `algua/contracts/types.py` — `ExecutionContract` (encodes the `t→t+1` anti-look-ahead rule), `OrderIntent`, and `Strategy`/`DataProvider`/`Broker` protocols. **Pure** (pandas only under `TYPE_CHECKING`).
 - `algua/calendar/market_calendar.py` — NYSE (`XNYS`) session calendar wrapper; `next_session`/`previous_session` are **strictly** after/before the given day.
@@ -65,9 +74,11 @@ not a driver. Work on a branch, not directly on `main`.
 - `algua/cli/registry_cmd.py` — `registry` subcommands (`add`/`list`/`show`/`transition`/`approve`) + `_json_errors` decorator.
 - `algua/cli/main.py` — entry point (`algua = "algua.cli.main:app"`).
 
-**Tests** mirror the modules under `tests/` (`test_lifecycle.py`, `test_contracts.py`,
-`test_calendar.py`, `test_config.py`, `test_registry_db.py`, `test_registry_store.py`,
-`test_registry_approvals.py`, `test_cli_core.py`, `test_cli_registry.py`).
+Data/snapshot storage, research/backtesting, tracking/knowledge, portfolio/risk, execution,
+paper/live ticks, audit/observability and autonomous operator machinery also exist. Use
+`docs/architecture.md` for their package map and `tests/` for current coverage. A package's
+existence does not establish that a future capability or unattended live acceptance target
+has been delivered.
 
 ---
 
@@ -78,14 +89,14 @@ Treat these as hard constraints. If a "fix" requires violating one, **stop and f
 1. **The live gate.** Entering `Stage.LIVE` requires ALL of: `actor == Actor.HUMAN`, both
    `code_hash` and `config_hash` provided, and a matching unrevoked row in `approvals`.
    `transition` coerces inputs to enums first so a raw string `"live"` cannot skip the gate.
-   The live runner (future) must trust the *approval*, never the bare `stage` flag. Never make
+   The live runner must trust the *approval*, never the bare `stage` flag. Never make
    this easier to bypass. (`algua/registry/store/`, `algua/registry/approvals.py`)
 2. **Module purity / boundaries.** `algua/contracts` and `algua/calendar` import no other
    `algua` modules (enforced by `lint-imports`). `contracts`/`features` stay side-effect-free.
    Don't introduce cross-layer imports to make something convenient.
 3. **The `t→t+1` rule.** `ExecutionContract.decision_lag_bars >= 1` — features computed on a
    closed bar `t` may not fill on the same bar. Don't relax this; it prevents look-ahead bias.
-4. **Reproducibility & point-in-time correctness** (design-level, becomes code in sub-project 2):
+4. **Reproducibility & point-in-time correctness:**
    backtests must record exactly which data snapshot/config/seed they used.
 5. **JSON command contract.** Every CLI command (success *and* error) emits parseable JSON on
    stdout with a meaningful exit code. Don't reintroduce raw tracebacks.
@@ -94,10 +105,13 @@ Treat these as hard constraints. If a "fix" requires violating one, **stop and f
 
 ## 4. Intentionally deferred — do NOT flag these as defects
 
-The current code is **only sub-project 1 (foundation)**. The following are *known, planned
-absences*, scoped to later sub-projects in the spec — do not "fix" them or report them as bugs:
+Review the implemented system, not only its original foundation. Distinguish defects in shipped
+behavior from missing target capabilities in `docs/vision-reconciliation.md`. Do not implement
+future capabilities during a review without explicit scope, especially when they affect safety.
 
-- **No data layer, backtest engine, features, execution, or paper/live runner yet** (sub-projects 2–5).
+- **Target capabilities remain partial:** immutable deployed planners, complete hourly operation,
+  comprehensive experiment memory, the complete autonomous repair/release loop and compatible
+  external-capital integrations. Their absence is roadmap work, not a foundation defect.
 - **`--actor human` below the live wall is now AUTHENTICATED (#329).** Asserting `--actor human`
   on a gated command (`research promote`, `paper promote`) requires an SSH signature (namespace
   `algua-human-actor`, enrolled via `registry enroll-approver --namespace human-actor`) over a
@@ -110,9 +124,11 @@ absences*, scoped to later sub-projects in the spec — do not "fix" them or rep
   paper thresholds) are a cryptographic boundary against a same-CLI agent that cannot write the
   tree/DB — no longer "discipline." The go-live `registry transition --to live` signed ceremony was
   already authenticated. The RESIDUAL deferred half is deploy-time anchor immutability (below).
-- **Deferred to live-hardening:** full economic-state reconciliation, crash/restart playbook,
-  real monitoring/alerting, production secrets (keyring/mounted vs `.env`), Docker/cloud deploy,
-  kill-switch hardening.
+- **Live-hardening remains an acceptance obligation:** verify economic-state reconciliation,
+  crash/restart recovery, monitoring/alerting, production secrets and runtime isolation against
+  the intended deployment. Reconciliation, monitoring, kill switches, Docker research runs and
+  systemd operators already have implementations; do not describe them all as absent. Their
+  existence does not prove safe unattended real-money operation.
 
 **Accepted residual exposures (threat-model).** These are understood, accepted trade-offs with a
 named mitigation — not defects to fix:
@@ -126,17 +142,18 @@ named mitigation — not defects to fix:
   (`algua/registry/approvals.py::compute_artifact_hashes`), so a prior approval can satisfy the live
   gate only against the same statically-reachable first-party source a human reviewed (dynamic
   `importlib` string imports and non-source data files are outside the closure). A true execution
-  sandbox is future live-hardening work.
+  strategy sandbox is future live-hardening work; the OpenCode agent's write sandbox is a
+  separate boundary. Artifact-freeze implementation is partial; see the reconciliation record.
 
 **Deployment hardening (enforce when deployment lands).** The trust anchor
 `approvers/allowed_signers` is the root of BOTH go-live authority AND (since #329) authenticated
 `--actor human`. In any real deployment it MUST NOT be writable by the runtime (agent/operator)
 user — only by the human who controls CODEOWNERS — else the runtime could enroll its own key and
 self-authorize (this is the explicit RESIDUAL of #329: the gate code reads the anchor from the
-running tree, so a tree/DB writer defeats it exactly as it defeats go-live). No deployment exists
-yet (see Docker/cloud deploy above), so this is a requirement to enforce at deploy time — a
-deploy-time-immutable installed anchor distinct from the mutable worktree copy — not a code check
-today.
+running tree, so a tree/DB writer defeats it exactly as it defeats go-live). Docker research and
+systemd operator deployment files exist. Verify an immutable installed anchor distinct from the
+mutable worktree before real deployment; these files alone do not prove that requirement is met.
+Changes to the anchor or its enforcement require human review.
 
 If you believe something deferred is mis-scoped or risky, **flag it with reasoning** — don't build it.
 
@@ -162,7 +179,7 @@ Finding *new* real issues beyond this list is exactly your job.
 ## 6. How to review and fix
 
 1. **Read** the spec + `CLAUDE.md` + `operating.md`, then the module(s) in question.
-2. **Classify** each finding: Critical / Important / Minor, and whether it's in-scope (foundation)
+2. **Classify** each finding: Critical / Important / Minor, and whether it's in-scope (implemented behavior)
    or deferred/safety-invariant (flag-only).
 3. **Fix in scope, test-first.** Write or update a failing test that captures the bug, then fix it.
    Match existing style (small focused modules, typed, JSON-emitting CLI, parameterized SQL).

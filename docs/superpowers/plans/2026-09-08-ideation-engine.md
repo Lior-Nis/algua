@@ -1,5 +1,10 @@
 # Ideation Engine Implementation Plan
 
+> Historical implementation plan. PRD step/section numbers and runtime commands below preserve
+> the September 6–8 context. Current product direction is [PRD](../../PRD.md) §§3, 8–10, 25;
+> current runtime instructions are in `CLAUDE.md` and `.opencode/`. See
+> [reconciliation](../../vision-reconciliation.md) before reusing this plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the ideation engine of PRD step 3: a web-foraging stage that writes inspiration notes, a leaping stage that turns them into structured hypotheses in the idea pool, a research loop that claims ideas from the pool and reports outcomes, and a scorecard that closes the loop — with no agent ever writing authoritative state.

@@ -1,6 +1,6 @@
 """The ideation category vocabulary (`.opencode/categories.txt`).
 
-ONE reader for the file that is a human steering surface (spec 2026-09-08 §4, PRD §7): the forage
+ONE reader for the file that is a human steering surface (spec 2026-09-08 §4, PRD §8): the forage
 rotation, the leap prompt, `research inspirations propose/accept`, `research idea add` and the
 trusted leap import all key on the SAME slug list. Duplicating the parser is how a slug becomes
 legal in one lane and unknown in another.

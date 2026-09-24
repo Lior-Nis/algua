@@ -1,5 +1,9 @@
 # Algua architecture — the one-page map
 
+**Product authority:** [Vision of Record](PRD.md). This document maps current implementation;
+the [reconciliation record](vision-reconciliation.md) tracks the gap to the target architecture
+and the PRD §25 development sequence. Earlier specs do not override that sequence.
+
 **Read this before adding anything.** It tells you which package owns what, and where the
 extension points are. If you find yourself editing a core file to add a provider, broker, calendar,
 tracker or command, stop — there is almost certainly a registration seam for it below.
@@ -11,6 +15,13 @@ change fights a boundary, the boundary is usually right.
 ---
 
 ## The shape
+
+The target is a **modular monolith + isolated live runtime + background workers** (PRD §6).
+The existing package boundaries support that direction. Isolated immutable deployment execution
+is still partial: the [artifact-freeze design](superpowers/specs/2026-09-22-artifact-freeze-design.md)
+separates a frozen decision planner from the current supervisor, with only its first slice shipped.
+The supervisor retains broker access, reconciliation and account-wide risk controls. Development
+and deployed artifacts belong to one product/repository; no production fork is required.
 
 Algua is a lifecycle: an idea becomes a backtest, a backtest becomes a gated candidate, a candidate
 paper-trades, and only a human with a signed challenge puts it live. The packages follow that arc.
@@ -66,6 +77,8 @@ stays visible rather than being blessed by an exemption.
 | `operator` | the autonomous loop: session gating, merge-back saga, loop health | cli imports |
 | `evaluation` | shared task bodies (`backtest_run`, `sweep_run`) + input resolution, importable by BOTH cli and registry | cli imports |
 | `knowledge` | the Obsidian vault sync; inspirations domain (`kb/inspirations/`) | imports of cli/registry/backtest/live/execution |
+| `tracking` | experiment provenance and artifacts; the default MLflow SQLite backend | treating recorded results as promotion authority |
+| `audit` / `observability` | operational events and structured telemetry | granting permissions from runtime evidence |
 | `cli` | typer commands, the JSON envelope, flag resolution | domain logic — extract it |
 
 ---
@@ -151,6 +164,10 @@ both key on the slug.
 
 ## The walls (why a change might be refused)
 
+- **Vision versus authority** — PRD §§18–19 describe intended autonomy. Today's authenticated
+  live gate and merge allowlists remain binding. The research worker stops at `candidate`;
+  gated operational commands may reach `forward_tested`. Broader repair/deployment permission
+  needs explicit implementation and review.
 - **PIT / anti-look-ahead** — `backtest/pit_view.py` masks universe, fundamentals and news as-of each
   decision instant; `backtest/engine.py` shifts decisions `t → t+1`. `decision_path.py`'s parity
   guard is what licenses the fast vectorised path: it proves the fast path agrees with the canonical
