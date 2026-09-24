@@ -33,9 +33,12 @@ reports must distinguish tests passing, code merged, deployment verified and cap
 
 ## Current handoff
 
-[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md) is prepared
-for development; its implementation tasks remain unchecked. Subsequent stories are not yet
-prepared. No runtime implementation or full-epic readiness approval is implied.
+[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md) is implemented
+and independently reviewed, with local verification recorded in the story. This is not a main
+merge or deployment; subsequent stories remain unprepared. The
+[readiness assessment](implementation-readiness-report-2026-09-24.md) covers only this story,
+not either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues
+outside the behavior-preserving extraction.
 
 Workflow path bindings: `planning_artifacts = docs/development`,
 `implementation_artifacts = docs/development/stories`; use `docs/PRD.md` and

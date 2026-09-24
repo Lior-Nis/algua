@@ -1,6 +1,10 @@
+---
+baseline_commit: c9cb91c7b0db3235c18438b74646f1ae795e758d
+---
+
 # Story 1.1: Extract the in-process decision planner
 
-Status: ready-for-dev
+Status: done
 
 Prepared: 2026-09-24. Baseline: `c4e8c8f409a8233cb5bc2a1ffe4f9ddba6bd8875`.
 Epic: 1. Requirements: FR2–FR3; enabling work for FR4–FR7, not their completion.
@@ -73,41 +77,54 @@ logic still supervisor-side so the frozen-execution story cannot mistake this fo
 
 ## Tasks / Subtasks
 
-- [ ] Characterize the baseline before extracting (AC 1, 4–6, 8).
-  - [ ] Add focused tests in `tests/test_planner_parity.py` for normal decisions, dropped symbols,
+- [x] Characterize the baseline before extracting (AC 1, 4–6, 8).
+  - [x] Add focused tests in `tests/test_planner_parity.py` for normal decisions, dropped symbols,
     empty/flat/held warm-up, divergent held-read versus later snapshot, stale marks and risk failures.
-  - [ ] Record provider/snapshot/belief/cancel/submit/hook event traces; assert the exact ordering,
+  - [x] Record provider/snapshot/belief/cancel/submit/hook event traces; assert the exact ordering,
     permitted earlier reads and snapshot counts, and absence of cancellation, submission or
     downstream hooks after the failing stage. Prove these tests pass against the pre-refactor path.
-  - [ ] Add failing tests for the new versioned surface and authority boundary (AC 2–3).
-- [ ] Extract the shared decision surface (AC 1–3).
-  - [ ] Create `algua/live/planner.py`; move actual `decide` and `build_intents` computation out of
+  - [x] Add failing tests for the new versioned surface and authority boundary (AC 2–3).
+- [x] Extract the shared decision surface (AC 1–3).
+  - [x] Create `algua/live/planner.py`; move actual `decide` and `build_intents` computation out of
     `paper_loop.py`, not a wrapper importing its `SimBroker` dependency.
-  - [ ] Define small typed request/result values and a protocol-version check. Use existing
+  - [x] Define small typed request/result values and a protocol-version check. Use existing
     types and pandas objects in-process; no promise of wire compatibility or deep immutability.
-  - [ ] Extract value-only preparation into a focused sibling module only where needed; preserve
+  - [x] Extract value-only preparation into a focused sibling module only where needed; preserve
     staged supervisor calls. Do not pass `SizingSnapshot`, hooks or callback-based data getters.
-  - [ ] Add `tests/test_planner.py`: normal/rejected weights, sorted intents, zero targets for
+  - [x] Add `tests/test_planner.py`: normal/rejected weights, sorted intents, zero targets for
     removed holdings, unsupported version, equivalent-input repeatability and boundary checks.
-- [ ] Wire both existing paths (AC 1, 4–6).
-  - [ ] Update `live_loop.py` to call the planner after existing pre-decision checks. Keep
+- [x] Wire both existing paths (AC 1, 4–6).
+  - [x] Update `live_loop.py` to call the planner after existing pre-decision checks. Keep
     acquisition, reconciliation, cancellation, sizing/submission and persistence supervisor-owned.
-  - [ ] Update `paper_loop.py` to use the shared decision implementation; preserve public helper
+  - [x] Update `paper_loop.py` to use the shared decision implementation; preserve public helper
     compatibility where callers rely on it and preserve simulation's next-bar fill logic.
-  - [ ] Preserve existing `live_loop.decide` observation points where feasible. If tests must
+  - [x] Preserve existing `live_loop.decide` observation points where feasible. If tests must
     observe the new entry point, read those files completely and retain behavioral assertions.
-- [ ] Validate the boundary and identity implications (AC 3, 7–8).
-  - [ ] Add a structural dependency test in `tests/test_planner.py` covering planner-owned helper
+- [x] Validate the boundary and identity implications (AC 3, 7–8).
+  - [x] Add a structural dependency test in `tests/test_planner.py` covering planner-owned helper
     modules as well as the entry point; check transitive first-party dependencies for operational
     imports. Do not treat strategy callbacks as proof of sandbox isolation.
-  - [ ] Inspect representative closure membership and before/after identities through the existing
+  - [x] Inspect representative closure membership and before/after identities through the existing
     read-only computation API. Report results; never update the DB to hide identity drift.
-  - [ ] Lower/remove the `live_loop.py` pin in `tests/test_module_size_ratchet.py` if needed after
+  - [x] Lower/remove the `live_loop.py` pin in `tests/test_module_size_ratchet.py` if needed after
     extraction; new source modules stay below 300 lines. Do not raise the current 418-line pin.
-  - [ ] Run focused regressions and then the full gate below. Record actual commands/results.
-  - [ ] Obtain independent code review and resolve findings before marking implemented/reviewed.
-  - [ ] List timing, freshness and pre-decision risk logic still supervisor-side in completion
+  - [x] Run focused regressions and then the full gate below. Record actual commands/results.
+  - [x] Obtain independent code review and resolve findings before marking implemented/reviewed.
+  - [x] List timing, freshness and pre-decision risk logic still supervisor-side in completion
     notes, identifying what later frozen execution must cover without changing its semantics now.
+
+### Review Findings
+
+- [x] [Review][Patch] Correct stale-mark characterization: preserve fresh AAA history, shift only
+  OLD timestamps back 21 days, and assert the stale diagnostic and unchanged effect trace.
+  Minor, AC5/AC8; owner approved patch and acceptance reviewer confirmed resolution
+  (`tests/test_planner_parity.py:127`).
+- [x] [Review][Defer] Non-finite current holding weight can suppress an intent because comparison
+  against NaN is false (`algua/live/planner.py:50`) — deferred, pre-existing behavior moved unchanged;
+  requires separate risk-input validation review, not an incidental policy change in this refactor.
+- [x] [Review][Defer] Mixed zero-valued non-string target labels can reach sorting and raise
+  `TypeError` (`algua/live/planner.py:47`) — deferred, pre-existing validation/error behavior;
+  address separately through the shared symbol contract.
 
 ## Dev Notes
 
@@ -198,20 +215,67 @@ uv run lint-imports
 
 ### Agent Model Used
 
-To be recorded by the implementing agent.
+Codex (model identifier not recorded by the local workflow).
 
 ### Debug Log References
 
-No implementation run yet. Preparation included a separate read-only planner-boundary review.
+Baseline characterization: 15 tests passed before production edits (after correcting a fixture's
+missing required `rebalance_frequency`). Red checks demonstrated missing planner, missing version
+rejection and old loop wiring; each passed after its corresponding implementation.
+
+Focused gate: 107 passed, including the existing live/paper/lane/sizing/size suites and 31 new
+checks. Ruff passed; mypy passed for 293 files; import-linter kept 28 contracts with 0 broken.
+Full regression: 4,016 passed, 171 warnings in 541.94 seconds. The review changed only a test
+fixture while that run was active; the final 107-test focused suite passed afterward (2.47 seconds),
+followed by clean ruff, mypy and all 28 import contracts. Three independent BMAD review layers
+completed: one minor fixture correction applied and independently rechecked, two pre-existing
+input-validation issues deferred. Focused suite passed again after the review patch.
+
+The first external-dependency assertion incorrectly followed annotation-only `LoadedStrategy`
+imports into feature-catalogue discovery (`importlib`). The corrected test still checks ALL
+first-party edges, including annotations, for operational modules; external capabilities are
+checked on runtime edges. No production exemption or boundary was introduced.
 
 ### Completion Notes List
 
 - Owner approved the artifact-freeze-first scope, both epic outcomes and preparation of this story.
 - Story context prepared using BMAD create-story; current code and regression hazards inspected.
-- `ready-for-dev` means this bounded refactor is specified, not that it is implemented, deployed,
-  independently code-reviewed or a full-epic implementation-readiness assessment has passed.
+- Definition of done passed for this bounded story; independent review completed with its patch
+  resolved. `done` records implementation and review only: no main merge, deployment, frozen
+  execution or full-epic readiness is implied. No sprint-status file exists; tracking is here.
 - No prior story in this epic. Later deployment, migration and live-policy stories remain unprepared.
+- Implemented one computation path in `planner.plan`, with typed in-process input/result values
+  and strict integer protocol version 1. Existing `decide` signature and paper helper re-export
+  retain compatibility; unsupported protocol fails before strategy access or execution effects.
+- No additional preparation helper was needed. The supervisor still owns timeframe/closed-bar
+  selection, held/universe filtering, warm-up, freshness/calendar resolution, snapshot acquisition,
+  equity/drawdown/realized-gross checks and reconciliation. Later frozen execution must explicitly
+  cover behavior-affecting timing/risk semantics without freezing operational authority.
+- Module sizes: planner 82 lines, live loop unchanged at 418, paper loop reduced to 122. No size
+  ratchet update was needed; no threshold, hash algorithm, approval or lockfile changed.
+- Read-only identity checks before/after were identical for two in-tree strategies:
+  `cross_sectional_momentum` code `76afe2da0f9343653eb133a18640e33f`, config
+  `5e4f08591d72dcf08117abaa75a87bb0`; `cross_horizon_low_vol_consensus` code
+  `e84ca55673c5c4e46151dbb533c232f9`, config `1439efc33cbb81bed6b7ac06c4ae4638`.
+  Both dependency digests were `a4a792aea9fe58599066ae7204069ce4257cb937af20a2392e2f053ac531eaff`.
+  Their 14-module closures were unchanged and contain neither loop nor planner. This is sample
+  evidence, not universal hash coverage; binding the planner remains later reviewed work.
+- No registry records were rewritten and no process was deployed or restarted.
 
 ### File List
 
-Implementation changes: none. The paths above are planned, not a claim of completed edits.
+- `algua/live/planner.py` — new versioned decision seam and compatibility helper.
+- `algua/live/live_loop.py` — import the shared planner helper directly.
+- `algua/live/paper_loop.py` — replace duplicate helper bodies with planner imports.
+- `tests/test_planner.py` — decision, version, validation and dependency-boundary checks.
+- `tests/test_planner_parity.py` — baseline effect-order and early-failure characterization.
+- `docs/development/implementation-readiness-report-2026-09-24.md` — bounded readiness assessment.
+- `docs/development/stories/1-1-extract-in-process-decision-planner.md` — implementation record.
+- `docs/development/stories/deferred-work.md` — pre-existing review findings, unchanged in code.
+- `docs/development/README.md` — update the current handoff.
+
+## Change Log
+
+- 2026-09-24: Prepared and implemented the in-process decision seam; independent review's fixture
+  finding resolved; full regression and final focused/static gates passed. No claim of deployed
+  artifact isolation or whole-epic completion.

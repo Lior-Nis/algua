@@ -7,14 +7,11 @@ from typing import Any
 
 import pandas as pd
 
-from algua.contracts.types import OrderIntent, Side, fill_reference_column
+from algua.contracts.types import OrderIntent, fill_reference_column
 from algua.execution.sim_broker import Fill, SimBroker
-from algua.risk.limits import (
-    WEIGHT_TOL,
-    RiskBreach,
-    check_drawdown,
-    validate_decision_weights,
-)
+from algua.live.planner import build_intents as build_intents
+from algua.live.planner import decide
+from algua.risk.limits import RiskBreach, check_drawdown
 from algua.strategies.base import LoadedStrategy
 
 
@@ -36,45 +33,6 @@ class PaperRunResult:
     final_cash: float
     final_equity: float
     reconcile_ok: bool
-
-
-def build_intents(
-    weights: pd.Series,
-    current_weights: dict[str, float],
-    decision_ts: datetime,
-) -> list[OrderIntent]:
-    """Emit one OrderIntent per symbol whose target weight differs from its current weight by more
-    than WEIGHT_TOL. `current_weights` is each held symbol's market-value weight (shares*price over
-    equity for the sim, market_value/equity for Alpaca); the caller computes it from what it has."""
-    intents: list[OrderIntent] = []
-    symbols = sorted(set(weights.index) | set(current_weights))
-    for sym in symbols:
-        target = float(weights.get(sym, 0.0))
-        current = float(current_weights.get(sym, 0.0))
-        if abs(target - current) > WEIGHT_TOL:
-            side = Side.BUY if target > current else Side.SELL
-            intents.append(
-                OrderIntent(symbol=sym, side=side, target_weight=target, decision_ts=decision_ts)
-            )
-    return intents
-
-
-def decide(
-    strategy: LoadedStrategy,
-    view: pd.DataFrame,
-    current_weights: dict[str, float],
-    decision_ts: datetime,
-) -> tuple[pd.Series, list[OrderIntent]]:
-    """Shared decision core both loops call: evaluate target weights on the closed-bar `view`, run
-    the shared decision-weight rails, then build the per-symbol intents against the caller's current
-    market-value weights. Broker mechanics (sim fill_pending vs Alpaca submit) stay in each loop;
-    only this weights->risk->intents step is shared (#25)."""
-    weights = strategy.target_weights(view)
-    validate_decision_weights(
-        weights, strategy.execution, strategy.name, allowed_symbols=strategy.universe
-    )
-    intents = build_intents(weights, current_weights, decision_ts)
-    return weights, intents
 
 
 def run_paper(

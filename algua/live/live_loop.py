@@ -11,7 +11,7 @@ import pandas as pd
 from algua.calendar.factory import get_calendar
 from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
-from algua.live.paper_loop import decide
+from algua.live.planner import decide
 from algua.risk.limits import (
     MAX_STALE_SESSIONS,
     WEIGHT_TOL,
