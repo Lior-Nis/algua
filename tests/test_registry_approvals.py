@@ -16,6 +16,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.strategies.loader import load_strategy
+from tests._deployment_helpers import force_legacy_strategy
 
 STRATEGY = "cross_sectional_momentum"  # a real, loadable strategy module
 
@@ -44,7 +45,7 @@ def _advance_to_paper(repo, name):
     transition_strategy(repo, name, Stage.BACKTESTED, Actor.AGENT)
     # CANDIDATE via human: scaffolding to a later stage, not exercising the agent shortlist gate.
     transition_strategy(repo, name, Stage.CANDIDATE, Actor.HUMAN)
-    transition_strategy(repo, name, Stage.PAPER, Actor.AGENT)
+    force_legacy_strategy(repo._conn, repo.get(name).id)
 
 
 def _advance_to_forward_tested(repo, name):

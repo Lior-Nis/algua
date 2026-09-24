@@ -8,15 +8,19 @@ Task-9: end-to-end reconcile regression tests (#249 phantom-flatten fix).
 """
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 from typer.testing import CliRunner
 
 from algua.cli.main import app
 from algua.cli.paper_cmd import _ingest_paper_venue
+from algua.config.settings import get_settings
 from algua.execution.alpaca_broker import AccountState, TickSnapshot
 from algua.execution.live_ledger import LedgerKind, fill_cursor, paper_believed_positions
-from algua.registry.db import migrate
+from algua.registry.db import connect, migrate
+from algua.registry.store import SqliteStrategyRepository
+from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
 
 _FAR_PAST = "1970-01-01T00:00:00Z"
@@ -95,11 +99,13 @@ def _to_paper(name: str = _NAME) -> None:
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
-                               "--actor", "agent", "--reason", "paper"]).exit_code == 0
     # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
     # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
     seed_passing_gate(name)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        force_legacy_strategy(conn, rec.id)
 
 
 class _PaperVenueTestBroker:

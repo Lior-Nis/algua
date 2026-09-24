@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS tick_snapshots (
     peak_equity  REAL,
     positions    TEXT NOT NULL,
     n_submitted  INTEGER NOT NULL,
-    reconcile_ok INTEGER NOT NULL
+    reconcile_ok INTEGER NOT NULL,
+    deployment_id INTEGER REFERENCES strategy_deployments(id)
 );
 CREATE INDEX IF NOT EXISTS ix_tick_snapshots_strategy_ts ON tick_snapshots(strategy, tick_ts);
 CREATE TABLE IF NOT EXISTS global_halt (

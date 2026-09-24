@@ -54,8 +54,8 @@ EXTERNAL_CAPITAL_TYPES = frozenset({"CSD", "CSW", "TRANS", "JNLC", "JNLS", "ACAT
 _MAX_DECISION_LAG_SESSIONS = 2
 
 # Per-filter exclusion keys, IN EVALUATION ORDER (first matching filter wins the count).
-_EXCLUSION_FILTERS = ("local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
-                      "no_decision", "bad_decision_ts", "stale_decision", "pre_epoch")
+_EXCLUSION_FILTERS = ("deployment_mismatch", "local_clock", "identity_drift", "legacy_null",
+                      "bad_tick_ts", "no_decision", "bad_decision_ts", "stale_decision")
 
 
 # (after_iso, until_iso) -> raw activity dicts; exhaustively paginated by the broker layer,
@@ -106,33 +106,13 @@ def _identity_matches(row: sqlite3.Row, identity: ArtifactIdentity) -> bool:
             and row["dependency_hash"] == identity.dependency_hash)
 
 
-def _epoch_start_id(rows: list[sqlite3.Row], identity: ArtifactIdentity) -> int | None:
-    """The id of the first tick in the LAST contiguous run of `identity`, or None if the newest
-    tick is a different identity.
-
-    Evidence may not be back-credited across an identity change. Without this bound, reverting a
-    strategy to an earlier artifact AFTER seeing how that artifact's forward period turned out
-    would silently re-credit the old run -- choosing the artifact on the strength of the evidence
-    it is about to be judged by.
-
-    A run is broken ONLY by a tick of a different identity. A tick that is inadmissible for some
-    other reason (a local clock, a stale decision) is a bad tick of the SAME artifact, so it must
-    not restart the epoch.
-    """
-    start: int | None = None
-    for row in rows:
-        if _identity_matches(row, identity):
-            if start is None:
-                start = int(row["id"])
-        else:
-            start = None
-    return start
-
-
 def _inadmissible_reason(
-    row: sqlite3.Row, identity: ArtifactIdentity, calendar: SessionCalendar, now_utc: datetime,
+    row: sqlite3.Row, deployment_id: int, identity: ArtifactIdentity,
+    calendar: SessionCalendar, now_utc: datetime,
 ) -> str | None:
     """The FIRST failing admissibility filter (spec order), or None for an admissible tick."""
+    if row["deployment_id"] != deployment_id:
+        return "deployment_mismatch"
     if row["clock_source"] != "broker":
         return "local_clock"
     if not _identity_matches(row, identity):
@@ -203,6 +183,7 @@ def assemble_forward_evidence(
     *,
     strategy_id: int,
     name: str,
+    deployment_id: int,
     identity: ArtifactIdentity,
     calendar: SessionCalendar,
     now: datetime,
@@ -221,22 +202,31 @@ def assemble_forward_evidence(
     now_utc = now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
     now_iso = now_utc.isoformat()
 
-    # 1-2. Fetch in id order; partition into admissible ticks vs per-filter exclusions.
+    deployment = conn.execute(
+        "SELECT activated_at FROM strategy_deployments"
+        " WHERE id=? AND strategy_id=? AND retired_at IS NULL",
+        (deployment_id, strategy_id),
+    ).fetchone()
+    if deployment is None:
+        raise ValueError("forward evidence requires the strategy's active deployment epoch")
+    activated_at = _parse_dt(deployment["activated_at"])
+    if activated_at is None or activated_at > now_utc:
+        raise ValueError("deployment activation timestamp is invalid")
+    activated_iso = activated_at.isoformat()
+
+    # 1-2. Fetch this deployment's complete post-activation epoch in id order; partition into
+    # admissible return observations vs integrity-only rows.
     rows = conn.execute(
         "SELECT id, tick_ts, decision_ts, equity, reconcile_ok, clock_source, code_hash,"
-        " config_hash, dependency_hash, account_id, recorded_at"
-        " FROM tick_snapshots WHERE lane='paper' AND strategy_id=? ORDER BY id",
-        (strategy_id,),
+        " config_hash, dependency_hash, account_id, recorded_at, deployment_id"
+        " FROM tick_snapshots WHERE lane='paper' AND strategy_id=? AND deployment_id=?"
+        " AND recorded_at>=? ORDER BY id",
+        (strategy_id, deployment_id, activated_iso),
     ).fetchall()
-    epoch_start = _epoch_start_id(rows, identity)
     excluded = dict.fromkeys(_EXCLUSION_FILTERS, 0)
     admissible: list[sqlite3.Row] = []
     for row in rows:
-        reason = _inadmissible_reason(row, identity, calendar, now_utc)
-        if reason is None and (epoch_start is None or int(row["id"]) < epoch_start):
-            # Would have counted, but predates the current artifact's run. Reported separately so
-            # the gate's own output shows the bound was applied rather than silently dropping rows.
-            reason = "pre_epoch"
+        reason = _inadmissible_reason(row, deployment_id, identity, calendar, now_utc)
         if reason is None:
             admissible.append(row)
         else:
@@ -261,34 +251,27 @@ def assemble_forward_evidence(
     else:
         session_coverage = 0.0
 
-    # 5. Integrity universe: EVERY paper-lane row for this strategy from the first admissible
-    # row onward — inadmissible rows cannot hide. Empty when there are no observations at all
-    # (the gate fails on the missing observations anyway).
+    # 5. Integrity universe: EVERY row in the deployment from activation, including failures
+    # before the first admissible return observation.
     n_reconcile_failures = 0
     n_defective_ticks = 0
-    if admissible:
-        first_admissible_id = admissible[0]["id"]
-        for row in rows:
-            if row["id"] < first_admissible_id:
-                continue
-            if not row["reconcile_ok"]:
-                n_reconcile_failures += 1
-            tick_dt = _parse_dt(row["tick_ts"])
-            if tick_dt is None or tick_dt > now_utc:
-                n_defective_ticks += 1
+    for row in rows:
+        if not row["reconcile_ok"]:
+            n_reconcile_failures += 1
+        tick_dt = _parse_dt(row["tick_ts"])
+        if tick_dt is None or tick_dt > now_utc:
+            n_defective_ticks += 1
 
     # 6. Breakers: current kill/halt state, plus kill-switch trip EVENTS inside the window —
     # a tripped-then-resumed forward test is a failed forward test.
     kill_switch_tripped = is_tripped(conn, name)
     global_halt_engaged = is_engaged(conn)
     n_kill_trips_in_window = 0
-    if admissible:
-        window_start_recorded_at = admissible[0]["recorded_at"]
-        n_kill_trips_in_window = conn.execute(
-            "SELECT COUNT(*) FROM audit_log"
-            " WHERE strategy=? AND action='kill_switch_trip' AND ts >= ?",
-            (name, window_start_recorded_at),
-        ).fetchone()[0]
+    n_kill_trips_in_window = conn.execute(
+        "SELECT COUNT(*) FROM audit_log"
+        " WHERE strategy=? AND action='kill_switch_trip' AND ts >= ?",
+        (name, activated_iso),
+    ).fetchone()[0]
 
     # 7. Single account: the admissible ticks must all share ONE account (mixed-account evidence
     # is a tenancy violation). Siblings on the same account are ALLOWED: the multi-tenant book
@@ -305,12 +288,11 @@ def assemble_forward_evidence(
     # paper-lane ticks overlapping the window — failed/inadmissible siblings still inflated
     # the family-wise error rate.
     n_concurrent_forward = 0
-    if admissible:
-        n_concurrent_forward = conn.execute(
-            "SELECT COUNT(DISTINCT strategy) FROM tick_snapshots"
-            " WHERE lane='paper' AND recorded_at >= ? AND recorded_at <= ?",
-            (admissible[0]["recorded_at"], now_iso),
-        ).fetchone()[0]
+    n_concurrent_forward = conn.execute(
+        "SELECT COUNT(DISTINCT strategy) FROM tick_snapshots"
+        " WHERE lane='paper' AND recorded_at >= ? AND recorded_at <= ?",
+        (activated_iso, now_iso),
+    ).fetchone()[0]
 
     # 8b. Optional-stopping count (#431): PRIOR forward-gate evaluations of THIS strategy+identity
     # in the ledger, WITHIN a trailing FORWARD_RELOOK_HORIZON_SESSIONS window — the re-runnable
@@ -364,10 +346,8 @@ def assemble_forward_evidence(
              horizon_cutoff_iso),
         ).fetchone()[0]
 
-    # 9-10. Broker activities + staleness. With no admissible ticks there is no window: skip
-    # the broker entirely (activities_ok=True, zeros — the gate already fails on observations)
-    # and staleness is None (fail closed in the evaluator). Any fetch/classify failure means
-    # the account is UNVERIFIABLE: partial history never passes.
+    # 9-10. Broker activity integrity starts at activation even before the first admissible return
+    # tick. Staleness still depends on the last admissible tick.
     staleness_sessions: int | None = None
     activities_ok = True
     n_external_cash_flows = 0
@@ -376,23 +356,15 @@ def assemble_forward_evidence(
         last_tick_dt = _parse_dt(admissible[-1]["tick_ts"])
         assert last_tick_dt is not None  # admissibility already proved it parses
         staleness_sessions = calendar.sessions_between(last_tick_dt.date(), now_utc.date())
-        # Alpaca's activities `after` bound is EXCLUSIVE: an external deposit stamped at
-        # EXACTLY the first-tick instant would escape an `after == first_tick_ts` window, so
-        # widen the start 1s earlier. The overlap errs fail-closed — an extra pre-window
-        # capital movement can only FAIL the gate, never pass it; pre-window FILLs from ANY
-        # paper-book strategy's order on this account remain attributable (account-level
-        # attribution).
-        first_tick_dt = _parse_dt(admissible[0]["tick_ts"])
-        assert first_tick_dt is not None  # admissibility already proved it parses
-        window_after = (first_tick_dt - timedelta(seconds=1)).isoformat()
-        try:
-            acts = activities_fetch(window_after, now_iso)
-            n_external_cash_flows, n_unattributable_fills = _classify_activities(
-                conn, acts)
-        except Exception:
-            activities_ok = False
-            n_external_cash_flows = 0
-            n_unattributable_fills = 0
+    # Alpaca's activities `after` bound is EXCLUSIVE, so overlap activation by one second.
+    window_after = (activated_at - timedelta(seconds=1)).isoformat()
+    try:
+        acts = activities_fetch(window_after, now_iso)
+        n_external_cash_flows, n_unattributable_fills = _classify_activities(conn, acts)
+    except Exception:
+        activities_ok = False
+        n_external_cash_flows = 0
+        n_unattributable_fills = 0
 
     evidence = ForwardEvidence(
         n_return_observations=len(returns),

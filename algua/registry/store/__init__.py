@@ -24,6 +24,7 @@ from algua.registry.repository import (
 from algua.registry.store.approvals import ApprovalLedgerMixin
 from algua.registry.store.backtest_returns import BacktestReturnsLedgerMixin
 from algua.registry.store.crud import CrudMixin
+from algua.registry.store.deployment import DeploymentLedgerMixin, DeploymentRecord
 from algua.registry.store.family import (
     AGENT_NOVEL_MINT_CAP as AGENT_NOVEL_MINT_CAP,
 )
@@ -37,6 +38,7 @@ from algua.registry.store.search_breadth import SearchBreadthLedgerMixin
 __all__ = [
     "AGENT_NOVEL_MINT_CAP",
     "SqliteStrategyRepository",
+    "DeploymentRecord",
     "StrategyExists",
     "StrategyNotFound",
     "StrategyRecord",
@@ -44,6 +46,7 @@ __all__ = [
 
 
 class SqliteStrategyRepository(
+    DeploymentLedgerMixin,
     CrudMixin,
     ApprovalLedgerMixin,
     SearchBreadthLedgerMixin,

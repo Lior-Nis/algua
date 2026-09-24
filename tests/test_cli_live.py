@@ -9,6 +9,7 @@ from algua.cli.main import app
 from algua.contracts.types import LiveAuthorization
 from algua.data.refresh import RefreshError
 from algua.execution.live_ledger import LedgerKind
+from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
@@ -93,14 +94,14 @@ def _to_live(name="cross_sectional_momentum", allocate=True):
     # CONFIG.universe, preserving what these tick tests already assume.
     seed_passing_gate(name)
     # CANDIDATE via human: scaffolding to live, not exercising the agent shortlist gate.
-    for to, actor in (("candidate", "human"), ("paper", "agent")):
+    for to, actor in (("candidate", "human"),):
         runner.invoke(app, ["registry", "transition", name, "--to", to, "--actor", actor,
                             "--reason", "x"])
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
-        conn.execute("UPDATE strategies SET stage='live' WHERE name=?", (name,))
+        sid = SqliteStrategyRepository(conn).get(name).id
+        force_legacy_strategy(conn, sid, stage="live")
         if allocate:
-            sid = SqliteStrategyRepository(conn).get(name).id
             conn.execute(
                 "INSERT INTO strategy_allocations(strategy_id, capital, effective_ts, actor) "
                 "VALUES (?,?,?,?)",
@@ -861,7 +862,7 @@ def test_live_allocate_rejects_dormant(monkeypatch):
     monkeypatch.setattr("algua.cli.live_cmd._live_account_equity", _boom)
     # register a strategy and drive it to paper via the legal chain
     assert runner.invoke(app, ["registry", "add", "s1"]).exit_code == 0
-    for to, actor in (("backtested", "human"), ("candidate", "human"), ("paper", "agent")):
+    for to, actor in (("backtested", "human"), ("candidate", "human")):
         r = runner.invoke(app, ["registry", "transition", "s1", "--to", to,
                                 "--actor", actor, "--reason", "x"])
         assert r.exit_code == 0, r.stdout
@@ -869,6 +870,7 @@ def test_live_allocate_rejects_dormant(monkeypatch):
     with closing(connect(get_settings().db_path)) as conn:
         migrate(conn)
         repo = SqliteStrategyRepository(conn)
+        force_legacy_strategy(conn, repo.get("s1").id)
         transition_strategy(repo, "s1", Stage.DORMANT, Actor.AGENT, reason="bench")
     # live allocate must refuse
     r = runner.invoke(app, ["live", "allocate", "s1", "--capital", "10000"])
@@ -1205,9 +1207,15 @@ def test_live_flatten_non_live_stage_refused_no_trip(monkeypatch):
     # and the DB kill-switch must NOT be written (no cross-lane DoS).
     name = "paper_only"
     assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
-    for to, actor in (("backtested", "human"), ("candidate", "human"), ("paper", "agent")):
+    for to, actor in (("backtested", "human"), ("candidate", "human")):
         assert runner.invoke(app, ["registry", "transition", name, "--to", to,
                                    "--actor", actor, "--reason", "x"]).exit_code == 0
+    from algua.config.settings import get_settings
+    from algua.registry.db import connect, migrate
+    from algua.registry.store import SqliteStrategyRepository
+    with connect(get_settings().db_path) as conn:
+        migrate(conn)
+        force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(name).id)
 
     def _no_helper(*a, **k):
         raise AssertionError("flatten_strategy must not run for a non-LIVE strategy")
@@ -1422,9 +1430,13 @@ def test_live_flatten_rejects_non_live(monkeypatch):
     name = "paper_only"
     assert runner.invoke(app, ["registry", "add", name]).exit_code == 0
     # Bring to paper (via backtested -> candidate -> paper)
-    for to, actor in (("backtested", "human"), ("candidate", "human"), ("paper", "agent")):
+    for to, actor in (("backtested", "human"), ("candidate", "human")):
         assert runner.invoke(app, ["registry", "transition", name, "--to", to,
                                    "--actor", actor, "--reason", "x"]).exit_code == 0
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        from algua.registry.store import SqliteStrategyRepository
+        force_legacy_strategy(conn, SqliteStrategyRepository(conn).get(name).id)
 
     # Do NOT monkeypatch verify_live_authorization, so the REAL check raises
     # Assert broker is never built

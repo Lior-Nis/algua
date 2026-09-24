@@ -12,6 +12,7 @@ from algua.config.settings import get_settings
 from algua.execution.order_state import record_tick_snapshot
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
+from tests._deployment_helpers import force_legacy_strategy
 
 runner = CliRunner()
 
@@ -25,10 +26,13 @@ def _conn():
 
 
 def _register(conn, name):
-    return SqliteStrategyRepository(conn).add(name)
+    rec = SqliteStrategyRepository(conn).add(name)
+    force_legacy_strategy(conn, rec.id)
+    return rec
 
 
 def _tick(conn, rec, *, tick_ts, lane="paper", equity=100_000.0):
+    force_legacy_strategy(conn, rec.id, stage="live" if lane == "live" else "paper")
     record_tick_snapshot(
         conn, rec.name, tick_ts=tick_ts, decision_ts=tick_ts, equity=equity,
         peak_equity=equity, positions={}, n_submitted=0, reconcile_ok=True, lane=lane,

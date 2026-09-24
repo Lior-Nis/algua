@@ -23,6 +23,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.gating import load_gated_strategy
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt, kill_switch
+from tests._deployment_helpers import force_legacy_strategy
 from tests._session_ts import fresh_decision_ts
 
 runner = CliRunner()
@@ -40,7 +41,7 @@ def _register(conn, name, stage=Stage.PAPER):
     # Drive to the requested stage directly at the DB level for a hermetic unit test.
     if stage is not Stage.IDEA:
         conn.execute("UPDATE strategies SET stage = ? WHERE name = ?", (stage.value, name))
-        conn.commit()
+        force_legacy_strategy(conn, repo.get(name).id, stage=stage.value)
     return repo.get(name)
 
 
@@ -50,12 +51,17 @@ def _tick(conn, rec, *, tick_ts, equity=100_000.0, peak=100_000.0, reconcile_ok=
     # derive the freshest closed session as of tick_ts unless a caller pins one (#632).
     if decision_ts is None:
         decision_ts = fresh_decision_ts(datetime.fromisoformat(tick_ts))
+    original_stage = rec.stage.value
+    force_legacy_strategy(conn, rec.id, stage="paper")
     update_peak_equity(conn, rec.name, peak)
     record_tick_snapshot(
         conn, rec.name, tick_ts=tick_ts, decision_ts=decision_ts, equity=equity, peak_equity=peak,
         positions={}, n_submitted=0, reconcile_ok=reconcile_ok, lane="paper", strategy_id=rec.id,
         code_hash="c", config_hash="cfg", dependency_hash="d", account_id="acct", cash=equity,
         clock_source="broker")
+    if original_stage != "paper":
+        conn.execute("UPDATE strategies SET stage=? WHERE id=?", (original_stage, rec.id))
+        conn.commit()
 
 
 def _now():

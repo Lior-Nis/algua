@@ -4,7 +4,7 @@ baseline_commit: 118558c3b2ccd36827cffd988c848a43aa88a614
 
 # Story 1.2: Record working-tree deployments and evaluate one explicit epoch
 
-Status: ready-for-dev
+Status: done
 
 Prepared: 2026-09-24. Baseline: Story 1.1 merge `118558c` (PR #667).
 Epic: 1. Requirements: FR5 and the record-only portion of FR4/FR12.
@@ -130,69 +130,100 @@ it does not grant new live authority or replace the later deployment-bound signi
 
 ## Tasks / Subtasks
 
-- [ ] Characterize the current adoption/evidence/certificate paths before schema edits (AC 1, 5–11).
-  - [ ] Add red tests proving same-hash redeployment currently risks old-epoch evidence/certificate
+- [x] Characterize the current adoption/evidence/certificate paths before schema edits (AC 1, 5–11).
+  - [x] Add red tests proving same-hash redeployment currently risks old-epoch evidence/certificate
     reuse; preserve current legacy behavior explicitly where migration is deferred.
-  - [ ] Record paper setup/effect traces so deployment drift is proven to fail before provider,
+  - [x] Record paper setup/effect traces so deployment drift is proven to fail before provider,
     venue, cancellation, submission and downstream hooks.
-  - [ ] Record the intended transition-to-retirement matrix for protected review before wiring it.
-- [ ] Add immutable deployment schema and typed records (AC 2–4, 6–7).
-  - [ ] Add `algua/registry/db/deployment.py` with `deployment_artifacts` and
+  - [x] Record the intended transition-to-retirement matrix for protected review before wiring it.
+- [x] Add immutable deployment schema and typed records (AC 2–4, 6–7).
+  - [x] Add `algua/registry/db/deployment.py` with `deployment_artifacts` and
     `strategy_deployments`; include foreign keys, lookup indexes, append-preserving guards and a
     partial unique index for one active deployment per strategy, plus permanent uniqueness of
     `research_gate_id` across deployments.
-  - [ ] Add nullable `deployment_id` foreign keys to both fresh and migrated `tick_snapshots` and
+  - [x] Add nullable `deployment_id` foreign keys to both fresh and migrated `tick_snapshots` and
     `forward_gate_evaluations`; bump the schema marker and prove idempotent migration. Leave legacy
     values null and atomically capture the fixed pre-migration tenant cohort through an explicit,
     auditable marker that later admissions cannot obtain.
-  - [ ] Add small immutable manifest/record values and canonical digest/environment/source capture.
+  - [x] Add small immutable manifest/record values and canonical digest/environment/source capture.
     Centralize the complete working-tree read-set rule: tracked tree equals recorded HEAD, no
     non-generated untracked file beneath `algua/`, and every external config-referenced executable/
     model asset path and digest is part of the manifest. Keep git/filesystem/environment I/O outside
     SQL transactions.
-  - [ ] Make artifact resolution insert-or-verify, never replace; detect byte disagreement under an
+  - [x] Make artifact resolution insert-or-verify, never replace; detect byte disagreement under an
     existing digest as corruption.
-- [ ] Make new paper admission open one atomic deployment epoch (AC 1–4, 8–9).
-  - [ ] Resolve the exact qualified research gate and gate-bound universe; never use a
+- [x] Make new paper admission open one atomic deployment epoch (AC 1–4, 8–9).
+  - [x] Resolve the exact qualified research gate and gate-bound universe; never use a
     merely latest passing row as the deployment anchor, and reject a gate already referenced by any
     committed deployment. Cover both agent-consumed and human audit-only promotion rows.
-  - [ ] Extend or carve the intake store so artifact insert, activation, allocation and stage CAS
+  - [x] Extend or carve the intake store so artifact insert, activation, allocation and stage CAS
     share its existing `BEGIN IMMEDIATE`, with fault-injection rollback tests after each write.
-  - [ ] Serialize retirement and enforce the reviewed transition matrix. Inventory every public
+  - [x] Serialize retirement and enforce the reviewed transition matrix. Inventory every public
     paper-deployment retirement path and make it acquire the paper operator lock before the stage/
     deployment transaction. Do not hold the SQLite write lock across git, provider, broker or other
     external I/O, and do not add a general replacement command.
-  - [ ] Prove concurrent admissions/activations produce one valid result or a domain failure, not
+  - [x] Prove concurrent admissions/activations produce one valid result or a domain failure, not
     partial state or a leaked SQLite lock error.
-- [ ] Bind operational paper ticks to the active deployment (AC 5–6, 8, 11).
-  - [ ] Resolve and verify the deployment during setup before current side effects. Keep the legacy
+- [x] Bind operational paper ticks to the active deployment (AC 5–6, 8, 11).
+  - [x] Resolve and verify the deployment during setup before current side effects. Keep the legacy
     path explicit and temporary only for the migration-time cohort; missing records are not proof of
     legacy status.
-  - [ ] Resolve the operational universe through `deployment.research_gate_id` for deployment-aware
+  - [x] Resolve the operational universe through `deployment.research_gate_id` for deployment-aware
     ticks, while retaining the current warning/fallback only for truly legacy rows.
-  - [ ] Thread `deployment_id` into the tick writer and guarded persistence. If module ratchets require
+  - [x] Thread `deployment_id` into the tick writer and guarded persistence. If module ratchets require
     a carve, preserve compatibility imports rather than growing pinned modules.
-  - [ ] Test drift, missing deployment, wrong strategy, operator-lock retirement contention and
+  - [x] Test drift, missing deployment, wrong strategy, operator-lock retirement contention and
     identity mismatch without weakening existing planner/lane/risk parity assertions.
-- [ ] Replace inferred epochs with explicit deployment evidence (AC 7, 10).
-  - [ ] Require one active deployment in forward promotion and select its exact tick rows. Remove the
+- [x] Replace inferred epochs with explicit deployment evidence (AC 7, 10).
+  - [x] Require one active deployment in forward promotion and select its exact tick rows. Remove the
     contiguous-hash epoch inference; retain identity checks as independent corruption detection.
-  - [ ] Anchor return, reconciliation, defect, breaker, activity, concurrency and optional-stopping
+  - [x] Anchor return, reconciliation, defect, breaker, activity, concurrency and optional-stopping
     windows to the same deployment epoch. A bad tick may be excluded as a return observation but not
     disappear from its integrity window.
-  - [ ] Store `deployment_id` on pass and fail evaluations and make same-artifact new deployments
+  - [x] Store `deployment_id` on pass and fail evaluations and make same-artifact new deployments
     begin with no return observations from their predecessor. Preserve at least the current
     identity-scoped bounded repeated-look count so redeployment is not a tax-reset escape hatch.
-  - [ ] Tighten protected certificate selection so an identity-matching row from another deployment
+  - [x] Tighten protected certificate selection so an identity-matching row from another deployment
     cannot authorize the current one. Obtain explicit protected-code review for this subtask.
-- [ ] Verify and document the temporary boundary (AC 2, 5, 9–11).
-  - [ ] Add focused schema, deployment store, tick provenance, universe binding, forward promotion,
+- [x] Verify and document the temporary boundary (AC 2, 5, 9–11).
+  - [x] Add focused schema, deployment store, tick provenance, universe binding, forward promotion,
     certificate, CLI paper, concurrency and parity tests listed below.
-  - [ ] Run the focused suites and then the full sequential root gate. Record exact results.
-  - [ ] Obtain independent review of schema safety, epoch selection, transaction rollback and the
+  - [x] Run the focused suites and then the full sequential root gate. Record exact results.
+  - [x] Obtain independent review of schema safety, epoch selection, transaction rollback and the
     protected certificate tightening before marking implemented/reviewed.
-  - [ ] Update architecture/reconciliation docs to say execution still uses the mutable working tree,
+  - [x] Update architecture/reconciliation docs to say execution still uses the mutable working tree,
     existing tenants remain unmigrated and deployment materialization is the next slice.
+
+### Review Findings
+
+- [x] [Review][Patch] Make the manifest verifier validate the complete canonical payload against
+  every denormalized descriptor field, and make artifact reuse compare the complete stored record
+  rather than `manifest_json` alone. [algua/registry/deployment.py:172]
+- [x] [Review][Patch] Reject symlinked external assets (or bind their resolved target identity) so a
+  recorded asset path cannot be retargeted without changing the descriptor. [algua/registry/deployment.py:101]
+- [x] [Review][Patch] Restrict generated-file exclusions to cache files mechanically derived from
+  tracked source; a sourceless `.pyc` must not bypass the untracked-source check.
+  [algua/registry/deployment.py:65]
+- [x] [Review][Patch] Enforce the migration-time legacy cohort in schema, preventing any later
+  insert as well as updates/deletes. [algua/registry/db/deployment.py:63]
+- [x] [Review][Patch] Make atomic deployment intake the only `candidate -> paper` transition path;
+  the generic transition API and CLI currently bypass deployment creation. [algua/registry/transitions.py:36]
+- [x] [Review][Patch] Prove the selected research gate is the one that justified the current
+  candidate episode, including exact artifact identity, rather than any eligible historical gate.
+  [algua/registry/deployment.py:202]
+- [x] [Review][Patch] Perform complete deployment-manifest verification before every paper provider,
+  venue, cancellation, submission or hook effect. [algua/registry/store/deployment.py:114]
+- [x] [Review][Patch] Reverify the complete active deployment descriptor during forward promotion
+  and live-certificate verification, not only its three hashes. [algua/registry/live_certificate.py:34]
+- [x] [Review][Patch] Bind legacy tick writes to the named strategy and enforce deployment-aware tick
+  lane/stage compatibility in addition to deployment ID and hash checks.
+  [algua/execution/tick_snapshots.py:14]
+- [x] [Review][Patch] Put every retirement entry point, including programmatic transitions, behind
+  the operator lock and fail if the guarded deployment retirement updates zero rows.
+  [algua/registry/transitions.py:36]
+- [x] [Review][Patch] Anchor reconciliation, defect, breaker, activity and concurrency integrity
+  windows at deployment activation, so failures before the first admissible return tick remain in
+  the epoch. [algua/registry/forward_evidence.py:181]
 
 ## Dev Notes
 
@@ -357,16 +388,47 @@ absent. A successfully opened epoch is permanent history even if immediately ret
 
 ### Agent Model Used
 
-To be completed by the implementing agent.
+OpenAI Codex (GPT-5)
 
 ### Debug Log References
 
-To be completed by the implementing agent.
+- Implemented against baseline `68c5081` on `feat/deployment-epochs`.
+- BMAD adversarial review produced 11 patch findings; all were applied and independently
+  regression-tested before completion.
+- Full gate: `4044 passed, 171 warnings in 546.50s`; Ruff clean; mypy clean across 301 source
+  files; import-linter 28 kept / 0 broken; `git diff --check` clean.
 
 ### Completion Notes List
 
-To be completed by the implementing agent.
+- Added canonical working-tree deployment manifests, immutable artifact/deployment schema, fixed
+  migration-time legacy membership and atomic candidate-to-paper deployment intake.
+- Bound paper preflight, tick provenance, universe resolution, retirement serialization, forward
+  evidence and certificate selection to the exact active deployment epoch.
+- Applied all review hardening: complete descriptor verification, external-asset and generated-file
+  controls, exact candidate-gate binding, no generic paper bypass, pre-effect verification, lane/
+  stage checks, programmatic retirement locking and activation-anchored integrity windows.
+- Preserved the current authority boundaries: no live ceremony, capital policy, frozen-execution or
+  deployment-permission expansion was introduced.
+- Updated architecture and reconciliation documentation to state the precise temporary boundary:
+  deployment identity is enforced, while planner execution still comes from the mutable tree.
 
 ### File List
 
-To be completed by the implementing agent.
+- Deployment contracts/runtime: `algua/contracts/planner.py`, `algua/registry/deployment.py`,
+  `algua/registry/deployment_runtime.py`, `algua/registry/paper_runtime.py`,
+  `algua/registry/store/deployment.py`, `algua/execution/tick_snapshots.py`,
+  `algua/operator/deployment_lock.py`.
+- Schema/store integration: `algua/registry/db/{constants,deployment,execution,forward_gate,migrate,
+  schema}.py`, `algua/registry/store/{__init__,base,crud,forward_gate}.py`,
+  `algua/registry/{repository,intake,transitions,universe_binding}.py`.
+- Runtime/evidence integration: `algua/cli/{live,paper,registry}_cmd.py`,
+  `algua/execution/order_state.py`, `algua/live/planner.py`,
+  `algua/registry/{forward_evidence,forward_promotion,live_certificate}.py`.
+- Documentation: `docs/architecture.md`, `docs/vision-reconciliation.md`, this story record.
+- Tests: `tests/test_deployments.py`, `tests/_deployment_helpers.py`, and the touched registry,
+  migration, intake, paper/live, evidence, certificate, provenance, parity and lifecycle suites.
+
+## Change Log
+
+- 2026-09-24: Implemented explicit working-tree deployment epochs and exact-epoch evidence.
+- 2026-09-24: Applied all 11 BMAD review patches and completed the full repository gate.

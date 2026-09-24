@@ -42,7 +42,8 @@ NOW = datetime(2026, 6, 12, 21, 0, tzinfo=UTC)
 IDENT = ArtifactIdentity(code_hash="c", config_hash="g", dependency_hash="d")
 
 EXCLUSION_KEYS = {"local_clock", "identity_drift", "legacy_null", "bad_tick_ts",
-                  "no_decision", "bad_decision_ts", "stale_decision", "pre_epoch"}
+                  "no_decision", "bad_decision_ts", "stale_decision",
+                  "deployment_mismatch"}
 
 
 class FakeCalendar:
@@ -83,6 +84,25 @@ def conn(tmp_path):
     migrate(c)
     c.execute("INSERT INTO strategies(name, stage, created_at, updated_at) "
               "VALUES ('s', 'paper', 't', 't')")
+    repo = SqliteStrategyRepository(c)
+    gate_id = repo.record_gate_evaluation(
+        1, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=90, breadth_provenance="measured", pit_ok=True,
+        pit_override=False, holdout_n_bars=63, min_holdout_observations=63,
+        code_hash="c", config_hash="g", dependency_hash="d", data_source="test",
+        snapshot_id="snap", period_start="2024-01-01", period_end="2024-12-31",
+        holdout_frac=0.2, actor="human", decision_json="{}", universe_name="u")
+    c.execute(
+        "INSERT INTO deployment_artifacts("
+        "manifest_digest, manifest_json, code_hash, config_hash, dependency_hash,"
+        " resolved_config_json, universe_name, environment_digest, python_implementation,"
+        " python_version, abi_tag, platform_tag, planner_protocol_version, source_kind,"
+        " source_ref, asset_digests_json, created_at)"
+        " VALUES ('m','{}','c','g','d','{}','u','e','CPython','3.12','abi','platform',1,"
+        " 'working_tree','ref','[]','t')")
+    c.execute(
+        "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id, activated_at)"
+        " VALUES (1,1,?,'2025-01-01T00:00:00+00:00')", (gate_id,))
     c.commit()
     return c
 
@@ -103,7 +123,8 @@ _AUTO = "AUTO"
 
 def seed_tick(conn, day: date, equity: float, *, name="s", strategy_id=1, decision_ts=_AUTO,
               reconcile_ok=True, clock_source="broker", code_hash="c", config_hash="g",
-              dependency_hash="d", account_id="acct", recorded_at=None, hour=20) -> int:
+              dependency_hash="d", account_id="acct", recorded_at=None, hour=20,
+              deployment_id=1) -> int:
     """Seed via the REAL writer, then pin recorded_at (the writer stamps wall-clock time,
     which would fall outside the fixed test NOW)."""
     if decision_ts == _AUTO:
@@ -113,7 +134,7 @@ def seed_tick(conn, day: date, equity: float, *, name="s", strategy_id=1, decisi
         peak_equity=None, positions={}, n_submitted=0, reconcile_ok=reconcile_ok,
         lane="paper", strategy_id=strategy_id, code_hash=code_hash, config_hash=config_hash,
         dependency_hash=dependency_hash, account_id=account_id, cash=0.0,
-        clock_source=clock_source,
+        clock_source=clock_source, deployment_id=deployment_id,
     )
     rid = conn.execute("SELECT max(id) FROM tick_snapshots").fetchone()[0]
     conn.execute("UPDATE tick_snapshots SET recorded_at=? WHERE id=?",
@@ -124,27 +145,52 @@ def seed_tick(conn, day: date, equity: float, *, name="s", strategy_id=1, decisi
 
 def raw_tick(conn, *, name="s", strategy_id=1, tick_ts, decision_ts, equity=100.0,
              reconcile_ok=1, lane="paper", clock_source="broker", code_hash="c",
-             config_hash="g", dependency_hash="d", account_id="acct", recorded_at=None) -> int:
+             config_hash="g", dependency_hash="d", account_id="acct", recorded_at=None,
+             deployment_id=1) -> int:
     """Raw INSERT for legacy/defective rows the real writer refuses to produce."""
     cur = conn.execute(
         "INSERT INTO tick_snapshots(strategy, tick_ts, decision_ts, equity, positions, "
         "n_submitted, reconcile_ok, lane, strategy_id, code_hash, config_hash, "
-        "dependency_hash, account_id, cash, clock_source, recorded_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "dependency_hash, account_id, cash, clock_source, recorded_at, deployment_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (name, tick_ts, decision_ts, equity, "{}", 0, reconcile_ok, lane, strategy_id,
          code_hash, config_hash, dependency_hash, account_id, 0.0, clock_source,
-         recorded_at or "2026-06-11T20:00:00+00:00"),
+         recorded_at or "2026-06-11T20:00:00+00:00", deployment_id),
     )
     conn.commit()
     return cur.lastrowid
 
 
 def assemble(conn, *, activities=lambda after, until: [], now=NOW,
-             identity=IDENT) -> AssembledEvidence:
+             identity=IDENT, deployment_id=1) -> AssembledEvidence:
     return assemble_forward_evidence(
-        conn, strategy_id=1, name="s", identity=identity, calendar=CAL, now=now,
+        conn, strategy_id=1, name="s", deployment_id=deployment_id, identity=identity,
+        calendar=CAL, now=now,
         activities_fetch=activities,
     )
+
+
+def activate_successor_deployment(conn) -> int:
+    """Retire deployment 1 and activate an identical-hash deployment under a new gate."""
+    conn.execute(
+        "UPDATE strategy_deployments SET retired_at='2026-06-09T00:00:00+00:00' WHERE id=1"
+    )
+    repo = SqliteStrategyRepository(conn)
+    gate_id = repo.record_gate_evaluation(
+        1, passed=True, n_funnel=1, own_lifetime_combos=1, windowed_total_combos=1,
+        funnel_window_days=90, breadth_provenance="measured", pit_ok=True,
+        pit_override=False, holdout_n_bars=63, min_holdout_observations=63,
+        code_hash="c", config_hash="g", dependency_hash="d", data_source="test",
+        snapshot_id="snap-2", period_start="2024-01-01", period_end="2024-12-31",
+        holdout_frac=0.2, actor="human", decision_json="{}", universe_name="u")
+    cur = conn.execute(
+        "INSERT INTO strategy_deployments(strategy_id, artifact_id, research_gate_id,"
+        " activated_at) VALUES (1,1,?,'2026-06-09T00:00:00+00:00')",
+        (gate_id,),
+    )
+    conn.commit()
+    assert cur.lastrowid is not None
+    return int(cur.lastrowid)
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +213,8 @@ def test_local_clock_excluded(conn):
 def test_identity_drift_excluded(conn):
     # The mismatched tick must precede the admissible run (in id order) so it does not itself
     # become the "newest tick" and break the epoch under test elsewhere in this file.
-    seed_tick(conn, date(2026, 6, 9), 99.0, code_hash="STALE")
+    raw_tick(conn, tick_ts=_ts(date(2026, 6, 9)),
+             decision_ts=_ts(date(2026, 6, 8)), equity=99.0, code_hash="STALE")
     _two_admissible(conn)
     res = assemble(conn)
     assert res.excluded["identity_drift"] == 1
@@ -175,7 +222,8 @@ def test_identity_drift_excluded(conn):
 
 
 def test_null_hash_never_matches_identity(conn):
-    seed_tick(conn, date(2026, 6, 9), 99.0, dependency_hash=None)
+    raw_tick(conn, tick_ts=_ts(date(2026, 6, 9)),
+             decision_ts=_ts(date(2026, 6, 8)), equity=99.0, dependency_hash=None)
     _two_admissible(conn)
     res = assemble(conn)
     assert res.excluded["identity_drift"] == 1
@@ -296,7 +344,9 @@ def test_first_matching_filter_wins(conn):
     # Fails BOTH local-clock and identity; counted once, under the FIRST filter only. Precedes
     # the admissible run (in id order) so it doesn't itself become the "newest tick" and break
     # the epoch under test elsewhere in this file.
-    seed_tick(conn, date(2026, 6, 9), 99.0, clock_source="local", code_hash="STALE")
+    raw_tick(conn, tick_ts=_ts(date(2026, 6, 9)),
+             decision_ts=_ts(date(2026, 6, 8)), equity=99.0,
+             clock_source="local", code_hash="STALE")
     _two_admissible(conn)
     res = assemble(conn)
     assert res.excluded["local_clock"] == 1
@@ -358,7 +408,7 @@ def test_last_tick_per_decision_session_wins(conn):
 # ---------------------------------------------------------------------------
 
 def test_integrity_universe_catches_inadmissible_bad_rows_in_window(conn):
-    # Reconcile-failed local-clock row BEFORE the first admissible row: outside the universe.
+    # Reconcile-failed local-clock row before the first admissible return is still in the epoch.
     raw_tick(conn, tick_ts=_ts(date(2026, 6, 9)), decision_ts=_ts(date(2026, 6, 8)),
              clock_source="local", reconcile_ok=0)
     seed_tick(conn, date(2026, 6, 10), 100.0)
@@ -369,7 +419,7 @@ def test_integrity_universe_catches_inadmissible_bad_rows_in_window(conn):
     raw_tick(conn, tick_ts=_ts(date(2026, 6, 16)), decision_ts=_ts(date(2026, 6, 11)))
     seed_tick(conn, date(2026, 6, 12), 101.0)
     res = assemble(conn)
-    assert res.evidence.n_reconcile_failures == 1   # only the in-window failure
+    assert res.evidence.n_reconcile_failures == 2
     assert res.evidence.n_defective_ticks == 1
     assert res.evidence.n_return_observations == 1  # bad rows never become observations
 
@@ -381,7 +431,7 @@ def test_kill_halt_state_and_trip_events_in_window(conn):
                  "VALUES ('s', 'dd', 'system', 't')")
     conn.execute("INSERT INTO global_halt(id, reason, actor, created_at) "
                  "VALUES (1, 'r', 'human', 't')")
-    rows = [("2026-06-09T00:00:00+00:00", "s"),   # before window start -> not counted
+    rows = [("2026-06-09T00:00:00+00:00", "s"),   # after activation -> counted
             ("2026-06-11T00:00:00+00:00", "s"),   # inside -> counted
             ("2026-06-11T00:00:00+00:00", "other")]  # other strategy -> not counted
     for ts, strat in rows:
@@ -391,7 +441,7 @@ def test_kill_halt_state_and_trip_events_in_window(conn):
     res = assemble(conn)
     assert res.evidence.kill_switch_tripped is True
     assert res.evidence.global_halt_engaged is True
-    assert res.evidence.n_kill_trips_in_window == 1
+    assert res.evidence.n_kill_trips_in_window == 2
 
 
 # ---------------------------------------------------------------------------
@@ -433,9 +483,7 @@ def test_sibling_on_same_account_passes_single_account(conn):
     assert res.n_concurrent_forward == 2
 
 
-def test_sibling_before_window_single_account_ok(conn):
-    # A sibling tick recorded before the first admissible tick has no effect:
-    # strategy 1's admissible ticks are all on "acct" -> single_account_ok True.
+def test_sibling_before_first_return_counts_from_activation(conn):
     seed_tick(conn, date(2026, 6, 10), 100.0)
     seed_tick(conn, date(2026, 6, 12), 101.0)
     raw_tick(conn, name="other", strategy_id=2, tick_ts=_ts(date(2026, 6, 9)),
@@ -443,7 +491,7 @@ def test_sibling_before_window_single_account_ok(conn):
              recorded_at=_ts(date(2026, 6, 9)))  # before first admissible recorded_at
     res = assemble(conn)
     assert res.evidence.single_account_ok is True
-    assert res.n_concurrent_forward == 1
+    assert res.n_concurrent_forward == 2
 
 
 def test_mixed_account_admissible_ticks_fail_single_account(conn):
@@ -484,9 +532,7 @@ def test_external_capital_types_constant():
         {"CSD", "CSW", "TRANS", "JNLC", "JNLS", "ACATC", "ACATS"})
 
 
-def test_activities_window_starts_one_second_before_first_admissible_tick(conn):
-    # Alpaca's `after` bound is EXCLUSIVE, so the window start is widened 1s before the first
-    # admissible tick instant — otherwise a deposit stamped exactly at first_tick_ts escapes.
+def test_activities_window_starts_one_second_before_activation(conn):
     _three_admissible(conn)
     seen = {}
 
@@ -495,7 +541,7 @@ def test_activities_window_starts_one_second_before_first_admissible_tick(conn):
         return []
 
     assemble(conn, activities=fetch)
-    assert seen["after"] == "2026-06-10T19:59:59+00:00"  # _ts(Jun 10) minus 1s
+    assert seen["after"] == "2024-12-31T23:59:59+00:00"
     assert seen["until"] == NOW.isoformat()
 
 
@@ -576,22 +622,22 @@ def test_activities_fetch_failure_fails_closed(conn):
 # No admissible ticks at all
 # ---------------------------------------------------------------------------
 
-def test_no_admissible_ticks_skips_broker_and_zeroes_evidence(conn):
+def test_no_admissible_ticks_still_checks_epoch_integrity(conn):
     seed_tick(conn, date(2026, 6, 11), 100.0, clock_source="local")  # inadmissible only
 
-    def must_not_call(after, until):
-        raise AssertionError("broker must not be called with no admissible window")
+    def unavailable(after, until):
+        raise RuntimeError("broker unavailable")
 
-    res = assemble(conn, activities=must_not_call)
+    res = assemble(conn, activities=unavailable)
     ev = res.evidence
     assert ev.staleness_sessions is None
-    assert ev.activities_ok is True  # would be False had the fake been called
+    assert ev.activities_ok is False
     assert ev.n_external_cash_flows == 0 and ev.n_unattributable_fills == 0
     assert ev.n_return_observations == 0 and ev.session_coverage == 0.0
     assert ev.n_reconcile_failures == 0 and ev.n_defective_ticks == 0
     assert ev.n_kill_trips_in_window == 0
     assert ev.single_account_ok is True
-    assert res.n_concurrent_forward == 0
+    assert res.n_concurrent_forward == 1
     assert res.first_tick_id is None and res.last_tick_id is None
     assert res.first_tick_ts is None and res.last_tick_ts is None
     assert res.account_id is None
@@ -817,6 +863,10 @@ def _pin_identity(monkeypatch):
     monkeypatch.setattr(
         "algua.registry.forward_promotion.compute_artifact_hashes", lambda name: IDENT)
     monkeypatch.setattr("algua.registry.transitions._compute_hashes", lambda name: IDENT)
+    # These orchestration tests seed a deliberately minimal descriptor; descriptor byte/source
+    # verification itself is covered exhaustively in test_deployments.py.
+    monkeypatch.setattr(
+        "algua.registry.deployment.verify_working_tree_manifest", lambda manifest, repo_root: None)
 
 
 def _weekdays_ending(n: int, end: date = date(2026, 6, 12)) -> list[date]:
@@ -1008,120 +1058,69 @@ def test_classify_activities_attributes_fill_to_any_paper_order(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Evidence epoch: no back-crediting across an identity change (anti-gaming)
+# Explicit deployment epoch: no back-crediting across deployment activation
 # ---------------------------------------------------------------------------
 
-def test_a_revert_does_not_re_credit_the_old_run(conn):
-    """Anti-gaming. Ticks are admitted only from the LAST contiguous run of the current identity.
+def test_identical_hash_successor_starts_with_zero_evidence(conn):
+    seed_tick(conn, date(2026, 6, 1), 100.0)
+    seed_tick(conn, date(2026, 6, 2), 140.0)
+    successor_id = activate_successor_deployment(conn)
 
-    The concrete attack: run under identity "c", switch away, switch BACK to "c". Without this
-    bound an operator could revert a strategy to an earlier artifact AFTER seeing how that
-    artifact's forward period turned out, and the old (here: flatteringly profitable) run would be
-    silently re-credited.
-    """
-    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c" -- pre-epoch run
-    seed_tick(conn, date(2026, 6, 2), 140.0)      # identity "c" -- a flattering old run
-    seed_tick(conn, date(2026, 6, 3), 90.0, code_hash="OTHER")   # the run breaker
-    seed_tick(conn, date(2026, 6, 10), 100.0)     # back to "c" -- current epoch
-    seed_tick(conn, date(2026, 6, 12), 101.0)     # current epoch
+    res = assemble(conn, deployment_id=successor_id)
 
-    res = assemble(conn)   # assembles against identity code_hash="c"
-    assert res.excluded["pre_epoch"] == 2
-    assert res.evidence.n_return_observations == 1, "only the final run of two sessions counts"
+    assert res.evidence.n_return_observations == 0
+    assert res.excluded["deployment_mismatch"] == 0
 
 
-def test_a_run_is_not_broken_by_a_bad_tick_of_the_SAME_identity(conn):
-    """A local-clock or stale tick is a bad tick, not a different artifact. It must not restart the
-    epoch -- only an identity CHANGE does."""
-    seed_tick(conn, date(2026, 6, 10), 100.0)
-    seed_tick(conn, date(2026, 6, 11), 99.0, clock_source="local")
-    seed_tick(conn, date(2026, 6, 12), 101.0)
+def test_successor_credits_only_its_own_ticks(conn):
+    seed_tick(conn, date(2026, 6, 1), 100.0)
+    seed_tick(conn, date(2026, 6, 2), 140.0)
+    successor_id = activate_successor_deployment(conn)
+    seed_tick(conn, date(2026, 6, 10), 100.0, deployment_id=successor_id)
+    seed_tick(conn, date(2026, 6, 12), 101.0, deployment_id=successor_id)
 
-    res = assemble(conn)
-    assert res.excluded["local_clock"] == 1
-    assert res.excluded["pre_epoch"] == 0
+    res = assemble(conn, deployment_id=successor_id)
+
+    assert res.excluded["deployment_mismatch"] == 0
     assert res.evidence.n_return_observations == 1
 
 
-def test_no_evidence_when_the_newest_tick_is_a_different_identity(conn):
-    """The strategy has been recoded and has not traded since. Nothing may be credited.
+def test_bad_tick_in_current_deployment_stays_in_hygiene_universe(conn):
+    successor_id = activate_successor_deployment(conn)
+    first = seed_tick(conn, date(2026, 6, 10), 100.0, deployment_id=successor_id)
+    raw_tick(
+        conn, tick_ts="not-a-timestamp", decision_ts=_ts(date(2026, 6, 10)),
+        reconcile_ok=0, deployment_id=successor_id,
+    )
+    seed_tick(conn, date(2026, 6, 12), 101.0, deployment_id=successor_id)
 
-    The two earlier ticks DID match the current identity "c" in isolation -- they are shed as
-    `pre_epoch` (there is no run of "c" ending at the newest tick), not `identity_drift` (which is
-    reserved for the "NEWER" tick itself, which never matches at all). That distinction is the
-    whole epoch semantics: a same-identity tick that merely predates the run boundary is a
-    different failure mode from a tick of a genuinely different artifact.
-    """
-    seed_tick(conn, date(2026, 6, 10), 100.0)
-    seed_tick(conn, date(2026, 6, 12), 101.0)
-    seed_tick(conn, date(2026, 6, 13), 102.0, code_hash="NEWER")
+    res = assemble(conn, deployment_id=successor_id)
 
-    res = assemble(conn)
-    assert res.evidence.n_return_observations == 0
-    assert res.excluded["pre_epoch"] == 2
-    assert res.excluded["identity_drift"] == 1
+    assert res.first_tick_id == first
+    assert res.excluded["bad_tick_ts"] == 1
+    assert res.evidence.n_reconcile_failures == 1
+    assert res.evidence.n_defective_ticks == 1
 
 
-def test_legacy_null_hash_tick_mid_run_truncates_the_epoch(conn):
-    """A legacy tick recorded before the hash columns existed carries NULL code/config/dependency
-    hashes -- exactly what production `tick_snapshots` rows predating this feature contain.
-    `_identity_matches` never matches a NULL stored hash (fail closed), so such a row breaks the
-    contiguous run exactly like a genuine identity change: the two SAME-identity ticks before it
-    are silently shed as `pre_epoch` even though nothing about the artifact actually changed."""
-    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c" -- would-be pre-epoch run
-    seed_tick(conn, date(2026, 6, 2), 101.0)      # identity "c" -- would-be pre-epoch run
-    raw_tick(conn, tick_ts=_ts(date(2026, 6, 3)), decision_ts=_ts(date(2026, 6, 2)),
-             code_hash=None, config_hash=None, dependency_hash=None)  # legacy NULL-hash row
-    seed_tick(conn, date(2026, 6, 10), 100.0)     # identity "c" -- current epoch
-    seed_tick(conn, date(2026, 6, 12), 101.0)     # identity "c" -- current epoch
+def test_redeployment_does_not_reset_identity_scoped_relook_count(conn):
+    repo = SqliteStrategyRepository(conn)
+    seed_cert_kwargs = dict(
+        passed=False, n_forward_observations=0, min_forward_observations=63,
+        session_coverage=0.0, realized_sharpe=None, holdout_sharpe=1.0,
+        degradation_factor=0.5, sharpe_floor=0.3, realized_vol=None,
+        min_forward_vol=0.02, realized_max_drawdown=None, max_forward_drawdown=0.25,
+        first_tick_id=None, last_tick_id=None, first_tick_ts=None, last_tick_ts=None,
+        max_staleness_sessions=5, n_reconcile_failures=0, n_concurrent_forward=1,
+        account_id=None, code_hash="c", config_hash="g", dependency_hash="d",
+        actor="agent", decision_json="{}", consumable=False, deployment_id=1,
+    )
+    row_id = repo.record_forward_gate_evaluation(1, **seed_cert_kwargs)
+    conn.execute(
+        "UPDATE forward_gate_evaluations SET created_at=? WHERE id=?",
+        (_ts(date(2026, 6, 11)), row_id),
+    )
+    successor_id = activate_successor_deployment(conn)
 
-    res = assemble(conn)
-    assert res.excluded["pre_epoch"] == 2
-    assert res.excluded["identity_drift"] == 1
-    assert res.evidence.n_return_observations == 1
+    res = assemble(conn, deployment_id=successor_id)
 
-
-def test_legacy_null_hash_tick_as_newest_zeroes_all_evidence(conn):
-    """The sharper case: the legacy NULL-hash row is the NEWEST tick. `_epoch_start_id` finds no
-    run of the current identity ending at the newest row, so it returns None and EVERY otherwise-
-    admissible tick -- however honest -- is shed as `pre_epoch`. This is exactly the production
-    shape the epoch bound must not choke on silently: a fleet with pre-existing NULL-hash rows
-    must fail closed (zero evidence), not raise and not admit the legacy row by treating NULL as
-    a wildcard match."""
-    seed_tick(conn, date(2026, 6, 10), 100.0)
-    seed_tick(conn, date(2026, 6, 12), 101.0)
-    raw_tick(conn, tick_ts=_ts(date(2026, 6, 13)), decision_ts=_ts(date(2026, 6, 12)),
-             code_hash=None, config_hash=None, dependency_hash=None)
-
-    res = assemble(conn)
-    assert res.evidence.n_return_observations == 0
-    assert res.excluded["pre_epoch"] == 2
-    assert res.excluded["identity_drift"] == 1
-
-
-def test_kill_switch_trip_in_a_shed_pre_epoch_run_does_not_taint_current_hygiene(conn):
-    """The integrity/hygiene windows (reconcile failures, kill-switch trips, concurrency breadth)
-    anchor on `admissible[0]`, which the epoch bound now moves forward to the epoch start. A trip
-    during a PRE-epoch run of the SAME identity is shed along with that run's evidence -- it must
-    not fail the current epoch's hygiene. A trip INSIDE the epoch must still fail it."""
-    seed_tick(conn, date(2026, 6, 1), 100.0)      # identity "c" -- pre-epoch run
-    seed_tick(conn, date(2026, 6, 2), 101.0)      # identity "c" -- pre-epoch run
-    seed_tick(conn, date(2026, 6, 3), 90.0, code_hash="OTHER")  # the run breaker
-    epoch_start_id = seed_tick(conn, date(2026, 6, 10), 100.0)   # epoch start
-    seed_tick(conn, date(2026, 6, 12), 101.0)
-
-    epoch_start_recorded_at = conn.execute(
-        "SELECT recorded_at FROM tick_snapshots WHERE id=?", (epoch_start_id,),
-    ).fetchone()[0]
-    assert epoch_start_recorded_at == _ts(date(2026, 6, 10))
-
-    conn.execute("INSERT INTO audit_log(ts, actor, action, reason, strategy) "
-                 "VALUES (?, 'system', 'kill_switch_trip', 'dd', 's')",
-                 (_ts(date(2026, 6, 2)),))  # inside the shed pre-epoch run -> must NOT count
-    conn.execute("INSERT INTO audit_log(ts, actor, action, reason, strategy) "
-                 "VALUES (?, 'system', 'kill_switch_trip', 'dd', 's')",
-                 (_ts(date(2026, 6, 11)),))  # inside the epoch -> must count
-    conn.commit()
-
-    res = assemble(conn)
-    assert res.evidence.n_kill_trips_in_window == 1
+    assert res.n_prior_forward_looks == 1

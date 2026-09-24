@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from algua.contracts.lifecycle import TransitionError
+from algua.registry.deployment import DeploymentError
 from algua.registry.forward_evidence import (
     ActivitiesFetch,
     SessionCalendar,
@@ -26,6 +27,7 @@ from algua.registry.forward_evidence import (
     _parse_dt,
 )
 from algua.registry.repository import ArtifactIdentity, StrategyRepository
+from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import CERTIFICATE_FRESH_SESSIONS
 from algua.risk.global_halt import is_engaged
 from algua.risk.kill_switch import is_tripped
@@ -60,8 +62,41 @@ def verify_forward_certificate(
     # Normalize (not just tag) to UTC — same rule as assemble_forward_evidence: `.date()`
     # freshness arithmetic must use the UTC date, not a local one.
     now_utc = now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
-    row = repo.latest_forward_gate_row(
-        strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
+    deployment = SqliteStrategyRepository(conn).active_deployment(strategy_id)
+    deployment_id: int | None = None
+    if deployment is not None:
+        # This is the live authority path: verify the complete descriptor/current source before
+        # accepting any evidence row, not merely the three denormalized identity hashes.
+        try:
+            deployment = SqliteStrategyRepository(conn).require_tick_deployment(strategy_id)
+        except DeploymentError as exc:
+            raise TransitionError(f"active deployment descriptor is invalid: {exc}") from exc
+        assert deployment is not None
+        deployment_id = deployment.id
+        if (
+            deployment.code_hash != identity.code_hash
+            or deployment.config_hash != identity.config_hash
+            or deployment.dependency_hash != identity.dependency_hash
+        ):
+            raise TransitionError(
+                "active deployment identity does not match the live artifact identity")
+        row_data = conn.execute(
+            "SELECT * FROM forward_gate_evaluations WHERE strategy_id=? AND deployment_id=?"
+            " AND code_hash=? AND config_hash=? AND dependency_hash=?"
+            " ORDER BY id DESC LIMIT 1",
+            (strategy_id, deployment_id, identity.code_hash, identity.config_hash,
+             identity.dependency_hash),
+        ).fetchone()
+        row = dict(row_data) if row_data is not None else None
+    elif conn.execute(
+        "SELECT 1 FROM legacy_deployment_strategies WHERE strategy_id=?", (strategy_id,)
+    ).fetchone() is not None:
+        row = repo.latest_forward_gate_row(
+            strategy_id, identity.code_hash, identity.config_hash, identity.dependency_hash)
+    else:
+        raise TransitionError(
+            "go-live requires an active deployment; this strategy is not in the fixed legacy "
+            "cohort")
     if row is None:
         raise TransitionError(
             "go-live requires a forward-test certificate for the current "
@@ -77,10 +112,16 @@ def verify_forward_certificate(
         raise TransitionError(
             f"the forward-test certificate is stale: {age} sessions old, max "
             f"{CERTIFICATE_FRESH_SESSIONS}; re-run `algua paper promote` to refresh it")
+    deployment_clause = " AND deployment_id=?" if deployment_id is not None else ""
+    tick_params: tuple[int, int] | tuple[int, int, int] = (
+        (strategy_id, row["last_tick_id"] or 0, deployment_id)
+        if deployment_id is not None
+        else (strategy_id, row["last_tick_id"] or 0)
+    )
     ticks_since = conn.execute(
         "SELECT tick_ts, reconcile_ok FROM tick_snapshots WHERE lane='paper' AND strategy_id=?"
-        " AND id > ?",
-        (strategy_id, row["last_tick_id"] or 0),
+        " AND id > ?" + deployment_clause,
+        tick_params,
     ).fetchall()
     n_bad_ticks = sum(1 for t in ticks_since if not t["reconcile_ok"])
     if n_bad_ticks:

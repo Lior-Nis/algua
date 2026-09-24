@@ -17,6 +17,7 @@ from algua.registry import allocations
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+from tests._deployment_helpers import force_legacy_strategy
 
 
 def _repo(tmp_path) -> tuple[SqliteStrategyRepository, sqlite3.Connection]:
@@ -28,8 +29,7 @@ def _repo(tmp_path) -> tuple[SqliteStrategyRepository, sqlite3.Connection]:
 def _set_stage(conn: sqlite3.Connection, sid: int, stage: Stage) -> None:
     # Set the source stage DIRECTLY rather than driving the full lifecycle — we are unit-testing the
     # exit edge in isolation, not the gates that guard reaching that stage.
-    with conn:
-        conn.execute("UPDATE strategies SET stage=? WHERE id=?", (stage.value, sid))
+    force_legacy_strategy(conn, sid, stage=stage.value)
 
 
 def _seed_alloc(conn: sqlite3.Connection, sid: int, capital: float = 10_000.0) -> None:

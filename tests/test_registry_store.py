@@ -21,6 +21,7 @@ from algua.registry.repository import (
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
 from algua.research.clustering import clustering_version
+from tests._deployment_helpers import force_legacy_strategy
 
 
 def test_no_mixin_shadows_another() -> None:
@@ -123,7 +124,7 @@ def test_transition_service_allows_injected_live_approval_verifier(repo):
     # CANDIDATE via human: scaffolding to forward_tested, not exercising the agent shortlist gate.
     _transition(repo, "cross_sectional_momentum", Stage.BACKTESTED, Actor.AGENT)
     _transition(repo, "cross_sectional_momentum", Stage.CANDIDATE, Actor.HUMAN)
-    _transition(repo, "cross_sectional_momentum", Stage.PAPER, Actor.AGENT)
+    force_legacy_strategy(repo._conn, repo.get("cross_sectional_momentum").id)
     _transition(repo, "cross_sectional_momentum", Stage.FORWARD_TESTED, Actor.HUMAN,
                 "test setup")
 
@@ -704,7 +705,7 @@ def _find_forward(repo, sid, code="c0", config="cfg0", dep="dep0"):
 def _to_paper(repo, name):
     repo.apply_transition(repo.get(name), Stage.BACKTESTED, Actor.AGENT, "bt")
     repo.apply_transition(repo.get(name), Stage.CANDIDATE, Actor.HUMAN, "sl")
-    repo.apply_transition(repo.get(name), Stage.PAPER, Actor.AGENT, "pp")
+    force_legacy_strategy(repo._conn, repo.get(name).id)
     return repo.get(name)
 
 
@@ -959,8 +960,11 @@ def test_apply_transition_revokes_allocation_atomically(tmp_path):
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")
-    for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
-               Stage.FORWARD_TESTED, Stage.LIVE):
+    for to in (Stage.BACKTESTED, Stage.CANDIDATE):
+        rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
+    force_legacy_strategy(conn, rec.id)
+    rec = repo.get("s1")
+    for to in (Stage.FORWARD_TESTED, Stage.LIVE):
         rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
     with conn:
         allocations.allocate_locked(conn, rec.id, 10_000.0, "human", 50_000.0)
@@ -980,8 +984,11 @@ def test_apply_transition_revoke_rolls_back_with_stage_on_cas_failure(tmp_path):
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")
-    for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
-               Stage.FORWARD_TESTED, Stage.LIVE):
+    for to in (Stage.BACKTESTED, Stage.CANDIDATE):
+        rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
+    force_legacy_strategy(conn, rec.id)
+    rec = repo.get("s1")
+    for to in (Stage.FORWARD_TESTED, Stage.LIVE):
         rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
     with conn:
         allocations.allocate_locked(conn, rec.id, 10_000.0, "human", 50_000.0)

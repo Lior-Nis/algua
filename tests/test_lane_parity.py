@@ -63,7 +63,10 @@ def test_both_lanes_bind_to_the_gated_universe():
     A strategy is promoted on evidence gathered over the gate's universe. Trading a config list
     that has since drifted means trading symbols the promotion evidence never covered.
     """
-    missing = [lane for lane in LANES if "resolve_operational_universe" not in _calls(lane)]
+    paper_setup = (REPO / "algua/registry/paper_runtime.py").read_text()
+    missing = [lane for lane in LANES if (
+        "resolve_operational_universe" not in (_tick_source(lane) + paper_setup)
+    )]
     assert not missing, (
         f"these lanes do NOT bind to the gated universe: {missing}. This is the #601 defect "
         f"recurring: the lane trades whatever its CONFIG says, not what its promotion evidence "

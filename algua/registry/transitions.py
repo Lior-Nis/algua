@@ -46,6 +46,9 @@ def transition_strategy(
     target = Stage(to)
     transition_actor = Actor(actor)
     rec = repo.get(name)
+    if rec.stage is Stage.CANDIDATE and target is Stage.PAPER:
+        raise TransitionError(
+            "candidate -> paper requires atomic deployment intake; run `algua paper intake`")
     validate_transition(rec.stage, target)
     if target is Stage.DORMANT and not (reason and reason.strip()):
         raise TransitionError("transition to dormant requires a non-empty reason")
@@ -87,24 +90,26 @@ def transition_strategy(
         if transition_actor is not Actor.HUMAN:
             consume_forward_gate_id = _validate_forward_gate(
                 repo=repo, strategy_id=rec.id, identity=identity)
-    return repo.apply_transition(
-        rec=rec,
-        to=target,
-        actor=transition_actor,
-        reason=reason,
-        code_hash=code_hash,
-        config_hash=config_hash,
-        dependency_hash=dependency_hash,
-        consume_gate_id=consume_gate_id,
-        consume_forward_gate_id=consume_forward_gate_id,
-        revoke_allocation=revoke_allocation,
-        live_authorization=live_authorization,
-        # The source-lane open-order drain only applies to a book-exit edge that sheds the
-        # allocation (#497 F2/H1); forwarding it on any other edge would trip the store-layer
-        # "exit_guard is only valid on a revoke_allocation transition" guard. The CLI only builds a
-        # guard for a live-source revoke edge, so in practice this is a belt-and-suspenders filter.
-        exit_guard=exit_guard if revoke_allocation else None,
-    )
+    from algua.operator.deployment_lock import deployment_retirement_lock
+
+    with deployment_retirement_lock(rec.stage, target):
+        return repo.apply_transition(
+            rec=rec,
+            to=target,
+            actor=transition_actor,
+            reason=reason,
+            code_hash=code_hash,
+            config_hash=config_hash,
+            dependency_hash=dependency_hash,
+            consume_gate_id=consume_gate_id,
+            consume_forward_gate_id=consume_forward_gate_id,
+            revoke_allocation=revoke_allocation,
+            live_authorization=live_authorization,
+            # The source-lane open-order drain only applies to a book-exit edge that sheds the
+            # allocation (#497 F2/H1); forwarding it on any other edge would trip the store-layer
+            # "exit_guard is only valid on a revoke_allocation transition" guard.
+            exit_guard=exit_guard if revoke_allocation else None,
+        )
 
 
 def _validate_live_gate(

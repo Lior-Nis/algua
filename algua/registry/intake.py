@@ -29,6 +29,7 @@ from algua.registry.allocations import (
     active_allocation,
     active_paper_lane_count,
 )
+from algua.registry.deployment import prepare_working_tree_deployment
 from algua.registry.store import SqliteStrategyRepository
 
 
@@ -198,9 +199,12 @@ def run_intake(
             queued.extend(c.name for c in ordered[i:])
             break
         try:
+            prepared = prepare_working_tree_deployment(conn, cand.name)
             repo.intake_candidate_to_paper(
                 repo.get(cand.name), capital=slc, actor=actor,
-                account_equity=equity, max_concurrent=max_concurrent)
+                account_equity=equity, max_concurrent=max_concurrent,
+                deployment_manifest=prepared.manifest,
+                research_gate_id=prepared.research_gate_id)
         except (CountCapReached, AllocationError):
             # Hard bound in-txn (book full or no capital headroom): queue the rest, stop.
             queued.extend(c.name for c in ordered[i:])

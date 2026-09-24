@@ -4,7 +4,6 @@ import importlib
 import json
 import sqlite3
 import subprocess
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -99,10 +98,11 @@ from algua.registry.gating import load_gated_strategy
 from algua.registry.human_actor import authenticate_actor, canonical_run_context
 from algua.registry.intake import run_intake
 from algua.registry.kb_sync import sync_kb_doc
+from algua.registry.paper_runtime import prepare_paper_book, prepare_paper_runtime
+from algua.registry.paper_runtime import still_paper_allocated as _still_paper_allocated
 from algua.registry.promote_run import promote_task
 from algua.registry.repository import StrategyNotFound
 from algua.registry.store import SqliteStrategyRepository
-from algua.registry.universe_binding import SOURCE_CONFIG_LEGACY, resolve_operational_universe
 from algua.research.forward_gates import (
     DEGRADATION_FACTOR,
     FORWARD_SHARPE_CONFIDENCE,
@@ -670,20 +670,10 @@ def merge_back(
     }))
 
 
-def _still_paper_allocated(conn, name: str) -> bool:
-    """True iff `name` is still a paper-lane book tenant (Stage.PAPER/FORWARD_TESTED AND an active
-    allocation). Re-read at submit time so a mid-cycle lane-crossing transition (which atomically
-    revokes the slice, #497) halts further submits instead of trading a stale capital base — the
-    paper mirror of live `_still_live_allocated` (#281)."""
-    rec = SqliteStrategyRepository(conn).get(name)
-    return (rec.stage in (Stage.PAPER, Stage.FORWARD_TESTED)
-            and active_allocation(conn, rec.id) is not None)
-
-
 def _run_paper_strategy_tick(  # noqa: PLR0913
     conn, name: str, strategy, rec, broker, provider, max_drawdown,
     tick_ts, clock_source, acct, *, cancel=None, reserve_buy=None,
-    start: str, end: str, snapshot_id: str | None = None,
+    start: str, end: str, snapshot_id: str | None = None, prepared=None,
 ) -> dict:
     """ONE strategy's multi-tenant paper tick: NAV-snapshot sizing (#314), crash-safe ledger
     recording, breach trip + scoped flatten, tick-snapshot persistence (equity = per-strategy NAV).
@@ -700,21 +690,12 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
         if alloc is None:
             raise ValueError(f"{name} has no paper allocation")
         allocation = float(alloc["capital"])
-        identity = compute_artifact_hashes(name)
-
-        # #559: bind this tick to the GATED universe (never the CONFIG template); a missing gate
-        # row raises -> StrategySetupError; a legacy row (universe_name NULL) falls back to CONFIG.
-        resolved_universe, universe_source = resolve_operational_universe(
-            conn, get_settings().data_dir, name, strategy.universe)
-        if universe_source == SOURCE_CONFIG_LEGACY:
-            log.warning("universe_binding_config_legacy", extra={"fields": {
-                "strategy": name, "lane": "paper",
-                "note": "newest passing gate row has no universe_name (pre-#559); ticking on "
-                        "CONFIG.universe — re-run research promote to bind the gate universe"}})
-        if resolved_universe != strategy.universe:
-            strategy = replace(
-                strategy,
-                config=strategy.config.model_copy(update={"universe": resolved_universe}))
+        if prepared is None:
+            prepared = prepare_paper_runtime(
+                conn, name, strategy, rec, data_dir=get_settings().data_dir,
+                identity_loader=compute_artifact_hashes,
+                logger=log)
+        strategy, deployment, identity = prepared
 
         # coids THIS tick's before_submit freshly inserted are safe to retract on a noop; a
         # pre-existing NULL row may be a crash-orphaned real order and MUST be preserved (#311).
@@ -819,8 +800,9 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             positions=result.positions_before, n_submitted=len(result.submitted),
             reconcile_ok=result.reconcile_ok, lane="paper", strategy_id=rec.id,
             code_hash=identity.code_hash, config_hash=identity.config_hash,
-            dependency_hash=identity.dependency_hash, account_id=acct.account_id,
-            cash=acct.cash, clock_source=clock_source, snapshot_id=snapshot_id)
+            dependency_hash=identity.dependency_hash, account_id=acct.account_id, cash=acct.cash,
+            clock_source=clock_source, snapshot_id=snapshot_id,
+            deployment_id=(deployment.id if deployment is not None else None))
     audit_append(conn, actor="agent", action="trade_tick",
                  reason=f"{len(result.submitted)} orders submitted", strategy=name)
     return ok({
@@ -865,6 +847,10 @@ def trade_tick(
                                  reason="paper trade-tick invoked with --disable-drawdown-breaker",
                                  strategy=name)
                 strategy, rec = load_gated_strategy(conn, name, "trade-tick")
+                prepared = prepare_paper_runtime(
+                    conn, name, strategy, rec, data_dir=get_settings().data_dir,
+                    identity_loader=compute_artifact_hashes,
+                    logger=log)
                 broker = _alpaca_broker_from_settings()
                 provider = _select_provider(False, snapshot)
                 acct = broker.account()
@@ -910,7 +896,7 @@ def trade_tick(
                     out = _run_paper_strategy_tick(
                         conn, name, strategy, rec, broker, provider, max_drawdown,
                         tick_ts, clock_source, acct, start=start, end=end,
-                        snapshot_id=snapshot)
+                        snapshot_id=snapshot, prepared=prepared)
                 except StrategySetupError as exc:
                     # SINGLE-strategy path has no siblings to isolate: unwrap the per-tenant
                     # StrategySetupError so json_errors renders the real cause's message/code (#374)
@@ -989,12 +975,8 @@ def run_all(
                                  reason="paper run-all invoked with --disable-drawdown-breaker",
                                  strategy=None)
                 repo = SqliteStrategyRepository(conn)
-                # Both paper-lane stages tick (parity with load_gated_strategy/trade-tick),
-                # preserving each list's insertion order (#124).
                 paper = repo.list_strategies(Stage.PAPER) + repo.list_strategies(
                     Stage.FORWARD_TESTED)
-                # A recovery/demotion re-entrant (dormant->paper, live->paper) has no allocation and
-                # is always FLAT: SKIP it, don't tick it (would abort the whole cycle, #317 #2).
                 skipped_unallocated = [prec.name for prec in paper
                                        if active_allocation(conn, prec.id) is None]
                 tickable = [prec for prec in paper if prec.name not in set(skipped_unallocated)]
@@ -1005,6 +987,24 @@ def run_all(
                 if global_halt.is_engaged(conn):
                     emit({**breach_payload("global halt engaged", halted=True),
                           "skipped_unallocated": skipped_unallocated})
+                    raise typer.Exit(1)
+                results: list[dict] = []
+                preflight = prepare_paper_book(
+                    conn, tickable, data_dir=get_settings().data_dir,
+                    loader=load_gated_strategy, identity_loader=compute_artifact_hashes,
+                    logger=log)
+                prepared_runtimes, tickable = preflight.runtimes, preflight.tickable
+                for failed_name, exc in preflight.failures:
+                    setup = StrategySetupError(failed_name, exc)
+                    audit_append(conn, actor="system", action="strategy_setup_error",
+                                 reason=setup.code, strategy=failed_name)
+                    results.append({"ok": False, "strategy": failed_name,
+                                    "kind": "setup_error", "error": setup.code})
+                    counters.setup_errors += 1
+                if preflight.failures and not tickable:
+                    emit({"ok": False, "code": "strategy_setup_failed",
+                          "error": "every tickable strategy failed pre-effect setup",
+                          "strategies": results, "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1)
                 broker = _alpaca_broker_from_settings()
                 acct = broker.account()
@@ -1023,7 +1023,6 @@ def run_all(
                           "skipped_unallocated": skipped_unallocated})
                     raise typer.Exit(1) from exc
 
-                results: list[dict] = []
                 # Lane bars refresh (#556): AFTER fill ingest (so ledger-held symbols are current),
                 # BEFORE the reconcile. Broker positions are read TWICE on purpose: this first
                 # read only feeds symbol DISCOVERY (orphan/residual marks get fetched too); the
@@ -1150,7 +1149,8 @@ def run_all(
                             tick_ts, clock_source, acct,
                             reserve_buy=_paper_reserve_for(name),
                             cancel=lambda n=name: _paper_scoped_cancel(conn, broker, n),
-                            start=start, end=end, snapshot_id=snapshot)
+                            start=start, end=end, snapshot_id=snapshot,
+                            prepared=prepared_runtimes[name])
                     except StrategySetupError as exc:
                         log.error("strategy_setup_error",
                                   extra={"fields": {"lane": "paper", "strategy": name,

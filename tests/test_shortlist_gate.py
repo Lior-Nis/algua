@@ -5,6 +5,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+from tests._deployment_helpers import force_legacy_strategy
 
 _IDENT = type("I", (), {"code_hash": "c0", "config_hash": "cfg0", "dependency_hash": "dep0"})
 _FWD_IDENT = ArtifactIdentity("c0", "cfg0", "dep0")  # unpackable, like the real recomputed one
@@ -91,7 +92,7 @@ def _paper(repo, name="alpha"):
     rec = repo.add(name)
     repo.apply_transition(rec, Stage.BACKTESTED, Actor.AGENT, "bt")
     repo.apply_transition(repo.get(name), Stage.CANDIDATE, Actor.HUMAN, "sl")
-    repo.apply_transition(repo.get(name), Stage.PAPER, Actor.AGENT, "pp")
+    force_legacy_strategy(repo._conn, rec.id)
     return repo.get(name)
 
 

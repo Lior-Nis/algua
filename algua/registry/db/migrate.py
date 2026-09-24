@@ -19,6 +19,7 @@ have prevented it; it would only have scattered the sequence that makes such a b
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 
 from algua.registry.db._util import _add_missing_columns
 from algua.registry.db.constants import SCHEMA_VERSION
@@ -251,5 +252,31 @@ def migrate(conn: sqlite3.Connection) -> None:
     # bootstrapped before this change (SQLite can't ALTER a CHECK; see the docstring for why a
     # rebuild is needed and why it's safe). No-op on a fresh DB or one already rebuilt.
     _rebuild_negative_results_if_stale(conn)
+    # v47 (#661): explicit deployment epochs. Existing tick/evaluation rows stay NULL forever;
+    # provenance is never reconstructed. The compatibility cohort is captured once, before the
+    # marker insert, so later paper/live admissions cannot acquire legacy status merely by lacking
+    # a deployment row.
+    _add_missing_columns(
+        conn, "tick_snapshots",
+        {"deployment_id": "INTEGER REFERENCES strategy_deployments(id)"})
+    _add_missing_columns(
+        conn, "forward_gate_evaluations",
+        {"deployment_id": "INTEGER REFERENCES strategy_deployments(id)"})
+    if conn.execute("SELECT 1 FROM deployment_migrations WHERE id=1").fetchone() is None:
+        marked_at = datetime.now(UTC).isoformat()
+        strategy_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(strategies)").fetchall()
+        }
+        if "stage" in strategy_columns:
+            conn.execute(
+                "INSERT INTO legacy_deployment_strategies(strategy_id, original_stage, marked_at)"
+                " SELECT id, stage, ? FROM strategies"
+                " WHERE stage IN ('paper','forward_tested','live','dormant')",
+                (marked_at,),
+            )
+        conn.execute(
+            "INSERT INTO deployment_migrations(id, legacy_cohort_captured_at) VALUES (1,?)",
+            (marked_at,),
+        )
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION};")
     conn.commit()

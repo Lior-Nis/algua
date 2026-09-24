@@ -31,6 +31,7 @@ from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.risk import global_halt
 from algua.risk.limits import RiskBreach
+from tests._deployment_helpers import force_legacy_strategy
 from tests._gate_row_helpers import seed_passing_gate
 
 runner = CliRunner()
@@ -91,11 +92,13 @@ def _to_paper(name: str) -> None:
                                "--start", "2022-01-01", "--end", "2023-12-31"]).exit_code == 0
     assert runner.invoke(app, ["registry", "transition", name, "--to", "candidate",
                                "--actor", "human", "--reason", "ok"]).exit_code == 0
-    assert runner.invoke(app, ["registry", "transition", name, "--to", "paper",
-                               "--actor", "agent", "--reason", "paper"]).exit_code == 0
     # #559: the tick binds to the newest passing gate row; a legacy (universe_name NULL) row
     # preserves the pre-binding behaviour (tick on CONFIG.universe via config_legacy).
     seed_passing_gate(name)
+    with closing(connect(get_settings().db_path)) as conn:
+        migrate(conn)
+        rec = SqliteStrategyRepository(conn).get(name)
+        force_legacy_strategy(conn, rec.id)
 
 
 def _force_stage(name: str, stage_value: str) -> None:
@@ -991,7 +994,7 @@ def test_run_all_refresh_isolates_one_planless_strategy(monkeypatch):
     assert r.exit_code == 0, r.stdout
     by_name = {s["strategy"]: s for s in json.loads(r.stdout)["strategies"]}
     assert by_name[_S1].get("ok") is True and ticked == [_S1]
-    assert by_name[_S2]["traded"] is False and "cycle plan" in by_name[_S2]["skipped"]
+    assert by_name[_S2]["kind"] == "setup_error"
 
 
 def test_run_all_refresh_all_planless_is_a_failed_cycle(monkeypatch):
@@ -1008,7 +1011,7 @@ def test_run_all_refresh_all_planless_is_a_failed_cycle(monkeypatch):
     r = runner.invoke(app, ["paper", "run-all", "--refresh"])
     assert r.exit_code == 1
     payload = json.loads(r.stdout)
-    assert payload["ok"] is False and payload["code"] == "cycle_plan_failed"
+    assert payload["ok"] is False and payload["code"] == "strategy_setup_failed"
     assert payload["strategies"][0]["strategy"] == _S1 and called == []
 
 

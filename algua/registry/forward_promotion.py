@@ -25,6 +25,7 @@ from typing import Any
 
 from algua.contracts.lifecycle import Actor, Stage, TransitionError, validate_transition
 from algua.registry.approvals import compute_artifact_hashes
+from algua.registry.deployment import DeploymentError
 from algua.registry.forward_evidence import (
     ActivitiesFetch,
     AssembledEvidence,
@@ -32,6 +33,7 @@ from algua.registry.forward_evidence import (
     assemble_forward_evidence,
 )
 from algua.registry.repository import StrategyRecord, StrategyRepository
+from algua.registry.store import SqliteStrategyRepository
 from algua.research.forward_gates import (
     ForwardGateCriteria,
     ForwardGateDecision,
@@ -111,8 +113,19 @@ def run_forward_gate(
     never disagree."""
     rec = repo.get(name)
     identity = compute_artifact_hashes(name)
+    deployment = SqliteStrategyRepository(conn).require_tick_deployment(rec.id)
+    if deployment is None:
+        raise DeploymentError("forward promotion requires one active deployment epoch")
+    if (
+        deployment.code_hash != identity.code_hash
+        or deployment.config_hash != identity.config_hash
+        or deployment.dependency_hash != identity.dependency_hash
+    ):
+        raise DeploymentError("active deployment identity does not match the working tree")
+    deployment_id = deployment.id
     asm = assemble_forward_evidence(
-        conn, strategy_id=rec.id, name=name, identity=identity, calendar=calendar, now=now,
+        conn, strategy_id=rec.id, name=name, deployment_id=deployment_id,
+        identity=identity, calendar=calendar, now=now,
         activities_fetch=activities_fetch)
     decision = evaluate_forward_gate(asm.evidence, criteria)
     gate_row: dict[str, Any] = {
@@ -136,6 +149,7 @@ def run_forward_gate(
         "account_id": asm.account_id,
         "code_hash": identity.code_hash, "config_hash": identity.config_hash,
         "dependency_hash": identity.dependency_hash,
+        "deployment_id": deployment_id,
         "decision_json": json.dumps(decision.to_dict(), sort_keys=True),
     }
     promoted = False

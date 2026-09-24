@@ -8,6 +8,7 @@ from algua.registry import allocations
 from algua.registry.db import connect, migrate
 from algua.registry.store import SqliteStrategyRepository
 from algua.registry.transitions import transition_strategy
+from tests._deployment_helpers import force_legacy_strategy
 
 
 def _paper_strategy(tmp_path):
@@ -16,8 +17,9 @@ def _paper_strategy(tmp_path):
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")
-    for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER):
+    for to in (Stage.BACKTESTED, Stage.CANDIDATE):
         rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
+    force_legacy_strategy(conn, rec.id)
     return repo
 
 
@@ -41,9 +43,9 @@ def _live_strategy(tmp_path):
     repo = SqliteStrategyRepository(conn)
     repo.add(name="s1")
     rec = repo.get("s1")
-    for to in (Stage.BACKTESTED, Stage.CANDIDATE, Stage.PAPER,
-               Stage.FORWARD_TESTED, Stage.LIVE):
+    for to in (Stage.BACKTESTED, Stage.CANDIDATE):
         rec = repo.apply_transition(rec, to, Actor.HUMAN, reason="setup")
+    force_legacy_strategy(conn, rec.id, stage="live")
     return repo, conn
 
 

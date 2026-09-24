@@ -32,6 +32,8 @@ def resolve_operational_universe(
     data_dir: Path,
     strategy_name: str,
     config_universe: list[str],
+    *,
+    research_gate_id: int | None = None,
 ) -> tuple[list[str], str]:
     """Resolve the symbols ``strategy_name`` may operationally trade, bound to its gate evidence.
 
@@ -40,13 +42,21 @@ def resolve_operational_universe(
     universe has no membership effective on or before today (an empty operational universe is a
     data error, not a tradable state).
     """
-    row = conn.execute(
-        "SELECT g.universe_name FROM gate_evaluations g"
-        " JOIN strategies s ON s.id = g.strategy_id"
-        " WHERE s.name = ? AND g.passed = 1"
-        " ORDER BY g.id DESC LIMIT 1",
-        (strategy_name,),
-    ).fetchone()
+    if research_gate_id is None:
+        row = conn.execute(
+            "SELECT g.universe_name FROM gate_evaluations g"
+            " JOIN strategies s ON s.id = g.strategy_id"
+            " WHERE s.name = ? AND g.passed = 1"
+            " ORDER BY g.id DESC LIMIT 1",
+            (strategy_name,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT g.universe_name FROM gate_evaluations g"
+            " JOIN strategies s ON s.id=g.strategy_id"
+            " WHERE s.name=? AND g.id=? AND g.passed=1",
+            (strategy_name, research_gate_id),
+        ).fetchone()
     if row is None:
         raise LookupError(
             f"strategy {strategy_name!r} has no passing gate_evaluations row; an unpromoted "
