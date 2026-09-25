@@ -37,8 +37,13 @@ reports must distinguish tests passing, code merged, deployment verified and cap
 [Story 1.2 — explicit deployment epochs](stories/1-2-record-working-tree-deployments.md) are
 implemented, independently reviewed and merged. Neither merge is a deployment.
 [Story 1.3 — frozen planner artifacts](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md)
-is prepared as `ready-for-dev`; its approved design freezes new admissions while keeping existing
-working-tree/legacy tenants explicit until the controlled migration story. The
+is the `decomposed` parent outcome. The
+[2026-09-25 readiness assessment](implementation-readiness-report-2026-09-25.md) found it too large
+for one implementation/review cycle, and the approved
+[Sprint Change Proposal](sprint-change-proposal-2026-09-25.md) divides it into Stories 1.3a–1.3d.
+[Story 1.3a](stories/1-3a-complete-two-phase-planner-boundary-in-process.md) is
+`prepared-for-readiness-review`; Stories 1.3b–1.3d remain backlog. No child is ready for development
+until its own readiness review passes. The older
 [readiness assessment](implementation-readiness-report-2026-09-24.md) covers only Story 1.1, not
 either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues outside
 the active story boundary.
