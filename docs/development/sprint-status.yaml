@@ -1,0 +1,55 @@
+# generated: 2026-09-25
+# last_updated: 2026-09-25
+# project: Algua
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: docs/development/stories
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when the first story becomes active
+#   - in-progress -> done: Manually when all stories reach done
+#
+# Story Status:
+#   - backlog: Story is planned but not admitted for development
+#   - ready-for-dev: Story passed readiness and may be implemented
+#   - in-progress: Developer is actively implementing the story
+#   - review: Story implementation awaits independent code review
+#   - done: Story implementation and review are complete
+#
+# Retrospective Status:
+#   - optional: Available but not required
+#   - done: Retrospective completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Story 1.3 is a decomposed parent traceability record, not an executable work item.
+# - Only Story 1.3a has passed readiness; Stories 1.3b-1.3d remain backlog.
+# - A ready story is not merged, deployed, qualified, or authorized to trade.
+# - Move a story through in-progress and review before done.
+
+generated: 2026-09-25
+last_updated: 2026-09-25
+project: Algua
+project_key: NOKEY
+tracking_system: file-system
+story_location: docs/development/stories
+
+development_status:
+  epic-1: in-progress
+  1-1-extract-in-process-decision-planner: done
+  1-2-record-working-tree-deployments: done
+  1-3-materialize-and-execute-frozen-planner-artifacts: in-progress  # aggregate parent only
+  1-3a-complete-two-phase-planner-boundary-in-process: ready-for-dev
+  1-3b-materialize-and-verify-recoverable-planner-artifacts: backlog
+  1-3c-execute-frozen-planners-in-paper: backlog
+  1-3d-bind-operational-evidence-and-qualification: backlog
+  epic-1-retrospective: optional
+  epic-2: backlog
+  epic-2-retrospective: optional
