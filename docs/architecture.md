@@ -19,12 +19,14 @@ change fights a boundary, the boundary is usually right.
 The target is a **modular monolith + isolated live runtime + background workers** (PRD §6).
 The existing package boundaries support that direction. Isolated immutable deployment execution
 is still partial: the [artifact-freeze design](superpowers/specs/2026-09-22-artifact-freeze-design.md)
-separates a frozen decision planner from the current supervisor. The planner seam and explicit
-deployment epochs are shipped: new paper intake records a canonical working-tree descriptor,
-ticks and forward evaluations carry its append-only deployment ID, and certificates cannot cross
-epochs. Execution is **not frozen yet**: it still imports the mutable working tree and refuses a
-deployment-aware tick when that tree or environment drifts. The next artifact-freeze slice must
-materialize recoverable immutable planner content; existing migration-time tenants remain an
+separates a frozen decision planner from the current supervisor. The initial pure planner seam and
+explicit deployment epochs are shipped: new paper intake records a canonical working-tree
+descriptor, ticks and forward evaluations carry its append-only deployment ID, and certificates
+cannot cross epochs. Execution is **not frozen yet**: it still imports the mutable working tree and
+refuses a deployment-aware tick when that tree or environment drifts. The approved Story 1.3 parent
+is decomposed into four reviewable increments: complete the full two-phase behavior boundary
+in-process, materialize and verify immutable content/environments, execute frozen planners in paper,
+then bind operational evidence and qualification. Existing migration-time tenants remain an
 explicit unmigrated cohort. The supervisor retains broker access, reconciliation and account-wide
 risk controls. Development and deployed artifacts belong to one product/repository; no production
 fork is required.

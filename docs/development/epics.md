@@ -1,6 +1,6 @@
 ---
 stepsCompleted: [1, 2]
-status: epics-approved-third-story-prepared
+status: epics-approved-story-1-3-decomposed
 scope: phase-1-operating-kernel
 inputDocuments:
   - docs/PRD.md
@@ -199,14 +199,13 @@ does not mint a frozen executable, migrate the existing fleet or redesign the si
 Full acceptance criteria, transaction boundaries, migration rules and current-code traps are in
 [Story 1.2](stories/1-2-record-working-tree-deployments.md).
 
-### Story 1.3: Materialize and execute frozen planner artifacts
+### Story 1.3: Materialize and execute frozen planner artifacts (parent outcome)
 
 As the operator, I want each newly admitted paper strategy's planner to execute from recoverable
 immutable content so it can accumulate trustworthy evidence while repository development continues.
 
-The approved design uses a deterministic content-addressed source bundle and copied model assets,
-one short-lived planner subprocess per strategy, a shared environment only for a complete matching
-dependency/interpreter/ABI/platform fingerprint, Parquet inputs and strictly validated JSON output.
+The 2026-09-25 readiness review found that this approved outcome was too large for one implementation
+story. It remains the complete requirement and traceability record, but its status is `decomposed`.
 The current supervisor retains every shared authority and broker effect. Existing working-tree and
 legacy tenants remain explicit until controlled migration; artifacts are retained without GC.
 
@@ -214,6 +213,18 @@ Full acceptance criteria, transaction/filesystem boundaries, transport validatio
 and current-code integration seams are in
 [Story 1.3](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md).
 
-Stories 1.1–1.3 are prepared. Epic 1 migration and Epic 2 require their own detailed stories and
-readiness review. Approval of the outcomes is not approval of protected implementation changes. No
-sprint completion is claimed.
+The approved implementation sequence is:
+
+1. [Story 1.3a — complete the two-phase planner boundary in-process](stories/1-3a-complete-two-phase-planner-boundary-in-process.md)
+   (`prepared-for-readiness-review`);
+2. [Story 1.3b — materialize and verify recoverable planner artifacts](stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md)
+   (`backlog`);
+3. [Story 1.3c — execute frozen planners in paper](stories/1-3c-execute-frozen-planners-in-paper.md)
+   (`backlog`);
+4. [Story 1.3d — bind operational evidence and qualification](stories/1-3d-bind-operational-evidence-and-qualification.md)
+   (`backlog`).
+
+Stories 1.1 and 1.2 are done. Story 1.3a is the only next readiness candidate; no child is approved
+for implementation merely because the parent outcome or this decomposition is approved. Epic 1
+migration and Epic 2 require their own detailed stories and readiness review. No sprint completion
+is claimed.

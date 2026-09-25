@@ -4,9 +4,12 @@
 This remains foundational implementation direction. The status below is deliberately partial;
 adopting the vision does not ship the remaining slices or authorize a live-gate change.
 
-**Status:** design, approved in principle 2026-09-22. Planned
-(`docs/superpowers/plans/2026-09-22-evidence-epoch-and-source-normalization.md`); slice 1 (the two
-defects below) is implemented. Slices 2-7 are not yet planned or implemented.
+**Status:** design, approved in principle 2026-09-22. Slice 1 (the two defects below), slice 2's
+initial pure planner seam and slice 3's deployment/epoch records are implemented. The complete
+frozen behavior boundary and execution work in slice 4 was decomposed on 2026-09-25 into Stories
+1.3a–1.3d after implementation-readiness review. Slices 5-7 remain future work. See the
+[approved delivery correction](../../development/sprint-change-proposal-2026-09-25.md); it does not
+change this design's authority boundaries.
 
 ## The problem
 
@@ -280,17 +283,24 @@ independently reviewable:
 3. **Deployment records + epoch evaluation.** `deployment_artifact`, `strategy_deployment`,
    `deployment_id` on ticks, and the forward gate evaluating one epoch. Still executing from the
    working tree, so the records are recorded and enforced before anything is frozen.
-4. **Frozen execution.** Mint the artifact, run the planner from it, supervisor dispatch.
+4. **Frozen execution.** Mint the artifact, run the planner from it, supervisor dispatch. Delivery
+   is further decomposed into: (a) the complete two-phase in-process behavior boundary, (b)
+   recoverable bundle/environment materialization, (c) frozen paper dispatch, and (d)
+   deployment-bound evidence and qualification.
 5. **Migration of the 18**, as its own controlled command.
 6. **Live** ceremony onto `deployment_id`.
 7. Separately and only if reviewed as a wall change: narrowing `code_hash` to the selected
    construction/overlay callables (defect 3 above).
 
-## Open questions
+## Open questions resolved or deferred by delivery planning
 
-- Artifact representation: git worktree at a pinned commit, an exported tree, or a built wheel.
-- Planner transport: subprocess with a JSON contract is the obvious first cut; the protocol version
-  must be stamped either way.
-- Garbage collection: when a deployment is retired, what is reclaimed and when.
-- Whether the supervisor should refuse to start when any active deployment's artifact is missing
-  (fail closed) or skip that strategy (degrade). Probably fail closed.
+- Artifact representation: a deterministic exported bundle of tracked `algua/` source plus
+  canonical configuration/manifest metadata; environment build inputs come from the same Git
+  commit but are not executable bundle content.
+- Planner transport: two stateless, independently invocable phases; frozen dispatch uses a fresh
+  short-lived subprocess for each required phase with a versioned Parquet/JSON contract.
+- Garbage collection: deferred. Phase 1 retains artifacts and environments indefinitely.
+- Failure policy: setup/decision failure is isolated per strategy before tenant effects; shared
+  authority, reconciliation and account-wide risk failures remain systemic.
+- Model assets: non-empty asset bundles remain unsupported until a separately reviewed tradable
+  model lane can copy already-verified bytes without reopening mutable paths.

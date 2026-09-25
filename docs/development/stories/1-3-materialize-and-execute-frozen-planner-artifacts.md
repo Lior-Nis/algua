@@ -4,11 +4,39 @@ baseline_commit: 34ab0d77c61af9ac20637c59545874720bd15fc9
 
 # Story 1.3: Materialize and execute frozen planner artifacts
 
-Status: ready-for-dev
+Status: decomposed
 
 Prepared: 2026-09-24. Baseline: Story 1.2 merge `34ab0d7` (PR #669).
 Epic: 1. Requirements: FR4, FR6, FR9–FR10 and the paper portion of FR1/FR12.
 Constraints: NFR1–NFR8. Upstream: #661, artifact-freeze design slices 4–5.
+
+## Decomposition status
+
+The 2026-09-25 implementation-readiness review found that this complete outcome is too large for one
+implementation and review cycle. This file remains the approved parent requirement record; it is not
+an executable development story. The approved children are:
+
+1. [Story 1.3a](1-3a-complete-two-phase-planner-boundary-in-process.md) — complete the two-phase
+   behavior boundary in-process;
+2. [Story 1.3b](1-3b-materialize-and-verify-recoverable-planner-artifacts.md) — materialize and
+   verify recoverable bundle/environment content;
+3. [Story 1.3c](1-3c-execute-frozen-planners-in-paper.md) — dispatch frozen planners in paper;
+4. [Story 1.3d](1-3d-bind-operational-evidence-and-qualification.md) — bind evidence and permit
+   qualification from verified immutable content.
+
+Parent acceptance coverage maps as follows:
+
+| Parent acceptance criteria | Child ownership |
+|---|---|
+| AC6 plus in-process portions of AC9–AC10 | Story 1.3a |
+| AC1–AC2, AC4–AC5, AC12–AC13 materialization/retention portions | Story 1.3b |
+| AC3 future model assets | Superseded for this cycle: 1.3b reserves the manifest shape but rejects non-empty assets pending a separately reviewed tradable model lane |
+| AC6–AC11 transport/dispatch/failure portions; AC14 compatibility dispatch | Story 1.3c |
+| AC11–AC14 evidence, restart and qualification portions | Story 1.3d |
+
+Shared parity, authority, compatibility and full-gate constraints apply to every child. The parent is
+complete only after all four children are done; approval of this decomposition does not authorize
+implementation or deployment.
 
 ## Story
 
@@ -69,12 +97,14 @@ its JSON envelope.
    one identical immutable artifact or a domain failure—never mixed content. Published files are
    non-writable and verified before dispatch. No `.env`, registry database, credentials, trust
    anchor, mutable worktree path or operational configuration is copied.
-3. **Model assets are frozen from verified bytes.** Given a strategy with a future supported model
+3. **Model assets are frozen from verified bytes (superseded for this cycle).** Given a strategy with a future supported model
    lane, when its artifact is prepared, then model content is copied from the atomically resolved
    `ModelHandle.artifact_bytes`, not reopened through an external path after validation. Its stable
    relative location, full digest and pinned model metadata are in the canonical artifact manifest.
    Today's paper tradability restrictions remain unchanged; this criterion closes the materializer
-   contract without enabling an unsupported model/sidecar lane.
+   contract without enabling an unsupported model/sidecar lane. The approved decomposition narrows
+   Story 1.3b to source-only artifacts: it reserves the canonical asset inventory but rejects
+   non-empty assets until a separately reviewed tradable model lane exists.
 4. **Frozen records are append-only.** Given successful materialization, when candidate intake
    commits, then the artifact row records `source_kind="frozen"`, bundle digest and stable relative
    locator plus the complete Story 1.2 descriptor, and the deployment/allocation/stage transition
@@ -355,5 +385,8 @@ To be recorded during implementation.
 
 ## Change Log
 
+- 2026-09-25: Status changed to `decomposed` after implementation-readiness review. Stories
+  1.3a–1.3d and their coverage map now govern implementation; unsupported model assets were
+  explicitly deferred. No runtime, authority, schema or deployment behavior changed.
 - 2026-09-24: Story prepared from the approved Story 1.3 architecture decision; status set to
   `ready-for-dev`. No runtime, authority, schema or deployment behavior changed by this document.
