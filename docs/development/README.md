@@ -42,8 +42,9 @@ is the `decomposed` parent outcome. The
 for one implementation/review cycle, and the approved
 [Sprint Change Proposal](sprint-change-proposal-2026-09-25.md) divides it into Stories 1.3a–1.3d.
 [Story 1.3a](stories/1-3a-complete-two-phase-planner-boundary-in-process.md) is
-`prepared-for-readiness-review`; Stories 1.3b–1.3d remain backlog. No child is ready for development
-until its own readiness review passes. The older
+`ready-for-dev` after its [targeted readiness rerun](implementation-readiness-report-2026-09-25-story-1-3a-rerun.md)
+and adopted [normative machine contract](specs/spec-story-1-3a-planner-contract/SPEC.md). Stories
+1.3b–1.3d remain backlog and require their own readiness reviews. The older
 [readiness assessment](implementation-readiness-report-2026-09-24.md) covers only Story 1.1, not
 either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues outside
 the active story boundary.

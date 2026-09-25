@@ -216,7 +216,7 @@ and current-code integration seams are in
 The approved implementation sequence is:
 
 1. [Story 1.3a — complete the two-phase planner boundary in-process](stories/1-3a-complete-two-phase-planner-boundary-in-process.md)
-   (`prepared-for-readiness-review`);
+   (`ready-for-dev`);
 2. [Story 1.3b — materialize and verify recoverable planner artifacts](stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md)
    (`backlog`);
 3. [Story 1.3c — execute frozen planners in paper](stories/1-3c-execute-frozen-planners-in-paper.md)
@@ -224,7 +224,8 @@ The approved implementation sequence is:
 4. [Story 1.3d — bind operational evidence and qualification](stories/1-3d-bind-operational-evidence-and-qualification.md)
    (`backlog`).
 
-Stories 1.1 and 1.2 are done. Story 1.3a is the only next readiness candidate; no child is approved
-for implementation merely because the parent outcome or this decomposition is approved. Epic 1
-migration and Epic 2 require their own detailed stories and readiness review. No sprint completion
-is claimed.
+Stories 1.1 and 1.2 are done. Story 1.3a passed its targeted readiness rerun after adopting an exact
+normative Phase A/Phase B machine contract and is the only child ready for development. Stories
+1.3b–1.3d remain backlog; no later child is approved merely because the parent or decomposition is
+approved. Epic 1 migration and Epic 2 require their own detailed stories and readiness review. No
+sprint completion is claimed.
