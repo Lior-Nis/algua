@@ -35,8 +35,9 @@ authority in the current supervisor.
 - id: CAP-3
   intent: Phase B can recompute Phase A, verify its binding and evaluate captured per-strategy risk
     and decision state.
-  success: A mismatch terminates before decision computation; a match yields the same no-decision,
-    risk-breach or decision outcome as the baseline.
+  success: A mismatch terminates before decision computation; a match either requests venue belief
+    after equity/drawdown pass or yields the same no-decision, risk-breach or decision outcome as
+    the baseline. Reinvocation remains stateless.
 - id: CAP-4
   intent: The current paper supervisor can use the two-phase API without changing acquisition,
     cancellation, submission, hooks, audit or persistence ordering.

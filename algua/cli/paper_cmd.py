@@ -77,6 +77,7 @@ from algua.live.live_loop import (
     SubmittedOrder,
     TickHalted,
     TickHooks,
+    planner_context_for_deployment,
     run_tick,
 )
 from algua.live.paper_loop import run_paper
@@ -697,8 +698,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                 logger=log)
         strategy, deployment, identity = prepared
 
-        # coids THIS tick's before_submit freshly inserted are safe to retract on a noop; a
-        # pre-existing NULL row may be a crash-orphaned real order and MUST be preserved (#311).
+        # Only coids freshly inserted by this tick are safe to retract on noop (#311).
         freshly_recorded: set[str] = set()
 
         def _before_submit(intent: OrderIntent, coid: str | None) -> None:
@@ -708,8 +708,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
                 freshly_recorded.add(coid)
 
         def _on_submitted(rec_: SubmittedOrder) -> None:
-            # A real order landed: backfill its broker id and drop it from the fresh set so on_noop
-            # can never retract a resolved order (defense beyond submit_sized's noop/POST split).
+            # Backfill real orders and remove them from the noop-retractable set (#311).
             backfill_paper_venue_broker_order_id(conn, rec_.client_order_id, rec_.order_id)
             freshly_recorded.discard(rec_.client_order_id)
 
@@ -734,6 +733,7 @@ def _run_paper_strategy_tick(  # noqa: PLR0913
             live_snapshot=lambda bars: build_paper_sizing_snapshot(
                 conn, name, allocation, bars, strategy.universe),
             live_positions=lambda: paper_believed_positions(conn, name),
+            planner_context=planner_context_for_deployment(deployment, get_settings().exchange),
         )
     except (KeyboardInterrupt, SystemExit):
         raise

@@ -1,82 +1,51 @@
-"""Versioned in-process decision seam, without broker or registry authority.
-
-The supervisor owns acquisition, timing, valuation, reconciliation and effects. This is not
-the complete future frozen boundary or a sandbox for the supplied strategy. Inputs contain
-pandas objects by reference; frozen dataclasses do not make their contents immutable.
-"""
+"""Public stateless planner facade; all inputs are data and carry no operational authority."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING
 
-import pandas as pd
-
-from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
-from algua.contracts.types import OrderIntent, Side
-from algua.risk.limits import WEIGHT_TOL, validate_decision_weights
+from algua.live.planner_contract import (
+    EarlyPlannerInput,
+    EarlyPlannerResult,
+    LatePlannerInput,
+    LatePlannerResult,
+)
+from algua.live.planner_decision import (
+    PlannerInput,
+    PlannerResult,
+    build_intents,
+    decide,
+    plan,
+)
+from algua.live.planner_early import phase_a as _phase_a
+from algua.live.planner_early import prepare_early
+from algua.live.planner_late import phase_b_impl
 
 if TYPE_CHECKING:
     from algua.strategies.base import LoadedStrategy
 
+__all__ = [
+    "PlannerInput",
+    "PlannerResult",
+    "build_intents",
+    "decide",
+    "phase_a",
+    "phase_a_closed_bars",
+    "phase_b",
+    "plan",
+]
 
 
-@dataclass(frozen=True)
-class PlannerInput:
-    view: pd.DataFrame
-    current_weights: dict[str, float]
-    decision_ts: datetime
-    protocol_version: int = PLANNER_PROTOCOL_VERSION
+def phase_a(strategy: LoadedStrategy, early: EarlyPlannerInput) -> EarlyPlannerResult:
+    return _phase_a(strategy, early)
 
 
-@dataclass(frozen=True)
-class PlannerResult:
-    weights: pd.Series
-    intents: list[OrderIntent]
-    protocol_version: int = PLANNER_PROTOCOL_VERSION
+def phase_a_closed_bars(strategy: LoadedStrategy, early: EarlyPlannerInput):
+    """Return Phase A's canonical closed union frame for supervisor-owned valuation."""
+    return prepare_early(strategy, early).bars
 
 
-def build_intents(
-    weights: pd.Series,
-    current_weights: dict[str, float],
-    decision_ts: datetime,
-) -> list[OrderIntent]:
-    """Emit sorted target-weight deltas, including zero targets for dropped holdings."""
-    intents: list[OrderIntent] = []
-    symbols = sorted(set(weights.index) | set(current_weights))
-    for sym in symbols:
-        target = float(weights.get(sym, 0.0))
-        current = float(current_weights.get(sym, 0.0))
-        if abs(target - current) > WEIGHT_TOL:
-            side = Side.BUY if target > current else Side.SELL
-            intents.append(
-                OrderIntent(symbol=sym, side=side, target_weight=target, decision_ts=decision_ts)
-            )
-    return intents
-
-
-def plan(strategy: LoadedStrategy, inputs: PlannerInput) -> PlannerResult:
-    """Compute weights -> shared risk validation -> intents over explicit decision inputs."""
-    if (
-        type(inputs.protocol_version) is not int
-        or inputs.protocol_version != PLANNER_PROTOCOL_VERSION
-    ):
-        raise ValueError(f"unsupported planner protocol: {inputs.protocol_version!r}")
-    weights = strategy.target_weights(inputs.view)
-    validate_decision_weights(
-        weights, strategy.execution, strategy.name, allowed_symbols=strategy.universe
-    )
-    intents = build_intents(weights, inputs.current_weights, inputs.decision_ts)
-    return PlannerResult(weights, intents)
-
-
-def decide(
-    strategy: LoadedStrategy,
-    view: pd.DataFrame,
-    current_weights: dict[str, float],
-    decision_ts: datetime,
-) -> tuple[pd.Series, list[OrderIntent]]:
-    """Compatibility surface for the existing loops; computation lives solely in ``plan``."""
-    result = plan(strategy, PlannerInput(view, current_weights, decision_ts))
-    return result.weights, result.intents
+def phase_b(strategy: LoadedStrategy, late: LatePlannerInput) -> LatePlannerResult:
+    # Resolve facade globals on every invocation: Phase B recomputes Phase A without retaining
+    # state, and both public seams remain independently observable by the future dispatcher.
+    return phase_b_impl(strategy, late, phase_a_fn=phase_a, plan_fn=plan)

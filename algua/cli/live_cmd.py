@@ -52,6 +52,7 @@ from algua.live.live_loop import (
     SubmittedOrder,
     TickHalted,
     TickHooks,
+    planner_context_for_deployment,
     run_tick,
 )
 from algua.observability import (
@@ -171,15 +172,13 @@ def _run_strategy_tick(  # noqa: PLR0913
                 strategy,
                 config=strategy.config.model_copy(update={"universe": resolved_universe}))
 
-        # No buying-power preflight: min(allocation, NAV) sizing already de-risks; a coarse
-        # allocation-vs-BP check would falsely refuse a fully-invested rebalance-only strategy.
+        # No coarse buying-power preflight: min(allocation, NAV) already de-risks sizing.
 
         def _live_snap(bars):
             return build_live_sizing_snapshot(conn, name, allocation, bars, strategy.universe)
 
         def _persist(record: SubmittedOrder) -> None:
-            # Record in the BOOKS immediately (client_order_id is the durable identity) so fills
-            # attribute back and scoped cancel finds it; audit too (#18) — never batch after loop.
+            # Record immediately so fills attribute and scoped cancel finds the order (#18).
             record_live_order(conn, name, record.symbol, record.side, None, record.client_order_id)
             backfill_broker_order_id(conn, record.client_order_id, record.order_id)
             audit_append(conn, actor="agent", action="live_order",
@@ -194,6 +193,7 @@ def _run_strategy_tick(  # noqa: PLR0913
                                  or not _still_live_allocated(conn, name)),
             peak_equity=get_nav_peak(conn, name),
             reserve_buy=reserve_buy,
+            planner_context=planner_context_for_deployment(deployment, get_settings().exchange),
         )
     except (KeyboardInterrupt, SystemExit):
         raise

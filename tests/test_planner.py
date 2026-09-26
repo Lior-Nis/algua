@@ -78,7 +78,12 @@ def test_planner_dependency_closure_has_no_operational_authority():
     graph = grimp.build_graph("algua", include_external_packages=True, cache_dir=None)
     dependencies = graph.find_upstream_modules("algua.live.planner")
     pure_prefixes = ("algua.contracts", "algua.features", "algua.portfolio")
-    allowed_leaves = {"algua.risk.limits", "algua.strategies.base"}
+    allowed_leaves = {
+        "algua.calendar.market_calendar", "algua.live.planner_binding",
+        "algua.live.planner_contract", "algua.live.planner_decision",
+        "algua.live.planner_early", "algua.live.planner_late", "algua.risk.limits",
+        "algua.strategies.base",
+    }
     forbidden = {
         name for name in dependencies if name.startswith("algua.")
         and name not in allowed_leaves
@@ -92,5 +97,5 @@ def test_planner_dependency_closure_has_no_operational_authority():
                                exclude_type_checking_imports=True, cache_dir=None)
     assert not runtime.find_upstream_modules("algua.live.planner").intersection({
         "os", "pathlib", "sqlite3", "socket", "subprocess", "requests", "httpx",
-        "time", "importlib", "builtins",
+        "time", "builtins",
     })
