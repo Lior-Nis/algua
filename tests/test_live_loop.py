@@ -657,14 +657,15 @@ def test_held_out_of_universe_absent_bar_trips_no_mark():
 def test_decide_view_excludes_out_of_universe_held(monkeypatch):
     # #452 Round-2c/2d: decide() must see the UNIVERSE-only history, never the widened union frame.
     import algua.live.live_loop as ll
+    import algua.live.planner as planner
     captured: dict[str, set] = {}
-    orig = ll.decide
+    orig = planner.plan
 
-    def _spy(strategy, view, cw, ts):
-        captured["cols"] = set(view["symbol"].unique())
-        return orig(strategy, view, cw, ts)
+    def _spy(strategy, inputs):
+        captured["cols"] = set(inputs.view["symbol"].unique())
+        return orig(strategy, inputs)
 
-    monkeypatch.setattr(ll, "decide", _spy)
+    monkeypatch.setattr(planner, "plan", _spy)
     broker = _FakeBroker(positions={"BBB": 10.0})
     bars = _bars({"AAA": [100.0, 100.0, 100.0], "BBB": [50.0, 50.0, 50.0]})
     ll.run_tick(_strategy({"AAA": 1.0}), broker, _FakeProvider(bars), DATES[0], DATES[-1], now=NOW)

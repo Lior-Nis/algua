@@ -102,7 +102,7 @@ A held book never terminates as an unvalued early no-decision: unusable held mar
 | `quantities` | map of string to float | exact captured snapshot quantities, including zero entries |
 | `market_values` | map of string to float | exact captured snapshot market values, including zero entries |
 | `persisted_peak_equity` | float or null | state read once before Phase B |
-| `venue_belief` | tagged union | `disabled` or `enabled` with a quantity map; enabled-empty is distinct from disabled |
+| `venue_belief` | tagged union | `pending`, `disabled`, or `enabled` with a quantity map; enabled-empty is distinct from disabled |
 
 Phase B derives `positions_before`, `current_weights`, ratcheted peak, reconciliation status and
 realized gross from these values. Callers cannot supply those derived values separately. Account
@@ -117,6 +117,7 @@ Phase B first recomputes Phase A from the original early input. It returns exact
 |---|---|---|
 | `PhaseBindingFailure` | `code`, `detail` | recomputed Phase A is not `SnapshotRequired`, or its binding/outcome differs; no late risk or strategy decision runs |
 | `PlannerRiskFailure` | `kind`, `detail`, `is_dark_feed` | typed baseline breach from equity, drawdown, reconciliation, realized gross or decision-weight validation |
+| `VenueBeliefRequired` | no fields | equity/drawdown passed with `pending`; capture venue belief and reinvoke Phase B with the same early input and binding |
 | `LateNoDecision` | `reason`, `state` | valued held book remains in warm-up; `reason` is `warming` |
 | `Decision` | `state`, `ordered_intents` | complete pure portfolio intent ready for supervisor effect checks; target weights are in `state` |
 | `PlannerInputFailure` | `code`, `detail` | deterministic invalid late input or resolved-identity mismatch |
@@ -218,10 +219,12 @@ comparison before inspecting late state or invoking strategy decision code.
    `EarlyPlannerInput`.
 2. Phase A evaluates only the early input. A terminal result ends planner work. It performs no late
    acquisition.
-3. On `SnapshotRequired`, the supervisor captures one sizing snapshot, drawdown basis, peak and
-   tagged venue belief, then creates `LatePlannerInput` without mutating the early input.
-4. Phase B recomputes Phase A and verifies the binding before reading/evaluating late state.
-5. The supervisor translates the pure outcome into the existing result/exception surface, applies
+3. On `SnapshotRequired`, the supervisor captures one sizing snapshot, drawdown basis and peak,
+   then invokes Phase B with `venue_belief=pending` without mutating the early input.
+4. Phase B recomputes Phase A, verifies the binding, and evaluates equity/drawdown. A passing
+   pending request returns `VenueBeliefRequired`; the supervisor captures tagged venue belief and
+   reinvokes Phase B statelessly with the same early input, binding and economic snapshot.
+5. The supervisor translates the terminal pure outcome into the existing result/exception surface, applies
    halt/cancel/submit hooks in the existing order and persists operational evidence.
 
 ## Required parity matrix

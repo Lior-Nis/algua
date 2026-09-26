@@ -1,27 +1,45 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import secrets
 from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
-
-import pandas as pd
 
 from algua.calendar.factory import get_calendar
 from algua.contracts.types import OrderIntent
 from algua.execution.alpaca_broker import _AlpacaBroker
-from algua.live.planner import decide
+from algua.live import planner as decision_planner
+from algua.live.planner_contract import (
+    BOUNDARY_VERSION,
+    CapturedStrategyState,
+    Decision,
+    EarlyNoDecision,
+    EarlyPlannerInput,
+    LateNoDecision,
+    LatePlannerInput,
+    PhaseBindingFailure,
+    PlannerInputFailure,
+    PlannerRiskFailure,
+    SnapshotRequired,
+    VenueBeliefDisabled,
+    VenueBeliefEnabled,
+    VenueBeliefPending,
+    VenueBeliefRequired,
+)
 from algua.risk.limits import (
     MAX_STALE_SESSIONS,
     WEIGHT_TOL,
     RiskBreach,
-    check_drawdown,
     check_mark_freshness,
 )
 from algua.strategies.base import LoadedStrategy
 
 _RECONCILE_TOL = 1e-6
+decide = decision_planner.decide
 
 
 def _positions(broker: _AlpacaBroker) -> dict[str, float]:
@@ -36,29 +54,17 @@ def _early_positions(hooks: TickHooks, broker: _AlpacaBroker) -> dict[str, float
     return hooks.live_positions() if hooks.live_positions is not None else _positions(broker)
 
 
-def _latest_rows(bars: pd.DataFrame) -> pd.DataFrame:
-    """Each symbol's LATEST row selected by timestamp with NULLS PRESERVED. The frame is already
-    `sort_index()`-ed by the caller, so `groupby('symbol').tail(1)` returns the newest row per
-    symbol WITHOUT dropping a NaN close — unlike `groupby(...).last()`, which skips NaN and would
-    backfill an older finite close paired with the newest timestamp, masking a NaN-latest mark
-    from the `isfinite and > 0` wall (#452 Round-2b). `_latest_bar_ts` and `_latest_marks` both
-    read from this same per-symbol row so the timestamp and close come from ONE atomic row."""
-    if bars.empty or "symbol" not in bars.columns:
-        return bars.iloc[0:0]
-    return bars.groupby("symbol", sort=False).tail(1)
-
-
-def _latest_bar_ts(bars: pd.DataFrame) -> dict[str, datetime]:
-    """{symbol: latest kept bar timestamp} from the null-preserving latest-row selection."""
-    tail = _latest_rows(bars)
+def _latest_bar_ts(bars) -> dict[str, datetime]:
+    tail = bars.iloc[0:0] if bars.empty else bars.groupby("symbol", sort=False).tail(1)
     return {str(sym): ts for ts, sym in zip(tail.index, tail["symbol"], strict=True)}
 
 
-def _latest_marks(bars: pd.DataFrame) -> dict[str, float]:
-    """{symbol: latest kept close} from the null-preserving latest-row selection. A NaN/+inf close
-    is PRESERVED (not skipped) so the usability wall can reject it as `unvaluable_marks`."""
-    tail = _latest_rows(bars)
-    return {str(sym): float(c) for sym, c in zip(tail["symbol"], tail["close"], strict=True)}
+def _latest_marks(bars) -> dict[str, float]:
+    tail = bars.iloc[0:0] if bars.empty else bars.groupby("symbol", sort=False).tail(1)
+    return {
+        str(sym): float(close)
+        for sym, close in zip(tail["symbol"], tail["close"], strict=True)
+    }
 
 
 def assert_marks_usable(
@@ -76,7 +82,8 @@ def assert_marks_usable(
     `RiskBreach('unvaluable_marks' | 'stale_marks')` which the per-lane handlers route to
     HALT-WITHOUT-FLATTEN (a dark bar feed, broker still alive)."""
     unvaluable = sorted(
-        s for s in symbols
+        s
+        for s in symbols
         if s in latest_close and not (math.isfinite(latest_close[s]) and latest_close[s] > 0.0)
     )
     if unvaluable:
@@ -125,6 +132,32 @@ class TickResult:
     realized_gross: float = 0.0
 
 
+@dataclass(frozen=True)
+class PlannerContext:
+    """Supervisor-verified identity values copied into one planner request."""
+
+    deployment_id: int | None
+    artifact_id: int | None
+    manifest_digest: str | None
+    config_hash: str
+    resolved_config_json: str
+    calendar_code: str
+
+
+def planner_context_for_deployment(deployment: Any, calendar_code: str) -> PlannerContext | None:
+    """Copy an already-verified deployment record into the authority-free planner envelope."""
+    if deployment is None:
+        return None
+    return PlannerContext(
+        deployment.id,
+        deployment.artifact_id,
+        deployment.manifest_digest,
+        deployment.config_hash,
+        deployment.resolved_config_json,
+        calendar_code,
+    )
+
+
 @dataclass
 class TickHooks:
     """Side-effecting callbacks the orchestrator (the CLI) supplies so the loop itself stays free
@@ -170,10 +203,46 @@ class TickHooks:
     # venue — both sentinels return before the POST) AFTER before_submit already recorded a durable
     # intent, so the paper lane can retract that phantom intent row (#311). None -> skipped.
     on_noop: Callable[[OrderIntent, str | None], None] | None = None
+    planner_context: PlannerContext | None = None
 
 
 class TickHalted(RuntimeError):
     """The kill-switch tripped between cancel and submit; the tick aborted before sending orders."""
+
+
+def _default_planner_context(strategy: LoadedStrategy) -> PlannerContext:
+    """Compatibility identity for direct/legacy callers without a deployment record."""
+    if hasattr(strategy, "config"):
+        from algua.strategies.base import config_hash
+
+        resolved = strategy.config.model_dump(mode="json")
+        digest = config_hash(strategy)
+    else:
+        resolved = {"name": strategy.name, "universe": list(strategy.universe)}
+        encoded = json.dumps(resolved, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()[:32]
+    resolved_json = json.dumps(resolved, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return PlannerContext(None, None, None, digest, resolved_json, get_calendar().code)
+
+
+def _tick_result(state, *, submitted=None) -> TickResult:
+    return TickResult(
+        decision_ts=state.decision_ts,
+        target_weights=dict(state.target_weights),
+        positions_before=dict(state.positions_before),
+        submitted=[] if submitted is None else submitted,
+        equity=state.equity,
+        peak_equity=state.peak_equity,
+        reconcile_ok=state.reconcile_ok,
+        realized_gross=state.realized_gross,
+    )
+
+
+def _raise_planner_failure(result: object) -> None:
+    if isinstance(result, PlannerRiskFailure):
+        raise RiskBreach(result.kind, result.detail)
+    if isinstance(result, (PlannerInputFailure, PhaseBindingFailure)):
+        raise ValueError(result.detail)
 
 
 def run_tick(
@@ -201,162 +270,75 @@ def run_tick(
         raise ValueError(f"mark-freshness wall supports only 1d bars; got {timeframe!r}")
     now = now or datetime.now(UTC)
 
-    # Discover the held book BEFORE the fetch (ledger/broker positions need no bars), then fetch
-    # marks for the UNIVERSE ∪ HELD set — so a held INHERITED / out-of-universe symbol is actually
-    # requested and gets a REAL mark, instead of falsely reading as `no_mark` merely because it was
-    # never fetched (#452 Round-2c). Valuation reads this union frame; the DECISION reads a
-    # universe-only view (below), so the widened fetch never pollutes target_weights() or timing.
     held_qtys = _early_positions(hooks, broker)
     held = {s for s, q in held_qtys.items() if q != 0.0}
     universe_and_held = sorted(set(strategy.universe) | held)
-    bars = provider.get_bars(universe_and_held, start, end, timeframe).sort_index()
-    if not bars.empty:
-        # Only decide on fully-closed sessions: drop any bar dated on/after today so a partial
-        # current-session bar can't drive the decision. (B2b's scheduler can use the exchange
-        # calendar to admit today's bar once its session has closed.)
-        cutoff = now.date()
-        bars = bars[[ts.date() < cutoff for ts in bars.index]]
+    bars = provider.get_bars(universe_and_held, start, end, timeframe)
+    context = hooks.planner_context or _default_planner_context(strategy)
+    early = EarlyPlannerInput(
+        boundary_version=BOUNDARY_VERSION,
+        request_id=secrets.token_hex(16),
+        strategy_name=strategy.name,
+        deployment_id=context.deployment_id,
+        artifact_id=context.artifact_id,
+        manifest_digest=context.manifest_digest,
+        config_hash=context.config_hash,
+        resolved_config_json=context.resolved_config_json,
+        now=now,
+        timeframe=timeframe,
+        calendar_code=context.calendar_code,
+        raw_bars=bars,
+        early_positions=dict(held_qtys),
+        gate_universe=tuple(strategy.universe),
+        max_drawdown=max_drawdown,
+    )
+    first = decision_planner.phase_a(strategy, early)
+    _raise_planner_failure(first)
+    if isinstance(first, EarlyNoDecision):
+        return _tick_result(first.state)
+    if not isinstance(first, SnapshotRequired):
+        raise RuntimeError("planner returned an unknown Phase A result")
 
-    # Latest mark + timestamp per symbol, read ATOMICALLY from the same (null-preserving) row.
-    latest_ts = _latest_bar_ts(bars)
-    latest_close = _latest_marks(bars)
-
-    # (1) HELD-book gate — BEFORE the empty-bars / warm-up early returns and BEFORE sizing (#452,
-    # findings 1 + CRITICAL). A book that holds ANY position must have a usable mark for every held
-    # symbol; a dead / empty / stale feed on a held book must TRIP (RiskBreach), not slip out on a
-    # no-op early return. A FLAT book has nothing at risk, so the early returns proceed unchanged.
-    if held:
-        assert_marks_usable(held, latest_ts, latest_close, now)
-
-    if bars.empty:
-        # Nothing fetched at all. If the book were held, the gate above already tripped; so a FLAT
-        # book falls through here to the unchanged no-op early return (no marks, nothing to value).
-        return TickResult(None, {}, held_qtys, [])
-
-    # Decision TIMING + warm-up derive from the UNIVERSE-restricted history ONLY (#452 Round-2d): a
-    # held out-of-universe symbol's longer / independent history must NOT make the universe look
-    # warmed or move the decision timestamp. Valuation (below) still reads the full union frame.
-    universe_bars = bars[bars["symbol"].isin(strategy.universe)]
-    t = universe_bars.index.max() if not universe_bars.empty else None
-    # warmup_bars = N holds the first N closed sessions flat: refuse to decide until strictly MORE
-    # than N distinct closed sessions are available, so the FIRST decision happens on session index
-    # N (the bar that sees N+1 sessions of history) — identical to the backtest loop's
-    # `if i < warmup: continue` and the paper loop's `if bars_seen <= warmup: continue`
-    # (#1: reconcile the historical off-by-one, which decided one bar early at nunique() == N).
-    warming = universe_bars.index.nunique() <= strategy.execution.warmup_bars
-
-    # (2) HELD-book risk VALUATION — runs whenever the book is held, warm-up or not (#452).
-    # Warm-up is a DECISION gate, not a risk gate: it may suppress decide()/new orders, but it must
-    # NEVER suppress valuation of a book that is already held. So the sizing snapshot + the
-    # non-positive-equity guard + check_drawdown + reconcile + realized-gross run whenever
-    # `held or not warming`.
-    valued = held or not warming
-    snap: Any = None
-    drawdown_equity = 0.0
-    peak: float | None = None
-    positions_before: dict[str, float] = {}
-    current_weights: dict[str, float] = {}
-    reconcile_ok = True
-    realized_gross = 0.0
-    if valued:
-        # Snapshot equity + positions ONCE (1 account GET + 1 positions GET); reuse it as the fixed
-        # sizing denominator AND as the deterministic position state for the report, reconcile, and
-        # the symbol union, so nothing can drift between two network calls mid-tick (#20, #23). When
-        # live_snapshot is supplied, it provides a ledger-backed SizingSnapshot (equity =
-        # min(allocation, NAV)) and the NAV used as the drawdown basis. It reads the UNION frame so
-        # a held out-of-universe mark is priced. Paper passes None -> broker path.
-        if hooks.live_snapshot is not None:
-            snap, drawdown_equity = hooks.live_snapshot(bars)
-        else:
-            snap = broker.snapshot(strategy.universe)
-            drawdown_equity = snap.equity
-
-        # snap.equity is the sizing denominator for the mv/equity weights below: a value that is not
-        # a positive finite number ZeroDivisions (== 0), silently flips every current weight's sign
-        # (< 0) so decide() trades against inverted holdings, or NaN-poisons every weight to a no-op
-        # (NaN, via a bad mark) — refuse before any of those. `not (x > 0.0)` rejects NaN too. Trip
-        # BEFORE drawdown/reconcile/division (#162). A non-positive NAV off trustworthy marks is a
-        # genuine economic wipe, so this routes to the trip + flatten economic-breach handler.
-        if not (snap.equity > 0.0):
-            raise RiskBreach(
-                "non_positive_equity",
-                f"sizing equity {snap.equity} is not a usable (positive, finite) denominator — "
-                f"refusing to trade before it divides by zero, inverts weights, or NaN-poisons",
-            )
-
-        # Drawdown against the persisted peak: equity below the breaker threshold halts the tick
-        # before any order (#27). The peak ratchets up to this tick's drawdown basis. This runs for
-        # a held-but-warming book too, so an inherited book down past the limit trips even while the
-        # strategy is short of warm-up bars.
-        peak = (
-            drawdown_equity if hooks.peak_equity is None
-            else max(hooks.peak_equity, drawdown_equity)
+    if hooks.live_snapshot is not None:
+        snap, drawdown_equity = hooks.live_snapshot(
+            decision_planner.phase_a_closed_bars(strategy, early)
         )
-        check_drawdown(drawdown_equity, peak, max_drawdown)
-
-        positions_before = {s: q for s, q in snap.qtys.items() if q != 0.0}
-        # Realized current weight per held symbol from the SAME snapshot (market_value / equity), so
-        # the shared decide() compares targets against what the broker actually holds (#23).
-        current_weights = {
-            s: mv / snap.equity for s, mv in snap.market_values.items() if mv != 0.0
-        }
-
-        # Reconcile the lane-supplied venue belief against the broker's pre-submit snapshot (#249):
-        # a drift means an attributed fill and a broker position diverge — halt before compounding
-        # it. Reconcile whenever the hook is supplied (venue_belief is not None), INCLUDING when it
-        # returns an empty dict: an empty belief against a held broker book is exactly the drift we
-        # must catch. Tolerance (_RECONCILE_TOL) absorbs floating-point residuals from fill
-        # arithmetic so sub-nano differences don't trip false positives (#249).
-        if hooks.venue_belief is not None:
-            belief = {s: q for s, q in hooks.venue_belief().items() if q != 0.0}
-            all_symbols = set(belief) | set(positions_before)
-            drift = [
-                s for s in all_symbols
-                if abs(belief.get(s, 0.0) - positions_before.get(s, 0.0)) > _RECONCILE_TOL
-            ]
-            if drift:
-                reconcile_ok = False
-                raise RiskBreach(
-                    "reconcile",
-                    f"venue belief {belief} disagrees with positions_before {positions_before} "
-                    f"before tick — refusing to trade on inconsistent state",
-                )
-
-        # Validate REALIZED gross exposure from the snapshot BEFORE cancelling/submitting (#27): if
-        # the broker book is already over the limit, trip/flatten before any NEW order goes out. The
-        # target-weight gross check in decide() can't catch a book that drifted across ticks.
-        realized_gross = sum(abs(w) for w in current_weights.values())
-        check_gross_exposure_realized(realized_gross, strategy.execution.max_gross_exposure)
-        # NOTE (#251): only realized GROSS is re-checked here. The per-symbol concentration cap and
-        # short policy are enforced on TARGET weights inside decide()/validate_decision_weights, not
-        # on realized positions — so a held name that drifts past max_weight_per_symbol on a
-        # realized basis while gross stays in-bounds is NOT tripped here. This is a DELIBERATE
-        # deferral ("Realized per-symbol cap in live", in the risk-walls-concentration-cap-design
-        # spec), not an oversight; add a realized check here if it becomes a hard live invariant.
-
-    if warming:
-        # Warm-up not met: no decide()/submit. A HELD book has already been valued + breaker-checked
-        # above, so return its drawdown state (equity/peak/realized_gross/positions_before) to
-        # persist the peak and record the tick snapshot — keeping the breaker basis continuous
-        # across warm-up (#452 CRITICAL). Only a FLAT warming book takes the unchanged no-op return.
-        if valued:
-            return TickResult(t, {}, positions_before, [], equity=drawdown_equity,
-                              peak_equity=peak, reconcile_ok=reconcile_ok,
-                              realized_gross=realized_gross)
-        return TickResult(t, {}, held_qtys, [])  # FLAT + warming: unchanged no-op
-
-    # (3) CONSUMED-set gate — DECISION path only (past warm-up), after the sizing snapshot, before
-    # decide()/submit (#452). The consumed set widens to the valued book ∪ decision universe; the
-    # same usability wall runs over all of it so no stale/absent-priced ranked target or order
-    # reaches the venue. Past warm-up `valued` is always True (not warming), so snap is defined.
-    assert snap is not None  # valued is True on the decision path (not warming)
-    assert t is not None  # past warm-up universe_bars is non-empty, so t is a real timestamp
-    consumed = {s for s, q in snap.qtys.items() if q != 0.0} | set(strategy.universe)
-    assert_marks_usable(consumed, latest_ts, latest_close, now)
-
-    # DECISION view is the UNIVERSE-only history up to t — the widened fetch (held out-of-universe
-    # marks) NEVER reaches target_weights(); decide() sees exactly the universe bars it saw before.
-    weights, intents = decide(strategy, universe_bars.loc[:t], current_weights, t)
+    else:
+        snap = broker.snapshot(strategy.universe)
+        drawdown_equity = snap.equity
+    captured = CapturedStrategyState(
+        request_id=early.request_id,
+        sizing_equity=float(snap.equity),
+        drawdown_equity=float(drawdown_equity),
+        quantities=dict(snap.qtys),
+        market_values=dict(snap.market_values),
+        persisted_peak_equity=hooks.peak_equity,
+        venue_belief=VenueBeliefPending(),
+    )
+    late = LatePlannerInput(early, first.phase_a_binding, captured)
+    second = decision_planner.phase_b(strategy, late)
+    _raise_planner_failure(second)
+    if not isinstance(second, VenueBeliefRequired):
+        raise RuntimeError("planner did not request venue belief after late risk validation")
+    venue_belief = (
+        VenueBeliefDisabled()
+        if hooks.venue_belief is None
+        else VenueBeliefEnabled(dict(hooks.venue_belief()))
+    )
+    second = decision_planner.phase_b(
+        strategy,
+        replace(late, captured=replace(captured, venue_belief=venue_belief)),
+    )
+    _raise_planner_failure(second)
+    if isinstance(second, LateNoDecision):
+        return _tick_result(second.state)
+    if not isinstance(second, Decision):
+        raise RuntimeError("planner returned an unknown Phase B result")
+    t = second.state.decision_ts
+    if t is None:
+        raise RuntimeError("decision result has no decision timestamp")
+    weights = dict(second.state.target_weights)
+    intents = list(second.ordered_intents)
 
     if hooks.should_halt is not None and hooks.should_halt():
         raise TickHalted("kill-switch tripped before submit phase")
@@ -375,7 +357,8 @@ def run_tick(
             raise TickHalted("kill-switch tripped during submit phase")
         coid = (
             hooks.client_order_id_for(strategy.name, t, intent.symbol)
-            if hooks.client_order_id_for is not None else None
+            if hooks.client_order_id_for is not None
+            else None
         )
         if hooks.before_submit is not None:
             hooks.before_submit(intent, coid)
@@ -385,25 +368,36 @@ def run_tick(
             if hooks.on_noop is not None:
                 hooks.on_noop(intent, coid)
             continue
-        record = SubmittedOrder(symbol=intent.symbol, side=intent.side.value,
-                                target_weight=intent.target_weight, order_id=order_id,
-                                client_order_id=coid or "", decision_ts=t)
+        record = SubmittedOrder(
+            symbol=intent.symbol,
+            side=intent.side.value,
+            target_weight=intent.target_weight,
+            order_id=order_id,
+            client_order_id=coid or "",
+            decision_ts=t,
+        )
         # Persist IMMEDIATELY (before the next submit) so a mid-loop death never loses this order.
         if hooks.on_submitted is not None:
             hooks.on_submitted(record)
-        submitted.append({"symbol": record.symbol, "side": record.side,
-                          "target_weight": record.target_weight, "order_id": record.order_id,
-                          "client_order_id": record.client_order_id})
+        submitted.append(
+            {
+                "symbol": record.symbol,
+                "side": record.side,
+                "target_weight": record.target_weight,
+                "order_id": record.order_id,
+                "client_order_id": record.client_order_id,
+            }
+        )
 
     return TickResult(
         decision_ts=t,
         target_weights={s: float(w) for s, w in weights.items()},
-        positions_before=positions_before,
+        positions_before=dict(second.state.positions_before),
         submitted=submitted,
-        equity=drawdown_equity,
-        peak_equity=peak,
-        reconcile_ok=reconcile_ok,
-        realized_gross=realized_gross,
+        equity=second.state.equity,
+        peak_equity=second.state.peak_equity,
+        reconcile_ok=second.state.reconcile_ok,
+        realized_gross=second.state.realized_gross,
     )
 
 
