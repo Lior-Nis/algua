@@ -4,7 +4,7 @@ baseline_commit: dc2a222ef811dc1c3a835d656a411de58423796c
 
 # Story 1.3a: Complete the two-phase planner boundary in-process
 
-Status: ready-for-dev
+Status: done
 
 Prepared: 2026-09-25. Baseline: Story 1.3 readiness baseline `dc2a222` (PR #671).
 Epic: 1. Parent: Story 1.3. Requirements: FR2–FR3, FR6, FR9–FR10 and NFR1–NFR6.
@@ -46,8 +46,8 @@ selecting Story 1.3c's Parquet/JSON byte encoding.
 |---|---|
 | `EarlyPlannerInput` | verified request/deployment/config identity, explicit clock/timeframe/calendar, raw bars, early positions, gate universe and drawdown bound |
 | Phase A result | `EarlyNoDecision`, `PlannerRiskFailure`, `PlannerInputFailure` or `SnapshotRequired` |
-| `CapturedStrategyState` | sizing and drawdown equity, quantities, market values, persisted peak and tagged disabled/enabled venue belief |
-| Phase B result | `PhaseBindingFailure`, `PlannerRiskFailure`, `PlannerInputFailure`, `LateNoDecision` or `Decision` |
+| `CapturedStrategyState` | sizing and drawdown equity, quantities, market values, persisted peak and tagged pending/disabled/enabled venue belief |
+| Phase B result | `PhaseBindingFailure`, `PlannerRiskFailure`, `PlannerInputFailure`, `VenueBeliefRequired`, `LateNoDecision` or `Decision` |
 
 The full SHA-256 Phase A binding is defined over a versioned canonical logical preimage. Bars and
 resolved configuration enter through named full-digest components; mappings, timestamps, floats,
@@ -77,8 +77,9 @@ evidence.
 4. **Stateless Phase B.** Given the exact `CapturedStrategyState`, when Phase B runs, then it receives
    the original early input, captured late value and supplied Phase A binding, recomputes Phase A and
    returns `PhaseBindingFailure` before inspecting late risk or invoking decision code if the binding
-   or outcome differs. No mutable process-local state connects the phases. Tagged venue belief
-   preserves disabled versus enabled-empty semantics.
+   or outcome differs. No mutable process-local state connects the phases. A pending late request
+   evaluates equity/drawdown before returning `VenueBeliefRequired`; stateless reinvocation with
+   captured belief preserves disabled versus enabled-empty semantics and baseline hook ordering.
 5. **Complete decision boundary.** Given a valid Phase B request, when it completes, then it returns
    exactly one normative result variant with the same no-decision state, typed risk breach or
    decision as the baseline. Derived equity/peak/reconciliation/realized-gross state, decision
@@ -100,16 +101,32 @@ evidence.
 
 ## Tasks / subtasks
 
-- [ ] Characterize the complete pre-cancel path with red golden-master tests (AC2, AC5–AC7).
-- [ ] Implement the exact immutable Phase A/Phase B inputs and result unions from the normative
+- [x] Characterize the complete pre-cancel path with red golden-master tests (AC2, AC5–AC7).
+- [x] Implement the exact immutable Phase A/Phase B inputs and result unions from the normative
   machine contract in a pure contract location (AC1–AC5).
-- [ ] Implement the normative component digests, normalization and Phase A logical binding without
+- [x] Implement the normative component digests, normalization and Phase A logical binding without
   authority-bearing values or wire-format coupling (AC3–AC4).
-- [ ] Move early timing/warm-up/freshness evaluation behind Phase A (AC2).
-- [ ] Move captured per-strategy risk and decision evaluation behind Phase B (AC4–AC5).
-- [ ] Route the existing in-process paper path through both phases and preserve effect order (AC6).
-- [ ] Add structural tests proving planner inputs cannot carry registry/provider/broker/hooks (AC1).
-- [ ] Run independent review against this story before changing its status (AC7–AC8).
+- [x] Move early timing/warm-up/freshness evaluation behind Phase A (AC2).
+- [x] Move captured per-strategy risk and decision evaluation behind Phase B (AC4–AC5).
+- [x] Route the existing in-process paper path through both phases and preserve effect order (AC6).
+- [x] Add structural tests proving planner inputs cannot carry registry/provider/broker/hooks (AC1).
+- [x] Run independent review against this story before changing its status (AC7–AC8).
+
+### Review Findings
+
+- [x] [Review][Patch] Add a stateless late-risk handshake that evaluates equity/drawdown before
+  requesting venue belief, then reruns Phase B with the complete captured value; this preserves both
+  authoritative planner ownership and baseline hook ordering [algua/live/live_loop.py:316]
+- [x] [Review][Patch] Pass Phase A's closed-bar frame to live sizing instead of raw bars [algua/live/live_loop.py:311]
+- [x] [Review][Patch] Validate deployment identity independently from the gate-resolved universe overlay [algua/live/planner_early.py:96]
+- [x] [Review][Patch] Reject inconsistent captured quantity and market-value symbol sets [algua/live/planner_late.py:62]
+- [x] [Review][Patch] Reject non-finite captured economics and venue quantities before arithmetic [algua/live/planner_late.py:49]
+- [x] [Review][Patch] Reject Unicode-normalization collisions in bound symbols and mapping keys [algua/live/planner_binding.py:89]
+- [x] [Review][Patch] Enforce one canonical UTC bar representation so equal bindings cannot produce different behavior [algua/live/planner_binding.py:43]
+- [x] [Review][Patch] Return typed failures for malformed early scalar and collection types [algua/live/planner_early.py:60]
+- [x] [Review][Patch] Validate the supplied Phase A binding before constant-time comparison [algua/live/planner_late.py:88]
+- [x] [Review][Patch] Reject unknown or malformed tagged venue-belief variants [algua/live/planner_late.py:99]
+- [x] [Review][Patch] Complete the required parity and binding-change test matrix [tests/test_planner_parity.py:51]
 
 ## Development notes
 
@@ -145,3 +162,56 @@ uv run lint-imports
 - [Parent Implementation Readiness Report](../implementation-readiness-report-2026-09-25.md)
 - [Story 1.3a READY rerun](../implementation-readiness-report-2026-09-25-story-1-3a-rerun.md)
 - [Artifact-freeze design](../../superpowers/specs/2026-09-22-artifact-freeze-design.md)
+
+## Dev Agent Record
+
+### Implementation Plan
+
+- Characterize the Story 1.1 supervisor trace before moving behavior.
+- Introduce immutable logical request/result values and a canonical Phase A binding.
+- Route early behavior through Phase A and captured risk/decision behavior through stateless Phase B.
+- Preserve existing paper/live effects, deployment verification, authority boundaries and module pins.
+- Run independent adversarial, edge-case and acceptance review before completion.
+
+### Debug Log References
+
+- Independent review found 11 actionable issues; all were fixed and regression-tested.
+- Review exposed a contract conflict between Phase B ownership and venue-hook ordering. The approved
+  resolution is a stateless `VenueBeliefRequired` handshake and Phase B reinvocation.
+- Full verification: 4,077 tests passed with 171 pre-existing warnings; ruff, mypy and all 28 import
+  contracts passed.
+
+### Completion Notes
+
+- Added a stateless two-phase planner facade with explicit Phase A integrity binding and complete
+  typed outcomes.
+- Moved timing, closed-bar filtering, freshness, warm-up, snapshot risk, reconciliation and decision
+  semantics behind the planner boundary while preserving supervisor effects.
+- Bound deployment identity independently from point-in-time gate-universe overlays.
+- Hardened malformed input, UTC/canonicalization, Unicode collision, non-finite economic state,
+  snapshot consistency and venue-belief validation.
+- Preserved the live gate, deployment schema, capital authority, CLI JSON contract and import walls.
+
+### File List
+
+- `algua/cli/live_cmd.py`
+- `algua/cli/paper_cmd.py`
+- `algua/live/live_loop.py`
+- `algua/live/planner.py`
+- `algua/live/planner_binding.py`
+- `algua/live/planner_contract.py`
+- `algua/live/planner_decision.py`
+- `algua/live/planner_early.py`
+- `algua/live/planner_late.py`
+- `docs/development/specs/spec-story-1-3a-planner-contract/SPEC.md`
+- `docs/development/specs/spec-story-1-3a-planner-contract/planner-contract.md`
+- `docs/development/sprint-status.yaml`
+- `docs/development/stories/1-3a-complete-two-phase-planner-boundary-in-process.md`
+- `tests/test_live_loop.py`
+- `tests/test_planner.py`
+- `tests/test_planner_parity.py`
+- `tests/test_two_phase_planner.py`
+
+### Change Log
+
+- 2026-09-26: Implemented, independently reviewed and hardened Story 1.3a; all quality gates pass.
