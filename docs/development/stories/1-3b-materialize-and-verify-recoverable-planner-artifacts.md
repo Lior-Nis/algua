@@ -231,10 +231,10 @@ These identities are non-cyclic. An environment-only change does not change `bun
   object and string-or-null universe [algua/registry/frozen_manifest_contract.py:33]
 - [x] [Review][Patch] Reject Git assume-unchanged and skip-worktree flags that can hide tracked
   source drift from status checks [algua/registry/frozen_source.py:187]
-- [ ] [Review][Patch] Purge timestamp-valid cached bytecode before refreshing a warm strategy
+- [x] [Review][Patch] Purge timestamp-valid cached bytecode before refreshing a warm strategy
   module so same-size, same-mtime source changes cannot retain stale CONFIG
   [algua/strategies/loader.py:221]
-- [ ] [Review][Patch] Reload the strategy-family module closure in dependency-first order rather
+- [x] [Review][Patch] Reload the strategy-family module closure in dependency-first order rather
   than relying on the incorrect assumption that `sys.modules` insertion order is dependency-first
   [algua/strategies/loader.py:72]
 - [ ] [Review][Patch] Require NFC-normalized installer identity and argument strings before they

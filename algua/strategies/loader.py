@@ -14,6 +14,7 @@ from algua.portfolio.construction import (
     validate_construction_params,
 )
 from algua.portfolio.overlays import OverlayError, resolve_overlays
+from algua.primitives.module_refresh import refresh_package_closure
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
@@ -66,35 +67,9 @@ def _reload_strategy_closure(dotted: str) -> None:
     helpers live as sibling modules in its family package ``algua.strategies.<family>``; reload
     every already-loaded module under that package, the strategy module LAST (so it re-binds helper
     references). The family ``__init__`` is reloaded too (a family may keep shared helpers there).
-    The enforced-pure shared layers outside the family package are intentionally left warm."""
-    family_pkg = dotted.rsplit(".", 1)[0]  # algua.strategies.<family>
-    prefix = family_pkg + "."
-    # sys.modules INSERTION order is dependency-first: Python finishes importing a module's
-    # imported submodules (inserting them) before the importer finishes and is itself inserted. So
-    # iterating in insertion order reloads a helper's dependencies BEFORE the helper, and the helper
-    # re-executes its `from ._dep import x` against the freshly-reloaded dep — no stale object
-    # rebind. The strategy module is reloaded LAST (below), after every helper it depends on.
-    siblings = [
-        m for m in list(sys.modules)
-        if (m == family_pkg or m.startswith(prefix)) and m != dotted and sys.modules[m] is not None
-    ]
-    for mod_name in siblings:
-        # Best-effort: a stale entry whose source file was deleted (e.g. a test's temp module left
-        # in sys.modules after its file was unlinked) is not a live dependency of THIS strategy and
-        # cannot be reloaded — skip it rather than fail the load.
-        if not _module_source_exists(sys.modules[mod_name]):
-            continue
-        importlib.reload(sys.modules[mod_name])
-    importlib.reload(sys.modules[dotted])  # the strategy module last
-
-
-def _module_source_exists(module: object) -> bool:
-    """True iff the module still has an on-disk source file (a reload target). A namespace package
-    or a module whose file was deleted returns False."""
-    origin = getattr(getattr(module, "__spec__", None), "origin", None)
-    if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
-        return False
-    return Path(origin).exists()
+    The enforced-pure shared layers outside the family package are intentionally left warm. The
+    closure reloads from CURRENT source, dependency-first (see ``primitives.module_refresh``)."""
+    refresh_package_closure(dotted.rsplit(".", 1)[0], last=dotted)  # algua.strategies.<family>
 
 
 def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:

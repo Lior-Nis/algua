@@ -328,3 +328,123 @@ def test_load_strategy_config_refreshes_a_warm_module_before_retaining_config():
     finally:
         strat.unlink(missing_ok=True)
         sys.modules.pop("algua.strategies.momentum.config_refresh_probe", None)
+
+
+def test_load_strategy_config_bypasses_timestamp_valid_stale_bytecode():
+    """A same-size, same-mtime source edit leaves the cached bytecode's timestamp stamp valid; the
+    warm refresh must still compile the CURRENT source rather than retain the stale CONFIG."""
+    import importlib.util
+    import os
+    import py_compile
+
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    strat = Path(fam.__path__[0]) / "bytecode_refresh_probe.py"
+    cached = Path(importlib.util.cache_from_source(str(strat)))
+    template = (
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "CONFIG = StrategyConfig(name='bytecode_refresh_probe', universe=['{symbol}'],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        strat.write_text(template.format(symbol="AAPL"))
+        assert load_strategy_config("bytecode_refresh_probe").universe == ["AAPL"]
+        py_compile.compile(
+            str(strat), cfile=str(cached),
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+        )
+        stamp = strat.stat()
+        strat.write_text(template.format(symbol="MSFT"))
+        os.utime(strat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        assert strat.stat().st_size == stamp.st_size
+        assert load_strategy_config("bytecode_refresh_probe").universe == ["MSFT"]
+    finally:
+        strat.unlink(missing_ok=True)
+        cached.unlink(missing_ok=True)
+        sys.modules.pop("algua.strategies.momentum.bytecode_refresh_probe", None)
+
+
+def test_load_strategy_config_reloads_the_family_closure_dependency_first():
+    """``sys.modules`` order reflects when each module last finished executing, not its current
+    source's imports: a helper loaded before an independently imported deeper helper, and only
+    later edited to import it, sits BEFORE it. The refresh must still reload the deeper helper
+    first, or the helper re-binds a stale value and the retained CONFIG is stale."""
+    import importlib
+
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    d = Path(fam.__path__[0])
+    deep = d / "_closure_deep_probe.py"
+    mid = d / "_closure_mid_probe.py"
+    strat = d / "closure_order_probe.py"
+    mid.write_text("UNIVERSE = ['AAPL']\n")
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._closure_mid_probe import UNIVERSE\n"
+        "CONFIG = StrategyConfig(name='closure_order_probe', universe=list(UNIVERSE),\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        assert load_strategy_config("closure_order_probe").universe == ["AAPL"]
+        # Another family member imports the deeper helper independently, AFTER the helper that
+        # will later depend on it is already loaded.
+        deep.write_text("UNIVERSE = ['AAPL', 'MSFT']\n")
+        importlib.invalidate_caches()
+        importlib.import_module("algua.strategies.momentum._closure_deep_probe")
+        mid.write_text("from algua.strategies.momentum._closure_deep_probe import UNIVERSE\n")
+        deep.write_text("UNIVERSE = ['MSFT']\n")
+        assert load_strategy_config("closure_order_probe").universe == ["MSFT"]
+        assert load_strategy("closure_order_probe").config.universe == ["MSFT"]
+    finally:
+        for f in (deep, mid, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.closure_order_probe",
+                  "algua.strategies.momentum._closure_mid_probe",
+                  "algua.strategies.momentum._closure_deep_probe"):
+            sys.modules.pop(m, None)
+
+
+def test_dependency_first_order_is_deterministic_and_cycle_safe():
+    from algua.primitives.module_refresh import dependency_first as _dependency_first
+
+    graph = {
+        "fam": {"fam._a"}, "fam._a": {"fam._b"}, "fam._b": set(),
+        "fam._c": {"fam._d"}, "fam._d": {"fam._c"},
+    }
+    order = _dependency_first(graph)
+    assert sorted(order) == sorted(graph)
+    assert order.index("fam._b") < order.index("fam._a") < order.index("fam")
+    assert order == _dependency_first(dict(reversed(list(graph.items()))))
+
+
+def test_package_import_edges_resolve_absolute_relative_and_submodule_forms(tmp_path):
+    from types import SimpleNamespace
+
+    from algua.primitives.module_refresh import _package_imports
+
+    source = tmp_path / "strat.py"
+    source.write_text(
+        "import fam._a\n"
+        "from . import _b\n"
+        "from ._c import VALUE\n"
+        "from fam import _d as alias\n"
+        "def lazy():\n    from fam._e import thing\n"
+        "import os\nfrom fam.strat import self_reference\n"
+    )
+    module = SimpleNamespace(
+        __spec__=SimpleNamespace(origin=str(source), parent="fam", name="fam.strat"))
+    members = {"fam", "fam._a", "fam._b", "fam._c", "fam._d", "fam._e", "fam.strat", "fam._z"}
+    assert _package_imports(module, members) == {
+        "fam", "fam._a", "fam._b", "fam._c", "fam._d", "fam._e"}
