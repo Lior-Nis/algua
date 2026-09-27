@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: ready-for-dev
+Status: in-progress
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -121,12 +121,12 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 ## Tasks / subtasks
 
-- [ ] Lock the pure descriptor and digest contracts with failing tests (AC3, AC5, AC9).
-  - [ ] Add typed/versioned frozen bundle, environment and manifest values with strict unknown/
+- [x] Lock the pure descriptor and digest contracts with failing tests (AC3, AC5, AC9).
+  - [x] Add typed/versioned frozen bundle, environment and manifest values with strict unknown/
     missing-field and canonical-JSON validation.
-  - [ ] Add literal golden vectors for bundle, build inputs, environment key/inventory/environment
+  - [x] Add literal golden vectors for bundle, build inputs, environment key/inventory/environment
     and outer manifest, including correct layer sensitivity and order/mtime/root invariance.
-  - [ ] Preserve existing working-tree manifest canonical bytes and verification tests.
+  - [x] Preserve existing working-tree manifest canonical bytes and verification tests.
 - [ ] Export and validate source/build inputs from exact Git objects (AC1–AC3).
   - [ ] Add binary-safe `ls-tree` parsing and blob reads for accepted source and root build inputs;
     never read their bytes through checkout paths.
@@ -212,25 +212,35 @@ uv run lint-imports
 
 ### Implementation Plan
 
-- To be completed during implementation from the normative contract and task sequence above.
+- Implement the story in its approved task order using a red-green-refactor cycle per task.
+- Keep canonical identity values and strict manifest parsing separate from Git/filesystem/uv I/O.
+- Preserve current working-tree descriptor bytes and verify the full repository after each task.
 
 ### Debug Log References
 
 - Story preparation used repository inspection plus independent requirements, implementation and
   security review. The initial backlog draft was not admitted until digest, Git export, environment,
   atomicity, persistence, CLI, recovery and authority semantics were closed normatively.
+- Task 1 red phase failed on the absent `artifact_contract` module. Green phase added typed values,
+  strict canonical parsing and literal vectors; 33 focused tests and the full 4,086-test suite pass.
 
 ### Completion Notes
 
-- Not implemented. The 2026-09-27 readiness report grants implementation admission only; it is not
-  completion, deployment or trading authorization.
+- Task 1 complete: non-cyclic bundle/build-input/environment/manifest identities are typed and
+  versioned, parsing rejects noncanonical/duplicate/unknown input, and working-tree compatibility is
+  unchanged. No filesystem, database, deployment or runtime behavior is introduced yet.
 
 ### File List
 
-- To be completed during implementation.
+- `algua/registry/artifact_contract.py`
+- `algua/registry/artifact_manifest.py`
+- `docs/development/sprint-status.yaml`
+- `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
+- `tests/test_frozen_artifact_contract.py`
 
 ### Change Log
 
 - 2026-09-27: Rebased on Story 1.3a, added the normative artifact/environment contract and prepared
   the bounded non-activating implementation story for readiness review.
 - 2026-09-27: Passed BMAD implementation readiness and moved to `ready-for-dev`.
+- 2026-09-27: Started implementation and completed the pure frozen identity/manifest contract.
