@@ -249,7 +249,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
   [algua/registry/frozen_manifest_contract.py:42]
 - [x] [Review][Patch] Enforce the bundle file-count bound before constructing or hashing the
   inventory payload [algua/registry/artifact_contract.py:157]
-- [ ] [Review][Patch] Inspect repository-wide hidden Git index flags without imposing the
+- [x] [Review][Patch] Inspect repository-wide hidden Git index flags without imposing the
   source-entry aggregate byte bound on the complete repository index
   [algua/registry/frozen_source.py:201]
 

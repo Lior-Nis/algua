@@ -198,3 +198,104 @@ def test_clean_head_rejects_hidden_flags_even_without_content_drift(repo: Path) 
     _git(repo, "update-index", "--skip-worktree", "algua/tool.py")
     with pytest.raises(FrozenSourceError, match="hide tracked"):
         assert_clean_head(repo)
+
+
+def _commit_long_paths(repo: Path, count: int, *, top: str = "vendor") -> list[str]:
+    """Commit ``count`` non-source files whose paths are each ~500 UTF-8 bytes."""
+    paths = []
+    for index in range(count):
+        relative = f"{top}/{'d' * 240}/{index:03d}{'f' * 240}.txt"
+        (repo / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repo / relative).write_text("data\n")
+        paths.append(relative)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "long non-source paths")
+    return paths
+
+
+def test_index_flag_scan_is_not_bounded_by_the_source_listing_aggregate(
+    repo: Path, monkeypatch,
+) -> None:
+    """The repository-wide index may be far larger than the source-entry aggregate bound; the
+    hidden-flag scan must still inspect all of it rather than fail on its total size."""
+    import algua.registry.frozen_source as frozen_source
+
+    paths = _commit_long_paths(repo, 12)
+    monkeypatch.setattr(frozen_source, "MAX_SOURCE_FILES", 2)
+    aggregate = (frozen_source.MAX_PATH_BYTES + 100) * (frozen_source.MAX_SOURCE_FILES + 1)
+    assert len(_git(repo, "ls-files", "-z", "-v").encode()) > aggregate
+    assert assert_clean_head(repo) == _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "update-index", "--skip-worktree", paths[-1])
+    with pytest.raises(FrozenSourceError, match="hide tracked"):
+        assert_clean_head(repo)
+
+
+def test_index_flag_scan_accepts_non_source_paths_beyond_the_source_path_bound(
+    repo: Path,
+) -> None:
+    deep = "vendor/" + "/".join(["p" * 200] * 7) + "/file.txt"
+    assert len(deep.encode()) > 1_024
+    (repo / deep).parent.mkdir(parents=True)
+    (repo / deep).write_text("data\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "deep non-source path")
+    assert assert_clean_head(repo) == _git(repo, "rev-parse", "HEAD")
+
+
+def test_index_flag_scan_rejects_tracked_source_beyond_its_bounds(repo: Path, monkeypatch) -> None:
+    import algua.registry.frozen_source as frozen_source
+
+    monkeypatch.setattr(frozen_source, "MAX_SOURCE_FILES", 1)
+    with pytest.raises(FrozenSourceError, match="file-count"):
+        assert_clean_head(repo)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, 4096])
+def test_index_record_scan_is_independent_of_chunk_boundaries(chunk_size: int) -> None:
+    from algua.registry.frozen_source import _scan_index_records
+
+    listing = b"H algua/a.py\0H README.md\0H algua/sub/b.py\0H " + b"x" * 5000 + b"\0"
+    chunks = (listing[i:i + chunk_size] for i in range(0, len(listing), chunk_size))
+    assert _scan_index_records(chunks) == {"algua/a.py", "algua/sub/b.py"}
+
+
+@pytest.mark.parametrize(
+    "listing,message",
+    [
+        (b"H algua/a.py\0h README.md\0", "hide tracked"),
+        (b"H algua/a.py\0S docs/x.md\0", "hide tracked"),
+        (b"H algua/a.py", "NUL terminated"),
+        (b"H algua/" + b"x" * 1_100 + b"\0", "path bound"),
+        (b"H algua/\xff.py\0", "UTF-8"),
+    ],
+    ids=["assume-unchanged", "skip-worktree", "unterminated", "long-source-path", "invalid-utf8"],
+)
+def test_index_record_scan_fails_closed(listing: bytes, message: str) -> None:
+    from algua.registry.frozen_source import _scan_index_records
+
+    with pytest.raises(FrozenSourceError, match=message):
+        _scan_index_records(iter([listing]))
+
+
+@pytest.mark.parametrize("delivery", ["streamed", "single-chunk"])
+def test_index_record_scan_retains_bounded_memory_for_huge_records(delivery: str) -> None:
+    import tracemalloc
+
+    from algua.registry.frozen_source import _scan_index_records
+
+    def huge_listing():
+        yield b"H vendor/"
+        for _ in range(512):  # one 32 MiB non-source record
+            yield b"x" * 65_536
+        yield b"\0H algua/a.py\0"
+
+    # A single pre-built chunk is allocated before tracing starts; only retention is measured.
+    listing = iter([b"".join(huge_listing())]) if delivery == "single-chunk" else huge_listing()
+    tracemalloc.start()
+    try:
+        assert _scan_index_records(listing) == {"algua/a.py"}
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024

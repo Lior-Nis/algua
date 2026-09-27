@@ -7,6 +7,7 @@ import re
 import selectors
 import subprocess
 import time
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -61,11 +62,9 @@ class FrozenFile:
         )
 
 
-def _read_bounded(process: subprocess.Popen[bytes], max_bytes: int, deadline: float) -> bytes:
-    """Stream stdout, stopping the moment it exceeds ``max_bytes`` or the deadline passes."""
+def _stdout_chunks(process: subprocess.Popen[bytes], deadline: float) -> Iterator[bytes]:
+    """Stream stdout chunk by chunk until EOF, failing once the deadline passes."""
     assert process.stdout is not None
-    chunks: list[bytes] = []
-    received = 0
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ)
         while True:
@@ -76,14 +75,26 @@ def _read_bounded(process: subprocess.Popen[bytes], max_bytes: int, deadline: fl
                 continue
             chunk = os.read(process.stdout.fileno(), _READ_CHUNK)
             if not chunk:
-                return b"".join(chunks)
-            received += len(chunk)
-            if received > max_bytes:
-                raise FrozenSourceError("Git output exceeds its protected bound")
-            chunks.append(chunk)
+                return
+            yield chunk
 
 
-def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
+def _collect_bounded(chunks: Iterator[bytes], max_bytes: int) -> bytes:
+    """Buffer output, stopping the moment it exceeds ``max_bytes``."""
+    collected: list[bytes] = []
+    received = 0
+    for chunk in chunks:
+        received += len(chunk)
+        if received > max_bytes:
+            raise FrozenSourceError("Git output exceeds its protected bound")
+        collected.append(chunk)
+    return b"".join(collected)
+
+
+def _git_consume[T](
+    repo_root: Path, args: tuple[str, ...], consume: Callable[[Iterator[bytes]], T],
+) -> T:
+    """Run Git, hand its streamed stdout to ``consume`` and kill it on any consumer failure."""
     deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
     try:
         with subprocess.Popen(
@@ -91,7 +102,7 @@ def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
             stderr=subprocess.DEVNULL,
         ) as process:
             try:
-                output = _read_bounded(process, max_bytes, deadline)
+                result = consume(_stdout_chunks(process, deadline))
                 returncode = process.wait(timeout=max(deadline - time.monotonic(), 0))
             except BaseException:
                 process.kill()
@@ -103,7 +114,11 @@ def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
         raise FrozenSourceError("Git source could not be read") from exc
     if returncode != 0:
         raise FrozenSourceError("Git source could not be read")
-    return output
+    return result
+
+
+def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
+    return _git_consume(repo_root, args, lambda chunks: _collect_bounded(chunks, max_bytes))
 
 
 def _canonical_path(raw: bytes) -> str:
@@ -198,25 +213,44 @@ def _generated_cache(path: str, tracked: set[str]) -> bool:
     return str(pure.parent.parent / f"{module}.py") in tracked
 
 
-def _tracked_paths_without_hidden_flags(root: Path, max_bytes: int) -> set[str]:
-    """Return tracked ``algua/`` paths, rejecting index flags that make ``status`` skip a file.
+def _admit_index_record(record: bytes, tracked: set[str]) -> None:
+    if not record.startswith(b"H "):
+        raise FrozenSourceError("Git index flags hide tracked working-tree drift")
+    path = record[2:]
+    if not path.startswith(b"algua/"):
+        return
+    if len(path) > MAX_PATH_BYTES:
+        raise FrozenSourceError("Git index source path exceeds its path bound")
+    try:
+        tracked.add(path.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise FrozenSourceError("Git index path is not valid UTF-8") from exc
+    if len(tracked) > MAX_SOURCE_FILES:
+        raise FrozenSourceError("Git index source exceeds the file-count bound")
 
-    ``git ls-files -v`` tags a plain cached entry ``H``; assume-unchanged entries are lowercase and
+
+def _scan_index_records(chunks: Iterable[bytes]) -> set[str]:
+    """Return tracked ``algua/`` paths from streamed ``git ls-files -z -v`` output.
+
+    ``-v`` tags a plain cached entry ``H``; assume-unchanged entries are lowercase and
     skip-worktree entries ``S``. Either flag hides working-tree drift from the status check, so any
-    tag other than ``H`` anywhere in the index fails closed.
+    tag other than ``H`` ANYWHERE in the repository index fails closed. The whole index is
+    inspected without buffering it or imposing the source aggregate bound: only a bounded prefix of
+    the current record (its tag plus one over-long source path) is ever retained.
     """
+    limit = len(b"H ") + MAX_PATH_BYTES + 1
     tracked: set[str] = set()
-    for record in _git(root, "ls-files", "-z", "-v", max_bytes=max_bytes).split(b"\0"):
-        if not record:
-            continue
-        if not record.startswith(b"H "):
-            raise FrozenSourceError("Git index flags hide tracked working-tree drift")
-        try:
-            path = record[2:].decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise FrozenSourceError("Git index path is not valid UTF-8") from exc
-        if path.startswith("algua/"):
-            tracked.add(path)
+    record = bytearray()
+    for chunk in chunks:
+        start = 0
+        while (end := chunk.find(b"\0", start)) >= 0:
+            record += chunk[start:min(end, start + max(limit - len(record), 0))]
+            _admit_index_record(bytes(record), tracked)
+            record.clear()
+            start = end + 1
+        record += chunk[start:start + max(limit - len(record), 0)]
+    if record:
+        raise FrozenSourceError("Git index listing is not NUL terminated")
     return tracked
 
 
@@ -226,7 +260,7 @@ def assert_clean_head(repo_root: Path) -> str:
     if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
         raise FrozenSourceError("Git HEAD is not a full commit object ID")
     listing_bound = (MAX_PATH_BYTES + 100) * (MAX_SOURCE_FILES + 1)
-    tracked = _tracked_paths_without_hidden_flags(root, listing_bound)
+    tracked = _git_consume(root, ("ls-files", "-z", "-v"), _scan_index_records)
     if _git(
         root, "status", "--porcelain=v1", "-z", "--untracked-files=no",
         max_bytes=listing_bound,
