@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from algua.registry.environment_contract import (
 from algua.registry.planner_environment_errors import EnvironmentIncompatible
 
 _CHUNK_SIZE = 1024 * 1024
+_SEPARATOR_RUN = re.compile(r"[-_.]+")
 
 
 def scrubbed_environment(binary_path: Path, *, home: Path | None = None) -> dict[str, str]:
@@ -42,7 +44,7 @@ def _metadata_identity(raw: str) -> InstalledDistribution:
     versions = headers.get_all("Version") or []
     if len(names) != 1 or len(versions) != 1:
         raise EnvironmentIncompatible("installed distribution metadata is incomplete")
-    name = str(names[0]).strip().lower().replace("_", "-")
+    name = _SEPARATOR_RUN.sub("-", str(names[0]).strip()).lower()  # PEP 503 canonical name
     if name == "algua":
         raise EnvironmentIncompatible("installed Algua distribution is forbidden")
     try:
@@ -112,6 +114,9 @@ def inventory_environment(root: Path) -> InstalledInventory:
             files.append(ArtifactFile(relative, mode, size, digest))
             if path.name == "METADATA" and path.parent.name.endswith(".dist-info"):
                 distributions.append(_metadata_identity(path.read_text(encoding="utf-8")))
+    names = [item.name for item in distributions]
+    if len(set(names)) != len(names):
+        raise EnvironmentIncompatible("environment has duplicate installed distributions")
     versioned_python = f"bin/python{sys.version_info.major}.{sys.version_info.minor}"
     expected_links = {"bin/python", "bin/python3", versioned_python}
     if {link.path for link in links} != expected_links:

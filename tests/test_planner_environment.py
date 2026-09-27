@@ -235,3 +235,35 @@ def test_distribution_identity_rejects_ambiguous_or_malformed_headers(raw: str) 
 
     with pytest.raises(EnvironmentIncompatible):
         _metadata_identity(raw)
+
+
+@pytest.mark.parametrize(
+    "declared,canonical",
+    [("Zope.Interface", "zope-interface"), ("ruamel.yaml.clib", "ruamel-yaml-clib"),
+     ("typing__extensions", "typing-extensions"), ("A-_.B", "a-b"), ("numpy", "numpy")],
+)
+def test_distribution_identity_collapses_separator_runs(declared: str, canonical: str) -> None:
+    from algua.registry.planner_environment_inventory import _metadata_identity
+
+    assert _metadata_identity(f"Name: {declared}\nVersion: 1.0\n").name == canonical
+
+
+@pytest.mark.parametrize("declared", ["algua", "ALGUA", "Algua"])
+def test_distribution_identity_forbids_algua_in_any_spelling(declared: str) -> None:
+    from algua.registry.planner_environment_inventory import _metadata_identity
+
+    with pytest.raises(EnvironmentIncompatible, match="Algua"):
+        _metadata_identity(f"Name: {declared}\nVersion: 1\n")
+
+
+def test_environment_inventory_rejects_distributions_equal_after_canonicalization(
+    tmp_path: Path,
+) -> None:
+    env = tmp_path / "env"
+    site = env / "lib/python3.12/site-packages"
+    for directory, declared in (("zope.interface-1.dist-info", "zope.interface"),
+                                ("zope_interface-2.dist-info", "Zope_Interface")):
+        (site / directory).mkdir(parents=True)
+        (site / directory / "METADATA").write_text(f"Name: {declared}\nVersion: 1\n")
+    with pytest.raises(EnvironmentIncompatible, match="duplicate"):
+        inventory_environment(env)

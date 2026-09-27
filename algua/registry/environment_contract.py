@@ -18,7 +18,8 @@ BASE_INTERPRETER = "base-interpreter"
 MAX_IDENTITY_CHARS = 128
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 _PYTHON_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*")
-_DISTRIBUTION_NAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+# PEP 503 canonical form: lowercase, every run of "-", "_" or "." collapsed to one hyphen.
+_DISTRIBUTION_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _DISTRIBUTION_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+!_-]*")
 
 

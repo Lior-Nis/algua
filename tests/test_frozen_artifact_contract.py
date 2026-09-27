@@ -293,7 +293,8 @@ def test_environment_key_requires_installer_identity_and_exact_argv(changes) -> 
 @pytest.mark.parametrize(
     "name,version",
     [("", "1.0"), ("numpy", ""), (None, "1.0"), ("numpy", 1.0), ("NumPy", "1.0"),
-     ("num_py", "1.0"), ("numpy ", "1.0"), ("numpy", "1 .0"), ("-numpy", "1.0")],
+     ("num_py", "1.0"), ("numpy ", "1.0"), ("numpy", "1 .0"), ("-numpy", "1.0"),
+     ("zope.interface", "1.0"), ("typing--extensions", "1.0"), ("numpy-", "1.0")],
 )
 def test_installed_distribution_identity_is_validated(name, version) -> None:
     with pytest.raises(ValueError, match="distribution"):

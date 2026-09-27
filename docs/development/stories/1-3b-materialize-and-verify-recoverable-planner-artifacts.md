@@ -241,7 +241,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
   enter the content-addressed environment key [algua/registry/environment_contract.py:77]
 - [x] [Review][Patch] Translate lone-surrogate manifest text into the parser's stable ValueError
   contract instead of leaking UnicodeEncodeError [algua/registry/artifact_manifest.py:58]
-- [ ] [Review][Patch] Canonicalize installed distribution names across runs of hyphen, underscore
+- [x] [Review][Patch] Canonicalize installed distribution names across runs of hyphen, underscore
   and dot before forbidden-name and uniqueness checks
   [algua/registry/planner_environment_inventory.py:45]
 - [x] [Review][Patch] Normalize and retain universe names before canonical JSON and denormalized
