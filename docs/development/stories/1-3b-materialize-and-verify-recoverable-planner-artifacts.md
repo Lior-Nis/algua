@@ -282,6 +282,26 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Replace recursive cycle traversal with an explicit stack so a valid large
   acyclic source closure cannot fail with `RecursionError`
   [algua/primitives/module_refresh.py:126]
+- [ ] [Review][Patch] Remove the CPython global import lock from strategy refresh because its lock
+  ordering can deadlock against an already-running import; serialize only supported loader/refresh
+  callers and document the import-quiescent process precondition
+  [algua/primitives/module_refresh.py:52]
+- [ ] [Review][Patch] Snapshot and restore every affected module's direct parent binding exactly so
+  rollback cannot delete a pre-existing binding when attempted code replaces its child module
+  [algua/primitives/module_refresh.py:88]
+- [ ] [Review][Patch] Reject every symlink entry in the complete family tree before purge/import so
+  a dynamic `importlib`/`__import__` edge cannot reach stale bytecode outside the static closure
+  [algua/primitives/module_refresh.py:146]
+- [ ] [Review][Patch] Reject lexical parent traversal before normalization so a `symlink/..` search
+  path cannot erase the symlink component before validation
+  [algua/primitives/module_refresh.py:107]
+- [ ] [Review][Patch] Snapshot module state before package discovery and restore it on every
+  preflight failure so a cold nested-parent import is not left behind
+  [algua/primitives/module_refresh.py:60]
+- [ ] [Review][Patch] Keep beyond-recursion coverage in the in-memory graph test but use a small
+  fixed filesystem closure for integration so the normal root gate does not create thousands of
+  source files or scale with a mutable interpreter recursion limit
+  [tests/test_module_refresh.py:264]
 
 ## Development notes
 
