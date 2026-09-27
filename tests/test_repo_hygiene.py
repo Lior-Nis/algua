@@ -276,6 +276,7 @@ INTEGRITY_CRITICAL_MODULES = frozenset(
         "algua/registry/artifact_verification.py",
         "algua/registry/artifact_errors.py",
         "algua/registry/store/artifacts.py",
+        "algua/primitives/module_refresh.py",
         "algua/cli/deployment_cmd.py",
         "algua/cli/errors.py",
         "algua/portfolio/construction.py",
