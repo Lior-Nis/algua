@@ -7,18 +7,27 @@ valid), and a failure part-way leaves a mixed-version closure. The refresh there
 the root as FRESH module objects after purging the package's bytecode, and restores the previous
 module state if anything fails. A cyclic static import component has no dependency-safe
 execution order, and a symlinked source path escapes the package-wide bytecode purge, so both
-fail closed before anything is purged or executed. The complete transaction runs under the
-process-global import lock, so no other thread can import into a partially rebuilt family.
+fail closed before anything is purged or executed.
+
+Concurrency: the complete transaction runs under a private module lock shared ONLY by the
+supported Algua callers (``refresh_package_closure`` and ``serialized_import``, which the strategy
+loader uses for every cold, warm and reload path). It deliberately does not take CPython's global
+import lock, whose ordering against per-module import locks deadlocks with an import already in
+progress. This is not a claim of arbitrary ``importlib`` concurrency safety: the process must be
+import-quiescent for everything else. A direct import of a family module (or of anything the
+refresh imports) from another thread, or a supported call made from inside a module body another
+thread is initializing, while a refresh runs is unsupported and may observe a partially rebuilt
+family or deadlock.
 """
 from __future__ import annotations
 
-import _imp
 import ast
 import importlib
 import importlib.machinery
 import importlib.util
 import os
 import sys
+import threading
 from collections.abc import Iterator
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -30,6 +39,15 @@ class ModuleRefreshError(ImportError):
 
 
 _ABSENT = object()
+# Re-entrant: a supported caller that runs inside a refresh on the same thread must not self-block.
+_REFRESH_LOCK = threading.RLock()
+
+
+def serialized_import(name: str) -> ModuleType:
+    """``importlib.import_module(name)`` under the refresh serialization, so a supported caller
+    never imports into, or returns a module from, a family another caller is rebuilding."""
+    with _REFRESH_LOCK:
+        return importlib.import_module(name)
 
 
 def refresh_package_closure(package: str, root: str) -> ModuleType:
@@ -43,17 +61,12 @@ def refresh_package_closure(package: str, root: str) -> ModuleType:
     attribute still bound to it), and every previous ``sys.modules`` entry and the ``package``
     parent binding are restored; the previous family objects' dictionaries were never touched.
 
-    The global import lock is held from preflight to commit or rollback: another thread's import
-    of a module not already loaded waits for the final state. A thread importing a module outside
-    the refresh that itself needs a new import can deadlock against it, so warm refreshes belong
-    in processes that do not import concurrently from other threads."""
+    The private refresh lock is held from preflight to commit or rollback, so a supported caller
+    waits for the final state; other imports must be quiescent (see the module docstring)."""
     if not root.startswith(package + "."):
         raise ValueError(f"{root!r} is not inside package {package!r}")
-    _imp.acquire_lock()
-    try:
+    with _REFRESH_LOCK:
         return _refresh_locked(package, root)
-    finally:
-        _imp.release_lock()
 
 
 def _refresh_locked(package: str, root: str) -> ModuleType:

@@ -455,3 +455,26 @@ def test_load_strategy_config_fails_closed_on_a_cyclic_family_import_graph():
                   "algua.strategies.momentum._cycle_left_probe",
                   "algua.strategies.momentum._cycle_right_probe"):
             sys.modules.pop(m, None)
+
+
+def test_cold_load_shares_the_refresh_serialization():
+    """A non-reloading load imports through the same serialization as the warm refresh, so it can
+    never import into (or return) a family another supported caller is still rebuilding."""
+    import threading
+
+    from algua.primitives import module_refresh
+
+    loaded = threading.Event()
+
+    def load() -> None:
+        load_strategy("cross_sectional_momentum")
+        loaded.set()
+
+    with module_refresh._REFRESH_LOCK:
+        loader = threading.Thread(target=load)
+        loader.start()
+        entered_while_held = loaded.wait(0.3)
+    loader.join(10)
+
+    assert not entered_while_held, "a cold load bypassed the refresh serialization"
+    assert loaded.is_set()

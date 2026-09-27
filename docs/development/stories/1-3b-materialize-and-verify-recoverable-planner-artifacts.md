@@ -282,7 +282,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Replace recursive cycle traversal with an explicit stack so a valid large
   acyclic source closure cannot fail with `RecursionError`
   [algua/primitives/module_refresh.py:126]
-- [ ] [Review][Patch] Remove the CPython global import lock from strategy refresh because its lock
+- [x] [Review][Patch] Remove the CPython global import lock from strategy refresh because its lock
   ordering can deadlock against an already-running import; serialize only supported loader/refresh
   callers and document the import-quiescent process precondition
   [algua/primitives/module_refresh.py:52]

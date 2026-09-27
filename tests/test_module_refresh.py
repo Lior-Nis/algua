@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import os
 import py_compile
+import subprocess
 import sys
 import textwrap
 import threading
@@ -395,10 +396,10 @@ def test_refresh_returns_the_fresh_root_module(family) -> None:
     assert root is family.mod("strat")
 
 
-def test_refresh_holds_the_import_lock_so_a_competing_import_cannot_enter(family) -> None:
-    """The whole transaction (purge, drop, fresh import, rollback) runs under the global import
-    lock: another thread importing a family member mid-refresh waits for the final state instead
-    of importing into a partially rebuilt family that may still be discarded."""
+def test_a_supported_serialized_import_waits_for_an_in_progress_refresh(family) -> None:
+    """Supported loader callers share the refresh serialization: a serialized import of a family
+    member mid-refresh waits for the final state instead of importing into a partially rebuilt
+    family that may still be discarded."""
     gate = f"{family.top}.gate"
     (family.dir.parent / "gate.py").write_text(
         "import threading\nentered = threading.Event()\nrelease = threading.Event()\n")
@@ -415,7 +416,7 @@ def test_refresh_holds_the_import_lock_so_a_competing_import_cannot_enter(family
             outcome["refresh_error"] = exc
 
     def compete() -> None:
-        outcome["other"] = importlib.import_module(f"{family.package}.other")
+        outcome["other"] = module_refresh.serialized_import(f"{family.package}.other")
         imported.set()
 
     refresher = threading.Thread(target=refresh)
@@ -430,7 +431,60 @@ def test_refresh_holds_the_import_lock_so_a_competing_import_cannot_enter(family
         refresher.join(10)
         competitor.join(10)
 
-    assert not entered_mid_refresh, "a competing import entered the refresh transaction"
+    assert not entered_mid_refresh, "a serialized import entered the refresh transaction"
     assert "refresh_error" not in outcome
     assert outcome["root"] is family.mod("strat")
     assert outcome["other"] is family.mod("other") is sys.modules[family.package].other
+
+
+_DEADLOCK_PROBE = """
+import importlib, os, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+from algua.primitives.module_refresh import refresh_package_closure
+import gate_probe
+errors = []
+def run(target):
+    try:
+        target()
+    except BaseException as exc:
+        errors.append(exc)
+importer = threading.Thread(
+    target=run, args=(lambda: importlib.import_module("slow_probe"),), daemon=True)
+importer.start()
+assert gate_probe.entered.wait(10)
+refresher = threading.Thread(
+    target=run, args=(lambda: refresh_package_closure("top_probe.fam", "top_probe.fam.strat"),),
+    daemon=True)
+refresher.start()
+time.sleep(0.5)  # the refresh now waits for slow_probe, which another thread is initializing
+gate_probe.go.set()
+importer.join(10)
+refresher.join(10)
+alive = importer.is_alive() or refresher.is_alive()
+print("deadlock" if alive else f"done errors={errors!r}", flush=True)
+os._exit(3 if alive else (1 if errors else 0))
+"""
+
+
+def test_refresh_does_not_deadlock_against_an_import_already_in_progress(tmp_path) -> None:
+    """The refresh must not hold the process-global import lock: a thread already initializing a
+    module the refresh imports, that itself needs a NEW import, would wait for the global lock
+    while the refresh waits for that module's lock. Run in a child process so a deadlock cannot
+    wedge the test runner's own import system."""
+    (tmp_path / "top_probe" / "fam").mkdir(parents=True)
+    (tmp_path / "top_probe" / "__init__.py").write_text("")
+    (tmp_path / "top_probe" / "fam" / "__init__.py").write_text("")
+    (tmp_path / "top_probe" / "fam" / "strat.py").write_text("import slow_probe\nVALUE = 1\n")
+    (tmp_path / "gate_probe.py").write_text(
+        "import threading\nentered = threading.Event()\ngo = threading.Event()\n")
+    (tmp_path / "slow_probe.py").write_text(
+        "import gate_probe\ngate_probe.entered.set()\nassert gate_probe.go.wait(10)\n"
+        "import late_probe\n")
+    (tmp_path / "late_probe.py").write_text("VALUE = 1\n")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _DEADLOCK_PROBE, str(tmp_path)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import inspect
 import pkgutil
 from pathlib import Path
@@ -14,7 +13,11 @@ from algua.portfolio.construction import (
     validate_construction_params,
 )
 from algua.portfolio.overlays import OverlayError, resolve_overlays
-from algua.primitives.module_refresh import ModuleRefreshError, refresh_package_closure
+from algua.primitives.module_refresh import (
+    ModuleRefreshError,
+    refresh_package_closure,
+    serialized_import,
+)
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
@@ -69,8 +72,8 @@ def _reload_strategy_closure(dotted: str) -> ModuleType:
     CURRENT source (the family ``__init__`` included), all-or-nothing, with stale bytecode purged
     first (see ``primitives.module_refresh``). The enforced-pure shared layers outside the family
     package stay warm. A cyclic or symlinked family closure fails closed as not found. Returns the
-    fresh strategy module, so a caller never re-reads ``sys.modules`` after the import lock is
-    released (another thread's refresh may then be mid-transaction)."""
+    fresh strategy module, so a caller never re-reads ``sys.modules`` after the refresh
+    serialization is released (another supported caller's refresh may then be mid-transaction)."""
     try:
         family = dotted.rsplit(".", 1)[0]  # algua.strategies.<family>
         return refresh_package_closure(family, root=dotted)
@@ -100,7 +103,7 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     if reload:
         module = _reload_strategy_closure(dotted)
     else:
-        module = importlib.import_module(dotted)
+        module = serialized_import(dotted)
     if not hasattr(module, "CONFIG") or not hasattr(module, "signal"):
         raise StrategyNotFound(f"{name} is missing CONFIG or signal")
 
