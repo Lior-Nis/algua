@@ -269,3 +269,16 @@ def test_refresh_accepts_a_lazy_acyclic_chain_deeper_than_the_recursion_limit(fa
     _refresh(family)
 
     assert family.mod("strat").VALUE == 1
+
+
+def test_rollback_never_installs_a_binding_manufactured_by_parent_getattr(family) -> None:
+    (family.dir.parent / "__init__.py").write_text(
+        "def __getattr__(name):\n    return 'manufactured'\n")
+    importlib.import_module(family.top)
+    family.write("strat", "raise RuntimeError('boom')\n")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    assert family.entries() == {}
+    assert "fam" not in vars(sys.modules[family.top])

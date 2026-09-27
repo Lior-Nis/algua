@@ -46,7 +46,7 @@ def refresh_package_closure(package: str, root: str) -> None:
     parent_name, _, child = package.rpartition(".")
     parent = sys.modules.get(parent_name) if parent_name else None
     unbound = object()
-    parent_binding = getattr(parent, child, unbound)
+    parent_binding = parent.__dict__.get(child, unbound) if parent is not None else unbound
     for name in previous:
         del sys.modules[name]
     try:
@@ -59,7 +59,7 @@ def refresh_package_closure(package: str, root: str) -> None:
             if parent_binding is unbound:
                 parent.__dict__.pop(child, None)
             else:
-                setattr(parent, child, parent_binding)
+                parent.__dict__[child] = parent_binding
         raise
 
 
