@@ -15,6 +15,7 @@ from algua.cli import (  # noqa: F401 - imports register subcommands
     backtest_cmd,
     data_cmd,
     data_refresh_cmd,
+    deployment_cmd,
     eval_cmd,
     fleet_cmd,
     governance_cmd,
@@ -54,6 +55,7 @@ research_cmd.research_app.add_typer(research_batch_cmd.run_all_app, name="run-al
 # data_app so `algua data refresh-bars ...` is unchanged while data_refresh_cmd never imports
 # data_cmd (#556 review finding 2).
 data_cmd.data_app.add_typer(data_refresh_cmd.refresh_app)
+app.add_typer(deployment_cmd.deployment_app, name="deployment")
 
 __all__ = ["app", "main"]
 

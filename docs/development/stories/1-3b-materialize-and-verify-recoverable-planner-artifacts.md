@@ -154,12 +154,12 @@ These identities are non-cyclic. An environment-only change does not change `bun
     transaction; insert or byte-verify only the artifact row.
   - [x] Prove no Git/uv/filesystem walk runs under the transaction and DB rollback leaves complete
     reusable unreferenced objects.
-- [ ] Add the thin deployment command surface (AC10–AC11).
-  - [ ] Add a focused `algua/cli/deployment_cmd.py`, mount it only at the CLI composition root and
+- [x] Add the thin deployment command surface (AC10–AC11).
+  - [x] Add a focused `algua/cli/deployment_cmd.py`, mount it only at the CLI composition root and
     implement exact prepare/verify success schemas.
-  - [ ] Add domain exception mapping and the normative retry allowlist entry only for environment
+  - [x] Add domain exception mapping and the normative retry allowlist entry only for environment
     unavailability; test every stable error envelope and disclosure bound.
-  - [ ] Prove verify performs no Git, uv, network, checkout or mutation access.
+  - [x] Prove verify performs no Git, uv, network, checkout or mutation access.
 - [ ] Protect and review the new integrity surface (AC12).
   - [ ] Add new identity, verifier, publication, descriptor-recording and error-policy modules to
     root `CODEOWNERS` and `tests/test_repo_hygiene.py`; do not broaden existing allowlists.
@@ -238,6 +238,10 @@ uv run lint-imports
   rollback and slow-work transaction boundaries. The first full run exposed the module-size ratchet;
   splitting the artifact ledger into its own mixin fixed the structural regression. Thirty-seven
   focused tests and the full 4,133-test suite pass.
+- Task 6 red tests failed on the absent error, verification and command modules. Green added the
+  composition-root command mount, exact payload projection, offline descriptor/content verification
+  and all nine bounded frozen error envelopes. Seventy-six focused tests and the full 4,155-test
+  suite pass; lint, types and all 28 import contracts are green.
 
 ### Completion Notes
 
@@ -253,14 +257,22 @@ uv run lint-imports
 - Task 5 complete: preparation publishes deterministic bundle/environment content outside SQLite,
   repeats identity and clean-HEAD checks, then atomically inserts or byte-verifies only the frozen
   descriptor after revalidating the candidate episode and gate. Digest lookup is activation-free.
+- Task 6 complete: `deployment prepare` and `deployment verify` expose only canonical relative
+  identities, offline verification performs no qualification or rebuilding, and retry policy is
+  false for every frozen failure except temporary locked-environment acquisition.
 
 ### File List
 
 - `algua/registry/artifact_contract.py`
+- `algua/registry/artifact_errors.py`
 - `algua/registry/artifact_manifest.py`
 - `algua/registry/artifact_preparation.py`
 - `algua/registry/artifact_recording.py`
 - `algua/registry/artifact_store.py`
+- `algua/registry/artifact_verification.py`
+- `algua/cli/deployment_cmd.py`
+- `algua/cli/errors.py`
+- `algua/cli/main.py`
 - `algua/registry/environment_store.py`
 - `algua/registry/frozen_source.py`
 - `algua/registry/planner_environment.py`
@@ -268,9 +280,12 @@ uv run lint-imports
 - `algua/registry/store/artifacts.py`
 - `algua/registry/store/deployment.py`
 - `docs/development/sprint-status.yaml`
+- `docs/contracts/cli-error-envelope.md`
 - `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
 - `tests/test_frozen_artifact_contract.py`
 - `tests/test_frozen_artifact_ledger.py`
+- `tests/test_cli_deployment.py`
+- `tests/test_frozen_artifact_verification.py`
 - `tests/test_artifact_store.py`
 - `tests/test_environment_store.py`
 - `tests/test_frozen_source.py`
@@ -288,3 +303,5 @@ uv run lint-imports
 - 2026-09-27: Completed atomic environment publication and final-locator verification.
 - 2026-09-27: Added non-activating frozen preparation, typed immutable-ledger recording and
   digest-based retrieval with candidate/gate revalidation and transaction-boundary tests.
+- 2026-09-27: Added bounded deployment prepare/verify JSON commands, offline recovery verification
+  and the stable frozen-artifact error/retry taxonomy.

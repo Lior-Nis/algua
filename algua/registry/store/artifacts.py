@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from algua.contracts.lifecycle import Actor, Stage
+from algua.registry.artifact_errors import ArtifactNotFound, FrozenDescriptorConflict
 from algua.registry.deployment import DeploymentError, DeploymentManifest
 
 
@@ -24,7 +25,10 @@ class ArtifactRecord:
     def frozen_manifest(self):
         from algua.registry.artifact_recording import parse_frozen_deployment_manifest
 
-        return parse_frozen_deployment_manifest(self.descriptor)
+        try:
+            return parse_frozen_deployment_manifest(self.descriptor)
+        except DeploymentError as exc:
+            raise FrozenDescriptorConflict() from exc
 
 
 @dataclass(frozen=True)
@@ -73,7 +77,7 @@ class ArtifactLedgerMixin:
             "SELECT * FROM deployment_artifacts WHERE manifest_digest=?", (manifest_digest,),
         ).fetchone()
         if row is None:
-            raise LookupError("deployment artifact not found")
+            raise ArtifactNotFound()
         return ArtifactRecord(id=int(row["id"]), descriptor=_manifest_from_row(row))
 
     def qualify_frozen_candidate(
@@ -125,7 +129,10 @@ class ArtifactLedgerMixin:
     ) -> int:
         from algua.registry.artifact_recording import parse_frozen_deployment_manifest
 
-        parse_frozen_deployment_manifest(manifest)
+        try:
+            parse_frozen_deployment_manifest(manifest)
+        except DeploymentError as exc:
+            raise FrozenDescriptorConflict() from exc
         if self._conn.in_transaction:
             raise RuntimeError("record_frozen_artifact must run outside an open transaction")
         try:
@@ -139,7 +146,10 @@ class ArtifactLedgerMixin:
                     "research gate is not the newest qualifying gate for this candidate+identity")
             if qualification.universe_name != manifest.universe_name:
                 raise DeploymentError("deployment universe binding does not match research gate")
-            artifact_id = self.resolve_deployment_artifact_locked(manifest)
+            try:
+                artifact_id = self.resolve_deployment_artifact_locked(manifest)
+            except DeploymentError as exc:
+                raise FrozenDescriptorConflict() from exc
             self._conn.commit()
             return artifact_id
         except BaseException:

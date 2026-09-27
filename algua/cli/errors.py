@@ -36,6 +36,17 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     from algua.live.live_loop import TickHalted
     from algua.portfolio.construction import ConstructionError
     from algua.registry.allocations import AllocationError
+    from algua.registry.artifact_errors import (
+        ArtifactNotFound,
+        FrozenAssetsUnsupported,
+        FrozenBundleCorrupt,
+        FrozenDescriptorConflict,
+        FrozenEnvironmentCorrupt,
+        FrozenEnvironmentIncompatible,
+        FrozenEnvironmentUnavailable,
+        FrozenSourceDrift,
+        FrozenSourceInvalid,
+    )
     from algua.registry.idea_attempts import ClaimTokenMismatch
     from algua.registry.live_gate import LiveAuthorizationError, SignatureError
     from algua.risk.limits import RiskBreach
@@ -44,6 +55,13 @@ def _registry() -> list[tuple[type[BaseException], str]]:
     # specific code wins; the two generic buckets and stdlib types come after.
     return [
         # --- ValueError family (specific -> generic) ---
+        (FrozenSourceInvalid, "frozen_source_invalid"),
+        (FrozenSourceDrift, "frozen_source_drift"),
+        (FrozenAssetsUnsupported, "frozen_assets_unsupported"),
+        (FrozenBundleCorrupt, "frozen_bundle_corrupt"),
+        (FrozenEnvironmentIncompatible, "frozen_environment_incompatible"),
+        (FrozenEnvironmentCorrupt, "frozen_environment_corrupt"),
+        (FrozenDescriptorConflict, "frozen_descriptor_conflict"),
         (AllocationError, "allocation_error"),
         (ClaimTokenMismatch, "claim_token_mismatch"),
         (TransitionError, "wrong_stage"),
@@ -52,8 +70,10 @@ def _registry() -> list[tuple[type[BaseException], str]]:
         (LiveSizingError, "sizing_error"),
         (RiskBreach, "risk_breach"),
         # --- LookupError family ---
+        (ArtifactNotFound, "artifact_not_found"),
         (SnapshotNotFound, "not_found"),  # explicit; other *NotFound inherit the generic below
         # --- RuntimeError family (distinct domain types kept out of the `internal` bucket) ---
+        (FrozenEnvironmentUnavailable, "frozen_environment_unavailable"),
         (RefreshError, "refresh_failed"),
         (SignatureError, "bad_signature"),
         (LiveAuthorizationError, "live_unauthorized"),
@@ -88,7 +108,9 @@ def error_code(exc: BaseException) -> str:
 # that would fail identically on replay. Deliberately conservative: retry defaults to FALSE and a
 # code is opt-in here. Single shared definition — every envelope surface derives `retryable` from
 # this set (see ``docs/contracts/cli-error-envelope.md``), never duplicating the policy per command.
-RETRYABLE_CODES: frozenset[str] = frozenset({"db_unavailable"})
+RETRYABLE_CODES: frozenset[str] = frozenset({
+    "db_unavailable", "frozen_environment_unavailable",
+})
 
 
 def is_retryable(code: str) -> bool:
