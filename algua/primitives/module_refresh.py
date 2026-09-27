@@ -16,6 +16,7 @@ import importlib.machinery
 import importlib.util
 import os
 import sys
+from collections.abc import Iterator
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 
@@ -124,27 +125,32 @@ def _source_imports(origin: str, parent: str) -> set[str]:
 
 
 def _require_acyclic(graph: dict[str, set[str]]) -> None:
-    """Fail closed on any cyclic import component, naming one cycle deterministically."""
+    """Fail closed on any cyclic import component, naming one cycle deterministically. The DFS is
+    iterative (explicit ``(node, dependency iterator)`` frames), so depth is not bounded by the
+    interpreter recursion limit."""
     done: set[str] = set()
-    path: list[str] = []
-
-    def visit(name: str) -> None:
-        if name in done:
-            return
-        if name in path:
-            cycle = path[path.index(name):] + [name]
-            raise ModuleRefreshError(
-                "cyclic package imports have no dependency-safe order: " + " -> ".join(cycle),
-                name=name,
-            )
-        path.append(name)
-        for dependency in sorted(graph.get(name, ())):
-            visit(dependency)
-        path.pop()
-        done.add(name)
-
-    for name in sorted(graph):
-        visit(name)
+    for start in sorted(graph):
+        if start in done:
+            continue
+        frames: list[tuple[str, Iterator[str]]] = [(start, iter(sorted(graph[start])))]
+        on_path = {start}
+        while frames:
+            name, dependencies = frames[-1]
+            dependency = next(dependencies, None)
+            if dependency is None:
+                frames.pop()
+                on_path.discard(name)
+                done.add(name)
+            elif dependency in on_path:
+                path = [frame_name for frame_name, _ in frames]
+                cycle = path[path.index(dependency):] + [dependency]
+                raise ModuleRefreshError(
+                    "cyclic package imports have no dependency-safe order: " + " -> ".join(cycle),
+                    name=dependency,
+                )
+            elif dependency not in done:
+                frames.append((dependency, iter(sorted(graph.get(dependency, ())))))
+                on_path.add(dependency)
 
 
 def _purge_package_bytecode(locations: list[str]) -> None:

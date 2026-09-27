@@ -221,3 +221,51 @@ def test_require_acyclic_names_the_cycle_deterministically() -> None:
         _require_acyclic(dict(reversed(list(graph.items()))))
     assert str(first.value) == str(second.value)
     assert "f._c -> f._d -> f._e -> f._c" in str(first.value)
+
+
+def test_require_acyclic_is_iterative_beyond_the_recursion_limit() -> None:
+    depth = sys.getrecursionlimit() + 500
+    graph: dict[str, set[str]] = {f"f._{i}": {f"f._{i + 1}"} for i in range(depth)}
+    graph[f"f._{depth}"] = set()
+    _require_acyclic(graph)
+
+    graph[f"f._{depth}"] = {"f._0"}
+    with pytest.raises(ModuleRefreshError, match="cycl"):
+        _require_acyclic(graph)
+
+
+def test_require_acyclic_expands_each_module_once_across_shared_dependencies() -> None:
+    """Diamonds are acyclic (a finished module leaves the active path) and a finished module is
+    never expanded again, so layered shared dependencies stay linear rather than exponential."""
+    expanded: list[str] = []
+
+    class Recording(dict[str, set[str]]):
+        def __getitem__(self, name: str) -> set[str]:
+            expanded.append(name)
+            return super().__getitem__(name)
+
+        def get(self, name: str, default: object = None) -> set[str]:  # noqa: ARG002
+            expanded.append(name)
+            return super().__getitem__(name)
+
+    layers = [[f"f._{layer}_{i}" for i in range(2)] for layer in range(12)]
+    graph = Recording({"f": set(layers[0])})
+    for upper, lower in zip(layers, layers[1:], strict=False):
+        graph.update({name: set(lower) for name in upper})
+    graph.update({name: set() for name in layers[-1]})
+
+    _require_acyclic(graph)
+
+    assert sorted(expanded) == sorted(graph)
+
+
+def test_refresh_accepts_a_lazy_acyclic_chain_deeper_than_the_recursion_limit(family) -> None:
+    depth = sys.getrecursionlimit() + 200
+    for i in range(depth):
+        family.write(f"h{i}", f"def follow():\n    from . import h{i + 1}\n")
+    family.write(f"h{depth}", "VALUE = 1\n")
+    family.write("strat", "from . import h0\nVALUE = 1\n")
+
+    _refresh(family)
+
+    assert family.mod("strat").VALUE == 1
