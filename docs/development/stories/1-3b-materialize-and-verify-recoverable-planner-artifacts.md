@@ -133,12 +133,12 @@ These identities are non-cyclic. An environment-only change does not change `bun
   - [x] Enforce clean current full-OID HEAD, source-shadow detection, modes, path normalization/
     collision/portability rules and every protected size/count bound.
   - [x] Reject unsupported assets before external path/byte access and prove no publication/row.
-- [ ] Implement the immutable content store (AC4, AC11).
-  - [ ] Add exact digest-derived locator resolution beneath trusted `Settings.data_dir` with
+- [x] Implement the immutable content store (AC4, AC11).
+  - [x] Add exact digest-derived locator resolution beneath trusted `Settings.data_dir` with
     component/type/containment checks.
-  - [ ] Implement private same-filesystem staging, canonical verification, sealing, fsync, flock,
+  - [x] Implement private same-filesystem staging, canonical verification, sealing, fsync, flock,
     no-overwrite rename and final verification without replacement helpers.
-  - [ ] Cover same/different-digest races, winner reuse, corrupt existing targets and fault injection
+  - [x] Cover same/different-digest races, winner reuse, corrupt existing targets and fault injection
     at every write/fsync/seal/rename boundary; delete only owned staging content.
 - [ ] Provision and verify the shared planner environment (AC5–AC7).
   - [ ] Build from private committed inputs using exact tested uv argv/environment and current
@@ -226,6 +226,9 @@ uv run lint-imports
 - Task 2 red phase failed on the absent `frozen_source` module. Green phase added binary Git-object
   export, strict path/mode/bound checks, clean-HEAD shadow detection and pre-dereference asset refusal;
   21 focused tests and the full 4,098-test suite pass.
+- Task 3 red phase failed on the absent `artifact_store` module. Green phase added canonical locator
+  resolution, sealed same-parent staging, durable locked no-overwrite publication and full inventory
+  verification; 11 focused tests and the full 4,109-test suite pass.
 
 ### Completion Notes
 
@@ -234,15 +237,19 @@ uv run lint-imports
   unchanged. No filesystem, database, deployment or runtime behavior is introduced yet.
 - Task 2 complete: source and build inputs are read from the exact commit object database, unsafe or
   ambiguous trees fail closed, and unsupported model content is refused before external access.
+- Task 3 complete: bundle publication is atomic and reusable under races, detects corruption and
+  permission/link drift without repair, and leaves only complete published objects across faults.
 
 ### File List
 
 - `algua/registry/artifact_contract.py`
 - `algua/registry/artifact_manifest.py`
+- `algua/registry/artifact_store.py`
 - `algua/registry/frozen_source.py`
 - `docs/development/sprint-status.yaml`
 - `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
 - `tests/test_frozen_artifact_contract.py`
+- `tests/test_artifact_store.py`
 - `tests/test_frozen_source.py`
 
 ### Change Log
@@ -252,3 +259,4 @@ uv run lint-imports
 - 2026-09-27: Passed BMAD implementation readiness and moved to `ready-for-dev`.
 - 2026-09-27: Started implementation and completed the pure frozen identity/manifest contract.
 - 2026-09-27: Added exact Git-object source/build-input export and source-only admission checks.
+- 2026-09-27: Added durable content-addressed bundle publication and offline verification.
