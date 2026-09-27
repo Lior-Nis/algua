@@ -1,12 +1,12 @@
 ---
-baseline_commit: dc2a222ef811dc1c3a835d656a411de58423796c
+baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 ---
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: backlog
+Status: ready-for-dev
 
-Prepared: 2026-09-25. Baseline: Story 1.3 readiness baseline `dc2a222` (PR #671).
+Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
 Depends on: Story 1.3a reviewed and merged.
 
@@ -15,84 +15,176 @@ Depends on: Story 1.3a reviewed and merged.
 As Algua's operator,
 I want a qualified candidate's planner source and matching dependency environment materialized as
 recoverable content-addressed objects,
-so that I can verify what will run before any deployment is activated or trading behavior changes.
+so that I can verify exactly what may run before any deployment is activated or trading behavior
+changes.
 
 ## Scope and authority
 
-This story builds and verifies immutable content but does not execute it for a tick. It adds an
-operator-visible JSON command that prepares or verifies an artifact descriptor without activating a
-strategy deployment, allocating capital, changing lifecycle stage or changing paper/live behavior.
+This story builds, publishes, records and verifies immutable content; it never executes that content
+for a tick. `algua deployment prepare NAME` may publish a bundle/environment and insert or
+byte-verify one append-only artifact descriptor. `algua deployment verify MANIFEST_DIGEST` is an
+offline read-only verifier. Neither command activates or retires a deployment, allocates capital,
+changes lifecycle stage, consumes a research gate, invokes a planner, contacts a provider/broker or
+changes paper/live behavior.
 
-The artifact is an exported source bundle, not a worktree and not an installed Algua wheel. The
+Preparation accepts only the exact current clean full-OID `HEAD` whose recomputed artifact identity
+matches the candidate's newest eligible gate and entry. Source and build-input bytes come from Git
+objects, never checkout files. The source bundle is not a checkout or an installed wheel. The shared
 environment contains locked third-party runtime dependencies and no local/editable Algua install.
-Current paper-tradable strategies are source-only. Non-empty model assets remain unsupported and do
-not become tradable through this story.
+
+Current paper-tradable strategies are source-only. A model handle or non-empty asset inventory fails
+before any external asset path or bytes are read. Existing working-tree descriptors remain byte-
+compatible and their execution/verification path is unchanged.
+
+## Normative artifact contract
+
+The [Story 1.3b machine contract](../specs/spec-story-1-3b-artifact-environment-contract/SPEC.md) and
+its [field-level companion](../specs/spec-story-1-3b-artifact-environment-contract/artifact-environment-contract.md)
+are normative. Implementers and reviewers must read both. They define all digest domains, schemas,
+limits, Git/path rules, environment flags, publication/recovery behavior, persistence semantics,
+command payloads and error codes.
+
+| Identity | Exact role |
+|---|---|
+| `bundle_digest` | exported Git source plus generated resolved configuration and protocol metadata |
+| `build_inputs_digest` | exact committed `pyproject.toml`, `uv.lock` and `.python-version` blobs |
+| `environment_key` | build inputs, dependency hash, complete interpreter/platform facts and installer policy |
+| `installed_inventory_digest` | normalized installed distributions and importable files |
+| `environment_digest` | environment key, installed inventory and verified interpreter identity |
+| `manifest_digest` | outer frozen descriptor binding qualified identity, bundle, environment, config, assets and protocols |
+
+These identities are non-cyclic. An environment-only change does not change `bundle_digest`.
 
 ## Acceptance criteria
 
-1. **Exact source inventory.** Given a clean recorded Git `source_ref`, materialization reads Git
-   object bytes for every tracked regular file beneath `algua/`, plus generated canonical resolved
-   configuration and manifest/protocol metadata. Mutable working-tree bytes are never the source.
-   `.git`, `.env`, databases, credentials, trust anchors, logs, datasets, docs, tests, web files and
-   host-absolute paths are excluded.
-2. **Deterministic digest.** The tree digest covers normalized relative path, file kind/mode and exact
-   bytes. Enumeration order, timestamps and host paths cannot change it; any source, configuration,
-   protocol or environment-identity change does. Links, special files, traversal and normalized or
-   case-colliding paths are rejected.
-3. **Atomic immutable publication.** Bundle/environment content is built in a unique private staging
-   directory on the target filesystem, verified, fsynced where supported and atomically published
-   without overwrite beneath digest-derived paths in `Settings.data_dir`. A pre-existing digest is
-   accepted only after canonical byte/inventory verification. Concurrent builders yield one
-   identical object or a domain failure, never mixed content.
-4. **Environment build inputs and identity.** `pyproject.toml`, `uv.lock` and `.python-version` are
-   read from the same Git commit as build inputs, not copied into the executable bundle. Sharing is
-   allowed only for the complete dependency digest, Python implementation/full version, ABI/cache
-   tag and platform tag. Installed inventory and interpreter identity are recorded and verified.
-5. **Admission-time acquisition only.** Preparation may download distributions already selected by
-   the committed lockfile using locked/no-project-install semantics. It may not resolve, upgrade or
-   select versions. A missing locked distribution fails with a stable retryable code before any
-   activation or stage change. Tick-time resolution, download and `uv` execution remain forbidden.
-6. **No checkout-bound package.** The prepared environment contains no editable/local `algua`
-   distribution and cannot resolve `algua` from the mutable checkout during verification. Published
-   bundle and environment files are non-writable.
-7. **Current asset boundary.** Source-only candidates use an empty canonical asset inventory.
-   Non-empty assets fail with a stable unsupported-lane code. The manifest may reserve asset entries,
-   but this story does not copy a path, enable a model sidecar or weaken paper tradability gates.
-8. **Append-only descriptor.** The existing immutable deployment-artifact ledger records or
-   byte-verifies the frozen descriptor. Manifest data includes source commit, bundle digest, stable
-   digest-derived locator, environment identity and canonical resolved configuration. No absolute
-   host path is identity. Existing rows are never mutated or repointed.
-9. **Read-only operator command.** A typed JSON-emitting preparation/verification command succeeds
-   with artifact/environment identities and verification state or fails with a stable code. It does
-   not create `strategy_deployments`, transition a strategy, allocate capital, invoke a planner or
-   contact a broker.
-10. **Retention and recovery.** Published complete objects remain addressable indefinitely. Failed
-    transactions may leave only complete unreferenced objects that are safe to reuse. Cleanup may
-    remove only provably owned incomplete staging directories; no garbage collection is introduced.
-11. **Quality and authority preservation.** Slow Git/filesystem/environment work occurs outside a
-    SQLite write transaction. CLI JSON, import boundaries, module-size ratchets, live authority and
-    the full repository gate remain unchanged/green.
+1. **Qualification is exact and race-safe.** Given `deployment prepare NAME`, preparation requires
+   the current candidate, exact recomputed code/config/dependency identity, newest eligible
+   unanchored research gate and current clean full-OID `HEAD`. It rejects tracked drift and
+   untracked source shadowing. After slow work, a short `BEGIN IMMEDIATE` transaction revalidates
+   all predicates and the same HEAD before recording only the descriptor; drift produces
+   `frozen_source_drift` and no row/state change.
+2. **Source bytes come from Git objects.** Every accepted tracked regular blob under `algua/` is
+   enumerated from the recorded commit using binary/NUL-safe parsing and read by object ID. Only
+   modes `100644` and `100755` are accepted. Symlinks, gitlinks, special entries, unsafe/invalid or
+   colliding paths and protected-limit violations fail with `frozen_source_invalid`. Mutable
+   checkout bytes, `.git`, credentials, operational data and host-absolute paths are never copied.
+3. **Bundle identity is deterministic and non-cyclic.** The bundle contains exact exported source,
+   canonical `resolved-config.json` and canonical `protocol.json`. Its ordered inventory binds path,
+   logical mode, size and full file digest under the normative domain. Order, root and timestamps do
+   not affect it; any source/mode/config/protocol change does. Literal golden digest vectors pass.
+4. **Publication is atomic and immutable.** Bundle and environment use unique private same-filesystem
+   staging, complete canonical verification, sealing, bottom-up fsync, a per-digest lock and
+   no-overwrite rename into exact digest-derived relative locators. A race loser verifies the
+   winner. Existing valid content is reused; corrupt/partial/writable/mis-typed content fails closed
+   without overwrite or repair. Failures clean only the exact owned staging path.
+5. **Environment inputs and key are complete.** Exact committed `pyproject.toml`, `uv.lock` and
+   `.python-version` bytes form the build-input digest. The environment key additionally binds the
+   existing dependency hash, implementation/full Python version, cache tag, SOABI, platform/arch,
+   uv version and complete normative create/sync policy. Equal environments share only when this
+   full key matches; each relevant change separates them.
+6. **Provisioning is locked and checkout-independent.** Preparation creates a relocatable
+   environment from the exact current interpreter and committed lock with the normative locked,
+   no-project/workspace/local/editable/build/download and copy-link flags. It may acquire a
+   compatible wheel already selected by the lock, but never resolves/upgrades or downloads Python.
+   Path/VCS/local/editable/source-only dependencies fail as incompatible; a temporarily unavailable
+   compatible locked wheel alone yields retryable `frozen_environment_unavailable`.
+7. **Published environment verifies independently.** Before and after final-location publication,
+   the environment's interpreter proves its keyed identity, exact installed inventory, absence of
+   an installed/importable `algua`, absence of checkout/cache hardlink leakage and compliance with
+   the narrow interpreter-link and read-only permission policy. Verification after publication
+   succeeds without Git, uv, network or the current checkout; any mismatch fails closed.
+8. **Assets remain unsupported.** A source-only candidate records canonical assets `[]`. A model
+   handle or other non-empty inventory yields `frozen_assets_unsupported` before external asset
+   dereference and leaves no object or descriptor row. No model lane or paper-tradability rule is
+   changed.
+9. **Frozen descriptor is typed and append-only.** The canonical version-1 manifest records the
+   exact qualified identity, full source commit, bundle/environment identities and locators,
+   resolved config, universe, empty assets, existing integer planner protocol, boundary version and
+   named `frozen-planner` wire version. Existing `deployment_artifacts` columns exactly agree with
+   it. Insert-or-byte-verification is concurrency-safe; existing rows are never mutated/repointed;
+   working-tree manifest bytes remain valid; no schema change occurs unless separately reviewed.
+10. **Commands are bounded JSON and non-activating.** Prepare and verify return the exact normative
+    JSON fields or stable typed error envelopes with correct retry flags, bounded sanitized
+    diagnostics and relative locators only. No absolute path, raw uv stderr, URL, credential or
+    traceback leaks. Tests prove zero deployment, allocation, transition, gate-consumption, planner,
+    provider and broker effects.
+11. **Recovery is offline and retained.** `deployment verify MANIFEST_DIGEST` loads the descriptor
+    by digest and verifies all descriptor relations, inventories, permissions and the final
+    interpreter from the trusted store root only. Missing/corrupt content is not rebuilt. Complete
+    unreferenced objects left by a database failure are reusable; retry records the same bytes and
+    ID. Retirement, startup and repeated verification never garbage-collect content.
+12. **Repository and authority walls remain intact.** New artifact identity/publication/
+    verification/error-policy modules are CODEOWNERS-protected and pinned by the repository hygiene
+    test. Existing planner parity, working-tree behavior, live authority, capital controls, JSON
+    contract, import boundaries and module-size ratchets remain unchanged, and the full root gate
+    passes.
 
 ## Tasks / subtasks
 
-- [ ] Add red digest/inventory/path-safety and concurrent-publication tests (AC1–AC3).
-- [ ] Implement source export and canonical manifest in focused non-CLI modules (AC1–AC3).
-- [ ] Add full environment-key calculation, locked provisioning and inventory verification (AC4–AC6).
-- [ ] Enforce the source-only asset boundary (AC7).
-- [ ] Record/verify the append-only descriptor without activation (AC8).
-- [ ] Add the JSON preparation/verification command as a thin composition layer (AC9).
-- [ ] Cover crash, race, cache-miss, corruption and unreferenced-content recovery (AC3, AC5, AC10).
-- [ ] Obtain protected schema/identity review if persistence changes are required (AC8, AC11).
+- [ ] Lock the pure descriptor and digest contracts with failing tests (AC3, AC5, AC9).
+  - [ ] Add typed/versioned frozen bundle, environment and manifest values with strict unknown/
+    missing-field and canonical-JSON validation.
+  - [ ] Add literal golden vectors for bundle, build inputs, environment key/inventory/environment
+    and outer manifest, including correct layer sensitivity and order/mtime/root invariance.
+  - [ ] Preserve existing working-tree manifest canonical bytes and verification tests.
+- [ ] Export and validate source/build inputs from exact Git objects (AC1–AC3).
+  - [ ] Add binary-safe `ls-tree` parsing and blob reads for accepted source and root build inputs;
+    never read their bytes through checkout paths.
+  - [ ] Enforce clean current full-OID HEAD, source-shadow detection, modes, path normalization/
+    collision/portability rules and every protected size/count bound.
+  - [ ] Reject unsupported assets before external path/byte access and prove no publication/row.
+- [ ] Implement the immutable content store (AC4, AC11).
+  - [ ] Add exact digest-derived locator resolution beneath trusted `Settings.data_dir` with
+    component/type/containment checks.
+  - [ ] Implement private same-filesystem staging, canonical verification, sealing, fsync, flock,
+    no-overwrite rename and final verification without replacement helpers.
+  - [ ] Cover same/different-digest races, winner reuse, corrupt existing targets and fault injection
+    at every write/fsync/seal/rename boundary; delete only owned staging content.
+- [ ] Provision and verify the shared planner environment (AC5–AC7).
+  - [ ] Build from private committed inputs using exact tested uv argv/environment and current
+    interpreter; reject resolution, project/local installs, unsupported lock entries and downloads.
+  - [ ] Generate/verify the complete installed inventory, keyed interpreter facts, permitted
+    interpreter links, absence of hardlinks/writable content and absence of Algua/checkout imports.
+  - [ ] Re-run verification with the published interpreter at its final locator and test offline
+    recovery plus sharing/separation cases.
+- [ ] Record and retrieve the frozen descriptor without activation (AC1, AC9, AC11).
+  - [ ] Reuse the current immutable ledger and denormalized fields; add typed frozen dispatch without
+    changing working-tree parsing. Add fetch-by-manifest-digest.
+  - [ ] Revalidate stage, candidate entry, newest gate, identity and HEAD in one short write
+    transaction; insert or byte-verify only the artifact row.
+  - [ ] Prove no Git/uv/filesystem walk runs under the transaction and DB rollback leaves complete
+    reusable unreferenced objects.
+- [ ] Add the thin deployment command surface (AC10–AC11).
+  - [ ] Add a focused `algua/cli/deployment_cmd.py`, mount it only at the CLI composition root and
+    implement exact prepare/verify success schemas.
+  - [ ] Add domain exception mapping and the normative retry allowlist entry only for environment
+    unavailability; test every stable error envelope and disclosure bound.
+  - [ ] Prove verify performs no Git, uv, network, checkout or mutation access.
+- [ ] Protect and review the new integrity surface (AC12).
+  - [ ] Add new identity, verifier, publication, descriptor-recording and error-policy modules to
+    root `CODEOWNERS` and `tests/test_repo_hygiene.py`; do not broaden existing allowlists.
+  - [ ] Run focused contract/store/environment/CLI tests, Story 1.3a parity, then the full sequential
+    root gate.
+  - [ ] Obtain independent adversarial, edge-case and acceptance review before marking done. Any
+    schema, activation/intake, paper/live runtime, broker, capital or authority change requires
+    explicit rescoping rather than an incidental patch.
 
 ## Development notes
 
-- Reuse `deployment_artifacts` and `DeploymentManifest` where their immutable semantics suffice;
-  prefer canonical manifest fields over a schema expansion unless queries require first-class data.
-- The authoritative source set matches current clean-tree verification: tracked `algua/` files.
-- Never hold `BEGIN IMMEDIATE` across Git, uv, filesystem walks, fsync or environment provisioning.
-- A digest-derived relative locator is data; the trusted store root is operational configuration.
-- Same-UID hostile replacement remains within the accepted no-sandbox residual. Do not claim this
-  story creates a security sandbox.
+- Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
+  `registry/artifact_store.py`, `registry/planner_environment.py`,
+  `registry/artifact_preparation.py` and `cli/deployment_cmd.py`. Keep each below 300 lines and do
+  not grow the already size-pinned `registry/deployment.py` or command modules.
+- Reuse `algua/primitives/atomic_io.py` fsync helpers and `algua/primitives/flock.py`; do not use
+  `write_bytes_durable` because replacement semantics are forbidden for immutable objects.
+- Registry code must not import `algua.live`. Shared protocol constants belong in the pure
+  `algua/contracts/planner.py` seam if an additional constant is required.
+- The trusted root is operational configuration; manifest locators are data and must exactly equal
+  their digest-derived form. Do not expose resolved absolute paths in output.
+- Same-UID hostile replacement remains inside the accepted no-sandbox residual. Do not describe
+  read-only permissions or flock as a security sandbox.
+- A ready story authorizes implementation and review only. It does not authorize activation,
+  deployment, capital use or live operation.
 
 ## Verification
 
@@ -106,6 +198,39 @@ uv run lint-imports
 ## References
 
 - [Parent Story 1.3](1-3-materialize-and-execute-frozen-planner-artifacts.md)
+- [Normative Story 1.3b machine contract](../specs/spec-story-1-3b-artifact-environment-contract/SPEC.md)
+- [Normative artifact/environment companion](../specs/spec-story-1-3b-artifact-environment-contract/artifact-environment-contract.md)
+- [Story 1.3a](1-3a-complete-two-phase-planner-boundary-in-process.md)
 - [Approved Sprint Change Proposal](../sprint-change-proposal-2026-09-25.md)
 - [Artifact-freeze design](../../superpowers/specs/2026-09-22-artifact-freeze-design.md)
+- [Canonical PRD](../../PRD.md), §§5–7, 10, 15, 24–26.
+- [Current architecture](../../architecture.md)
+- Repository `AGENTS.md`, `CLAUDE.md`, `docs/agent/operating.md` and frozen
+  `docs/contracts/bar-schema.md` remain binding during implementation.
 
+## Dev Agent Record
+
+### Implementation Plan
+
+- To be completed during implementation from the normative contract and task sequence above.
+
+### Debug Log References
+
+- Story preparation used repository inspection plus independent requirements, implementation and
+  security review. The initial backlog draft was not admitted until digest, Git export, environment,
+  atomicity, persistence, CLI, recovery and authority semantics were closed normatively.
+
+### Completion Notes
+
+- Not implemented. The 2026-09-27 readiness report grants implementation admission only; it is not
+  completion, deployment or trading authorization.
+
+### File List
+
+- To be completed during implementation.
+
+### Change Log
+
+- 2026-09-27: Rebased on Story 1.3a, added the normative artifact/environment contract and prepared
+  the bounded non-activating implementation story for readiness review.
+- 2026-09-27: Passed BMAD implementation readiness and moved to `ready-for-dev`.

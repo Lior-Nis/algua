@@ -33,18 +33,19 @@ reports must distinguish tests passing, code merged, deployment verified and cap
 
 ## Current handoff
 
-[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md) and
-[Story 1.2 — explicit deployment epochs](stories/1-2-record-working-tree-deployments.md) are
-implemented, independently reviewed and merged. Neither merge is a deployment.
+[Story 1.1 — planner extraction](stories/1-1-extract-in-process-decision-planner.md),
+[Story 1.2 — explicit deployment epochs](stories/1-2-record-working-tree-deployments.md) and
+[Story 1.3a — two-phase planner boundary](stories/1-3a-complete-two-phase-planner-boundary-in-process.md)
+are implemented, independently reviewed and merged. None of those merges is a deployment.
 [Story 1.3 — frozen planner artifacts](stories/1-3-materialize-and-execute-frozen-planner-artifacts.md)
 is the `decomposed` parent outcome. The
 [2026-09-25 readiness assessment](implementation-readiness-report-2026-09-25.md) found it too large
 for one implementation/review cycle, and the approved
 [Sprint Change Proposal](sprint-change-proposal-2026-09-25.md) divides it into Stories 1.3a–1.3d.
-[Story 1.3a](stories/1-3a-complete-two-phase-planner-boundary-in-process.md) is
-`ready-for-dev` after its [targeted readiness rerun](implementation-readiness-report-2026-09-25-story-1-3a-rerun.md)
-and adopted [normative machine contract](specs/spec-story-1-3a-planner-contract/SPEC.md). Stories
-1.3b–1.3d remain backlog and require their own readiness reviews. The older
+[Story 1.3b](stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md) is
+`ready-for-dev` after its [targeted readiness review](implementation-readiness-report-2026-09-27-story-1-3b.md)
+and adopted [normative artifact/environment contract](specs/spec-story-1-3b-artifact-environment-contract/SPEC.md).
+Stories 1.3c–1.3d remain backlog and require their own readiness reviews. The older
 [readiness assessment](implementation-readiness-report-2026-09-24.md) covers only Story 1.1, not
 either whole epic. [Deferred findings](stories/deferred-work.md) retain pre-existing issues outside
 the active story boundary.
@@ -53,4 +54,4 @@ Workflow path bindings: `planning_artifacts = docs/development`,
 `implementation_artifacts = docs/development/stories`; use `docs/PRD.md` and
 `docs/architecture.md` directly rather than copying them into the planning folder. There is no
 repository `_bmad` configuration at preparation time; installed skill defaults apply. Sprint
-tracking, when initialized, belongs at `docs/development/stories/sprint-status.yaml`.
+tracking is `docs/development/sprint-status.yaml`.
