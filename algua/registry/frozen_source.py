@@ -2,21 +2,25 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import selectors
 import subprocess
-import tempfile
-import unicodedata
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from algua.registry.artifact_contract import (
     MAX_BUNDLE_BYTES,
     MAX_FILE_BYTES,
+    MAX_PATH_BYTES,
+    MAX_SOURCE_FILES,
     ArtifactFile,
+    canonical_relative_path,
 )
 
-MAX_SOURCE_FILES = 10_000
-MAX_PATH_BYTES = 1_024
+_GIT_TIMEOUT_SECONDS = 60
+_READ_CHUNK = 64 * 1024
 _OID = re.compile(rb"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _MODES = {b"100644", b"100755"}
 _BUILD_INPUTS = (".python-version", "pyproject.toml", "uv.lock")
@@ -57,44 +61,60 @@ class FrozenFile:
         )
 
 
-def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
-    try:
-        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-            subprocess.run(
-                ["git", *args], cwd=repo_root, check=True, stdout=stdout, stderr=stderr,
-                timeout=60,
-            )
-            size = stdout.tell()
-            if size > max_bytes:
+def _read_bounded(process: subprocess.Popen[bytes], max_bytes: int, deadline: float) -> bytes:
+    """Stream stdout, stopping the moment it exceeds ``max_bytes`` or the deadline passes."""
+    assert process.stdout is not None
+    chunks: list[bytes] = []
+    received = 0
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, _GIT_TIMEOUT_SECONDS)
+            if not selector.select(remaining):
+                continue
+            chunk = os.read(process.stdout.fileno(), _READ_CHUNK)
+            if not chunk:
+                return b"".join(chunks)
+            received += len(chunk)
+            if received > max_bytes:
                 raise FrozenSourceError("Git output exceeds its protected bound")
-            stdout.seek(0)
-            return stdout.read(max_bytes + 1)
+            chunks.append(chunk)
+
+
+def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
+    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    try:
+        with subprocess.Popen(
+            ["git", *args], cwd=repo_root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as process:
+            try:
+                output = _read_bounded(process, max_bytes, deadline)
+                returncode = process.wait(timeout=max(deadline - time.monotonic(), 0))
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
     except FrozenSourceError:
         raise
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise FrozenSourceError("Git source could not be read") from exc
+    if returncode != 0:
+        raise FrozenSourceError("Git source could not be read")
+    return output
 
 
 def _canonical_path(raw: bytes) -> str:
-    if not raw or len(raw) > MAX_PATH_BYTES or b"\0" in raw or b"\\" in raw:
-        raise FrozenSourceError("Git path is unsafe")
     try:
         path = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise FrozenSourceError("Git path is not valid UTF-8") from exc
-    if unicodedata.normalize("NFC", path) != path:
-        raise FrozenSourceError("Git path is not NFC-normalized")
-    pure = PurePosixPath(path)
-    segments = path.split("/")
-    if (
-        pure.is_absolute()
-        or not segments
-        or any(segment in {"", ".", ".."} for segment in segments)
-        or re.match(r"^[A-Za-z]:", segments[0])
-        or any(segment.endswith((".", " ")) for segment in segments)
-    ):
-        raise FrozenSourceError("Git path is unsafe")
-    return path
+    try:
+        return canonical_relative_path(path, "Git path")
+    except ValueError as exc:
+        raise FrozenSourceError(str(exc)) from exc
 
 
 def parse_tree(raw: bytes) -> tuple[GitTreeEntry, ...]:
@@ -178,19 +198,40 @@ def _generated_cache(path: str, tracked: set[str]) -> bool:
     return str(pure.parent.parent / f"{module}.py") in tracked
 
 
+def _tracked_paths_without_hidden_flags(root: Path, max_bytes: int) -> set[str]:
+    """Return tracked ``algua/`` paths, rejecting index flags that make ``status`` skip a file.
+
+    ``git ls-files -v`` tags a plain cached entry ``H``; assume-unchanged entries are lowercase and
+    skip-worktree entries ``S``. Either flag hides working-tree drift from the status check, so any
+    tag other than ``H`` anywhere in the index fails closed.
+    """
+    tracked: set[str] = set()
+    for record in _git(root, "ls-files", "-z", "-v", max_bytes=max_bytes).split(b"\0"):
+        if not record:
+            continue
+        if not record.startswith(b"H "):
+            raise FrozenSourceError("Git index flags hide tracked working-tree drift")
+        try:
+            path = record[2:].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FrozenSourceError("Git index path is not valid UTF-8") from exc
+        if path.startswith("algua/"):
+            tracked.add(path)
+    return tracked
+
+
 def assert_clean_head(repo_root: Path) -> str:
     root = repo_root.resolve()
     head = _git(root, "rev-parse", "--verify", "HEAD^{commit}", max_bytes=129).decode().strip()
     if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
         raise FrozenSourceError("Git HEAD is not a full commit object ID")
     listing_bound = (MAX_PATH_BYTES + 100) * (MAX_SOURCE_FILES + 1)
+    tracked = _tracked_paths_without_hidden_flags(root, listing_bound)
     if _git(
         root, "status", "--porcelain=v1", "-z", "--untracked-files=no",
         max_bytes=listing_bound,
     ):
         raise FrozenSourceError("working tree tracked files do not match HEAD")
-    tracked_raw = _git(root, "ls-files", "-z", "--", "algua", max_bytes=listing_bound)
-    tracked = {item.decode("utf-8") for item in tracked_raw.split(b"\0") if item}
     source_root = root / "algua"
     if not source_root.is_dir() or source_root.is_symlink():
         raise FrozenSourceError("working tree has no canonical algua source root")

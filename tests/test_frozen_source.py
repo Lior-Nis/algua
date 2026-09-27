@@ -145,3 +145,56 @@ def test_asset_rejection_does_not_dereference_model_handle() -> None:
     with pytest.raises(FrozenAssetsUnsupported):
         require_source_only(ExplosiveHandle())
     require_source_only(None)
+
+
+def test_git_output_is_stopped_once_it_exceeds_the_protected_bound(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    import time
+
+    from algua.registry.frozen_source import _git as bounded_git
+
+    marker = tmp_path / "finished"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "git"
+    fake.write_text(f"#!/bin/sh\nhead -c 4096 /dev/zero\nsleep 5\ntouch {marker}\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    started = time.monotonic()
+    with pytest.raises(FrozenSourceError, match="protected bound"):
+        bounded_git(tmp_path, "cat-file", "blob", "a" * 40, max_bytes=1024)
+    assert time.monotonic() - started < 4
+    time.sleep(0.1)
+    assert not marker.exists()
+
+
+def test_git_output_within_the_bound_is_returned_exactly(repo: Path) -> None:
+    from algua.registry.frozen_source import _git as bounded_git
+
+    oid = _git(repo, "rev-parse", "HEAD:algua/__init__.py")
+    data = b"VALUE = 'committed'\n"
+    assert bounded_git(repo, "cat-file", "blob", oid, max_bytes=len(data)) == data
+    with pytest.raises(FrozenSourceError, match="protected bound"):
+        bounded_git(repo, "cat-file", "blob", oid, max_bytes=len(data) - 1)
+    with pytest.raises(FrozenSourceError, match="could not be read"):
+        bounded_git(repo, "cat-file", "blob", "f" * 40, max_bytes=1024)
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+@pytest.mark.parametrize("path", ["algua/__init__.py", "pyproject.toml"])
+def test_clean_head_rejects_index_flags_that_hide_tracked_drift(
+    repo: Path, flag: str, path: str,
+) -> None:
+    _git(repo, "update-index", flag, path)
+    (repo / path).write_text("hidden drift\n")
+    assert _git(repo, "status", "--porcelain") == ""
+    with pytest.raises(FrozenSourceError, match="hide tracked"):
+        assert_clean_head(repo)
+
+
+def test_clean_head_rejects_hidden_flags_even_without_content_drift(repo: Path) -> None:
+    _git(repo, "update-index", "--skip-worktree", "algua/tool.py")
+    with pytest.raises(FrozenSourceError, match="hide tracked"):
+        assert_clean_head(repo)
