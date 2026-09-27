@@ -295,7 +295,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Reject lexical parent traversal before normalization so a `symlink/..` search
   path cannot erase the symlink component before validation
   [algua/primitives/module_refresh.py:107]
-- [ ] [Review][Patch] Snapshot module state before package discovery and restore it on every
+- [x] [Review][Patch] Snapshot module state before package discovery and restore it on every
   preflight failure so a cold nested-parent import is not left behind
   [algua/primitives/module_refresh.py:60]
 - [ ] [Review][Patch] Keep beyond-recursion coverage in the in-memory graph test but use a small

@@ -491,6 +491,48 @@ def test_failed_refresh_restores_each_affected_parent_binding_exactly(family, ca
     assert sys.modules.get(f"{family.top}.ext") is previous_entry
 
 
+@pytest.mark.parametrize("failure", ["cycle", "keyboard-interrupt"])
+@pytest.mark.parametrize("warm_top", [False, True], ids=["cold-top", "warm-top"])
+def test_failed_preflight_rolls_back_cold_parent_imports(
+        tmp_path, monkeypatch, failure, warm_top) -> None:
+    """Package discovery imports cold parents (``find_spec``), so module state is snapshotted
+    BEFORE discovery and every preflight failure, including a ``BaseException``, restores it:
+    no cold nested parent entry or parent binding is left behind."""
+    top = f"mrcold_{uuid.uuid4().hex[:10]}"
+    fam_dir = tmp_path / top / "mid" / "fam"
+    fam_dir.mkdir(parents=True)
+    for directory in (fam_dir.parent.parent, fam_dir.parent, fam_dir):
+        (directory / "__init__.py").write_text("")
+    (fam_dir / "a.py").write_text("from . import strat\n")
+    (fam_dir / "strat.py").write_text("from . import a\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    if failure == "keyboard-interrupt":
+        (fam_dir / "strat.py").write_text("VALUE = 1\n")
+
+        def interrupted(*_args: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(module_refresh, "_static_closure", interrupted)
+    package = f"{top}.mid.fam"
+    try:
+        if warm_top:
+            importlib.import_module(top)
+        before = dict(sys.modules)
+
+        with pytest.raises(ModuleRefreshError if failure == "cycle" else KeyboardInterrupt):
+            refresh_package_closure(package, f"{package}.strat")
+
+        assert f"{top}.mid" not in sys.modules and package not in sys.modules
+        assert set(sys.modules) == set(before)
+        if warm_top:
+            assert "mid" not in vars(sys.modules[top])
+        else:
+            assert top not in sys.modules
+    finally:
+        for key in [k for k in sys.modules if k == top or k.startswith(top + ".")]:
+            del sys.modules[key]
+
+
 def test_refresh_returns_the_fresh_root_module(family) -> None:
     family.write("strat", "VALUE = 1\n")
 

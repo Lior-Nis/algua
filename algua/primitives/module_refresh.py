@@ -72,6 +72,18 @@ def refresh_package_closure(package: str, root: str) -> ModuleType:
 
 
 def _refresh_locked(package: str, root: str) -> ModuleType:
+    """Snapshot module state BEFORE package discovery (``find_spec`` imports cold parents), so any
+    failure from preflight to the fresh import, including a ``BaseException``, restores it."""
+    before = dict(sys.modules)
+    namespaces = _namespaces(before)
+    try:
+        return _refresh_attempt(package, root)
+    except BaseException:
+        _restore_modules(before, namespaces)
+        raise
+
+
+def _refresh_attempt(package: str, root: str) -> ModuleType:
     importlib.invalidate_caches()
     package_spec = importlib.util.find_spec(package)
     if package_spec is None or package_spec.submodule_search_locations is None:
@@ -82,16 +94,9 @@ def _refresh_locked(package: str, root: str) -> ModuleType:
         _require_unlinked_tree(location, package)
     _require_acyclic(_static_closure(package, root))
     _purge_package_bytecode(locations)
-
-    before = dict(sys.modules)
-    namespaces = _namespaces(before)
-    for name in [name for name in before if _within(name, package)]:
+    for name in [name for name in sys.modules if _within(name, package)]:
         del sys.modules[name]
-    try:
-        return importlib.import_module(root)
-    except BaseException:
-        _restore_modules(before, namespaces)
-        raise
+    return importlib.import_module(root)
 
 
 def _namespaces(modules: dict[str, ModuleType]) -> dict[str, dict[str, object]]:
