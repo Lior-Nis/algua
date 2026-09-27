@@ -379,6 +379,41 @@ def test_any_symlink_in_the_family_tree_fails_closed_before_any_purge(
     assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
 
 
+def test_lexical_parent_traversal_is_refused_before_normalization_erases_a_symlink(
+        tmp_path, monkeypatch) -> None:
+    """``link/..`` resolves physically to the link TARGET's parent, but lexical normalization
+    erases ``link`` entirely, so the symlink check would inspect an unrelated path. A raw ``..``
+    component is refused before any normalization."""
+    top = f"mrdots_{uuid.uuid4().hex[:10]}"
+    (tmp_path / "outer" / "inner").mkdir(parents=True)
+    fam_dir = tmp_path / "outer" / top / "fam"
+    fam_dir.mkdir(parents=True)
+    (fam_dir.parent / "__init__.py").write_text("")
+    (fam_dir / "__init__.py").write_text("")
+    (fam_dir / "strat.py").write_text("VALUE = 1\n")
+    (tmp_path / "link").symlink_to(tmp_path / "outer" / "inner", target_is_directory=True)
+    monkeypatch.syspath_prepend(str(tmp_path / "link") + os.sep + "..")
+    package = f"{top}.fam"
+    try:
+        importlib.import_module(f"{package}.strat")
+        cached = Path(py_compile.compile(str(fam_dir / "strat.py")))
+
+        with pytest.raises(ModuleRefreshError, match="traversal"):
+            refresh_package_closure(package, f"{package}.strat")
+
+        assert cached.is_file(), "a refused refresh must not purge anything"
+    finally:
+        for key in [k for k in sys.modules if k == top or k.startswith(top + ".")]:
+            del sys.modules[key]
+
+
+@pytest.mark.parametrize("suffix", ["..", "../sub", "x/../.."])
+def test_any_raw_parent_component_is_refused(tmp_path, suffix) -> None:
+    (tmp_path / "sub" / "x").mkdir(parents=True)
+    with pytest.raises(ModuleRefreshError, match="traversal"):
+        module_refresh._require_unlinked(str(tmp_path / "sub") + os.sep + suffix, "fam")
+
+
 def test_a_symlinked_search_location_is_refused_before_source_discovery(
         family, tmp_path, monkeypatch) -> None:
     linked = tmp_path / "linked"

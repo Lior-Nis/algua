@@ -129,7 +129,10 @@ def _restore_modules(
 
 
 def _require_unlinked(path: str, name: str) -> None:
-    """Fail closed if ``path``'s lexical form, or any existing ancestor of it, is a symlink."""
+    """Fail closed if ``path`` has a raw ``..`` component (normalizing ``link/..`` would erase the
+    link before it is inspected), or if its lexical form or any existing ancestor is a symlink."""
+    if os.pardir in Path(path).parts:
+        raise ModuleRefreshError(f"{name!r} source path contains a parent traversal", name=name)
     lexical = Path(os.path.abspath(path))
     if any(candidate.is_symlink() for candidate in (lexical, *lexical.parents)):
         raise ModuleRefreshError(f"{name!r} source lies at or under a symlink", name=name)
