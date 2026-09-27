@@ -20,10 +20,14 @@ import sys
 from collections.abc import Iterator
 from importlib.machinery import ModuleSpec
 from pathlib import Path
+from types import ModuleType
 
 
 class ModuleRefreshError(ImportError):
     """The package closure cannot be refreshed safely from its current source."""
+
+
+_ABSENT = object()
 
 
 def refresh_package_closure(package: str, root: str) -> None:
@@ -32,8 +36,9 @@ def refresh_package_closure(package: str, root: str) -> None:
     ``root`` (a module inside ``package``) is imported anew and pulls in, as fresh module objects,
     exactly the ``package`` modules its current source reaches; other previously loaded
     ``package`` modules are dropped and re-import fresh on next use. Modules outside ``package``
-    stay warm. On any failure every ``package`` entry of ``sys.modules`` and the parent binding
-    are restored to their previous objects, whose dictionaries were never touched."""
+    stay warm. On any failure every module the attempt introduced is dropped (with each parent
+    attribute still bound to it), and every previous ``sys.modules`` entry and the ``package``
+    parent binding are restored; the previous family objects' dictionaries were never touched."""
     if not root.startswith(package + "."):
         raise ValueError(f"{root!r} is not inside package {package!r}")
     importlib.invalidate_caches()
@@ -46,25 +51,41 @@ def refresh_package_closure(package: str, root: str) -> None:
     _require_acyclic(_static_closure(package, root))
     _purge_package_bytecode(locations)
 
-    previous = {name: module for name, module in sys.modules.items() if _within(name, package)}
+    before = dict(sys.modules)
     parent_name, _, child = package.rpartition(".")
     parent = sys.modules.get(parent_name) if parent_name else None
-    unbound = object()
-    parent_binding = parent.__dict__.get(child, unbound) if parent is not None else unbound
-    for name in previous:
+    parent_binding = parent.__dict__.get(child, _ABSENT) if parent is not None else _ABSENT
+    for name in [name for name in before if _within(name, package)]:
         del sys.modules[name]
     try:
         importlib.import_module(root)
     except BaseException:
-        for name in [name for name in sys.modules if _within(name, package)]:
-            del sys.modules[name]
-        sys.modules.update(previous)
+        _restore_modules(before)
         if parent is not None:
-            if parent_binding is unbound:
+            if parent_binding is _ABSENT:
                 parent.__dict__.pop(child, None)
             else:
                 parent.__dict__[child] = parent_binding
         raise
+
+
+def _restore_modules(before: dict[str, ModuleType]) -> None:
+    """Drop every ``sys.modules`` entry that differs from ``before`` (plus any parent attribute
+    still bound to such a discarded object), then reinstate ``before``'s entries."""
+    discarded = {
+        name: module for name, module in list(sys.modules.items())
+        if before.get(name, _ABSENT) is not module
+    }
+    for name in discarded:
+        sys.modules.pop(name, None)
+    for name, module in before.items():
+        if sys.modules.get(name, _ABSENT) is not module:
+            sys.modules[name] = module
+    for name, module in discarded.items():
+        parent_name, _, child = name.rpartition(".")
+        holder = sys.modules.get(parent_name) if parent_name else None
+        if isinstance(holder, ModuleType) and holder.__dict__.get(child, _ABSENT) is module:
+            del holder.__dict__[child]
 
 
 def _require_unlinked(path: str, name: str) -> None:

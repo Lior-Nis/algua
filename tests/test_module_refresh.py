@@ -349,3 +349,38 @@ def test_a_symlinked_search_location_is_refused_before_source_discovery(
     monkeypatch.setattr(module_refresh, "_static_closure", discovery)
     with pytest.raises(ModuleRefreshError, match="symlink"):
         _refresh(family)
+
+
+def test_failed_refresh_discards_new_external_modules_and_their_parent_bindings(family) -> None:
+    """A module outside the family first imported by a failed refresh may hold the discarded
+    fresh family objects; it is dropped along with the parent attribute that binds it."""
+    for name in ("ext", "newext"):
+        (family.dir.parent / name).mkdir()
+        (family.dir.parent / name / "__init__.py").write_text("KEEP = 'kept'\n")
+        (family.dir.parent / name / "held.py").write_text(
+            f"from {family.package} import a_ok as HELD\n")
+    ext = importlib.import_module(f"{family.top}.ext")
+    family.write("a_ok", "VALUE = 1\n")
+    family.write("strat", "from . import a_ok\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    family.write("b_bad", "raise RuntimeError('boom')\n")
+    family.write("strat", (
+        "from . import a_ok\n"
+        f"import {family.top}.ext.held\n"
+        f"import {family.top}.newext.held\n"
+        "from . import b_bad\n"
+    ))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    for name in ("ext.held", "newext", "newext.held"):
+        assert f"{family.top}.{name}" not in sys.modules
+    assert sys.modules[f"{family.top}.ext"] is ext
+    assert "held" not in vars(ext) and ext.KEEP == "kept"
+    assert "newext" not in vars(sys.modules[family.top])
+    after = family.entries()
+    assert vars(sys.modules[family.package])["a_ok"] is before[f"{family.package}.a_ok"], (
+        "a restored parent binding to a previous object is not a discarded-module binding")
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
