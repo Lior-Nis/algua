@@ -262,16 +262,29 @@ def test_require_acyclic_expands_each_module_once_across_shared_dependencies() -
     assert sorted(expanded) == sorted(graph)
 
 
-def test_refresh_accepts_a_lazy_acyclic_chain_deeper_than_the_recursion_limit(family) -> None:
-    depth = sys.getrecursionlimit() + 200
-    for i in range(depth):
-        family.write(f"h{i}", f"def follow():\n    from . import h{i + 1}\n")
-    family.write(f"h{depth}", "VALUE = 1\n")
+_LAZY_CHAIN_DEPTH = 6  # fixed: depth beyond the recursion limit is proven on the in-memory graph
+
+
+def test_refresh_follows_a_fixed_lazy_acyclic_helper_chain(family) -> None:
+    """Integration over a small FIXED lazy-import chain. The beyond-recursion-limit depth proof is
+    ``test_require_acyclic_is_iterative_beyond_the_recursion_limit`` (in memory), so the root gate
+    never writes thousands of files or scales with a mutable interpreter recursion limit."""
+    for i in range(_LAZY_CHAIN_DEPTH):
+        family.write(f"h{i}", f"def follow():\n    from . import h{i + 1}\n    return h{i + 1}\n")
+    family.write(f"h{_LAZY_CHAIN_DEPTH}", "VALUE = 1\n")
     family.write("strat", "from . import h0\nVALUE = 1\n")
 
+    graph = _static_closure(family.package, f"{family.package}.strat")
     _refresh(family)
 
+    chain = [f"{family.package}.h{i}" for i in range(_LAZY_CHAIN_DEPTH + 1)]
+    assert all(graph[upper] >= {lower} for upper, lower in zip(chain, chain[1:], strict=False))
     assert family.mod("strat").VALUE == 1
+    module = family.mod("h0")
+    for _ in range(_LAZY_CHAIN_DEPTH):
+        module = module.follow()
+    assert module is family.mod(f"h{_LAZY_CHAIN_DEPTH}") and module.VALUE == 1
+    assert len(list(family.dir.glob("*.py"))) == _LAZY_CHAIN_DEPTH + 3
 
 
 def test_rollback_never_installs_a_binding_manufactured_by_parent_getattr(family) -> None:

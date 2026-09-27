@@ -298,7 +298,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Snapshot module state before package discovery and restore it on every
   preflight failure so a cold nested-parent import is not left behind
   [algua/primitives/module_refresh.py:60]
-- [ ] [Review][Patch] Keep beyond-recursion coverage in the in-memory graph test but use a small
+- [x] [Review][Patch] Keep beyond-recursion coverage in the in-memory graph test but use a small
   fixed filesystem closure for integration so the normal root gate does not create thousands of
   source files or scale with a mutable interpreter recursion limit
   [tests/test_module_refresh.py:264]
