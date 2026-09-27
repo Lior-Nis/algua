@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from algua.primitives import module_refresh
 from algua.primitives.module_refresh import (
     ModuleRefreshError,
     _require_acyclic,
@@ -282,3 +283,69 @@ def test_rollback_never_installs_a_binding_manufactured_by_parent_getattr(family
 
     assert family.entries() == {}
     assert "fam" not in vars(sys.modules[family.top])
+
+
+@pytest.mark.parametrize(
+    "case", ["helper-file", "subpackage", "package-directory", "package-ancestor"])
+def test_symlinked_family_source_paths_fail_closed_before_any_purge(
+        tmp_path, monkeypatch, case) -> None:
+    """A symlinked path escapes the package walk (a linked subdirectory's timestamp-valid stale
+    bytecode would execute as current source), so every search location and reachable source
+    whose lexical path or existing ancestor is a symlink is refused before anything is purged."""
+    top = f"mrlink_{uuid.uuid4().hex[:10]}"
+    real, elsewhere = tmp_path / "real", tmp_path / "elsewhere"
+    fam_dir = (elsewhere if case == "package-directory" else real / top) / "fam"
+    fam_dir.mkdir(parents=True)
+    elsewhere.mkdir(exist_ok=True)
+    (real / top).mkdir(parents=True, exist_ok=True)
+    (real / top / "__init__.py").write_text("")
+    (fam_dir / "__init__.py").write_text("")
+    (fam_dir / "strat.py").write_text("VALUE = 1\n")
+    if case == "package-directory":
+        (real / top / "fam").symlink_to(fam_dir, target_is_directory=True)
+    elif case == "helper-file":
+        (elsewhere / "helper.py").write_text("VALUE = 1\n")
+        (fam_dir / "helper.py").symlink_to(elsewhere / "helper.py")
+        (fam_dir / "strat.py").write_text("from .helper import VALUE\n")
+    elif case == "subpackage":
+        (elsewhere / "sub").mkdir()
+        (elsewhere / "sub" / "__init__.py").write_text("")
+        (elsewhere / "sub" / "deep.py").write_text("VALUE = 1\n")
+        (fam_dir / "sub").symlink_to(elsewhere / "sub", target_is_directory=True)
+        (fam_dir / "strat.py").write_text("from .sub.deep import VALUE\n")
+    entry = real
+    if case == "package-ancestor":
+        entry = tmp_path / "link"
+        entry.symlink_to(real, target_is_directory=True)
+    monkeypatch.syspath_prepend(str(entry))
+    package = f"{top}.fam"
+    try:
+        importlib.import_module(f"{package}.strat")
+        before = {k: v for k, v in sys.modules.items() if k.startswith(package)}
+        cached = Path(py_compile.compile(str(entry / top / "fam" / "strat.py")))
+
+        with pytest.raises(ModuleRefreshError, match="symlink"):
+            refresh_package_closure(package, f"{package}.strat")
+
+        assert cached.is_file(), "a refused refresh must not purge anything"
+        after = {k: v for k, v in sys.modules.items() if k.startswith(package)}
+        assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+    finally:
+        for key in [k for k in sys.modules if k == top or k.startswith(top + ".")]:
+            del sys.modules[key]
+
+
+def test_a_symlinked_search_location_is_refused_before_source_discovery(
+        family, tmp_path, monkeypatch) -> None:
+    linked = tmp_path / "linked"
+    linked.symlink_to(family.dir.parent.parent, target_is_directory=True)
+    monkeypatch.syspath_prepend(str(linked))
+    importlib.invalidate_caches()
+    family.write("strat", "VALUE = 1\n")
+
+    def discovery(*_args: object) -> None:
+        raise AssertionError("source discovery ran before the search-location check")
+
+    monkeypatch.setattr(module_refresh, "_static_closure", discovery)
+    with pytest.raises(ModuleRefreshError, match="symlink"):
+        _refresh(family)

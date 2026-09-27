@@ -6,7 +6,8 @@ trusts timestamp-validated cached bytecode (a same-size, same-mtime edit keeps a
 valid), and a failure part-way leaves a mixed-version closure. The refresh therefore re-imports
 the root as FRESH module objects after purging the package's bytecode, and restores the previous
 module objects if anything fails. A cyclic static import component has no dependency-safe
-execution order, so it fails closed before anything is purged or executed.
+execution order, and a symlinked source path escapes the package-wide bytecode purge, so both
+fail closed before anything is purged or executed.
 """
 from __future__ import annotations
 
@@ -39,8 +40,11 @@ def refresh_package_closure(package: str, root: str) -> None:
     package_spec = importlib.util.find_spec(package)
     if package_spec is None or package_spec.submodule_search_locations is None:
         raise ModuleRefreshError(f"{package!r} is not a package", name=package)
+    locations = list(package_spec.submodule_search_locations)
+    for location in locations:
+        _require_unlinked(location, package)
     _require_acyclic(_static_closure(package, root))
-    _purge_package_bytecode(package_spec.submodule_search_locations)
+    _purge_package_bytecode(locations)
 
     previous = {name: module for name, module in sys.modules.items() if _within(name, package)}
     parent_name, _, child = package.rpartition(".")
@@ -61,6 +65,13 @@ def refresh_package_closure(package: str, root: str) -> None:
             else:
                 parent.__dict__[child] = parent_binding
         raise
+
+
+def _require_unlinked(path: str, name: str) -> None:
+    """Fail closed if ``path``'s lexical form, or any existing ancestor of it, is a symlink."""
+    lexical = Path(os.path.abspath(path))
+    if any(candidate.is_symlink() for candidate in (lexical, *lexical.parents)):
+        raise ModuleRefreshError(f"{name!r} source lies at or under a symlink", name=name)
 
 
 def _within(name: str, package: str) -> bool:
@@ -95,6 +106,8 @@ def _static_closure(package: str, root: str) -> dict[str, set[str]]:
         if spec is None:
             raise ModuleRefreshError(f"{name!r} has no importable source", name=name)
         origin = spec.origin
+        if isinstance(origin, str):
+            _require_unlinked(origin, name)
         if not isinstance(origin, str) or not origin.endswith(".py") or not Path(origin).is_file():
             raise ModuleRefreshError(f"{name!r} is not a Python source module", name=name)
         candidates = _source_imports(origin, spec.parent or "")
