@@ -267,19 +267,19 @@ These identities are non-cyclic. An environment-only change does not change `bun
   [algua/registry/environment_contract.py:85]
 - [x] [Review][Patch] Add the identity-critical module refresh seam to CODEOWNERS and the repository
   hygiene protection set [algua/primitives/module_refresh.py:18]
-- [ ] [Review][Patch] Serialize the complete process-global module refresh transaction so concurrent
+- [x] [Review][Patch] Serialize the complete process-global module refresh transaction so concurrent
   callers cannot observe or retain an absent or partially rebuilt strategy family
   [algua/primitives/module_refresh.py:44]
-- [ ] [Review][Patch] Remove newly imported external modules and their parent bindings when a failed
+- [x] [Review][Patch] Remove newly imported external modules and their parent bindings when a failed
   refresh would otherwise leave references to discarded fresh family objects
   [algua/primitives/module_refresh.py:50]
-- [ ] [Review][Patch] Reject symlinked package/source paths before discovery or bytecode purge so a
+- [x] [Review][Patch] Reject symlinked package/source paths before discovery or bytecode purge so a
   symlinked helper cannot execute timestamp-valid stale bytecode as current source
   [algua/primitives/module_refresh.py:93]
-- [ ] [Review][Patch] Snapshot the parent package binding directly from its dictionary so a dynamic
+- [x] [Review][Patch] Snapshot the parent package binding directly from its dictionary so a dynamic
   `__getattr__` cannot manufacture state that rollback later installs
   [algua/primitives/module_refresh.py:48]
-- [ ] [Review][Patch] Replace recursive cycle traversal with an explicit stack so a valid large
+- [x] [Review][Patch] Replace recursive cycle traversal with an explicit stack so a valid large
   acyclic source closure cannot fail with `RecursionError`
   [algua/primitives/module_refresh.py:126]
 
@@ -386,6 +386,19 @@ uv run lint-imports
   refused refresh purges nothing. All 25 bundled strategies resolve to acyclic closures, and the
   23 source-only strategies keep identical code/config/dependency hashes cold, after the
   declared-config refresh and after `reload=True`.
+- Fifth review round: all 5 accepted patches first failed red (10 new cases): a competing
+  thread imported a family member while the refresh was mid-transaction; a new external module
+  holding the discarded fresh family stayed in `sys.modules` and bound on its parent; a parent
+  `__getattr__` value was installed by rollback; all four symlink shapes (linked helper file,
+  linked subpackage, linked package directory, linked `sys.path` ancestor) refreshed without
+  refusal; and the recursive cycle check raised `RecursionError` on a valid closure deeper than
+  the recursion limit, including a real lazy helper chain. Every new guard was mutation-checked
+  (12 mutations, all killed). Three initially survived: popping a parent attribute without the
+  identity check, and DFS without path release or memoization; the external-module case now
+  asserts a restored parent keeps its previous binding, and a layered-diamond case proves each
+  module is expanded exactly once. A dedicated case proves the search-location check precedes
+  source discovery, which the origin check would otherwise mask. All 25 bundled strategies still
+  refresh through `load_strategy_config`.
 
 ### Completion Notes
 
@@ -440,6 +453,22 @@ uv run lint-imports
   a plain `ValueError`. `module_refresh.py` is CODEOWNERS- and hygiene-protected. Golden digest
   vectors, schema, working-tree descriptors and every live, authority, deployment and capital
   wall are unchanged.
+- Fifth review round complete: the whole refresh transaction (preflight, bytecode purge,
+  `sys.modules` drop, fresh import and rollback) holds the CPython global import lock
+  (`_imp.acquire_lock`), so another thread's import of a module not already loaded waits for
+  the final state; the refresh returns the fresh root module, so the loader no longer re-reads
+  `sys.modules` after releasing the lock. Rollback snapshots every `sys.modules` entry, drops each
+  entry the attempt introduced (inside or outside the family) plus any parent attribute bound to
+  that exact discarded object, then reinstates the previous entries and the family parent
+  binding, which is now read from and written to `parent.__dict__` directly. Every package search
+  location and reachable source origin whose lexical path or any existing ancestor is a symlink
+  fails closed before discovery, purge or import. The cycle check is an iterative DFS over
+  explicit `(node, iterator)` frames with unchanged deterministic cycle naming. Static cycles
+  still fail closed, and namespace and compiled modules stay unsupported. Accepted residual: a
+  thread initializing a module the refresh also imports, that itself needs a new import while
+  the refresh holds the lock, can deadlock against it, so warm refreshes belong in processes that
+  do not import concurrently. Golden digest vectors, schema, working-tree descriptors and every
+  live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -508,3 +537,7 @@ uv run lint-imports
   all-or-nothing strategy-closure refresh with package-wide bytecode purge; surrogate-safe typed
   construction; protected refresh seam); the full 4,385-test root gate, ruff, mypy and all 28
   import contracts pass.
+- 2026-09-28: Addressed all 5 fifth-round review patches test-first (import-lock-serialized
+  refresh returning the fresh root, complete rollback of newly introduced modules and their
+  parent bindings, symlinked source-path refusal, dictionary-read parent binding, iterative
+  cycle check); the full 4,397-test root gate, ruff, mypy and all 28 import contracts pass.
