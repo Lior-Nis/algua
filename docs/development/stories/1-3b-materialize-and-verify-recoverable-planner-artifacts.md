@@ -267,6 +267,21 @@ These identities are non-cyclic. An environment-only change does not change `bun
   [algua/registry/environment_contract.py:85]
 - [x] [Review][Patch] Add the identity-critical module refresh seam to CODEOWNERS and the repository
   hygiene protection set [algua/primitives/module_refresh.py:18]
+- [ ] [Review][Patch] Serialize the complete process-global module refresh transaction so concurrent
+  callers cannot observe or retain an absent or partially rebuilt strategy family
+  [algua/primitives/module_refresh.py:44]
+- [ ] [Review][Patch] Remove newly imported external modules and their parent bindings when a failed
+  refresh would otherwise leave references to discarded fresh family objects
+  [algua/primitives/module_refresh.py:50]
+- [ ] [Review][Patch] Reject symlinked package/source paths before discovery or bytecode purge so a
+  symlinked helper cannot execute timestamp-valid stale bytecode as current source
+  [algua/primitives/module_refresh.py:93]
+- [ ] [Review][Patch] Snapshot the parent package binding directly from its dictionary so a dynamic
+  `__getattr__` cannot manufacture state that rollback later installs
+  [algua/primitives/module_refresh.py:48]
+- [ ] [Review][Patch] Replace recursive cycle traversal with an explicit stack so a valid large
+  acyclic source closure cannot fail with `RecursionError`
+  [algua/primitives/module_refresh.py:126]
 
 ## Development notes
 
