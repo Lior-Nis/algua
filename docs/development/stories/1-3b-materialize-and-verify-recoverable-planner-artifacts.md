@@ -237,17 +237,17 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Reload the strategy-family module closure in dependency-first order rather
   than relying on the incorrect assumption that `sys.modules` insertion order is dependency-first
   [algua/strategies/loader.py:72]
-- [ ] [Review][Patch] Require NFC-normalized installer identity and argument strings before they
+- [x] [Review][Patch] Require NFC-normalized installer identity and argument strings before they
   enter the content-addressed environment key [algua/registry/environment_contract.py:77]
-- [ ] [Review][Patch] Translate lone-surrogate manifest text into the parser's stable ValueError
+- [x] [Review][Patch] Translate lone-surrogate manifest text into the parser's stable ValueError
   contract instead of leaking UnicodeEncodeError [algua/registry/artifact_manifest.py:58]
 - [ ] [Review][Patch] Canonicalize installed distribution names across runs of hyphen, underscore
   and dot before forbidden-name and uniqueness checks
   [algua/registry/planner_environment_inventory.py:45]
-- [ ] [Review][Patch] Normalize and retain universe names before canonical JSON and denormalized
+- [x] [Review][Patch] Normalize and retain universe names before canonical JSON and denormalized
   ledger projection so a descriptor cannot disagree with its own stored columns
   [algua/registry/frozen_manifest_contract.py:42]
-- [ ] [Review][Patch] Enforce the bundle file-count bound before constructing or hashing the
+- [x] [Review][Patch] Enforce the bundle file-count bound before constructing or hashing the
   inventory payload [algua/registry/artifact_contract.py:157]
 - [ ] [Review][Patch] Inspect repository-wide hidden Git index flags without imposing the
   source-entry aggregate byte bound on the complete repository index

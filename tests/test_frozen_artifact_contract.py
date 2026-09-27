@@ -421,3 +421,62 @@ def test_frozen_manifest_accepts_a_null_universe_and_round_trips() -> None:
         bundle=manifest.bundle, environment=manifest.environment,
     )
     assert parse_frozen_manifest(unscoped.json) == unscoped
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"uv_version": "uv café"}, {"create_argv": ("uv", "café")},
+        {"sync_argv": ("uv", "sync", "Å")},
+    ],
+)
+def test_environment_key_requires_nfc_installer_strings(changes) -> None:
+    """Canonical JSON NFC-normalizes strings, so a non-NFC installer value would share its digest
+    with a distinct retained value; it must be refused before it enters the key."""
+    with pytest.raises(ValueError, match="NFC"):
+        _key(**changes)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["\ud800", pytest.param(None, id="surrogate-inside-canonical-manifest")],
+)
+def test_manifest_parser_translates_lone_surrogates_to_its_stable_error(raw) -> None:
+    if raw is None:
+        raw = _manifest().json.replace("liquid-us", "liquid-\ud800")
+    with pytest.raises(ValueError, match="frozen manifest") as caught:
+        parse_frozen_manifest(raw)
+    assert not isinstance(caught.value, UnicodeError)
+
+
+def test_frozen_manifest_normalizes_and_retains_its_universe_name() -> None:
+    from algua.registry.artifact_recording import (
+        frozen_deployment_manifest,
+        parse_frozen_deployment_manifest,
+    )
+
+    manifest = _manifest()
+    decomposed = FrozenManifest(
+        source_ref=manifest.source_ref, code_hash=manifest.code_hash,
+        config_hash=manifest.config_hash, dependency_hash=manifest.dependency_hash,
+        resolved_config=manifest.resolved_config, universe_name="café",
+        bundle=manifest.bundle, environment=manifest.environment,
+    )
+    assert decomposed.universe_name == "café"
+    assert json.loads(decomposed.json)["universe_name"] == decomposed.universe_name
+    projected = frozen_deployment_manifest(decomposed)
+    assert projected.universe_name == decomposed.universe_name
+    assert parse_frozen_deployment_manifest(projected) == decomposed
+
+
+def test_bundle_count_bound_precedes_building_or_hashing_the_inventory(monkeypatch) -> None:
+    from algua.registry.artifact_contract import MAX_BUNDLE_FILES
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("inventory payload work ran before the count bound")
+
+    monkeypatch.setattr("algua.registry.artifact_contract._inventory_payload", forbidden)
+    monkeypatch.setattr("algua.registry.artifact_contract._digest", forbidden)
+    entry = ArtifactFile("x", "100644", 1, _SHA)
+    with pytest.raises(ValueError, match="count"):
+        BundleDescriptor.from_files((entry,) * (MAX_BUNDLE_FILES + 1))

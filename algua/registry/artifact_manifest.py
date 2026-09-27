@@ -55,7 +55,11 @@ def _require_version(value: Any, expected: int, label: str) -> None:
 def _load_canonical(raw: Any) -> Any:
     if not isinstance(raw, str):
         raise ValueError("frozen manifest must be text")
-    if len(raw.encode("utf-8")) > MAX_MANIFEST_BYTES:
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeEncodeError as exc:  # a lone surrogate is not UTF-8 text
+        raise ValueError("frozen manifest is not valid UTF-8 text") from exc
+    if len(encoded) > MAX_MANIFEST_BYTES:
         raise ValueError("frozen manifest exceeds the canonical size bound")
     try:
         payload = json.loads(raw, object_pairs_hook=_no_duplicates)

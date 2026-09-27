@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,8 +40,12 @@ class FrozenManifest:
         _require_digest(self.dependency_hash, "dependency hash")
         if not isinstance(self.resolved_config, dict):
             raise ValueError("resolved config must be an object")
-        if self.universe_name is not None and not isinstance(self.universe_name, str):
-            raise ValueError("universe name must be a string or null")
+        if self.universe_name is not None:
+            if not isinstance(self.universe_name, str):
+                raise ValueError("universe name must be a string or null")
+            # Retain the canonical-JSON form so the ledger projection cannot disagree with it.
+            object.__setattr__(
+                self, "universe_name", unicodedata.normalize("NFC", self.universe_name))
         if not isinstance(self.bundle, BundleDescriptor) or not isinstance(
             self.environment, EnvironmentDescriptor,
         ):

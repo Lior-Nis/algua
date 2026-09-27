@@ -155,12 +155,13 @@ class BundleDescriptor:
 
     @classmethod
     def from_files(cls, files: tuple[ArtifactFile, ...]) -> BundleDescriptor:
-        payload = _inventory_payload(files)
+        # Every bound precedes building or hashing the inventory payload.
+        _require_count(len(files), "bundle file count", MAX_BUNDLE_FILES)
         if any(item.size > MAX_FILE_BYTES for item in files):
             raise ValueError("bundle file exceeds the per-file size bound")
         if sum(item.size for item in files) > MAX_BUNDLE_BYTES:
             raise ValueError("bundle exceeds the aggregate size bound")
-        digest = _digest("algua.frozen-bundle", payload)
+        digest = _digest("algua.frozen-bundle", _inventory_payload(files))
         return cls(
             digest=digest,
             locator=f"frozen/bundles/sha256/{digest[:2]}/{digest}",

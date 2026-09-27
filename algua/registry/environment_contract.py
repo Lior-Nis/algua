@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,6 +88,13 @@ class EnvironmentKey:
             ):
                 raise ValueError(
                     f"installer {label} argv must be a non-empty tuple of non-empty strings")
+        # Canonical JSON NFC-normalizes strings: a non-NFC value would share its key digest with a
+        # distinct retained value, so it is refused rather than silently aliased.
+        if any(
+            unicodedata.normalize("NFC", text) != text
+            for text in (installer, *self.create_argv, *self.sync_argv)
+        ):
+            raise ValueError("installer identity and argv strings must be NFC-normalized")
 
     def to_dict(self) -> dict[str, Any]:
         return {
