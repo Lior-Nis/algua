@@ -209,6 +209,28 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Classify a missing or unusable local uv executable as incompatible, leaving
   retryable unavailable for compatible locked-wheel acquisition only
   [algua/registry/planner_environment.py:48]
+- [x] [Review][Patch] Force-refresh the strategy module before retaining CONFIG so a warm process
+  cannot freeze stale configuration [algua/strategies/loader.py:212]
+- [x] [Review][Patch] Stop a Git subprocess once its stdout exceeds the protected limit instead of
+  bounding memory only after unbounded temporary-file output [algua/registry/frozen_source.py:60]
+- [x] [Review][Patch] Require artifact sizes to be exact non-negative integers
+  [algua/registry/artifact_contract.py:85]
+- [x] [Review][Patch] Require bundle counts to be exact bounded integers
+  [algua/registry/artifact_contract.py:144]
+- [x] [Review][Patch] Apply the canonical relative-path rules to every ArtifactFile contract value
+  [algua/registry/artifact_contract.py:85]
+- [x] [Review][Patch] Reject empty or malformed interpreter identity fields at construction
+  [algua/registry/artifact_contract.py:144]
+- [x] [Review][Patch] Validate non-empty installer identity/argv and exact argument element types
+  [algua/registry/artifact_contract.py:165]
+- [x] [Review][Patch] Validate and uniquely order installed distribution and interpreter-link
+  identities [algua/registry/artifact_contract.py:191]
+- [x] [Review][Patch] Make manifest parsing total and strictly typed for versions, counts and argv
+  rather than accepting bool/float equality aliases [algua/registry/artifact_manifest.py:42]
+- [x] [Review][Patch] Require direct FrozenManifest construction to retain only a configuration
+  object and string-or-null universe [algua/registry/frozen_manifest_contract.py:33]
+- [x] [Review][Patch] Reject Git assume-unchanged and skip-worktree flags that can hide tracked
+  source drift from status checks [algua/registry/frozen_source.py:187]
 
 ## Development notes
 
@@ -286,6 +308,13 @@ uv run lint-imports
 - Task 7 protected every new integrity surface and completed the adversarial, edge-case and
   acceptance review. All 18 accepted review patches were implemented test-first; the focused
   artifact plus Story 1.3a parity matrix passes, and the full sequential root gate is green.
+- Second review round: each of the 11 accepted patches first failed red (100 contract/manifest
+  cases, 6 Git bound/index-flag cases and the warm-module CONFIG case). Validating installed
+  distribution identities exposed that METADATA parsing read the description body (the locked
+  `vectorbt` README overrides its `Name`); header-only parsing was added test-first. All 153 locked
+  distributions and 25,596 files of the repository environment satisfy the stricter identities.
+  Every new guard was mutation-checked; a redundant duplicate count check was removed. The full
+  4,325-test suite, ruff, mypy and all 28 import contracts pass.
 
 ### Completion Notes
 
@@ -307,10 +336,19 @@ uv run lint-imports
 - Task 7 complete: real Linux venv-link behavior, pre-dereference asset refusal, transaction
   adjacency, bounded Git/filesystem input, immutable-store ancestry, exact environment inventory,
   sanitized diagnostics and the complete publication/recovery fault matrix are now enforced.
+- Second review round complete: the declared-config read force-refreshes the strategy closure;
+  Git reads stream and kill the subprocess once output exceeds its bound; any assume-unchanged or
+  skip-worktree index flag fails clean-HEAD qualification; artifact files, bundle counts,
+  interpreter/installer/distribution/link identities and direct `FrozenManifest` fields are
+  strictly typed and bounded at construction; and manifest parsing is total with exact-integer
+  version, count and argv typing. Environment identity values moved to the protected
+  `environment_contract.py` to keep both contract modules below the size floor. Golden digest
+  vectors, working-tree descriptors, schema and every authority wall are unchanged.
 
 ### File List
 
 - `algua/registry/artifact_contract.py`
+- `algua/registry/environment_contract.py`
 - `algua/registry/artifact_errors.py`
 - `algua/registry/artifact_manifest.py`
 - `algua/registry/frozen_manifest_contract.py`
@@ -343,6 +381,7 @@ uv run lint-imports
 - `tests/test_frozen_source.py`
 - `tests/test_planner_environment.py`
 - `tests/test_repo_hygiene.py`
+- `tests/test_strategy_loader.py`
 
 ### Change Log
 
@@ -360,3 +399,6 @@ uv run lint-imports
   and the stable frozen-artifact error/retry taxonomy.
 - 2026-09-27: Addressed all 18 accepted independent-review patches, protected the expanded
   integrity surface and moved Story 1.3b to review with the full root gate green.
+- 2026-09-28: Addressed all 11 second-round review patches test-first (warm CONFIG refresh, bounded
+  Git streaming, hidden index flags, strict artifact/environment/manifest typing), carved the
+  protected environment identity contract and kept the full root gate green.
