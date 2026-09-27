@@ -252,20 +252,20 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Inspect repository-wide hidden Git index flags without imposing the
   source-entry aggregate byte bound on the complete repository index
   [algua/registry/frozen_source.py:201]
-- [ ] [Review][Patch] Purge cached bytecode for newly imported strategy-family helpers before any
+- [x] [Review][Patch] Purge cached bytecode for newly imported strategy-family helpers before any
   warm refresh executes current source [algua/primitives/module_refresh.py:24]
-- [ ] [Review][Patch] Detect cyclic strategy-family import components and fail closed instead of
+- [x] [Review][Patch] Detect cyclic strategy-family import components and fail closed instead of
   claiming an arbitrary DFS order is dependency-safe [algua/primitives/module_refresh.py:36]
-- [ ] [Review][Patch] Remove globals deleted from current source when refreshing a module rather
+- [x] [Review][Patch] Remove globals deleted from current source when refreshing a module rather
   than retaining them through `importlib.reload` dictionary reuse
   [algua/primitives/module_refresh.py:31]
-- [ ] [Review][Patch] Roll back the complete strategy-family module state if any closure member
+- [x] [Review][Patch] Roll back the complete strategy-family module state if any closure member
   fails during refresh so later callers cannot observe a mixed-version closure
   [algua/primitives/module_refresh.py:31]
-- [ ] [Review][Patch] Reject surrogate-bearing installer arguments, universe names and resolved
+- [x] [Review][Patch] Reject surrogate-bearing installer arguments, universe names and resolved
   configuration during direct typed construction with stable ValueError failures
   [algua/registry/environment_contract.py:85]
-- [ ] [Review][Patch] Add the identity-critical module refresh seam to CODEOWNERS and the repository
+- [x] [Review][Patch] Add the identity-critical module refresh seam to CODEOWNERS and the repository
   hygiene protection set [algua/primitives/module_refresh.py:18]
 
 ## Development notes
@@ -360,6 +360,17 @@ uv run lint-imports
   retained memory for a 32 MiB record. Every new guard was mutation-checked (17 mutations, all
   killed; one survivor exposed an unexercised single-chunk retention path, now covered). All 152
   locked third-party distributions stay unique under PEP 503 canonicalization.
+- Fourth review round: all 6 accepted patches first failed red. With temporary stubs for the new
+  names, the current refresh returned a newly imported helper's stale timestamp-valid bytecode
+  value, accepted two-, three-, lazy-import and package-`__init__` cycles, retained a deleted
+  global, silently re-imported a helper name removed from source, and left a `(2, 2)` mixed
+  closure after a later member failed; nine surrogate cases passed construction and only failed
+  as `UnicodeEncodeError` when first encoded; the hygiene set lacked `module_refresh.py`. Every
+  new guard was mutation-checked (25 mutations, all killed). One initially survived because
+  rollback masked a cycle check moved after the purge/drop; the cycle test now also proves a
+  refused refresh purges nothing. All 25 bundled strategies resolve to acyclic closures, and the
+  23 source-only strategies keep identical code/config/dependency hashes cold, after the
+  declared-config refresh and after `reload=True`.
 
 ### Completion Notes
 
@@ -401,6 +412,19 @@ uv run lint-imports
   size bounds precede inventory payload work. The index-flag scan streams the whole repository
   index with bounded retention, without the source aggregate cap. Golden digest vectors, schema,
   working-tree descriptors and every live, authority, deployment and capital wall are unchanged.
+- Fourth review round complete: the warm refresh no longer uses `importlib.reload`. It statically
+  resolves the strategy's current family closure without executing it and fails closed on any
+  cyclic component (`ModuleRefreshError`, an `ImportError` the loader maps to `StrategyNotFound`,
+  hence frozen preparation's existing fail-closed drift envelope) before anything is purged or
+  executed. It then purges the cached bytecode of every source under the family package, loaded
+  or not, drops the warm family entries and re-imports the strategy as fresh module objects, so a
+  deleted global or removed helper name cannot survive. Any failure, including a
+  `BaseException`, restores every previous family module object and the parent binding, whose
+  dictionaries were never touched. Refresh paths no longer pre-import the warm module. Canonical
+  JSON, installer argv and the retained universe name reject lone surrogates at construction with
+  a plain `ValueError`. `module_refresh.py` is CODEOWNERS- and hygiene-protected. Golden digest
+  vectors, schema, working-tree descriptors and every live, authority, deployment and capital
+  wall are unchanged.
 
 ### File List
 
@@ -440,6 +464,7 @@ uv run lint-imports
 - `tests/test_planner_environment.py`
 - `tests/test_repo_hygiene.py`
 - `tests/test_strategy_loader.py`
+- `tests/test_module_refresh.py`
 
 ### Change Log
 
@@ -464,3 +489,7 @@ uv run lint-imports
   dependency-first closure refresh, NFC installer strings, surrogate-safe parsing, PEP 503
   distribution names, retained NFC universe, bound-first bundle inventory, streamed index-flag
   scan); the full 4,363-test root gate, ruff, mypy and all 28 import contracts pass.
+- 2026-09-28: Addressed all 6 fourth-round review patches test-first (fresh, acyclic,
+  all-or-nothing strategy-closure refresh with package-wide bytecode purge; surrogate-safe typed
+  construction; protected refresh seam); the full 4,385-test root gate, ruff, mypy and all 28
+  import contracts pass.
