@@ -7,6 +7,7 @@ import os
 import py_compile
 import sys
 import textwrap
+import threading
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -384,3 +385,52 @@ def test_failed_refresh_discards_new_external_modules_and_their_parent_bindings(
     assert vars(sys.modules[family.package])["a_ok"] is before[f"{family.package}.a_ok"], (
         "a restored parent binding to a previous object is not a discarded-module binding")
     assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+def test_refresh_returns_the_fresh_root_module(family) -> None:
+    family.write("strat", "VALUE = 1\n")
+
+    root = refresh_package_closure(family.package, f"{family.package}.strat")
+
+    assert root is family.mod("strat")
+
+
+def test_refresh_holds_the_import_lock_so_a_competing_import_cannot_enter(family) -> None:
+    """The whole transaction (purge, drop, fresh import, rollback) runs under the global import
+    lock: another thread importing a family member mid-refresh waits for the final state instead
+    of importing into a partially rebuilt family that may still be discarded."""
+    gate = f"{family.top}.gate"
+    (family.dir.parent / "gate.py").write_text(
+        "import threading\nentered = threading.Event()\nrelease = threading.Event()\n")
+    signal = importlib.import_module(gate)
+    family.write("other", "VALUE = 'other'\n")
+    family.write("strat", f"import {gate} as _g\n_g.entered.set()\nassert _g.release.wait(10)\n")
+    outcome: dict[str, object] = {}
+    imported = threading.Event()
+
+    def refresh() -> None:
+        try:
+            outcome["root"] = refresh_package_closure(family.package, f"{family.package}.strat")
+        except BaseException as exc:  # surfaced by the assertion below
+            outcome["refresh_error"] = exc
+
+    def compete() -> None:
+        outcome["other"] = importlib.import_module(f"{family.package}.other")
+        imported.set()
+
+    refresher = threading.Thread(target=refresh)
+    competitor = threading.Thread(target=compete)
+    refresher.start()
+    try:
+        assert signal.entered.wait(10)
+        competitor.start()
+        entered_mid_refresh = imported.wait(0.5)
+    finally:
+        signal.release.set()
+        refresher.join(10)
+        competitor.join(10)
+
+    assert not entered_mid_refresh, "a competing import entered the refresh transaction"
+    assert "refresh_error" not in outcome
+    assert outcome["root"] is family.mod("strat")
+    assert outcome["other"] is family.mod("other") is sys.modules[family.package].other

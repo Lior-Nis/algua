@@ -5,12 +5,14 @@ global deleted from source survives, and a helper's removed name is silently re-
 trusts timestamp-validated cached bytecode (a same-size, same-mtime edit keeps a stale ``.pyc``
 valid), and a failure part-way leaves a mixed-version closure. The refresh therefore re-imports
 the root as FRESH module objects after purging the package's bytecode, and restores the previous
-module objects if anything fails. A cyclic static import component has no dependency-safe
+module state if anything fails. A cyclic static import component has no dependency-safe
 execution order, and a symlinked source path escapes the package-wide bytecode purge, so both
-fail closed before anything is purged or executed.
+fail closed before anything is purged or executed. The complete transaction runs under the
+process-global import lock, so no other thread can import into a partially rebuilt family.
 """
 from __future__ import annotations
 
+import _imp
 import ast
 import importlib
 import importlib.machinery
@@ -30,17 +32,31 @@ class ModuleRefreshError(ImportError):
 _ABSENT = object()
 
 
-def refresh_package_closure(package: str, root: str) -> None:
-    """Replace every loaded ``package`` module with a fresh import of ``root``'s current closure.
+def refresh_package_closure(package: str, root: str) -> ModuleType:
+    """Replace every loaded ``package`` module with a fresh import of ``root``'s current closure,
+    returning the fresh ``root`` module.
 
     ``root`` (a module inside ``package``) is imported anew and pulls in, as fresh module objects,
     exactly the ``package`` modules its current source reaches; other previously loaded
     ``package`` modules are dropped and re-import fresh on next use. Modules outside ``package``
     stay warm. On any failure every module the attempt introduced is dropped (with each parent
     attribute still bound to it), and every previous ``sys.modules`` entry and the ``package``
-    parent binding are restored; the previous family objects' dictionaries were never touched."""
+    parent binding are restored; the previous family objects' dictionaries were never touched.
+
+    The global import lock is held from preflight to commit or rollback: another thread's import
+    of a module not already loaded waits for the final state. A thread importing a module outside
+    the refresh that itself needs a new import can deadlock against it, so warm refreshes belong
+    in processes that do not import concurrently from other threads."""
     if not root.startswith(package + "."):
         raise ValueError(f"{root!r} is not inside package {package!r}")
+    _imp.acquire_lock()
+    try:
+        return _refresh_locked(package, root)
+    finally:
+        _imp.release_lock()
+
+
+def _refresh_locked(package: str, root: str) -> ModuleType:
     importlib.invalidate_caches()
     package_spec = importlib.util.find_spec(package)
     if package_spec is None or package_spec.submodule_search_locations is None:
@@ -58,7 +74,7 @@ def refresh_package_closure(package: str, root: str) -> None:
     for name in [name for name in before if _within(name, package)]:
         del sys.modules[name]
     try:
-        importlib.import_module(root)
+        return importlib.import_module(root)
     except BaseException:
         _restore_modules(before)
         if parent is not None:

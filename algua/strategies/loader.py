@@ -3,8 +3,8 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
-import sys
 from pathlib import Path
+from types import ModuleType
 
 import algua.strategies as _strategies_pkg
 from algua.contracts.model_types import ModelHandle
@@ -61,16 +61,19 @@ def _index() -> dict[str, str]:
     return index
 
 
-def _reload_strategy_closure(dotted: str) -> None:
+def _reload_strategy_closure(dotted: str) -> ModuleType:
     """Re-import the strategy module ``dotted`` and its author-written first-party helper modules
     so a warm batch worker (#326) does not carry their module-level state across tasks. A
     strategy's helpers live as sibling modules in its family package ``algua.strategies.<family>``;
     every loaded module under that package is replaced by FRESH module objects imported from
     CURRENT source (the family ``__init__`` included), all-or-nothing, with stale bytecode purged
     first (see ``primitives.module_refresh``). The enforced-pure shared layers outside the family
-    package stay warm. A cyclic family import graph fails closed as not found."""
+    package stay warm. A cyclic or symlinked family closure fails closed as not found. Returns the
+    fresh strategy module, so a caller never re-reads ``sys.modules`` after the import lock is
+    released (another thread's refresh may then be mid-transaction)."""
     try:
-        refresh_package_closure(dotted.rsplit(".", 1)[0], root=dotted)  # algua.strategies.<family>
+        family = dotted.rsplit(".", 1)[0]  # algua.strategies.<family>
+        return refresh_package_closure(family, root=dotted)
     except ModuleRefreshError as exc:
         raise StrategyNotFound(f"{dotted}: {exc}") from exc
 
@@ -95,8 +98,7 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     if dotted is None:
         raise StrategyNotFound(name)
     if reload:
-        _reload_strategy_closure(dotted)
-        module = sys.modules[dotted]
+        module = _reload_strategy_closure(dotted)
     else:
         module = importlib.import_module(dotted)
     if not hasattr(module, "CONFIG") or not hasattr(module, "signal"):
@@ -197,8 +199,7 @@ def load_strategy_config(name: str) -> StrategyConfig:
     dotted = _index().get(name)
     if dotted is None:
         raise StrategyNotFound(name)
-    _reload_strategy_closure(dotted)
-    module = sys.modules[dotted]
+    module = _reload_strategy_closure(dotted)
     config = getattr(module, "CONFIG", None)
     if not isinstance(config, StrategyConfig) or config.name != name:
         raise StrategyNotFound(f"{name}: missing or mismatched CONFIG")
