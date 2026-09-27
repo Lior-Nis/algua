@@ -300,3 +300,31 @@ def test_reload_resets_reexported_class_state(tmp_path):
                   "algua.strategies.momentum._cls_mid_probe",
                   "algua.strategies.momentum._cls_state_probe"):
             sys.modules.pop(m, None)
+
+
+def test_load_strategy_config_refreshes_a_warm_module_before_retaining_config():
+    """Frozen preparation retains CONFIG from the declared-config read: a warm process that already
+    imported the module must not freeze its stale configuration after the source changed."""
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
+
+    strat = Path(fam.__path__[0]) / "config_refresh_probe.py"
+    template = (
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "CONFIG = StrategyConfig(name='config_refresh_probe', universe=[{universe}],\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
+    )
+    try:
+        strat.write_text(template.format(universe="'AAPL'"))
+        assert load_strategy_config("config_refresh_probe").universe == ["AAPL"]
+        strat.write_text(template.format(universe="'AAPL', 'MSFT'"))
+        assert load_strategy_config("config_refresh_probe").universe == ["AAPL", "MSFT"]
+        assert load_strategy("config_refresh_probe").config.universe == ["AAPL", "MSFT"]
+    finally:
+        strat.unlink(missing_ok=True)
+        sys.modules.pop("algua.strategies.momentum.config_refresh_probe", None)

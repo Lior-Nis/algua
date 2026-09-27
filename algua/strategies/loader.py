@@ -210,11 +210,17 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
 
 
 def load_strategy_config(name: str) -> StrategyConfig:
-    """Read a strategy's declared config without resolving any referenced model artifact."""
+    """Read a strategy's declared config without resolving any referenced model artifact.
+
+    The module closure is force-refreshed first, so a warm process that already imported it
+    cannot retain (and later freeze) a CONFIG that no longer matches the current source; later
+    non-reloading loads in the same process then observe the refreshed module."""
     dotted = _index().get(name)
     if dotted is None:
         raise StrategyNotFound(name)
-    module = importlib.import_module(dotted)
+    importlib.import_module(dotted)
+    _reload_strategy_closure(dotted)
+    module = sys.modules[dotted]
     config = getattr(module, "CONFIG", None)
     if not isinstance(config, StrategyConfig) or config.name != name:
         raise StrategyNotFound(f"{name}: missing or mismatched CONFIG")
