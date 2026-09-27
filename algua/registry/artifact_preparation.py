@@ -1,6 +1,7 @@
 """Non-activating orchestration for recoverable frozen planner artifacts."""
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -14,7 +15,6 @@ from algua.registry.artifact_contract import (
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
     EnvironmentDescriptor,
-    FrozenManifest,
     canonical_json,
 )
 from algua.registry.artifact_errors import (
@@ -31,6 +31,7 @@ from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.artifact_store import ArtifactStoreError, publish_bundle
 from algua.registry.deployment import DeploymentError
 from algua.registry.environment_store import EnvironmentStoreError, publish_environment
+from algua.registry.frozen_manifest_contract import FrozenManifest
 from algua.registry.frozen_source import (
     FrozenAssetsUnsupported as SourceAssetsUnsupported,
 )
@@ -51,7 +52,7 @@ from algua.registry.planner_environment import (
 )
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
-from algua.strategies.loader import load_tradable_strategy
+from algua.strategies.loader import load_strategy_config, load_tradable_strategy
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,10 @@ def prepare_frozen_artifact(
     root = repo_root.resolve()
     try:
         source_ref = assert_clean_head(root)
+        declared_config = load_strategy_config(name)
+        if declared_config.needs_model or declared_config.model_ref is not None:
+            raise SourceAssetsUnsupported(
+                "frozen planner assets are unsupported in this cycle")
         identity = compute_artifact_hashes(name)
         if identity.dependency_hash is None:
             raise FrozenSourceDrift()
@@ -115,7 +120,7 @@ def prepare_frozen_artifact(
         raise FrozenSourceDrift() from exc
     try:
         resolved_config = strategy.config.model_dump(mode="json")
-        canonical_json(resolved_config)
+        resolved_config = json.loads(canonical_json(resolved_config))
     except (TypeError, ValueError) as exc:
         raise FrozenSourceInvalid() from exc
     try:
@@ -166,12 +171,15 @@ def prepare_frozen_artifact(
         universe_name=qualification.universe_name, bundle=bundle, environment=environment,
     )
     try:
-        _require_same_identity(compute_artifact_hashes(name), identity)
-        if assert_clean_head(root) != source_ref:
-            raise FrozenSourceDrift()
+        def final_revalidation() -> None:
+            _require_same_identity(compute_artifact_hashes(name), identity)
+            if assert_clean_head(root) != source_ref:
+                raise FrozenSourceDrift()
+
         artifact_id = repo.record_frozen_artifact(
             name, frozen_deployment_manifest(frozen),
             research_gate_id=qualification.research_gate_id,
+            pre_begin_check=final_revalidation,
         )
     except FrozenDescriptorConflict:
         raise

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -126,6 +127,7 @@ class ArtifactLedgerMixin:
 
     def record_frozen_artifact(
         self, name: str, manifest: DeploymentManifest, *, research_gate_id: int,
+        pre_begin_check: Callable[[], None] | None = None,
     ) -> int:
         from algua.registry.artifact_recording import parse_frozen_deployment_manifest
 
@@ -136,6 +138,8 @@ class ArtifactLedgerMixin:
         if self._conn.in_transaction:
             raise RuntimeError("record_frozen_artifact must run outside an open transaction")
         try:
+            if pre_begin_check is not None:
+                pre_begin_check()
             self._conn.execute("BEGIN IMMEDIATE")
             qualification = self.qualify_frozen_candidate(
                 name, code_hash=manifest.code_hash, config_hash=manifest.config_hash,

@@ -12,6 +12,9 @@ from typing import Any
 DESCRIPTOR_VERSION = 1
 PLANNER_BOUNDARY_VERSION = 1
 FROZEN_WIRE = {"name": "frozen-planner", "version": 1}
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -119,6 +122,10 @@ class BundleDescriptor:
     @classmethod
     def from_files(cls, files: tuple[ArtifactFile, ...]) -> BundleDescriptor:
         payload = _inventory_payload(files)
+        if any(item.size > MAX_FILE_BYTES for item in files):
+            raise ValueError("bundle file exceeds the per-file size bound")
+        if sum(item.size for item in files) > MAX_BUNDLE_BYTES:
+            raise ValueError("bundle exceeds the aggregate size bound")
         digest = _digest("algua.frozen-bundle", payload)
         return cls(
             digest=digest,
@@ -201,18 +208,32 @@ class InstalledDistribution:
 
 
 @dataclass(frozen=True)
+class InterpreterLink:
+    path: str
+    target: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "target": self.target}
+
+
+@dataclass(frozen=True)
 class InstalledInventory:
     distributions: tuple[InstalledDistribution, ...]
     files: tuple[ArtifactFile, ...]
+    interpreter_links: tuple[InterpreterLink, ...] = ()
 
     @property
     def digest(self) -> str:
         distributions = [item.to_dict() for item in self.distributions]
         if distributions != sorted(distributions, key=lambda item: (item["name"], item["version"])):
             raise ValueError("installed distributions must be sorted")
+        links = [item.to_dict() for item in self.interpreter_links]
+        if links != sorted(links, key=lambda item: item["path"]):
+            raise ValueError("interpreter links must be sorted")
         return _digest(
             "algua.frozen-installed-inventory",
-            {"distributions": distributions, "files": _inventory_payload(self.files)},
+            {"distributions": distributions, "files": _inventory_payload(self.files),
+             "interpreter_links": links},
         )
 
 
@@ -244,47 +265,3 @@ class EnvironmentDescriptor:
 
     def to_dict(self) -> dict[str, Any]:
         return {**self.identity_payload(), "digest": self.digest, "locator": self.locator}
-
-
-@dataclass(frozen=True)
-class FrozenManifest:
-    source_ref: str
-    code_hash: str
-    config_hash: str
-    dependency_hash: str
-    resolved_config: dict[str, Any]
-    universe_name: str | None
-    bundle: BundleDescriptor
-    environment: EnvironmentDescriptor
-
-    def __post_init__(self) -> None:
-        _require_digest(self.source_ref, "source ref", _OID)
-        _require_digest(self.code_hash, "code hash", _HEX32)
-        _require_digest(self.config_hash, "config hash", _HEX32)
-        _require_digest(self.dependency_hash, "dependency hash")
-        if self.environment.key.dependency_hash != self.dependency_hash:
-            raise ValueError("environment dependency hash disagrees")
-        canonical_json(self.resolved_config)
-
-    def to_dict(self) -> dict[str, Any]:
-        from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
-
-        return {
-            "descriptor_version": DESCRIPTOR_VERSION, "source_kind": "frozen",
-            "source_ref": self.source_ref,
-            "identity": {"code_hash": self.code_hash, "config_hash": self.config_hash,
-                         "dependency_hash": self.dependency_hash},
-            "resolved_config": self.resolved_config, "universe_name": self.universe_name,
-            "bundle": self.bundle.to_dict(), "environment": self.environment.to_dict(),
-            "assets": [], "planner_protocol_version": PLANNER_PROTOCOL_VERSION,
-            "planner_boundary_version": PLANNER_BOUNDARY_VERSION,
-            "frozen_wire": FROZEN_WIRE,
-        }
-
-    @property
-    def json(self) -> str:
-        return canonical_json(self.to_dict())
-
-    @property
-    def digest(self) -> str:
-        return _digest("algua.frozen-manifest", self.to_dict())

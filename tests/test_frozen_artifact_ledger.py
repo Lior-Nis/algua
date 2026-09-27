@@ -11,13 +11,13 @@ from algua.registry.artifact_contract import (
     BundleDescriptor,
     EnvironmentDescriptor,
     EnvironmentKey,
-    FrozenManifest,
     InterpreterIdentity,
 )
 from algua.registry.artifact_preparation import prepare_frozen_artifact
 from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.db import connect, migrate
 from algua.registry.deployment import DeploymentError
+from algua.registry.frozen_manifest_contract import FrozenManifest
 from algua.registry.frozen_source import FrozenFile
 from algua.registry.repository import ArtifactIdentity
 from algua.registry.store import SqliteStrategyRepository
@@ -184,6 +184,26 @@ def test_record_rolls_back_partial_insert(tmp_path, monkeypatch) -> None:
     assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 0
 
 
+def test_final_revalidation_is_immediately_before_begin_immediate(tmp_path) -> None:
+    conn = connect(tmp_path / "registry.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    frozen = _frozen_manifest()
+    _strategy_id, gate_id = _candidate(repo, frozen)
+    events: list[str] = []
+    conn.set_trace_callback(lambda sql: events.append(sql) if sql == "BEGIN IMMEDIATE" else None)
+
+    def revalidate() -> None:
+        assert not conn.in_transaction
+        events.append("revalidate")
+
+    repo.record_frozen_artifact(
+        "s", frozen_deployment_manifest(frozen), research_gate_id=gate_id,
+        pre_begin_check=revalidate,
+    )
+    assert events[:2] == ["revalidate", "BEGIN IMMEDIATE"]
+
+
 def test_preparation_runs_slow_work_outside_transaction_and_records_only_descriptor(
     tmp_path, monkeypatch,
 ) -> None:
@@ -213,6 +233,10 @@ def test_preparation_runs_slow_work_outside_transaction_and_records_only_descrip
         config=SimpleNamespace(model_dump=lambda **_kwargs: {"name": "s"}),
     )
     inventory = SimpleNamespace(digest="2" * 64)
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.load_strategy_config",
+        outside("declared-config", SimpleNamespace(needs_model=False, model_ref=None)),
+    )
     monkeypatch.setattr(
         "algua.registry.artifact_preparation.compute_artifact_hashes",
         outside("identity", identity),
@@ -267,3 +291,31 @@ def test_preparation_runs_slow_work_outside_transaction_and_records_only_descrip
     assert conn.execute(
         "SELECT COUNT(*) FROM stage_transitions WHERE strategy_id=?", (strategy_id,),
     ).fetchone()[0] == 2
+
+
+def test_preparation_rejects_model_config_before_artifact_identity_or_model_bytes(
+    tmp_path, monkeypatch,
+) -> None:
+    conn = connect(tmp_path / "registry.db")
+    migrate(conn)
+    repo = SqliteStrategyRepository(conn)
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.assert_clean_head", lambda _root: "a" * 40,
+    )
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.load_strategy_config",
+        lambda _name: SimpleNamespace(needs_model=True, model_ref=object()),
+    )
+    monkeypatch.setattr(
+        "algua.registry.artifact_preparation.compute_artifact_hashes",
+        lambda _name: (_ for _ in ()).throw(AssertionError("identity/model bytes touched")),
+    )
+
+    from algua.registry.artifact_errors import FrozenAssetsUnsupported
+
+    with pytest.raises(FrozenAssetsUnsupported):
+        prepare_frozen_artifact(
+            repo, "s", repo_root=tmp_path, store_root=tmp_path / "store",
+        )
+    assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 0
+    assert not (tmp_path / "store").exists()

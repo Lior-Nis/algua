@@ -41,8 +41,10 @@ class FrozenEnvironmentCorrupt(FrozenArtifactError):
 
 
 class FrozenDescriptorConflict(DeploymentError):
-    def __init__(self) -> None:
-        super().__init__("frozen descriptor conflicts with immutable ledger bytes")
+    def __init__(
+        self, message: str = "frozen descriptor conflicts with immutable ledger bytes",
+    ) -> None:
+        super().__init__(message)
 
 
 class ArtifactNotFound(LookupError):

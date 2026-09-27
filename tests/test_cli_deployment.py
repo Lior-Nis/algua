@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 from typer.testing import CliRunner
@@ -143,3 +144,37 @@ def test_every_frozen_failure_has_a_bounded_json_envelope(
     assert payload["retryable"] is retryable
     assert 0 < len(payload["error"].encode()) <= 8 * 1024
     assert set(payload) == {"ok", "error", "code", "retryable"}
+
+
+def test_unexpected_frozen_command_failure_is_sanitized(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "registry.db"))
+    secret = "https://user:password@example.test/" + "x" * 20_000
+    monkeypatch.setattr(
+        "algua.cli.deployment_cmd.verify_frozen_artifact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+    invocation = runner.invoke(app, ["deployment", "verify", "0" * 64])
+    payload = json.loads(invocation.stdout)
+    assert payload == {
+        "ok": False,
+        "error": "frozen artifact verification failed unexpectedly",
+        "code": "frozen_descriptor_conflict",
+        "retryable": False,
+    }
+
+
+def test_database_diagnostic_is_sanitized_but_remains_retryable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ALGUA_DB_PATH", str(tmp_path / "registry.db"))
+    monkeypatch.setattr(
+        "algua.cli.deployment_cmd.verify_frozen_artifact",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("/secret/path?token=credential"),
+        ),
+    )
+    invocation = runner.invoke(app, ["deployment", "verify", "0" * 64])
+    assert json.loads(invocation.stdout) == {
+        "ok": False,
+        "error": "registry is unavailable",
+        "code": "db_unavailable",
+        "retryable": True,
+    }

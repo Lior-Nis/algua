@@ -11,7 +11,7 @@ from pathlib import Path
 from algua.primitives.atomic_io import fsync_parents, fsync_tree
 from algua.primitives.flock import file_lock
 from algua.registry.artifact_contract import ArtifactFile, BundleDescriptor
-from algua.registry.frozen_source import FrozenFile
+from algua.registry.frozen_source import MAX_BUNDLE_BYTES, MAX_FILE_BYTES, FrozenFile
 
 
 class ArtifactStoreError(ValueError):
@@ -28,6 +28,15 @@ def resolve_locator(
     candidate = root.joinpath(*locator.split("/"))
     if root not in candidate.parents:
         raise ArtifactStoreError("artifact locator escapes the trusted store root")
+    current = root
+    for component in locator.split("/")[:-1]:
+        current = current / component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ArtifactStoreError("artifact locator has an unsafe ancestor")
     return candidate
 
 
@@ -68,8 +77,12 @@ def _inventory(root: Path) -> tuple[ArtifactFile, ...]:
     if stat.S_IMODE(root.stat().st_mode) != 0o555:
         raise ArtifactStoreError("bundle root permissions drifted")
     entries: list[ArtifactFile] = []
+    directories: set[str] = set()
+    total = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         directory = Path(dirpath)
+        if directory != root:
+            directories.add(directory.relative_to(root).as_posix())
         if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o555:
             raise ArtifactStoreError("bundle directory is linked or writable")
         for dirname in dirnames:
@@ -84,12 +97,30 @@ def _inventory(root: Path) -> tuple[ArtifactFile, ...]:
             permissions = stat.S_IMODE(info.st_mode)
             if permissions not in {0o444, 0o555}:
                 raise ArtifactStoreError("bundle file permissions drifted")
-            data = path.read_bytes()
+            if info.st_size > MAX_FILE_BYTES:
+                raise ArtifactStoreError("bundle file exceeds the per-file bound")
+            digest = hashlib.sha256()
+            size = 0
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    size += len(chunk)
+                    digest.update(chunk)
+            total += size
+            if total > MAX_BUNDLE_BYTES:
+                raise ArtifactStoreError("bundle exceeds the aggregate size bound")
             entries.append(ArtifactFile(
                 path=path.relative_to(root).as_posix(),
                 mode="100755" if permissions == 0o555 else "100644",
-                size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                size=size, sha256=digest.hexdigest(),
             ))
+    implied = {
+        parent.as_posix()
+        for entry in entries
+        for parent in Path(entry.path).parents
+        if parent.as_posix() != "."
+    }
+    if directories != implied:
+        raise ArtifactStoreError("bundle contains an undeclared or empty directory")
     return tuple(sorted(entries, key=lambda item: item.path.encode()))
 
 

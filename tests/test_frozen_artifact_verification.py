@@ -34,3 +34,7 @@ def test_verify_uses_only_ledger_and_trusted_store(tmp_path, monkeypatch) -> Non
     assert [name for name, _args in calls] == ["bundle", "environment"]
     assert conn.execute("SELECT COUNT(*) FROM deployment_artifacts").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM strategy_deployments").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM strategy_allocations").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT consumed FROM gate_evaluations WHERE id=?", (gate_id,),
+    ).fetchone()[0] == 0

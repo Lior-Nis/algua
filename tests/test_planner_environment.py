@@ -21,14 +21,21 @@ from algua.registry.planner_environment import (
     verify_environment,
 )
 
+WHEEL_HASH = "sha256:" + "a" * 64
+
 
 def _inputs() -> tuple[FrozenFile, ...]:
     return (
         FrozenFile(".python-version", "100644", b"3.12\n"),
         FrozenFile("pyproject.toml", "100644", b"[project]\nname='algua'\nversion='0'\n"),
-        FrozenFile("uv.lock", "100644", b"version=1\n[[package]]\nname='x'\n"
-                   b"version='1'\nsource={registry='https://pypi.org/simple'}\n"
-                   b"wheels=[{url='https://example/x.whl',hash='sha256:aa'}]\n"),
+        FrozenFile(
+            "uv.lock", "100644",
+            (
+                "version=1\n[[package]]\nname='x'\nversion='1'\n"
+                "source={registry='https://pypi.org/simple'}\n"
+                f"wheels=[{{url='https://files.pythonhosted.org/x.whl',hash='{WHEEL_HASH}'}}]\n"
+            ).encode(),
+        ),
     )
 
 
@@ -59,7 +66,7 @@ def test_scrubbed_environment_has_no_inherited_authority(monkeypatch: pytest.Mon
     monkeypatch.setenv("HTTPS_PROXY", "http://secret")
     env = scrubbed_environment(Path("/tmp/bin"))
     assert env == {
-        "HOME": env["HOME"], "PATH": "/tmp/bin", "PYTHONDONTWRITEBYTECODE": "1",
+        "HOME": "/nonexistent", "PATH": "/tmp/bin", "PYTHONDONTWRITEBYTECODE": "1",
         "LANG": env["LANG"], "LC_ALL": env["LC_ALL"],
     }
 
@@ -81,6 +88,24 @@ def test_lock_requires_a_wheel_for_every_registry_package() -> None:
         validate_lock(lock)
 
 
+@pytest.mark.parametrize(
+    "wheel",
+    [
+        "{url='http://files.pythonhosted.org/x.whl',hash='sha256:" + "a" * 64 + "'}",
+        "{url='https://files.pythonhosted.org/x.whl',hash='sha256:aa'}",
+        "{url='https://files.pythonhosted.org/x.whl'}",
+    ],
+)
+def test_lock_requires_canonical_registry_wheel_url_and_hash(wheel: str) -> None:
+    lock = (
+        "version=1\n[[package]]\nname='bad'\nversion='1'\n"
+        "source={registry='https://pypi.org/simple'}\n"
+        f"wheels=[{wheel}]\n"
+    ).encode()
+    with pytest.raises(EnvironmentIncompatible, match="wheel"):
+        validate_lock(lock)
+
+
 def test_python_pin_must_match_running_minor() -> None:
     wrong = list(_inputs())
     wrong[0] = FrozenFile(".python-version", "100644", b"9.9\n")
@@ -91,7 +116,7 @@ def test_python_pin_must_match_running_minor() -> None:
 
 def test_environment_inventory_and_isolated_probe(tmp_path: Path) -> None:
     env = tmp_path / "env"
-    venv.EnvBuilder(with_pip=False).create(env)
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(env)
     lib64 = env / "lib64"
     if lib64.is_symlink():
         lib64.unlink()
@@ -105,7 +130,14 @@ def test_environment_inventory_and_isolated_probe(tmp_path: Path) -> None:
     inventory = inventory_environment(env)
     assert [(item.name, item.version) for item in inventory.distributions] == [("numpy", "2.3.3")]
     assert inventory.digest
+    assert {link.path for link in inventory.interpreter_links} == {
+        "bin/python", "bin/python3", "bin/python3.12",
+    }
     verify_environment(env, current_interpreter_identity(), inventory.digest)
+
+    (env / "bin/python3").unlink()
+    with pytest.raises(EnvironmentIncompatible, match="interpreter link"):
+        inventory_environment(env)
 
 
 def test_environment_inventory_rejects_algua_hardlinks_and_unexpected_symlinks(
@@ -125,17 +157,14 @@ def test_environment_inventory_rejects_algua_hardlinks_and_unexpected_symlinks(
 
 
 def test_provision_uses_exact_uv_commands_and_private_inputs(tmp_path: Path) -> None:
-    calls: list[tuple[list[str], Path, dict[str, str]]] = []
+    calls: list[tuple[list[str], Path, dict[str, str], int]] = []
     environment = tmp_path / "environment"
     build_root = tmp_path / "inputs"
 
-    def runner(argv, *, cwd, env, check, capture_output, text):
-        calls.append((argv, cwd, env))
+    def runner(argv, *, cwd, env, check, capture_output, text, timeout):
+        calls.append((argv, cwd, env, timeout))
         if argv[1] == "venv":
-            venv.EnvBuilder(with_pip=False).create(environment)
-            lib64 = environment / "lib64"
-            if lib64.is_symlink():
-                lib64.unlink()
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
         return type("Completed", (), {"returncode": 0, "stderr": ""})()
 
     key = build_environment_key(_inputs(), "a" * 64, uv_version="uv 0.9.26")
@@ -148,5 +177,34 @@ def test_provision_uses_exact_uv_commands_and_private_inputs(tmp_path: Path) -> 
         [item.replace("<private-build-input-root>", str(build_root)) for item in SYNC_FLAGS],
     ]
     assert calls[1][2]["VIRTUAL_ENV"] == str(environment)
+    assert calls[0][2]["HOME"] == str(build_root / ".home")
+    assert calls[0][3] > 0 and calls[1][3] > 0
+    assert not (environment / "lib64").exists()
     assert (build_root / "uv.lock").read_bytes() == _inputs()[2].data
     assert inventory.digest
+
+
+def test_provision_rechecks_key_and_uv_before_running(tmp_path: Path, monkeypatch) -> None:
+    key = build_environment_key(_inputs(), "a" * 64, uv_version="uv 0.9.26")
+    monkeypatch.setattr(
+        "algua.registry.planner_environment.installer_version", lambda: "uv 0.9.27",
+    )
+    called = False
+
+    def runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    with pytest.raises(EnvironmentIncompatible, match="key"):
+        provision_environment(
+            tmp_path / "inputs", tmp_path / "environment", _inputs(), key, runner=runner,
+        )
+    assert called is False
+
+
+def test_missing_uv_is_incompatible_not_retryable(monkeypatch) -> None:
+    monkeypatch.setattr("algua.registry.planner_environment.shutil.which", lambda _name: None)
+    from algua.registry.planner_environment import installer_version
+
+    with pytest.raises(EnvironmentIncompatible, match="uv"):
+        installer_version()

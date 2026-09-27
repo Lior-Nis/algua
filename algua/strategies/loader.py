@@ -209,6 +209,18 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     )
 
 
+def load_strategy_config(name: str) -> StrategyConfig:
+    """Read a strategy's declared config without resolving any referenced model artifact."""
+    dotted = _index().get(name)
+    if dotted is None:
+        raise StrategyNotFound(name)
+    module = importlib.import_module(dotted)
+    config = getattr(module, "CONFIG", None)
+    if not isinstance(config, StrategyConfig) or config.name != name:
+        raise StrategyNotFound(f"{name}: missing or mismatched CONFIG")
+    return config
+
+
 def _resolve_model_handle(name: str, config: StrategyConfig) -> ModelHandle:
     """Resolve a needs_model strategy's PINNED model_ref against the model registry and build the
     ModelHandle injected into signal(view, params, model). Fails closed (StrategyNotFound) unless

@@ -4,15 +4,18 @@ from __future__ import annotations
 import hashlib
 import re
 import subprocess
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from algua.registry.artifact_contract import ArtifactFile
+from algua.registry.artifact_contract import (
+    MAX_BUNDLE_BYTES,
+    MAX_FILE_BYTES,
+    ArtifactFile,
+)
 
 MAX_SOURCE_FILES = 10_000
-MAX_FILE_BYTES = 64 * 1024 * 1024
-MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 MAX_PATH_BYTES = 1_024
 _OID = re.compile(rb"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _MODES = {b"100644", b"100755"}
@@ -54,12 +57,21 @@ class FrozenFile:
         )
 
 
-def _git(repo_root: Path, *args: str) -> bytes:
+def _git(repo_root: Path, *args: str, max_bytes: int) -> bytes:
     try:
-        return subprocess.run(
-            ["git", *args], cwd=repo_root, check=True, capture_output=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            subprocess.run(
+                ["git", *args], cwd=repo_root, check=True, stdout=stdout, stderr=stderr,
+                timeout=60,
+            )
+            size = stdout.tell()
+            if size > max_bytes:
+                raise FrozenSourceError("Git output exceeds its protected bound")
+            stdout.seek(0)
+            return stdout.read(max_bytes + 1)
+    except FrozenSourceError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
         raise FrozenSourceError("Git source could not be read") from exc
 
 
@@ -114,16 +126,27 @@ def parse_tree(raw: bytes) -> tuple[GitTreeEntry, ...]:
 
 
 def _export(repo_root: Path, source_ref: str, paths: tuple[str, ...]) -> tuple[FrozenFile, ...]:
-    raw = _git(repo_root, "ls-tree", "-r", "-z", "--full-tree", source_ref, "--", *paths)
+    tree_bound = (MAX_PATH_BYTES + 100) * (MAX_SOURCE_FILES + 1)
+    raw = _git(
+        repo_root, "ls-tree", "-r", "-z", "--full-tree", source_ref, "--", *paths,
+        max_bytes=tree_bound,
+    )
     entries = parse_tree(raw)
     if len(entries) > MAX_SOURCE_FILES:
         raise FrozenSourceError("Git source exceeds the file-count bound")
     files: list[FrozenFile] = []
     total = 0
     for entry in entries:
-        data = _git(repo_root, "cat-file", "blob", entry.oid)
-        if len(data) > MAX_FILE_BYTES:
+        size_raw = _git(repo_root, "cat-file", "-s", entry.oid, max_bytes=32)
+        try:
+            size = int(size_raw)
+        except ValueError as exc:
+            raise FrozenSourceError("Git blob size is invalid") from exc
+        if size < 0 or size > MAX_FILE_BYTES:
             raise FrozenSourceError("Git blob exceeds the per-file bound")
+        data = _git(repo_root, "cat-file", "blob", entry.oid, max_bytes=MAX_FILE_BYTES)
+        if len(data) != size:
+            raise FrozenSourceError("Git blob size changed while exporting")
         total += len(data)
         if total > MAX_BUNDLE_BYTES:
             raise FrozenSourceError("Git source exceeds the bundle-size bound")
@@ -157,12 +180,16 @@ def _generated_cache(path: str, tracked: set[str]) -> bool:
 
 def assert_clean_head(repo_root: Path) -> str:
     root = repo_root.resolve()
-    head = _git(root, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    head = _git(root, "rev-parse", "--verify", "HEAD^{commit}", max_bytes=129).decode().strip()
     if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head) is None:
         raise FrozenSourceError("Git HEAD is not a full commit object ID")
-    if _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=no"):
+    listing_bound = (MAX_PATH_BYTES + 100) * (MAX_SOURCE_FILES + 1)
+    if _git(
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=no",
+        max_bytes=listing_bound,
+    ):
         raise FrozenSourceError("working tree tracked files do not match HEAD")
-    tracked_raw = _git(root, "ls-files", "-z", "--", "algua")
+    tracked_raw = _git(root, "ls-files", "-z", "--", "algua", max_bytes=listing_bound)
     tracked = {item.decode("utf-8") for item in tracked_raw.split(b"\0") if item}
     source_root = root / "algua"
     if not source_root.is_dir() or source_root.is_symlink():
@@ -170,7 +197,17 @@ def assert_clean_head(repo_root: Path) -> str:
     untracked: list[str] = []
     for item in source_root.rglob("*"):
         relative = item.relative_to(root).as_posix()
-        if (item.is_file() or item.is_symlink()) and relative not in tracked:
+        if item.is_dir() and not item.is_symlink():
+            if any(path.startswith(relative + "/") for path in tracked):
+                continue
+            descendants = [path for path in item.rglob("*") if path.is_file() or path.is_symlink()]
+            if item.name == "__pycache__" and descendants and all(
+                _generated_cache(path.relative_to(root).as_posix(), tracked)
+                for path in descendants
+            ):
+                continue
+            untracked.append(relative)
+        elif (item.is_file() or item.is_symlink()) and relative not in tracked:
             if not _generated_cache(relative, tracked):
                 untracked.append(relative)
     if untracked:

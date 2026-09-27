@@ -10,13 +10,14 @@ from algua.registry.artifact_contract import (
     BundleDescriptor,
     EnvironmentDescriptor,
     EnvironmentKey,
-    FrozenManifest,
     InstalledDistribution,
     InstalledInventory,
     InterpreterIdentity,
+    InterpreterLink,
     canonical_json,
 )
 from algua.registry.artifact_manifest import parse_frozen_manifest
+from algua.registry.frozen_manifest_contract import FrozenManifest
 
 
 def _identity() -> InterpreterIdentity:
@@ -51,6 +52,11 @@ def _manifest() -> FrozenManifest:
         distributions=(InstalledDistribution("numpy", "2.3.3"),),
         files=(ArtifactFile("lib/python3.12/site-packages/numpy/__init__.py", "100644", 7,
                             "5" * 64),),
+        interpreter_links=(
+            InterpreterLink("bin/python", "base-interpreter"),
+            InterpreterLink("bin/python3", "bin/python"),
+            InterpreterLink("bin/python3.12", "bin/python"),
+        ),
     )
     environment = EnvironmentDescriptor(
         key=key,
@@ -87,10 +93,10 @@ def test_literal_digest_vectors_and_round_trip() -> None:
     assert manifest.environment.key.digest == (
         "f591017e696ca18a917b3aaa62df509720bdbdc396c240439f924f301a67ad06")
     assert manifest.environment.inventory_digest == (
-        "0c6a447758b69d1cbe42bf43b499481693a1cf60daec646b3cac195ec8b16d94")
+        "868609493a8ffd308a32abcf7a5b9a53449c5b958379940874b3fb5179098d7f")
     assert manifest.environment.digest == (
-        "e08c5a9f19d10dcf3bd466de30c39c8856463dd5684b5b1b282c83e450480ea0")
-    assert manifest.digest == "95ceccc46814838d047dc558bddf3a90adba01c6cf049e8300cef47be9e0b3b7"
+        "be7ba718e3da41af3aa7d5a70d4762e07d61a2da48cd14bf3202a0a1a3cb227e")
+    assert manifest.digest == "410ed32a3c39e2d978ee6760d6b6f4d1532bbfe413241514573ead74ea26bc23"
     assert parse_frozen_manifest(manifest.json) == manifest
 
 
@@ -98,6 +104,35 @@ def test_canonical_json_normalizes_unicode_and_rejects_non_finite() -> None:
     assert canonical_json({"z": "cafe\u0301", "a": 1}) == '{"a":1,"z":"caf\u00e9"}'
     with pytest.raises(ValueError, match="finite"):
         canonical_json({"bad": float("nan")})
+
+
+def test_manifest_retains_a_canonicalized_config_and_enforces_size_bound() -> None:
+    manifest = _manifest()
+    changed = FrozenManifest(
+        source_ref=manifest.source_ref,
+        code_hash=manifest.code_hash,
+        config_hash=manifest.config_hash,
+        dependency_hash=manifest.dependency_hash,
+        resolved_config={"label": "cafe\u0301"},
+        universe_name=manifest.universe_name,
+        bundle=manifest.bundle,
+        environment=manifest.environment,
+    )
+    assert changed.resolved_config == {"label": "caf\u00e9"}
+    with pytest.raises(ValueError, match="size"):
+        parse_frozen_manifest(" " * (1024 * 1024 + 1))
+
+
+def test_bundle_descriptor_enforces_generated_and_aggregate_size_bounds(monkeypatch) -> None:
+    monkeypatch.setattr("algua.registry.artifact_contract.MAX_FILE_BYTES", 4)
+    monkeypatch.setattr("algua.registry.artifact_contract.MAX_BUNDLE_BYTES", 6)
+    with pytest.raises(ValueError, match="per-file"):
+        BundleDescriptor.from_files((ArtifactFile("x", "100644", 5, "1" * 64),))
+    with pytest.raises(ValueError, match="aggregate"):
+        BundleDescriptor.from_files((
+            ArtifactFile("x", "100644", 4, "1" * 64),
+            ArtifactFile("y", "100644", 3, "2" * 64),
+        ))
 
 
 @pytest.mark.parametrize(

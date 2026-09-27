@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from algua.registry.artifact_contract import FrozenManifest
 from algua.registry.artifact_errors import (
     FrozenBundleCorrupt,
     FrozenDescriptorConflict,
@@ -13,6 +12,7 @@ from algua.registry.artifact_errors import (
 from algua.registry.artifact_store import ArtifactStoreError, verify_bundle
 from algua.registry.deployment import DeploymentError
 from algua.registry.environment_store import EnvironmentStoreError, verify_published_environment
+from algua.registry.frozen_manifest_contract import FrozenManifest
 from algua.registry.store import SqliteStrategyRepository
 
 

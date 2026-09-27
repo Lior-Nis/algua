@@ -102,6 +102,40 @@ def test_clean_head_rejects_untracked_symlink(repo: Path) -> None:
         assert_clean_head(repo)
 
 
+def test_clean_head_rejects_untracked_empty_directory(repo: Path) -> None:
+    (repo / "algua/shadow").mkdir()
+    with pytest.raises(FrozenSourceError, match="untracked"):
+        assert_clean_head(repo)
+
+
+def test_clean_head_allows_only_recognized_generated_cache(repo: Path) -> None:
+    cache = repo / "algua/__pycache__"
+    cache.mkdir()
+    (cache / "__init__.cpython-312.pyc").write_bytes(b"generated")
+    assert assert_clean_head(repo) == _git(repo, "rev-parse", "HEAD")
+    (cache / "foreign.pyc").write_bytes(b"generated")
+    with pytest.raises(FrozenSourceError, match="untracked"):
+        assert_clean_head(repo)
+
+
+def test_export_checks_blob_size_before_reading(monkeypatch, tmp_path: Path) -> None:
+    oid = "a" * 40
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(_root, *args, max_bytes):
+        calls.append(args)
+        if args[0] == "ls-tree":
+            return f"100644 blob {oid}\talgua/x.py\0".encode()
+        if args[:2] == ("cat-file", "-s"):
+            return str(64 * 1024 * 1024 + 1).encode()
+        raise AssertionError("oversized blob bytes were read")
+
+    monkeypatch.setattr("algua.registry.frozen_source._git", fake_git)
+    with pytest.raises(FrozenSourceError, match="per-file"):
+        export_source(tmp_path, "b" * 40)
+    assert not any(args[:2] == ("cat-file", "blob") for args in calls)
+
+
 def test_asset_rejection_does_not_dereference_model_handle() -> None:
     class ExplosiveHandle:
         @property

@@ -8,16 +8,17 @@ from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
 from algua.registry.artifact_contract import (
     DESCRIPTOR_VERSION,
     FROZEN_WIRE,
+    MAX_MANIFEST_BYTES,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
     EnvironmentDescriptor,
     EnvironmentKey,
-    FrozenManifest,
     InterpreterIdentity,
     _require_keys,
     _require_str,
     canonical_json,
 )
+from algua.registry.frozen_manifest_contract import FrozenManifest
 
 
 def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -43,6 +44,8 @@ def _parse_argv(value: Any) -> tuple[str, ...]:
 
 
 def parse_frozen_manifest(raw: str) -> FrozenManifest:
+    if len(raw.encode("utf-8")) > MAX_MANIFEST_BYTES:
+        raise ValueError("frozen manifest exceeds the canonical size bound")
     try:
         payload = json.loads(raw, object_pairs_hook=_no_duplicates)
     except json.JSONDecodeError as exc:

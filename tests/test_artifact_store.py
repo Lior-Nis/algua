@@ -64,18 +64,42 @@ def test_concurrent_different_digests_publish_separate_objects(tmp_path: Path) -
     verify_bundle(tmp_path, other)
 
 
-@pytest.mark.parametrize("boundary", ["stage", "rename", "parent_fsync"])
+@pytest.mark.parametrize(
+    "boundary", ["write", "file_fsync", "seal", "tree_fsync", "rename", "parent_fsync"],
+)
 def test_faults_never_leave_partial_published_object(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str,
 ) -> None:
-    if boundary == "stage":
-        original = artifact_store._write_stage
+    if boundary == "write":
+        original_open = artifact_store.os.open
 
-        def fail_after_stage(*args, **kwargs):
-            original(*args, **kwargs)
-            raise OSError("injected after stage")
+        def fail_write(path, flags, *args, **kwargs):
+            if flags & artifact_store.os.O_WRONLY:
+                raise OSError("injected write")
+            return original_open(path, flags, *args, **kwargs)
 
-        monkeypatch.setattr(artifact_store, "_write_stage", fail_after_stage)
+        monkeypatch.setattr(
+            artifact_store.os, "open", fail_write,
+        )
+    elif boundary == "file_fsync":
+        monkeypatch.setattr(
+            artifact_store.os, "fsync",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected file fsync")),
+        )
+    elif boundary == "seal":
+        original_chmod = Path.chmod
+
+        def fail_seal(path, mode, *args, **kwargs):
+            if mode in {0o444, 0o555}:
+                raise OSError("injected seal")
+            return original_chmod(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "chmod", fail_seal)
+    elif boundary == "tree_fsync":
+        monkeypatch.setattr(
+            artifact_store, "fsync_tree",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected tree fsync")),
+        )
     elif boundary == "rename":
         monkeypatch.setattr(artifact_store.os, "rename", lambda *_: (_ for _ in ()).throw(
             OSError("injected rename")))
@@ -118,3 +142,29 @@ def test_verify_rejects_extra_file_symlink_and_hardlink(tmp_path: Path) -> None:
 def test_locator_resolution_rejects_untrusted_paths(tmp_path: Path, locator: str) -> None:
     with pytest.raises(ArtifactStoreError):
         resolve_locator(tmp_path, locator, expected_digest="a" * 64, kind="bundles")
+
+
+def test_locator_resolution_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "frozen").symlink_to(outside, target_is_directory=True)
+    locator = "frozen/bundles/sha256/aa/" + "a" * 64
+    with pytest.raises(ArtifactStoreError, match="ancestor"):
+        resolve_locator(tmp_path, locator, expected_digest="a" * 64, kind="bundles")
+
+
+def test_verify_rejects_empty_directory_and_oversized_file(tmp_path: Path, monkeypatch) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    root.chmod(0o755)
+    empty = root / "empty"
+    empty.mkdir(mode=0o555)
+    root.chmod(0o555)
+    with pytest.raises(ArtifactStoreError):
+        verify_bundle(tmp_path, _descriptor())
+    root.chmod(0o755)
+    empty.rmdir()
+    root.chmod(0o555)
+
+    monkeypatch.setattr(artifact_store, "MAX_FILE_BYTES", 1)
+    with pytest.raises(ArtifactStoreError):
+        verify_bundle(tmp_path, _descriptor())
