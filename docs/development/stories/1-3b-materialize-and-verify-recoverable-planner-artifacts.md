@@ -127,12 +127,12 @@ These identities are non-cyclic. An environment-only change does not change `bun
   - [x] Add literal golden vectors for bundle, build inputs, environment key/inventory/environment
     and outer manifest, including correct layer sensitivity and order/mtime/root invariance.
   - [x] Preserve existing working-tree manifest canonical bytes and verification tests.
-- [ ] Export and validate source/build inputs from exact Git objects (AC1–AC3).
-  - [ ] Add binary-safe `ls-tree` parsing and blob reads for accepted source and root build inputs;
+- [x] Export and validate source/build inputs from exact Git objects (AC1–AC3).
+  - [x] Add binary-safe `ls-tree` parsing and blob reads for accepted source and root build inputs;
     never read their bytes through checkout paths.
-  - [ ] Enforce clean current full-OID HEAD, source-shadow detection, modes, path normalization/
+  - [x] Enforce clean current full-OID HEAD, source-shadow detection, modes, path normalization/
     collision/portability rules and every protected size/count bound.
-  - [ ] Reject unsupported assets before external path/byte access and prove no publication/row.
+  - [x] Reject unsupported assets before external path/byte access and prove no publication/row.
 - [ ] Implement the immutable content store (AC4, AC11).
   - [ ] Add exact digest-derived locator resolution beneath trusted `Settings.data_dir` with
     component/type/containment checks.
@@ -223,20 +223,27 @@ uv run lint-imports
   atomicity, persistence, CLI, recovery and authority semantics were closed normatively.
 - Task 1 red phase failed on the absent `artifact_contract` module. Green phase added typed values,
   strict canonical parsing and literal vectors; 33 focused tests and the full 4,086-test suite pass.
+- Task 2 red phase failed on the absent `frozen_source` module. Green phase added binary Git-object
+  export, strict path/mode/bound checks, clean-HEAD shadow detection and pre-dereference asset refusal;
+  21 focused tests and the full 4,098-test suite pass.
 
 ### Completion Notes
 
 - Task 1 complete: non-cyclic bundle/build-input/environment/manifest identities are typed and
   versioned, parsing rejects noncanonical/duplicate/unknown input, and working-tree compatibility is
   unchanged. No filesystem, database, deployment or runtime behavior is introduced yet.
+- Task 2 complete: source and build inputs are read from the exact commit object database, unsafe or
+  ambiguous trees fail closed, and unsupported model content is refused before external access.
 
 ### File List
 
 - `algua/registry/artifact_contract.py`
 - `algua/registry/artifact_manifest.py`
+- `algua/registry/frozen_source.py`
 - `docs/development/sprint-status.yaml`
 - `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
 - `tests/test_frozen_artifact_contract.py`
+- `tests/test_frozen_source.py`
 
 ### Change Log
 
@@ -244,3 +251,4 @@ uv run lint-imports
   the bounded non-activating implementation story for readiness review.
 - 2026-09-27: Passed BMAD implementation readiness and moved to `ready-for-dev`.
 - 2026-09-27: Started implementation and completed the pure frozen identity/manifest contract.
+- 2026-09-27: Added exact Git-object source/build-input export and source-only admission checks.
