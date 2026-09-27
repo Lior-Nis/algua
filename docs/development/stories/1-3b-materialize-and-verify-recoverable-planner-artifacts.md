@@ -140,12 +140,12 @@ These identities are non-cyclic. An environment-only change does not change `bun
     no-overwrite rename and final verification without replacement helpers.
   - [x] Cover same/different-digest races, winner reuse, corrupt existing targets and fault injection
     at every write/fsync/seal/rename boundary; delete only owned staging content.
-- [ ] Provision and verify the shared planner environment (AC5–AC7).
+- [x] Provision and verify the shared planner environment (AC5–AC7).
   - [x] Build from private committed inputs using exact tested uv argv/environment and current
     interpreter; reject resolution, project/local installs, unsupported lock entries and downloads.
   - [x] Generate/verify the complete installed inventory, keyed interpreter facts, permitted
     interpreter links, absence of hardlinks/writable content and absence of Algua/checkout imports.
-  - [ ] Re-run verification with the published interpreter at its final locator and test offline
+  - [x] Re-run verification with the published interpreter at its final locator and test offline
     recovery plus sharing/separation cases.
 - [ ] Record and retrieve the frozen descriptor without activation (AC1, AC9, AC11).
   - [ ] Reuse the current immutable ledger and denormalized fields; add typed frozen dispatch without
@@ -232,6 +232,8 @@ uv run lint-imports
 - Task 4 provisioning/inventory red tests locked exact uv policy, scrubbed environment, lock-source
   rejection, installed inventory and isolated interpreter verification. Twelve focused tests and the
   full 4,121-test suite pass; atomic environment publication remains unchecked.
+- Task 4 final publication added sealed atomic environment reuse and post-rename execution checks;
+  26 combined focused tests and the full 4,124-test suite pass.
 
 ### Completion Notes
 
@@ -242,20 +244,22 @@ uv run lint-imports
   ambiguous trees fail closed, and unsupported model content is refused before external access.
 - Task 3 complete: bundle publication is atomic and reusable under races, detects corruption and
   permission/link drift without repair, and leaves only complete published objects across faults.
-- Task 4 partial: private exact-lock provisioning and environment/inventory verification are complete;
-  the task remains open until final-locator atomic publication and offline recovery pass.
+- Task 4 complete: private exact-lock provisioning, complete environment inventory, sealed atomic
+  publication, final-locator interpreter execution and offline reuse all fail closed on drift.
 
 ### File List
 
 - `algua/registry/artifact_contract.py`
 - `algua/registry/artifact_manifest.py`
 - `algua/registry/artifact_store.py`
+- `algua/registry/environment_store.py`
 - `algua/registry/frozen_source.py`
 - `algua/registry/planner_environment.py`
 - `docs/development/sprint-status.yaml`
 - `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
 - `tests/test_frozen_artifact_contract.py`
 - `tests/test_artifact_store.py`
+- `tests/test_environment_store.py`
 - `tests/test_frozen_source.py`
 - `tests/test_planner_environment.py`
 
@@ -268,3 +272,4 @@ uv run lint-imports
 - 2026-09-27: Added exact Git-object source/build-input export and source-only admission checks.
 - 2026-09-27: Added durable content-addressed bundle publication and offline verification.
 - 2026-09-27: Added pinned uv provisioning policy and isolated environment inventory verification.
+- 2026-09-27: Completed atomic environment publication and final-locator verification.
