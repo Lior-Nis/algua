@@ -6,8 +6,9 @@ trusts timestamp-validated cached bytecode (a same-size, same-mtime edit keeps a
 valid), and a failure part-way leaves a mixed-version closure. The refresh therefore re-imports
 the root as FRESH module objects after purging the package's bytecode, and restores the previous
 module state if anything fails. A cyclic static import component has no dependency-safe
-execution order, and a symlinked source path escapes the package-wide bytecode purge, so both
-fail closed before anything is purged or executed.
+execution order, and a symlink anywhere in the package tree (which a dynamic import can reach
+even outside the static closure) escapes the package-wide bytecode purge, so both fail closed
+before anything is purged or executed.
 
 Concurrency: the complete transaction runs under a private module lock shared ONLY by the
 supported Algua callers (``refresh_package_closure`` and ``serialized_import``, which the strategy
@@ -78,6 +79,7 @@ def _refresh_locked(package: str, root: str) -> ModuleType:
     locations = list(package_spec.submodule_search_locations)
     for location in locations:
         _require_unlinked(location, package)
+        _require_unlinked_tree(location, package)
     _require_acyclic(_static_closure(package, root))
     _purge_package_bytecode(locations)
 
@@ -131,6 +133,21 @@ def _require_unlinked(path: str, name: str) -> None:
     lexical = Path(os.path.abspath(path))
     if any(candidate.is_symlink() for candidate in (lexical, *lexical.parents)):
         raise ModuleRefreshError(f"{name!r} source lies at or under a symlink", name=name)
+
+
+def _require_unlinked_tree(location: str, name: str) -> None:
+    """Fail closed if ANY entry of the complete tree under ``location`` is a symlink (file,
+    directory or dangling), scanning without following links: a dynamic import can reach any
+    file, not only the static closure, and the bytecode purge never descends into a link."""
+    pending = [location]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    raise ModuleRefreshError(
+                        f"{name!r} source tree contains a symlink: {entry.name!r}", name=name)
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
 
 
 def _within(name: str, package: str) -> bool:

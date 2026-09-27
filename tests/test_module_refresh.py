@@ -337,6 +337,48 @@ def test_symlinked_family_source_paths_fail_closed_before_any_purge(
             del sys.modules[key]
 
 
+@pytest.mark.parametrize(
+    "case", ["dynamic-subpackage", "dynamic-module", "unreached-nested-file", "dangling"])
+def test_any_symlink_in_the_family_tree_fails_closed_before_any_purge(
+        family, tmp_path, monkeypatch, case) -> None:
+    """A dynamic ``importlib``/``__import__`` edge is invisible to the static closure, so the
+    COMPLETE family tree is scanned without following links and any symlink entry is refused
+    before discovery, purge or execution."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "dyn").mkdir(parents=True)
+    (elsewhere / "dyn" / "__init__.py").write_text("")
+    (elsewhere / "dyn" / "mod.py").write_text("VALUE = 1\n")
+    (elsewhere / "other.py").write_text("VALUE = 1\n")
+    family.write("strat", "VALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    if case == "dynamic-subpackage":
+        (family.dir / "dyn").symlink_to(elsewhere / "dyn", target_is_directory=True)
+        family.write("strat", (
+            "import importlib\nVALUE = importlib.import_module(__package__ + '.dyn.mod').VALUE\n"))
+    elif case == "dynamic-module":
+        (family.dir / "other.py").symlink_to(elsewhere / "other.py")
+        family.write("strat", "VALUE = __import__(__package__ + '.other', fromlist=['_']).VALUE\n")
+    elif case == "unreached-nested-file":
+        (family.dir / "sub").mkdir()
+        (family.dir / "sub" / "__init__.py").write_text("")
+        (family.dir / "sub" / "deep.py").symlink_to(elsewhere / "other.py")
+    else:
+        (family.dir / "broken").symlink_to(tmp_path / "missing")
+    before = family.entries()
+    cached = Path(py_compile.compile(str(family.dir / "strat.py")))
+
+    def discovery(*_args: object) -> None:
+        raise AssertionError("source discovery ran before the family-tree symlink scan")
+
+    monkeypatch.setattr(module_refresh, "_static_closure", discovery)
+    with pytest.raises(ModuleRefreshError, match="symlink"):
+        _refresh(family)
+
+    assert cached.is_file(), "a refused refresh must not purge anything"
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
 def test_a_symlinked_search_location_is_refused_before_source_discovery(
         family, tmp_path, monkeypatch) -> None:
     linked = tmp_path / "linked"

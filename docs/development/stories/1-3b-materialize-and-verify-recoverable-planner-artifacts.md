@@ -289,7 +289,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Snapshot and restore every affected module's direct parent binding exactly so
   rollback cannot delete a pre-existing binding when attempted code replaces its child module
   [algua/primitives/module_refresh.py:88]
-- [ ] [Review][Patch] Reject every symlink entry in the complete family tree before purge/import so
+- [x] [Review][Patch] Reject every symlink entry in the complete family tree before purge/import so
   a dynamic `importlib`/`__import__` edge cannot reach stale bytecode outside the static closure
   [algua/primitives/module_refresh.py:146]
 - [ ] [Review][Patch] Reject lexical parent traversal before normalization so a `symlink/..` search
