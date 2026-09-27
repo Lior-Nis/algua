@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +10,7 @@ from algua.registry.artifact_contract import (
     _digest,
     _inventory_payload,
     _require_digest,
+    _utf8_nfc,
     canonical_relative_path,
 )
 
@@ -90,9 +90,10 @@ class EnvironmentKey:
                 raise ValueError(
                     f"installer {label} argv must be a non-empty tuple of non-empty strings")
         # Canonical JSON NFC-normalizes strings: a non-NFC value would share its key digest with a
-        # distinct retained value, so it is refused rather than silently aliased.
+        # distinct retained value, so it is refused rather than silently aliased. A lone surrogate
+        # (not UTF-8 text) fails here too, not later when the key digest is first encoded.
         if any(
-            unicodedata.normalize("NFC", text) != text
+            _utf8_nfc(text, "installer identity and argv strings") != text
             for text in (installer, *self.create_argv, *self.sync_argv)
         ):
             raise ValueError("installer identity and argv strings must be NFC-normalized")

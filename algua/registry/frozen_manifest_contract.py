@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +16,7 @@ from algua.registry.artifact_contract import (
     BundleDescriptor,
     _digest,
     _require_digest,
+    _utf8_nfc,
     canonical_json,
 )
 from algua.registry.environment_contract import EnvironmentDescriptor
@@ -45,7 +45,7 @@ class FrozenManifest:
                 raise ValueError("universe name must be a string or null")
             # Retain the canonical-JSON form so the ledger projection cannot disagree with it.
             object.__setattr__(
-                self, "universe_name", unicodedata.normalize("NFC", self.universe_name))
+                self, "universe_name", _utf8_nfc(self.universe_name, "universe name"))
         if not isinstance(self.bundle, BundleDescriptor) or not isinstance(
             self.environment, EnvironmentDescriptor,
         ):

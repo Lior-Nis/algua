@@ -27,9 +27,18 @@ _DRIVE = re.compile(r"^[A-Za-z]:")
 _FILE_MODES = frozenset({"100644", "100755"})
 
 
+def _utf8_nfc(value: str, label: str) -> str:
+    """NFC form of ``value``; a lone surrogate is not UTF-8 text and fails as a plain ValueError."""
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{label} must be valid UTF-8 text") from None
+    return unicodedata.normalize("NFC", value)
+
+
 def _normalized(value: Any) -> Any:
     if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
+        return _utf8_nfc(value, "canonical JSON text")
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
@@ -43,7 +52,7 @@ def _normalized(value: Any) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError("canonical JSON object keys must be strings")
-            normalized = unicodedata.normalize("NFC", key)
+            normalized = _utf8_nfc(key, "canonical JSON text")
             if normalized in result:
                 raise ValueError("canonical JSON keys collide after normalization")
             result[normalized] = _normalized(item)

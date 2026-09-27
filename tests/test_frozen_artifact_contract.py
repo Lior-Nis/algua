@@ -481,3 +481,50 @@ def test_bundle_count_bound_precedes_building_or_hashing_the_inventory(monkeypat
     entry = ArtifactFile("x", "100644", 1, _SHA)
     with pytest.raises(ValueError, match="count"):
         BundleDescriptor.from_files((entry,) * (MAX_BUNDLE_FILES + 1))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"create_argv": ("uv", "venv-\ud800")}, {"sync_argv": ("uv", "\udfff")},
+        {"uv_version": "uv \ud800"},
+    ],
+)
+def test_environment_key_rejects_surrogate_installer_strings_at_construction(changes) -> None:
+    """A lone surrogate is not UTF-8 text: it must fail construction as a plain ValueError, not
+    later as a UnicodeEncodeError when the key digest is first computed."""
+    with pytest.raises(ValueError, match="installer") as caught:
+        _key(**changes)
+    assert type(caught.value) is ValueError
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"universe_name": "liquid-\ud800"},
+        {"resolved_config": {"name": "alpha-\ud800"}},
+        {"resolved_config": {"\udfff": 1}},
+        {"resolved_config": {"params": {"symbols": ["AAPL", "\ud83d"]}}},
+    ],
+)
+def test_frozen_manifest_rejects_surrogate_text_at_construction(changes) -> None:
+    manifest = _manifest()
+    fields = {
+        "source_ref": manifest.source_ref, "code_hash": manifest.code_hash,
+        "config_hash": manifest.config_hash, "dependency_hash": manifest.dependency_hash,
+        "resolved_config": manifest.resolved_config, "universe_name": manifest.universe_name,
+        "bundle": manifest.bundle, "environment": manifest.environment,
+    }
+    fields.update(changes)
+    with pytest.raises(ValueError, match="UTF-8") as caught:
+        FrozenManifest(**fields)
+    assert type(caught.value) is ValueError
+
+
+@pytest.mark.parametrize("value", ["\ud800", {"k\udfff": 1}, [{"v": "\ud83d"}]])
+def test_canonical_json_rejects_surrogate_text_with_a_stable_error(value) -> None:
+    from algua.registry.artifact_contract import canonical_json
+
+    with pytest.raises(ValueError, match="UTF-8") as caught:
+        canonical_json(value)
+    assert type(caught.value) is ValueError
