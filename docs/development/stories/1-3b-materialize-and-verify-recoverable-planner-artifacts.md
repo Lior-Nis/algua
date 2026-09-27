@@ -252,6 +252,21 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Inspect repository-wide hidden Git index flags without imposing the
   source-entry aggregate byte bound on the complete repository index
   [algua/registry/frozen_source.py:201]
+- [ ] [Review][Patch] Purge cached bytecode for newly imported strategy-family helpers before any
+  warm refresh executes current source [algua/primitives/module_refresh.py:24]
+- [ ] [Review][Patch] Detect cyclic strategy-family import components and fail closed instead of
+  claiming an arbitrary DFS order is dependency-safe [algua/primitives/module_refresh.py:36]
+- [ ] [Review][Patch] Remove globals deleted from current source when refreshing a module rather
+  than retaining them through `importlib.reload` dictionary reuse
+  [algua/primitives/module_refresh.py:31]
+- [ ] [Review][Patch] Roll back the complete strategy-family module state if any closure member
+  fails during refresh so later callers cannot observe a mixed-version closure
+  [algua/primitives/module_refresh.py:31]
+- [ ] [Review][Patch] Reject surrogate-bearing installer arguments, universe names and resolved
+  configuration during direct typed construction with stable ValueError failures
+  [algua/registry/environment_contract.py:85]
+- [ ] [Review][Patch] Add the identity-critical module refresh seam to CODEOWNERS and the repository
+  hygiene protection set [algua/primitives/module_refresh.py:18]
 
 ## Development notes
 
