@@ -336,6 +336,15 @@ uv run lint-imports
   distributions and 25,596 files of the repository environment satisfy the stricter identities.
   Every new guard was mutation-checked; a redundant duplicate count check was removed. The full
   4,325-test suite, ruff, mypy and all 28 import contracts pass.
+- Third review round: all 8 accepted patches first failed red. The closure-order finding was
+  sharper than stated: completed imports and reloads both move a module to the end of
+  `sys.modules`, so order is dependency-first until a helper loaded earlier is edited to import a
+  module that another family member imported independently; the red case reproduces exactly that.
+  The stale-bytecode red case writes a timestamp pyc, then restores the old size and mtime. The
+  scan of a streamed index is proven chunk-boundary independent and bounded to under 1 MiB of
+  retained memory for a 32 MiB record. Every new guard was mutation-checked (17 mutations, all
+  killed; one survivor exposed an unexercised single-chunk retention path, now covered). All 152
+  locked third-party distributions stay unique under PEP 503 canonicalization.
 
 ### Completion Notes
 
@@ -365,6 +374,18 @@ uv run lint-imports
   version, count and argv typing. Environment identity values moved to the protected
   `environment_contract.py` to keep both contract modules below the size floor. Golden digest
   vectors, working-tree descriptors, schema and every authority wall are unchanged.
+- Third review round complete: the warm strategy-closure refresh purges each module's cached
+  bytecode and reloads in the dependency-first order of its current source's static family
+  imports, the strategy module last. That machinery is the new stdlib-only
+  `algua/primitives/module_refresh.py` leaf, carved out so `loader.py` stays below the size floor.
+  Installer identity and argv strings must be NFC; lone-surrogate manifest text fails as the
+  parser's plain `ValueError`; `FrozenManifest` retains its NFC universe name, so JSON and ledger
+  columns agree. A non-NFC gate universe still fails recording closed through the existing exact
+  qualification comparison. Distribution names are PEP 503 canonical before forbidden-name and
+  uniqueness checks, and a canonical collision is `EnvironmentIncompatible`. The bundle count and
+  size bounds precede inventory payload work. The index-flag scan streams the whole repository
+  index with bounded retention, without the source aggregate cap. Golden digest vectors, schema,
+  working-tree descriptors and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -389,6 +410,7 @@ uv run lint-imports
 - `algua/registry/store/artifacts.py`
 - `algua/registry/store/deployment.py`
 - `algua/strategies/loader.py`
+- `algua/primitives/module_refresh.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
@@ -423,3 +445,7 @@ uv run lint-imports
 - 2026-09-28: Addressed all 11 second-round review patches test-first (warm CONFIG refresh, bounded
   Git streaming, hidden index flags, strict artifact/environment/manifest typing), carved the
   protected environment identity contract and kept the full root gate green.
+- 2026-09-28: Addressed all 8 third-round review patches test-first (stale-bytecode and
+  dependency-first closure refresh, NFC installer strings, surrogate-safe parsing, PEP 503
+  distribution names, retained NFC universe, bound-first bundle inventory, streamed index-flag
+  scan); the full 4,363-test root gate, ruff, mypy and all 28 import contracts pass.
