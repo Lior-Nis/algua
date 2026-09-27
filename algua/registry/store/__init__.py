@@ -22,6 +22,11 @@ from algua.registry.repository import (
     StrategyRecord as StrategyRecord,
 )
 from algua.registry.store.approvals import ApprovalLedgerMixin
+from algua.registry.store.artifacts import (
+    ArtifactLedgerMixin,
+    ArtifactRecord,
+    FrozenQualification,
+)
 from algua.registry.store.backtest_returns import BacktestReturnsLedgerMixin
 from algua.registry.store.crud import CrudMixin
 from algua.registry.store.deployment import DeploymentLedgerMixin, DeploymentRecord
@@ -37,8 +42,10 @@ from algua.registry.store.search_breadth import SearchBreadthLedgerMixin
 
 __all__ = [
     "AGENT_NOVEL_MINT_CAP",
+    "ArtifactRecord",
     "SqliteStrategyRepository",
     "DeploymentRecord",
+    "FrozenQualification",
     "StrategyExists",
     "StrategyNotFound",
     "StrategyRecord",
@@ -46,6 +53,7 @@ __all__ = [
 
 
 class SqliteStrategyRepository(
+    ArtifactLedgerMixin,
     DeploymentLedgerMixin,
     CrudMixin,
     ApprovalLedgerMixin,

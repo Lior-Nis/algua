@@ -66,43 +66,7 @@ class DeploymentLedgerMixin:
             consume_gate_id: int | None, consume_forward_gate_id: int | None, now: str,
             *, revoke_allocation: bool = False, live_authorization=None,
         ) -> StrategyRecord: ...
-
-    def resolve_deployment_artifact_locked(self, manifest: DeploymentManifest) -> int:
-        """Insert a descriptor or verify the byte-identical row already at its digest."""
-        row = self._conn.execute(
-            "SELECT * FROM deployment_artifacts WHERE manifest_digest=?",
-            (manifest.manifest_digest,),
-        ).fetchone()
-        if row is not None:
-            immutable_fields = (
-                "manifest_digest", "manifest_json", "code_hash", "config_hash",
-                "dependency_hash", "resolved_config_json", "universe_name",
-                "environment_digest", "python_implementation", "python_version", "abi_tag",
-                "platform_tag", "planner_protocol_version", "source_kind", "source_ref",
-                "asset_digests_json",
-            )
-            if any(row[field] != getattr(manifest, field) for field in immutable_fields):
-                raise DeploymentError(
-                    "deployment artifact digest collision or corrupt stored descriptor")
-            return int(row["id"])
-        cur = self._conn.execute(
-            "INSERT INTO deployment_artifacts("
-            "manifest_digest, manifest_json, code_hash, config_hash, dependency_hash,"
-            " resolved_config_json, universe_name, environment_digest, python_implementation,"
-            " python_version, abi_tag, platform_tag, planner_protocol_version, source_kind,"
-            " source_ref, asset_digests_json, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                manifest.manifest_digest, manifest.manifest_json, manifest.code_hash,
-                manifest.config_hash, manifest.dependency_hash, manifest.resolved_config_json,
-                manifest.universe_name, manifest.environment_digest,
-                manifest.python_implementation, manifest.python_version, manifest.abi_tag,
-                manifest.platform_tag, manifest.planner_protocol_version, manifest.source_kind,
-                manifest.source_ref, manifest.asset_digests_json, _now(),
-            ),
-        )
-        assert cur.lastrowid is not None
-        return int(cur.lastrowid)
+        def resolve_deployment_artifact_locked(self, manifest: DeploymentManifest) -> int: ...
 
     def active_deployment(self, strategy_id: int) -> DeploymentRecord | None:
         row = self._conn.execute(

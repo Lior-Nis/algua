@@ -147,12 +147,12 @@ These identities are non-cyclic. An environment-only change does not change `bun
     interpreter links, absence of hardlinks/writable content and absence of Algua/checkout imports.
   - [x] Re-run verification with the published interpreter at its final locator and test offline
     recovery plus sharing/separation cases.
-- [ ] Record and retrieve the frozen descriptor without activation (AC1, AC9, AC11).
-  - [ ] Reuse the current immutable ledger and denormalized fields; add typed frozen dispatch without
+- [x] Record and retrieve the frozen descriptor without activation (AC1, AC9, AC11).
+  - [x] Reuse the current immutable ledger and denormalized fields; add typed frozen dispatch without
     changing working-tree parsing. Add fetch-by-manifest-digest.
-  - [ ] Revalidate stage, candidate entry, newest gate, identity and HEAD in one short write
+  - [x] Revalidate stage, candidate entry, newest gate, identity and HEAD in one short write
     transaction; insert or byte-verify only the artifact row.
-  - [ ] Prove no Git/uv/filesystem walk runs under the transaction and DB rollback leaves complete
+  - [x] Prove no Git/uv/filesystem walk runs under the transaction and DB rollback leaves complete
     reusable unreferenced objects.
 - [ ] Add the thin deployment command surface (AC10–AC11).
   - [ ] Add a focused `algua/cli/deployment_cmd.py`, mount it only at the CLI composition root and
@@ -234,6 +234,10 @@ uv run lint-imports
   full 4,121-test suite pass; atomic environment publication remains unchecked.
 - Task 4 final publication added sealed atomic environment reuse and post-rename execution checks;
   26 combined focused tests and the full 4,124-test suite pass.
+- Task 5 red tests locked typed ledger round-trips, candidate/gate revalidation, non-activation,
+  rollback and slow-work transaction boundaries. The first full run exposed the module-size ratchet;
+  splitting the artifact ledger into its own mixin fixed the structural regression. Thirty-seven
+  focused tests and the full 4,133-test suite pass.
 
 ### Completion Notes
 
@@ -246,18 +250,27 @@ uv run lint-imports
   permission/link drift without repair, and leaves only complete published objects across faults.
 - Task 4 complete: private exact-lock provisioning, complete environment inventory, sealed atomic
   publication, final-locator interpreter execution and offline reuse all fail closed on drift.
+- Task 5 complete: preparation publishes deterministic bundle/environment content outside SQLite,
+  repeats identity and clean-HEAD checks, then atomically inserts or byte-verifies only the frozen
+  descriptor after revalidating the candidate episode and gate. Digest lookup is activation-free.
 
 ### File List
 
 - `algua/registry/artifact_contract.py`
 - `algua/registry/artifact_manifest.py`
+- `algua/registry/artifact_preparation.py`
+- `algua/registry/artifact_recording.py`
 - `algua/registry/artifact_store.py`
 - `algua/registry/environment_store.py`
 - `algua/registry/frozen_source.py`
 - `algua/registry/planner_environment.py`
+- `algua/registry/store/__init__.py`
+- `algua/registry/store/artifacts.py`
+- `algua/registry/store/deployment.py`
 - `docs/development/sprint-status.yaml`
 - `docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md`
 - `tests/test_frozen_artifact_contract.py`
+- `tests/test_frozen_artifact_ledger.py`
 - `tests/test_artifact_store.py`
 - `tests/test_environment_store.py`
 - `tests/test_frozen_source.py`
@@ -273,3 +286,5 @@ uv run lint-imports
 - 2026-09-27: Added durable content-addressed bundle publication and offline verification.
 - 2026-09-27: Added pinned uv provisioning policy and isolated environment inventory verification.
 - 2026-09-27: Completed atomic environment publication and final-locator verification.
+- 2026-09-27: Added non-activating frozen preparation, typed immutable-ledger recording and
+  digest-based retrieval with candidate/gate revalidation and transaction-boundary tests.

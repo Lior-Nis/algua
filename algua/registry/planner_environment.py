@@ -44,6 +44,24 @@ class EnvironmentUnavailable(RuntimeError):
     """A selected compatible locked wheel cannot currently be acquired."""
 
 
+def installer_version() -> str:
+    """Return the exact uv version used by the keyed provisioning policy."""
+    uv = shutil.which("uv")
+    if uv is None:
+        raise EnvironmentUnavailable("uv is unavailable for frozen environment acquisition")
+    try:
+        result = subprocess.run(
+            [uv, "--version"], env=scrubbed_environment(Path(uv).parent), check=True,
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EnvironmentUnavailable("uv version could not be determined") from exc
+    version = result.stdout.strip()
+    if not version or len(version) > 128 or "\n" in version:
+        raise EnvironmentIncompatible("uv returned an invalid version identity")
+    return version
+
+
 def current_interpreter_identity() -> InterpreterIdentity:
     return InterpreterIdentity(
         implementation=platform.python_implementation(),
