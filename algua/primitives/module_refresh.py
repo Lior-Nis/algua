@@ -1,78 +1,160 @@
-"""Re-execute an already-imported package closure from its CURRENT source (stdlib only).
+"""Re-import a package closure from its CURRENT source, all-or-nothing (stdlib only).
 
-``importlib.reload`` alone is not a faithful refresh: it trusts timestamp-validated cached
-bytecode (a same-size, same-mtime edit keeps a stale ``.pyc`` valid), and reloading in
-``sys.modules`` order is not dependency-first (that order records when each module last finished
-executing, not what its current source imports), so a module can re-bind a stale value from a
-dependency that has not been reloaded yet.
+``importlib.reload`` is not a faithful refresh: it re-executes into the SAME module dictionary (a
+global deleted from source survives, and a helper's removed name is silently re-imported), it
+trusts timestamp-validated cached bytecode (a same-size, same-mtime edit keeps a stale ``.pyc``
+valid), and a failure part-way leaves a mixed-version closure. The refresh therefore re-imports
+the root as FRESH module objects after purging the package's bytecode, and restores the previous
+module objects if anything fails. A cyclic static import component has no dependency-safe
+execution order, so it fails closed before anything is purged or executed.
 """
 from __future__ import annotations
 
 import ast
 import importlib
+import importlib.machinery
 import importlib.util
+import os
 import sys
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 
 
-def refresh_package_closure(package: str, last: str) -> None:
-    """Reload every loaded module of ``package`` (the package and its submodules) from current
-    source in the dependency-first order of its static imports, then ``last`` (already imported).
+class ModuleRefreshError(ImportError):
+    """The package closure cannot be refreshed safely from its current source."""
 
-    A loaded module with no on-disk source (e.g. a deleted temp module) cannot be reloaded and is
-    skipped. Each module's cached bytecode is purged before its reload."""
-    members = {
-        name: module for name, module in list(sys.modules.items())
-        if (name == package or name.startswith(package + ".")) and name != last
-        and module is not None and _source_exists(module)
-    }
+
+def refresh_package_closure(package: str, root: str) -> None:
+    """Replace every loaded ``package`` module with a fresh import of ``root``'s current closure.
+
+    ``root`` (a module inside ``package``) is imported anew and pulls in, as fresh module objects,
+    exactly the ``package`` modules its current source reaches; other previously loaded
+    ``package`` modules are dropped and re-import fresh on next use. Modules outside ``package``
+    stay warm. On any failure every ``package`` entry of ``sys.modules`` and the parent binding
+    are restored to their previous objects, whose dictionaries were never touched."""
+    if not root.startswith(package + "."):
+        raise ValueError(f"{root!r} is not inside package {package!r}")
     importlib.invalidate_caches()
-    graph = {name: _package_imports(module, set(members)) for name, module in members.items()}
-    for name in [*dependency_first(graph), last]:
-        _purge_cached_bytecode(sys.modules[name])
-        importlib.reload(sys.modules[name])
+    package_spec = importlib.util.find_spec(package)
+    if package_spec is None or package_spec.submodule_search_locations is None:
+        raise ModuleRefreshError(f"{package!r} is not a package", name=package)
+    _require_acyclic(_static_closure(package, root))
+    _purge_package_bytecode(package_spec.submodule_search_locations)
+
+    previous = {name: module for name, module in sys.modules.items() if _within(name, package)}
+    parent_name, _, child = package.rpartition(".")
+    parent = sys.modules.get(parent_name) if parent_name else None
+    unbound = object()
+    parent_binding = getattr(parent, child, unbound)
+    for name in previous:
+        del sys.modules[name]
+    try:
+        importlib.import_module(root)
+    except BaseException:
+        for name in [name for name in sys.modules if _within(name, package)]:
+            del sys.modules[name]
+        sys.modules.update(previous)
+        if parent is not None:
+            if parent_binding is unbound:
+                parent.__dict__.pop(child, None)
+            else:
+                setattr(parent, child, parent_binding)
+        raise
 
 
-def dependency_first(graph: dict[str, set[str]]) -> list[str]:
-    """Deterministic post-order: every module after the modules it imports (cycles tolerated)."""
-    order: list[str] = []
-    seen: set[str] = set()
-
-    def visit(name: str) -> None:
-        if name not in seen:
-            seen.add(name)
-            for dependency in sorted(graph[name]):
-                visit(dependency)
-            order.append(name)
-
-    for name in sorted(graph):
-        visit(name)
-    return order
+def _within(name: str, package: str) -> bool:
+    return name == package or name.startswith(package + ".")
 
 
-def _package_imports(module: object, members: set[str]) -> set[str]:
-    """The ``members`` that ``module``'s current source statically imports (any nesting)."""
-    spec = getattr(module, "__spec__", None)
-    origin, parent = getattr(spec, "origin", ""), getattr(spec, "parent", "")
+def _static_closure(package: str, root: str) -> dict[str, set[str]]:
+    """The ``package`` source modules reachable from ``root``'s current source, each mapped to the
+    ``package`` modules it statically imports (at any nesting) plus its own parent package."""
+    specs: dict[str, ModuleSpec | None] = {}
+
+    def resolve(name: str) -> ModuleSpec | None:
+        if name not in specs:
+            if name == package:
+                specs[name] = importlib.util.find_spec(package)
+            else:
+                parent = resolve(name.rpartition(".")[0])
+                locations = parent.submodule_search_locations if parent is not None else None
+                specs[name] = (
+                    None if locations is None
+                    else importlib.machinery.PathFinder.find_spec(name, list(locations))
+                )
+        return specs[name]
+
+    graph: dict[str, set[str]] = {}
+    pending = [root]
+    while pending:
+        name = pending.pop()
+        if name in graph:
+            continue
+        spec = resolve(name)
+        if spec is None:
+            raise ModuleRefreshError(f"{name!r} has no importable source", name=name)
+        origin = spec.origin
+        if not isinstance(origin, str) or not origin.endswith(".py") or not Path(origin).is_file():
+            raise ModuleRefreshError(f"{name!r} is not a Python source module", name=name)
+        candidates = _source_imports(origin, spec.parent or "")
+        if name != package:
+            candidates.add(name.rpartition(".")[0])
+        graph[name] = {
+            target for target in candidates
+            if _within(target, package) and target != name and resolve(target) is not None
+        }
+        pending.extend(sorted(graph[name]))
+    return graph
+
+
+def _source_imports(origin: str, parent: str) -> set[str]:
+    """Every module name ``origin``'s source statically imports, relative forms resolved."""
     targets: set[str] = set()
     for node in ast.walk(ast.parse(Path(origin).read_bytes(), filename=origin)):
         if isinstance(node, ast.Import):
             targets.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            base = importlib.util.resolve_name("." * node.level + (node.module or ""), parent)
+            try:
+                base = importlib.util.resolve_name("." * node.level + (node.module or ""), parent)
+            except (ImportError, ValueError):
+                continue  # beyond the top-level package: the real import fails on its own
             targets.add(base)
             targets.update(f"{base}.{alias.name}" for alias in node.names)
-    return (targets & members) - {getattr(spec, "name", "")}
+    return targets
 
 
-def _purge_cached_bytecode(module: object) -> None:
-    origin = getattr(getattr(module, "__spec__", None), "origin", None)
-    if isinstance(origin, str) and origin.endswith(".py") and sys.implementation.cache_tag:
-        Path(importlib.util.cache_from_source(origin)).unlink(missing_ok=True)
+def _require_acyclic(graph: dict[str, set[str]]) -> None:
+    """Fail closed on any cyclic import component, naming one cycle deterministically."""
+    done: set[str] = set()
+    path: list[str] = []
+
+    def visit(name: str) -> None:
+        if name in done:
+            return
+        if name in path:
+            cycle = path[path.index(name):] + [name]
+            raise ModuleRefreshError(
+                "cyclic package imports have no dependency-safe order: " + " -> ".join(cycle),
+                name=name,
+            )
+        path.append(name)
+        for dependency in sorted(graph.get(name, ())):
+            visit(dependency)
+        path.pop()
+        done.add(name)
+
+    for name in sorted(graph):
+        visit(name)
 
 
-def _source_exists(module: object) -> bool:
-    origin = getattr(getattr(module, "__spec__", None), "origin", None)
-    if not isinstance(origin, str) or origin in ("built-in", "frozen", "namespace"):
-        return False
-    return Path(origin).exists()
+def _purge_package_bytecode(locations: list[str]) -> None:
+    """Unlink the cached bytecode of EVERY source file under the package, so no module the refresh
+    imports (including one no process has loaded yet) can execute a stale timestamp-valid cache."""
+    if sys.implementation.cache_tag is None:
+        return
+    for location in locations:
+        for directory, _subdirs, files in os.walk(location):
+            for file in files:
+                if file.endswith(".py"):
+                    source = os.path.join(directory, file)
+                    Path(importlib.util.cache_from_source(source)).unlink(missing_ok=True)

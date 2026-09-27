@@ -14,7 +14,7 @@ from algua.portfolio.construction import (
     validate_construction_params,
 )
 from algua.portfolio.overlays import OverlayError, resolve_overlays
-from algua.primitives.module_refresh import refresh_package_closure
+from algua.primitives.module_refresh import ModuleRefreshError, refresh_package_closure
 from algua.strategies.base import (
     LoadedStrategy,
     StrategyConfig,
@@ -62,14 +62,17 @@ def _index() -> dict[str, str]:
 
 
 def _reload_strategy_closure(dotted: str) -> None:
-    """Reload the strategy module ``dotted`` and its author-written first-party helper modules so a
-    warm batch worker (#326) does not carry their module-level state across tasks. A strategy's
-    helpers live as sibling modules in its family package ``algua.strategies.<family>``; reload
-    every already-loaded module under that package, the strategy module LAST (so it re-binds helper
-    references). The family ``__init__`` is reloaded too (a family may keep shared helpers there).
-    The enforced-pure shared layers outside the family package are intentionally left warm. The
-    closure reloads from CURRENT source, dependency-first (see ``primitives.module_refresh``)."""
-    refresh_package_closure(dotted.rsplit(".", 1)[0], last=dotted)  # algua.strategies.<family>
+    """Re-import the strategy module ``dotted`` and its author-written first-party helper modules
+    so a warm batch worker (#326) does not carry their module-level state across tasks. A
+    strategy's helpers live as sibling modules in its family package ``algua.strategies.<family>``;
+    every loaded module under that package is replaced by FRESH module objects imported from
+    CURRENT source (the family ``__init__`` included), all-or-nothing, with stale bytecode purged
+    first (see ``primitives.module_refresh``). The enforced-pure shared layers outside the family
+    package stay warm. A cyclic family import graph fails closed as not found."""
+    try:
+        refresh_package_closure(dotted.rsplit(".", 1)[0], root=dotted)  # algua.strategies.<family>
+    except ModuleRefreshError as exc:
+        raise StrategyNotFound(f"{dotted}: {exc}") from exc
 
 
 def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
@@ -83,18 +86,19 @@ def load_strategy(name: str, *, reload: bool = False) -> LoadedStrategy:
     run-all``, #326) reuses ONE process across many strategies, so ``sys.modules`` would otherwise
     carry a strategy's OWN module-level state into the next task. A strategy's first-party helper
     modules are part of its artifact identity (they are hashed into ``code_hash`` — see
-    ``registry.approvals``) and live as sibling modules in its family package, so we reload every
-    already-loaded ``algua.strategies.<family>.*`` module (helpers first, the strategy module last,
-    so the root re-binds fresh helper references). The enforced-pure shared layers
+    ``registry.approvals``) and live as sibling modules in its family package, so every loaded
+    ``algua.strategies.<family>.*`` module is replaced by a fresh import of the strategy's current
+    closure (see ``_reload_strategy_closure``). The enforced-pure shared layers
     (``algua.features`` / ``portfolio`` / ``contracts``, import-linter-guarded to hold no mutable
     globals) need no reload; the heavy vectorbt/numba stack stays warm."""
     dotted = _index().get(name)
     if dotted is None:
         raise StrategyNotFound(name)
-    module = importlib.import_module(dotted)
     if reload:
         _reload_strategy_closure(dotted)
         module = sys.modules[dotted]
+    else:
+        module = importlib.import_module(dotted)
     if not hasattr(module, "CONFIG") or not hasattr(module, "signal"):
         raise StrategyNotFound(f"{name} is missing CONFIG or signal")
 
@@ -193,7 +197,6 @@ def load_strategy_config(name: str) -> StrategyConfig:
     dotted = _index().get(name)
     if dotted is None:
         raise StrategyNotFound(name)
-    importlib.import_module(dotted)
     _reload_strategy_closure(dotted)
     module = sys.modules[dotted]
     config = getattr(module, "CONFIG", None)

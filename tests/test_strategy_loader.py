@@ -416,35 +416,42 @@ def test_load_strategy_config_reloads_the_family_closure_dependency_first():
             sys.modules.pop(m, None)
 
 
-def test_dependency_first_order_is_deterministic_and_cycle_safe():
-    from algua.primitives.module_refresh import dependency_first as _dependency_first
+def test_load_strategy_config_fails_closed_on_a_cyclic_family_import_graph():
+    """A cyclic static import component has no dependency-safe refresh order: the declared-config
+    read refuses it as not found (frozen preparation's fail-closed mapping) and leaves the warm
+    family closure exactly as it was."""
+    import algua.strategies.momentum as fam
+    from algua.strategies.loader import load_strategy_config
 
-    graph = {
-        "fam": {"fam._a"}, "fam._a": {"fam._b"}, "fam._b": set(),
-        "fam._c": {"fam._d"}, "fam._d": {"fam._c"},
-    }
-    order = _dependency_first(graph)
-    assert sorted(order) == sorted(graph)
-    assert order.index("fam._b") < order.index("fam._a") < order.index("fam")
-    assert order == _dependency_first(dict(reversed(list(graph.items()))))
-
-
-def test_package_import_edges_resolve_absolute_relative_and_submodule_forms(tmp_path):
-    from types import SimpleNamespace
-
-    from algua.primitives.module_refresh import _package_imports
-
-    source = tmp_path / "strat.py"
-    source.write_text(
-        "import fam._a\n"
-        "from . import _b\n"
-        "from ._c import VALUE\n"
-        "from fam import _d as alias\n"
-        "def lazy():\n    from fam._e import thing\n"
-        "import os\nfrom fam.strat import self_reference\n"
+    d = Path(fam.__path__[0])
+    left, right = d / "_cycle_left_probe.py", d / "_cycle_right_probe.py"
+    strat = d / "cycle_probe_strat.py"
+    left.write_text("UNIVERSE = ['AAPL']\n")
+    strat.write_text(
+        "import pandas as pd\n"
+        "from algua.contracts.types import ExecutionContract\n"
+        "from algua.strategies.base import StrategyConfig\n"
+        "from algua.strategies.momentum._cycle_left_probe import UNIVERSE\n"
+        "CONFIG = StrategyConfig(name='cycle_probe_strat', universe=list(UNIVERSE),\n"
+        "    execution=ExecutionContract(rebalance_frequency='1d'),\n"
+        "    construction='equal_weight_positive')\n"
+        "def signal(view, params):\n"
+        "    return pd.Series(dtype='float64')\n"
     )
-    module = SimpleNamespace(
-        __spec__=SimpleNamespace(origin=str(source), parent="fam", name="fam.strat"))
-    members = {"fam", "fam._a", "fam._b", "fam._c", "fam._d", "fam._e", "fam.strat", "fam._z"}
-    assert _package_imports(module, members) == {
-        "fam", "fam._a", "fam._b", "fam._c", "fam._d", "fam._e"}
+    try:
+        assert load_strategy_config("cycle_probe_strat").universe == ["AAPL"]
+        warm = sys.modules["algua.strategies.momentum.cycle_probe_strat"]
+        left.write_text(
+            "from algua.strategies.momentum import _cycle_right_probe\nUNIVERSE = ['MSFT']\n")
+        right.write_text("from algua.strategies.momentum import _cycle_left_probe\n")
+        with pytest.raises(StrategyNotFound, match="cyclic"):
+            load_strategy_config("cycle_probe_strat")
+        assert sys.modules["algua.strategies.momentum.cycle_probe_strat"] is warm
+        assert load_strategy("cycle_probe_strat").config.universe == ["AAPL"]
+    finally:
+        for f in (left, right, strat):
+            f.unlink(missing_ok=True)
+        for m in ("algua.strategies.momentum.cycle_probe_strat",
+                  "algua.strategies.momentum._cycle_left_probe",
+                  "algua.strategies.momentum._cycle_right_probe"):
+            sys.modules.pop(m, None)
