@@ -388,6 +388,32 @@ def test_failed_refresh_discards_new_external_modules_and_their_parent_bindings(
     assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
 
 
+@pytest.mark.parametrize("case", ["replaced-child-module", "pre-existing-value"])
+def test_failed_refresh_restores_each_affected_parent_binding_exactly(family, case) -> None:
+    """Rollback restores every affected module's direct parent binding to its exact prior state:
+    a binding the attempt overwrote (a replaced child module, or a non-module value shadowed by a
+    newly imported child) is reinstated, not deleted."""
+    (family.dir.parent / "ext").mkdir()
+    (family.dir.parent / "ext" / "__init__.py").write_text("")
+    if case == "pre-existing-value":
+        (family.dir.parent / "__init__.py").write_text("ext = 'pre-existing'\n")
+        top = importlib.import_module(family.top)
+        attempt = f"import {family.top}.ext\n"
+    else:
+        top = importlib.import_module(family.top)
+        importlib.import_module(f"{family.top}.ext")
+        attempt = f"import sys\nsys.modules.pop('{family.top}.ext')\nimport {family.top}.ext\n"
+    previous = vars(top)["ext"]
+    previous_entry = sys.modules.get(f"{family.top}.ext")
+    family.write("strat", attempt + "raise RuntimeError('boom')\n")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _refresh(family)
+
+    assert vars(top)["ext"] is previous
+    assert sys.modules.get(f"{family.top}.ext") is previous_entry
+
+
 def test_refresh_returns_the_fresh_root_module(family) -> None:
     family.write("strat", "VALUE = 1\n")
 

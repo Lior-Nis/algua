@@ -286,7 +286,7 @@ These identities are non-cyclic. An environment-only change does not change `bun
   ordering can deadlock against an already-running import; serialize only supported loader/refresh
   callers and document the import-quiescent process precondition
   [algua/primitives/module_refresh.py:52]
-- [ ] [Review][Patch] Snapshot and restore every affected module's direct parent binding exactly so
+- [x] [Review][Patch] Snapshot and restore every affected module's direct parent binding exactly so
   rollback cannot delete a pre-existing binding when attempted code replaces its child module
   [algua/primitives/module_refresh.py:88]
 - [ ] [Review][Patch] Reject every symlink entry in the complete family tree before purge/import so

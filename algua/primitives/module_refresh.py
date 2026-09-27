@@ -57,9 +57,10 @@ def refresh_package_closure(package: str, root: str) -> ModuleType:
     ``root`` (a module inside ``package``) is imported anew and pulls in, as fresh module objects,
     exactly the ``package`` modules its current source reaches; other previously loaded
     ``package`` modules are dropped and re-import fresh on next use. Modules outside ``package``
-    stay warm. On any failure every module the attempt introduced is dropped (with each parent
-    attribute still bound to it), and every previous ``sys.modules`` entry and the ``package``
-    parent binding are restored; the previous family objects' dictionaries were never touched.
+    stay warm. On any failure every ``sys.modules`` entry the attempt introduced or replaced is
+    dropped, every previous entry is reinstated, and each affected module's direct parent binding
+    is restored to its exact prior value or absence; the previous family objects' dictionaries
+    were never touched.
 
     The private refresh lock is held from preflight to commit or rollback, so a supported caller
     waits for the final state; other imports must be quiescent (see the module docstring)."""
@@ -81,40 +82,48 @@ def _refresh_locked(package: str, root: str) -> ModuleType:
     _purge_package_bytecode(locations)
 
     before = dict(sys.modules)
-    parent_name, _, child = package.rpartition(".")
-    parent = sys.modules.get(parent_name) if parent_name else None
-    parent_binding = parent.__dict__.get(child, _ABSENT) if parent is not None else _ABSENT
+    namespaces = _namespaces(before)
     for name in [name for name in before if _within(name, package)]:
         del sys.modules[name]
     try:
         return importlib.import_module(root)
     except BaseException:
-        _restore_modules(before)
-        if parent is not None:
-            if parent_binding is _ABSENT:
-                parent.__dict__.pop(child, None)
-            else:
-                parent.__dict__[child] = parent_binding
+        _restore_modules(before, namespaces)
         raise
 
 
-def _restore_modules(before: dict[str, ModuleType]) -> None:
-    """Drop every ``sys.modules`` entry that differs from ``before`` (plus any parent attribute
-    still bound to such a discarded object), then reinstate ``before``'s entries."""
-    discarded = {
-        name: module for name, module in list(sys.modules.items())
-        if before.get(name, _ABSENT) is not module
+def _namespaces(modules: dict[str, ModuleType]) -> dict[str, dict[str, object]]:
+    """A shallow copy of every module's own ``__dict__`` (read directly, so a module-level
+    ``__getattr__`` cannot manufacture a binding), keyed by module name."""
+    return {
+        name: dict(module.__dict__) for name, module in modules.items()
+        if isinstance(module, ModuleType)
     }
-    for name in discarded:
+
+
+def _restore_modules(
+        before: dict[str, ModuleType], namespaces: dict[str, dict[str, object]]) -> None:
+    """Reinstate exactly ``before``'s ``sys.modules`` entries (dropping every entry the attempt
+    introduced or replaced), then restore each affected module's direct parent binding to its
+    snapshotted state: the previous value, or absence."""
+    affected = {
+        name for name in {*sys.modules, *before}
+        if sys.modules.get(name, _ABSENT) is not before.get(name, _ABSENT)
+    }
+    for name in affected:
         sys.modules.pop(name, None)
-    for name, module in before.items():
-        if sys.modules.get(name, _ABSENT) is not module:
-            sys.modules[name] = module
-    for name, module in discarded.items():
+        if name in before:
+            sys.modules[name] = before[name]
+    for name in affected:
         parent_name, _, child = name.rpartition(".")
         holder = sys.modules.get(parent_name) if parent_name else None
-        if isinstance(holder, ModuleType) and holder.__dict__.get(child, _ABSENT) is module:
-            del holder.__dict__[child]
+        if not isinstance(holder, ModuleType) or parent_name not in namespaces:
+            continue  # a parent the attempt introduced was discarded with its bindings
+        previous = namespaces[parent_name].get(child, _ABSENT)
+        if previous is _ABSENT:
+            holder.__dict__.pop(child, None)
+        else:
+            holder.__dict__[child] = previous
 
 
 def _require_unlinked(path: str, name: str) -> None:
