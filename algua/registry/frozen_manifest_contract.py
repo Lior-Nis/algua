@@ -14,11 +14,11 @@ from algua.registry.artifact_contract import (
     MAX_MANIFEST_BYTES,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
-    EnvironmentDescriptor,
     _digest,
     _require_digest,
     canonical_json,
 )
+from algua.registry.environment_contract import EnvironmentDescriptor
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,14 @@ class FrozenManifest:
         _require_digest(self.code_hash, "code hash", _HEX32)
         _require_digest(self.config_hash, "config hash", _HEX32)
         _require_digest(self.dependency_hash, "dependency hash")
+        if not isinstance(self.resolved_config, dict):
+            raise ValueError("resolved config must be an object")
+        if self.universe_name is not None and not isinstance(self.universe_name, str):
+            raise ValueError("universe name must be a string or null")
+        if not isinstance(self.bundle, BundleDescriptor) or not isinstance(
+            self.environment, EnvironmentDescriptor,
+        ):
+            raise ValueError("frozen manifest bundle and environment must be typed descriptors")
         if self.environment.key.dependency_hash != self.dependency_hash:
             raise ValueError("environment dependency hash disagrees")
         normalized = json.loads(canonical_json(self.resolved_config))

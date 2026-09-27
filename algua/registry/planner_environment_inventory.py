@@ -7,10 +7,12 @@ import os
 import stat
 import subprocess
 import sys
+from email.parser import HeaderParser
 from pathlib import Path
 
-from algua.registry.artifact_contract import (
-    ArtifactFile,
+from algua.registry.artifact_contract import ArtifactFile
+from algua.registry.environment_contract import (
+    BASE_INTERPRETER,
     InstalledDistribution,
     InstalledInventory,
     InterpreterIdentity,
@@ -34,18 +36,19 @@ def scrubbed_environment(binary_path: Path, *, home: Path | None = None) -> dict
 
 
 def _metadata_identity(raw: str) -> InstalledDistribution:
-    fields: dict[str, str] = {}
-    for line in raw.splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            if key in {"Name", "Version"}:
-                fields[key] = value.strip()
-    if set(fields) != {"Name", "Version"}:
+    """Read exactly one Name and Version from the header block, never the description body."""
+    headers = HeaderParser().parsestr(raw)
+    names = headers.get_all("Name") or []
+    versions = headers.get_all("Version") or []
+    if len(names) != 1 or len(versions) != 1:
         raise EnvironmentIncompatible("installed distribution metadata is incomplete")
-    name = fields["Name"].lower().replace("_", "-")
+    name = str(names[0]).strip().lower().replace("_", "-")
     if name == "algua":
         raise EnvironmentIncompatible("installed Algua distribution is forbidden")
-    return InstalledDistribution(name, fields["Version"])
+    try:
+        return InstalledDistribution(name, str(versions[0]).strip())
+    except ValueError as exc:
+        raise EnvironmentIncompatible("installed distribution identity is malformed") from exc
 
 
 def _file_digest(path: Path) -> tuple[int, str]:
@@ -68,7 +71,7 @@ def _interpreter_link(root: Path, path: Path) -> InterpreterLink:
     if raw_target.is_absolute():
         if resolved != base:
             raise EnvironmentIncompatible("interpreter link escapes its keyed base interpreter")
-        target = "base-interpreter"
+        target = BASE_INTERPRETER
     else:
         if resolved != base and root.resolve() not in resolved.parents:
             raise EnvironmentIncompatible("interpreter link escapes its environment")

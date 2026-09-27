@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from algua.registry.artifact_contract import EnvironmentDescriptor, EnvironmentKey
+from algua.registry.environment_contract import EnvironmentDescriptor, EnvironmentKey
 from algua.registry.environment_store import (
     EnvironmentStoreError,
     publish_environment,

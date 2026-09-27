@@ -9,8 +9,8 @@ from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_dir, fsync_file, fsync_parents
 from algua.primitives.flock import file_lock
-from algua.registry.artifact_contract import EnvironmentDescriptor
 from algua.registry.artifact_store import resolve_locator
+from algua.registry.environment_contract import EnvironmentDescriptor
 from algua.registry.planner_environment import (
     EnvironmentIncompatible,
     inventory_environment,

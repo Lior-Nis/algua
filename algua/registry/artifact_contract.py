@@ -11,13 +11,20 @@ from typing import Any
 
 DESCRIPTOR_VERSION = 1
 PLANNER_BOUNDARY_VERSION = 1
-FROZEN_WIRE = {"name": "frozen-planner", "version": 1}
+FROZEN_WIRE_NAME = "frozen-planner"
+FROZEN_WIRE_VERSION = 1
+FROZEN_WIRE = {"name": FROZEN_WIRE_NAME, "version": FROZEN_WIRE_VERSION}
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
+MAX_SOURCE_FILES = 10_000
+MAX_BUNDLE_FILES = MAX_SOURCE_FILES + 2  # exported source plus the two generated files
+MAX_PATH_BYTES = 1_024
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_DRIVE = re.compile(r"^[A-Za-z]:")
+_FILE_MODES = frozenset({"100644", "100755"})
 
 
 def _normalized(value: Any) -> Any:
@@ -75,6 +82,34 @@ def _require_digest(value: Any, label: str, pattern: re.Pattern[str] = _HEX64) -
     return text
 
 
+def canonical_relative_path(value: Any, label: str = "artifact path") -> str:
+    """Return ``value`` only if it is already a canonical portable relative POSIX path."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} must be a non-empty string")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} is not valid UTF-8") from exc
+    if len(encoded) > MAX_PATH_BYTES or "\0" in value or "\\" in value:
+        raise ValueError(f"{label} is unsafe")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError(f"{label} is not NFC-normalized")
+    segments = value.split("/")
+    if (
+        _DRIVE.match(segments[0])
+        or any(segment in {"", ".", ".."} for segment in segments)
+        or any(segment.endswith((".", " ")) for segment in segments)
+    ):
+        raise ValueError(f"{label} is unsafe")
+    return value
+
+
+def _require_count(value: Any, label: str, maximum: int) -> int:
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ValueError(f"{label} must be an exact integer count within its bound")
+    return value
+
+
 @dataclass(frozen=True)
 class ArtifactFile:
     path: str
@@ -83,12 +118,11 @@ class ArtifactFile:
     sha256: str
 
     def __post_init__(self) -> None:
-        if not self.path or unicodedata.normalize("NFC", self.path) != self.path:
-            raise ValueError("artifact path must be non-empty NFC")
-        if self.mode not in {"100644", "100755"}:
+        canonical_relative_path(self.path)
+        if not isinstance(self.mode, str) or self.mode not in _FILE_MODES:
             raise ValueError("artifact mode is unsupported")
-        if isinstance(self.size, bool) or self.size < 0:
-            raise ValueError("artifact size must be non-negative")
+        if type(self.size) is not int or self.size < 0:
+            raise ValueError("artifact size must be an exact non-negative integer")
         _require_digest(self.sha256, "artifact sha256")
 
     def to_dict(self) -> dict[str, Any]:
@@ -141,9 +175,8 @@ class BundleDescriptor:
         expected = f"frozen/bundles/sha256/{self.digest[:2]}/{self.digest}"
         if self.locator != expected or self.inventory_digest != self.digest:
             raise ValueError("bundle locator or inventory digest disagrees")
-        counts = (self.file_count, self.total_bytes)
-        if any(isinstance(value, bool) or value < 0 for value in counts):
-            raise ValueError("bundle counts must be non-negative")
+        _require_count(self.file_count, "bundle file count", MAX_BUNDLE_FILES)
+        _require_count(self.total_bytes, "bundle byte count", MAX_BUNDLE_BYTES)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -151,117 +184,3 @@ class BundleDescriptor:
             "inventory_digest": self.inventory_digest, "file_count": self.file_count,
             "total_bytes": self.total_bytes,
         }
-
-
-@dataclass(frozen=True)
-class InterpreterIdentity:
-    implementation: str
-    version: str
-    cache_tag: str
-    soabi: str
-    platform_tag: str
-    os_name: str
-    machine: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "implementation": self.implementation, "version": self.version,
-            "cache_tag": self.cache_tag, "soabi": self.soabi,
-            "platform_tag": self.platform_tag, "os_name": self.os_name,
-            "machine": self.machine,
-        }
-
-
-@dataclass(frozen=True)
-class EnvironmentKey:
-    build_inputs_digest: str
-    dependency_hash: str
-    interpreter: InterpreterIdentity
-    uv_version: str
-    create_argv: tuple[str, ...]
-    sync_argv: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _require_digest(self.build_inputs_digest, "build inputs digest")
-        _require_digest(self.dependency_hash, "dependency hash")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "build_inputs_digest": self.build_inputs_digest,
-            "dependency_hash": self.dependency_hash,
-            "interpreter": self.interpreter.to_dict(), "uv_version": self.uv_version,
-            "create_argv": list(self.create_argv), "sync_argv": list(self.sync_argv),
-        }
-
-    @property
-    def digest(self) -> str:
-        return _digest("algua.frozen-environment-key", self.to_dict())
-
-
-@dataclass(frozen=True)
-class InstalledDistribution:
-    name: str
-    version: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {"name": self.name, "version": self.version}
-
-
-@dataclass(frozen=True)
-class InterpreterLink:
-    path: str
-    target: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {"path": self.path, "target": self.target}
-
-
-@dataclass(frozen=True)
-class InstalledInventory:
-    distributions: tuple[InstalledDistribution, ...]
-    files: tuple[ArtifactFile, ...]
-    interpreter_links: tuple[InterpreterLink, ...] = ()
-
-    @property
-    def digest(self) -> str:
-        distributions = [item.to_dict() for item in self.distributions]
-        if distributions != sorted(distributions, key=lambda item: (item["name"], item["version"])):
-            raise ValueError("installed distributions must be sorted")
-        links = [item.to_dict() for item in self.interpreter_links]
-        if links != sorted(links, key=lambda item: item["path"]):
-            raise ValueError("interpreter links must be sorted")
-        return _digest(
-            "algua.frozen-installed-inventory",
-            {"distributions": distributions, "files": _inventory_payload(self.files),
-             "interpreter_links": links},
-        )
-
-
-@dataclass(frozen=True)
-class EnvironmentDescriptor:
-    key: EnvironmentKey
-    inventory_digest: str
-    interpreter: InterpreterIdentity
-
-    def __post_init__(self) -> None:
-        _require_digest(self.inventory_digest, "installed inventory digest")
-        if self.key.interpreter != self.interpreter:
-            raise ValueError("verified interpreter disagrees with environment key")
-
-    @property
-    def digest(self) -> str:
-        return _digest("algua.frozen-environment", self.identity_payload())
-
-    @property
-    def locator(self) -> str:
-        return f"frozen/environments/sha256/{self.digest[:2]}/{self.digest}"
-
-    def identity_payload(self) -> dict[str, Any]:
-        return {
-            "key": self.key.to_dict(), "key_digest": self.key.digest,
-            "inventory_digest": self.inventory_digest,
-            "interpreter": self.interpreter.to_dict(),
-        }
-
-    def to_dict(self) -> dict[str, Any]:
-        return {**self.identity_payload(), "digest": self.digest, "locator": self.locator}

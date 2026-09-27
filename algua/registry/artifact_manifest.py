@@ -8,15 +8,18 @@ from algua.contracts.planner import PLANNER_PROTOCOL_VERSION
 from algua.registry.artifact_contract import (
     DESCRIPTOR_VERSION,
     FROZEN_WIRE,
+    FROZEN_WIRE_NAME,
+    FROZEN_WIRE_VERSION,
     MAX_MANIFEST_BYTES,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
+    _require_keys,
+    canonical_json,
+)
+from algua.registry.environment_contract import (
     EnvironmentDescriptor,
     EnvironmentKey,
     InterpreterIdentity,
-    _require_keys,
-    _require_str,
-    canonical_json,
 )
 from algua.registry.frozen_manifest_contract import FrozenManifest
 
@@ -34,33 +37,53 @@ def _parse_interpreter(value: Any) -> InterpreterIdentity:
     raw = _require_keys(value, {
         "implementation", "version", "cache_tag", "soabi", "platform_tag", "os_name", "machine",
     }, "interpreter identity")
-    return InterpreterIdentity(**{key: _require_str(item, key) for key, item in raw.items()})
+    return InterpreterIdentity(**raw)
 
 
 def _parse_argv(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
-        raise ValueError("installer argv must be a non-empty string list")
+    if not isinstance(value, list):
+        raise ValueError("installer argv must be a list")
     return tuple(value)
 
 
-def parse_frozen_manifest(raw: str) -> FrozenManifest:
+def _require_version(value: Any, expected: int, label: str) -> None:
+    """Exact integer equality: JSON ``true`` and ``1.0`` compare equal to ``1`` in Python."""
+    if type(value) is not int or value != expected:
+        raise ValueError(f"unsupported frozen manifest {label}")
+
+
+def _load_canonical(raw: Any) -> Any:
+    if not isinstance(raw, str):
+        raise ValueError("frozen manifest must be text")
     if len(raw.encode("utf-8")) > MAX_MANIFEST_BYTES:
         raise ValueError("frozen manifest exceeds the canonical size bound")
     try:
         payload = json.loads(raw, object_pairs_hook=_no_duplicates)
+        canonical = canonical_json(payload)
     except json.JSONDecodeError as exc:
         raise ValueError("frozen manifest is not valid JSON") from exc
-    if canonical_json(payload) != raw:
+    except RecursionError as exc:
+        raise ValueError("frozen manifest nesting is too deep") from exc
+    if canonical != raw:
         raise ValueError("frozen manifest bytes are not canonical")
-    root = _require_keys(payload, {
+    return payload
+
+
+def parse_frozen_manifest(raw: str) -> FrozenManifest:
+    root = _require_keys(_load_canonical(raw), {
         "descriptor_version", "source_kind", "source_ref", "identity", "resolved_config",
         "universe_name", "bundle", "environment", "assets", "planner_protocol_version",
         "planner_boundary_version", "frozen_wire",
     }, "frozen manifest")
-    if (root["descriptor_version"] != DESCRIPTOR_VERSION or root["source_kind"] != "frozen"
-            or root["assets"] != [] or root["planner_protocol_version"] != PLANNER_PROTOCOL_VERSION
-            or root["planner_boundary_version"] != PLANNER_BOUNDARY_VERSION
-            or root["frozen_wire"] != FROZEN_WIRE):
+    _require_version(root["descriptor_version"], DESCRIPTOR_VERSION, "descriptor version")
+    _require_version(
+        root["planner_protocol_version"], PLANNER_PROTOCOL_VERSION, "planner protocol version")
+    _require_version(
+        root["planner_boundary_version"], PLANNER_BOUNDARY_VERSION, "planner boundary version")
+    wire = _require_keys(root["frozen_wire"], set(FROZEN_WIRE), "frozen wire identity")
+    _require_version(wire["version"], FROZEN_WIRE_VERSION, "frozen wire version")
+    if (root["source_kind"] != "frozen" or root["assets"] != []
+            or wire["name"] != FROZEN_WIRE_NAME):
         raise ValueError("unsupported frozen manifest version or lane")
     identity = _require_keys(root["identity"], {"code_hash", "config_hash", "dependency_hash"},
                              "artifact identity")
@@ -79,7 +102,7 @@ def parse_frozen_manifest(raw: str) -> FrozenManifest:
         build_inputs_digest=key_raw["build_inputs_digest"],
         dependency_hash=key_raw["dependency_hash"],
         interpreter=_parse_interpreter(key_raw["interpreter"]),
-        uv_version=_require_str(key_raw["uv_version"], "uv version"),
+        uv_version=key_raw["uv_version"],
         create_argv=_parse_argv(key_raw["create_argv"]),
         sync_argv=_parse_argv(key_raw["sync_argv"]),
     )
@@ -93,15 +116,9 @@ def parse_frozen_manifest(raw: str) -> FrozenManifest:
     )
     if environment_disagrees:
         raise ValueError("environment descriptor disagrees")
-    resolved_config = root["resolved_config"]
-    if not isinstance(resolved_config, dict):
-        raise ValueError("resolved config must be an object")
-    universe_name = root["universe_name"]
-    if universe_name is not None and not isinstance(universe_name, str):
-        raise ValueError("universe name must be a string or null")
     return FrozenManifest(
         source_ref=root["source_ref"], code_hash=identity["code_hash"],
         config_hash=identity["config_hash"], dependency_hash=identity["dependency_hash"],
-        resolved_config=resolved_config, universe_name=universe_name,
+        resolved_config=root["resolved_config"], universe_name=root["universe_name"],
         bundle=BundleDescriptor(**bundle_raw), environment=environment,
     )

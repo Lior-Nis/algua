@@ -31,6 +31,7 @@
 # publication, environment verification, descriptor recording, offline recovery and bounded CLI
 # error policy. These files define what may later become executable capital-bearing content.
 /algua/registry/artifact_contract.py     @Lior-Nis
+/algua/registry/environment_contract.py  @Lior-Nis
 /algua/registry/artifact_manifest.py     @Lior-Nis
 /algua/registry/frozen_manifest_contract.py @Lior-Nis
 /algua/registry/artifact_store.py        @Lior-Nis

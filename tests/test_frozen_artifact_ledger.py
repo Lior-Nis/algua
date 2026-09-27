@@ -6,17 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from algua.registry.artifact_contract import (
-    ArtifactFile,
-    BundleDescriptor,
-    EnvironmentDescriptor,
-    EnvironmentKey,
-    InterpreterIdentity,
-)
+from algua.registry.artifact_contract import ArtifactFile, BundleDescriptor
 from algua.registry.artifact_preparation import prepare_frozen_artifact
 from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.db import connect, migrate
 from algua.registry.deployment import DeploymentError
+from algua.registry.environment_contract import (
+    EnvironmentDescriptor,
+    EnvironmentKey,
+    InterpreterIdentity,
+)
 from algua.registry.frozen_manifest_contract import FrozenManifest
 from algua.registry.frozen_source import FrozenFile
 from algua.registry.repository import ArtifactIdentity

@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from algua.registry.artifact_contract import (
-    BuildInputs,
+from algua.registry.artifact_contract import BuildInputs
+from algua.registry.environment_contract import (
     EnvironmentKey,
     InstalledInventory,
     InterpreterIdentity,

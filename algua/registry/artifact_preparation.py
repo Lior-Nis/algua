@@ -14,7 +14,6 @@ from algua.registry.artifact_contract import (
     FROZEN_WIRE,
     PLANNER_BOUNDARY_VERSION,
     BundleDescriptor,
-    EnvironmentDescriptor,
     canonical_json,
 )
 from algua.registry.artifact_errors import (
@@ -30,6 +29,7 @@ from algua.registry.artifact_errors import (
 from algua.registry.artifact_recording import frozen_deployment_manifest
 from algua.registry.artifact_store import ArtifactStoreError, publish_bundle
 from algua.registry.deployment import DeploymentError
+from algua.registry.environment_contract import EnvironmentDescriptor
 from algua.registry.environment_store import EnvironmentStoreError, publish_environment
 from algua.registry.frozen_manifest_contract import FrozenManifest
 from algua.registry.frozen_source import (

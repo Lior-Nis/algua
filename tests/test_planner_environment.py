@@ -208,3 +208,30 @@ def test_missing_uv_is_incompatible_not_retryable(monkeypatch) -> None:
 
     with pytest.raises(EnvironmentIncompatible, match="uv"):
         installer_version()
+
+
+def test_distribution_identity_reads_only_the_metadata_header_block() -> None:
+    from algua.registry.planner_environment_inventory import _metadata_identity
+
+    raw = (
+        "Metadata-Version: 2.1\nName: VectorBT_Pro\nVersion: 1.0.0\n\n"
+        "Example output:\nName: (10, 20, ETH-USD), dtype: object\nVersion: nonsense value\n"
+    )
+    identity = _metadata_identity(raw)
+    assert (identity.name, identity.version) == ("vectorbt-pro", "1.0.0")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Name: numpy\nName: numpy\nVersion: 2.3.3\n",
+        "Name: numpy\n\nVersion: 2.3.3\n",
+        "Name: num py\nVersion: 2.3.3\n",
+        "Name: numpy\nVersion: 2 .3\n",
+    ],
+)
+def test_distribution_identity_rejects_ambiguous_or_malformed_headers(raw: str) -> None:
+    from algua.registry.planner_environment_inventory import _metadata_identity
+
+    with pytest.raises(EnvironmentIncompatible):
+        _metadata_identity(raw)
