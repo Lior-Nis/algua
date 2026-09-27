@@ -38,6 +38,8 @@ Do not weaken a contract, delete a test, or `# type: ignore` your way to green �
 - `docs/superpowers/plans/2026-05-29-foundation-command-surface.md` — historical plan for the completed foundation, not the present scope limit.
 - `CLAUDE.md` — the agent operating contract (command surface, golden rules, live-gate summary).
 - `docs/agent/operating.md` — the *why* behind the rules (live-gate rationale, module boundaries, JSON convention).
+- `docs/agent/story-delivery.md` — Claude implementation, Codex review and Todoist mirroring. Read
+  whenever creating, implementing, reviewing or completing a BMAD story.
 - `docs/contracts/bar-schema.md` — **FROZEN** data contract for `DataProvider.get_bars`. The data
   lane's `get_bars` output MUST conform to this exact shape; it is the integration seam with the
   research lane. Do not change it (or `contracts/types.py::DataProvider`) without cross-lane agreement.
