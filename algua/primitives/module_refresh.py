@@ -152,7 +152,10 @@ class _ImportGuard:
     Once the family is prevalidated, the guard also RESOLVES every family module itself, from the
     exact scanned root only: a child is refused before it executes when its parent's search path
     (which a fresh ``__init__`` or member could extend) is not exactly that root, and a family
-    module that is missing from the root or is not Python source is never found elsewhere."""
+    module that is missing from the root or is not Python source is never found elsewhere. Each
+    family name is handed out at most once per transaction: a second resolution (after executed
+    code dropped the first module's entry) would let a stale first object survive beside the
+    certified replacement, so it fails closed."""
 
     def __init__(self) -> None:
         self.bindings: dict[str, tuple[ModuleType, object]] = {}
@@ -167,6 +170,9 @@ class _ImportGuard:
             self.bindings[fullname] = (holder, holder.__dict__.get(child, _ABSENT))
         if self.family is None or not within(fullname, self.family[0]):
             return None
+        if fullname in self.specs:
+            raise ModuleRefreshError(
+                f"{fullname!r} is resolved a second time in one refresh transaction", name=fullname)
         package, location = self.family
         if fullname != package:
             search = _exact_search_path(package, location, parent_name)

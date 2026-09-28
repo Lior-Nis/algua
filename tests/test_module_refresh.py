@@ -1749,3 +1749,53 @@ def test_a_package_subclass_concealing_an_alternate_search_path_never_commits(
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module(f"{family.package}.evil")
     assert f"{family.package}.evil" not in sys.modules
+
+
+_SECOND_RESOLUTIONS = {
+    "reimported-by-import-module": (
+        "import importlib, sys\nfrom . import helper\n"
+        "del sys.modules[helper.__name__]\nimportlib.import_module(helper.__name__)\nVALUE = 1\n"),
+    "reimported-by-import-statement": (
+        "import sys\nfrom . import helper\n"
+        "del sys.modules[helper.__name__]\n__import__(helper.__name__)\nVALUE = 1\n"),
+    "refusal-swallowed": (
+        "import importlib, sys\nfrom . import helper\ndel sys.modules[helper.__name__]\n"
+        "try:\n    importlib.import_module(helper.__name__)\nexcept ImportError:\n    pass\n"
+        "VALUE = 1\n"),
+    "reimported-subpackage-member": (
+        "import importlib, sys\nfrom .sub import inner\n"
+        "del sys.modules[inner.__name__]\nimportlib.import_module(inner.__name__)\nVALUE = 1\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SECOND_RESOLUTIONS))
+def test_a_second_resolution_of_the_same_family_name_never_commits(family, case) -> None:
+    """Refreshed code that imports a family module, drops its ``sys.modules`` entry and imports
+    it again would keep the stale first object while the replacement is the one certified in
+    ``sys.modules`` and on its parent. The guard refuses to hand out a second spec for a name it
+    already resolved in the transaction, so the complete transaction rolls back; code that
+    swallows the refusal still cannot commit a handed-out module with no bound entry."""
+    (family.dir / "sub").mkdir()
+    (family.dir / "sub" / "__init__.py").write_text("")
+    (family.dir / "sub" / "inner.py").write_text("VALUE = 1\n")
+    _assert_never_commits(family, _SECOND_RESOLUTIONS[case])
+
+
+def test_distinct_names_and_repeated_misses_resolve_normally_in_every_transaction(family) -> None:
+    """Only a second HAND-OUT of the same name is refused: distinct family names (a subpackage and
+    its member included) resolve once each, a repeated probe for a missing name is never a
+    duplicate, and a later transaction resolves the same names afresh."""
+    (family.dir / "sub").mkdir()
+    (family.dir / "sub" / "__init__.py").write_text("")
+    (family.dir / "sub" / "inner.py").write_text("VALUE = 2\n")
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", (
+        "import importlib\nfor _ in range(2):\n    try:\n"
+        "        importlib.import_module(__package__ + '.optional')\n"
+        "    except ModuleNotFoundError:\n        pass\n"
+        "from . import helper\nfrom .sub import inner\nVALUE = helper.VALUE + inner.VALUE\n"))
+
+    for _ in range(2):
+        fresh = refresh_package_closure(family.package, f"{family.package}.strat")
+        assert fresh.VALUE == 3 and family.mod("strat") is fresh
+        assert fresh.helper is family.mod("helper") and fresh.inner is family.mod("sub.inner")
