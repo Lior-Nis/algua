@@ -111,10 +111,9 @@ def package_location(package: str, entries: Iterable[object]) -> str:
         base = os.path.join(entry or os.getcwd(), leaf)
         if os.path.isdir(base) or os.path.lexists(base + ".py"):
             require_unlinked(base, package)
-            spec = _spec_at(base, package)
-            if spec is None or spec.submodule_search_locations is None:
-                break
-            return base
+            if os.path.isdir(base) and _is_regular(os.path.join(base, "__init__.py"), package):
+                return base
+            break
     raise ModuleRefreshError(f"{package!r} is not a regular package", name=package)
 
 

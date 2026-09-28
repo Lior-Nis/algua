@@ -1056,7 +1056,7 @@ def test_a_family_that_is_not_a_regular_source_package_is_refused(
         (tmp_path / top / "fam.py").write_text("VALUE = 1\n")
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
-        with pytest.raises(ModuleRefreshError):
+        with pytest.raises(ModuleRefreshError, match="not a regular package"):
             refresh_package_closure(f"{top}.fam", f"{top}.fam.strat")
         assert f"{top}.fam" not in sys.modules and top not in sys.modules
     finally:
@@ -1463,3 +1463,24 @@ def test_a_fork_after_a_completed_refresh_keeps_the_committed_family(tmp_path) -
 
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.stdout.strip() == "0", (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX special files")
+@pytest.mark.parametrize("swap", ["fifo", "symlink"])
+def test_a_source_node_swapped_after_the_scan_is_never_read_through(
+        tmp_path, special_node, swap) -> None:
+    """The preflight read opens without blocking or following a final link and requires a regular
+    file, so a node swapped in after the tree scan cannot block the read or redirect it."""
+    origin = tmp_path / "helper.py"
+    if swap == "fifo":
+        special_node(origin, "fifo")
+        match = "non-regular"
+    else:
+        (tmp_path / "elsewhere.py").write_text("VALUE = 1\n")
+        origin.symlink_to(tmp_path / "elsewhere.py")
+        match = "OSError, errno"
+
+    with pytest.raises(ModuleRefreshError, match=match) as caught:
+        module_source_scan._parse(str(origin), "fam.helper")
+
+    assert str(tmp_path) not in str(caught.value)
