@@ -178,7 +178,7 @@ def _refresh_attempt(package: str, root: str, guard: _ImportGuard) -> ModuleType
     location = package_location(package, entries)
     require_source_tree(location, package)
     require_acyclic(static_closure(package, location, root))
-    _purge_package_bytecode(location)
+    _purge_package_bytecode(location, package)
     for name in [name for name in sys.modules if within(name, package)]:
         del sys.modules[name]
     guard.family = (package, location)
@@ -208,13 +208,24 @@ def _restore_modules(
             holder.__dict__[child] = previous
 
 
-def _purge_package_bytecode(location: str) -> None:
+def _purge_package_bytecode(location: str, package: str) -> None:
     """Unlink the cached bytecode of EVERY source file under the package, so no module the refresh
-    imports (including one no process has loaded yet) can execute a stale timestamp-valid cache."""
+    imports (including one no process has loaded yet) can execute a stale timestamp-valid cache.
+    It runs before any family entry is dropped, so a failure part-way has deleted only caches; it
+    is the stable bounded refusal naming the error class and errno, never a host path."""
     if sys.implementation.cache_tag is None:
         return
-    for directory, _subdirs, files in os.walk(location):
-        for file in files:
-            if file.endswith(".py"):
-                source = os.path.join(directory, file)
-                Path(importlib.util.cache_from_source(source)).unlink(missing_ok=True)
+
+    def fail(exc: OSError) -> None:
+        raise exc
+
+    try:
+        for directory, _subdirs, files in os.walk(location, onerror=fail):
+            for file in files:
+                if file.endswith(".py"):
+                    source = os.path.join(directory, file)
+                    Path(importlib.util.cache_from_source(source)).unlink(missing_ok=True)
+    except OSError as exc:
+        raise ModuleRefreshError(
+            f"{package!r} bytecode cache cannot be purged ({type(exc).__name__}, errno "
+            f"{exc.errno})", name=package) from None

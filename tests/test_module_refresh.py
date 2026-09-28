@@ -1192,3 +1192,57 @@ def test_source_stat_read_and_parse_failures_fail_closed_with_bounded_diagnostic
     assert caught.value.__cause__ is None and caught.value.__suppress_context__
     after = family.entries()
     assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+def test_a_bytecode_purge_failure_fails_closed_without_touching_the_module_graph(family) -> None:
+    """The purge walks the family tree top-down; here it deletes the top-level cache and then
+    fails on a nested cache entry that cannot be unlinked. The partial deletion only removes
+    caches: the refusal is the stable bounded error, nothing commits, and every module entry and
+    parent binding is left exactly as it was."""
+    (family.dir / "sub").mkdir()
+    (family.dir / "sub" / "__init__.py").write_text("")
+    (family.dir / "sub" / "deep.py").write_text("VALUE = 1\n")
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", "from .helper import VALUE\nfrom .sub import deep\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    parent_binding = vars(sys.modules[family.top])["fam"]
+    helper_cache = Path(py_compile.compile(str(family.dir / "helper.py")))
+    blocked = Path(importlib.util.cache_from_source(str(family.dir / "sub" / "deep.py")))
+    blocked.unlink(missing_ok=True)
+    blocked.mkdir(parents=True)
+    (blocked / "keep").write_text("")
+    family.write("helper", "VALUE = 2\n")
+
+    with pytest.raises(ModuleRefreshError) as caught:
+        _refresh(family)
+
+    message = str(caught.value)
+    assert "IsADirectoryError" in message and len(message) <= 200
+    assert str(family.dir.parent.parent) not in message
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    assert not helper_cache.exists(), "the purge must have deleted a cache before failing"
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+    assert vars(sys.modules[family.top])["fam"] is parent_binding
+    assert family.mod("strat").VALUE == 1
+
+
+def test_a_purge_walk_that_cannot_enter_a_directory_is_refused_not_skipped(
+        family, monkeypatch) -> None:
+    """``os.walk`` silently skips a directory it cannot list, which would leave its stale caches
+    in place; the purge surfaces that as the bounded refusal instead (the tree scan is bypassed
+    here to reach the purge, as a directory can become unreadable after the scan)."""
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permissions")
+    (family.dir / "sub").mkdir()
+    (family.dir / "sub" / "deep.py").write_text("VALUE = 1\n")
+    family.write("strat", "VALUE = 1\n")
+    monkeypatch.setattr(module_refresh, "require_source_tree", lambda *_args: None)
+    (family.dir / "sub").chmod(0)
+    try:
+        with pytest.raises(ModuleRefreshError, match=r"bytecode.*PermissionError"):
+            _refresh(family)
+    finally:
+        (family.dir / "sub").chmod(0o755)
+    assert family.entries() == {}
