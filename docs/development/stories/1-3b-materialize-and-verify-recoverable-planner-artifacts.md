@@ -764,6 +764,28 @@ distinguishes it, and a counterexample runs the other way); a loop that itself m
 still compares its alive set with the one it started from by materializing both; and the adjacent
 false negatives listed at the end of the rescue entry of the Debug Log.
 
+#### Codex rescue review against `229182c` (2026-09-29)
+
+- [ ] [Review][Patch] Propagate feasible conditional-expression and walrus assignment aliases so a
+  raw `bounded_walk` call cannot evade the scoped-walk guard (Todoist 6hfV5wHWFc6pfC3p)
+  [tests/primitives/test_scoped_walk.py:1575]
+- [ ] [Review][Patch] Stop pre-seeding module builtin shadows from syntactic global writes in
+  helpers that are never called; propagate those shadows through feasible effects instead
+  (Todoist 6hfV5wJWVqrj9F2p) [tests/primitives/test_scoped_walk.py:624]
+- [ ] [Review][Patch] Make the remaining loop-created-object and distinct-late-bound-name
+  alive-state shapes near-linear under deterministic work counts (Todoist 6hfV5wMPh7FVrV6G)
+  [tests/primitives/test_scoped_walk.py:305]
+- [ ] [Review][Patch] Treat `raise` as a terminating helper path while preserving exception-handler
+  flow, so only feasible exits contribute effects (Todoist 6hfV5wMVp26w2R2p)
+  [tests/primitives/test_scoped_walk.py:1796]
+- [ ] [Review][Patch] Describe this rescue round as five analyzer fixes plus one evidence correction,
+  name both modified files, and qualify complexity claims to proven shapes (Todoist
+  6hfV5wHR9QvgpF5G)
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:1375]
+- [ ] [Review][Patch] Replace all six stale rescue evidence pointers with current named tests and
+  implementation locations or immutable commit-qualified evidence (Todoist 6hfV5wMP2cHM8Cjp)
+  [docs/development/stories/1-3b-materialize-and-verify-recoverable-planner-artifacts.md:744]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
