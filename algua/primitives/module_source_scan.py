@@ -44,9 +44,11 @@ def require_unlinked(path: str, name: str) -> None:
 
 def require_source_tree(location: str, name: str) -> None:
     """Fail closed if ANY entry of the complete tree under ``location`` is a symlink (file,
-    directory or dangling) or an importable non-source module, scanning without following links:
-    a dynamic import can reach any file, not only the static closure, the bytecode purge never
-    descends into a link, and sourceless bytecode or an extension is never current source."""
+    directory or dangling), a non-regular node (FIFO, socket or device) or an importable
+    non-source module, scanning without following links: a dynamic import can reach any file,
+    not only the static closure, the bytecode purge never descends into a link, reading a special
+    node can block or yield unsupported content, and sourceless bytecode or an extension is never
+    current source."""
     with _inspecting(name):
         _scan_tree(location, name)
 
@@ -61,6 +63,10 @@ def _scan_tree(location: str, name: str) -> None:
                         f"{name!r} source tree contains a symlink: {entry.name!r}", name=name)
                 if entry.is_dir(follow_symlinks=False):
                     pending.append(entry.path)
+                elif not entry.is_file(follow_symlinks=False):
+                    raise ModuleRefreshError(
+                        f"{name!r} source tree contains a non-regular node: {entry.name!r}",
+                        name=name)
                 elif _importable_non_source(entry.name):
                     raise ModuleRefreshError(
                         f"{name!r} source tree contains an importable non-source module: "
@@ -150,7 +156,11 @@ def _mode(path: str, name: str) -> int | None:
 
 
 def _is_regular(path: str, name: str) -> bool:
-    return stat.S_ISREG(_mode(path, name) or 0)
+    """Whether a source node exists at ``path``; one that is not a regular file fails closed."""
+    mode = _mode(path, name)
+    if mode is not None and not stat.S_ISREG(mode):
+        raise ModuleRefreshError(f"{name!r} source is a non-regular node", name=name)
+    return mode is not None
 
 
 def static_closure(package: str, location: str, root: str) -> dict[str, set[str]]:

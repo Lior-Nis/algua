@@ -1062,3 +1062,84 @@ def test_a_family_that_is_not_a_regular_source_package_is_refused(
     finally:
         for key in [k for k in sys.modules if k == top or k.startswith(top + ".")]:
             del sys.modules[key]
+
+
+@pytest.fixture
+def special_node(monkeypatch):
+    """Create a FIFO or UNIX socket at a path. A FIFO gets a writer thread that is released at
+    teardown, so any code that wrongly opens it for reading sees EOF instead of hanging."""
+    import socket
+
+    created: list[object] = []
+
+    def make(path: Path, kind: str) -> None:
+        if kind == "fifo":
+            os.mkfifo(path)
+
+            def feed() -> None:
+                with open(path, "wb"):  # blocks until a reader opens, then closes: EOF
+                    pass
+
+            writer = threading.Thread(target=feed, daemon=True)
+            writer.start()
+            created.append((path, writer))
+        else:
+            monkeypatch.chdir(path.parent)  # a relative bind keeps the socket path short
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path.name)
+            created.append(server)
+
+    yield make
+    for item in created:
+        if isinstance(item, tuple):
+            path, writer = item
+            os.close(os.open(path, os.O_RDONLY | os.O_NONBLOCK))
+            writer.join(10)
+        else:
+            item.close()  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX special files")
+@pytest.mark.parametrize(
+    ("kind", "where"),
+    [("fifo", "dynamic-module"), ("socket", "dynamic-module"), ("fifo", "subpackage-init"),
+     ("fifo", "unreached-data")])
+def test_non_regular_family_tree_nodes_fail_closed_before_any_read(
+        family, monkeypatch, special_node, kind, where) -> None:
+    """A FIFO, socket or device named like source is importable by a dynamic edge, yet reading it
+    can block or yield unsupported content, so the family-tree scan refuses every non-regular,
+    non-directory node before discovery, purge, read or execution."""
+    family.write("strat", "VALUE = 1\n")
+    importlib.import_module(f"{family.package}.strat")
+    if where == "dynamic-module":
+        special_node(family.dir / "dyn.py", kind)
+        family.write("strat", (
+            "import importlib\nVALUE = importlib.import_module(__package__ + '.dyn').VALUE\n"))
+    elif where == "subpackage-init":
+        (family.dir / "sub").mkdir()
+        special_node(family.dir / "sub" / "__init__.py", kind)
+    else:
+        special_node(family.dir / "data", kind)
+    before = family.entries()
+    cached = Path(py_compile.compile(str(family.dir / "strat.py")))
+
+    def discovery(*_args: object) -> None:
+        raise AssertionError("source discovery ran before the family-tree node scan")
+
+    monkeypatch.setattr(module_refresh, "static_closure", discovery)
+    with pytest.raises(ModuleRefreshError, match="non-regular"):
+        _refresh(family)
+
+    assert cached.is_file(), "a refused refresh must not purge anything"
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX special files")
+def test_a_family_spec_never_resolves_to_a_non_regular_source_node(family, special_node) -> None:
+    """Defense in depth behind the tree scan: exact spec construction itself refuses a source node
+    that is not a regular file instead of treating it as absent or opening it."""
+    special_node(family.dir / "dyn.py", "fifo")
+
+    with pytest.raises(ModuleRefreshError, match="non-regular"):
+        module_source_scan.source_spec(family.package, str(family.dir), f"{family.package}.dyn")
