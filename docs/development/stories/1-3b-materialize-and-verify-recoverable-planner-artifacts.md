@@ -544,6 +544,30 @@ These identities are non-cyclic. An environment-only change does not change `bun
   it, while preserving consumer-error and interrupt precedence (Todoist 6hfP4pVJxJ2jhRhp)
   [algua/primitives/bounded_walk.py:142]
 
+#### Review round against `9da4fd4` (2026-09-28)
+
+- [ ] [Review][Patch] Conservatively merge possible binding states across `if`/`while`,
+  zero-or-more-iteration `for`/`async for`, `try` handlers/`else`/`finally` and `match` cases,
+  so the scoped-walk guard flags a raw walk whenever any feasible path keeps or reaches the
+  imported alias and no branch inherits a sibling's impossible-path state; reproduced false
+  negatives: conditional, `try` and `match` rebinds and a zero-iteration loop (Todoist
+  6hfP9ww7Mx3rcx8p) [tests/primitives/test_scoped_walk.py:394]
+- [ ] [Review][Patch] Model Python function binding and call timing for simple static cases: a
+  call made before an enclosing rebind still reaches the alias, and a name that is a lexical
+  local of its function (assignment, import, loop/`with`/`except`/match target anywhere in the
+  body) is never resolved to an enclosing binding, honoring `global`/`nonlocal`; no arbitrary
+  call-graph soundness is claimed (Todoist 6hfP9wrVj8P5QG9p)
+  [tests/primitives/test_scoped_walk.py:271]
+- [ ] [Review][Patch] Preserve right-hand-side-before-target evaluation and propagate every safe
+  simple alias: self-assignment, chained plain assignment (`a = b = w`), annotated
+  self-assignment, alias-producing walrus and `type` alias target rebinding, retaining every
+  unrelated-rebind negative (Todoist 6hfP9wwJr96P4fqG) [tests/primitives/test_scoped_walk.py:375]
+- [ ] [Review][Patch] Inspect executable parameter/return and annotated-assignment annotations,
+  honoring postponed `from __future__ import annotations` evaluation, keep a lambda deferred
+  inside a comprehension in that comprehension's lexical environment, and bind a comprehension
+  walrus in the containing scope (Todoist 6hfP9x2F8GCg8Wmp)
+  [tests/primitives/test_scoped_walk.py:316]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
