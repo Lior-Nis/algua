@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import errno
 import importlib.util
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -212,6 +213,8 @@ RAW_WALK = f"{WALK_MODULE}.bounded_walk"
 
 BUILTIN_GETATTR = "builtins.getattr"
 Function = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+# each name mapped to every walk-relevant target it may hold on some path to this point
+Bindings = dict[str, frozenset[str]]
 
 
 def _dotted(node: ast.expr) -> str | None:
@@ -246,8 +249,33 @@ def _bound_names(target: ast.AST) -> set[str]:
     return names
 
 
+def _relevant(target: str) -> bool:
+    """Only a target on the way to the raw walk or `getattr` can ever resolve to either."""
+    return any(
+        goal == target or goal.startswith(f"{target}.") for goal in (RAW_WALK, BUILTIN_GETATTR))
+
+
+def _merge(into: Bindings, state: Bindings) -> None:
+    for name, targets in state.items():
+        into[name] = into.get(name, frozenset()) | targets
+
+
+def _join(*states: Bindings) -> Bindings:
+    joined: Bindings = {}
+    for state in states:
+        _merge(joined, state)
+    return joined
+
+
+def _irrefutable(case: ast.match_case) -> bool:
+    return (
+        isinstance(case.pattern, ast.MatchAs) and case.pattern.pattern is None
+        and case.guard is None
+    )
+
+
 class _WalkReferences:
-    """Statement-ordered, scope-aware resolution of names that reach the raw walk.
+    """Statement-ordered, scope-aware resolution of every target a name may hold on some path.
 
     Followed statically: imports (absolute or relative, aliased or not, star), single-name plain or
     annotated assignments whose value resolves to an imported module, package, function or the
@@ -258,17 +286,29 @@ class _WalkReferences:
     parameters; class-level names do not leak into methods. Dynamic access (`__import__`,
     `importlib.import_module`, `vars`, `globals`, `exec`, computed attribute names) is out of
     scope: this is a guard against accidental or casual bypass, not arbitrary dynamic execution.
+
+    Paths are joined conservatively. `if` branches start from the state before them; a `match`
+    case also starts after earlier cases failed to match, and control falls through them unless
+    the last is irrefutable. A loop body runs zero or more times, each iteration starting from
+    the entry state or any state that reaches the next one (the body's end or a `continue`), and
+    the loop leaves through its `else` or a `break`. A `try` handler may start from any point of
+    the body (an `except*` handler also after an earlier one), `else` follows the body alone, and
+    `finally` may start from any point of the whole statement. `return` and `raise` are not
+    modeled, so a join may include a path that cannot run, which only ever adds a flag. Only
+    targets on the way to the raw walk or `getattr` are kept, which keeps loop fixpoints finite.
     """
 
     def __init__(self, package: str) -> None:
         self._package = package
         self.uses: list[str] = []
+        self._watchers: list[Bindings] = []  # every state reached inside an enclosing `try`
+        self._loops: list[tuple[Bindings, Bindings]] = []  # each open loop's break/continue states
 
     def module(self, tree: ast.Module) -> list[str]:
-        self._scope(tree.body, {"getattr": BUILTIN_GETATTR})
-        return self.uses
+        self._scope(tree.body, {"getattr": frozenset({BUILTIN_GETATTR})})
+        return list(dict.fromkeys(self.uses))  # loop and `finally` bodies may be visited twice
 
-    def _scope(self, body: list[ast.stmt], bindings: dict[str, str]) -> None:
+    def _scope(self, body: list[ast.stmt], bindings: Bindings) -> None:
         deferred: list[Function] = []
         self._block(body, bindings, deferred)
         for function in deferred:
@@ -279,32 +319,39 @@ class _WalkReferences:
                 self._scope(function.body, local)
 
     def _block(
-        self, body: list[ast.stmt], bindings: dict[str, str], deferred: list[Function],
+        self, body: list[ast.stmt], bindings: Bindings, deferred: list[Function],
     ) -> None:
         for statement in body:
             self._statement(statement, bindings, deferred)
+            for reached in self._watchers:
+                _merge(reached, bindings)
 
-    def _resolved(self, node: ast.expr | None, bindings: dict[str, str]) -> str | None:
+    def _resolved(self, node: ast.expr | None, bindings: Bindings) -> frozenset[str]:
         dotted = None if node is None else _dotted(node)
         if dotted is None:
-            return None
+            return frozenset()
         head, _, rest = dotted.partition(".")
-        if head not in bindings:
-            return None  # a local or builtin name, not something imported
-        return f"{bindings[head]}.{rest}" if rest else bindings[head]
+        # a name not bound here is a local or builtin name, not something imported
+        targets = bindings.get(head, frozenset())
+        return frozenset(f"{target}.{rest}" if rest else target for target in targets)
 
-    def _propagate(self, name: str, value: ast.expr, bindings: dict[str, str]) -> None:
-        """Bind ``name`` to what ``value`` resolves to; callers have already unbound it."""
-        resolved = self._resolved(value, bindings)
-        if resolved is not None:
-            bindings[name] = resolved
+    def _bind(self, name: str, targets: Iterable[str], bindings: Bindings) -> None:
+        kept = frozenset(target for target in targets if _relevant(target))
+        if kept:
+            bindings[name] = kept
+        else:
+            bindings.pop(name, None)
 
-    def _unbind(self, target: ast.AST, bindings: dict[str, str]) -> None:
+    def _propagate(self, name: str, value: ast.expr, bindings: Bindings) -> None:
+        """Bind ``name`` to every target ``value`` may resolve to."""
+        self._bind(name, self._resolved(value, bindings), bindings)
+
+    def _unbind(self, target: ast.AST, bindings: Bindings) -> None:
         for name in _bound_names(target):
             bindings.pop(name, None)
 
     def _expression(
-        self, node: ast.AST | None, bindings: dict[str, str], deferred: list[Function],
+        self, node: ast.AST | None, bindings: Bindings, deferred: list[Function],
     ) -> None:
         if node is None:
             return
@@ -328,27 +375,96 @@ class _WalkReferences:
             self._expression(node.value, bindings, deferred)
             self._unbind(node.target, bindings)
             return
-        if isinstance(node, ast.Attribute) and self._resolved(node, bindings) == RAW_WALK:
+        if isinstance(node, ast.Attribute) and RAW_WALK in self._resolved(node, bindings):
             self.uses.append(f"line {node.lineno}: references {RAW_WALK}")
         if (
-            isinstance(node, ast.Call) and self._resolved(node.func, bindings) == BUILTIN_GETATTR
-            and len(node.args) >= 2 and self._resolved(node.args[0], bindings) == WALK_MODULE
+            isinstance(node, ast.Call) and BUILTIN_GETATTR in self._resolved(node.func, bindings)
+            and len(node.args) >= 2 and WALK_MODULE in self._resolved(node.args[0], bindings)
             and isinstance(node.args[1], ast.Constant) and node.args[1].value == "bounded_walk"
         ):
             self.uses.append(f"line {node.lineno}: getattr of {RAW_WALK}")
         for child in ast.iter_child_nodes(node):
             self._expression(child, bindings, deferred)
 
+    def _loop(
+        self, node: ast.For | ast.AsyncFor | ast.While, bindings: Bindings,
+        deferred: list[Function],
+    ) -> None:
+        if not isinstance(node, ast.While):
+            self._expression(node.iter, bindings, deferred)
+        breaks: Bindings = {}
+        continues: Bindings = {}
+        head = dict(bindings)  # every state an iteration may start from
+        while True:
+            tested = dict(head)
+            if isinstance(node, ast.While):
+                self._expression(node.test, tested, deferred)
+            body = dict(tested)
+            if not isinstance(node, ast.While):
+                self._unbind(node.target, body)
+            self._loops.append((breaks, continues))
+            self._block(node.body, body, deferred)
+            self._loops.pop()
+            following = _join(head, body, continues)
+            if following == head:
+                break
+            head = following
+        self._block(node.orelse, tested, deferred)
+        bindings.clear()
+        bindings.update(_join(tested, breaks))
+
+    def _try(
+        self, node: ast.Try | ast.TryStar, bindings: Bindings, deferred: list[Function],
+    ) -> None:
+        anywhere, raised = dict(bindings), dict(bindings)
+        self._watchers += [anywhere, raised]
+        self._block(node.body, bindings, deferred)
+        self._watchers.pop()
+        ends: list[Bindings] = []
+        for handler in node.handlers:
+            # the `except*` handlers of one exception group can each run, in order
+            state = _join(raised, *ends) if isinstance(node, ast.TryStar) else dict(raised)
+            self._expression(handler.type, state, deferred)
+            if handler.name:
+                state.pop(handler.name, None)
+            self._block(handler.body, state, deferred)
+            if handler.name:
+                state.pop(handler.name, None)  # Python deletes it as the handler ends
+            ends.append(state)
+        self._block(node.orelse, bindings, deferred)
+        self._watchers.pop()
+        for state in ends:
+            _merge(bindings, state)
+        if node.finalbody:
+            self._block(node.finalbody, anywhere, deferred)  # leaving by an exception or return
+            self._block(node.finalbody, bindings, deferred)
+
+    def _match(self, node: ast.Match, bindings: Bindings, deferred: list[Function]) -> None:
+        self._expression(node.subject, bindings, deferred)
+        unmatched = dict(bindings)
+        ends: list[Bindings] = []
+        for case in node.cases:
+            state = dict(unmatched)
+            self._unbind(case.pattern, state)
+            self._expression(case.guard, state, deferred)
+            _merge(unmatched, state)  # a pattern or guard may fail after binding captures
+            self._block(case.body, state, deferred)
+            ends.append(state)
+        if not _irrefutable(node.cases[-1]):
+            ends.append(unmatched)
+        bindings.clear()
+        bindings.update(_join(*ends))
+
     def _statement(
-        self, node: ast.stmt, bindings: dict[str, str], deferred: list[Function],
+        self, node: ast.stmt, bindings: Bindings, deferred: list[Function],
     ) -> None:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.asname:
-                    bindings[alias.asname] = alias.name
+                    self._bind(alias.asname, [alias.name], bindings)
                 else:
                     head = alias.name.partition(".")[0]
-                    bindings[head] = head
+                    self._bind(head, [head], bindings)
         elif isinstance(node, ast.ImportFrom):
             level = "." * node.level
             base = importlib.util.resolve_name(level + (node.module or ""), self._package)
@@ -358,7 +474,7 @@ class _WalkReferences:
                         self.uses.append(f"line {node.lineno}: star import of {WALK_MODULE}")
                     continue
                 target = f"{base}.{alias.name}"
-                bindings[alias.asname or alias.name] = target
+                self._bind(alias.asname or alias.name, [target], bindings)
                 if target == RAW_WALK:
                     self.uses.append(f"line {node.lineno}: imports {RAW_WALK}")
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -370,7 +486,9 @@ class _WalkReferences:
         elif isinstance(node, ast.ClassDef):
             for part in (*node.decorator_list, *node.bases, *(k.value for k in node.keywords)):
                 self._expression(part, bindings, deferred)
+            watchers, self._watchers = self._watchers, []  # class-level names stay in the class
             self._block(node.body, dict(bindings), deferred)  # methods resolve late, outside
+            self._watchers = watchers
             bindings.pop(node.name, None)
         elif isinstance(node, ast.Assign):
             self._expression(node.value, bindings, deferred)
@@ -391,36 +509,27 @@ class _WalkReferences:
             self._expression(node.value, bindings, deferred)
             self._expression(node.target, bindings, deferred)
             self._unbind(node.target, bindings)
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            self._expression(node.iter, bindings, deferred)
-            self._unbind(node.target, bindings)
-            self._block(node.body, bindings, deferred)
-            self._block(node.orelse, bindings, deferred)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            self._loop(node, bindings, deferred)
+        elif isinstance(node, (ast.Break, ast.Continue)) and self._loops:
+            breaks, continues = self._loops[-1]
+            _merge(breaks if isinstance(node, ast.Break) else continues, bindings)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 self._expression(item.context_expr, bindings, deferred)
                 if item.optional_vars is not None:
                     self._unbind(item.optional_vars, bindings)
             self._block(node.body, bindings, deferred)
-        elif isinstance(node, (ast.If, ast.While)):
+        elif isinstance(node, ast.If):
             self._expression(node.test, bindings, deferred)
+            orelse = dict(bindings)
             self._block(node.body, bindings, deferred)
-            self._block(node.orelse, bindings, deferred)
+            self._block(node.orelse, orelse, deferred)
+            _merge(bindings, orelse)
         elif isinstance(node, (ast.Try, ast.TryStar)):
-            self._block(node.body, bindings, deferred)
-            for handler in node.handlers:
-                self._expression(handler.type, bindings, deferred)
-                if handler.name:
-                    bindings.pop(handler.name, None)
-                self._block(handler.body, bindings, deferred)
-            self._block(node.orelse, bindings, deferred)
-            self._block(node.finalbody, bindings, deferred)
+            self._try(node, bindings, deferred)
         elif isinstance(node, ast.Match):
-            self._expression(node.subject, bindings, deferred)
-            for case in node.cases:
-                self._unbind(case.pattern, bindings)
-                self._expression(case.guard, bindings, deferred)
-                self._block(case.body, bindings, deferred)
+            self._match(node, bindings, deferred)
         elif isinstance(node, ast.Delete):
             for target in node.targets:
                 self._unbind(target, bindings)
@@ -591,3 +700,93 @@ SHADOWED_OR_REBOUND = {
 @pytest.mark.parametrize("source", SHADOWED_OR_REBOUND.values(), ids=SHADOWED_OR_REBOUND.keys())
 def test_the_guard_does_not_flag_shadowed_or_rebound_names(source: str) -> None:
     assert _direct_walk_uses(source, "algua.registry.consumer") == []
+
+
+IMPORT_W = "import algua.primitives.bounded_walk as w\n"
+REACHED_ON_SOME_PATH = {
+    "if-without-else-may-keep-module": "if c:\n    w = make()\nw.bounded_walk(root)\n",
+    "else-branch-keeps-module": "if c:\n    w = make()\nelse:\n    w.bounded_walk(root)\n",
+    "alias-from-one-branch": "if c:\n    m = w\nelse:\n    m = make()\nm.bounded_walk(root)\n",
+    "while-runs-zero-times": "while c:\n    w = make()\nw.bounded_walk(root)\n",
+    "while-next-iteration": "m = make()\nwhile c:\n    m.bounded_walk(root)\n    m = w\n",
+    "for-runs-zero-times": "for item in items:\n    w = make()\nw.bounded_walk(root)\n",
+    "for-next-iteration": "m = make()\nfor item in items:\n    m.bounded_walk(root)\n    m = w\n",
+    "continue-reaches-next-iteration": (
+        "m = make()\nfor item in items:\n    m.bounded_walk(root)\n    m = w\n"
+        "    if c:\n        continue\n    m = make()\n"),
+    "for-break-skips-else": (
+        "for item in items:\n    break\nelse:\n    w = make()\nw.bounded_walk(root)\n"),
+    "while-break-skips-else": "while c:\n    break\nelse:\n    w = make()\nw.bounded_walk(root)\n",
+    "async-for-runs-zero-times": (
+        "async def walk(items, root):\n    import algua.primitives.bounded_walk as v\n"
+        "    async for item in items:\n        v = make()\n    v.bounded_walk(root)\n"),
+    "alias-extended-in-a-loop": (
+        "m = w\nwhile c:\n    n = m.child\n    m = n\nm.bounded_walk(root)\n"),
+    "body-may-raise-before-rebind": (
+        "try:\n    w = make()\nexcept Exception:\n    pass\nw.bounded_walk(root)\n"),
+    "handler-sees-state-before-body": (
+        "try:\n    w = make()\nexcept Exception:\n    w.bounded_walk(root)\n"),
+    "handler-sees-mid-body-alias": (
+        "m = make()\ntry:\n    m = w\n    m = make()\nexcept Exception:\n"
+        "    m.bounded_walk(root)\n"),
+    "else-follows-body-not-handler": (
+        "try:\n    pass\nexcept Exception:\n    w = make()\nelse:\n    w.bounded_walk(root)\n"),
+    "finally-after-raise-before-rebind": (
+        "try:\n    w = make()\nfinally:\n    w.bounded_walk(root)\n"),
+    "except-star-handlers-may-both-run": (
+        "m = make()\ntry:\n    pass\nexcept* ValueError:\n    m = w\nexcept* TypeError:\n"
+        "    m.bounded_walk(root)\n"),
+    "no-match-case-matches": (
+        "match value:\n    case 1:\n        w = make()\nw.bounded_walk(root)\n"),
+    "later-match-case-keeps-module": (
+        "match value:\n    case 1:\n        w = make()\n    case _:\n"
+        "        w.bounded_walk(root)\n"),
+}
+
+
+@pytest.mark.parametrize(
+    "source", REACHED_ON_SOME_PATH.values(), ids=REACHED_ON_SOME_PATH.keys())
+def test_the_guard_flags_a_walk_reached_on_any_feasible_path(source: str) -> None:
+    assert _direct_walk_uses(IMPORT_W + source, "algua.registry.consumer")
+
+
+NOT_REACHED_ON_ANY_PATH = {
+    "both-branches-rebind": (
+        "if c:\n    w = make()\nelse:\n    w = other()\nw.bounded_walk(root)\n"),
+    "else-does-not-see-if-alias": (
+        "m = make()\nif c:\n    m = w\nelse:\n    m.bounded_walk(root)\n"),
+    "rebound-before-use-in-while": "while c:\n    w = make()\n    w.bounded_walk(root)\n",
+    "rebound-before-use-in-for": "for item in items:\n    w = make()\n    w.bounded_walk(root)\n",
+    "loop-else-without-break-rebinds": (
+        "for item in items:\n    pass\nelse:\n    w = make()\nw.bounded_walk(root)\n"),
+    "body-and-handler-both-rebind": (
+        "try:\n    w = make()\nexcept Exception:\n    w = other()\nw.bounded_walk(root)\n"),
+    "handler-does-not-see-else-alias": (
+        "m = make()\ntry:\n    pass\nexcept Exception:\n    m.bounded_walk(root)\n"
+        "else:\n    m = w\n"),
+    "else-does-not-see-handler-alias": (
+        "m = make()\ntry:\n    pass\nexcept Exception:\n    m = w\nelse:\n"
+        "    m.bounded_walk(root)\n"),
+    "except-handlers-are-exclusive": (
+        "m = make()\ntry:\n    pass\nexcept ValueError:\n    m = w\nexcept TypeError:\n"
+        "    m.bounded_walk(root)\n"),
+    "handler-name-is-deleted-as-the-handler-ends": (
+        "try:\n    pass\nexcept Exception as m:\n    m = w\nm.bounded_walk(root)\n"),
+    "finally-rebinds": "try:\n    pass\nfinally:\n    w = make()\nw.bounded_walk(root)\n",
+    "normal-exit-continues-from-body-end": (
+        "m = make()\ntry:\n    m = w\n    m = make()\nfinally:\n    pass\nm.bounded_walk(root)\n"),
+    "match-cases-are-exclusive": (
+        "m = make()\nmatch value:\n    case 1:\n        m = w\n    case _:\n"
+        "        m.bounded_walk(root)\n"),
+    "irrefutable-match-rebinds-on-every-path": (
+        "match value:\n    case 1:\n        w = make()\n    case _:\n        w = other()\n"
+        "w.bounded_walk(root)\n"),
+    "class-body-binding-does-not-reach-a-handler": (
+        "try:\n    class Store:\n        m = w\nexcept Exception:\n    m.bounded_walk(root)\n"),
+}
+
+
+@pytest.mark.parametrize(
+    "source", NOT_REACHED_ON_ANY_PATH.values(), ids=NOT_REACHED_ON_ANY_PATH.keys())
+def test_the_guard_does_not_flag_a_walk_no_feasible_path_reaches(source: str) -> None:
+    assert _direct_walk_uses(IMPORT_W + source, "algua.registry.consumer") == []
