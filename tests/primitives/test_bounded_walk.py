@@ -201,3 +201,127 @@ def test_an_abandoned_walk_closes_every_directory_handle(tmp_path: Path) -> None
 
     assert len(os.listdir("/proc/self/fd")) == before
     assert not [item for item in caught if issubclass(item.category, ResourceWarning)]
+
+
+class _Tracked:
+    """A scandir proxy that records its close; the faulty one closes, then raises."""
+
+    def __init__(self, inner, path: Path, fault: int | None, closed: dict[Path, bool]) -> None:
+        self._inner = inner
+        self._path = path
+        self._fault = fault
+        self._closed = closed
+        closed[path] = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._inner)
+
+    def close(self) -> None:
+        self._inner.close()
+        self._closed[self._path] = True
+        if self._fault is not None:
+            raise OSError(self._fault, "injected close fault")
+
+
+def _track_closes(
+    monkeypatch: pytest.MonkeyPatch, faulty: Path, *, also: dict[Path, int] | None = None,
+) -> dict[Path, bool]:
+    original = os.scandir
+    closed: dict[Path, bool] = {}
+    faults = {faulty: errno.EIO, **(also or {})}
+
+    def scandir(path):
+        target = Path(os.fsdecode(path))
+        return _Tracked(original(path), target, faults.get(target), closed)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    return closed
+
+
+def _chain(root: Path) -> None:
+    (root / "d1/d2/d3").mkdir(parents=True)
+    for index in range(5):
+        (root / f"d1/d2/f{index}").touch()
+
+
+def test_an_abandoned_walk_closes_every_handle_and_reports_the_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1")
+    walk = bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
+    for entry in walk:
+        if entry.relative == "d1/d2/d3":
+            break
+
+    with pytest.raises(OSError) as caught:
+        walk.close()
+
+    assert caught.value.errno == errno.EIO
+    assert closed and all(closed.values()), closed
+
+
+def test_the_deepest_cleanup_failure_is_reported_when_several_closes_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(
+        monkeypatch, faulty=tmp_path / "d1", also={tmp_path / "d1/d2": errno.ENOSPC})
+    walk = bounded_walk(tmp_path, max_files=100, max_directories=100, max_path_bytes=1024)
+    for entry in walk:
+        if entry.relative == "d1/d2/d3":
+            break
+
+    with pytest.raises(OSError) as caught:
+        walk.close()
+
+    assert caught.value.errno == errno.ENOSPC  # d1/d2 is closed before d1
+    assert all(closed.values()), closed
+
+
+def test_an_active_traversal_error_survives_a_failing_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1")
+
+    with pytest.raises(TraversalLimitExceeded):
+        _walk(tmp_path, files=1)
+
+    assert closed and all(closed.values()), closed
+
+
+def test_an_active_listing_error_survives_a_failing_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1")
+    tracked_scandir = os.scandir
+
+    def failing(path):
+        if Path(os.fsdecode(path)) == tmp_path / "d1/d2/d3":
+            raise PermissionError(errno.EACCES, "injected listing fault")
+        return tracked_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing)
+
+    with pytest.raises(PermissionError):
+        _walk(tmp_path)
+
+    assert closed and all(closed.values()), closed
+
+
+def test_a_failing_close_of_an_exhausted_directory_still_closes_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _chain(tmp_path)
+    closed = _track_closes(monkeypatch, faulty=tmp_path / "d1/d2/d3")
+
+    with pytest.raises(OSError) as caught:
+        _walk(tmp_path)
+
+    assert caught.value.errno == errno.EIO
+    assert closed and all(closed.values()), closed

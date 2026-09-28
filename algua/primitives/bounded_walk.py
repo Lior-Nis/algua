@@ -15,6 +15,7 @@ import os
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 class TraversalLimitExceeded(ValueError):
@@ -31,6 +32,19 @@ class TreeEntry:
     relative: str
     is_dir: bool
     is_symlink: bool
+
+
+def _close_all(stack: list[tuple[Any, str]]) -> OSError | None:
+    """Close every open listing, deepest first, even if one fails; return the first failure."""
+    failure: OSError | None = None
+    while stack:
+        listing, _prefix = stack.pop()
+        try:
+            listing.close()
+        except OSError as exc:
+            if failure is None:
+                failure = exc
+    return failure
 
 
 def bounded_walk(
@@ -63,6 +77,13 @@ def bounded_walk(
             yield TreeEntry(Path(entry.path), relative, is_dir, is_symlink)
             if is_dir:
                 stack.append((os.scandir(entry.path), relative + "/"))
-    finally:
-        for listing, _prefix in stack:
-            listing.close()
+    except GeneratorExit:
+        # An abandoned walk has no error of its own, so a cleanup failure is the one to report.
+        failure = _close_all(stack)
+        if failure is not None:
+            raise failure from None
+        raise
+    except BaseException:
+        # The active error stays primary; every remaining handle is still closed.
+        _close_all(stack)
+        raise
