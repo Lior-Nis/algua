@@ -20,3 +20,14 @@
   environment-key golden vector and the normative companion together, so it needs its own
   reviewed contract change; this review round leaves `SYNC_FLAGS`, the golden vectors and the
   normative sync argv unchanged.
+
+## Deferred from: code review of 1-3b-materialize-and-verify-recoverable-planner-artifacts (2026-09-28, `47062b9`)
+
+- `tests/primitives/test_scoped_walk.py:517`: `with` and `async with` are analyzed sequentially,
+  so a suppressing context manager can hide a feasible imported alias when an exception occurs
+  before a rebinding assignment completes. Track as Todoist 6hfPJj8H8RXq3vmG and address with a
+  bounded conservative flow model rather than expanding the current control-flow patch silently.
+- `tests/primitives/test_scoped_walk.py:486`: ordinary class bindings correctly stay isolated, but
+  a class-body `global` declaration writes the module scope. The guard currently misses alias
+  creation and reports aliases that were removed through that path. Track as Todoist
+  6hfPJj9J9jQVvpFG and coordinate it with the separate function-binding work.

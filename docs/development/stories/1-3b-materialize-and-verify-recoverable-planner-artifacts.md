@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: review
+Status: in-progress
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -567,6 +567,22 @@ These identities are non-cyclic. An environment-only change does not change `bun
   inside a comprehension in that comprehension's lexical environment, and bind a comprehension
   walrus in the containing scope (Todoist 6hfP9x2F8GCg8Wmp)
   [tests/primitives/test_scoped_walk.py:316]
+
+#### Review findings against `47062b9` (2026-09-28)
+
+- [ ] [Review][Patch] Terminate analyzed loop paths at `break`/`continue`, carry those transfers
+  through enclosing `finally` suites, and exclude impossible zero-iteration/`else` paths for
+  statically unconditional loops (Todoist 6hfPJjCg4JQrc6Rp)
+  [tests/primitives/test_scoped_walk.py:321]
+- [ ] [Review][Patch] Inspect executable match-pattern expressions and preserve exact capture,
+  guard-fallthrough and irrefutable-pattern state without retaining impossible aliases (Todoist
+  6hfPJj6JjXppmjpG) [tests/primitives/test_scoped_walk.py:442]
+- [x] [Review][Defer] Model exception-suppressing `with`/`async with` flow so an exception raised
+  before rebinding can preserve a reachable imported alias (Todoist 6hfPJj8H8RXq3vmG)
+  [tests/primitives/test_scoped_walk.py:517] — deferred, pre-existing
+- [x] [Review][Defer] Honor simple class-body `global` writes to the containing module while
+  keeping ordinary class locals isolated (Todoist 6hfPJj9J9jQVvpFG)
+  [tests/primitives/test_scoped_walk.py:486] — deferred, pre-existing
 
 ## Development notes
 
