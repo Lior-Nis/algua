@@ -489,17 +489,17 @@ These identities are non-cyclic. An environment-only change does not change `bun
 
 #### Review round against `635e1f6` (2026-09-28)
 
-- [ ] [Review][Patch] Validate each locked wheel URL against one explicit canonical HTTPS identity
+- [x] [Review][Patch] Validate each locked wheel URL against one explicit canonical HTTPS identity
   (lowercase scheme and hostname, no credentials or fragment, no whitespace or non-ASCII/control
   characters, valid non-default port, canonical percent escapes and authority/path/query form) and
   key duplicate-wheel ownership by that identity, because the `urlunsplit(urlsplit(url))` check
   accepts uppercase-host, default-port, whitespace, malformed-escape and invalid-port aliases
   [algua/registry/planner_environment.py:148]
-- [ ] [Review][Patch] Make bounded-walk cleanup exhaustive: retain the first (deepest) failure of
+- [x] [Review][Patch] Make bounded-walk cleanup exhaustive: retain the first (deepest) failure of
   any kind, keep closing every remaining listing, preserve an active traversal error, and do not
   drop an exhausted listing before a failed close has had a cleanup retry
   [algua/primitives/bounded_walk.py:40]
-- [ ] [Review][Patch] Keep a consumer's typed validation error primary when closing the walk also
+- [x] [Review][Patch] Keep a consumer's typed validation error primary when closing the walk also
   fails, through one shared scoped-walk seam that every production `bounded_walk` consumer uses,
   while still closing every listing [algua/primitives/bounded_walk.py:50]
 
@@ -879,6 +879,23 @@ uv run lint-imports
   mutations were run and all are killed; one initial survivor (which close failure is reported
   when two fail) was closed with a new case. The full 4,900-test root gate (`-p no:randomly`),
   ruff, mypy, all 28 import contracts and `git diff --check` pass.
+- Review round against `635e1f6` (3 consolidated patches): every code patch first failed red.
+  Wheel URLs: 30 malformed single URLs (uppercase or trailing-dot host, underscore or IPv6
+  host, default/empty/zero/leading-zero/out-of-range/non-numeric port, whitespace, non-ASCII,
+  short, non-hex, lowercase or unreserved-encoding escapes, raw `+` and `@`, query, empty or dot
+  segments, backslash, angle brackets, no path, non-wheel) and 7 alias pairs (host case, default
+  port, escape case, escaped unreserved, dot segment, trailing-dot host, raw versus escaped `+`)
+  were accepted; all 1,785 repository wheel URLs remain their own accepted identities, and the
+  lock policy moved into the protected `planner_environment_lock.py` for the 300-line ratchet.
+  Walk cleanup: a `RuntimeError`, `ValueError`, `KeyboardInterrupt` or `SystemExit` close
+  failure stopped cleanup (the root listing stayed open) and replaced the active traversal
+  error, and an exhausted listing whose close failed before releasing was never retried.
+  Consumers: with a failing close, a `RuntimeError` escaped the bundle store, published-seal
+  check, sealing and inventory typed error mapping, and an `OSError` displaced each typed
+  refusal. 30 mutations were run: 28 are killed and two exposed redundant guards that were
+  removed (an explicit empty-segment check subsumed by the one-or-more segment pattern, a
+  `?`/`#` exclusion subsumed by the segment character class). The full 4,973-test root gate
+  (`-p no:randomly`), ruff, mypy, all 28 import contracts and `git diff --check` pass.
 
 ### Completion Notes
 
@@ -1108,6 +1125,15 @@ uv run lint-imports
   `docs/development/stories/deferred-work.md`); same-UID `openat` hardening was dismissed as the
   accepted no-sandbox residual. The keyed argv, identity schemas, golden digests and every live,
   authority, deployment and capital wall are unchanged.
+- Review round against `635e1f6` complete: each locked wheel URL must be one canonical HTTPS
+  identity in which every character has exactly one spelling, and duplicate-wheel ownership is
+  keyed by it; bounded-walk cleanup closes every listing whatever a close raises, reports the
+  first (deepest) failure without ever dropping an interrupt, keeps an active traversal error
+  primary and retries a failed exhausted-listing close; and every production consumer walks
+  through the protected `scoped_walk` seam, which keeps a consumer's typed refusal primary
+  when closing also fails while still reporting cleanup failures after a normal or early exit.
+  The `--no-env-file` defect stays deferred. The keyed argv, identity schemas, golden digests
+  and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -1141,6 +1167,7 @@ uv run lint-imports
 - `algua/registry/planner_environment_outage.py`
 - `algua/registry/planner_environment_startup.py`
 - `algua/registry/planner_environment_probe.py`
+- `algua/registry/planner_environment_lock.py`
 - `CODEOWNERS`
 - `docs/development/sprint-status.yaml`
 - `docs/contracts/cli-error-envelope.md`
@@ -1162,6 +1189,7 @@ uv run lint-imports
 - `tests/_walk_faults.py`
 - `tests/primitives/test_bounded_subprocess.py`
 - `tests/primitives/test_bounded_walk.py`
+- `tests/primitives/test_scoped_walk.py`
 - `tests/fixtures/uv-0.9.26-virtualenv-shim.py.txt`
 - `tests/test_frozen_artifact_offline.py`
 - `tests/test_no_replace.py`
@@ -1260,3 +1288,7 @@ uv run lint-imports
   `METADATA` reads with the probe carved out, companion bound and startup-policy alignment,
   repaired traversal pointer) and recorded the `--no-env-file` defer; the full 4,900-test root
   gate, ruff, mypy, all 28 import contracts and `git diff --check` pass.
+- 2026-09-28: Addressed all 3 consolidated patches of the review round against `635e1f6`
+  test-first (canonical locked wheel-URL identity in a protected lock-policy module, exhaustive
+  bounded-walk cleanup, a shared `scoped_walk` seam keeping consumer errors primary); the full
+  4,973-test root gate, ruff, mypy, all 28 import contracts and `git diff --check` pass.
