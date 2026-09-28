@@ -20,6 +20,7 @@ from algua.registry.planner_environment import (
     validate_lock,
     verify_environment,
 )
+from tests._walk_faults import fail_scandir_once
 
 WHEEL_HASH = "sha256:" + "a" * 64
 
@@ -267,3 +268,22 @@ def test_environment_inventory_rejects_distributions_equal_after_canonicalizatio
         (site / directory / "METADATA").write_text(f"Name: {declared}\nVersion: 1\n")
     with pytest.raises(EnvironmentIncompatible, match="duplicate"):
         inventory_environment(env)
+
+
+def test_environment_inventory_propagates_traversal_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = tmp_path / "env"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(env)
+    lib64 = env / "lib64"
+    if lib64.is_symlink():
+        lib64.unlink()
+    hidden = env / "lib/python3.12/site-packages/hidden"
+    hidden.mkdir()
+    (hidden / "__init__.py").write_text("SMUGGLED = True\n")
+    (env / "lib/python3.12/site-packages/visible.py").write_text("x = 1\n")
+    failed = fail_scandir_once(monkeypatch, lambda path: path == hidden)
+
+    with pytest.raises(PermissionError):
+        inventory_environment(env)
+    assert failed == [hidden]

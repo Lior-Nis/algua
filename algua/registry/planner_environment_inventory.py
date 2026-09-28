@@ -11,6 +11,7 @@ import sys
 from email.parser import HeaderParser
 from pathlib import Path
 
+from algua.primitives.strict_walk import strict_walk
 from algua.registry.artifact_contract import ArtifactFile
 from algua.registry.environment_contract import (
     BASE_INTERPRETER,
@@ -91,7 +92,7 @@ def inventory_environment(root: Path) -> InstalledInventory:
     files: list[ArtifactFile] = []
     links: list[InterpreterLink] = []
     distributions: list[InstalledDistribution] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in strict_walk(root):
         directory = Path(dirpath)
         for name in dirnames:
             if (directory / name).is_symlink():

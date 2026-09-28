@@ -16,6 +16,7 @@ from algua.registry.artifact_store import (
     verify_bundle,
 )
 from algua.registry.frozen_source import FrozenFile
+from tests._walk_faults import fail_scandir_once
 
 
 def _files() -> tuple[FrozenFile, ...]:
@@ -263,3 +264,68 @@ def test_publication_fails_closed_without_a_no_replace_primitive(
     target = tmp_path / _descriptor().locator
     assert not target.exists()
     assert not list(target.parent.glob(".stage-*"))
+
+
+def test_verify_propagates_traversal_errors_instead_of_skipping_a_subtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    root.chmod(0o755)
+    extra = root / "zz-extra"
+    extra.mkdir()
+    (extra / "smuggled.py").write_text("x = 1\n")
+    (extra / "smuggled.py").chmod(0o444)
+    extra.chmod(0o555)
+    root.chmod(0o555)
+    failed = fail_scandir_once(monkeypatch, lambda path: path == extra)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert failed == [extra]
+    assert isinstance(caught.value.__cause__, PermissionError)
+
+
+def test_staging_seal_propagates_traversal_errors_and_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed = fail_scandir_once(
+        monkeypatch,
+        lambda path: path.name == "algua" and path.parent.name.startswith(".stage-"),
+    )
+
+    with pytest.raises(PermissionError):
+        publish_bundle(tmp_path, _files(), _descriptor())
+
+    assert failed
+    target = tmp_path / _descriptor().locator
+    assert not target.exists()
+    assert not list(target.parent.glob(".stage-*"))
+
+
+def test_inventory_enforces_the_file_count_bound_before_growth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    monkeypatch.setattr(artifact_store, "MAX_BUNDLE_FILES", len(_files()))
+    verify_bundle(tmp_path, _descriptor())
+
+    root.chmod(0o755)
+    for name in ("zz-empty-1", "zz-empty-2"):
+        (root / name).touch(mode=0o444)
+    root.chmod(0o555)
+    constructed: list[str] = []
+    real_file = artifact_store.ArtifactFile
+
+    def counted(*args, **kwargs):
+        entry = real_file(*args, **kwargs)
+        constructed.append(entry.path)
+        return entry
+
+    monkeypatch.setattr(artifact_store, "ArtifactFile", counted)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert "file-count" in str(caught.value.__cause__)
+    assert len(constructed) <= len(_files())

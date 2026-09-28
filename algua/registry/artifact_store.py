@@ -11,7 +11,8 @@ from pathlib import Path
 from algua.primitives.atomic_io import fsync_parents, fsync_tree
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
-from algua.registry.artifact_contract import ArtifactFile, BundleDescriptor
+from algua.primitives.strict_walk import strict_walk
+from algua.registry.artifact_contract import MAX_BUNDLE_FILES, ArtifactFile, BundleDescriptor
 from algua.registry.frozen_source import MAX_BUNDLE_BYTES, MAX_FILE_BYTES, FrozenFile
 
 
@@ -66,7 +67,7 @@ def _write_stage(stage: Path, files: tuple[FrozenFile, ...]) -> None:
         finally:
             os.close(fd)
         destination.chmod(0o555 if item.mode == "100755" else 0o444)
-    directories = [Path(path) for path, _dirs, _files in os.walk(stage, topdown=False)]
+    directories = [Path(path) for path, _dirs, _files in strict_walk(stage, topdown=False)]
     for directory in directories:
         directory.chmod(0o555)
     fsync_tree(stage)
@@ -80,7 +81,7 @@ def _inventory(root: Path) -> tuple[ArtifactFile, ...]:
     entries: list[ArtifactFile] = []
     directories: set[str] = set()
     total = 0
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in strict_walk(root):
         directory = Path(dirpath)
         if directory != root:
             directories.add(directory.relative_to(root).as_posix())
@@ -91,6 +92,8 @@ def _inventory(root: Path) -> tuple[ArtifactFile, ...]:
             if child.is_symlink():
                 raise ArtifactStoreError("bundle contains a directory symlink")
         for filename in filenames:
+            if len(entries) >= MAX_BUNDLE_FILES:
+                raise ArtifactStoreError("bundle exceeds the file-count bound")
             path = directory / filename
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:

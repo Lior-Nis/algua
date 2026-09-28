@@ -10,6 +10,7 @@ from pathlib import Path
 from algua.primitives.atomic_io import fsync_dir, fsync_file, fsync_parents
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
+from algua.primitives.strict_walk import strict_walk
 from algua.registry.artifact_store import resolve_locator
 from algua.registry.environment_contract import EnvironmentDescriptor
 from algua.registry.planner_environment import (
@@ -37,7 +38,7 @@ def _cleanup(path: Path) -> None:
 
 def _seal_and_sync(root: Path) -> None:
     directories: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root, topdown=False, followlinks=False):
+    for dirpath, dirnames, filenames in strict_walk(root, topdown=False):
         directory = Path(dirpath)
         directories.append(directory)
         for name in dirnames:
@@ -58,7 +59,7 @@ def _seal_and_sync(root: Path) -> None:
 
 
 def _assert_sealed(root: Path) -> None:
-    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, _dirnames, filenames in strict_walk(root):
         directory = Path(dirpath)
         if directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o555:
             raise EnvironmentStoreError("environment directory permissions drifted")
