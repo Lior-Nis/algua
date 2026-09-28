@@ -326,25 +326,25 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Replace the deadlock regression's scheduling sleep with an event handshake
   proving the refresher reached the contested import before the blocked importer is released
   [tests/test_module_refresh.py:613]
-- [ ] [Review][Patch] Resolve and validate every family spec against its exact deterministic
+- [x] [Review][Patch] Resolve and validate every family spec against its exact deterministic
   in-root source path so a poisoned path-entry finder or stale loaded-package spec cannot make
   preflight inspect one tree while execution loads another
   [algua/primitives/module_refresh.py:152]
-- [ ] [Review][Patch] Recover a forked child's complete inherited refresh transaction state by
+- [x] [Review][Patch] Recover a forked child's complete inherited refresh transaction state by
   restoring its pre-refresh modules/bindings, removing inherited guards, resetting transaction
   state and replacing the vanished owner's lock before later loads proceed
   [algua/primitives/module_refresh.py:55]
-- [ ] [Review][Patch] Validate the committed fresh family graph so every reached entry remains a
+- [x] [Review][Patch] Validate the committed fresh family graph so every reached entry remains a
   source-backed `ModuleType`, is identically bound in `sys.modules` and on its direct parent, and
   every package retains its exact confined `__path__`
   [algua/primitives/module_refresh.py:165]
-- [ ] [Review][Patch] Translate source stat/read/parse failures into bounded path-free
+- [x] [Review][Patch] Translate source stat/read/parse failures into bounded path-free
   `ModuleRefreshError` diagnostics rather than leaking raw `OSError` or absolute-path `SyntaxError`
   [algua/primitives/module_source_scan.py:116]
-- [ ] [Review][Patch] Reject non-regular importable source entries such as FIFOs, sockets and
+- [x] [Review][Patch] Reject non-regular importable source entries such as FIFOs, sockets and
   devices during preflight so a dynamic source import cannot block or execute unsupported content
   [algua/primitives/module_source_scan.py:50]
-- [ ] [Review][Patch] Translate bytecode-purge failures into the stable bounded refresh error
+- [x] [Review][Patch] Translate bytecode-purge failures into the stable bounded refresh error
   contract and explicitly prove partial cache deletion cannot commit or mutate the module graph
   [algua/primitives/module_refresh.py:217]
 
@@ -501,6 +501,31 @@ uv run lint-imports
   given path). Two guard branches (no fallback to later finders, source-loader only) initially
   survived and were closed with a later-finder and a namespace-directory case. All 25 bundled
   strategies still refresh through `load_strategy_config`.
+- Eighth review round: 32 new cases. Patch 1 first failed red in all three shapes (a poisoned
+  cached path-entry finder, a poisoned path hook and a stale loaded package `__spec__` each executed
+  outside code and served its value); a namespace, plain-module and absent family shape is a
+  preservation case. Patch 5 failed red for a FIFO and a socket `dyn.py`, a FIFO subpackage
+  `__init__.py` and an unreached FIFO (discovery ran before any refusal), and exact spec
+  construction treated a FIFO source as absent; FIFO fixtures keep a releasable writer so a
+  regression reads EOF instead of hanging. Patch 4 failed red for a syntax error, a NUL byte and
+  undecodable source (raw `SyntaxError` naming the host path) and an unreadable source (raw
+  `PermissionError`); the stat case already passed because patch 1's exact spec stat runs inside
+  the bounded inspection wrapper. Patch 6 failed red with a raw `IsADirectoryError` after the
+  top-level cache was already deleted, and a further case proves an unwalkable directory is
+  refused, not silently skipped by `os.walk`. Patch 3 failed red (no refusal) for a non-module
+  entry, a root replacing itself, a foreign entry, a self-removed entry, a rebound parent
+  attribute, an unbound family package, a foreign `__spec__` and a module gaining an in-root
+  `__path__`; a parent replaced by a non-module was added to kill a surviving mutation. Patch 2
+  failed red: a child forked while another thread was parked mid-refresh inherited the partially
+  rebuilt family (child exit 11). The first green attempt then hung in the child on CPython's own
+  per-module import lock for the module the vanished thread was still executing; that lock is
+  outside this patch and the import-quiescent precondition, so it is documented and the probe's
+  later child refresh goes through a root the vanished thread was not initializing. Owner-thread
+  fork (continues the transaction) and post-refresh fork (keeps the commit) are preservation
+  probes. Twenty-one mutations were run and all are killed; three first survived and were closed
+  with the stale-record fork probe, the non-module parent case and an explicit regular-package
+  location check with a pinned refusal message. All 25 bundled strategies still refresh twice
+  through `_reload_strategy_closure`.
 
 ### Completion Notes
 
@@ -608,6 +633,26 @@ uv run lint-imports
   import concurrency, sandboxing, mount cycles, memory exhaustion and external import side
   effects stay out of scope. Golden digest vectors, schema, working-tree descriptors and every
   live, authority, deployment and capital wall are unchanged.
+- Eighth review round complete: the family location is found on the filesystem from the parent's
+  search path (`sys.path` for a top-level family) and must be a regular source package, and every
+  family spec, in preflight and in the guard, is a `SourceFileLoader` spec constructed from the
+  exact expected in-root `__init__.py` or module `.py`, so no path hook, cached path-entry finder
+  or stale loaded `__spec__` can redirect inspection or execution; namespace and non-regular
+  shapes fail closed. The tree scan refuses every FIFO, socket or device node, and the preflight
+  read opens without blocking or following a final link and requires a regular file. Source
+  stat, read and parse failures (including `SyntaxError`) and bytecode-purge failures (including
+  a directory the walk cannot enter) are bounded path-free `ModuleRefreshError`s naming only the
+  error class and an errno or line; the purge precedes any module-graph change, so a partial cache
+  deletion neither commits nor mutates the graph. Commit requires every fresh family entry and
+  every guard-resolved module to be a `ModuleType` carrying its exact source spec, bound
+  identically in `sys.modules` and on its direct parent, with a package keeping exactly its
+  confined `__path__` and a module having none. A child forked while another thread runs a
+  refresh restores the pre-refresh modules and recorded direct-parent bindings, removes inherited
+  guards, resets the transaction record and replaces the lock; a transaction owned by the forking
+  thread continues in the child. Residual: CPython's own per-module import locks held by the
+  vanished thread are not reset, so re-importing exactly the modules it was initializing in that
+  child is unsupported under the import-quiescent precondition. The in-process/no-sandbox threat
+  model and every live, authority, deployment and capital wall are unchanged.
 
 ### File List
 
@@ -692,3 +737,7 @@ uv run lint-imports
   refresh lock, bounded tree-inspection `OSError` mapping, deterministic deadlock handshake) and
   carved the protected `module_source_scan.py`; the full 4,436-test root gate, ruff, mypy and all
   28 import contracts pass.
+- 2026-09-28: Addressed all 6 eighth-round review patches test-first (exact in-root spec
+  construction, fork-child transaction recovery, commit-time fresh-graph validation, bounded
+  source stat/read/parse and bytecode-purge errors, non-regular node refusal); the full
+  4,468-test root gate, ruff, mypy and all 28 import contracts pass.
