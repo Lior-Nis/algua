@@ -39,7 +39,11 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
 
-from algua.primitives.module_commit_check import SourceSpecFacts, require_committed_family
+from algua.primitives.module_commit_check import (
+    SourceSpecFacts,
+    record_source_spec,
+    require_committed_family,
+)
 from algua.primitives.module_source_scan import (
     ModuleRefreshError,
     package_location,
@@ -173,9 +177,7 @@ class _ImportGuard:
         spec = source_spec(package, location, fullname)
         if spec is None:
             raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
-        found = spec.submodule_search_locations
-        self.specs[fullname] = SourceSpecFacts(
-            spec, fullname, spec.origin, spec.cached, None if found is None else tuple(found))
+        self.specs[fullname] = record_source_spec(spec, fullname)
         return spec
 
 

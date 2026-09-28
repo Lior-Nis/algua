@@ -21,10 +21,22 @@ _ABSENT = object()
 class SourceSpecFacts(NamedTuple):
     """A source spec's facts, recorded when handed out: executed code can mutate it in place."""
     spec: ModuleSpec
+    loader: SourceFileLoader  # the ORIGINAL loader object, never re-read from the spec
+    state: tuple[tuple[str, object], ...]  # the loader's complete instance state when handed out
     name: str
     origin: str | None
     cached: str | None
     search: tuple[str, ...] | None
+
+
+def record_source_spec(spec: ModuleSpec, name: str) -> SourceSpecFacts:
+    """The facts of the exact source spec for ``name`` about to be handed to the import system:
+    the spec and loader objects themselves plus immutable snapshots of their allowed state."""
+    loader, found = spec.loader, spec.submodule_search_locations
+    assert type(loader) is SourceFileLoader  # ``source_spec`` builds exactly this loader
+    return SourceSpecFacts(
+        spec, loader, tuple(vars(loader).items()), name, spec.origin, spec.cached,
+        None if found is None else tuple(found))
 
 
 def require_committed_family(package: str, specs: dict[str, SourceSpecFacts]) -> None:
@@ -48,15 +60,20 @@ def require_committed_family(package: str, specs: dict[str, SourceSpecFacts]) ->
 
 
 def _intact(module: ModuleType, facts: SourceSpecFacts) -> bool:
-    """Whether ``facts.spec`` is still an exact ``SourceFileLoader`` spec with the recorded loader
-    name and path, name, origin, cache and search locations, and ``module`` still has the matching
-    ``__name__``, ``__package__``, ``__loader__``, ``__file__``, ``__cached__`` and ``__path__``."""
-    spec, attrs, loader = facts.spec, vars(module), facts.spec.loader
-    if type(loader) is not SourceFileLoader or attrs.get("__loader__") is not loader:
-        return False  # exactly the stdlib source loader (never a subclass), shared by the module
+    """Whether ``facts.spec`` is still exactly a ``ModuleSpec`` (a ``__class__`` swap to a subclass
+    fails) whose loader, and ``module``'s ``__loader__``, is the ORIGINAL loader object, still
+    exactly a ``SourceFileLoader`` with its recorded instance state (so no same-shaped replacement
+    or injected attribute overriding a loader operation passes); the spec still has the recorded
+    name, origin, cache and search locations, and ``module`` the matching ``__name__``,
+    ``__package__``, ``__file__``, ``__cached__`` and ``__path__``. Only identity and exact-type
+    comparisons are used, never a permissive ``__eq__``."""
+    spec, attrs, loader = facts.spec, vars(module), facts.loader
+    if not (type(spec) is ModuleSpec and type(loader) is SourceFileLoader
+            and spec.loader is loader and attrs.get("__loader__") is loader):
+        return False
     search = None if facts.search is None else list(facts.search)
     return all(_exact(value, expected) for value, expected in (
-        (getattr(loader, "name", None), facts.name), (getattr(loader, "path", None), facts.origin),
+        ([list(item) for item in vars(loader).items()], [list(item) for item in facts.state]),
         (spec.name, facts.name), (spec.origin, facts.origin), (spec.cached, facts.cached),
         (spec.submodule_search_locations, search), (attrs.get("__name__"), facts.name),
         (attrs.get("__package__"), facts.name if search else facts.name.rpartition(".")[0]),

@@ -1586,6 +1586,41 @@ def test_in_place_mutation_of_an_executed_source_spec_never_commits(family, case
     _assert_never_commits(family, _SPEC_MUTATIONS[case])
 
 
+_IDENTITY_FORGERIES = {
+    "spec-class-mutated": (
+        "import importlib.machinery\nfrom . import helper\n"
+        "helper.__spec__.__class__ = type('Spec', (importlib.machinery.ModuleSpec,), {})\n"),
+    "own-spec-class-mutated": (
+        "import importlib.machinery\n"
+        "__spec__.__class__ = type('Spec', (importlib.machinery.ModuleSpec,), {})\n"),
+    "loader-replaced-same-shape": (
+        "import importlib.machinery\nfrom . import helper\n"
+        "helper.__loader__ = helper.__spec__.loader = "
+        "importlib.machinery.SourceFileLoader(helper.__name__, helper.__file__)\n"),
+    "spec-loader-replaced-same-shape": (
+        "import importlib.machinery\nfrom . import helper\n"
+        "helper.__spec__.loader = "
+        "importlib.machinery.SourceFileLoader(helper.__name__, helper.__file__)\n"),
+    "loader-class-mutated": (
+        "import importlib.machinery\nfrom . import helper\n"
+        "helper.__loader__.__class__ = type('L', (importlib.machinery.SourceFileLoader,), {})\n"),
+    "loader-get-code-injected": (
+        "from . import helper\nhelper.__loader__.get_code = lambda name: None\n"),
+    "loader-get-data-injected": (
+        "from . import helper\nhelper.__spec__.loader.get_data = lambda path: b'VALUE = 2\\n'\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_IDENTITY_FORGERIES))
+def test_a_forged_spec_class_or_loader_identity_or_state_never_commits(family, case) -> None:
+    """At commit a family spec must still be exactly a ``ModuleSpec`` (not a subclass, even one
+    swapped in through ``__class__``) whose loader is the ORIGINAL ``SourceFileLoader`` object the
+    guard handed out, with unchanged concrete type and instance state. A same-shaped replacement
+    loader (same name and path, bound to both the spec and ``__loader__``) or an instance attribute
+    overriding a loader operation rolls the transaction back."""
+    _assert_never_commits(family, _IDENTITY_FORGERIES[case])
+
+
 _OWNER_FORK_CONTENDER_PROBE = """
 import os, sys
 sys.path.insert(0, sys.argv[1])
