@@ -584,6 +584,21 @@ These identities are non-cyclic. An environment-only change does not change `bun
   keeping ordinary class locals isolated (Todoist 6hfPJj9J9jQVvpFG)
   [tests/primitives/test_scoped_walk.py:486] — deferred, pre-existing
 
+#### Review findings against `762f984` (2026-09-28)
+
+- [ ] [Review][Patch] Classify statically constant `while` conditions so truthy constants do not
+  retain impossible zero-iteration/`else` paths and falsey constants do not execute an unreachable
+  body (Todoist 6hfPWRXC8MMwMrcG) [tests/primitives/test_scoped_walk.py:419]
+- [ ] [Review][Patch] Detect a deferred function's raw walk when it is called before a later
+  enclosing alias rebind, rather than analyzing the body only against the scope's final bindings
+  (Todoist 6hfPWX5RW3Hpvw7p) [tests/primitives/test_scoped_walk.py:331]
+- [ ] [Review][Patch] Join match-guard named-expression bindings only onto the guard-success path,
+  preserving the feasible guard-failure state without retaining a stale alias after success
+  (Todoist 6hfPWX55FXhj52Jp) [tests/primitives/test_scoped_walk.py:486]
+- [ ] [Review][Patch] Cover nested and conditional `finally` transfer forwarding, a continue-only
+  unconditional loop, and an actual deferred-function call from the endless-loop fixture
+  (Todoist 6hfPWRXGjPGr9qgp) [tests/primitives/test_scoped_walk.py:833]
+
 ## Development notes
 
 - Prefer focused modules: `registry/artifact_contract.py`, `registry/frozen_source.py`,
