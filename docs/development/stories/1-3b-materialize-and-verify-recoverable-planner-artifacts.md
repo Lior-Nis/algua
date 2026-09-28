@@ -4,7 +4,7 @@ baseline_commit: 24c4a2bc138822c5a74ea0ed91d6d5f03c402d97
 
 # Story 1.3b: Materialize and verify recoverable planner artifacts
 
-Status: review
+Status: in-progress
 
 Prepared: 2026-09-27. Baseline: Story 1.3a merge `24c4a2b` (PR #674).
 Epic: 1. Parent: Story 1.3. Requirements: FR4, FR6, FR9–FR10 and NFR1, NFR3–NFR8.
@@ -705,6 +705,37 @@ These identities are non-cyclic. An environment-only change does not change `bun
 - [x] [Review][Patch] Project return-summary cache keys onto names relevant to the summarized
   function so unrelated accumulated definitions cannot cause quadratic cache growth (Todoist
   6hfQ9RmmQ7HwXJ3p) [tests/primitives/test_scoped_walk.py:643]
+
+#### Review findings against `3c338bc` (2026-09-28)
+
+- [ ] [Review][Patch] Make alive-state materialization genuinely near-linear; current flattened
+  caches every growing frozenset prefix, measured about 1.38 GB at 8,000 objects (Todoist
+  6hfQqH2m97ch7g8p) [tests/primitives/test_scoped_walk.py:260]
+- [ ] [Review][Patch] Prove non-retaining builtins by binding and argument position; shadowed
+  bool/next/any/all retain, and builtin next may return its default argument (Todoist
+  6hfQqGxWrc4QpJqp) [tests/primitives/test_scoped_walk.py:585]
+- [ ] [Review][Patch] Drive deferred cross-scope discovery to a bounded fixpoint; fixed two
+  passes miss reverse-ordered call chains (Todoist 6hfQqH5p7CXJJCvG)
+  [tests/primitives/test_scoped_walk.py:714]
+- [ ] [Review][Patch] Resolve cross-scope calls from the callee's defining lexical environment
+  rather than filtering the current caller state (Todoist 6hfQqH3pfGW6W7Vp)
+  [tests/primitives/test_scoped_walk.py:888]
+- [ ] [Review][Patch] Include lambda bodies in cross-scope call propagation with their locals
+  (Todoist 6hfQqH2qxwxhVWHG) [tests/primitives/test_scoped_walk.py:725]
+- [ ] [Review][Patch] Apply declared global/nonlocal effects to their real lexical owner so
+  caller locals are not overwritten (Todoist 6hfQqGxfgHcvPFXp)
+  [tests/primitives/test_scoped_walk.py:888]
+- [ ] [Review][Patch] Compose transitive declared helper effects safely with recursion-bounded/
+  fixpoint summaries (Todoist 6hfQqH53pjrMWgxp) [tests/primitives/test_scoped_walk.py:857]
+- [ ] [Review][Patch] Bind positional, keyword, and default arguments in helper effect summaries
+  (Todoist 6hfQqH4P4QC6r8Rp) [tests/primitives/test_scoped_walk.py:824]
+- [ ] [Review][Patch] Propagate definite clearing in helper effects rather than retaining a stale
+  raw alias (Todoist 6hfQqGxXJRvpH62G) [tests/primitives/test_scoped_walk.py:881]
+- [ ] [Review][Patch] Fail closed when lazy-value traversal hits MAX_IFEXP_CHAIN instead of
+  returning partial escape results (Todoist 6hfQqH5HcRMg38jp)
+  [tests/primitives/test_scoped_walk.py:549]
+- [ ] [Review][Patch] Exclude all function-owned locals, not only parameters, from return/effect
+  summary cache entries (Todoist 6hfQqH4rMMvxq9JG) [tests/primitives/test_scoped_walk.py:824]
 
 ## Development notes
 
@@ -1667,3 +1698,5 @@ uv run lint-imports
   effect cache keys projected onto a function's actual reads); 16 new cases (303 to 319 guard-file
   tests), all passing; the full 5,394-test root gate, ruff, mypy, all 28 import contracts and
   `git diff --check` pass.
+- 2026-09-28: Recorded 11 findings from an independent BMAD review against `3c338bc` and mirrored
+  them to Todoist; not yet fixed. Story moved back to `in-progress`.
