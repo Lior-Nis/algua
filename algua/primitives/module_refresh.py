@@ -52,6 +52,17 @@ _REFRESH_LOCK = threading.RLock()
 _TRANSACTION = threading.local()
 
 
+def _reinitialize_after_fork() -> None:
+    """Only the forking thread survives in a child, so a lock held by any other thread would
+    never be released there: the child starts with a fresh, unowned refresh lock."""
+    global _REFRESH_LOCK
+    _REFRESH_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reinitialize_after_fork)
+
+
 def serialized_import(name: str) -> ModuleType:
     """``importlib.import_module(name)`` under the refresh serialization, so a supported caller
     never imports into, or returns a module from, a family another caller is rebuilding."""

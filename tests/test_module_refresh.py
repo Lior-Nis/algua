@@ -835,3 +835,40 @@ def test_a_serialized_import_inside_a_refresh_on_the_same_thread_proceeds(family
     root = refresh_package_closure(family.package, f"{family.package}.strat")
 
     assert root.VALUE == 2 and family.mod("other").VALUE == 2
+
+
+_FORK_PROBE = """
+import os, threading
+from algua.primitives import module_refresh
+held, release = threading.Event(), threading.Event()
+def owner():
+    with module_refresh._REFRESH_LOCK:
+        held.set()
+        release.wait(60)
+threading.Thread(target=owner, daemon=True).start()
+assert held.wait(10)
+pid = os.fork()
+if pid == 0:
+    acquired = module_refresh._REFRESH_LOCK.acquire(timeout=5)
+    if acquired:
+        module_refresh._REFRESH_LOCK.release()
+        module_refresh.serialized_import("json")
+    os._exit(0 if acquired else 7)
+_, status = os.waitpid(pid, 0)
+release.set()
+print(os.waitstatus_to_exitcode(status), flush=True)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-only platform behavior")
+def test_a_forked_child_does_not_inherit_a_vanished_refresh_lock_owner() -> None:
+    """A fork while another thread holds the refresh lock leaves the child a lock whose owner does
+    not exist there; the child reinitializes it, so later strategy loads do not block forever.
+    Run in a child process so the fork never touches the test runner's own threads."""
+    result = subprocess.run(
+        [sys.executable, "-W", "ignore::DeprecationWarning", "-c", _FORK_PROBE],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert result.stdout.strip() == "0", "the forked child could not acquire the refresh lock"
