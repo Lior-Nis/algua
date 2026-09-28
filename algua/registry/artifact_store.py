@@ -7,11 +7,11 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Generator
-from contextlib import closing
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_parents, fsync_tree
-from algua.primitives.bounded_walk import TraversalLimitExceeded, TreeEntry, bounded_walk
+from algua.primitives.bounded_walk import TraversalLimitExceeded, TreeEntry, scoped_walk
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
 from algua.registry.artifact_contract import (
@@ -28,11 +28,11 @@ class ArtifactStoreError(ValueError):
     """Published immutable content is unsafe, corrupt, or inconsistent."""
 
 
-def _tree(root: Path) -> closing[Generator[TreeEntry, None, None]]:
-    return closing(bounded_walk(
+def _tree(root: Path) -> AbstractContextManager[Generator[TreeEntry, None, None]]:
+    return scoped_walk(
         root, max_files=MAX_BUNDLE_FILES, max_directories=MAX_BUNDLE_DIRECTORIES,
         max_path_bytes=MAX_PATH_BYTES,
-    ))
+    )
 
 
 def resolve_locator(

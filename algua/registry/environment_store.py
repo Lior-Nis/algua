@@ -6,11 +6,11 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Generator
-from contextlib import closing
+from contextlib import AbstractContextManager
 from pathlib import Path
 
 from algua.primitives.atomic_io import fsync_dir, fsync_file, fsync_parents
-from algua.primitives.bounded_walk import TreeEntry, bounded_walk
+from algua.primitives.bounded_walk import TreeEntry, scoped_walk
 from algua.primitives.flock import file_lock
 from algua.primitives.no_replace import rename_noreplace
 from algua.registry.artifact_contract import MAX_PATH_BYTES
@@ -31,11 +31,11 @@ class EnvironmentStoreError(ValueError):
     """A published environment is missing, corrupt, or unsafe."""
 
 
-def _tree(root: Path) -> closing[Generator[TreeEntry, None, None]]:
-    return closing(bounded_walk(
+def _tree(root: Path) -> AbstractContextManager[Generator[TreeEntry, None, None]]:
+    return scoped_walk(
         root, max_files=MAX_ENVIRONMENT_FILES, max_directories=MAX_ENVIRONMENT_DIRECTORIES,
         max_path_bytes=MAX_PATH_BYTES,
-    ))
+    )
 
 
 def _cleanup(path: Path) -> None:

@@ -8,11 +8,15 @@ silently skips a directory it cannot list. This traversal pulls one entry at a t
 relative path length before yielding or descending (which also bounds depth and the number of
 open directory handles), never follows links, and propagates every listing, iteration and
 type-check error. Order is depth-first pre-order: a directory is yielded before its contents.
+
+Production consumers walk through `scoped_walk`, which always closes the walk and keeps a
+consumer's own error primary when closing also fails.
 """
 from __future__ import annotations
 
 import os
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,3 +107,31 @@ def bounded_walk(
         ):
             raise failure from active
         raise
+
+
+@contextmanager
+def scoped_walk(
+    root: Path, *, max_files: int, max_directories: int, max_path_bytes: int,
+) -> Iterator[Generator[TreeEntry, None, None]]:
+    """A `bounded_walk` that is always closed when the consumer's block exits.
+
+    If the block raised (a consumer's typed refusal, say), that error stays primary: closing the
+    walk still closes every listing, and an ordinary failure while closing does not replace it;
+    an interrupt while closing still propagates, caused by the block's error. If the block
+    finished or stopped early, a failure while closing is reported, as for any abandoned walk.
+    Errors raised by the traversal itself reach the block unchanged.
+    """
+    walk = bounded_walk(
+        root, max_files=max_files, max_directories=max_directories,
+        max_path_bytes=max_path_bytes,
+    )
+    try:
+        yield walk
+    except BaseException as active:
+        try:
+            walk.close()
+        except BaseException as failure:  # every listing is closed; decide what to report
+            if isinstance(active, Exception) and not isinstance(failure, Exception):
+                raise failure from active
+        raise
+    walk.close()

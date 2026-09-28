@@ -16,7 +16,7 @@ from algua.registry.artifact_store import (
     verify_bundle,
 )
 from algua.registry.frozen_source import FrozenFile
-from tests._walk_faults import count_scandir_pulls, fail_scandir_once
+from tests._walk_faults import count_scandir_pulls, fail_scandir_once, track_closes
 
 
 def _files() -> tuple[FrozenFile, ...]:
@@ -436,6 +436,22 @@ def test_a_file_growing_after_its_size_check_is_refused_while_streaming(
 
     assert "per-file" in str(caught.value.__cause__)
     assert requested and sum(requested) <= limit + 1
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, 5])
+def test_verify_keeps_its_typed_refusal_when_closing_the_walk_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    root = publish_bundle(tmp_path, _files(), _descriptor())
+    (root / "algua").chmod(0o755)
+    closed = track_closes(monkeypatch, faulty=root, fault=fault)
+
+    with pytest.raises(ArtifactStoreError) as caught:
+        verify_bundle(tmp_path, _descriptor())
+
+    assert isinstance(caught.value.__cause__, ArtifactStoreError)
+    assert "linked or writable" in str(caught.value.__cause__)
+    assert closed and all(closed.values()), closed
 
 
 def _foreign_stage(parent: Path) -> Path:

@@ -18,7 +18,7 @@ from algua.registry.environment_contract import (
 from algua.registry.planner_environment_errors import EnvironmentIncompatible
 from algua.registry.planner_environment_inventory import inventory_environment
 from tests._venv_fixture import SITE_PACKAGES, uv_like_venv
-from tests._walk_faults import count_scandir_pulls
+from tests._walk_faults import count_scandir_pulls, track_closes
 
 
 def _environment(tmp_path: Path) -> Path:
@@ -333,6 +333,20 @@ def test_malformed_paths_are_refused_before_their_content_is_read(
         inventory_environment(env)
 
     assert target not in hashed
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, 5])
+def test_inventory_keeps_its_typed_refusal_when_closing_the_walk_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    env = _environment(tmp_path)
+    (env / "trailing ").write_text("x")
+    closed = track_closes(monkeypatch, faulty=env, fault=fault)
+
+    with pytest.raises(EnvironmentIncompatible, match="path"):
+        inventory_environment(env)
+
+    assert closed and all(closed.values()), closed
 
 
 @pytest.mark.parametrize(

@@ -6,11 +6,10 @@ import os
 import re
 import stat
 import sys
-from contextlib import closing
 from email.parser import HeaderParser
 from pathlib import Path
 
-from algua.primitives.bounded_walk import TraversalLimitExceeded, bounded_walk
+from algua.primitives.bounded_walk import TraversalLimitExceeded, scoped_walk
 from algua.registry.artifact_contract import (
     MAX_PATH_BYTES,
     ArtifactFile,
@@ -151,12 +150,11 @@ def inventory_environment(root: Path) -> InstalledInventory:
     directories: set[str] = set()
     total = 0
     pyvenv: str | None = None
-    tree = bounded_walk(
-        root, max_files=MAX_ENVIRONMENT_FILES, max_directories=MAX_ENVIRONMENT_DIRECTORIES,
-        max_path_bytes=MAX_PATH_BYTES,
-    )
     try:
-        with closing(tree):
+        with scoped_walk(
+            root, max_files=MAX_ENVIRONMENT_FILES, max_directories=MAX_ENVIRONMENT_DIRECTORIES,
+            max_path_bytes=MAX_PATH_BYTES,
+        ) as tree:
             for entry in tree:
                 # Every entry, directories included, is canonical before it is retained or used;
                 # the walk descends only after this check, so a malformed directory's subtree is

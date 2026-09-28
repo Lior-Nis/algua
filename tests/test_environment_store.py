@@ -16,7 +16,7 @@ from algua.registry.environment_store import (
 )
 from algua.registry.planner_environment import current_interpreter_identity, inventory_environment
 from tests._venv_fixture import uv_like_venv
-from tests._walk_faults import count_scandir_pulls, fail_scandir_once
+from tests._walk_faults import count_scandir_pulls, fail_scandir_once, track_closes
 
 
 def _stage(root: Path, name: str = "build-environment") -> Path:
@@ -384,3 +384,38 @@ def test_published_seal_check_rejects_a_writable_directory(
     with pytest.raises(EnvironmentStoreError) as caught:
         verify_published_environment(tmp_path / "store", descriptor)
     assert "permissions drifted" in str(caught.value.__cause__)
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, 5])
+def test_published_seal_check_keeps_its_typed_refusal_when_closing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    stage = _stage(tmp_path)
+    descriptor = _descriptor(stage)
+    published = publish_environment(tmp_path / "store", stage, descriptor)
+    (published / "lib").chmod(0o755)
+    closed = track_closes(monkeypatch, faulty=published, fault=fault)
+
+    with pytest.raises(EnvironmentStoreError) as caught:
+        verify_published_environment(tmp_path / "store", descriptor)
+
+    assert isinstance(caught.value.__cause__, EnvironmentStoreError)
+    assert "permissions drifted" in str(caught.value.__cause__)
+    assert closed and all(closed.values()), closed
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, 5])
+def test_sealing_keeps_its_typed_refusal_when_closing_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: object,
+) -> None:
+    from algua.registry import environment_store
+
+    stage = _stage(tmp_path)
+    site = stage / "lib/python3.12/site-packages"
+    os.link(site / "_virtualenv.py", site / "hardlinked.py")
+    closed = track_closes(monkeypatch, faulty=stage, fault=fault)
+
+    with pytest.raises(EnvironmentStoreError, match="unsafe file content"):
+        environment_store._seal_and_sync(stage)
+
+    assert closed and all(closed.values()), closed
