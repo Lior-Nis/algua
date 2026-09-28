@@ -208,6 +208,35 @@ def test_an_interpreter_link_to_a_directory_is_refused(tmp_path: Path) -> None:
         inventory_environment(env)
 
 
+@pytest.mark.parametrize("link", ["python", "python3", "python3.12"])
+@pytest.mark.parametrize("shape", ["dangling", "loop", "unreadable"])
+def test_broken_required_interpreter_links_are_incompatible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str, shape: str,
+) -> None:
+    import errno
+
+    env = _environment(tmp_path)
+    target = env / "bin" / link
+    if shape == "dangling":
+        target.unlink()
+        target.symlink_to("missing-interpreter")
+    elif shape == "loop":
+        target.unlink()
+        target.symlink_to(link)
+    else:
+        real_readlink = os.readlink
+
+        def unreadable(path, *args, **kwargs):
+            if Path(path) == target:
+                raise PermissionError(errno.EACCES, "injected readlink fault")
+            return real_readlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "readlink", unreadable)
+
+    with pytest.raises(EnvironmentIncompatible, match="interpreter link"):
+        inventory_environment(env)
+
+
 def _malformed_path(env: Path, shape: str) -> Path:
     site = env / SITE_PACKAGES
     if shape == "overlong":

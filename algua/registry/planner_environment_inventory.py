@@ -178,9 +178,14 @@ def inventory_environment(root: Path) -> InstalledInventory:
                     continue
                 path = entry.path
                 if entry.is_symlink:
-                    if path.is_dir():
-                        raise EnvironmentIncompatible("environment contains an unexpected symlink")
-                    links.append(_interpreter_link(root, path))
+                    try:
+                        if path.is_dir():
+                            raise EnvironmentIncompatible(
+                                "environment contains an unexpected symlink")
+                        links.append(_interpreter_link(root, path))
+                    except (OSError, RuntimeError) as exc:  # dangling, looping or unreadable
+                        raise EnvironmentIncompatible(
+                            "environment interpreter link is dangling or unreadable") from exc
                     continue
                 info = path.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
