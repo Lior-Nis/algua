@@ -275,3 +275,72 @@ def test_published_seal_check_propagates_traversal_errors(
 
     assert failed == [published / "lib"]
     assert isinstance(caught.value.__cause__, PermissionError)
+
+
+def _foreign_reservation(parent: Path) -> Path:
+    """Another builder's in-progress reservation; this attempt must never remove it."""
+    parent.mkdir(parents=True, exist_ok=True)
+    foreign = parent / ".reserve-foreign"
+    foreign.mkdir(mode=0o700)
+    (foreign / "partial").write_text("another builder")
+    return foreign
+
+
+def test_lock_acquisition_fault_publishes_nothing_and_cleans_only_its_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextlib
+    import errno
+
+    from algua.registry import environment_store
+
+    stage = _stage(tmp_path)
+    descriptor = _descriptor(stage)
+    target = tmp_path / "store" / descriptor.locator
+    foreign = _foreign_reservation(target.parent)
+    attempted: list[Path] = []
+
+    @contextlib.contextmanager
+    def failing_lock(path: Path, **_kwargs):
+        attempted.append(path)
+        raise OSError(errno.ENOLCK, "injected lock acquisition fault")
+        yield
+
+    monkeypatch.setattr(environment_store, "file_lock", failing_lock)
+
+    with pytest.raises(OSError) as caught:
+        publish_environment(tmp_path / "store", stage, descriptor)
+
+    assert caught.value.errno == errno.ENOLCK
+    assert attempted == [
+        tmp_path / "store/frozen/.locks/environments" / f"{descriptor.digest}.lock"]
+    assert not target.exists() and not target.is_symlink()
+    assert sorted(path.name for path in target.parent.iterdir()) == [".reserve-foreign"]
+    assert (foreign / "partial").read_text() == "another builder"
+
+
+def test_post_publication_verification_fault_leaves_a_valid_immutable_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from algua.registry import environment_store
+
+    stage = _stage(tmp_path)
+    descriptor = _descriptor(stage)
+    target = tmp_path / "store" / descriptor.locator
+    foreign = _foreign_reservation(target.parent)
+    real_verify = environment_store.verify_published_environment
+
+    def failing_final_verify(*_args, **_kwargs):
+        assert target.is_dir(), "final verification must follow publication"
+        raise EnvironmentStoreError("injected post-publication verification fault")
+
+    monkeypatch.setattr(environment_store, "verify_published_environment", failing_final_verify)
+
+    with pytest.raises(EnvironmentStoreError, match="post-publication"):
+        publish_environment(tmp_path / "store", stage, descriptor)
+
+    assert real_verify(tmp_path / "store", descriptor) == target
+    assert target.stat().st_mode & 0o777 == 0o555
+    assert sorted(path.name for path in target.parent.iterdir()) == [
+        ".reserve-foreign", target.name]
+    assert (foreign / "partial").read_text() == "another builder"

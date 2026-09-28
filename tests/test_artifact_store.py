@@ -329,3 +329,63 @@ def test_inventory_enforces_the_file_count_bound_before_growth(
 
     assert "file-count" in str(caught.value.__cause__)
     assert len(constructed) <= len(_files())
+
+
+def _foreign_stage(parent: Path) -> Path:
+    """Another builder's in-progress stage; this attempt must never remove it."""
+    parent.mkdir(parents=True, exist_ok=True)
+    foreign = parent / ".stage-foreign"
+    foreign.mkdir(mode=0o700)
+    (foreign / "partial").write_text("another builder")
+    return foreign
+
+
+def test_lock_acquisition_fault_publishes_nothing_and_cleans_only_its_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import contextlib
+    import errno
+
+    target = tmp_path / _descriptor().locator
+    foreign = _foreign_stage(target.parent)
+    attempted: list[Path] = []
+
+    @contextlib.contextmanager
+    def failing_lock(path: Path, **_kwargs):
+        attempted.append(path)
+        raise OSError(errno.ENOLCK, "injected lock acquisition fault")
+        yield
+
+    monkeypatch.setattr(artifact_store, "file_lock", failing_lock)
+
+    with pytest.raises(OSError) as caught:
+        publish_bundle(tmp_path, _files(), _descriptor())
+
+    assert caught.value.errno == errno.ENOLCK
+    assert attempted == [tmp_path / "frozen/.locks/bundles" / f"{_descriptor().digest}.lock"]
+    assert not target.exists() and not target.is_symlink()
+    assert sorted(path.name for path in target.parent.iterdir()) == [".stage-foreign"]
+    assert (foreign / "partial").read_text() == "another builder"
+
+
+def test_post_publication_verification_fault_leaves_a_valid_immutable_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / _descriptor().locator
+    foreign = _foreign_stage(target.parent)
+    real_verify = artifact_store.verify_bundle
+
+    def failing_final_verify(*_args, **_kwargs):
+        assert target.is_dir(), "final verification must follow publication"
+        raise ArtifactStoreError("injected post-publication verification fault")
+
+    monkeypatch.setattr(artifact_store, "verify_bundle", failing_final_verify)
+
+    with pytest.raises(ArtifactStoreError, match="post-publication"):
+        publish_bundle(tmp_path, _files(), _descriptor())
+
+    assert real_verify(tmp_path, _descriptor()) == target
+    assert target.stat().st_mode & 0o777 == 0o555
+    assert sorted(path.name for path in target.parent.iterdir()) == [
+        ".stage-foreign", target.name]
+    assert (foreign / "partial").read_text() == "another builder"
