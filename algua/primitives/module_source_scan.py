@@ -189,7 +189,7 @@ def static_closure(package: str, location: str, root: str) -> dict[str, set[str]
         if spec is None or not isinstance(spec.origin, str):
             raise ModuleRefreshError(f"{name!r} has no importable source", name=name)
         require_unlinked(spec.origin, name)
-        candidates = _source_imports(spec.origin, spec.parent or "")
+        candidates = _source_imports(_parse(spec.origin, name), spec.parent or "")
         if name != package:
             candidates.add(name.rpartition(".")[0])
         graph[name] = {
@@ -200,10 +200,30 @@ def static_closure(package: str, location: str, root: str) -> dict[str, set[str]
     return graph
 
 
-def _source_imports(origin: str, parent: str) -> set[str]:
-    """Every module name ``origin``'s source statically imports, relative forms resolved."""
+def _parse(origin: str, name: str) -> ast.Module:
+    """Parse ``name``'s current source. A read or parse failure is the stable bounded refusal
+    naming only the error class and an errno or line, never a host path (the cause is not
+    chained). The source is opened without blocking or following a link and must be a regular
+    file, so a node swapped in after the scan cannot block the read."""
+    with _inspecting(name):
+        descriptor = os.open(origin, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with open(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ModuleRefreshError(f"{name!r} source is a non-regular node", name=name)
+            source = handle.read()
+    try:
+        return ast.parse(source)
+    except (SyntaxError, ValueError) as exc:
+        line = getattr(exc, "lineno", None)
+        raise ModuleRefreshError(
+            f"{name!r} source cannot be parsed ({type(exc).__name__}, line {line})",
+            name=name) from None
+
+
+def _source_imports(tree: ast.Module, parent: str) -> set[str]:
+    """Every module name ``tree`` statically imports, relative forms resolved."""
     targets: set[str] = set()
-    for node in ast.walk(ast.parse(Path(origin).read_bytes(), filename=origin)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             targets.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):

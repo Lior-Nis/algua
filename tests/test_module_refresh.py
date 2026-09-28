@@ -1143,3 +1143,52 @@ def test_a_family_spec_never_resolves_to_a_non_regular_source_node(family, speci
 
     with pytest.raises(ModuleRefreshError, match="non-regular"):
         module_source_scan.source_spec(family.package, str(family.dir), f"{family.package}.dyn")
+
+
+@pytest.mark.parametrize(
+    ("case", "error"),
+    [("syntax-error", "SyntaxError"), ("null-byte", "SyntaxError"),
+     ("undecodable", "SyntaxError"), ("read-denied", "PermissionError"),
+     ("stat-denied", "PermissionError")])
+def test_source_stat_read_and_parse_failures_fail_closed_with_bounded_diagnostics(
+        family, monkeypatch, case, error) -> None:
+    """Preflight reads and parses every reachable source; a failure there is the stable bounded
+    refusal naming only the module, the error class and a line or errno, never a host path, and
+    the raw exception is not chained."""
+    family.write("helper", "VALUE = 1\n")
+    family.write("strat", "from .helper import VALUE\n")
+    importlib.import_module(f"{family.package}.strat")
+    before = family.entries()
+    helper = family.dir / "helper.py"
+    if case == "syntax-error":
+        helper.write_text("def broken(:\n")
+    elif case == "null-byte":
+        helper.write_bytes(b"VALUE = 1\0\n")
+    elif case == "undecodable":
+        helper.write_bytes(b"VALUE = '\xff'\n")
+    elif case == "read-denied":
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions")
+        helper.chmod(0)
+    else:
+        real_stat = os.stat
+
+        def stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            if os.fspath(path) == str(helper):  # type: ignore[arg-type]
+                raise PermissionError(13, "Permission denied", _HOST_PATH)
+            return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(os, "stat", stat)
+
+    try:
+        with pytest.raises(ModuleRefreshError) as caught:
+            _refresh(family)
+    finally:
+        helper.chmod(0o644)
+
+    message = str(caught.value)
+    assert error in message and len(message) <= 200
+    assert _HOST_PATH not in message and str(family.dir.parent.parent) not in message
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+    after = family.entries()
+    assert set(after) == set(before) and all(after[k] is v for k, v in before.items())
