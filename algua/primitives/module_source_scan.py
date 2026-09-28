@@ -103,18 +103,29 @@ def package_location(package: str, entries: Iterable[object]) -> str:
     """The directory of the regular source package ``package`` in its parent's search ``entries``
     (``sys.path`` for a top-level package): the first entry holding the package directory or a
     same-named module decides, as for the default finder, and only a regular source package with
-    no raw ``..`` component or symlink is admissible."""
+    no raw ``..`` component or symlink is admissible. A relative entry is frozen against the
+    working directory NOW, before anything executes, and the location is returned absolute, so
+    refreshed code that changes directory cannot redirect preflight or any later resolution."""
     leaf = package.rpartition(".")[2]
     for entry in entries:
         if not isinstance(entry, str):
             continue
-        base = os.path.join(entry or os.getcwd(), leaf)
+        base = os.path.join(_absolute(entry, package), leaf)
         if os.path.isdir(base) or os.path.lexists(base + ".py"):
             require_unlinked(base, package)
             if os.path.isdir(base) and _is_regular(os.path.join(base, "__init__.py"), package):
-                return base
+                return os.path.normpath(base)  # no raw ``..`` remains, so this is lexical only
             break
     raise ModuleRefreshError(f"{package!r} is not a regular package", name=package)
+
+
+def _absolute(entry: str, name: str) -> str:
+    """``entry`` joined to the current working directory unless already absolute, WITHOUT
+    normalizing, so a raw ``..`` component is still refused afterwards."""
+    if os.path.isabs(entry):
+        return entry
+    with _inspecting(name):
+        return os.path.join(os.getcwd(), entry)
 
 
 def source_spec(package: str, location: str, name: str) -> ModuleSpec | None:

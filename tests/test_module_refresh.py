@@ -1484,3 +1484,54 @@ def test_a_source_node_swapped_after_the_scan_is_never_read_through(
         module_source_scan._parse(str(origin), "fam.helper")
 
     assert str(tmp_path) not in str(caught.value)
+
+
+@pytest.mark.parametrize("entry", ["sys-path", "dotted-sys-path", "parent-search-path"])
+def test_a_relative_search_entry_is_frozen_before_refreshed_code_can_change_directory(
+        tmp_path, monkeypatch, entry) -> None:
+    """A relative ``sys.path`` or parent ``__path__`` entry is resolved against the working
+    directory once, before preflight: refreshed code that changes directory mid-import cannot make
+    a later family import resolve, and execute, a same-shaped tree under the new directory. The
+    frozen location is canonical, so a ``./`` entry yields the same module paths."""
+    top = f"mrrel_{uuid.uuid4().hex[:10]}"
+    package = f"{top}.fam" if entry == "parent-search-path" else top
+    marker = tmp_path / "alt-executed"
+    for base in (tmp_path, tmp_path / "alt"):
+        directory = base.joinpath("src", *package.split("."))
+        directory.mkdir(parents=True)
+        (base / "src" / top / "__init__.py").write_text("")
+        (directory / "__init__.py").write_text("")
+        (directory / "helper.py").write_text(
+            "VALUE = 'real'\n" if base == tmp_path
+            else f"open({str(marker)!r}, 'w').close()\nVALUE = 'alt'\n")
+    real = tmp_path.joinpath("src", *package.split("."))
+    (real / "strat.py").write_text(
+        f"import os\nos.chdir({str(tmp_path / 'alt')!r})\n"
+        "from . import helper\nVALUE = helper.VALUE\n")
+    monkeypatch.chdir(tmp_path)
+    if entry != "parent-search-path":
+        monkeypatch.syspath_prepend("src" if entry == "sys-path" else "./src")
+    else:
+        monkeypatch.syspath_prepend(str(tmp_path / "src"))
+        importlib.import_module(top).__path__ = [os.path.join("src", top)]
+    try:
+        root = refresh_package_closure(package, f"{package}.strat")
+
+        assert not marker.exists(), "a same-shaped tree under the new working directory executed"
+        assert root.VALUE == "real"
+        assert sys.modules[f"{package}.helper"].__file__ == str(real / "helper.py")
+    finally:
+        for key in [k for k in sys.modules if k == top or k.startswith(top + ".")]:
+            del sys.modules[key]
+
+
+def test_a_relative_search_entry_under_a_vanished_working_directory_is_a_bounded_refusal(
+        tmp_path, monkeypatch) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    monkeypatch.syspath_prepend("src")
+
+    with pytest.raises(ModuleRefreshError, match=r"cannot be inspected \(FileNotFoundError"):
+        refresh_package_closure("mrgone_pkg", "mrgone_pkg.strat")
